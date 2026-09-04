@@ -235,6 +235,12 @@ pub struct Module {
     /// identical contents, which is what makes it a string pool.
     pool: Vec<u8>,
     pool_at: HashMap<Vec<u8>, u32>,
+    /// Every [`Module::data`] entry as `(address, length)`, in the order the
+    /// addresses were handed out — which is increasing, because each entry is
+    /// appended. [`Module::sweep_pool`] needs the extents: an address alone does
+    /// not say how many bytes belong to it. A [`Module::reserve`] is not here:
+    /// its bytes are zeros that no segment carries anyway.
+    spans: Vec<(u32, u32)>,
     /// Custom sections, emitted last and in the order they were added. A custom
     /// section is data for the host, not for the engine: nothing here changes
     /// what the module does.
@@ -264,6 +270,7 @@ impl Module {
             sweep: false,
             pool: Vec::new(),
             pool_at: HashMap::new(),
+            spans: Vec::new(),
             custom: Vec::new(),
             names: Vec::new(),
         }
@@ -345,6 +352,7 @@ impl Module {
         self.pool.resize((at - DATA_BASE) as usize, 0);
         self.pool.extend_from_slice(bytes);
         self.pool_at.insert(bytes.to_vec(), at);
+        self.spans.push((at, bytes.len() as u32));
         at
     }
 
@@ -561,6 +569,87 @@ impl Module {
             *i = map[*i as usize];
             *i != u32::MAX
         });
+        self.sweep_pool();
+    }
+
+    /// Zero every pool entry no surviving body can reach (RFC-0125 §3 M4).
+    ///
+    /// The functions were already swept; the data they interned on the way past
+    /// was not, and [`crate::direct`]'s runtime interned ITS data before any body
+    /// was walked. So a program that reads no file still carried the UTF-8 DFA
+    /// table and all six I/O wordings, and a program that formats no integer
+    /// still carried `intStr`'s proof sentence. This is the sweep's question
+    /// asked of the bytes.
+    ///
+    /// An entry is live when a surviving body pushes an address INSIDE it, or
+    /// when a live entry holds one: the trap table is eight pairs of addresses
+    /// and nothing but its own bytes names the rows (RFC-0125 §2.3), so the scan
+    /// has to follow data into data.
+    ///
+    /// **Conservative in the one safe direction.** A constant that is not a
+    /// pointer but lands inside an entry KEEPS that entry. That costs bytes and
+    /// cannot change what the module does; the opposite mistake would hand a
+    /// program zeros where its literal was. `intern` hands out `at + SHDR`
+    /// rather than `at`, and a folded offset into a literal is inside it too,
+    /// which is why the test is containment and not equality.
+    ///
+    /// Addresses do not move and [`Module::data_end`] does not shift — a dead
+    /// entry becomes zeros, and [`Module::finish`] already writes no segment for
+    /// a run of them.
+    fn sweep_pool(&mut self) {
+        // `spans` is in increasing address order (each entry is appended), so
+        // the entry an address falls in is one binary search.
+        let spans = &self.spans;
+        let find = |x: u32| -> Option<usize> {
+            let i = spans.partition_point(|&(at, _)| at <= x).checked_sub(1)?;
+            let (at, len) = spans[i];
+            (x - at < len).then_some(i)
+        };
+        let mut live = vec![false; spans.len()];
+        let mut work: Vec<usize> = Vec::new();
+        let mark = |i: usize, live: &mut Vec<bool>, work: &mut Vec<usize>| {
+            if !live[i] {
+                live[i] = true;
+                work.push(i);
+            }
+        };
+        for d in &self.bodies {
+            for ins in &d.body.as_ref().expect("a surviving body").body {
+                // An address reaches a body as a constant it pushes. A `memarg`
+                // offset is a field offset off a pointer already on the stack
+                // (`at`, `word_at`), never a whole address, so there is nothing
+                // to read out of one.
+                let c = match ins {
+                    Instruction::I32Const(c) => *c as u32,
+                    Instruction::I64Const(c) => *c as u32,
+                    _ => continue,
+                };
+                if let Some(i) = find(c) {
+                    mark(i, &mut live, &mut work);
+                }
+            }
+        }
+        while let Some(i) = work.pop() {
+            let (at, len) = self.spans[i];
+            let lo = (at - DATA_BASE) as usize;
+            let bytes = &self.pool[lo..lo + len as usize];
+            // Unaligned, because an entry's own alignment says nothing about
+            // where a table inside it puts its words. Four bytes of an ordinary
+            // string almost never read as an address in this range, and one that
+            // does only keeps an entry alive.
+            for w in bytes.windows(4) {
+                let x = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                if let Some(j) = find(x) {
+                    mark(j, &mut live, &mut work);
+                }
+            }
+        }
+        for (i, &(at, len)) in self.spans.iter().enumerate() {
+            if !live[i] {
+                let lo = (at - DATA_BASE) as usize;
+                self.pool[lo..lo + len as usize].fill(0);
+            }
+        }
     }
 
     /// The finished bytes, or the one refusal a program can earn here.
@@ -1198,6 +1287,38 @@ mod tests {
         );
         // The unreached signature went with it: `f64` (0x7c) appears nowhere.
         assert!(!bytes.contains(&0x7c), "a type only a pruned function used");
+    }
+
+    /// The same sweep over the bytes (RFC-0125 §3 M4): a literal no surviving
+    /// body names goes, one a surviving body names stays, and one that only a
+    /// live TABLE names stays with it — the trap table is addresses and nothing
+    /// else says its rows are live.
+    #[test]
+    fn the_sweep_takes_the_data_nothing_reaches() {
+        let mut m = Module::new();
+        let exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
+        let named = m.data(b"kept-by-a-body\0", 4);
+        let by_table = m.data(b"kept-by-a-table\0", 4);
+        m.data(b"reached-by-nothing\0", 4);
+        let table = m.data(&by_table.to_le_bytes(), 4);
+        let start = m.func(&[], &[], &[], 0, |b| {
+            b.ins(&Instruction::I32Const(named as i32))
+                .ins(&Instruction::Drop)
+                .ins(&Instruction::I32Const(table as i32))
+                .ins(&Instruction::Drop)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::Call(exit));
+        });
+        m.export("_start", start);
+        m.sweep();
+        let bytes = m.finish().unwrap();
+        let has = |s: &[u8]| bytes.windows(s.len()).any(|w| w == s);
+        assert!(has(b"kept-by-a-body"), "a literal the body names stays");
+        assert!(
+            has(b"kept-by-a-table"),
+            "a literal a live table names stays"
+        );
+        assert!(!has(b"reached-by-nothing"), "the literal nobody names goes");
     }
 
     #[test]
