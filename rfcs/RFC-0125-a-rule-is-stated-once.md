@@ -2338,7 +2338,7 @@ deleted here, and `--engine interp` is still the default.
 
 | capability | who needs it | the compiled route today | what moving it costs |
 |---|---|---|---|
-| `run-default` | every user; 34 of `vyrn-cli`'s test suites, at 150 `vyrn run` call sites; the fixture recorder | yes — 204 examples run under both engines, 203 byte-identical, the same 58 exit non-zero | flipping one default. the corpus costs 89.1 s under the interpreter and 39.4 s under the compiled route, compile included |
+| `run-default` | every user; 34 of `vyrn-cli`'s test suites, at 150 `vyrn run` call sites; the fixture recorder | yes — 204 examples run under both engines, all byte-identical since the fourth slice below (203 of 204 when this row was written), the same 58 exit non-zero | flipping one default. the corpus costs 89.1 s under the interpreter and 39.4 s under the compiled route, compile included |
 | `test-bodies` | 25 corpus files; `tests/testing.rs` | yes — all 25 byte-identical, `placeorder.vyrn` among them | 4.6 s against 5.3 s over the 25. The compiled route is SLOWER here: the bodies are small and the compile is the whole cost |
 | `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
@@ -2351,7 +2351,7 @@ deleted here, and `--engine interp` is still the default.
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
 | `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | no — the compiled route lives in `vyrn-cli`, not in the frontend | those tests move to the CLI's harness, or the frontend takes a dependency on a backend |
-| `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | worse — the interpreter prints ``error: extern `jsNow` is not available on this target`` and the compiled route traps with `error: error while executing at wasm backtrace:` | the direct backend has to refuse an unavailable `extern` in `interp::extern_unavailable`'s words. This is the one output difference in 204 programs |
+| `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | yes, since the fourth slice below — both engines print ``error: extern `jsNow` is not available on this target`` on standard error and exit 1. The third slice read `worse` here: the compiled route trapped with `error: error while executing at wasm backtrace:`, the one output difference in 204 programs | the embedded host answers the `vyrn` namespace with `interp::extern_unavailable`'s sentence, as native's C stub already did. No emitted byte changes |
 | `site-export` | CI's Site job | yes, and this is new — the frame-limit refusal M5's second slice recorded is gone, and the compiled route writes the same 241 files | 187.30 s against 13.89 s, medians of three interleaved runs, and the 241 files are byte-identical |
 
 #### How the third column was proved
@@ -2364,7 +2364,8 @@ Every `yes` above is a run, not a reading.
   203 are byte-identical on stdout, stderr and the exit code. The refusal sets
   are the same set, not the same size: 58 programs exit non-zero under each,
   and no program is refused by one engine and run by the other. The single
-  difference is `externdemo.vyrn`, the `extern-unavailable` row.
+  difference is `externdemo.vyrn`, the `extern-unavailable` row — closed by the
+  fourth slice, which makes the count 204 of 204.
 - **The bodies.** `vyrn test` over the 25 examples with `test` blocks and
   `vyrn bench --check` over the 17 with `bench` blocks, under both engines.
   All byte-identical. `placeorder.vyrn`, the placement defect M5's second
@@ -2506,7 +2507,8 @@ it, and `tests/benching.rs` pins both engines on the reduction. It changes no
 emitted bytes: `blackBox` exists only inside a `bench` or `test` body, and
 `wasmhash` builds each example's `main`.
 
-Two things were found and NOT fixed here, both recorded rather than repaired:
+Two things were found and NOT fixed here, both recorded rather than repaired.
+The fourth slice below fixed both:
 
 - `examples/externdemo.vyrn` under `--engine wasm` traps with wasmtime's
   backtrace where the interpreter names the unavailable `extern`. The
@@ -2543,6 +2545,78 @@ different bytes, and that was checked rather than argued: the manifest was
 regenerated twice in release, once with the base's `direct.rs` and once with
 this slice's, and the two files are identical. The committed file is left
 alone.
+
+#### The fourth slice (2026-09-04): the two defects the census recorded
+
+The third slice found two things and repaired neither. This slice repairs
+both. Nothing is deleted, and no emitted byte changes.
+
+**The reached `extern`.** A program that calls an `extern fn` no host answers
+must fail the same way on every engine. It did not. Read off
+`examples/externdemo.vyrn`, before:
+
+| engine | standard error | exit |
+|---|---|---|
+| interpreter | ``error: extern `jsNow` is not available on this target`` | 1 |
+| native | ``error: extern `jsNow` is not available on this target`` | 1 |
+| `--engine wasm` | `error: error while executing at wasm backtrace:` | 1 |
+
+After, all three print ``error: extern `jsNow` is not available on this
+target`` and exit 1.
+
+**Where the rule lives, and why there.** In the HOST, not in the emitter and
+not in a fourth copy of the wording. `vyrn-cli`'s embedded engine
+(`src/wasmrun.rs`) now defines every import in the `vyrn` namespace as a
+function that writes `vyrn_frontend::interp::extern_unavailable`'s sentence to
+fd 2 and exits 1, and it does that before `define_unknown_imports_as_traps`
+sees the module. Two other places were possible and both are wrong:
+
+- **The emitter.** A trap stub in the module would delete the import, and the
+  import is the whole point of RFC-0012 — a browser page fills it, and
+  `std/rpc`'s `vyrnRpcCall` is that import in three client artifacts. An
+  emitter that refuses on the author's behalf refuses in the browser too.
+- **A new wording.** There is one table since RFC-0101 M5 and one sentence for
+  this refusal since RFC-0012. The host reads it; it does not respell it. This
+  is the same shape native has: `toolchain::extern_trap_stubs` writes a C stub
+  per declaration from the same function.
+
+The sixth M6 slice decided that the `extern` row is a CALL, and the emitter
+agrees: `Module::sweep` drops an import nothing reaches, so a `vyrn` import in
+a loaded module is an `extern` the program REACHES. Naming it is therefore
+never a refusal of a program that would have run.
+
+**What the registries say now.** `tests/fixtures.rs` no longer skips
+`WASM_ONLY`, and `examples/expected/externdemo.{stdout,stderr,exit}` are
+recorded: the corpus is 204 of 204 compared, not 203 with one skipped. The
+list itself stays, because it is true of the harnesses that drive an OUTSIDE
+tool — parity's wasm column is the `wasmtime` CLI and `route.rs`'s is wasm2c,
+and neither knows the namespace. Its doc comment says which harness it binds
+and which it does not. The census row above reads `yes`, and `fixtures.rs`'s
+`CENSUS` reads `yes` with it.
+
+**The export's out-directory.** `site/export.vyrn` read `args()[1]`, and
+`args()` excludes the program's name (RFC-0014), so `vyrn run
+site/export.vyrn dist` fell to the default and wrote `out/` while printing
+`exported .. to out`. The read is one function now, `outDirFrom`, with the
+convention in its doc comment and a `test` block on it — the export into
+`dist` writes 241 files there and creates no `out/`, measured. The workflow's
+argument is unchanged and now takes effect: it passes `out`, which is also the
+default, which is why CI never saw the bug. The export produces the same 241
+files it did.
+
+**Gates.** In the order §1.4 requires, one at a time: `cargo fmt --all
+--check`; the release build; the `fixtures`, `boundaries` and `traps` suites;
+`kernel`, `coretables`, `typed` and `effects`; `audience`, `floor`,
+`contracts`, `fieldstore`, `places`, `simd`, `wasmabi`, `wasmio` and
+`bytesink`; `vyrn-frontend`; the workspace less the peak-RSS tests; those
+serially; parity in release with `--ignored`, 41 of 41; the residue ratchet;
+the cross-engine generator test with a fresh cache; `vyrn doc --std --verify`;
+and `vyrn test` over the site's files, 35 blocks in `export.vyrn` where there
+were 34. `VYRN_WASM_MANIFEST=check` is GREEN, which is the third slice's red
+gate turned over: the manifest was regenerated on this branch after that slice,
+and this slice adds no trap stub to any module, so every example's wasm still
+hashes to the committed row. The manifest is not regenerated here and needs no
+regenerating.
 
 ### M6 — the other two judgments
 

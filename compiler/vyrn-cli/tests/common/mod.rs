@@ -227,13 +227,22 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser
-/// page supplies the `vyrn` import namespace, so three-way output parity cannot
-/// apply — wasmtime provides WASI, not `vyrn`. Excluded from the parity loop;
-/// instead [`wasm_only_examples_trap_identically`] asserts the decided
-/// non-wasm semantics: interp and native both produce the canonical
-/// `error: extern `name` is not available on this target` trap, byte-identical
-/// to each other. The real browser behavior is exercised by `web/externdemo.html`.
-/// KNOWN_DIVERGENT stays empty — this list is about *hosts*, not divergence.
+/// page supplies the `vyrn` import namespace. The real browser behavior is
+/// exercised by `web/externdemo.html`. KNOWN_DIVERGENT stays empty — this list
+/// is about *hosts*, not divergence.
+///
+/// It names the harnesses that drive an OUTSIDE tool, and only those: the
+/// parity loop's wasm column is the `wasmtime` CLI and the route loop's is
+/// wasm2c, and neither knows the namespace, so neither can be compared with the
+/// other two engines. `parity::wasm_only_examples_trap_identically` asserts the
+/// decided non-wasm semantics instead: interp and native both produce the
+/// canonical `error: extern `name` is not available on this target` trap,
+/// byte-identical to each other.
+///
+/// `tests/fixtures.rs` does NOT skip this list. Its engine is the embedded host
+/// in `vyrn-cli`'s own `wasmrun`, which answers the `vyrn` namespace with that
+/// same sentence, so a reached `extern` fails identically on all three engines
+/// (RFC-0125 §3 M5, the fourth slice).
 ///
 /// The cost of that exclusion is on record: because nothing here ever *built* one
 /// of these to wasm either, the direct backend reached 87 of 87 with no lowering
