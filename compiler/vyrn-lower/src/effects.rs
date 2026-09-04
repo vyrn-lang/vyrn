@@ -13,7 +13,9 @@
 //! owned name born of a primitive or a literal (an allocation), and a trap.
 //! A call through a function value names a local, and the caller answers
 //! for its type with the closed set of functions a value of that type may
-//! hold — RFC-0037's stored sources (finding 3 of the first slice). A lambda
+//! hold — RFC-0037's stored sources AND the functions handed straight to a
+//! `fn`-typed parameter, which RFC-0023 monomorphizes and gives no tag
+//! (`StoredFnEffects::every_source`; findings 3 and 14). A lambda
 //! body is a frame of its own (RFC-0125 M3) and the caller hands every frame
 //! in; a body joins the frames of the lambdas it holds, because the value it
 //! builds can run them (finding 2).
@@ -53,8 +55,14 @@ pub enum Callee {
     Bodies(Vec<usize>),
     /// A builtin with no effect.
     Pure,
-    /// A name the caller cannot attribute, or a function type with no known
-    /// source. Judged as pure and reported, so the tally counts it.
+    /// A call through a function value whose closed set is EMPTY: the program
+    /// declares the `fn` type and holds no value of it, so nothing can be
+    /// called here and the call cannot run. An answer, not a missing one —
+    /// judged as pure and tallied apart from [`Callee::Unknown`] (RFC-0125 §3
+    /// M6, finding 14).
+    Empty,
+    /// A name the caller cannot attribute. Judged as pure and reported, so
+    /// the tally counts it.
     Unknown,
 }
 
@@ -86,6 +94,9 @@ pub struct Judged {
     /// attribute. The line is the call's, so a remaining one can be read in
     /// the source (RFC-0125 §3 M6, finding 14).
     pub unknown: Vec<(usize, String, usize)>,
+    /// The same, for every call whose closed set is empty — see
+    /// [`Callee::Empty`].
+    pub empty: Vec<(usize, String, usize)>,
     /// `(body index, callee name)` for every call through a function value
     /// that `through` answered with bodies.
     pub through: Vec<(usize, String)>,
@@ -112,6 +123,7 @@ pub fn judge(
     let mut own: Vec<Effects> = Vec::with_capacity(bodies.len());
     let mut edges: Vec<Vec<usize>> = Vec::with_capacity(bodies.len());
     let mut unknown = Vec::new();
+    let mut empty = Vec::new();
     let mut via = Vec::new();
     let mut spawns: Vec<(usize, String, usize, Vec<usize>)> = Vec::new();
     // One resolution per distinct name and per distinct type, not one per
@@ -124,6 +136,7 @@ pub fn judge(
             own: Effects::PURE,
             edges: Vec::new(),
             unknown: Vec::new(),
+            empty: Vec::new(),
             via: Vec::new(),
             spawns: Vec::new(),
             resolve,
@@ -146,6 +159,7 @@ pub fn judge(
         e.dedup();
         edges.push(e);
         unknown.extend(w.unknown.into_iter().map(|(n, l)| (i, n, l)));
+        empty.extend(w.empty.into_iter().map(|(n, l)| (i, n, l)));
         via.extend(w.via.into_iter().map(|n| (i, n)));
         spawns.extend(w.spawns.into_iter().map(|(c, l, idx)| (i, c, l, idx)));
     }
@@ -183,6 +197,7 @@ pub fn judge(
     Judged {
         effects,
         unknown,
+        empty,
         through: via,
         spawns,
     }
@@ -193,6 +208,8 @@ struct Walk<'a> {
     own: Effects,
     edges: Vec<usize>,
     unknown: Vec<(String, usize)>,
+    /// The callees whose closed set is empty.
+    empty: Vec<(String, usize)>,
     /// The callees `through` answered with bodies.
     via: Vec<String>,
     /// `(callee, line, callee bodies)` per spawn.
@@ -308,6 +325,10 @@ impl Walk<'_> {
                 (false, idx)
             }
             Callee::Pure => (true, Vec::new()),
+            Callee::Empty => {
+                self.empty.push((callee.clone(), line));
+                (true, Vec::new())
+            }
             Callee::Unknown => {
                 self.unknown.push((callee.clone(), line));
                 (true, Vec::new())
@@ -390,6 +411,23 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
             insts.push(inst);
         }
     }
+    // An `impl` projection's body (RFC-0091 M2, RFC-0120): no function of the
+    // program, no instance, and still a CALL by its own name in the core. It
+    // is judged so the join can bound what an access site runs (RFC-0125 §3
+    // M6, finding 14).
+    let mut place_bodies: Vec<(&str, crate::core::Body)> = Vec::new();
+    for pr in &lowered.places {
+        let inst = crate::Instance {
+            func: pr.func,
+            type_args: Vec::new(),
+            subst: Default::default(),
+            rows: pr.rows.clone(),
+            releases: Vec::new(),
+        };
+        if let Ok(b) = crate::core::build(program, &inst, &own) {
+            place_bodies.push((pr.func.name.as_str(), b));
+        }
+    }
     // Every frame, outermost first: `top[i]` is instance `i`'s own body, and a
     // lambda frame is keyed by the function it was written in and its line,
     // which is how RFC-0037 names a lambda source.
@@ -411,6 +449,13 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
                     .or_default()
                     .push(refs.len());
             }
+            refs.push(f);
+        }
+    }
+    let mut place_tops: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (name, b) in &place_bodies {
+        place_tops.entry(name).or_default().push(refs.len());
+        for f in b.frames() {
             refs.push(f);
         }
     }
@@ -455,6 +500,10 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         if let Some(idx) = impl_methods.get(name) {
             return Callee::Bodies(idx.clone());
         }
+        // A projection dispatched by name — the body the access site inlines.
+        if let Some(idx) = place_tops.get(name) {
+            return Callee::Bodies(idx.clone());
+        }
         Callee::Pure
     };
     let stored = vyrn_frontend::checker::stored_fn_effects(program);
@@ -464,7 +513,7 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
             return Callee::Unknown;
         }
         let mut idx: Vec<usize> = Vec::new();
-        for src in &stored.sources {
+        for src in stored.every_source() {
             if !vyrn_frontend::checker::fn_sigs_match(&src.sig, ty) {
                 continue;
             }
@@ -482,7 +531,7 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         idx.sort_unstable();
         idx.dedup();
         if idx.is_empty() {
-            Callee::Unknown
+            Callee::Empty
         } else {
             Callee::Bodies(idx)
         }

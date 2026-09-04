@@ -707,9 +707,9 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
 /// type is judged over its frame rather than nowhere (RFC-0125 §3 M6,
 /// finding 14).
 ///
-/// A `test` (RFC-0015) or `bench` (RFC-0055) body is a body too and is not
-/// here: the checker checks a CLONE of it, so nothing typed the nodes `own`
-/// and the lowering walk, and its core would be one gap per expression.
+/// A `test` (RFC-0015) or `bench` (RFC-0055) body is a body too; it is
+/// [`build_outside`]'s, because it is a BLOCK and this one is a list of
+/// stores.
 pub fn build_module_state<'a>(
     program: &'a Program,
     own: &'a Ownership,
@@ -765,6 +765,74 @@ pub fn build_module_state<'a>(
             releases: false,
         });
     }
+    b.body.stmts = out;
+    Ok(b.body)
+}
+
+/// A body that is no function of the program and no module-state
+/// initializer: a `test` (RFC-0015) or a `bench` (RFC-0055).
+///
+/// It is a block with no parameters, checked under the synthetic
+/// `test@<i>` / `bench@<i>` name that `own`'s release plan is keyed by. The
+/// checker used to check a CLONE of the block, so nothing typed the nodes
+/// `own` and the lowering walk and the core was one gap per expression; the
+/// checker checks the real nodes now (RFC-0125 §3 M6, seventh slice), and
+/// the lambdas the body holds get a frame like any other function's.
+pub fn build_outside<'a>(
+    program: &'a Program,
+    own: &'a Ownership,
+    name: &str,
+    file: Option<String>,
+    block: &Block,
+    rows: &[crate::Row<'a>],
+) -> Result<Body, Gap> {
+    let mut types: HashMap<usize, Type> = HashMap::new();
+    let mut produced: HashMap<usize, Type> = HashMap::new();
+    for r in rows {
+        if let Node::Expr(_) = r.node {
+            if let Some(t) = r.ty.as_ref().or(r.has.as_ref()) {
+                types.insert(r.node.id(), t.clone());
+            }
+            if let Some(t) = r.has.as_ref().or(r.ty.as_ref()) {
+                produced.insert(r.node.id(), t.clone());
+            }
+        }
+    }
+    // The plan's rows for this body. No substitution: the body has no type
+    // parameters, so `own`'s answer is already the concrete one.
+    let no_steps: Vec<Release> = Vec::new();
+    let steps = own.releases.get(name).unwrap_or(&no_steps);
+    let mut placed: HashMap<(Exit, usize), Vec<&Release>> = HashMap::new();
+    for r in steps {
+        placed.entry((r.exit, r.site)).or_default().push(r);
+    }
+    let mut b = Builder {
+        program,
+        own,
+        proto: &own.proto,
+        types,
+        produced,
+        placed,
+        body: Body {
+            name: name.to_string(),
+            file,
+            names: Vec::new(),
+            params: Vec::new(),
+            stmts: Vec::new(),
+            lambdas: Vec::new(),
+        },
+        scope: Vec::new(),
+        by_binding: HashMap::new(),
+        temps: 0,
+        func_name: name.to_string(),
+        pending_receiver: None,
+        drain: 0,
+        after: Vec::new(),
+        after_of_rhs: Vec::new(),
+        stream_loops: Vec::new(),
+    };
+    let mut out = Vec::new();
+    b.block(block, &mut out)?;
     b.body.stmts = out;
     Ok(b.body)
 }
@@ -2576,7 +2644,16 @@ impl<'a> Builder<'a> {
                         }
                         Ok(Place::Name(t))
                     }
-                    Val::Lit => gap("a place that is a literal", e.line()),
+                    // A literal receiver — `"abc".byteLength`, which the
+                    // corpus writes only inside a `test` body. The place is a
+                    // temporary the site owns, named here so the chain above
+                    // has a base (RFC-0125 §3 M6, seventh slice).
+                    Val::Lit => {
+                        let ty = self.ty_of(e)?;
+                        let t = self.temp(ty, e.line());
+                        out.push(St::Let(t, Rhs::Val(Val::Lit)));
+                        Ok(Place::Name(t))
+                    }
                 }
             }
         }

@@ -317,6 +317,47 @@ pub struct Lowered<'a> {
     /// set stays so the next engine that walks a lambda body can say which blocks
     /// those are without a second AST walk.
     pub lambda_bodies: std::collections::HashSet<usize>,
+    /// The `test` (RFC-0015) and `bench` (RFC-0055) bodies, in declaration
+    /// order, each body's rows under the synthetic `test@<i>` / `bench@<i>`
+    /// name the checker and `own` key it by.
+    ///
+    /// Outside every instantiation, like [`Lowered::globals`], and NOT
+    /// followed into the worklist, like [`Lowered::predicates`]: a test body
+    /// is no part of an artifact, so a generic it alone calls is an
+    /// instantiation no backend emits. The rows are here because a body the
+    /// judgment cannot see is a lambda with no frame, which is the half of
+    /// RFC-0125 §3 M6's finding 14 the third slice could not close.
+    pub bodies: Vec<OutsideBody<'a>>,
+    /// Every `impl` projection's body (RFC-0091 M2, RFC-0120), with its rows.
+    ///
+    /// A projection is never flattened into `Program::functions`, so no
+    /// instance covers it and no worklist reaches it — and the core still
+    /// lowers an access site as a CALL by the projection's own name. That is
+    /// why the effect judgment had twenty calls it could not attribute
+    /// (RFC-0125 §3 M6, finding 14). Outside every instantiation, like
+    /// [`Lowered::predicates`], and for the same reason: a projection is
+    /// inlined at its site, so following its calls would add instantiations
+    /// no backend's worklist has.
+    pub places: Vec<PlaceRows<'a>>,
+}
+
+/// One `impl` projection's body and its rows.
+#[derive(Debug, Clone)]
+pub struct PlaceRows<'a> {
+    pub func: &'a Function,
+    pub rows: Vec<Row<'a>>,
+}
+
+/// One body that is no function of the program: a `test` or a `bench`.
+#[derive(Debug, Clone)]
+pub struct OutsideBody<'a> {
+    /// `test@<i>` or `bench@<i>` — the name the checker checked it under and
+    /// the key `own`'s release plan uses.
+    pub name: String,
+    pub block: &'a vyrn_frontend::ast::Block,
+    pub module: Option<String>,
+    pub line: usize,
+    pub rows: Vec<Row<'a>>,
 }
 
 impl<'a> Lowered<'a> {
@@ -468,6 +509,45 @@ fn build<'a>(
         }
     }
     let predicates = pw.rows;
+    // The fourth root, and the second with no worklist attached: a `test` or
+    // `bench` body — see [`Lowered::bodies`].
+    let mut outside: Vec<OutsideBody<'a>> = Vec::new();
+    for (i, t) in program.tests.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&t.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("test@{i}"),
+            block: &t.body,
+            module: t.module.clone(),
+            line: t.line,
+            rows: w.rows,
+        });
+    }
+    for (i, b) in program.benches.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&b.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("bench@{i}"),
+            block: &b.body,
+            module: b.module.clone(),
+            line: b.line,
+            rows: w.rows,
+        });
+    }
+    // The fifth root, and the third with no worklist attached: an `impl`
+    // projection's body — see [`Lowered::places`].
+    let mut places: Vec<PlaceRows<'a>> = Vec::new();
+    for (_, f) in vyrn_frontend::project::all(program) {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&f.body, 0, &mut chain, &mut w);
+        places.push(PlaceRows {
+            func: f,
+            rows: w.rows,
+        });
+    }
     follow(
         "<module state>",
         std::mem::take(&mut gw.calls),
@@ -574,6 +654,8 @@ fn build<'a>(
         predicates,
         unresolved,
         lambda_bodies,
+        bodies: outside,
+        places,
     }
 }
 

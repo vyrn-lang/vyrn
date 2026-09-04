@@ -364,6 +364,10 @@ fn run_corpus() {
     // function types with a source the corpus has no body for (open sets).
     let mut through_calls = 0usize;
     let mut open: Vec<String> = Vec::new();
+    // Function types the program declares and holds no value of: the closed
+    // set is EMPTY, so the call through such a name cannot run.
+    let mut empty_sets: Vec<String> = Vec::new();
+    let mut empty_calls = 0usize;
     // Every spawn site, and the ones whose callee's set is outside the rule.
     let mut spawn_sites = 0usize;
     let mut spawn_outside: Vec<String> = Vec::new();
@@ -455,18 +459,74 @@ fn run_corpus() {
                 }
             }
         }
-        // The module-state initializer (RFC-0013), which is a body and no
-        // function of the program (RFC-0125 §3 M6, finding 14). No build
-        // emits it as an instance and no pass verdict stands beside it; it
-        // is judged here so the lambdas it holds have a frame, which is what
-        // a stored source names. A `test` or `bench` body is a body too and
-        // is NOT here: the checker checks a CLONE of it, so no type is
-        // recorded for the nodes `own` and the lowering walk.
+        // The bodies that are no function of the program (RFC-0125 §3 M6,
+        // finding 14): the module-state initializer (RFC-0013), and every
+        // `test` (RFC-0015) and `bench` (RFC-0055) body. No build emits one
+        // as an instance and no pass verdict stands beside it; they are
+        // judged here so the lambdas they hold have a frame, which is what a
+        // stored source names.
         let mut outside: Vec<vyrn_lower::core::Body> = Vec::new();
         if !program.globals.is_empty() {
             match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
                 Ok(b) => outside.push(b),
                 Err(g) => *gaps.entry(g.what).or_default() += 1,
+            }
+        }
+        for ob in &lowered.bodies {
+            match vyrn_lower::core::build_outside(
+                &program,
+                &own,
+                &ob.name,
+                ob.module.clone(),
+                ob.block,
+                &ob.rows,
+            ) {
+                Ok(b) => outside.push(b),
+                Err(g) => {
+                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
+                        eprintln!(
+                            "  gap: {} {}:{} {} {}",
+                            slash(path),
+                            ob.name,
+                            g.line,
+                            g.what,
+                            g.detail
+                        );
+                    }
+                    *gaps.entry(g.what).or_default() += 1;
+                }
+            }
+        }
+        // An `impl` projection's body (RFC-0091 M2, RFC-0120). It is no
+        // function of the program and no instance covers it, yet the core
+        // lowers an access site as a CALL by the projection's own name — so
+        // without a body here the judgment cannot bound what a `x.field(k)`
+        // runs (RFC-0125 §3 M6, finding 14). Built as `core::build` builds an
+        // instance, under the empty substitution a declaration has.
+        let mut place_bodies: Vec<(&str, vyrn_lower::core::Body)> = Vec::new();
+        for pr in &lowered.places {
+            let inst = vyrn_lower::Instance {
+                func: pr.func,
+                type_args: Vec::new(),
+                subst: Default::default(),
+                rows: pr.rows.clone(),
+                releases: Vec::new(),
+            };
+            match vyrn_lower::core::build(&program, &inst, &own) {
+                Ok(b) => place_bodies.push((pr.func.name.as_str(), b)),
+                Err(g) => {
+                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
+                        eprintln!(
+                            "  gap: {} place {}:{} {} {}",
+                            slash(path),
+                            pr.func.name,
+                            g.line,
+                            g.what,
+                            g.detail
+                        );
+                    }
+                    *gaps.entry(g.what).or_default() += 1;
+                }
             }
         }
         // Every frame, outermost first: the judgment's slice. `top[i]` is
@@ -494,9 +554,10 @@ fn run_corpus() {
                 refs.push(f);
             }
         }
-        // The initializer's frames. Its own body is no instance, so it lands
-        // in no `top` slot; the lambdas it holds are keyed by the body the
-        // checker records them under, which is the empty name.
+        // The frames of the bodies that are no instance: they land in no
+        // `top` slot, and the lambdas they hold are keyed by the name the
+        // checker records them under — the empty one for the module-state
+        // initializer, `test@<i>` / `bench@<i>` for a test or a bench.
         for b in &outside {
             for f in b.frames() {
                 if let Some(line) = f
@@ -510,6 +571,16 @@ fn run_corpus() {
                         .or_default()
                         .push(refs.len());
                 }
+                refs.push(f);
+            }
+        }
+        // A projection's frames. Its own body takes a slot the resolver
+        // reaches by the projection's SURFACE name, which is the name the
+        // core calls it by.
+        let mut place_tops: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (name, b) in &place_bodies {
+            place_tops.entry(name).or_default().push(refs.len());
+            for f in b.frames() {
                 refs.push(f);
             }
         }
@@ -566,6 +637,12 @@ fn run_corpus() {
             if let Some(idx) = impl_methods.get(name) {
                 return Callee::Bodies(idx.clone());
             }
+            // A projection dispatched by name (RFC-0120/0122/0123). It is no
+            // function value and no flattened method, so neither table above
+            // holds it; its body is the one the access site inlines.
+            if let Some(idx) = place_tops.get(name) {
+                return Callee::Bodies(idx.clone());
+            }
             if vyrn_frontend::prelude::signature(name).is_some()
                 || vyrn_frontend::checker::RESERVED.contains(&name)
                 || name.starts_with('@')
@@ -580,8 +657,10 @@ fn run_corpus() {
             }
             Callee::Unknown
         };
-        // RFC-0037: the closed set of functions a value of a function type
-        // may hold, as the checker's defunctionalization collected it. A
+        // The closed set of functions a value of a function type may hold: the
+        // defunctionalization sources RFC-0037 collects, and the functions
+        // handed straight to a `fn`-typed parameter, which RFC-0023
+        // monomorphizes and gives no tag (RFC-0125 §3 M6, finding 14). A
         // named source is its instances; a lambda source is its frame.
         let stored = vyrn_frontend::checker::stored_fn_effects(&program);
         let mut through = |ty: &Type| -> Callee {
@@ -593,7 +672,7 @@ fn run_corpus() {
             }
             let mut idx: Vec<usize> = Vec::new();
             let mut missing: Vec<String> = Vec::new();
-            for src in &stored.sources {
+            for src in stored.every_source() {
                 if !vyrn_frontend::checker::fn_sigs_match(&src.sig, ty) {
                     continue;
                 }
@@ -612,24 +691,30 @@ fn run_corpus() {
                     }
                 }
             }
+            // An OPEN set: a source the sources named and this corpus has no
+            // body for, so the join is short of what the value may hold. An
+            // EMPTY set is a different answer — see `Callee::Empty`.
             if !missing.is_empty() {
                 open.push(format!(
                     "{file}: a `{ty}` value may hold {}",
                     missing.join(", ")
                 ));
             } else if idx.is_empty() {
-                open.push(format!("{file}: a `{ty}` value has no source"));
+                empty_sets.push(format!("{file}: no `{ty}` value exists in this program"));
             }
             idx.sort_unstable();
             idx.dedup();
-            if idx.is_empty() {
-                Callee::Unknown
-            } else {
+            if !idx.is_empty() {
                 Callee::Bodies(idx)
+            } else if missing.is_empty() {
+                Callee::Empty
+            } else {
+                Callee::Unknown
             }
         };
         let judged = effects::judge(&refs, &mut resolve, &mut through);
         through_calls += judged.through.len();
+        empty_calls += judged.empty.len();
         spawn_sites += judged.spawns.len();
         for sp in &judged.spawns {
             if !sp.outside().is_pure() {
@@ -780,6 +865,7 @@ fn run_corpus() {
                                 .fold(Effects::PURE, Effects::join)
                                 .to_string(),
                             Callee::Pure => "pure".into(),
+                            Callee::Empty => "an empty set".into(),
                             Callee::Unknown => "unknown".into(),
                         };
                         eprintln!("  calls {c}: {ce}");
@@ -819,7 +905,7 @@ fn run_corpus() {
         "effects over the corpus: {programs} programs ({unloadable} not loadable here, \
          {refused} refused as recorded), {} functions judged, {pure} pure, {unlowered} unlowered, \
          {through_calls} calls through a function value judged over their sources, \
-         {} unattributed",
+         {empty_calls} through one whose set is empty, {} unattributed",
         rows.len(),
         unknown.values().sum::<usize>()
     );
@@ -827,6 +913,12 @@ fn run_corpus() {
     open.dedup();
     eprintln!("  open sets: {}", open.len());
     for o in &open {
+        eprintln!("    {o}");
+    }
+    empty_sets.sort();
+    empty_sets.dedup();
+    eprintln!("  empty sets: {}", empty_sets.len());
+    for o in &empty_sets {
         eprintln!("    {o}");
     }
     for (what, n) in &gaps {
@@ -874,10 +966,40 @@ fn run_corpus() {
         );
     }
     // Every call the judgment could not attribute, with its program, its
-    // line and the reason — the list RFC-0125 §3 M6's finding 14 is.
+    // line and the reason — the list RFC-0125 §3 M6's finding 14 was.
     for (name, n) in &unknown {
         eprintln!("  unattributed {n:5}  {name}");
     }
+    // Finding 14, closed by the seventh slice: the judgment answers for every
+    // call in the corpus. The count is EXACT, not a bound — a new one is a
+    // call whose effects the judgment does not bound, which is a hole in the
+    // M6 gate and not a number to raise.
+    const UNATTRIBUTED: usize = 0;
+    assert_eq!(
+        unknown.values().sum::<usize>(),
+        UNATTRIBUTED,
+        "calls the judgment could not attribute; the first: {}",
+        unknown.keys().next().map(String::as_str).unwrap_or("none")
+    );
+    // An open set is a source the collection named and this corpus has no
+    // body for. Zero since the seventh slice.
+    const OPEN_SETS: usize = 0;
+    assert_eq!(
+        open.len(),
+        OPEN_SETS,
+        "function types whose closed set names a body the corpus does not have; the first: {}",
+        open.first().map(String::as_str).unwrap_or("none")
+    );
+    // An EMPTY set is an answer, not a hole: the program declares the type
+    // and holds no value of it, so the call cannot run. Six in this corpus,
+    // each named in RFC-0125 §3 M6's seventh slice.
+    const EMPTY_SETS: usize = 6;
+    assert_eq!(
+        empty_sets.len(),
+        EMPTY_SETS,
+        "function types no value of which exists in their program:\n{}",
+        empty_sets.join("\n")
+    );
     if std::env::var("VYRN_EFFECTS_MODULES").is_ok() {
         let mut by_module: BTreeMap<&str, Effects> = BTreeMap::new();
         for r in &rows {
