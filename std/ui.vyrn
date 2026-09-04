@@ -1528,7 +1528,9 @@ type UiScan = { pages: Array<UiPageInfo>, layouts: Array<UiChrome>, errors: Arra
 /// never lowers it. `layout`/`error` `.vyx` files are chrome, not routes.
 gen fn uiScanAll(dir: String, prefix: Array<String>) -> UiScan {
     let listed = uiReadDirOf(dir)
-    let mut scanErr = listed.err
+    // `listed` owns the field, so the accumulator takes a value of its own
+    // (RFC-0125 §3 M3).
+    let mut scanErr = listed.err.copy()
     let mut pages: Array<UiPageInfo> = []
     let mut layouts: Array<UiChrome> = []
     let mut errors: Array<UiChrome> = []
@@ -2006,7 +2008,9 @@ gen fn uiWrapLayout(bodyExpr: String, layoutIdxs: Array<Int64>) -> String {
 /// The `Array<Html>` head expression: layout heads outer→inner, then the page
 /// head (`pageHeadCall`, "" for a `.vyrn` page or the error path). "[]" for none.
 gen fn uiHeadExpr(layoutIdxs: Array<Int64>, pageHeadCall: String) -> String {
-    let mut out = if pageHeadCall.byteLength > 0 { pageHeadCall } else { "[]" }
+    // One arm allocates and the other names a `read` parameter, so the arm
+    // that borrows takes a value of its own (RFC-0125 §3 M3).
+    let mut out = if pageHeadCall.byteLength > 0 { pageHeadCall.copy() } else { "[]" }
     let mut i = layoutIdxs.length - 1
     while i >= 0 {
         out = "uiHeadJoin2(uiLay" + layoutIdxs[i].toString() + ".head(), " + out + ")"

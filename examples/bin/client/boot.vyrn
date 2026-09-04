@@ -95,7 +95,9 @@ export extern fn setDraftLang(arg: String) {
 /// Validate the draft with fromJson; valid => fire the typed stub, invalid =>
 /// surface the Issues in the form.
 export extern fn submitCreate(arg: String) {
-    let raw = RawCreate { title: draftTitle, body: draftBody, lang: draftLang }
+    // A record literal takes what it is given, and nothing takes module state
+    // (RFC-0013, RFC-0125 §3 M3).
+    let raw = RawCreate { title: draftTitle.copy(), body: draftBody.copy(), lang: draftLang.copy() }
     match fromJson(api.CreateReq, toJson(raw)) {
         Valid(req) => api.pastesCreate(req, onPastesCreate),
         Invalid(iss) => setIssues(api.rpcIssuesFrom(iss)),
@@ -105,7 +107,9 @@ export extern fn submitCreate(arg: String) {
 /// Hand the pending soft-nav target to the host and clear it. The host polls this
 /// after each render; a non-empty result triggers a navigation.
 export extern fn takeNav() -> String {
-    let target = navTarget
+    // A value of its own: the store below ends every alias that reads out of
+    // `navTarget` (RFC-0090, RFC-0125 §3 M3).
+    let target = navTarget.copy()
     navTarget = ""
     return target
 }
