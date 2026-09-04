@@ -388,74 +388,6 @@ enum InstRule {
 // than firing zero times — §3 M2's own precedent, applied to itself for the
 // second time.
 
-/// Why an engine's boundary ladder took a rung the plan does not place —
-/// RFC-0101 §1.5's shadow.
-///
-/// Same discipline as [`Rule`]: a difference that fits a rule is a fact this
-/// file records, and one that fits none fails the run. **Every rule here is
-/// about ORDER, or about a rung one ladder does not have** — which is what M6's
-/// second phase predicted from reading the two ladders against each other, and
-/// it is why the plan does not try to be both of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum RungRule {
-    /// The textual ladder's resize rung is guarded by the TARGET being a sized
-    /// integer rather than by the pair differing, so `Int16 -> Int16` takes it
-    /// and emits nothing. A rung that does no work is not a decision about the
-    /// value; the plan places [`Rung::Identity`] there.
-    SizedTargetRung,
-    /// The direct ladder's numeric rung answers for EVERY integer pair, equal or
-    /// not — and it must, because it has to come before that ladder's shape
-    /// shortcut: `llt` prints `i8` for `Int8` and `UInt8` alike, so a shortcut
-    /// reached first would swallow the one pair whose bits genuinely move. This
-    /// is §1.5's order difference, and the reason is written at the rung.
-    NumericBeforeShape,
-    /// The direct ladder has no function-value rung at all: the structural
-    /// spelling and every named alias share the `{ i64, i64 }` shape, so its
-    /// shape shortcut answers first. The textual one re-tags explicitly.
-    FnByShape,
-    /// A type PARAMETER still spelled `T` on one side. The direct ladder
-    /// substitutes before its first rung (§1.5's first row) and the textual one
-    /// does not, so a pair like `String -> T` matches no guard there and falls
-    /// off the end.
-    ///
-    /// **It is a spelling, not a hole, and two programs say so.** A value can
-    /// only reach a `T` position if the checker solved `T` to its type: an
-    /// `Int64` flowing into a `T` the receiver fixed at a refined `Age` is
-    /// rejected — "type parameter `T` is both Age and Int64" — with a bare
-    /// generic and with an associated type alike. So `from` and `to` here are
-    /// one type under two spellings, the identity is right, and the validation
-    /// the textual ladder would appear to be skipping is one the checker has
-    /// already made unreachable. Both programs were written and both came back
-    /// green (RFC-0101 §3 M6's third phase).
-    ParamSpelling,
-}
-
-/// Which rule, if any, explains `took` where the plan places `planned`. `None`
-/// means the gate fails.
-///
-/// The pair is an argument because one rule is about the TYPES rather than the
-/// rungs: a `Refuse` the textual ladder walked past is a spelling when a type
-/// parameter is involved and a program that compiles on one target only when it
-/// is not.
-fn rung_rule(
-    site: Site,
-    from: &Type,
-    to: &Type,
-    planned: vyrn_codegen::Rung,
-    took: vyrn_codegen::Rung,
-) -> Option<RungRule> {
-    use vyrn_codegen::Rung as R;
-    match (site, planned, took) {
-        (Site::Native, R::Identity, R::Resize) => Some(RungRule::SizedTargetRung),
-        (Site::Wasm, R::Identity, R::Resize) => Some(RungRule::NumericBeforeShape),
-        (Site::Wasm, R::FnRetag, R::Identity) => Some(RungRule::FnByShape),
-        (Site::Native, R::Refuse, R::Identity) if mentions_param(from) || mentions_param(to) => {
-            Some(RungRule::ParamSpelling)
-        }
-        _ => None,
-    }
-}
-
 /// Why the interpreter's release sequence differs from the placement both
 /// compiled backends now read — RFC-0101 M4.
 ///
@@ -853,7 +785,6 @@ fn gate() {
         (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
         usize,
     > = Default::default();
-    let mut rung_rules: std::collections::BTreeMap<RungRule, usize> = Default::default();
     #[allow(clippy::type_complexity)]
     let mut unruled: std::collections::BTreeMap<
         (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
@@ -1010,20 +941,14 @@ fn gate() {
                 t.rungs_planned += 1;
                 continue;
             }
-            match rung_rule(c.site, &c.from, &c.to, planned, c.rung) {
-                Some(r) => *rung_rules.entry(r).or_insert(0) += 1,
-                None => {
-                    t.rungs_unruled += 1;
-                    if planned == vyrn_codegen::Rung::Refuse || c.rung == vyrn_codegen::Rung::Refuse
-                    {
-                        t.rungs_terminal += 1;
-                    }
-                    unruled
-                        .entry((c.site, planned, c.rung))
-                        .or_default()
-                        .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
-                }
+            t.rungs_unruled += 1;
+            if planned == vyrn_codegen::Rung::Refuse || c.rung == vyrn_codegen::Rung::Refuse {
+                t.rungs_terminal += 1;
             }
+            unruled
+                .entry((c.site, planned, c.rung))
+                .or_default()
+                .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
         }
 
         // Half zero, and RFC-0101 M2's own gate: the lowering's worklist against
@@ -1203,12 +1128,8 @@ fn gate() {
 
     eprintln!("  RFC-0101 M4: {rel_lambda} release steps placed inside a lambda body");
     eprintln!(
-        "  RFC-0101 §1.5: {} boundary crossings took the planned rung, {} took another          by a named rule {:?}, {} by none ({} of them terminal)",
-        t.rungs_planned,
-        rung_rules.values().sum::<usize>(),
-        rung_rules,
-        t.rungs_unruled,
-        t.rungs_terminal
+        "  RFC-0101 §1.5: {} boundary crossings took the planned rung, {} took another          ({} of them terminal)",
+        t.rungs_planned, t.rungs_unruled, t.rungs_terminal
     );
     for ((site, planned, took), n) in &ladder {
         eprintln!("    ladder {site:?}: plan {planned:?}, took {took:?} x{n}");
@@ -1393,21 +1314,22 @@ fn gate() {
     );
 
     // RFC-0101 §1.5's shadow, and the TERMINAL rung first, because it is the one
-    // difference that is a program compiling on one target only: the textual
-    // ladder falls through to identity where the direct one refuses. A pair the
-    // plan refuses and an engine walked past is either a type parameter's
-    // spelling (`RungRule::ParamSpelling`, with the two programs that prove it)
-    // or a hole, and nothing else in this repository asks.
+    // difference that is a program compiling on one target only: a pair one
+    // ladder refuses and the other walks past. Both ladders ask the plan now
+    // (RFC-0125 §3 M6, the coercion ladder), so the count is zero by
+    // construction — and this is what says so out loud if an emitter grows a
+    // rung of its own again.
     assert_eq!(
         t.rungs_terminal, 0,
-        "{} boundary crossings are at the end of one ladder and not the other, with          no rule to explain them — see the UNRULED lines above",
+        "{} boundary crossings are at the end of one ladder and not the other —          see the UNRULED lines above",
         t.rungs_terminal
     );
-    // …and then the rest of the ladder. Every crossing takes the planned rung or
-    // one of the four named differences, all of which are ORDER (§1.5).
+    // …and then the rest of the ladder. Every crossing takes the planned rung.
+    // The four named differences RFC-0101 §1.5 recorded — an order, and a rung
+    // one ladder did not have — went with the guards that produced them.
     assert_eq!(
         t.rungs_unruled, 0,
-        "{} boundary crossings took a rung the plan does not place and no rule          explains — see the UNRULED lines above",
+        "{} boundary crossings took a rung the plan does not place — see the          UNRULED lines above",
         t.rungs_unruled
     );
     // The floor under both: a shadow that observes nothing asserts nothing.
@@ -1444,73 +1366,10 @@ fn gate() {
     );
 }
 
-/// RFC-0101 §1.5's shadow, broken on purpose — in both directions, which is
-/// what M4's placement gate established a gate has to do before it is worth
-/// anything.
-///
-/// The corpus run above is green, and a green run over four rules proves the
-/// rules FIRE; it does not prove they are narrow. These are the cases that must
-/// still fail, and each one is a real difference wearing a rule's shape.
-#[test]
-fn the_ladder_rules_refuse_what_they_are_not_about() {
-    use vyrn_codegen::Rung as R;
-    let t = Type::Named("T".into());
-    let p = Type::Param("T".into());
-    let s = Type::Str;
-
-    // THE TERMINAL RUNG, and the reason it is gated first: the textual ladder
-    // walking past a pair the plan refuses is a spelling ONLY where a type
-    // parameter is in it. The same walk-past between two concrete types is a
-    // value reinterpreted on one target and a compile error on the other, and
-    // it has no rule.
-    assert_eq!(
-        rung_rule(Site::Native, &s, &p, R::Refuse, R::Identity),
-        Some(RungRule::ParamSpelling)
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Refuse, R::Identity),
-        None,
-        "a refused pair with no type parameter in it is the hole, not a spelling"
-    );
-    // …and in the other direction: the DIRECT ladder refusing is its declared
-    // end, but the textual one reaching `Refuse` would mean it grew an end it
-    // does not have.
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Identity, R::Refuse),
-        None
-    );
-
-    // Every other rule is about ONE engine's ladder, so the same pair of rungs
-    // at the other engine is a real difference. Swapping the site must not be
-    // explained.
-    assert_eq!(
-        rung_rule(Site::Wasm, &s, &t, R::FnRetag, R::Identity),
-        Some(RungRule::FnByShape)
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::FnRetag, R::Identity),
-        None,
-        "the textual ladder HAS a function rung; skipping it is not the shape shortcut"
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Identity, R::Resize),
-        Some(RungRule::SizedTargetRung)
-    );
-    assert_eq!(
-        rung_rule(Site::Wasm, &s, &t, R::Identity, R::Resize),
-        Some(RungRule::NumericBeforeShape)
-    );
-    // A rung nothing explains, at either engine.
-    assert_eq!(rung_rule(Site::Wasm, &s, &t, R::Heapify, R::Identity), None);
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Validate, R::Identity),
-        None,
-        "a validation skipped is the defect class this whole gate exists for"
-    );
-}
-
 /// The plan itself, at the pairs the corpus does not reach — the ends of the
-/// ladder, which is where the two engines disagree.
+/// ladder, which is where the two engines used to disagree. It is stated once
+/// and both emitters ask it now (RFC-0125 §3 M6), so what this pins is the
+/// ORDER, which is the half of the rule a green corpus cannot see.
 #[test]
 fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
     use vyrn_codegen::Rung as R;
@@ -1603,7 +1462,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "wasm",
             "the rung, and the wasm for it",
             true,
-            177,
+            169,
         ),
         site(
             "vyrn-frontend/src/interp.rs",
@@ -1742,8 +1601,8 @@ fn the_coercion_census_is_what_the_rfc_records() {
         }
     }
     assert_eq!(
-        ladder, 540,
-        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 540"
+        ladder, 532,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 532"
     );
     // The carriers that state the rung rule THEMSELVES, in the sense the
     // boundary census of §3 M6's fifth slice uses: an engine that ASKS another
