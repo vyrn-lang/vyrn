@@ -185,6 +185,7 @@ fn corpus() -> Vec<PathBuf> {
 }
 
 #[test]
+#[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test kernel -- --ignored"]
 fn the_kernel_over_the_corpus() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.

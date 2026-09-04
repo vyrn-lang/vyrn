@@ -495,6 +495,37 @@ jobs:
           & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  judgments:
+    name: the judgments over the corpus (kernel, effects, typed, core tables)
+    # These four suites build the named core for every instance of every corpus
+    # program and walk it: about eleven minutes together. They used to run
+    # inside `tests (workspace)`, where they tripled that job — 8 minutes to 27
+    # on the Windows leg — for no gain, because CI wall time is the slowest job
+    # and not the sum. They are `#[ignore]`d for the same reason parity and the
+    # residue ratchet are, and they gate here instead, in parallel (RFC-0125
+    # §3 M2, M3 and M6: each carries its own RATCHET).
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: The linear judgment over the corpus (RFC-0125 M2)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test kernel -- --ignored --nocapture
+      - name: The plan's tables against the core's (RFC-0125 M3)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test coretables -- --ignored --nocapture
+      - name: The effect judgment beside the audience and the floor (RFC-0125 M6)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test effects -- --ignored --nocapture
+      - name: Typed by construction over the corpus (RFC-0125 M6)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test typed -- --ignored --nocapture
+
   parity:
     name: three-way parity (interp == native == wasm)
     # x86-64 only, on purpose, and here is the case for the ARM leg that is NOT
