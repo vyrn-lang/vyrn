@@ -2582,7 +2582,8 @@ corpus is `examples/*.vyrn` alone — not `examples/shelf/`, not `std/`, not
 checkout, 466 of them: run `vyrn check` twice, once with the kernel and once
 without, and list what only the first refuses. **32 programs failed**, reaching
 20 refusal sites in nine files. Three of the sites were the kernel's fault,
-one the core's, and eleven the program's.
+one the core's, and eleven the program's. The gates then found a twelfth the
+sweep could not: a program a test writes to a scratch directory.
 
 **The three the kernel was wrong about.** Each is one probe under
 `rfcs/probes-0125/`, and each is a rule stated in the wrong place rather than a
@@ -2622,6 +2623,21 @@ The fixes are `.copy()` in nine of them, one `drop` before the store that
 replaces a value, and one call to the per-node predicate the array-wrapping
 call was reaching for. After them the sweep is **0 programs over 466**: no
 `.vyrn` file in the checkout is refused by the kernel and accepted without it.
+
+**The twelfth was not a file, and it is the finding.** A test writes its
+program to a scratch directory, so the sweep could not see it: `parity.rs`'s
+`a_specialization_discovered_from_another_gets_the_index_its_callers_named`.
+Its `wrap<T>(x: T) -> Pair<T, T>` stores one `read` parameter into two fields
+of the same record, and its `firstOf<A, B>(p: Pair<A, B>) -> A` returns a
+field of one. Both are rule 2, and the checker accepts them because it types
+the GENERIC body, where `T` owns heap or does not according to nothing. The
+kernel judges the INSTANCE, where `T` is `String`, and refuses: the record
+would hold the caller's buffer twice, and the result would be a lend. The
+program takes two `.copy()` calls and the note beside it says why. **Rule 2 is
+unenforced across a substitution today, and this is where the kernel first
+says so.** It is not a wording gap and not a new rule; it is the same rule
+asked one stage later, and it belongs in the record because the next generic
+accessor a person writes will meet it.
 
 **The licence the next deletion slice needs.** For every row of the refusals
 census whose kernel column says the kernel gives it — `the same` or `its own

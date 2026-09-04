@@ -843,6 +843,14 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
 /// substitution is even solved), and a further generic solved from a generic
 /// call's RESULT type — `firstOf(twice(41))` can only fix `A` if the call
 /// reports `Pair<Int64, Int64>` rather than its record shape.
+///
+/// The `.copy()` calls are RFC-0089 rule 2, and the kernel is what made them
+/// necessary (RFC-0125 §3 M3, the default slice). The checker types the
+/// GENERIC body, where `T` owns heap or does not according to nothing; the
+/// kernel judges the instance, where `T` is `String`. Without them `wrap`
+/// stores one `read` parameter into two fields of the same record and
+/// `firstOf` returns a field of a `read` parameter — a double free and a lend,
+/// visible only after substitution.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
@@ -855,7 +863,7 @@ fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
 type Pair<A, B> = { first: A, second: B }
 
 fn wrap<T>(x: T) -> Pair<T, T> {
-    return Pair { first: x, second: x }
+    return Pair { first: x.copy(), second: x.copy() }
 }
 
 fn twice<T>(x: T) -> Pair<T, T> {
@@ -863,7 +871,7 @@ fn twice<T>(x: T) -> Pair<T, T> {
 }
 
 fn firstOf<A, B>(p: Pair<A, B>) -> A {
-    return p.first
+    return p.first.copy()
 }
 
 fn main() -> Int64 {
