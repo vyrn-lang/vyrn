@@ -111,6 +111,7 @@ const CENSUS: &[Census] = &[
 ];
 
 #[test]
+#[ignore = "compiles and runs the whole corpus; the `fixtures` job runs it: cargo test -p vyrn-cli --test fixtures -- --ignored"]
 fn every_example_prints_what_was_recorded() {
     let dir = examples_dir();
     let write = match std::env::var("VYRN_FIXTURES").as_deref() {

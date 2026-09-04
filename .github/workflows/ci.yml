@@ -746,7 +746,7 @@ jobs:
           workspaces: compiler
       - name: Every example prints what was recorded, as compiled wasm
         working-directory: compiler
-        run: cargo test --quiet -p vyrn-cli --test fixtures -- --nocapture
+        run: cargo test --quiet -p vyrn-cli --test fixtures -- --ignored --nocapture
 
   gen-engine:
     name: cross-engine generation (interp == wasm)
