@@ -3660,9 +3660,142 @@ their passes deleted." Where each stands:
 What still stands between here and the gate is M6's other two sentences, which
 no slice has started: validation by construction in place of the boundary
 checks, and the trap primitive and its table in place of the sites. Finding 14
-is still open — 69 calls through a function value the join cannot attribute,
-40 open sets — and it bounds neither: the ratchet counts it as unattributed
-rather than as a disagreement.
+was open here — 69 calls through a function value the join could not
+attribute, 40 open sets — and it bounded neither: the ratchet counted it as
+unattributed rather than as a disagreement. The seventh slice below closes it,
+and the gate has no hole from it.
+
+#### The seventh slice (2026-09-04)
+
+The seventh slice closes finding 14. The judgment answers for every call in
+the corpus: **0 unattributed, 0 open sets**, and the test asserts both
+counts exactly rather than as a bound.
+
+Three things were missing, and none of them was a value holding a function
+from outside a closed set. Every one was a body or a source the collection
+did not reach, so the answer to the question the finding poses — a gap in
+what is collected, or a genuinely open set — is the first, in all three.
+
+**1. A `test` or a `bench` body had no core, because the checker checked a
+CLONE of it.** `check_tests` and `check_benches` built a synthetic
+`test@<i>` / `bench@<i>` function whose body was `t.body.clone()`. The
+checker keys its recorded answers by node ADDRESS (RFC-0101 M1), so the
+types landed on the clone and the real nodes — the ones `own`, the lowering
+and the interpreter walk — stayed untyped. The third slice measured what a
+core over them would cost at 3,663 gaps and left the body out. The head is
+still synthetic and the body is the real node now (`Checker::function_body`,
+one line of `Checker::function` split out), which is the whole of the
+frontend change: same statements, same diagnostics, one address instead of
+two. `Lowered::bodies` carries each body's rows, walked as `predicates` are
+and NOT followed into the worklist — a test body is no part of an artifact,
+so a generic it alone calls is an instantiation no backend emits — and
+`core::build_outside` builds it under the name `own`'s release plan is keyed
+by. A module-state initializer already had its core since the third slice;
+this is the other half.
+
+One core refused eleven of those bodies: `"abc".byteLength` is a place whose
+base is a literal, which `core::place` had no name for. It binds a temporary
+now, which is what the arm above it does for every other unnamed receiver.
+No instance in the corpus writes one, so the arm fires only inside a test
+body; unlowered is 0 in the effects harness, and the kernel's tally does not
+move — it builds no test body.
+
+**2. Whether a function value was collected turned on how the parameter's
+type was SPELLED.** RFC-0037 collects a defunctionalization source at a
+STORED position — a `let` annotation, a record field, an element, a return.
+A call ARGUMENT is checked by `Checker::check_fn_arg` instead, which
+monomorphizes it (RFC-0023) and recorded nothing. And the two paths are
+chosen by the parameter's type node: `f: Bump`, a named alias for
+`fn(Int64) -> Int64`, is not a `Type::Fn`, so it falls through to the stored
+path and IS collected; `f: fn(Int64) -> Int64` goes to `check_fn_arg` and is
+not. One value, one closed set, two answers by the spelling.
+
+`check_fn_arg` records the argument now, in the two arms that introduce a
+function — a lambda literal and a bare function name. The third arm, an
+expression of `fn` type, forwards a value some other position already
+collected, so the set stays closed by construction. The signature recorded
+is the parameter's type under everything the call has solved, so a generic
+`fn(T) -> U` is the concrete signature the instance calls through.
+
+The rows are a list of their own, `StoredFnEffects::arg_sources`, and NOT
+part of `sources`. The two positions are different things: a stored value
+carries a defunctionalization tag and one enum variant, an argument carries
+neither. The spawn-safety fixpoint and the `--workers` gate read `sources`
+alone and their verdicts do not move; the effect judgment reads both
+(`every_source`), because a parameter's call reaches whatever a caller
+handed it, whichever route the value took.
+
+**3. A projection is never flattened into `Program::functions` (RFC-0091
+M2), so the name the core calls it by named no body.** The core lowers
+`doc.field("items")` as a call to `field`, and neither the instance table
+nor the flattened-method table holds that name — twenty calls in
+`jchain.vyrn`, `jsonplace.vyrn`, `namedplace.vyrn`, `protoplace.vyrn` and
+`tryplace.vyrn` were unattributed for it. `Lowered::places` carries each
+`impl` projection's rows, walked as `predicates` are and not followed for
+the same reason (a projection is inlined at its site), and both readers —
+the harness and the floor's judge — build its core under the empty
+substitution a declaration has and resolve the surface name to it. A
+projection body can trap and allocate, so this is not a bookkeeping change:
+the join now covers what an access site runs.
+
+**An empty set is an answer, not a hole.** Six function types are left where
+the closed set is EMPTY — the program declares the type and holds no value
+of it, so the call cannot run. The judgment says so with `Callee::Empty` and
+the tally counts them apart from an unattributed call:
+
+| program | type | why no value exists |
+|---|---|---|
+| `examples/bin/client/boot.vyrn` | `fn(RpcReply<PasteList__from0>)` | `pastes/recent` is server-rendered and needs no client callback — the file says so on line 58; `std/rpc` still generates the deliverer |
+| `examples/shelf/client/boot.vyrn` | `fn(RpcReply<TagCounts>)` | the same, for `books/tags` |
+| `examples/fullstack/server.vyrn` | `Feed` | nothing in the program calls `sse` or `ws`, and `std/http`'s `httpFeed` is a non-generic function, so the lowering roots it whether or not it is reached |
+| `examples/pagesdemo.vyrn` | `Feed` | the same |
+| `examples/rest.vyrn` | `Feed` | the same |
+| `examples/shelf/server.vyrn` | `Feed` | the same |
+
+Every one is a generated or library body the worklist roots and the program
+never calls. Judging such a call pure is not an approximation: no value can
+reach it. `tests/effects.rs` asserts the count is 6 and lists them on
+failure.
+
+**The tally.** `cargo test -p vyrn-cli --test effects`, before and after, on
+the same 180 programs. The BEFORE column is this slice's own re-measure at
+its parent commit, not the sixth slice's printed numbers: the third
+judgment's fourth slice added the `where` constructors, so the corpus's
+function count moved between.
+
+| line | before | after |
+|---|---|---|
+| functions judged | 27,131 | 27,131 |
+| pure | 8,368 | 8,358 |
+| unlowered | 0 | 0 |
+| calls through a function value | 64 | 109 |
+| through one whose set is empty | — | 6 |
+| **unattributed** | **69** | **0** |
+| **open sets** | **40** | **0** |
+| empty sets | — | 6 |
+| floor agree | 26,873 | 26,865 |
+| floor callee-carried | 42 | 50 |
+| floor gen-body | 216 | 216 |
+| judged differ | 0 | 0 |
+
+Ten functions stop being pure and eight move from *agree* to
+*callee-carried*: their `extern` comes from a callee the join reaches only
+through a function value or a projection. `alloc` rises 18,218 to 18,228,
+`extern` 31 to 39 and `trap` 7,909 to 7,911, and no other row moves. **Both
+ratchets are 0**, and `judged: 0 differ` — the moved floor rows and the
+judgment still give one program one answer.
+
+**Finding 14 is closed, and the M6 gate has no hole from it.** Every call in
+the corpus is one of: an atom, a body the join names, a projection whose
+body it names, or a call through a function type with no value in the
+program. None of them is a call whose effects the judgment cannot bound.
+What the count does NOT prove is a property of the language: the argument
+position is closed by construction because `check_fn_arg` accepts three
+shapes and the third forwards, and a projection is closed because it is
+inlined. A route that let a function value into a program without passing
+either would be a new source list, not a raised number, and the exact
+assertion is there so it is found that way.
+
 #### The third judgment's second slice (2026-09-03)
 
 The census sorted every value boundary into five lines. This slice takes two
