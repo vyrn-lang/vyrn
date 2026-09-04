@@ -3069,7 +3069,7 @@ fn mentions_in_expr<'e>(e: &'e Expr, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&
 }
 
 thread_local! {
-    static STRICT_REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
+    static REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
 }
@@ -3278,17 +3278,28 @@ fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
     }
 }
 
-/// Whether `VYRN_KERNEL_STRICT=1` is set: a hard refusal by the kernel fails
-/// `vyrn check` and `vyrn build`.
-pub fn strict() -> bool {
-    std::env::var("VYRN_KERNEL_STRICT").is_ok_and(|v| v == "1")
+/// Whether the kernel's hard refusals fail the command. They do, and
+/// `VYRN_NO_KERNEL=1` turns them off (RFC-0125 §3 M3, the default slice).
+///
+/// The knob is a bisect, not a mode: it says whether a refusal came from the
+/// kernel or from somewhere else, the way `VYRN_NO_MOVECHECK=1` and
+/// `VYRN_NO_PLACER=1` say it for the two passes beside it. Nothing is built
+/// under it.
+pub fn refuses() -> bool {
+    !std::env::var("VYRN_NO_KERNEL").is_ok_and(|v| v == "1")
 }
 
 /// The hard refusals the placer met since the last call, on this thread: a
-/// double free, a use after release, a join whose edges disagree — what no
-/// placement repairs. Drained by the CLI in strict mode after an analysis.
-pub fn take_strict_refusals() -> Vec<crate::kernel::Refusal> {
-    STRICT_REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
+/// double free, a use after release, a join whose edges disagree, and a rule
+/// the core states about a construct it does lower.
+///
+/// A REFUSAL is not a GAP. A gap ([`Gap`] with no `rule`) is a construct this
+/// slice cannot lower, so the core has no opinion about the program and the
+/// command goes on with the plan the analysis left. A refusal is an answer:
+/// the program breaks a rule, and no placement repairs it. Only refusals are
+/// collected here, and only refusals fail a command.
+pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
+    REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
 /// RFC-0125 M3, first slice: the releases the plan did not place, placed.
@@ -3326,7 +3337,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 // lower: reported like the kernel's own refusals (RFC-0125
                 // §3 M3, the checker's deletion path).
                 if let Some(message) = g.rule {
-                    STRICT_REFUSALS.with(|v| {
+                    REFUSALS.with(|v| {
                         v.borrow_mut().push(crate::kernel::Refusal {
                             message,
                             line: g.line,
@@ -3362,9 +3373,9 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                         eprintln!("placer: refused: {}: {}", r.body, r.message);
                     }
                     // A refusal no placement repairs: a double free, a use after
-                    // release, a join whose edges disagree. Kept for the CLI's
-                    // strict mode.
-                    STRICT_REFUSALS.with(|v| v.borrow_mut().push(r));
+                    // release, a join whose edges disagree. A refusal, not a
+                    // gap: the CLI fails the command with it.
+                    REFUSALS.with(|v| v.borrow_mut().push(r));
                     continue;
                 }
             };

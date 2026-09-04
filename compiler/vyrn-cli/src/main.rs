@@ -538,7 +538,7 @@ fn real_main() -> ExitCode {
         "check" => profile_now(match load_program(path, &source) {
             Ok(program) => {
                 let _memo = shared_desugars();
-                if let Err(code) = kernel_strict(&program, path) {
+                if let Err(code) = kernel_refuses(&program, path) {
                     return code;
                 }
                 match vyrn_codegen::check_instantiations(&program) {
@@ -575,6 +575,14 @@ fn real_main() -> ExitCode {
             if let Err(e) = vyrn_codegen::check_instantiations(&program) {
                 eprintln!("error: {e}");
                 return ExitCode::FAILURE;
+            }
+            // And what `check` refuses, `run` refuses: one program has one
+            // answer, whichever engine runs it (RFC-0125 §3 M3, the default
+            // slice). `run_wasm` asks again on its own route.
+            if engine != Engine::Wasm {
+                if let Err(code) = kernel_refuses(&program, path) {
+                    return code;
+                }
             }
             if engine == Engine::Wasm {
                 return run_wasm(path, &program, &prog_args);
@@ -3145,20 +3153,28 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
     }
 }
 
-/// RFC-0125 M2, strict mode: with `VYRN_KERNEL_STRICT=1`, a hard refusal by
-/// the kernel — a double free, a use after release, a join whose edges
-/// disagree; not a missing release, which the placer repairs — fails the
-/// command with the kernel's message as a diagnostic, printed as the
-/// checker's are: `file:line:col: message` (RFC-0125 M3, third slice). The
-/// analysis runs once more here so the refusals are this program's and not
-/// a generator's.
-fn kernel_strict(program: &vyrn_frontend::ast::Program, path: &str) -> Result<(), ExitCode> {
-    if !vyrn_lower::kernel_strict() {
+/// A hard refusal by the kernel — a double free, a use after release, a join
+/// whose edges disagree, a rule the core states; not a missing release, which
+/// the placer repairs, and not a gap, which is a construct the core cannot
+/// lower and no opinion about the program — fails the command with the
+/// kernel's message as a diagnostic, printed as the checker's are:
+/// `file:line:col: message` (RFC-0125 §3 M3).
+///
+/// It fails by default (RFC-0125 §3 M3, the default slice), which is what
+/// lets a rule leave `movecheck.rs`: while the refusal was behind a flag, a
+/// deleted rule shipped a program that should be refused. `VYRN_NO_KERNEL=1`
+/// turns it off for a bisect.
+///
+/// The analysis runs once more here so the refusals are this program's and
+/// not a generator's — the load runs `gen fn` bodies as whole programs of
+/// their own, and each fills the same thread-local.
+fn kernel_refuses(program: &vyrn_frontend::ast::Program, path: &str) -> Result<(), ExitCode> {
+    if !vyrn_lower::kernel_refuses() {
         return Ok(());
     }
-    let _ = vyrn_lower::take_strict_refusals();
+    let _ = vyrn_lower::take_refusals();
     let _ = vyrn_frontend::own::analyze(program);
-    let refusals = vyrn_lower::take_strict_refusals();
+    let refusals = vyrn_lower::take_refusals();
     if refusals.is_empty() {
         return Ok(());
     }
@@ -5783,7 +5799,7 @@ fn write_response_vary(
 /// exit code `vyrn run` gives the interpreter. The kernel's refusals apply as
 /// they do to `build`, since this is the same route.
 fn run_wasm(path: &str, program: &vyrn_frontend::ast::Program, prog_args: &[String]) -> ExitCode {
-    if let Err(code) = kernel_strict(program, path) {
+    if let Err(code) = kernel_refuses(program, path) {
         return code;
     }
     let bytes = match vyrn_codegen::direct::compile(program) {
@@ -6050,7 +6066,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let _memo = shared_desugars();
-    if let Err(code) = kernel_strict(&program, path) {
+    if let Err(code) = kernel_refuses(&program, path) {
         return code;
     }
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)

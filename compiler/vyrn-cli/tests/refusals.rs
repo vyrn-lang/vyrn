@@ -10,10 +10,13 @@
 //! answer today.
 //!
 //! Two runs per row. `vyrn check` is the checker's answer, and it must be the
-//! wording in the table. `VYRN_NO_MOVECHECK=1 VYRN_KERNEL_STRICT=1 vyrn check`
-//! stands the checker aside so the kernel's own sentence is reachable — the
-//! checker refuses each of these first, so without the knob the kernel is
-//! never asked (RFC-0125 §3 M3, "wordings").
+//! wording in the table. `VYRN_NO_MOVECHECK=1 vyrn check` stands the checker
+//! aside so the kernel's own sentence is reachable — the checker refuses each
+//! of these first, so without the knob the kernel is never asked (RFC-0125 §3
+//! M3, "wordings"). The kernel's refusal needs no flag of its own since the
+//! default slice: the second run is the licence the deletion track reads, and
+//! a row that says `the same` or `its own words` is a rule `movecheck.rs`
+//! may lose without the program it refuses becoming one the compiler accepts.
 //!
 //! The column has four values, and each is asserted:
 //!
@@ -357,8 +360,7 @@ fn refusal(file: &str, kernel_mode: bool) -> (bool, String) {
     let mut cmd = vyrn();
     cmd.arg("check").arg(&path);
     if kernel_mode {
-        cmd.env("VYRN_NO_MOVECHECK", "1")
-            .env("VYRN_KERNEL_STRICT", "1");
+        cmd.env("VYRN_NO_MOVECHECK", "1");
     }
     let out = cmd.output().expect("vyrn check");
     let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");

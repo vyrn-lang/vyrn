@@ -48,7 +48,7 @@ pub fn install() {
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);
 }
-pub use core::{strict as kernel_strict, take_strict_refusals};
+pub use core::{refuses as kernel_refuses, take_refusals};
 pub use render::render;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
