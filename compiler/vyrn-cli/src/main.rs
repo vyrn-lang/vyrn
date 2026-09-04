@@ -1956,7 +1956,11 @@ fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
             if p.is_dir() {
-                if name.starts_with('.') || name == "vendor" || name == "node_modules" {
+                if name.starts_with('.')
+                    || name == "target"
+                    || name == "vendor"
+                    || name == "node_modules"
+                {
                     continue;
                 }
                 walk(&p, out);
