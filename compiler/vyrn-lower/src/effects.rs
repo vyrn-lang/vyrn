@@ -239,7 +239,7 @@ impl Walk<'_> {
                     Rhs::Call { .. } => atom_call,
                     Rhs::Val(_) | Rhs::Read(_) | Rhs::Take(_) => false,
                 };
-                if born && self.body.names[*n as usize].owned {
+                if born && self.body.names[*n as usize].releases {
                     self.own = self.own.with(Effect::Alloc);
                 }
             }

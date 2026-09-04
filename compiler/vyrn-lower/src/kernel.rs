@@ -14,6 +14,23 @@
 //! mechanism by which a placement the plan missed becomes a compile-time
 //! refusal instead of a runtime leak the ratchet measures.
 //!
+//! **Two questions, and the kernel asks them apart.** Whether the body OWNS
+//! what a name holds is RFC-0089 rule 1, and that rule reaches every value:
+//! a `consume` parameter takes ownership of a record of `Int64`s exactly as
+//! it takes ownership of a `String`. Whether a held name owes a RELEASE is
+//! RFC-0114, and that question is about a heap buffer: a value that owns no
+//! heap owes nothing at any exit. [`Kernel::owned`] answers the first,
+//! [`Kernel::releases`] the second, and the judgment tracks the ownership
+//! state ([`Own`]) of every owned name while it places a release for none
+//! but the ones that owe one.
+//!
+//! What follows from the split is what a take IS. A value that owes a release
+//! moves at every take, because the buffer has one owner: a rebinding, a
+//! literal part, a store, a `return`, a `consume` argument. A value that owes
+//! none moves only where a `consume` parameter takes it, because a copy of it
+//! costs nothing and owns nothing — `let b = a` over an `Int64` is not a
+//! move, and `take(consume a)` is ([`Kernel::moves`]).
+//!
 //! **Joins.** After an `if` or a `switch`, every owned name must be in the same
 //! state on every edge that reaches the join — released on one edge and held
 //! on another is refused, which is RFC-0114's Rule N stated once. An edge that
@@ -65,8 +82,8 @@
 //! (RFC-0037). Module state is neither: a read of a global is an alias of
 //! it, and RFC-0013's own sentence says why nothing may take it.
 //!
-//! Every other name the body does not own — a heapless value, a pattern
-//! binder of a non-consuming switch — is invisible here.
+//! Every other name the body does not own — a pattern binder of a
+//! non-consuming switch over a value that owns heap — is invisible here.
 
 use crate::core::{Arm, Body, BorrowKind, Name, Old, Place, Rhs, St, Val};
 use vyrn_frontend::ast::Capability;
@@ -268,7 +285,10 @@ fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
         alias: vec![None; body.names.len()],
     };
     for p in &body.params {
-        if body.names[*p as usize].owned {
+        let i = &body.names[*p as usize];
+        // The ownership question, not the release one: a `consume` parameter
+        // of a record of `Int64`s is this body's (RFC-0089 rule 1).
+        if i.releases || !i.heap {
             st.own[*p as usize] = Own::Held;
         }
     }
@@ -289,8 +309,27 @@ fn all_names(body: &Body) -> Vec<Name> {
 }
 
 impl<'b> Kernel<'b> {
+    /// Whether the body OWNS what `n` holds — RFC-0089 rule 1, which is a
+    /// rule about every value. A borrow is not owned; everything else the
+    /// body binds is, whatever its type owns.
     fn owned(&self, n: Name) -> bool {
-        self.body.names[n as usize].owned
+        let i = &self.body.names[n as usize];
+        i.releases || !i.heap
+    }
+
+    /// Whether a held `n` owes a RELEASE at an exit — RFC-0114, which is a
+    /// rule about a heap buffer. A value that owns none owes none.
+    fn releases(&self, n: Name) -> bool {
+        self.body.names[n as usize].releases
+    }
+
+    /// Whether a take of `n` at this site moves it. A value that owes a
+    /// release moves at every take, because the buffer has one owner. A
+    /// value that owes none moves only where a `consume` parameter takes it:
+    /// the capability IS the take (RFC-0089 rule 1), and a rebinding, a
+    /// literal or a store of such a value copies it.
+    fn moves(&self, n: Name, consume: bool) -> bool {
+        consume || !self.owned(n) || self.releases(n)
     }
 
     /// The name is consumed: nothing to release, and no holes to remember.
@@ -299,6 +338,23 @@ impl<'b> Kernel<'b> {
         st.own[n as usize] = Own::Gone;
         st.holes.retain(|(h, _)| *h != n);
         st.taker[n as usize] = Some((self.here, self.by.clone()));
+    }
+
+    /// The name is out of scope: like [`Kernel::gone`], but nothing took it.
+    /// A name that owes no release leaves this way, and a later mention of it
+    /// is a name the body never bound rather than a use after a take.
+    fn unbind(&self, st: &mut State, n: Name) {
+        st.own[n as usize] = Own::Gone;
+        st.holes.retain(|(h, _)| *h != n);
+        st.taker[n as usize] = None;
+    }
+
+    /// Whether `n` being gone here is a use after a take THIS body made. A
+    /// name that owes no release and carries no taker was never bound at all
+    /// — the unit result of a `match`, a temporary an arm stores into — and
+    /// the judgment has nothing to say about it.
+    fn used_up(&self, st: &State, n: Name) -> bool {
+        st.own[n as usize] == Own::Gone && (self.releases(n) || st.taker[n as usize].is_some())
     }
 
     fn src(&self, n: Name) -> &str {
@@ -405,6 +461,12 @@ impl<'b> Kernel<'b> {
         }
         for n in 0..self.body.names.len() {
             if chain.contains(&(n as Name)) {
+                continue;
+            }
+            // RFC-0090 is a rule about a buffer two names would see the write
+            // through. A name the body owns read a value out, and a value
+            // that owns no heap was copied out; neither aliases the place.
+            if self.owned(n as Name) {
                 continue;
             }
             let Some(x) = &st.alias[n] else {
@@ -514,13 +576,21 @@ impl<'b> Kernel<'b> {
     /// moved here into the binding `t` / line 4: ... and `s` is used again
     /// here", at the move).
     fn used_after(&self, st: &State, n: Name, what: &str) -> Refusal {
+        self.used_after_at(st, n, what, "")
+    }
+
+    /// The same, for a read of a sub-place. The `consume` wording names the
+    /// PATH the read spells (`x.id`), as `movecheck::check_read` does; the
+    /// move wording names the storage that moved, as it does too.
+    fn used_after_at(&self, st: &State, n: Name, what: &str, path: &str) -> Refusal {
         let s = self.src(n);
+        let read = format!("{s}{}", path.replace(".[]", "[..]"));
         let here = self.here;
         let r = match &st.taker[n as usize] {
             Some((l, by)) if by.ends_with("(..)`") => self.refuse_at::<()>(
                 here,
                 format!(
-                    "`{s}` is {what} here but was already consumed by {by} on line {l}\n  \
+                    "`{read}` is {what} here but was already consumed by {by} on line {l}\n  \
                      (a `consume` parameter takes ownership; the value can't be used afterward)"
                 ),
             ),
@@ -555,6 +625,12 @@ impl<'b> Kernel<'b> {
         for n in names {
             if self.owned(*n) && st.own[*n as usize] == Own::Static {
                 self.gone(st, *n);
+            }
+            // A name that owes no release leaves its scope owing nothing: the
+            // ownership state ends with the scope and no row is placed.
+            if self.owned(*n) && !self.releases(*n) && st.own[*n as usize] == Own::Held {
+                self.unbind(st, *n);
+                continue;
             }
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
                 // A placed row releases the whole value minus the holes it
@@ -617,6 +693,13 @@ impl<'b> Kernel<'b> {
                 self.info(n)
             ));
         }
+        // A release of a value that owns no heap frees nothing. The plan
+        // places such a row where its edge table wants one and every engine
+        // reads it as nothing; the ownership state ends here all the same.
+        if !self.releases(n) {
+            self.unbind(st, n);
+            return Ok(());
+        }
         if st.own[n as usize] == Own::Gone {
             return Err(self.used_after(st, n, "released"));
         }
@@ -658,9 +741,14 @@ impl<'b> Kernel<'b> {
 
     /// A read of a name: it must be held, and an alias's place unwritten.
     fn read(&self, st: &State, v: &Val) -> Result<(), Refusal> {
+        self.read_at(st, v, "")
+    }
+
+    /// The same, told the path under the name that is read, for the wording.
+    fn read_at(&self, st: &State, v: &Val, path: &str) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
-            if self.owned(*n) && st.own[*n as usize] == Own::Gone {
-                return Err(self.used_after(st, *n, "used"));
+            if self.owned(*n) && self.used_up(st, *n) {
+                return Err(self.used_after_at(st, *n, "used", path));
             }
             self.alias_read(st, *n, "used")?;
         }
@@ -702,7 +790,7 @@ impl<'b> Kernel<'b> {
     /// A take of a name: it must be held, and it is gone afterwards. An
     /// alias is never taken.
     fn take(&self, st: &mut State, v: &Val) -> Result<(), Refusal> {
-        self.take_arg(st, v, false)
+        self.take_arg(st, v, false, false)
     }
 
     /// A take, told whether it is the receiver of a rebuilding builtin
@@ -711,7 +799,13 @@ impl<'b> Kernel<'b> {
     /// parameter may be its subject. The core states the exception
     /// ([`crate::core::Rhs::Call::write_back`]) and the rule under it is
     /// `prelude::rebuilds`, which `movecheck::sinks` reads too.
-    fn take_arg(&self, st: &mut State, v: &Val, write_back: bool) -> Result<(), Refusal> {
+    fn take_arg(
+        &self,
+        st: &mut State,
+        v: &Val,
+        write_back: bool,
+        consume: bool,
+    ) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if !write_back {
                 if let Some(b) = &self.body.names[*n as usize].borrow_kind {
@@ -722,10 +816,13 @@ impl<'b> Kernel<'b> {
             }
             if st.alias[*n as usize].is_some() {
                 self.alias_read(st, *n, "used")?;
-                return Err(self.alias_take(st, *n));
+                if self.moves(*n, consume) {
+                    return Err(self.alias_take(st, *n));
+                }
+                return Ok(());
             }
             if self.owned(*n) {
-                if st.own[*n as usize] == Own::Gone {
+                if self.used_up(st, *n) {
                     return Err(self.used_after(st, *n, "used"));
                 }
                 if let Some((_, path)) = st.holes.iter().find(|(h, _)| h == n) {
@@ -739,7 +836,9 @@ impl<'b> Kernel<'b> {
                         ),
                     );
                 }
-                self.gone(st, *n);
+                if self.moves(*n, consume) {
+                    self.gone(st, *n);
+                }
             }
         }
         Ok(())
@@ -751,7 +850,7 @@ impl<'b> Kernel<'b> {
         let Some((n, path)) = root_of(p) else {
             return Ok(());
         };
-        self.read(st, &Val::Name(n))?;
+        self.read_at(st, &Val::Name(n), &path)?;
         if self.owned(n) {
             if let Some((_, h)) = st
                 .holes
@@ -837,7 +936,10 @@ impl<'b> Kernel<'b> {
             Rhs::Read(p) => self.place(st, p),
             Rhs::Take(p) => self.take_place(st, p),
             Rhs::Call {
-                args, write_back, ..
+                args,
+                write_back,
+                declared,
+                ..
             } => {
                 // Reads first, takes after: the call sees every argument
                 // before it owns any, so a receiver handed back through the
@@ -849,7 +951,12 @@ impl<'b> Kernel<'b> {
                 }
                 for (i, (v, cap)) in args.iter().enumerate() {
                     if matches!(cap, Capability::Consume) {
-                        self.take_arg(st, v, *write_back && i == 0)?;
+                        // Only a DECLARED `consume` parameter takes a value
+                        // that owns no heap: it is the author's word that the
+                        // callee owns what it is handed (RFC-0089 rule 1). A
+                        // builtin sink and a variant constructor store the
+                        // value, and storing one that owns no heap copies it.
+                        self.take_arg(st, v, *write_back && i == 0, *declared)?;
                     }
                 }
                 // A `modify` argument does NOT end the aliases of what it is
@@ -959,14 +1066,20 @@ impl<'b> Kernel<'b> {
             St::Let(n, rhs) => {
                 // A literal, or a literal built from literals (`[]`,
                 // `Body { nodes: [] }`), owns no heap yet.
-                let is_static = match rhs {
-                    Rhs::Val(Val::Lit) => true,
-                    Rhs::Make(vs) => vs.iter().all(|v| match v {
-                        Val::Lit => true,
-                        Val::Name(m) => !self.owned(*m) || st.own[*m as usize] == Own::Static,
-                    }),
-                    _ => false,
-                };
+                // `Static` is a statement about a RELEASE — there is none
+                // until a store gives the name a buffer — so a name that
+                // owes none is never `Static`, only held or gone.
+                let is_static = self.releases(*n)
+                    && match rhs {
+                        Rhs::Val(Val::Lit) => true,
+                        Rhs::Make(vs) => vs.iter().all(|v| match v {
+                            Val::Lit => true,
+                            Val::Name(m) => {
+                                !self.releases(*m) || st.own[*m as usize] == Own::Static
+                            }
+                        }),
+                        _ => false,
+                    };
                 // An alias: a borrow read out of a place, or a second name
                 // for a borrow. What it reads is kept, and a second name for
                 // a borrow is not a take of it.
@@ -974,6 +1087,14 @@ impl<'b> Kernel<'b> {
                 st.alias[*n as usize] = None;
                 match rhs {
                     Rhs::Read(p) if self.borrowed(*n) => {
+                        st.alias[*n as usize] = Some(self.src_of(st, p));
+                    }
+                    // A read of module state is an alias of it whatever it
+                    // holds: RFC-0013 is a rule about the LIFETIME of a
+                    // global — it lives for the whole module and nothing ever
+                    // drops it — and not about heap, so a `consume` parameter
+                    // may not take a heapless global either.
+                    Rhs::Read(p @ Place::Global(_)) if self.owned(*n) => {
                         st.alias[*n as usize] = Some(self.src_of(st, p));
                     }
                     Rhs::Val(Val::Name(m)) if self.borrowed(*n) && self.borrowed(*m) => {
@@ -1032,7 +1153,7 @@ impl<'b> Kernel<'b> {
                 // nothing.
                 let fresh_static = match value {
                     Val::Lit => true,
-                    Val::Name(m) => self.owned(*m) && st.own[*m as usize] == Own::Static,
+                    Val::Name(m) => self.releases(*m) && st.own[*m as usize] == Own::Static,
                 };
                 self.take(st, value)?;
                 if let Place::Name(n) = place {
@@ -1045,7 +1166,13 @@ impl<'b> Kernel<'b> {
                     }
                 }
                 match place {
-                    Place::Name(n) if self.owned(*n) => {
+                    // A store over a name that owes no release overwrites
+                    // nothing: it binds the name again, and the ownership
+                    // state starts over from there.
+                    Place::Name(n) if self.owned(*n) && !self.releases(*n) => {
+                        st.own[*n as usize] = Own::Held;
+                    }
+                    Place::Name(n) if self.releases(*n) => {
                         if st.own[*n as usize] == Own::Held
                             && *old != Old::Released
                             && *old != Old::Transferred
@@ -1260,6 +1387,10 @@ impl<'b> Kernel<'b> {
             if self.owned(*n) && st.own[*n as usize] == Own::Static {
                 self.gone(st, *n);
             }
+            if self.owned(*n) && !self.releases(*n) && st.own[*n as usize] == Own::Held {
+                self.unbind(st, *n);
+                continue;
+            }
             if self.owned(*n) && st.own[*n as usize] == Own::Held {
                 // The arm row carries the binder's holes (RFC-0125 M3), so a
                 // binder one of whose fields the arm handed out is freed
@@ -1294,7 +1425,9 @@ impl<'b> Kernel<'b> {
             return;
         }
         for n in 0..self.body.names.len() as Name {
-            if !self.owned(n) {
+            // Rule N is about a release, so a name that owes none needs no
+            // edge row: `join` reconciles its ownership state instead.
+            if !self.releases(n) {
                 continue;
             }
             let live: Vec<usize> = (0..edges.len()).filter(|i| !edges[*i].ended).collect();
@@ -1410,6 +1543,27 @@ impl<'b> Kernel<'b> {
             if !self.owned(n) || inside.contains(&n) {
                 continue;
             }
+            // A name that owes no release is judged for the one difference
+            // that is about OWNERSHIP: a turn that consumed it would use it
+            // again on the next one. A turn that BOUND it owes nothing to the
+            // turn after, so a temporary a switch arm stores into is not a
+            // difference the way a held buffer is.
+            if !self.releases(n) {
+                if at.own[n as usize] == Own::Gone && entry.own[n as usize] != Own::Gone {
+                    let s = self.src(n);
+                    return match &at.taker[n as usize] {
+                        Some((l, by)) if !by.is_empty() => self.refuse_at(
+                            *l,
+                            format!(
+                                "`{s}` is consumed by {by} inside a loop, so it would be used \
+                                 again on the next iteration"
+                            ),
+                        ),
+                        _ => Ok(()),
+                    };
+                }
+                continue;
+            }
             let within = at.own[n as usize] == Own::Static && entry.own[n as usize] == Own::Held;
             if at.own[n as usize] != entry.own[n as usize] && !within {
                 if at.own[n as usize] == Own::Gone {
@@ -1477,6 +1631,35 @@ impl<'b> Kernel<'b> {
                     joined.alias[n as usize] = other.alias[n as usize].clone();
                 }
                 if !self.owned(n) {
+                    continue;
+                }
+                // A name that owes no release: the edges disagree about
+                // OWNERSHIP and not about a release, so nothing has to be
+                // placed and nothing is refused here. The join keeps the
+                // pessimistic answer — consumed on one edge is consumed
+                // after it — so a use below the join is refused instead.
+                if !self.releases(n) {
+                    let taken = live
+                        .iter()
+                        .find(|s| s.own[n as usize] == Own::Gone && s.taker[n as usize].is_some());
+                    match taken {
+                        Some(s) => {
+                            joined.own[n as usize] = Own::Gone;
+                            joined.taker[n as usize] = s.taker[n as usize].clone();
+                        }
+                        // Neither edge consumed it. An edge that never bound
+                        // it says nothing about the edge that did.
+                        None if live.iter().any(|s| s.own[n as usize] != Own::Gone) => {
+                            joined.own[n as usize] = Own::Held;
+                        }
+                        None => {}
+                    }
+                    for h in self.holes_owned(other, n) {
+                        if !joined.holes.iter().any(|(m, p)| *m == n && *p == h) {
+                            joined.holes.push((n, h));
+                        }
+                    }
+                    joined.holes.sort();
                     continue;
                 }
                 let (a, b) = (first.own[n as usize], other.own[n as usize]);

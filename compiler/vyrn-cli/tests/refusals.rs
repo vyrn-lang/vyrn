@@ -550,12 +550,15 @@ fn the_census_as_a_table() {
 // `movecheck.rs`.
 // ---------------------------------------------------------------------------
 
-/// One program a census row's rule refuses and the kernel accepts.
+/// One program a census row's rule refuses. `closed` says whether the kernel
+/// refuses it too, in the same words at the same line — the day it does, the
+/// row's licence is real and the rule may leave `movecheck.rs`.
 struct Uncovered {
     file: &'static str,
     row: &'static str,
     says: &'static str,
     why: &'static str,
+    closed: bool,
 }
 
 const fn uncovered(
@@ -569,19 +572,37 @@ const fn uncovered(
         row,
         says,
         why,
+        closed: false,
+    }
+}
+
+/// The same, for a row the kernel now gives: it refuses the program with the
+/// checker's own sentence at the checker's own line.
+const fn covered(
+    file: &'static str,
+    row: &'static str,
+    says: &'static str,
+    why: &'static str,
+) -> Uncovered {
+    Uncovered {
+        file,
+        row,
+        says,
+        why,
+        closed: true,
     }
 }
 
 /// The counterexamples, one per rule the census column got wrong.
 fn counterexamples() -> Vec<Uncovered> {
     vec![
-        uncovered(
+        covered(
             "u04_whole_after_a_hole_heapless.vyrn",
             "04",
             "`p.name` was taken out of `p` here",
             "heap",
         ),
-        uncovered(
+        covered(
             "u06_use_after_consume_heapless.vyrn",
             "06, 07",
             "`x.id` is used here but was already consumed by `take(..)` on line 8",
@@ -600,7 +621,7 @@ fn counterexamples() -> Vec<Uncovered> {
             "`d` may not be consumed — it is a `read` parameter",
             "spelling",
         ),
-        uncovered(
+        covered(
             "u12_module_state_to_a_consume_parameter_heapless.vyrn",
             "12",
             "module state `g` may not be passed to a `consume` parameter via `take(..)` — \
@@ -615,7 +636,7 @@ fn counterexamples() -> Vec<Uncovered> {
              name for the `read` parameter `o`",
             "spelling",
         ),
-        uncovered(
+        covered(
             "u25_consume_inside_a_loop_heapless.vyrn",
             "25",
             "`x` is consumed by `take(..)` inside a loop, so it would be used again on the \
@@ -625,8 +646,9 @@ fn counterexamples() -> Vec<Uncovered> {
     ]
 }
 
-/// Each counterexample is refused by the checker and accepted by the kernel,
-/// so the rule above it may not leave `movecheck.rs`.
+/// Each counterexample is refused by the checker, and the kernel either says
+/// nothing about it — so the rule above it may not leave `movecheck.rs` — or
+/// refuses it in the same words at the same line, which is the licence.
 #[test]
 fn the_licence_is_per_program_and_these_are_the_counterexamples() {
     let mut bad: Vec<String> = Vec::new();
@@ -646,13 +668,32 @@ fn the_licence_is_per_program_and_these_are_the_counterexamples() {
             continue;
         }
         let (kok, ktext) = refusal_in(unlicensed_dir(), u.file, true);
-        if !kok {
+        if !u.closed {
+            if !kok {
+                bad.push(format!(
+                    "{} (row {}, {}): the kernel is supposed to accept it, and it said `{}`",
+                    u.file,
+                    u.row,
+                    u.why,
+                    ktext.lines().next().unwrap_or_default()
+                ));
+            }
+            continue;
+        }
+        // A closed row: rule 4 of the deletion is that the refusal is the
+        // same refusal — the same sentence at the same file and line — so
+        // the two texts are compared whole.
+        if kok {
             bad.push(format!(
-                "{} (row {}, {}): the kernel is supposed to accept it, and it said `{}`",
-                u.file,
-                u.row,
-                u.why,
-                ktext.lines().next().unwrap_or_default()
+                "{} (row {}): the kernel is supposed to refuse it and it said nothing",
+                u.file, u.row
+            ));
+            continue;
+        }
+        if ktext != text {
+            bad.push(format!(
+                "{} (row {}): the checker said `{text}` and the kernel said `{ktext}`",
+                u.file, u.row
             ));
         }
     }
@@ -686,10 +727,18 @@ fn the_counterexamples_cover_their_directory() {
 #[test]
 #[ignore]
 fn the_counterexamples_as_a_table() {
-    println!("| census row | the program | the checker's sentence | why the kernel says nothing |");
-    println!("|---|---|---|---|");
+    println!("| census row | the program | the checker's sentence | the cause | the kernel |");
+    println!("|---|---|---|---|---|");
     for u in counterexamples() {
-        println!("| {} | `{}` | {} | {} |", u.row, u.file, u.says, u.why);
+        let k = if u.closed {
+            "refuses it too"
+        } else {
+            "says nothing"
+        };
+        println!(
+            "| {} | `{}` | {} | {} | {k} |",
+            u.row, u.file, u.says, u.why
+        );
     }
 }
 
