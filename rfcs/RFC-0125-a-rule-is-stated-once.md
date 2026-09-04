@@ -3166,6 +3166,56 @@ no counterexample where a counterexample would be — which is what the sweep
 over the checker's own suite is for, and what the next deletion slice should
 run first.
 
+**Where the placer's time goes, measured 2026-09-04 (`track-av`).** §3 M4's
+phase table left the placer at 35 ms of the 46 ms a three-line program spends
+and 917 ms of `examples/pagesdemo.vyrn`'s 2.6 s. `prof.rs`'s build phases now
+reach inside it, so the split is measured and not argued: `placer`,
+`placer: lower_with`, `placer: core::build`, `placer: kernel::placement` and
+`placer: facts rebuild` under `VYRN_BUILD_PROFILE=1`.
+
+Two counts first, because they explain the rest.
+
+**How many instances a build places.** Every instance of the linked program is
+built and judged, and almost none of them belong to the file being compiled:
+
+| program | instances | root | `std/runtime` | `std/text` | the other `std` |
+|---|---|---|---|---|---|
+| a three-line `print` | 96 | 1 | 73 | 8 | 14 (`std/num`) |
+| `examples/pagesdemo.vyrn` | 532 | 127 | 73 | 8 | 324 |
+
+**How many times a build runs the analysis.** `own::analyze` runs the placer,
+so a second analysis is a second placement. `vyrn check` on the three-line
+program runs it TWICE: once in `kernel_refuses`, which re-analyses so the
+refusals it prints are this program's, and once inside `vyrn_lower::lower`,
+which the engine calls. `run`, `build` and `run --engine wasm` do the same.
+`pagesdemo` runs it three times, the third being a generator's own program
+during the load — a different program, correctly placed on its own.
+
+**And how many times one analysis builds each instance.** Twice: once for the
+placement walk, and once more at the end of `augment` for the `Facts` fold,
+because the first build read the plan before the pass filled it. So a
+`vyrn check` of a three-line program builds 96 core bodies four times over.
+
+The split, milliseconds, `vyrn check`, release binary, one run of each on
+Windows. The `count` column is the phase's own count, which is the repetition
+this slice is about:
+
+| phase | three-line: count / total | `pagesdemo`: count / total |
+|---|---|---|
+| `placer` | 2 / 59.05 | 3 / 2124 |
+| `placer: lower_with` | 2 / 5.60 | 3 / 99.97 |
+| `placer: core::build` | 192 / 25.48 | 2158 / 967.27 |
+| `placer: kernel::placement` | 192 / 2.54 | 2158 / 36.67 |
+| `placer: facts rebuild` | 2 / 24.56 | 3 / 1011 |
+
+The judgment is 4% of the placer. Building the core bodies is 85% of it, and
+three quarters of THAT is repetition: the same 96 bodies built four times.
+
+Wall clock at this baseline, best of three: `vyrn check three.vyrn` 136 ms,
+`vyrn check examples/pagesdemo.vyrn` 2,723 ms, `vyrn check site/export.vyrn`
+7,806 ms. The four suites, `cargo test -p vyrn-cli --test <name>`, one run
+each: `lowered` 56.9 s, `pages` 44.7 s, `symbolmap` 46.0 s, `vyx` 29.4 s.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

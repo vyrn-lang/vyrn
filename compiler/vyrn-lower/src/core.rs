@@ -3380,13 +3380,19 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
 /// refuses for a reason other than a missing release (a double free, a use
 /// after release), is left exactly as the plan had it.
 pub fn augment(program: &Program, own: &mut Ownership) {
+    let _p = vyrn_frontend::prof::phase("placer");
+    let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
+    drop(lw);
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
     let mut added: Vec<(String, Release, DropKind)> = Vec::new();
     for inst in &lowered.instances {
-        let top = match build(program, inst, own) {
+        let bs = vyrn_frontend::prof::phase("placer: core::build");
+        let built = build(program, inst, own);
+        drop(bs);
+        let top = match built {
             Ok(b) => b,
             Err(g) => {
                 // A rule the core states, rather than a construct it cannot
@@ -3422,7 +3428,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         // by its own nodes under the enclosing function's name, so a row
         // placed here lands where the emitters read (RFC-0125 M3, third slice).
         for body in top.frames() {
-            let missing = match crate::kernel::placement(body) {
+            let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
+            let placed = crate::kernel::placement(body);
+            drop(ks);
+            let missing = match placed {
                 Ok(m) => m,
                 Err(r) => {
                     if trace {
@@ -3589,6 +3598,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     if std::env::var("VYRN_PLAN_ROWS").is_ok() {
         return;
     }
+    let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
     if let Ok(top) = build_module_state(program, own, &lowered.globals) {
         for body in top.frames() {
