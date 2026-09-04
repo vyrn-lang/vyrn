@@ -674,6 +674,13 @@ impl<'b> Kernel<'b> {
                 "`{s}` may not be returned from a closure — it is a captured \
                  binding, and the closure's result is its caller's"
             )
+        } else if by == "a `return`" && self.body.export {
+            // RFC-0012 M2: the caller is JS and it releases what it is
+            // handed, so an export owns its result or it does not compile.
+            format!(
+                "`{s}` may not be returned from an exported function — it is {what}, \
+                 and the JS caller releases what it is handed"
+            )
         } else if by == "a `return`" {
             format!("`{s}` may not be returned — it is {what}, and a return is owned")
         } else if by.ends_with("(..)`") {

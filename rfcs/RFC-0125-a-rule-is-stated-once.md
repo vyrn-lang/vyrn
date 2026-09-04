@@ -2078,6 +2078,17 @@ that drifts fails the build rather than the reading.
   got through would move the ratchet rather than hide in the gap column.
 
 
+- **An exported function owns its result** (row 17). The kernel refused the
+  program already, in the general sentence: "it is a `read` parameter, and a
+  return is owned". True, and it names the wrong reason — the reason is that
+  the caller is JS and `wasi-min.js` releases every String an export hands
+  back (RFC-0012 M2, RFC-0089 M3b), so `.copy()` is the only way out and
+  `consume` is not one. The core carries `Body::export` now, a lambda frame
+  carries the flag of the body that holds it, and the kernel words the
+  return refusal as `movecheck::refuse_return` words it. One field and one
+  branch.
+
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

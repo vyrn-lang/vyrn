@@ -373,6 +373,13 @@ pub struct Body {
     pub name: String,
     /// The module file the function came from; `None` for the root.
     pub file: Option<String>,
+    /// `export extern fn`: the caller is JS, and it releases every String the
+    /// call hands back (RFC-0012 M2, RFC-0089 M3b). So a return of a borrow
+    /// gets its own sentence, and `.copy()` is the only way out that exists
+    /// (RFC-0125 §3 M3, the census, row 17). A lambda frame carries the flag
+    /// of the body that holds it, which is how `movecheck::refuse_return`
+    /// reads it — `cur_fn` is the enclosing function either way.
+    pub export: bool,
     pub names: Vec<NameInfo>,
     pub params: Vec<Name>,
     pub stmts: Vec<St>,
@@ -668,6 +675,7 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         body: Body {
             name: inst.spelling(),
             file: inst.func.module.clone(),
+            export: inst.func.is_export_extern,
             names: Vec::new(),
             params: Vec::new(),
             stmts: Vec::new(),
@@ -760,6 +768,7 @@ pub fn build_module_state<'a>(
         body: Body {
             name: String::new(),
             file: None,
+            export: false,
             names: Vec::new(),
             params: Vec::new(),
             stmts: Vec::new(),
@@ -838,6 +847,7 @@ pub fn build_outside<'a>(
         body: Body {
             name: name.to_string(),
             file,
+            export: false,
             names: Vec::new(),
             params: Vec::new(),
             stmts: Vec::new(),
@@ -2143,11 +2153,13 @@ impl<'a> Builder<'a> {
             return gap("a lambda with the wrong arity for its type", *line);
         }
         let file = self.body.file.clone();
+        let export = self.body.export;
         let outer = std::mem::replace(
             &mut self.body,
             Body {
                 name: String::new(),
                 file,
+                export,
                 names: Vec::new(),
                 params: Vec::new(),
                 stmts: Vec::new(),

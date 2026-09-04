@@ -207,9 +207,7 @@ fn census() -> Vec<Row> {
             "RFC-0012",
             "`s` may not be returned from an exported function — it is a `read` parameter, and \
              the JS caller releases what it is handed",
-            Kernel::Other(
-                "`s` may not be returned — it is a `read` parameter, and a return is owned",
-            ),
+            Kernel::Same,
         ),
         row(
             "r18_return_a_read_parameter.vyrn",
@@ -786,7 +784,7 @@ fn sections() -> Vec<Section> {
         sec(
             "    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) \
              -> Diagnostic {",
-            Checker,
+            Kernel,
             "the one exit every returned borrow leaves by, the exported \
              function's own sentence with it (row 17)",
         ),
@@ -1040,8 +1038,8 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 1000),
-        ("a rule only the checker gives", 770),
+        ("a rule the kernel now gives", 1047),
+        ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2335),
         ("a fix menu", 81),
         ("shared machinery", 3656),
