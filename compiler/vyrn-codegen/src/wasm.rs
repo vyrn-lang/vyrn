@@ -90,6 +90,27 @@ pub const SHIM_BASE: u32 = 32 * 1024 * 1024;
 /// today; a direct emitter knows it before it writes it.
 pub const STATICS_LIMIT: u32 = SHIM_BASE / 2;
 
+/// What `std/runtime` occupies at `heapBase()` before its first allocated block:
+/// the free-list heads, the buffered standard output and input, the scratch the
+/// host imports write their out-parameters into, and the digit buffer. The map
+/// is in `std/runtime.vyrn` above `drain`, and `malloc` starts its bump region at
+/// exactly this offset.
+///
+/// The emitted memory has to COVER it. `minimum` used to be
+/// `round_up(data_end, 65536)`, whose comment said "one page past the top of
+/// everything we occupy" — but `round_up` adds nothing when `data_end` is already
+/// near a page boundary, and the header is above `data_end`. A module whose
+/// statics end within these 8,768 bytes of a page therefore declared a memory
+/// that stops inside its own runtime header, and the first host call to use the
+/// scratch at `heapBase() + 8696` wrote past the end of memory: the `wasmtime`
+/// CLI refuses that with `In func wasi_snapshot_preview1::fd_prestat_get at write
+/// prestat: Pointer out of bounds`, and this repo's own host answers `BADF` and
+/// runs on with a broken filesystem. `examples/bin/server.vyrn` is such a module.
+///
+/// Nothing else changes: for a module whose statics are not near a boundary the
+/// two round-ups agree, so its memory section is the byte it was.
+pub const HEAP_HEADER_BYTES: u32 = 8_768;
+
 /// wasm has no sub-32-bit values on the operand stack, and the stack pointer
 /// itself is 4-byte-aligned by convention; clang keeps frames 16-aligned on
 /// wasm32 and matching it costs nothing.
@@ -739,9 +760,10 @@ impl Module {
         }
 
         let mem = MemoryType {
-            // One page past the top of everything we occupy; wasi-libc's
-            // `malloc` grows memory itself from there.
-            minimum: (round_up(self.data_end(), 65_536) / 65_536) as u64,
+            // Past the top of everything we occupy — the statics AND the runtime
+            // header above them ([`HEAP_HEADER_BYTES`]); `malloc` grows memory
+            // itself from there.
+            minimum: (round_up(self.data_end() + HEAP_HEADER_BYTES, 65_536) / 65_536) as u64,
             maximum: None,
             memory64: false,
             shared: false,
@@ -1348,6 +1370,89 @@ mod tests {
         let mut m = Module::new();
         m.func(&[], &[], &[], 0, |_| {});
         m.import("env", "late", &[], &[]);
+    }
+
+    /// [`HEAP_HEADER_BYTES`] is `std/runtime`'s number, and this reads it there.
+    ///
+    /// The two cannot be one constant — one is Rust and the other is Vyrn — so
+    /// the map above `drain` in `std/runtime.vyrn` is the source and this is the
+    /// check. A drift here declares a memory that stops inside the header, which
+    /// is the defect this constant was added for.
+    #[test]
+    fn the_runtime_header_is_the_size_std_runtime_says_it_is() {
+        let map = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../std/runtime.vyrn")
+            .canonicalize()
+            .expect("std/runtime.vyrn is in the tree");
+        let src = std::fs::read_to_string(&map).expect("read std/runtime.vyrn");
+        let line = src
+            .lines()
+            .find(|l| l.contains("the allocator's first block"))
+            .expect("the heap map names the allocator's first block");
+        let at: u32 = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|w| w.parse().ok())
+            .expect("the row starts with the offset");
+        assert_eq!(
+            at, HEAP_HEADER_BYTES,
+            "std/runtime.vyrn puts its first block at {at}, and the emitted memory \
+             reserves {HEAP_HEADER_BYTES} for the header in front of it"
+        );
+    }
+
+    /// The memory a module declares must cover the runtime header above its
+    /// statics, whatever the statics end on. The witness is the boundary case:
+    /// data ending EXACTLY on a page needs another page, and used to get none.
+    #[test]
+    fn the_declared_memory_covers_the_runtime_header() {
+        let mut m = Module::new();
+        m.data(&vec![7u8; (65_536 - DATA_BASE % 65_536) as usize], 1);
+        let f = m.func(&[], &[], &[], 0, |_| {});
+        m.export("_start", f);
+        let end = m.data_end();
+        assert_eq!(end % 65_536, 0, "the witness is data ending on a page");
+        let bytes = m.finish().expect("finish");
+        // The memory section's minimum, read back off the bytes: it has to cover
+        // `heapBase() + HEAP_HEADER_BYTES`, not just `data_end`.
+        let pages = read_memory_minimum(&bytes);
+        assert!(
+            pages * 65_536 >= end + HEAP_HEADER_BYTES,
+            "{pages} pages stop at {} and the header ends at {}",
+            pages * 65_536,
+            end + HEAP_HEADER_BYTES
+        );
+    }
+
+    /// The `minimum` of the module's one memory, off the finished bytes.
+    fn read_memory_minimum(bytes: &[u8]) -> u32 {
+        let mut i = 8;
+        while i < bytes.len() {
+            let id = bytes[i];
+            i += 1;
+            let (size, next) = uleb(bytes, i);
+            i = next;
+            if id == 5 {
+                let (_count, j) = uleb(bytes, i);
+                let (_flags, j) = (bytes[j], j + 1);
+                return uleb(bytes, j).0;
+            }
+            i += size as usize;
+        }
+        panic!("no memory section");
+    }
+
+    fn uleb(bytes: &[u8], mut i: usize) -> (u32, usize) {
+        let (mut out, mut shift) = (0u32, 0);
+        loop {
+            let b = bytes[i];
+            i += 1;
+            out |= ((b & 0x7f) as u32) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                return (out, i);
+            }
+        }
     }
 
     /// The one limit here a PROGRAM can reach, so the one that is a sentence.
