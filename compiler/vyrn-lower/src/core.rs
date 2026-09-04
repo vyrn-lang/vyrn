@@ -3541,166 +3541,49 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         // The body and every lambda frame under it: a lambda's rows are keyed
         // by its own nodes under the enclosing function's name, so a row
         // placed here lands where the emitters read (RFC-0125 M3, third slice).
-        for body in top.frames() {
-            let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
-            let placed = crate::kernel::placement(body);
-            drop(ks);
-            let missing = match placed {
-                Ok(m) => m,
-                Err(r) => {
-                    if trace {
-                        eprintln!("placer: refused: {}: {}", r.body, r.message);
-                    }
-                    // A refusal no placement repairs: a double free, a use after
-                    // release, a join whose edges disagree. A refusal, not a
-                    // gap: the CLI fails the command with it.
-                    REFUSALS.with(|v| v.borrow_mut().push(r));
-                    continue;
+        place_frames(&top, &inst.func.name, own, &mut added, &mut touched, trace);
+        built.push(Some(top));
+    }
+    // A `test` (RFC-0015) or `bench` (RFC-0055) body is a body, and the
+    // kernel judges it like any other (RFC-0125 §3 M3, the reach slice). The
+    // core lowers FUNCTION instances, so these two were the last bodies it
+    // did not reach: the judgment said nothing about them, and one program
+    // of `movecheck`'s own suite was accepted for that reason alone.
+    let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
+    for ob in &lowered.bodies {
+        match build_outside(
+            program,
+            own,
+            &ob.name,
+            ob.module.clone(),
+            ob.block,
+            &ob.rows,
+        ) {
+            Ok(top) => {
+                if std::env::var("VYRN_KERNEL_TRACE")
+                    .is_ok_and(|v| v != "1" && ob.name.contains(&v))
+                {
+                    eprintln!("{}", top.render());
                 }
-            };
-            for m in missing {
-                let info = &body.names[m.name as usize];
-                let kind = own.proto.release_kind(&info.ty);
-                if trace {
-                    eprintln!(
-                        "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
-                        body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
-                    );
+                place_frames(&top, &ob.name, own, &mut added, &mut touched, trace);
+                outside.push(Some(top));
+            }
+            Err(g) => {
+                if let Some(message) = g.rule {
+                    REFUSALS.with(|v| {
+                        v.borrow_mut().push(crate::kernel::Refusal {
+                            message,
+                            line: g.line,
+                            file: ob.module.clone(),
+                            body: ob.name.clone(),
+                        })
+                    });
+                } else if trace {
+                    eprintln!("placer: {} not lowered: {} {}", ob.name, g.what, g.detail);
                 }
-                // The receiver a call or an operator borrowed a heap field or
-                // element out of (`f(x).rhs.startsWith("{")`): an argument
-                // temporary of that consumer, keyed by the node that produced
-                // the receiver, which both backends tee and free after the
-                // consumer's drain (RFC-0125 M3, third slice).
-                if let Some(producer) = info.producer {
-                    if own.plan.arg_drops.insert(producer) {
-                        own.plan.owners.insert(producer, inst.func.name.clone());
-                        touched.insert(inst.func.name.clone());
-                    }
-                    continue;
-                }
-                if m.site == 0 {
-                    continue;
-                }
-                let Some(kind) = kind else {
-                    continue;
-                };
-                // The kernel spells a hole `.f.g`; the plan's tables spell it
-                // `f.g`, relative to the binding (RFC-0093 M2). An element hole
-                // (`.[]`) is one the walk cannot skip: no row, and the judgment
-                // refuses the name.
-                if m.holes.iter().any(|h| h.contains("[]")) {
-                    continue;
-                }
-                let holes: Vec<String> = m
-                    .holes
-                    .iter()
-                    .map(|h| h.trim_start_matches('.').to_string())
-                    .collect();
-                // A declared release takes the whole value (RFC-0086): it cannot
-                // be told a hole.
-                if !holes.is_empty() && matches!(kind, DropKind::Release(..)) {
-                    continue;
-                }
-                match m.kind {
-                    // Rule N's table: one edge of a join still holds what another
-                    // took. Consumed by name, so a loop variable qualifies.
-                    MissingKind::Edge { edge } => {
-                        let rows = own.plan.edge_releases.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
-                            rows.push((info.source.clone(), edge));
-                            own.plan.owners.insert(m.site, inst.func.name.clone());
-                            touched.insert(inst.func.name.clone());
-                        }
-                        continue;
-                    }
-                    // The same table, one level down: the sub-place one edge took,
-                    // released on the edge that did not. Spelled `d.line`, which
-                    // every reader of the table resolves as a place.
-                    MissingKind::EdgePlace { edge, path } => {
-                        let name = format!("{}{}", info.source, path);
-                        let rows = own.plan.edge_releases.entry(m.site).or_default();
-                        if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
-                            rows.push((name, edge));
-                            own.plan.owners.insert(m.site, inst.func.name.clone());
-                            touched.insert(inst.func.name.clone());
-                        }
-                        continue;
-                    }
-                    // Round forty's table: the arm's unmoved payload binders, one
-                    // entry per binder so an emitter frees exactly those, each
-                    // with the holes its arm left in it.
-                    MissingKind::ArmBinder { arm } => {
-                        let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
-                        if !rows.iter().any(|(n, _, _)| *n == info.source) {
-                            rows.push((info.source.clone(), kind.clone(), holes));
-                            touched.insert(inst.func.name.clone());
-                        }
-                        own.plan.owners.insert(m.site, inst.func.name.clone());
-                        continue;
-                    }
-                    MissingKind::Exit => {}
-                }
-                // The unnamed receiver of a field read: R1′'s table, with the
-                // field the read took as its hole. Freed right after the read,
-                // whichever exit found it held.
-                if let Some(node) = info.receiver {
-                    own.plan.receiver_frees.insert(node);
-                    if !holes.is_empty() {
-                        own.plan.receiver_holes.insert(node, holes);
-                    }
-                    own.plan.owners.insert(node, inst.func.name.clone());
-                    touched.insert(inst.func.name.clone());
-                    continue;
-                }
-                let Some(binding) = info.binding else {
-                    continue;
-                };
-                // A row the plan already placed here whose hole set is not the
-                // kernel's at this exit (the analysis's set is per binding, the
-                // kernel's is per path): the row keeps its key and takes the
-                // kernel's set.
-                if let Some(r) = own.releases.get_mut(&inst.func.name).and_then(|rows| {
-                    rows.iter_mut()
-                        .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
-                }) {
-                    if trace {
-                        eprintln!(
-                            "placer: rewrite {} `{}` {:?} -> {:?}",
-                            inst.func.name, info.source, m.exit, holes
-                        );
-                    }
-                    r.full = false;
-                    r.holes = Some(holes);
-                    touched.insert(inst.func.name.clone());
-                    continue;
-                }
-                let dup = added.iter().any(|(f, r, _)| {
-                    *f == inst.func.name
-                        && r.exit == m.exit
-                        && r.site == m.site
-                        && r.binding == binding
-                });
-                if dup {
-                    continue;
-                }
-                added.push((
-                    inst.func.name.clone(),
-                    Release {
-                        site: m.site,
-                        binding,
-                        name: info.source.clone(),
-                        kind: kind.clone(),
-                        exit: m.exit,
-                        line: info.line as u32,
-                        full: false,
-                        holes: if holes.is_empty() { None } else { Some(holes) },
-                    },
-                    kind,
-                ));
+                outside.push(None);
             }
         }
-        built.push(Some(top));
     }
     for (f, row, kind) in added {
         touched.insert(f.clone());
@@ -3743,5 +3626,202 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             fold_frame(body, &own.proto, &mut facts);
         }
     }
+    // The same for the bodies that are no function of the program: an emitter
+    // reads the core's answer by node, and a `test` body's nodes must be in
+    // it or the emitter falls back to a plan row this pass just placed.
+    for (i, ob) in lowered.bodies.iter().enumerate() {
+        let fresh = if touched.contains(&ob.name) {
+            build_outside(
+                program,
+                own,
+                &ob.name,
+                ob.module.clone(),
+                ob.block,
+                &ob.rows,
+            )
+            .ok()
+        } else {
+            None
+        };
+        let Some(top) = fresh.as_ref().or(outside[i].as_ref()) else {
+            continue;
+        };
+        for body in top.frames() {
+            fold_frame(body, &own.proto, &mut facts);
+        }
+    }
     FACTS.with(|f| *f.borrow_mut() = Some(facts));
+}
+
+/// Place what one built body owes, frame by frame (RFC-0125 §3 M3).
+///
+/// `owner` is the name the plan's tables are keyed by: a function's own name
+/// for an instance, and the synthetic `test@<i>` / `bench@<i>` for a body
+/// that is no function of the program (RFC-0015, RFC-0055). A lambda frame
+/// under either is keyed by its enclosing body's name, so a row placed here
+/// lands where the emitters read.
+fn place_frames(
+    top: &Body,
+    owner: &str,
+    own: &mut Ownership,
+    added: &mut Vec<(String, Release, DropKind)>,
+    touched: &mut std::collections::HashSet<String>,
+    trace: bool,
+) {
+    for body in top.frames() {
+        let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
+        let placed = crate::kernel::placement(body);
+        drop(ks);
+        let missing = match placed {
+            Ok(m) => m,
+            Err(r) => {
+                if trace {
+                    eprintln!("placer: refused: {}: {}", r.body, r.message);
+                }
+                // A refusal no placement repairs: a double free, a use after
+                // release, a join whose edges disagree. A refusal, not a
+                // gap: the CLI fails the command with it.
+                REFUSALS.with(|v| v.borrow_mut().push(r));
+                continue;
+            }
+        };
+        for m in missing {
+            let info = &body.names[m.name as usize];
+            let kind = own.proto.release_kind(&info.ty);
+            if trace {
+                eprintln!(
+                    "placer: {} `{}` (line {}) {:?} at {:?} site {} kind {:?} holes {:?}",
+                    body.name, info.source, info.line, m.kind, m.exit, m.site, kind, m.holes
+                );
+            }
+            // The receiver a call or an operator borrowed a heap field or
+            // element out of (`f(x).rhs.startsWith("{")`): an argument
+            // temporary of that consumer, keyed by the node that produced
+            // the receiver, which both backends tee and free after the
+            // consumer's drain (RFC-0125 M3, third slice).
+            if let Some(producer) = info.producer {
+                if own.plan.arg_drops.insert(producer) {
+                    own.plan.owners.insert(producer, owner.to_string());
+                    touched.insert(owner.to_string());
+                }
+                continue;
+            }
+            if m.site == 0 {
+                continue;
+            }
+            let Some(kind) = kind else {
+                continue;
+            };
+            // The kernel spells a hole `.f.g`; the plan's tables spell it
+            // `f.g`, relative to the binding (RFC-0093 M2). An element hole
+            // (`.[]`) is one the walk cannot skip: no row, and the judgment
+            // refuses the name.
+            if m.holes.iter().any(|h| h.contains("[]")) {
+                continue;
+            }
+            let holes: Vec<String> = m
+                .holes
+                .iter()
+                .map(|h| h.trim_start_matches('.').to_string())
+                .collect();
+            // A declared release takes the whole value (RFC-0086): it cannot
+            // be told a hole.
+            if !holes.is_empty() && matches!(kind, DropKind::Release(..)) {
+                continue;
+            }
+            match m.kind {
+                // Rule N's table: one edge of a join still holds what another
+                // took. Consumed by name, so a loop variable qualifies.
+                MissingKind::Edge { edge } => {
+                    let rows = own.plan.edge_releases.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
+                        rows.push((info.source.clone(), edge));
+                        own.plan.owners.insert(m.site, owner.to_string());
+                        touched.insert(owner.to_string());
+                    }
+                    continue;
+                }
+                // The same table, one level down: the sub-place one edge took,
+                // released on the edge that did not. Spelled `d.line`, which
+                // every reader of the table resolves as a place.
+                MissingKind::EdgePlace { edge, path } => {
+                    let name = format!("{}{}", info.source, path);
+                    let rows = own.plan.edge_releases.entry(m.site).or_default();
+                    if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
+                        rows.push((name, edge));
+                        own.plan.owners.insert(m.site, owner.to_string());
+                        touched.insert(owner.to_string());
+                    }
+                    continue;
+                }
+                // Round forty's table: the arm's unmoved payload binders, one
+                // entry per binder so an emitter frees exactly those, each
+                // with the holes its arm left in it.
+                MissingKind::ArmBinder { arm } => {
+                    let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
+                    if !rows.iter().any(|(n, _, _)| *n == info.source) {
+                        rows.push((info.source.clone(), kind.clone(), holes));
+                        touched.insert(owner.to_string());
+                    }
+                    own.plan.owners.insert(m.site, owner.to_string());
+                    continue;
+                }
+                MissingKind::Exit => {}
+            }
+            // The unnamed receiver of a field read: R1′'s table, with the
+            // field the read took as its hole. Freed right after the read,
+            // whichever exit found it held.
+            if let Some(node) = info.receiver {
+                own.plan.receiver_frees.insert(node);
+                if !holes.is_empty() {
+                    own.plan.receiver_holes.insert(node, holes);
+                }
+                own.plan.owners.insert(node, owner.to_string());
+                touched.insert(owner.to_string());
+                continue;
+            }
+            let Some(binding) = info.binding else {
+                continue;
+            };
+            // A row the plan already placed here whose hole set is not the
+            // kernel's at this exit (the analysis's set is per binding, the
+            // kernel's is per path): the row keeps its key and takes the
+            // kernel's set.
+            if let Some(r) = own.releases.get_mut(owner).and_then(|rows| {
+                rows.iter_mut()
+                    .find(|r| r.exit == m.exit && r.site == m.site && r.binding == binding)
+            }) {
+                if trace {
+                    eprintln!(
+                        "placer: rewrite {} `{}` {:?} -> {:?}",
+                        owner, info.source, m.exit, holes
+                    );
+                }
+                r.full = false;
+                r.holes = Some(holes);
+                touched.insert(owner.to_string());
+                continue;
+            }
+            let dup = added.iter().any(|(f, r, _)| {
+                *f == owner && r.exit == m.exit && r.site == m.site && r.binding == binding
+            });
+            if dup {
+                continue;
+            }
+            added.push((
+                owner.to_string(),
+                Release {
+                    site: m.site,
+                    binding,
+                    name: info.source.clone(),
+                    kind: kind.clone(),
+                    exit: m.exit,
+                    line: info.line as u32,
+                    full: false,
+                    holes: if holes.is_empty() { None } else { Some(holes) },
+                },
+                kind,
+            ));
+        }
+    }
 }
