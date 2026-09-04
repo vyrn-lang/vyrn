@@ -1161,7 +1161,7 @@ pub fn holes_under(holes: &[String], name: &str) -> Vec<String> {
 /// question about the expression's SHAPE, and a call's answer is its callee's:
 /// the position may retain the value, or take it, or hand it back. That verdict
 /// is [`crate::movecheck::ArgVerdict`], read per position and closed over the
-/// call graph, and [`Ownership::arg_drops`] is what the backends ask. A String
+/// call graph, and [`ReleasePlan::arg_drops`] is what the backends ask. A String
 /// `+` records its operands there under the name `@concat`, so an operand a
 /// call produced takes the same rule and the same guards as a call argument
 /// (`rfcs/census-call-arguments.md` §9, finding 3) — and the two rules
@@ -1613,12 +1613,6 @@ pub struct Ownership {
     /// lowering an explicit `drop x` asks the SAME question the automatic path
     /// asked, instead of keeping a second copy of the answer.
     pub proto: Owned,
-    /// Every call-argument temporary in the program, with the callee's verdict
-    /// on it (`rfcs/census-call-arguments.md`). The rows a backend acts on are
-    /// the [`crate::movecheck::ArgVerdict::Released`] ones, which is what
-    /// [`Ownership::arg_drops`] hands back; the rest are here so the census's
-    /// own table can be re-derived from the compiler instead of from a harness.
-    pub arg_temps: Vec<crate::movecheck::ArgTemp>,
     /// Per function: [`droppable`](Ownership::droppable)'s rows PLACED — every
     /// step, at the exit that runs it, in the order it runs (RFC-0101 M4).
     ///
@@ -1626,35 +1620,6 @@ pub struct Ownership {
     /// the one order that used to be asserted separately by `Gen::drop_stack`,
     /// `Fn_::releases` and the interpreter's per-block `Vec`.
     pub releases: HashMap<String, Vec<Release>>,
-}
-
-impl Ownership {
-    /// Every argument temporary the CALLER releases after the call, keyed by the
-    /// argument expression's node address — the key a backend releases by, the
-    /// way `droppable` is keyed by the `Stmt::Let`'s.
-    ///
-    /// Only a `String` today. Both backends free one out of a register with a
-    /// helper each already has ([`str_temporary`]'s), and every other kind wants
-    /// the walking release, which needs a PLACE and therefore a slot to spill
-    /// into. The rows for those kinds are recorded and left alone: a leak, which
-    /// is what they are today.
-    ///
-    /// **A wider kind has one more question to ask first.** A seeded row may
-    /// hand a CONTAINER back — `@push` answers `Array<T>` and its receiver is
-    /// the same `Array<T>` — so freeing at the call would free a buffer the
-    /// result still names. No `Array` is a `FreeStr`, so no such row can reach
-    /// this filter; `movecheck::arg_verdict` answers the same question for a row
-    /// that hands back a bare type parameter, which `blackBox` does.
-    pub fn arg_drops(&self) -> std::collections::HashSet<usize> {
-        // EVERY `Released` temporary, whatever its kind (RFC-0114 M1). This
-        // carried `&& s.kind == DropKind::FreeStr` for as long as the emitters
-        // could only free a String — so a call-argument tree, array or record
-        // was analysed, verdicted, and then thrown away here, which is why
-        // `check(make(depth))` leaked 313.9 MB against the interpreter's 8.5.
-        // Both backends free by TYPE now, through the same `release_kind`
-        // table this filter used to consult, so the filter is the leak.
-        self.plan.arg_drops.clone()
-    }
 }
 
 /// Analyse ownership across a whole program.
@@ -2267,7 +2232,6 @@ pub fn analyze(program: &Program) -> Ownership {
         holes,
         notes,
         proto,
-        arg_temps: facts.arg_temps,
         releases,
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
