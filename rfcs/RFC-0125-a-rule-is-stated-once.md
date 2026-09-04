@@ -2548,6 +2548,85 @@ The next slice's first move is therefore not another rule. It is to split the
 walk: one traversal that refuses, one that records, so that a closed rule takes
 its call site with it.
 
+**The reader census (2026-09-04): every public item of `own.rs`, and who reads
+it.** The deletion this slice performs may remove only what has no reader, so
+the census names every public item of `compiler/vyrn-frontend/src/own.rs` and
+every call site outside the file, by crate and by function. It is grepped
+rather than remembered, and the compiler cross-checks it: with `pub mod own`
+made `pub(crate) mod own`, `cargo build -p vyrn-frontend` reports `dead_code`
+for every item no OTHER crate reads, and the two lists agree.
+
+**A reader here is any call site, and that is the correction.** The two records
+above count an emission site and the interpreter alone, because the question
+they asked was which emitter still reads the plan. The CORE reads the plan too,
+at ten of the eleven per-node tables, and a table the core reads is a table the
+deletion cannot take: the core is what the placer builds, the placer is what
+fills the plan's own rows, and the emitters read the core's fold. So the
+close-out's table of four tables and 170 lines is what the deletion is WORTH,
+not what it may take today. Every one of the four waits on the same thing:
+`vyrn-lower`'s `core.rs` must state the decision it now reads.
+
+| item | readers, by crate and function | verdict |
+|---|---|---|
+| `ReleasePlan::arg_drops` | `vyrn-codegen` `Cx::arg_drop_row`, `Gen::arg_drop_row`; `vyrn-lower` `Builder::read_val`, `Builder::release_receiver`, `Builder::call`, `core::augment`; `coretables` | waits: the core |
+| `ReleasePlan::store_owned` | `vyrn-codegen` `Cx::store_row`, `Fn_::elem_field_store`, `Fn_::stmt`, `Gen::store_row`, `Gen::gen_stmt`; `vyrn-lower` `Builder::stmt`, `Builder::old_for` | waits: the core, and the twelve rewritten statements |
+| `ReleasePlan::store_fresh` | `vyrn-codegen` `Fn_::stmt`, `Gen::gen_stmt`; `vyrn-lower` `Builder::stmt` | waits: the core |
+| `ReleasePlan::discarded_results` | `vyrn-codegen` `Cx::discarded_row`, `Gen::discarded_row`; `vyrn-lower` `Builder::stmt` | waits: the core |
+| `ReleasePlan::edge_releases` | `vyrn-codegen` `Cx::edge_rows`, `Gen::edge_rows`; `vyrn-lower` `Builder::edge_drops`, `core::augment`; `coretables` | waits: the core |
+| `ReleasePlan::receiver_frees` | `vyrn-codegen` `Cx::receiver_row`, `Gen::receiver_row`; `vyrn-lower` `Builder::release_receiver`, `core::augment`; `coretables` | waits: the core |
+| `ReleasePlan::receiver_holes` | `vyrn-codegen` `Cx::receiver_row`, `Gen::receiver_row`; `vyrn-lower` `Builder::release_receiver`, `core::augment`; `coretables` | waits: the core |
+| `ReleasePlan::consuming_matches` | `vyrn-codegen` `Cx::match_consumes`, `Fn_::frees_boxes`, `Gen::gen_match`; `vyrn-lower` `Builder::scrutinee`, `Builder::own_the_scrutinee` | waits: the core, and `frees_boxes`'s own rule |
+| `ReleasePlan::receiver_malloc` | `vyrn-codegen` `Cx::receiver_malloc`, `Gen::gen_expr_inner`; `coretables` | stays: the region stand-down |
+| `ReleasePlan::malloc_scrutinees` | `vyrn-codegen` `Gen::register_drop` | stays: the region stand-down |
+| `ReleasePlan::arm_frees` | `vyrn-codegen` `Cx::arm_row`, `Gen::arm_row`; `vyrn-frontend` `Interp::release_arm_binders`; `vyrn-lower` `Builder::rhs_inner`, `core::augment`; `coretables`, `kernel` | stays: an `if let` and a `?`, and the core |
+| `ReleasePlan::owners` | `vyrn-lower` `core::augment`; `coretables`, `kernel` | stays: the corpus tests key a row by its function |
+| `ReleasePlan::key_of`, `acknowledge`, `unconsumed` | `vyrn-codegen` every reader helper, and `compile_inner`, `emit` | stays: the acknowledgement |
+| `ReleasePlan::alias_clones`, `alias_clones_scoped`, `alias_scope`, `alias_unwind` | `vyrn-codegen` `Fn_::stmt`, `Fn_::call_inner`, `Fn_::ho_call`, `Fn_::target_call`, `Fn_::resolve_fn_arg`, `Fn_::lift_lambda`, `Gen::gen_stmt`, `Gen::gen_call_inner` | stays: not a placement table |
+| `Ownership::plan` | every reader above | stays |
+| `Ownership::droppable` | `vyrn-codegen` `compile_inner`, `lower_body`, `Gen::begin_body`, `Gen::function`, `Gen::gen_stmt`, `Gen::gen_match`; `vyrn-frontend` `new_interp`, `Interp::block_seeded`, `Interp::release_temp`; `vyrn-lower` `Builder::stmt`, `core::augment` | stays: a frame in all three engines |
+| `Ownership::early` | `vyrn-codegen` `compile_inner`, `lower_body`, `Fn_::stmt`, `Gen::begin_body`, `Gen::gen_stmt` | stays |
+| `Ownership::holes` | `vyrn-codegen` `compile_inner`, `Fn_::stmt`, `emit`; `vyrn-lower` `Builder::plan_holes`, `Builder::drops_at`, `core::fold_facts`, `Kernel::holes_of` | stays |
+| `Ownership::releases` | `vyrn-codegen` `compile_inner`, `lower_body`, `Gen::begin_body`; `vyrn-lower` `core::build`, `core::augment`, `render::render`; `kernel`, `lowered` | stays |
+| `Ownership::notes` | `vyrn-cli` `why_memory`; `vyrn-frontend` `symbols::memory_notes`; `vyrn-lower` `Builder::fate_of` | stays: `vyrn why --memory` |
+| `Ownership::owned_fns` | `vyrn-cli` `why_memory` | stays |
+| `Ownership::proto` | `vyrn-codegen` `compile_inner`, `emit`; `vyrn-lower` `core::build`, `Builder::owns`, `Builder::name`, `core::augment`; `coretables` | stays |
+| `Ownership::arg_temps` | **none** | **deleted here** |
+| `Ownership::arg_drops` | **none** | **deleted here** |
+| `Owned::new` | `vyrn-frontend` `Declared::new` | stays |
+| `Owned::owns_heap`, `release_kind`, `linear_kind`, `must_use`, `reaches_declared`, `is_release_fn` | `vyrn-codegen` `Fn_::rel_at`, `Gen::deep_release`, `Gen::gen_match`; `vyrn-frontend` `declared.rs`, `movecheck.rs`; `vyrn-lower` `Builder::owns`, `core::augment` | stays |
+| `Owned::unbounded` | `own.rs` alone (`release_kind`, `owns_heap`) | stays: an internal reader |
+| `Owned::declares_any` | **none** | **deleted here** |
+| `analyze`, `placed`, `for_var_key`, `install_placer`, `install_arm_rows`, `core_arm_rows` | `vyrn-codegen` `compile_inner`, `emit`, `lower_body`, `Gen::begin_body`, `Gen::gen_stmt`; `vyrn-frontend` `new_interp`, `Interp::release_arm_binders`, `symbols::memory_notes`; `vyrn-lower` `install`, `lower`, `Builder::stmt`; `vyrn-cli` `why_memory`, `kernel_strict` | stays |
+| `str_temporary`, `holes_under`, `self_referring`, `owns_heap` (the free function) | `vyrn-codegen` `Fn_::tee_str_temp`, `Fn_::rel_at`, `Gen::free_str_temp`, `Gen::deep_release`; `vyrn-frontend` `Checker::call`, `Declared::owns_heap` | stays |
+| `Exit`, `Release`, `DropKind`, `Leak`, `Fate`, `BindingNote`, `Linear`, `Placer`, `ArmRows` | `vyrn-codegen`; `vyrn-frontend` `interp.rs`, `symbols.rs`, `declared.rs`, `movecheck.rs`; `vyrn-lower`; `vyrn-cli` `why_memory` | stays |
+| `trace::start`, `take`, `on`, `adopt`, `leaving`, `joining`, `joined`, `note` | `vyrn-frontend` `interp.rs`; `lowered` | stays: the exit trace |
+
+Three readings of the census.
+
+- **Three items have no reader, and all three are the argument-temporary
+  hand-back.** `Ownership::arg_drops` filtered the plan's rows for a backend
+  that has not called it since both backends began to free by type.
+  `Ownership::arg_temps` carried every row with its verdict, so that
+  `rfcs/census-call-arguments.md` could be re-derived from the compiler; no
+  code re-derives it, and the document is committed. `Owned::declares_any` is
+  the coarse gate that the per-type `Owned::reaches_declared` replaced. None
+  of the three is a table, and the table two of them served (`arg_drops`)
+  stays.
+- **The core is the last reader of five tables, and of parts of four more.**
+  `arg_drops`, `discarded_results`, `edge_releases`, `receiver_frees` and
+  `receiver_holes` have no emitter reader left, and `vyrn-lower`'s `core.rs`
+  reads every one: `Builder::read_val` and `Builder::release_receiver` ask the
+  plan whether an argument temporary drops at a node, `Builder::stmt` asks
+  whether a discarded result frees, `Builder::edge_drops` asks Rule N's table
+  for the join, and `Builder::release_receiver` asks both receiver tables.
+  Each read decides a `St` that the emitters then run, so deleting the table
+  stops an emission. The tables go the day the core states the same decision
+  out of its own judgment, which is M5 and M6's work.
+- **The price the deletion is worth is unchanged, and it is not payable
+  today.** The close-out above prices the four tables at 170 lines, and R1′'s
+  fold at a further 71. That price stands. This slice pays the part of it that
+  has no reader at all, and the record below counts what that came to.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
