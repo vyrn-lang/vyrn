@@ -6031,7 +6031,7 @@ on every run, so the two tables cannot both be wrong.
 
 | site | rung ladder | engine | what it decides | code |
 |---|---|---|---|---|
-| `vyrn-codegen/src/lib.rs` `coerce_plan` | yes | shared | which rung a pair takes | 49 |
+| `vyrn-codegen/src/lib.rs` `coerce_plan` | yes | shared | which rung a pair takes | 54 |
 | `vyrn-codegen/src/lib.rs` `Gen::coerce` | yes | native | the rung, and the IR for it | 104 |
 | `vyrn-codegen/src/direct.rs` `Fn_::coerce` | yes | wasm | the rung, and the wasm for it | 177 |
 | `vyrn-frontend/src/interp.rs` `Interp::coerce` | yes | interp | the scalar targets that need no walk | 19 |
@@ -6104,9 +6104,9 @@ by one edit. The two rows that did not move are in the census above.
 
 | site | states the rung | engine | what it decides | code |
 |---|---|---|---|---|
-| `vyrn-codegen/src/lib.rs` `coerce_plan` | yes | shared | which rung a pair takes | 49 |
-| `vyrn-codegen/src/lib.rs` `Gen::coerce` | no | native | the IR for the rung the plan placed | 111 |
-| `vyrn-codegen/src/direct.rs` `Fn_::coerce` | no | wasm | the wasm for the rung the plan placed | 169 |
+| `vyrn-codegen/src/lib.rs` `coerce_plan` | yes | shared | which rung a pair takes | 54 |
+| `vyrn-codegen/src/lib.rs` `Gen::coerce` | no | native | the IR for the rung the plan placed | 118 |
+| `vyrn-codegen/src/direct.rs` `Fn_::coerce` | no | wasm | the wasm for the rung the plan placed | 192 |
 | `vyrn-frontend/src/interp.rs` `Interp::coerce` | yes | interp | the scalar targets that need no walk | 19 |
 | `vyrn-frontend/src/interp.rs` `coerce_walk` | yes | interp | the rung, by target type and value shape | 112 |
 | `vyrn-frontend/src/interp.rs` `coercion_is_noop` | yes | interp | whether the walk would change the value | 86 |
@@ -6121,7 +6121,8 @@ other row of §3 M6 gives — deleting it is deleting the third picture of
 memory.
 
 **The line counts, and what they do and do not show.** The rung ladder was 533
-code lines and is 532. The native emitter grew by 7 and the direct one shrank
+code lines and is 532. (RFC-0126 §8.9 took it to 562: one rung more, stated
+once in the plan and written by each emitter.) The native emitter grew by 7 and the direct one shrank
 by 8. That is the same measurement the `where-scalar` row already carried and
 the same warning: the column that counts CARRIERS moves when a rule moves, and
 the column that counts LINES moves when a shape moves. What each emitter lost
@@ -6179,6 +6180,25 @@ order is now the whole of the rule.
 - **`coerce_flow` and `prove_coercion` are not the ladder** and did not move.
   Both already state their rule once — `finite::string_flow_proven` and
   `consteval::eval` — and both are call sites of it.
+
+### The surface collapse — RFC-0126 §8, one line per step
+
+§2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
+collapse the census ranked first — `Option` and `Result` into `Type::Enum` — in
+five steps. This is the register of them, because the milestones above are the
+core's and this one is the surface's; each line names the step, its price and
+its record.
+
+- **M1 — a sum may hold a sum (2026-09-04, `4f6bfaea`).** The checker's nested
+  refusal was conservatism: all three engines already ran what it refused.
+  16 mentions, one function, one diagnostic, zero bytes. RFC-0126 §8.7.
+- **M2 — one payload encoding per engine (2026-09-05).** §8.4's rule: an `i64`
+  tag for every sum, a slot count that follows the payload's width, and one
+  encoder per engine. Five functions and 55 code lines out of `vyrn-codegen`;
+  143 of 174 wasm hashes moved, and the manifest is regenerated in that commit
+  and no other; parity 41 of 41. It needed one rung the design did not foresee,
+  `Rung::Reshape`, because a generic enum now has one shape per type argument.
+  RFC-0126 §8.9.
 
 ### What each milestone is worth on its own
 

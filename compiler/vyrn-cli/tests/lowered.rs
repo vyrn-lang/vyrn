@@ -1452,7 +1452,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "which rung a pair takes",
             true,
             true,
-            49,
+            54,
         ),
         site(
             "vyrn-codegen/src/lib.rs",
@@ -1461,7 +1461,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "the IR for the rung the plan placed",
             true,
             false,
-            111,
+            118,
         ),
         site(
             "vyrn-codegen/src/direct.rs",
@@ -1470,7 +1470,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "the wasm for the rung the plan placed",
             true,
             false,
-            169,
+            192,
         ),
         site(
             "vyrn-frontend/src/interp.rs",
@@ -1615,8 +1615,8 @@ fn the_coercion_census_is_what_the_rfc_records() {
         }
     }
     assert_eq!(
-        ladder, 532,
-        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 532"
+        ladder, 562,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 562"
     );
     // The separate statements of the rung rule, which is what the milestone
     // moves: an engine that ASKS another site's statement is not one. It was

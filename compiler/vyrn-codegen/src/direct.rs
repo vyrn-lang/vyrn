@@ -1465,6 +1465,18 @@ impl<'a> Cx<'a> {
         ftypes::resolve(&self.sub(ty), &self.types)
     }
 
+    /// RFC-0126 §8.4's `words(t)`: the slots a payload of type `t` rides in.
+    /// `Gen`'s own answer, for [`Cx::ll`]'s reason.
+    fn words(&self, ty: &Type) -> usize {
+        crate::payload_words_of(&self.sub(ty), &self.types)
+    }
+
+    /// The aggregate member index the `i`th payload of a variant starts at
+    /// (member 0 is the tag).
+    fn payload_slot(&self, payload: &[Type], i: usize) -> usize {
+        1 + payload[..i].iter().map(|p| self.words(p)).sum::<usize>()
+    }
+
     /// The PROGRAM's own body for a lambda literal at this address, or `None`
     /// for a literal the program does not hold — see [`Cx::lambdas`].
     fn lambda(&self, at: &Expr) -> Option<&'a LambdaBody> {
@@ -3195,22 +3207,19 @@ impl<'p> Fn_<'_, 'p> {
         for (tag, var) in vs.iter().enumerate() {
             let mut boxed = Vec::new();
             for (j, pty) in var.payload.clone().iter().enumerate() {
-                if self.owns_heap(pty) && matches!(self.word1(pty), Word::Boxed) {
-                    boxed.push(j);
+                if self.owns_heap(pty) && matches!(self.word2(pty)?, Word::Boxed) {
+                    boxed.push(self.cx.payload_slot(&var.payload, j));
                 }
             }
             if boxed.is_empty() {
                 continue;
             }
-            b.ins(&Instruction::LocalGet(a));
-            b.ins(&Instruction::I64Load(word8()));
-            b.ins(&Instruction::I64Const(tag as i64));
-            b.ins(&Instruction::I64Eq);
+            tag_eq(b, a, tag as i64);
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
             for j in boxed {
                 b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[j + 1])));
+                b.ins(&Instruction::I64Load(at(l.fields[j])));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::Call(self.cx.rt.free));
             }
@@ -3507,8 +3516,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::Option(inner) => {
                 let l = self.layout_of(ty, line)?;
                 let w = self.word2(&inner)?;
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
+                tag_eq(b, a, 1);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.rel_word(m, b, a, l.fields[1], &inner, w, line)?;
@@ -3519,8 +3527,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::Result(ok, err) => {
                 let l = self.layout_of(ty, line)?;
                 let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
+                tag_eq(b, a, 1);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.rel_word(m, b, a, l.fields[1], &ok, wo, line)?;
@@ -3536,18 +3543,16 @@ impl<'p> Fn_<'_, 'p> {
                     if !var.payload.iter().any(|p| self.owns_heap(p)) {
                         continue;
                     }
-                    b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I64Load(word8()));
-                    b.ins(&Instruction::I64Const(tag as i64));
-                    b.ins(&Instruction::I64Eq);
+                    tag_eq(b, a, tag as i64);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     for (j, pty) in var.payload.clone().iter().enumerate() {
                         if !self.owns_heap(pty) {
                             continue;
                         }
-                        let w = self.word1(pty);
-                        self.rel_word(m, b, a, l.fields[j + 1], pty, w, line)?;
+                        let at = self.cx.payload_slot(&var.payload, j);
+                        let w = self.word2(pty)?;
+                        self.rel_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -4433,12 +4438,10 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 let mark = self.scope.len();
-                for (i, (n, t)) in self
-                    .pattern_binds(&sum, pattern, *line)?
-                    .into_iter()
-                    .enumerate()
-                {
-                    let place = self.bind_payload(b, addr, &sum, &sl, i, &t, *line, free_box)?;
+                let binds = self.pattern_binds(&sum, pattern, *line)?;
+                let ptys: Vec<Type> = binds.iter().map(|(_, t)| t.clone()).collect();
+                for (i, (n, t)) in binds.into_iter().enumerate() {
+                    let place = self.bind_payload(b, addr, &sl, &ptys, i, &t, *line, free_box)?;
                     self.scope.push((n, place, t));
                 }
                 self.block(m, b, then_block)?;
@@ -5325,6 +5328,32 @@ impl<'p> Fn_<'_, 'p> {
                         Repr::Unit => return unsupported("a Unit field", line),
                     }
                 }
+                b.slot(off);
+                Ok(())
+            }
+            // Two shapes of one sum (RFC-0126 §8.4). The tag is at offset 0 and
+            // the slots follow it, so the bytes both shapes have are a prefix:
+            // zero the destination, then copy that prefix.
+            crate::Rung::Reshape => {
+                let src = self.scratch(b, ValType::I32, 0);
+                b.ins(&Instruction::LocalSet(src));
+                let Repr::Agg(dl) = self.cx.repr(to, line)? else {
+                    return unsupported("a sum that is not an aggregate", line);
+                };
+                let sl =
+                    layout::of_ll(&self.cx.ll(from)).map_err(|e| format!("direct backend: {e}"))?;
+                let off = b.alloc(dl.size, dl.align);
+                b.slot(off);
+                b.ins(&Instruction::I32Const(0));
+                b.ins(&Instruction::I32Const(dl.size as i32));
+                b.ins(&Instruction::MemoryFill(0));
+                b.slot(off);
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Const(dl.size.min(sl.size) as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
                 b.slot(off);
                 Ok(())
             }
@@ -10942,9 +10971,10 @@ impl<'p> Fn_<'_, 'p> {
         let ooff = b.alloc(ol.size, ol.align);
         b.slot(ooff);
         b.ins(&Instruction::LocalGet(has));
-        b.ins(&Instruction::I32Store8(byte()));
-        for a in [ooff + ol.fields[1], ooff + ol.fields[2]] {
-            b.slot(a);
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::I64Store(word8()));
+        for f in &ol.fields[1..] {
+            b.slot(ooff + f);
             b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
         }
@@ -11215,7 +11245,16 @@ impl<'p> Fn_<'_, 'p> {
         let sum = Sum::Opt(elem.clone());
         self.tag_test(b, oaddr, &sum, &Pattern::Some(String::new()), line)?;
         b.ins(&Instruction::If(BlockType::Empty));
-        let got = self.bind_payload(b, oaddr, &sum, &ol, 0, elem, line, false)?;
+        let got = self.bind_payload(
+            b,
+            oaddr,
+            &ol,
+            std::slice::from_ref(elem),
+            0,
+            elem,
+            line,
+            false,
+        )?;
         match (place, got, &r) {
             (Place::Local(d), Place::Local(v), _) => {
                 b.ins(&Instruction::LocalGet(v));
@@ -12065,9 +12104,9 @@ impl<'p> Fn_<'_, 'p> {
         // one destination, filled in place, which is destination-first with the
         // trivial arm pre-applied.
         b.slot(out + ol.fields[0]);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::I32Store8(byte()));
-        for f in [ol.fields[1], ol.fields[2]] {
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64Store(word8()));
+        for f in &ol.fields[1..] {
             b.slot(out + f);
             b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
@@ -12089,8 +12128,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalTee(last));
         b.ins(&Instruction::I64Store(word8()));
         b.slot(out + ol.fields[0]);
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Store8(byte()));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Store(word8()));
         b.slot(out + ol.fields[1]);
         self.elem_addr(b, &w, last);
         self.load_elem(b, &w, line)?;
@@ -12652,8 +12691,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::Option(inner) => {
                 let l = self.layout_of(ty, line)?;
                 let w = self.word2(&inner)?;
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
+                tag_eq(b, a, 1);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.copy_word(b, a, l.fields[1], &inner, w, line)?;
@@ -12664,8 +12702,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::Result(ok, err) => {
                 let l = self.layout_of(ty, line)?;
                 let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
+                tag_eq(b, a, 1);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.copy_word(b, a, l.fields[1], &ok, wo, line)?;
@@ -12684,18 +12721,16 @@ impl<'p> Fn_<'_, 'p> {
                     if !var.payload.iter().any(|p| self.owns_heap(p)) {
                         continue;
                     }
-                    b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I64Load(word8()));
-                    b.ins(&Instruction::I64Const(tag as i64));
-                    b.ins(&Instruction::I64Eq);
+                    tag_eq(b, a, tag as i64);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     for (j, pty) in var.payload.clone().iter().enumerate() {
                         if !self.owns_heap(pty) {
                             continue;
                         }
-                        let w = self.word1(pty);
-                        self.copy_word(b, a, l.fields[j + 1], pty, w, line)?;
+                        let at = self.cx.payload_slot(&var.payload, j);
+                        let w = self.word2(pty)?;
+                        self.copy_word(b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -12793,19 +12828,14 @@ impl<'p> Fn_<'_, 'p> {
             // `Word::Float` was added for.
             Repr::Scalar(ValType::V128) => Word::Boxed,
             Repr::Scalar(v) => Word::Ext(v),
-            Repr::Agg(_) if self.cx.ll(t) == "{ i64, i64 }" => Word::Inline2,
+            // `words(t) == 2` and not the shape STRING: since RFC-0126 §8.4 a
+            // one-slot sum prints `{ i64, i64 }` too, and a payload that is
+            // itself a sum rides in one slot, boxed. Reading the string here
+            // gave a nested `Option` two slots where the shape gave it one, and
+            // the second word was read as the payload.
+            Repr::Agg(_) if self.cx.words(t) == 2 => Word::Inline2,
             _ => Word::Boxed,
         })
-    }
-
-    /// How a user-enum payload of type `t` fills its ONE word: an `i64` is the
-    /// word, and everything else is a pointer to itself.
-    fn word1(&self, t: &Type) -> Word {
-        if self.cx.ll(t) == "i64" {
-            Word::Direct
-        } else {
-            Word::Boxed
-        }
     }
 
     /// Copy the value on the stack (a scalar, or an aggregate's address) onto
@@ -12867,6 +12897,30 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
         hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
+        let args: Vec<&Expr> = payload.iter().map(|(e, _)| *e).collect();
+        let tys: Vec<Type> = payload.iter().map(|(_, t)| t.clone()).collect();
+        self.build_variant(m, b, ty, tag as u64, &args, &tys, line, hint)
+    }
+
+    /// Build a sum value: the tag, then the live variant's payloads in the slots
+    /// they occupy. ONE builder since M2 — a built-in sum and a declared enum
+    /// have one tag width and one payload encoding (RFC-0126 §8.4), so the two
+    /// that stood here differed only in which one they refused.
+    #[allow(clippy::too_many_arguments)]
+    fn build_variant(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ty: &Type,
+        tag: u64,
+        args: &[&Expr],
+        payload: &[Type],
+        line: usize,
+        hint: Option<(Dest, Type)>,
+    ) -> Result<Type, String> {
+        if args.len() != payload.len() {
+            return unsupported("an enum variant at this arity", line);
+        }
         let Repr::Agg(l) = self.cx.repr(ty, line)? else {
             return unsupported("a sum that is not an aggregate", line);
         };
@@ -12876,82 +12930,33 @@ impl<'p> Fn_<'_, 'p> {
             _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
         };
         dest.addr(b, 0);
-        b.ins(&Instruction::I32Const(tag));
-        b.ins(&Instruction::I32Store8(byte()));
-        let (w0, w1) = (l.fields[1], l.fields[2]);
-        match payload {
-            None => {
-                for a in [w0, w1] {
-                    dest.addr(b, a);
-                    b.ins(&Instruction::I64Const(0));
-                    b.ins(&Instruction::I64Store(word8()));
-                }
-            }
-            Some((e, t)) if self.word2(&t)? == Word::Inline2 => {
+        b.ins(&Instruction::I64Const(tag as i64));
+        b.ins(&Instruction::I64Store(word8()));
+        // Every slot this variant does not fill is zeroed: a `None` and a
+        // narrower variant must not leave the widest one's words behind.
+        let mut filled = 1;
+        for (i, (a, t)) in args.iter().zip(payload).enumerate() {
+            let at = self.cx.payload_slot(payload, i);
+            if self.word2(t)? == Word::Inline2 {
                 // Two words already side by side: one copy, no encoding.
-                dest.addr(b, w0);
-                self.expr_as(m, b, e, &t)?;
+                dest.addr(b, l.fields[at]);
+                self.expr_as(m, b, a, t)?;
                 b.ins(&Instruction::I32Const(16));
                 b.ins(&Instruction::MemoryCopy {
                     src_mem: 0,
                     dst_mem: 0,
                 });
-            }
-            Some((e, t)) => {
-                dest.addr(b, w0);
-                self.expr_as(m, b, e, &t)?;
-                match self.word2(&t)? {
-                    Word::Direct => {}
-                    Word::Ext(_) => {
-                        b.ins(&Instruction::I64ExtendI32U);
-                    }
-                    Word::Float(v) => float_into_word(b, v),
-                    _ => self.box_value(b, &t, line)?,
-                }
-                b.ins(&Instruction::I64Store(word8()));
-                dest.addr(b, w1);
-                b.ins(&Instruction::I64Const(0));
+            } else {
+                dest.addr(b, l.fields[at]);
+                self.expr_as(m, b, a, t)?;
+                self.encode_word2(b, t, line)?;
                 b.ins(&Instruction::I64Store(word8()));
             }
+            filled = at + self.cx.words(t);
         }
-        dest.addr(b, 0);
-        self.dest_used = used;
-        Ok(ty.clone())
-    }
-
-    /// Build a user-enum value: the tag, then one word per payload.
-    #[allow(clippy::too_many_arguments)]
-    fn build_enum(
-        &mut self,
-        m: &mut Module,
-        b: &mut Frame,
-        ty: &Type,
-        tag: u64,
-        args: &[Expr],
-        payload: &[Type],
-        line: usize,
-        hint: Option<(Dest, Type)>,
-    ) -> Result<Type, String> {
-        if args.len() != payload.len() {
-            return unsupported("an enum variant at this arity", line);
-        }
-        let Repr::Agg(l) = self.cx.repr(ty, line)? else {
-            return unsupported("an enum that is not an aggregate", line);
-        };
-        // RFC-0125 M1: the consumer's storage when it holds this very type.
-        let (dest, used) = match hint {
-            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(ty) => (d, true),
-            _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
-        };
-        dest.addr(b, 0);
-        b.ins(&Instruction::I64Const(tag as i64));
-        b.ins(&Instruction::I64Store(word8()));
-        for (i, (a, t)) in args.iter().zip(payload).enumerate() {
-            dest.addr(b, l.fields[1 + i]);
-            self.expr_as(m, b, a, t)?;
-            if self.word1(t) == Word::Boxed {
-                self.box_value(b, t, line)?;
-            }
+        for slot in filled..l.fields.len() {
+            dest.addr(b, l.fields[slot]);
+            b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
         }
         dest.addr(b, 0);
@@ -13087,7 +13092,8 @@ impl<'p> Fn_<'_, 'p> {
                 (ty, tag, payload)
             }
         };
-        self.build_enum(m, b, &ty, tag, args, &payload, line, hint)
+        let refs: Vec<&Expr> = args.iter().collect();
+        self.build_variant(m, b, &ty, tag, &refs, &payload, line, hint)
             .map(Some)
     }
 
@@ -13207,9 +13213,10 @@ impl<'p> Fn_<'_, 'p> {
 
             let mark = self.scope.len();
             let binds = self.pattern_binds(&sum, &arm.pattern, line)?;
+            let ptys: Vec<Type> = binds.iter().map(|(_, t)| t.clone()).collect();
             let mut bound: Vec<(String, Place, Type)> = Vec::new();
             for (i, (n, t)) in binds.into_iter().enumerate() {
-                let place = self.bind_payload(b, addr, &sum, &sl, i, &t, line, free_box)?;
+                let place = self.bind_payload(b, addr, &sl, &ptys, i, &t, line, free_box)?;
                 bound.push((n.clone(), place.clone(), t.clone()));
                 self.scope.push((n, place, t));
             }
@@ -13318,10 +13325,10 @@ impl<'p> Fn_<'_, 'p> {
             return unsupported("`?` on a non-aggregate sum", line);
         };
         // The propagated value is the WHOLE sum, byte for byte, which is only
-        // sound if the two are the same shape — `{ i1, i64, i64 }` on both sides,
-        // differing at most in a payload half the failing tag says is not there.
-        // The textual backend gets this for free (`ret { i1, i64, i64 } %agg`); a
-        // memcpy has a width, so the width is checked rather than assumed.
+        // sound if the two are the same shape. Since RFC-0126 §8.4 a sum's slot
+        // count follows its widest payload, so the two really can differ; the
+        // textual backend makes the same check in the same words, and a memcpy
+        // has a width, so the width is checked rather than assumed.
         let ret_ty = self.ret_ty.clone();
         if self.sum_of(&ret_ty).is_none() || self.cx.ll(&ret_ty) != self.cx.ll(&st) {
             return unsupported(
@@ -13360,7 +13367,16 @@ impl<'p> Fn_<'_, 'p> {
         // Reusing `bind_payload` costs one local or slot that nothing else reads,
         // and buys the four payload shapes (direct, extended, inline pair, boxed)
         // already being right here because they are right in `match`.
-        let place = self.bind_payload(b, addr, &sum, &sl, 0, &ok_ty, line, false)?;
+        let place = self.bind_payload(
+            b,
+            addr,
+            &sl,
+            std::slice::from_ref(&ok_ty),
+            0,
+            &ok_ty,
+            line,
+            false,
+        )?;
         match place {
             Place::Local(l) => {
                 b.ins(&Instruction::LocalGet(l));
@@ -13527,14 +13543,17 @@ impl<'p> Fn_<'_, 'p> {
         let off = b.alloc(l.size, l.align);
         b.slot(off + l.fields[0]);
         b.ins(&Instruction::LocalGet(tag));
-        b.ins(&Instruction::I32Store8(byte()));
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::I64Store(word8()));
         b.slot(off + l.fields[1]);
         b.ins(&Instruction::LocalGet(held));
         self.encode_word2(b, &base, line)?;
         b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(word8()));
+        for f in &l.fields[2..] {
+            b.slot(off + f);
+            b.ins(&Instruction::I64Const(0));
+            b.ins(&Instruction::I64Store(word8()));
+        }
         b.slot(off);
         Ok(ty)
     }
@@ -13649,33 +13668,31 @@ impl<'p> Fn_<'_, 'p> {
             }
             (_, p) => {
                 let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_));
-                b.ins(&Instruction::I32Load8U(byte()));
-                b.ins(&Instruction::I32Const(i32::from(one)));
-                b.ins(&Instruction::I32Eq);
+                b.ins(&Instruction::I64Load(word8()));
+                b.ins(&Instruction::I64Const(i64::from(one)));
+                b.ins(&Instruction::I64Eq);
             }
         }
         Ok(())
     }
 
     /// Bind payload `i` of the matched variant out of the sum at `addr`.
+    /// `ptys` is the whole variant's payload list, because a payload's slot is
+    /// the width of the ones before it (RFC-0126 §8.4).
+    #[allow(clippy::too_many_arguments)]
     fn bind_payload(
         &mut self,
         b: &mut Frame,
         addr: u32,
-        sum: &Sum,
         sl: &Layout,
+        ptys: &[Type],
         i: usize,
         t: &Type,
         line: usize,
         free_box: bool,
     ) -> Result<Place, String> {
-        let is_enum = matches!(sum, Sum::Enum(_));
-        let off = sl.fields[1 + if is_enum { i } else { 0 }];
-        let kind = if is_enum {
-            self.word1(t)
-        } else {
-            self.word2(t)?
-        };
+        let off = sl.fields[self.cx.payload_slot(ptys, i)];
+        let kind = self.word2(t)?;
         let ll = self.cx.ll(t);
         Ok(match kind {
             Word::Direct => {
@@ -13945,19 +13962,16 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         // miss: NOW the key exists — str_from_bytes, whose Err is the trap.
-        let rl = layout::of_ll("{ i1, i64, i64 }").expect("the Result shape");
+        let rty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+        let rl = layout::of_ll(&self.cx.ll(&rty)).expect("the Result shape");
         let dest = b.alloc(rl.size, rl.align);
         b.slot(dest);
         b.ins(&Instruction::LocalGet(wdata));
         b.ins(&Instruction::LocalGet(wlen));
         self.str_from_bytes_tail(b);
         b.slot(dest + rl.fields[0]);
-        b.ins(&Instruction::I32Load8U(MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
-        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         let msg = self.cx.rt.intern(
@@ -14474,8 +14488,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         b.slot(off + ol.fields[0]);
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Store8(byte()));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Store(word8()));
         match self.word2(val)? {
             // Two words already side by side in the value buffer: one copy, and
             // nothing to encode. A `Ref`, or a stored `fn` (RFC-0037).
@@ -14975,8 +14989,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Sub);
                 b.ins(&Instruction::LocalSet(last));
                 b.slot(off + ol.fields[0]);
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::I32Store8(byte()));
+                b.ins(&Instruction::I64Const(1));
+                b.ins(&Instruction::I64Store(word8()));
                 b.slot(off + ol.fields[1]);
                 self.elem_addr(b, &w, last);
                 match self.word2(inner)? {
@@ -16118,6 +16132,17 @@ fn byte() -> MemArg {
     }
 }
 
+/// Push `1` when the sum at address local `a` carries variant `tag`, `0`
+/// otherwise — the condition an `If` over a sum's tag takes. Since M2 every
+/// sum's tag is the enum's `i64` (RFC-0126 §8.4), so this is one test for the
+/// built-in sums and the declared ones alike.
+fn tag_eq(b: &mut Frame, a: u32, tag: i64) {
+    b.ins(&Instruction::LocalGet(a));
+    b.ins(&Instruction::I64Load(word8()));
+    b.ins(&Instruction::I64Const(tag));
+    b.ins(&Instruction::I64Eq);
+}
+
 fn word() -> MemArg {
     MemArg {
         offset: 0,
@@ -16556,7 +16581,7 @@ mod tests {
         // every `T` but its element STRIDE is not: the substitution has to reach
         // inside the shape, not just past the outermost one.
         assert_eq!(c.ll(&Type::ArrayN(Box::new(t.clone()), 3)), "[3 x i64]");
-        assert_eq!(c.ll(&Type::Option(Box::new(t))), "{ i1, i64, i64 }");
+        assert_eq!(c.ll(&Type::Option(Box::new(t))), "{ i64, i64 }");
     }
 
     /// A validated type has the SAME representation as its base, so a lowering
