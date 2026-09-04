@@ -544,7 +544,7 @@ fn real_main() -> ExitCode {
         // refusal alone — every other codegen error stays `build`'s.
         "check" => profile_now(match load_program(path, &source) {
             Ok(program) => {
-                let _memo = shared_desugars();
+                let _memo = shared_desugars(&program);
                 if let Err(code) = kernel_refuses(&program, path) {
                     return code;
                 }
@@ -574,7 +574,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars();
+            let _memo = shared_desugars(&program);
             // What `check` refuses, `run` refuses, under either engine: a
             // polymorphic recursion has no finite set of instances, and the
             // interpreter running it anyway (audit A5.2) was one program with
@@ -619,7 +619,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars();
+            let _memo = shared_desugars(&program);
             match vyrn_codegen::emit(&program) {
                 Ok(ir) => {
                     print!("{ir}");
@@ -639,7 +639,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars();
+            let _memo = shared_desugars(&program);
             match vyrn_codegen::direct::wat(&program) {
                 Ok(wat) => {
                     print!("{wat}");
@@ -661,7 +661,7 @@ fn real_main() -> ExitCode {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars();
+            let _memo = shared_desugars(&program);
             let lowered = vyrn_lower::lower(&program);
             print!("{}", vyrn_lower::render(&lowered, path));
             ExitCode::SUCCESS
@@ -3172,16 +3172,20 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
 /// deleted rule shipped a program that should be refused. `VYRN_NO_KERNEL=1`
 /// turns it off for a bisect.
 ///
-/// The analysis runs once more here so the refusals are this program's and
-/// not a generator's — the load runs `gen fn` bodies as whole programs of
-/// their own, and each fills the same thread-local.
+/// The refusals are this program's because [`RefusalScope`] cleared the
+/// thread-local when the program was linked — the load runs `gen fn` bodies as
+/// whole programs of their own, and each fills the same one. The analysis is
+/// asked for here rather than re-run: under the ownership memo it is the one
+/// this build already made, and where no memo is armed it is a second run that
+/// says the same thing twice, which the dedup below drops.
 fn kernel_refuses(program: &vyrn_frontend::ast::Program, path: &str) -> Result<(), ExitCode> {
     if !vyrn_lower::kernel_refuses() {
         return Ok(());
     }
-    let _ = vyrn_lower::take_refusals();
     let _ = vyrn_frontend::own::analyze(program);
-    let refusals = vyrn_lower::take_refusals();
+    let mut refusals = vyrn_lower::take_refusals();
+    let mut seen = std::collections::HashSet::new();
+    refusals.retain(|r| seen.insert((r.file.clone(), r.line, r.message.clone())));
     if refusals.is_empty() {
         return Ok(());
     }
@@ -3242,8 +3246,34 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
 /// `Memo` doc warns about — with the verification bill still attached. What
 /// this covers is the one program the command is about, from the point it is
 /// linked to the point it has been lowered and emitted.
-fn shared_desugars() -> vyrn_frontend::project::Memo {
-    vyrn_frontend::project::Memo::open()
+fn shared_desugars(
+    program: &vyrn_frontend::ast::Program,
+) -> (
+    vyrn_frontend::project::Memo,
+    vyrn_frontend::own::Memo<'_>,
+    RefusalScope,
+) {
+    (
+        vyrn_frontend::project::Memo::open(),
+        vyrn_frontend::own::Memo::open(program),
+        RefusalScope::open(),
+    )
+}
+
+/// Everything the kernel refuses from here on belongs to THIS program.
+///
+/// The loader runs generators by loading and judging whole programs of their
+/// own (RFC-0021), and each fills the same thread-local. Clearing here, once,
+/// at the point the command's program is linked, is what `kernel_refuses` used
+/// to do by re-analysing — which under the ownership memo (RFC-0125 §3 M3, the
+/// repetition slice) would re-analyse nothing and print nothing.
+struct RefusalScope;
+
+impl RefusalScope {
+    fn open() -> RefusalScope {
+        let _ = vyrn_lower::take_refusals();
+        RefusalScope
+    }
 }
 
 /// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
@@ -3733,7 +3763,7 @@ fn test_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
     // A file with no root-module tests: nothing to run.
     let has_tests = program.tests.iter().any(|t| t.module.is_none());
     if !has_tests {
@@ -3864,7 +3894,7 @@ fn bench_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
 
     // Root-file benches only (RFC-0055), in declaration order, name-filtered.
     let matches = |name: &str| filter.as_deref().is_none_or(|sub| name.contains(sub));
@@ -4567,7 +4597,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
 
     // `vyrn serve` requires `fn handle(req: Request) -> Response` (exactly this
     // signature — the checker's no-`main` exemption uses the same rule).
@@ -4799,7 +4829,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
     use vyrn_frontend::ast::Type;
     let has_handle = program.functions.iter().any(|f| {
         f.name == "handle"
@@ -6072,7 +6102,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
     if let Err(code) = kernel_refuses(&program, path) {
         return code;
     }

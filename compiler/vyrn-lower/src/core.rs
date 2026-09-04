@@ -3380,13 +3380,27 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
 /// refuses for a reason other than a missing release (a double free, a use
 /// after release), is left exactly as the plan had it.
 pub fn augment(program: &Program, own: &mut Ownership) {
+    let _p = vyrn_frontend::prof::phase("placer");
+    let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
+    drop(lw);
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
     let mut added: Vec<(String, Release, DropKind)> = Vec::new();
+    // Every core body this pass builds, kept for the `Facts` fold below, and
+    // the functions this pass wrote a row for (RFC-0125 §3 M3, the repetition
+    // slice). A row is keyed by a NODE and a node belongs to one function, so
+    // a body whose function is not named here is a body the fold would rebuild
+    // to the same thing — the second build's whole purpose is the rows this
+    // one added, and it added none there.
+    let mut built: Vec<Option<Body>> = Vec::with_capacity(lowered.instances.len());
+    let mut touched: std::collections::HashSet<String> = Default::default();
     for inst in &lowered.instances {
-        let top = match build(program, inst, own) {
+        let bs = vyrn_frontend::prof::phase("placer: core::build");
+        let made = build(program, inst, own);
+        drop(bs);
+        let top = match made {
             Ok(b) => b,
             Err(g) => {
                 // A rule the core states, rather than a construct it cannot
@@ -3401,6 +3415,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                             body: inst.func.name.clone(),
                         })
                     });
+                    built.push(None);
                     continue;
                 }
                 if trace {
@@ -3411,6 +3426,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                         g.detail
                     );
                 }
+                built.push(None);
                 continue;
             }
         };
@@ -3422,7 +3438,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         // by its own nodes under the enclosing function's name, so a row
         // placed here lands where the emitters read (RFC-0125 M3, third slice).
         for body in top.frames() {
-            let missing = match crate::kernel::placement(body) {
+            let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
+            let placed = crate::kernel::placement(body);
+            drop(ks);
+            let missing = match placed {
                 Ok(m) => m,
                 Err(r) => {
                     if trace {
@@ -3452,6 +3471,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 if let Some(producer) = info.producer {
                     if own.plan.arg_drops.insert(producer) {
                         own.plan.owners.insert(producer, inst.func.name.clone());
+                        touched.insert(inst.func.name.clone());
                     }
                     continue;
                 }
@@ -3486,6 +3506,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                         if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
                             rows.push((info.source.clone(), edge));
                             own.plan.owners.insert(m.site, inst.func.name.clone());
+                            touched.insert(inst.func.name.clone());
                         }
                         continue;
                     }
@@ -3498,6 +3519,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                         if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
                             rows.push((name, edge));
                             own.plan.owners.insert(m.site, inst.func.name.clone());
+                            touched.insert(inst.func.name.clone());
                         }
                         continue;
                     }
@@ -3508,6 +3530,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                         let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
                         if !rows.iter().any(|(n, _, _)| *n == info.source) {
                             rows.push((info.source.clone(), kind.clone(), holes));
+                            touched.insert(inst.func.name.clone());
                         }
                         own.plan.owners.insert(m.site, inst.func.name.clone());
                         continue;
@@ -3523,6 +3546,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                         own.plan.receiver_holes.insert(node, holes);
                     }
                     own.plan.owners.insert(node, inst.func.name.clone());
+                    touched.insert(inst.func.name.clone());
                     continue;
                 }
                 let Some(binding) = info.binding else {
@@ -3544,6 +3568,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                     }
                     r.full = false;
                     r.holes = Some(holes);
+                    touched.insert(inst.func.name.clone());
                     continue;
                 }
                 let dup = added.iter().any(|(f, r, _)| {
@@ -3571,8 +3596,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 ));
             }
         }
+        built.push(Some(top));
     }
     for (f, row, kind) in added {
+        touched.insert(f.clone());
         own.droppable
             .entry(f.clone())
             .or_default()
@@ -3589,17 +3616,27 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     if std::env::var("VYRN_PLAN_ROWS").is_ok() {
         return;
     }
+    let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
     if let Ok(top) = build_module_state(program, own, &lowered.globals) {
         for body in top.frames() {
             fold_frame(body, &own.proto, &mut facts);
         }
     }
-    for inst in &lowered.instances {
-        if let Ok(top) = build(program, inst, own) {
-            for body in top.frames() {
-                fold_frame(body, &own.proto, &mut facts);
-            }
+    for (i, inst) in lowered.instances.iter().enumerate() {
+        // Rebuilt only where the pass above wrote a row for this function; the
+        // rest fold the body that pass already built.
+        let fresh = if touched.contains(&inst.func.name) {
+            let _p = vyrn_frontend::prof::phase("placer: facts: rebuilt");
+            build(program, inst, own).ok()
+        } else {
+            None
+        };
+        let Some(top) = fresh.as_ref().or(built[i].as_ref()) else {
+            continue;
+        };
+        for body in top.frames() {
+            fold_frame(body, &own.proto, &mut facts);
         }
     }
     FACTS.with(|f| *f.borrow_mut() = Some(facts));
