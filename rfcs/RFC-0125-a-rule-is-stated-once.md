@@ -2084,6 +2084,142 @@ answers the close-out above lists as having no kernel equivalent at all —
 the binding notes behind `vyrn why --memory`, the `FreeArr` handover — are
 stated somewhere else.
 
+**The deletion slice for the direct emitter and the interpreter (2026-09-04).**
+The rows the two slices above left with the plan are closed here, and the two
+that stay say what a reader of `own.rs` still needs. Every row's final verdict
+for these two engines:
+
+| # | table | the verdict |
+|---|---|---|
+| 01–05 | `store_owned`, `store_fresh` | carried, flipped in the slice above |
+| 06 | `store_owned` at a map entry | **no reader**: acknowledged only |
+| 07 | `store_owned` at `a[i].f = v` | **no reader**: acknowledged only |
+| 08 | `discarded_results` | carried, flipped in the slice above |
+| 09 | `arg_drops` | carried, flipped in the slice above |
+| 10 | `edge_releases` | carried, flipped in the slice above |
+| 11 | `receiver_frees` | carried, flipped two slices above |
+| 11b | `receiver_malloc` | **carried and flipped here** |
+| 12 | `receiver_holes` | carried, flipped two slices above |
+| 13 | `arm_frees` at a `match` | carried two slices above; the interpreter reads it here |
+| 14 | `consuming_matches` | **carried and flipped here** |
+| — | `store_owned` at RFC-0091 M2's rewrite | **stays with the plan**, twelve rows |
+
+**Rows 06 and 07 were never read.** The census listed both as "acknowledged
+only", and that is the whole of them: `Fn_::stmt`'s map arm decides the entry's
+release from `map_set`'s own two questions, and `Fn_::elem_field_store` emits
+nothing for a heapless element. Each calls `store_owned_at` and throws the
+answer away, so §26's finish check does not count the row as a decision nobody
+looked at. Nothing to flip; the calls go with the acknowledgement when the
+tables go.
+
+**Row 14, and the ownership the rule needed.** The previous slice measured six
+sites where the plan called a `match` consuming and the core did not, each one
+`let s = match o { .. }` on an owned local, and each a payload box the flipped
+emitter would have stopped freeing. The reason was named there: round
+twenty-seven's table is what makes `o`'s note `Leak::Aliased`, this pass read
+that note as "never owned", and the rule then answered "not taken" — resting on
+the decision it feeds. **An alias is a handover, not a loss of ownership.** The
+binding owns its value where it is bound; the alias takes it, and this core
+already models both takes — `let t = s` is a take of `s`, and a consuming
+construct takes its scrutinee into a temporary. So where a construct the plan
+calls consuming names such a binding, the core states the ownership and the
+take (`core::Builder::own_the_scrutinee`), and `frees_boxes` reads
+`St::Switch`'s `consuming` (`direct.rs` `Cx::match_consumes`). The pin moved
+from a count to a diff: `coretables.rs` fails on a site the plan calls
+consuming and the core does not, and there is none.
+
+The statement is made AT THE TAKE and nowhere else, which is what keeps the
+placement still. Read as a blanket rule — every `Leak::Aliased` binding owned —
+the kernel finds fourteen more Rule N edges owed across ten corpus programs
+(`attrKey`'s `found` in five, `rpcApplyConfig`'s `p` and `t`, `gqlScalar`'s
+`folded`, `gqlSplitDecl`'s `head`, `gqlVariantsOf`'s `body`, `storage`'s
+`fallback`), because an owned name nothing takes is a release the placer adds
+where the plan places none. Those fourteen are a class of their own and are not
+this slice's; recorded so the next reader does not re-find them.
+
+The six boxes, proved: the residue ratchet is green with `jsonplace`,
+`matchown` and `refutablelet` all `clean` (the native build under
+`VYRN_LEAK_CHECK=1`, where a double free exits 134 and a leak 135), and each of
+the three prints the same bytes under `vyrn run --engine wasm` as under the
+interpreter. One program's wasm moved, and it is the one place the flip changed
+a decision rather than restating it: `refutablelet.vyrn` gains one `FreeStr` of
+`tag` at the end of `main`. `let Tagged(tag, n) = local` is RFC-0121's
+refutable let over a consumed local, so the payload is the binder's; the plan
+releases nothing for `local`, which is `Aliased`, and nothing released the
+payload either. Here it is a string literal, so the free is a no-op the audit
+does not see; over a heap payload it is the leak the rule closes. The manifest
+records that one line and nothing else.
+
+**Row 11b, the region stand-down, is the core's now.** The rule is round
+fifty-seven's: a CALLEE allocated the block, so it is malloc-side whatever
+`region` is open at the call site, while the `@`-spelled producers route
+through the arena lexically. The core states it where the producer is known —
+the receiver expression is a call whose name does not start with `@` — and
+carries it beside the receiver (`NameInfo::receiver_malloc`,
+`Facts::receiver_malloc`). The region DEPTH stays the emitter's, as it does at
+a store, because this pass lowers a `region` as an ordinary block. The diff is
+pinned one way and counted the other: a plan row the core loses would stop a
+free inside a `region` and fails; the core answering yes where the plan does
+not is counted, and the count is one — `gqlParseQuery(query).sels` in
+`gqlTestProject`, whose producer the analysis spells `@fieldof:gqlParseQuery`
+and screens out with the arena's own `@` names, though a callee allocated it.
+The emitter is at region depth zero there, so no byte moves; the core's answer
+is the rule the table means.
+
+**The interpreter reads round forty off the core.** It could not call
+`vyrn_lower::core::facts()`: `vyrn-frontend` is the crate BELOW the lowering,
+which is why the placer is installed rather than called. So the core hands this
+one answer down the same way — `own::install_arm_rows`, filled by
+`vyrn_lower::install`, answering from the core's own fold. The slot is not a
+placement table: it holds no rows and goes when `ReleasePlan` does. One thing
+the flip needed: an arm row names a release KIND, and the interpreter has no
+type of its own to ask, so `Facts::arms` carries `(binder, holes, kind)` with
+the kind read off the binder's type through the same `Owned` table the analysis
+decided with. `coretables.rs` diffs the kind too. The fallback rule is the
+slice's own: an `if let` or a `?` states no answer, and the site reads the plan
+exactly as before.
+
+**RFC-0091 M2's rewritten stores stay with the plan, and here is precisely what
+it would take.** The rewrite CAN be keyed: `project::store_index` memoizes its
+expansion on the index node (`project::stored`), so the checker, both emitters
+and this pass all get the same block at the same statement addresses. What it
+cannot do is JUDGE it. Lowering the block here takes the residue to zero —
+55,486 store sites stated, none left to the plan — and refuses one function:
+`main` in `std/slots`, "`people[]` may not be stored into a store — it is read
+out of `people[..]`, a place that owns it". The rewrite's last statement is a
+write-back — `people.vals[][idx] = people[]`, the element read back into the
+container it came out of — and the kernel's write-back exception matches an
+alias's root and path against the store's place, which `people.vals[]` (a fresh
+read of `people!.vals`) does not equal. Refusing `main` loses the two release
+rows the placer had put at its return, so the emitted bytes would move for a
+leak and not for a fix. The rule the row waits on is the one the census already
+owes: `sinks`'s write-back exception, stated for a projection's expansion
+rather than for a rebuilding builtin's receiver alone. Until then the twelve
+rows are the plan's, and `coretables.rs` pins the count.
+
+**What `own.rs` has no reader for, from these two engines.** After this slice
+the direct wasm emitter and the interpreter read no per-node placement table
+except `store_owned` and `store_fresh` at RFC-0091 M2's twelve rewritten
+statements, and `arm_frees` at an `if let` or a `?`. Named:
+
+- `consuming_matches` — no reader from these two engines. The core reads it
+  (`Builder::scrutinee`, `own_the_scrutinee`), as the core reads the whole plan
+  until M5 and M6 take that away; no emitter does.
+- `receiver_malloc` — no reader from these two engines.
+- `receiver_frees`, `receiver_holes` — no reader from these two engines.
+- `arm_frees` at a `match` — no reader from these two engines; at an `if let`
+  or a `?` the plan is still read by both.
+- `store_owned`, `store_fresh` at a map entry and at `a[i].f = v` — no reader,
+  acknowledgement only.
+- `discarded_results`, `arg_drops`, `edge_releases`, and `store_owned` and
+  `store_fresh` everywhere but the twelve — no reader, from the slice above.
+
+The union with the native emitter's list is what the deletion slice removes.
+Everything else the close-out named is unchanged: `DropKind` and a declared
+release's ordering, `Leak::Hole` and `Leak::Region`, the binding notes behind
+`vyrn why --memory`, the `FreeArr` handover, and the argument verdicts over the
+call graph.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

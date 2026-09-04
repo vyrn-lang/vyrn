@@ -21,6 +21,12 @@
 //!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
 //!     whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
+//! `receiver_malloc` (row 11b) is pinned one way and counted the other: the
+//! core states it from the producer it records beside that name, and a plan
+//! row the core loses would stop a free inside a `region`, while the core
+//! answering yes where the plan's spelling of the producer says no is
+//! counted, at one site.
+//!
 //! A third is pinned since M6's third judgment took its third slice: every
 //! `Rhs` in the core names the type its node produces, and none is an
 //! exception. That is what lets the typed judgment ask what produced a value
@@ -48,14 +54,14 @@
 //! ask `Owned::release_kind` — and [`arm_kinds`] asserts that answer equals
 //! the plan's row at every arm the core frees a binder in.
 //!
-//! One is COUNTED and not pinned, and the count is the finding.
-//! `St::Switch`'s `consuming` is not the plan's `consuming_matches`: it is
-//! the whole disjunction the emitter computes in `frees_boxes` — a
-//! `consume`, a scrutinee that names no place, or the table — narrowed to an
-//! owned scrutinee with no placed release after the construct. The two
-//! answer different questions, and six sites in the corpus answer them the
-//! other way round, so the emitter keeps reading the plan there (RFC-0125 §3
-//! M3, row 14).
+//! One is half COUNTED and half pinned. `St::Switch`'s `consuming` is not
+//! the plan's `consuming_matches`: it is the whole disjunction the emitter
+//! computes in `frees_boxes` — a `consume`, a scrutinee that names no place,
+//! or the table — narrowed to an owned scrutinee with no placed release
+//! after the construct. So the core says yes at sites the table does not
+//! name, and that direction is counted; a site the plan calls consuming and
+//! the core does not is a payload box the emitter would stop freeing, and
+//! that direction is pinned (RFC-0125 §3 M3, row 14).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -245,13 +251,16 @@ fn run() {
             *counted.entry("arm_frees").or_default() += 1;
             // The plan's row may name a binder no arm of this shape drops;
             // only the binders the core released are compared, by name.
-            let want: Vec<(String, Vec<String>)> = own
+            // The KIND travels with each binder since the deletion slice:
+            // the interpreter reads round forty's answer off the core and
+            // has no type of its own to ask (RFC-0125 §3 M3).
+            let want: Vec<(String, Vec<String>, Option<vyrn_frontend::own::DropKind>)> = own
                 .plan
                 .arm_payload_free(*site, *arm)
                 .map(|rows| {
                     rows.iter()
-                        .filter(|(n, _, _)| core_says.iter().any(|(c, _)| c == n))
-                        .map(|(n, _, h)| (n.clone(), h.clone()))
+                        .filter(|(n, _, _)| core_says.iter().any(|(c, _, _)| c == n))
+                        .map(|(n, k, h)| (n.clone(), h.clone(), Some(k.clone())))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -272,7 +281,7 @@ fn run() {
                 continue;
             };
             for (n, _, h) in rows {
-                if !core_says.iter().any(|(cn, ch)| cn == n && ch == h) {
+                if !core_says.iter().any(|(cn, ch, _)| cn == n && ch == h) {
                     diffs.push(format!(
                         "{file}: site {site} arm {arm}: arm_frees:                          the plan frees `{n}` {h:?} and the core does not"
                     ));
@@ -396,22 +405,46 @@ fn run() {
                      plan free {plan_free} holes {plan_holes:?}"
                 ));
             }
+            // Row 11b, the region stand-down: whether a CALLEE allocated the
+            // block. The emitter asks its own region depth beside it. The
+            // plan losing a row here would stop a free inside a `region`,
+            // so that direction is pinned; the core saying yes where the
+            // plan's SPELLING of the producer says no is counted, and the
+            // count is one — `gqlParseQuery(query).sels`, whose producer the
+            // analysis spells `@fieldof:gqlParseQuery` and screens out with
+            // the arena's own `@` names, though a callee allocated it.
+            let core_malloc = facts.receiver_malloc.contains(node);
+            let plan_malloc = own.plan.receiver_malloc_at(*node);
+            if plan_malloc && !core_malloc {
+                diffs.push(format!(
+                    "{file}: site {node} in {}: receiver_malloc: plan yes, core no",
+                    owner(node)
+                ));
+            }
+            *counted.entry("receiver_malloc: core only").or_default() +=
+                usize::from(core_malloc && !plan_malloc);
         }
 
-        // No pin: `St::Switch`'s `consuming` is a different rule from the
-        // plan's `consuming_matches`, so the two directions are COUNTED and
-        // the emitter keeps reading the plan (RFC-0125 §3 M3, row 14). The
-        // second count is the one that decided it: a site the plan calls
-        // consuming and the core does not is a payload box the flipped
-        // emitter would stop freeing.
+        // `St::Switch`'s `consuming` is a WIDER rule than the plan's
+        // `consuming_matches`: it is the whole disjunction the emitter
+        // computes, a `consume` or a scrutinee that names no place
+        // included, so the core says yes at sites the table does not name
+        // and that direction is COUNTED. The other direction is PINNED
+        // (RFC-0125 §3 M3, row 14): a site the plan calls consuming and the
+        // core does not is a payload box the flipped emitter would stop
+        // freeing, and six such sites are what kept this row on the plan
+        // until the core stated a scrutinee's ownership apart from the
+        // decision it feeds.
         for (site, took) in &facts.consuming {
             *counted.entry("switch sites").or_default() += 1;
             if *took {
                 *counted.entry("consuming: core only").or_default() +=
                     usize::from(!own.plan.consuming_matches.contains(site));
-            } else {
-                *counted.entry("consuming: plan only").or_default() +=
-                    usize::from(own.plan.consuming_matches.contains(site));
+            } else if own.plan.consuming_matches.contains(site) {
+                diffs.push(format!(
+                    "{file}: site {site}: consuming: the plan took the                      scrutinee and the core did not (in {})",
+                    owner(site)
+                ));
             }
         }
 
@@ -457,6 +490,14 @@ fn run() {
         diffs.is_empty(),
         "{} sites where the core and the plan disagree",
         diffs.len()
+    );
+    assert_eq!(
+        counted
+            .get("receiver_malloc: core only")
+            .copied()
+            .unwrap_or(0),
+        1,
+        "`gqlParseQuery(query).sels`, and nothing else"
     );
     assert_eq!(
         counted

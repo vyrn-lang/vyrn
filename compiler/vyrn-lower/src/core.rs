@@ -91,6 +91,14 @@ pub struct NameInfo {
     /// M2's table), spelled as the kernel spells them (`.f.g`). A `Drop` of
     /// the name walks around exactly these; a placed row may carry its own.
     pub holes: Vec<String>,
+    /// RFC-0125 §3 M3, row 11b: for a receiver ([`NameInfo::receiver`]), was
+    /// the block a CALLEE allocated? A callee's block is malloc-side
+    /// whatever `region` is open at the call site, so the free stands there
+    /// too; the `@`-spelled producers (`@concat`, `@str`, `@copy`) route
+    /// through the arena lexically and stay region-gated. The region itself
+    /// is the emitter's, because this pass lowers a `region` as an ordinary
+    /// block.
+    pub receiver_malloc: bool,
 }
 
 /// The borrow a parameter's capability makes, or `None` for one that owns
@@ -858,7 +866,7 @@ struct Builder<'a> {
     /// An unnamed receiver `place` minted for a field or element read, with
     /// the node that produced it, so the read can release it afterwards when
     /// the plan says the frame owns it (R1').
-    pending_receiver: Option<(Name, usize)>,
+    pending_receiver: Option<(Name, usize, bool)>,
     /// How many calls that do not lend, and operators, enclose the expression
     /// being built. Each is a site the compiled backends drain argument
     /// temporaries at, so a receiver borrowed under one can be freed there.
@@ -894,6 +902,7 @@ impl<'a> Builder<'a> {
             producer: None,
             arg_drop: None,
             holes: Vec::new(),
+            receiver_malloc: false,
         });
         (self.body.names.len() - 1) as Name
     }
@@ -1760,6 +1769,7 @@ impl<'a> Builder<'a> {
         match e {
             Expr::Var { name, .. } if self.lookup(name).is_some() => {
                 let n = self.lookup(name).unwrap();
+                self.own_the_scrutinee(n, construct);
                 if !self.body.names[n as usize].owned {
                     return Ok((Val::Name(n), false));
                 }
@@ -1806,6 +1816,38 @@ impl<'a> Builder<'a> {
                     Val::Lit => Ok((Val::Lit, false)),
                 }
             }
+        }
+    }
+
+    /// RFC-0125 §3 M3, row 14: state a scrutinee's ownership APART from the
+    /// decision it feeds.
+    ///
+    /// The plan's note for `let o = tag(7)` in `let s = match o { Some(v) =>
+    /// v, .. }` is `Leak::Aliased`, and round twenty-seven's own table is
+    /// what makes it so: the construct hands the payload out, `s` reclaims
+    /// it, and `o` releases nothing. Read as "never owned", the note made
+    /// this pass bind `o` as a borrow, so the construct read its scrutinee
+    /// and the rule that asks whether it TOOK it answered no — resting on
+    /// the decision it feeds. The binding owns its value where it is bound,
+    /// and the take is here; so where a construct the plan calls consuming
+    /// names the binding, the value is this frame's and the take is stated.
+    ///
+    /// Stated at the take and nowhere else. A binding aliased by anything
+    /// but a consuming construct — `let t = s`, an arm handing the loop's
+    /// accumulator back — keeps the note's answer, because nothing in this
+    /// core takes it and an owned name nothing takes is a release the
+    /// placer would add where the plan places none.
+    fn own_the_scrutinee(&mut self, n: Name, construct: usize) {
+        let info = &self.body.names[n as usize];
+        if info.owned || !info.heap || info.borrow {
+            return;
+        }
+        let aliased = matches!(
+            self.fate_of(&info.source, info.line),
+            Some(Fate::Leaked(Leak::Aliased { .. }))
+        );
+        if aliased && self.own.plan.match_consumes(construct) {
+            self.body.names[n as usize].owned = true;
         }
     }
 
@@ -1954,7 +1996,7 @@ impl<'a> Builder<'a> {
     /// where such a drain encloses the read; elsewhere the receiver stays
     /// held and the judgment refuses it.
     fn release_receiver(&mut self, e: &Expr, out: &mut Vec<St>, borrowed: bool) {
-        let Some((r, producer)) = self.pending_receiver.take() else {
+        let Some((r, producer, malloc)) = self.pending_receiver.take() else {
             return;
         };
         let node = e as *const Expr as usize;
@@ -1982,6 +2024,7 @@ impl<'a> Builder<'a> {
             return;
         }
         self.body.names[r as usize].holes = holes.iter().map(|h| format!(".{h}")).collect();
+        self.body.names[r as usize].receiver_malloc = malloc;
         out.push(St::Drop(r, Site::None));
     }
 
@@ -2277,7 +2320,7 @@ impl<'a> Builder<'a> {
             Expr::Field { expr, field, .. } => {
                 let fty = self.ty_of(e)?;
                 let place = self.place(expr, out)?;
-                if let Some((r, _)) = self.pending_receiver {
+                if let Some((r, _, _)) = self.pending_receiver {
                     self.body.names[r as usize].receiver = Some(e as *const Expr as usize);
                 }
                 if self.owns(&fty) {
@@ -2640,7 +2683,13 @@ impl<'a> Builder<'a> {
                 match v {
                     Val::Name(t) => {
                         if self.body.names[t as usize].owned {
-                            self.pending_receiver = Some((t, e as *const Expr as usize));
+                            // Row 11b's rule, stated where the producer is
+                            // known: a callee's own allocation.
+                            let malloc = matches!(
+                                e,
+                                Expr::Call { name, .. } if !name.starts_with('@')
+                            );
+                            self.pending_receiver = Some((t, e as *const Expr as usize, malloc));
                         }
                         Ok(Place::Name(t))
                     }
@@ -2985,9 +3034,12 @@ pub struct Facts {
     /// RFC-0114 R1′: the `Expr::Field` node of an unnamed receiver the core
     /// releases after the read, and the holes the release walks around.
     pub receivers: std::collections::HashMap<usize, Vec<String>>,
-    /// Round forty's table: `(match, arm) -> [(binder, holes)]`, the payload
-    /// binders the arm's own body releases at its end.
-    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+    /// Round forty's table: `(match, arm) -> [(binder, holes, kind)]`, the
+    /// payload binders the arm's own body releases at its end. The kind is
+    /// the binder type's release rule ([`vyrn_frontend::own::Owned`]), which
+    /// the interpreter needs and the two compiled backends read off the type
+    /// themselves.
+    pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>, Option<DropKind>)>>,
     /// RFC-0114 M2 and exit-residue round eighteen: the store statements
     /// whose old value the store releases — a `St::Store`'s `releases` at a
     /// [`Site::Node`]. The plan's `store_owned` and
@@ -3009,6 +3061,12 @@ pub struct Facts {
     /// owes because another edge took the name — a `St::Drop` at a
     /// [`Site::Edge`].
     pub edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// RFC-0125 §3 M3, row 11b: of those receivers, the ones a CALLEE
+    /// allocated. Such a block is malloc-side whatever `region` is open at
+    /// the call site, so the free stands inside one; an emitter still asks
+    /// its own region depth, because this pass lowers a `region` as an
+    /// ordinary block.
+    pub receiver_malloc: std::collections::HashSet<usize>,
     /// Round twenty-seven's question, answered by the rule rather than by
     /// the plan's table: per `match`, `if let` or `?` node, whether the
     /// construct TOOK its scrutinee, so the boxes its binders came out of
@@ -3024,6 +3082,20 @@ pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
+/// Round forty's answer for one arm, handed down to the interpreter through
+/// [`vyrn_frontend::own::install_arm_rows`] — the one engine that cannot name
+/// this crate. `None` where this pass states no answer (an `if let`, a `?`),
+/// and the reader falls back to the plan there.
+pub fn arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
+    let f = facts()?;
+    let rows = f.arms.get(&(key, arm))?;
+    Some(
+        rows.iter()
+            .filter_map(|(n, h, k)| k.clone().map(|k| (n.clone(), k, h.clone())))
+            .collect(),
+    )
+}
+
 /// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
 /// the binding (RFC-0093 M2).
 fn plan_holes(holes: &[String]) -> Vec<String> {
@@ -3035,14 +3107,14 @@ fn plan_holes(holes: &[String]) -> Vec<String> {
 
 /// Fold one frame's statements into the side table. Called after the placer
 /// has added every row, so the core here is the core the emitters will run.
-fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
+fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
     for s in stmts {
         match s {
             St::If { then, els, .. } => {
-                fold_facts(body, then, out);
-                fold_facts(body, els, out);
+                fold_facts(body, proto, then, out);
+                fold_facts(body, proto, els, out);
             }
-            St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, b, out),
+            St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, proto, b, out),
             St::Store {
                 releases,
                 site: Site::Node(at),
@@ -3075,11 +3147,15 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
                 }
                 for a in arms {
                     if let Some(frees) = &a.frees {
-                        let rows: Vec<(String, Vec<String>)> = frees
+                        let rows: Vec<(String, Vec<String>, Option<DropKind>)> = frees
                             .iter()
                             .map(|b| {
                                 let info = &body.names[*b as usize];
-                                (info.source.clone(), plan_holes(&info.holes))
+                                (
+                                    info.source.clone(),
+                                    plan_holes(&info.holes),
+                                    proto.release_kind(&info.ty),
+                                )
                             })
                             .collect();
                         // An entry even when it is empty: "this arm states
@@ -3087,7 +3163,7 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
                         // as "this pass did not state them".
                         out.arms.entry((a.site, a.index)).or_default().extend(rows);
                     }
-                    fold_facts(body, &a.body, out);
+                    fold_facts(body, proto, &a.body, out);
                 }
             }
             _ => {}
@@ -3096,8 +3172,8 @@ fn fold_facts(body: &Body, stmts: &[St], out: &mut Facts) {
 }
 
 /// Every frame's answers, added to the table.
-fn fold_frame(body: &Body, out: &mut Facts) {
-    fold_facts(body, &body.stmts, out);
+fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
+    fold_facts(body, proto, &body.stmts, out);
     let mut released = std::collections::HashSet::new();
     collect_drops(&body.stmts, &mut released);
     for (i, info) in body.names.iter().enumerate() {
@@ -3106,6 +3182,9 @@ fn fold_frame(body: &Body, out: &mut Facts) {
         }
         if let Some(node) = info.receiver {
             out.receivers.insert(node, plan_holes(&info.holes));
+            if info.receiver_malloc {
+                out.receiver_malloc.insert(node);
+            }
         }
     }
     for info in body.names.iter() {
@@ -3374,13 +3453,13 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     let mut facts = Facts::default();
     if let Ok(top) = build_module_state(program, own, &lowered.globals) {
         for body in top.frames() {
-            fold_frame(body, &mut facts);
+            fold_frame(body, &own.proto, &mut facts);
         }
     }
     for inst in &lowered.instances {
         if let Ok(top) = build(program, inst, own) {
             for body in top.frames() {
-                fold_frame(body, &mut facts);
+                fold_frame(body, &own.proto, &mut facts);
             }
         }
     }
