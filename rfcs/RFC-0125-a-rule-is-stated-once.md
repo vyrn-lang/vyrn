@@ -1929,6 +1929,64 @@ a declared release's ordering, `Leak::Hole` and `Leak::Region`, the binding
 notes behind `vyrn why --memory`, the `FreeArr` handover — are stated
 somewhere else.
 
+**The census (2026-09-04): every read of the plan in the NATIVE emitter, and
+whether the core says the same thing.** The slice after this one deletes
+`own.rs`'s per-node tables, and it may delete only what something else states.
+The direct emitter's census above did that job for `direct.rs`; this one does
+it for `compiler/vyrn-codegen/src/lib.rs`, which reads the same tables through
+`gen_stmt`, `gen_expr`, `gen_call`, `gen_match`, `gen_arm_body` and
+`gen_match_enum`. Every `self.plan.*` in that file is one row below, with the
+function that reads it, what the read decides, and whether the core carries the
+same fact at the same key. The last column is `coretables.rs`'s, not an eye's.
+
+| # | reader | table | what it decides | the core |
+|---|---|---|---|---|
+| 01 | `Gen::gen_stmt`, `Stmt::Assign`, the `String` append spine | `store_owned` | whether the buffer the append copied out of is this path's to free | **carried** |
+| 02 | `Gen::gen_stmt`, `Stmt::Assign`, a store to a name | `store_owned` | whether the store releases the value it displaces | **carried** |
+| 03 | `Gen::gen_stmt`, `Stmt::Assign`, a store to a name | `store_fresh` | whether a mention of the place in the value can hand the old buffer back | **carried**, inside 02's one answer |
+| 04 | `Gen::gen_stmt`, `Stmt::SetField` | `store_owned` | the same, through a field | **carried** |
+| 05 | `Gen::gen_stmt`, `Stmt::IndexSet`, the `Array` and `SmallArray` arms | `store_owned` | the same, through an element | **carried** |
+| 06 | `Gen::gen_stmt`, `Stmt::IndexSet`, the `ArrayN` and `Map` arms, and a projection's store | `store_owned` | acknowledged only, so §26's finish check counts the row | acknowledged only |
+| 07 | `Gen::gen_stmt`, `Stmt::Expr` | `discarded_results` | free an owned result nothing binds, rather than dropping it | **carried** |
+| 08 | `Gen::gen_expr` | `arg_drops` | tee this node's value and free it after the call or operator above | **carried** |
+| 09 | `Gen::gen_expr_inner`, `Expr::Field` — `byteLength`, `length`, a record field | `receiver_frees` | free the unnamed receiver right after the read | **carried** |
+| 09b | `Gen::gen_expr_inner`, `Expr::Field` | `receiver_malloc` | whether that free stands inside a `region` — a callee allocation is malloc-side | the region stand-down, not modelled |
+| 10 | `Gen::gen_expr_inner`, `Expr::Field` | `receiver_holes` | the field the read took, which the free walks around | **carried** |
+| 11 | `Gen::gen_match`; `Gen::gen_if_expr` | `edge_releases` | the release one edge of a join owes because another edge took the name | **carried**, by join and edge |
+| 12 | `Gen::gen_match_body_boxed`, `Gen::gen_arm_body`, `Gen::gen_match_enum` | `arm_frees` | the payload binders this arm releases, the holes each has, and the KIND each is released with | the binders and the holes **carried**; the kind is the TYPE's |
+| 13 | `Gen::gen_match` | `consuming_matches` | whether the arms free the boxes their binders came out of | a different rule |
+| 14 | `Gen::register_drop` | `malloc_scrutinees` | whether a binding's release stands inside a `region` | the region stand-down, not modelled |
+| 15 | `Gen::lower_body`, `Gen::emit_releases` (through `own::placed`) | `releases`, `droppable`, `early`, `holes` | which bindings get a release slot, with what kind and what holes, and the order and exits they run at | `St::Row`, keyed the same; a name's `owned` and `holes` |
+| 16 | `compile_inner` | `unconsumed` | §26's finish check: a planned row no query hit | the audit's, not a placement read |
+| 17 | `Gen::gen_call_inner`, the `fromJson` rewrite | `alias_clones`, `alias_scope`, `alias_unwind` | the node a projection's expansion stands for | not a placement table |
+
+Three readings of the table, and the first is the point of the slice.
+
+- **The native emitter's needs are the direct emitter's, one column apart.**
+  Rows 01 to 12 are the same ten decisions, at the same keys, that the two
+  slices above flipped in `direct.rs` — so nothing new has to be stated in the
+  core, and the flip is a reader change alone. `core::Site` already keys the
+  store statements, the discarded result, the argument temporary and the edge
+  release; `NameInfo::receiver`, `NameInfo::holes` and `Arm::frees` already
+  name the receiver and the arm.
+- **One column IS the native emitter's alone: the release kind.** `direct.rs`
+  derived an arm payload's release shape from the binder's TYPE all along
+  (`rel_for`), so the plan's stored `DropKind` was never its reader; `lib.rs`
+  emitted the row's own `kind`. The core states no kind, and it should not: a
+  kind is a property of the type, not of the site, and the placer itself
+  derives the plan's kinds from `Owned::release_kind`. So the flip asks that
+  table. `coretables.rs`'s `arm_kinds` walks every arm the core frees a binder
+  in — 594 over the corpus — and asserts the type's answer equals the plan's
+  row, so the column is asserted rather than argued.
+- **Two rows are a region stand-down, and one is not a placement table.** Rows
+  09b and 14 (`receiver_malloc`, `malloc_scrutinees`) ask whether a value
+  inside a `region` came from the arena or from a callee's `malloc`, which the
+  core does not model — a `region` lowers as an ordinary block. Row 17's alias
+  scope is the `fromJson` rewrite's own bookkeeping. Row 13 is
+  `consuming_matches`, measured in the slice above and left with the plan for
+  the reason recorded there: its rule rests on an ownership the decision itself
+  changes.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

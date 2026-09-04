@@ -41,6 +41,13 @@
 //! nothing for is a site a flipped emitter would stop releasing at, and a
 //! core answer the plan does not have is one it would release twice.
 //!
+//! One more is pinned since the deletion slice, and it is the native
+//! emitter's alone: the arm table's release KIND. `direct.rs` derived the
+//! shape from the binder's type all along; `lib.rs` emitted the row's stored
+//! `DropKind`. The core states no kind, so the flip has the native emitter
+//! ask `Owned::release_kind` — and [`arm_kinds`] asserts that answer equals
+//! the plan's row at every arm the core frees a binder in.
+//!
 //! One is COUNTED and not pinned, and the count is the finding.
 //! `St::Switch`'s `consuming` is not the plan's `consuming_matches`: it is
 //! the whole disjunction the emitter computes in `frees_boxes` — a
@@ -93,6 +100,65 @@ fn corpus() -> Vec<PathBuf> {
     names.sort();
     assert!(!names.is_empty(), "no examples found");
     names
+}
+
+/// The one thing the NATIVE emitter needs from the arm table that the direct
+/// emitter does not: the release KIND.
+///
+/// RFC-0125 §3 M3, the deletion slice. `direct.rs` derives the shape of an
+/// arm payload's release from the binder's TYPE (`rel_for`), so the plan's
+/// stored `DropKind` was never its reader. `lib.rs` emitted the row's own
+/// `kind`. The core states no kind — a kind is a property of the type, not of
+/// the site — so the flip has the native emitter ask
+/// [`vyrn_frontend::own::Owned::release_kind`], which is the table the placer
+/// itself derived the plan's kinds from. This walks every arm the core frees
+/// a binder in and asserts the two answers are one, so the census's column is
+/// asserted rather than argued.
+fn arm_kinds(
+    body: &vyrn_lower::core::Body,
+    stmts: &[St],
+    own: &vyrn_frontend::own::Ownership,
+    file: &str,
+    diffs: &mut Vec<String>,
+    counted: &mut BTreeMap<&'static str, usize>,
+) {
+    for s in stmts {
+        match s {
+            St::If { then, els, .. } => {
+                arm_kinds(body, then, own, file, diffs, counted);
+                arm_kinds(body, els, own, file, diffs, counted);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => {
+                arm_kinds(body, b, own, file, diffs, counted)
+            }
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    arm_kinds(body, &a.body, own, file, diffs, counted);
+                    let Some(frees) = &a.frees else { continue };
+                    let Some(rows) = own.plan.arm_payload_free(a.site, a.index) else {
+                        continue;
+                    };
+                    for b in frees {
+                        let info = &body.names[*b as usize];
+                        let Some((_, kind, _)) = rows.iter().find(|(n, _, _)| *n == info.source)
+                        else {
+                            continue;
+                        };
+                        *counted.entry("arm release kinds").or_default() += 1;
+                        let from_ty = own.proto.release_kind(&info.ty);
+                        if from_ty.as_ref() != Some(kind) {
+                            diffs.push(format!(
+                                "{file}: site {} arm {}: arm kind: plan {kind:?}, \
+                                 the type says {from_ty:?}",
+                                a.site, a.index
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Every producer type the core carries, and every one it does not.
@@ -358,6 +424,7 @@ fn run() {
             };
             for body in top.frames() {
                 producers(&body.stmts, &mut produced);
+                arm_kinds(body, &body.stmts, &own, &file, &mut diffs, &mut counted);
             }
         }
     }
