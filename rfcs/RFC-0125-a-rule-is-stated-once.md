@@ -3530,6 +3530,180 @@ half is a rule: the walk (`stmt` and `expr`, 1,929 lines, which refuses and
 records in the same arm) and the 81 lines of menu. The structural census did
 not move, because no line of `movecheck.rs` changed in this slice.
 
+**The containment slice (2026-09-04): the licence is measured on every
+program that reaches a rule, and one rule left.** The slice before licensed
+twenty-eight rows. This one spends that licence, and it spends almost none of
+it, because rule 4 of the deletion asks for the whole diagnostic and the
+licence was read off a sentence. A refusal is a head, a sentence and a menu.
+The census test strips the menu before it compares (`refusal` drops every
+`fix:` and `note:` line), so `the same` means "the same sentence", and a
+reader who loses a menu loses part of the refusal all the same.
+
+**The method, and it is the previous slice's method one level deeper.** The
+licence went from an intersection to a containment when it stopped being read
+off one program a rule. It goes from an acceptance to a REFUSAL here: for
+every program of the corpus, run `vyrn check` and `VYRN_NO_MOVECHECK=1 vyrn
+check`, and compare the two standard error streams WHOLE. Four answers:
+
+- **identical** — the whole refusal survives the checker's deletion;
+- **menu** — the sentence and the line survive and one or more `fix:` lines
+  do not;
+- **text** — the sentence moves;
+- **accepted** — the kernel says nothing, which is the previous slice's
+  licence and the only one it measured.
+
+The corpus is 134 programs: the 93 the checker's own suite refuses
+(`VYRN_DUMP_MOVECHECK=<dir> cargo test -p vyrn-frontend movecheck`), the 34
+census rows, and the 7 pinned counterexamples. A rule may leave only if EVERY
+program that reaches it is identical, so the unit of the licence is a rule and
+the unit of the measurement is a program.
+
+| answer | programs |
+|---|---|
+| identical | 25 |
+| menu | 27 |
+| text | 59 |
+| accepted | 23 |
+
+**One rule has every program in the identical column.** It is census row 12,
+RFC-0013 at a `consume` parameter — `MoveCheck::reject_consume_global` — and
+it is deleted. Five programs reach it and all five now print the kernel's
+refusal, which is the checker's word for word, at the same line, with no menu
+to lose because the rule never had one. `movecheck.rs` is 10,052 lines before
+and 9,996 after: the rule's 36, its two call sites' 6, and its 15 lines of
+unit test, less one line the closing brace gave back to `expr`'s span.
+
+**One kernel wording was closed first, because two of those five programs
+needed it.** The checker writes `spawn take(..)` where the kernel wrote
+`take(..)`, so a spawned call's refusal was a sentence that would have moved.
+The core already carries the marker on the call (`Rhs::Call::spawn`); the
+kernel's `by_of` reads it. That is one commit and eight lines, and it also
+closed the one program of row 06's family that was not identical.
+
+**What every other rule waits on, measured rather than argued.** The rows are
+grouped by the sentence the checker gives, which is one refusal site each.
+The table is 126 programs — the whole corpus less the eight another pass
+refuses (region escape, and six type errors a test writes on the way to its
+own subject).
+
+| the checker's rule | census row | programs | identical | menu | text | accepted |
+|---|---|---|---|---|---|---|
+| module state to a `consume` parameter | 12 | 5 | 5 | | | |
+| rule 1: a use after a take | 06 | 9 | 8 | | 1 | |
+| rule 1 across a back edge | 25 | 7 | 5 | | 2 | |
+| a must-use obligation, never discharged | 30 | 16 | | | | 16 |
+| a must-use obligation, discharged twice | 31 | 8 | | | 7 | 1 |
+| rule 2: a borrow to a `consume` parameter | 13 | 7 | | 4 | 3 | |
+| rule 2 at a store: a borrowed parameter | 02, 27, 34 | 6 | | | 6 | |
+| rule 2 at a store: a place that owns it | 01, 03 | 3 | | | 3 | |
+| rule 2: a prefix `consume` of a borrow | 11 | 5 | | 2 | 3 | |
+| rule 2: a projection to a `consume` parameter | 14 | 5 | | | 5 | |
+| an exported function owns its result | 17 | 5 | | 2 | 3 | |
+| a return of module state | 15 | 4 | | 3 | 1 | |
+| rule 1: a move into a binding | 07 | 8 | | 2 | 6 | |
+| an arm binder to a `consume` parameter | 13 | 3 | | 2 | 1 | |
+| a name with a hole, used whole | 04 | 3 | | 3 | | |
+| `consume` with nothing to take | 09 | 3 | | 3 | | |
+| a `modify` borrow is exclusive | 23 | 3 | | | | 3 |
+| rule 3: a return of a borrow | 18 | 3 | | 2 | 1 | |
+| module state by a prefix `consume` | 10 | 2 | | | 2 | |
+| module state by a `for` loop | 29 | 2 | | | 2 | |
+| a capture that outlives the call | 24 | 2 | | | | 2 |
+| `consume` of an element | 08 | 2 | | 2 | | |
+| a write ends every alias | 05 | 1 | | 1 | | |
+| a closure's result is its caller's | 28 | 1 | | 1 | | |
+| a `drop` after a take | 20 | 1 | | | 1 | |
+| rule 4 at the drop | 21 | 1 | | | 1 | |
+| a rebuilding builtin takes its receiver | 26 | 1 | | | 1 | |
+| a `drop` after a hole | 22 | 1 | | | | 1 |
+| rule 2 through a wrapper | 19 | 1 | | | 1 | |
+| rule 2 at the return: a place that owns it | 16 | 1 | | | 1 | |
+| shapes with no census row: a loop variable stored, passed or returned; a return of an arm binder; module state as a projection | — | 7 | | | 7 | |
+
+**Two rules were one program away, and each names a different obstacle.**
+
+- **Row 06**, a use after a take, is 8 identical and 1 text. The one is a use
+  after a `drop`: the checker says "`xs.length` is used here but was already
+  consumed by `drop` on line 1" and the kernel says "`xs` is used here after
+  it was released" — a different sentence for the same rule, naming the root
+  where the checker names the path. Even with that closed the rule may not
+  go, because its refusal site shares one function with row 07's and row 07's
+  refusal carries a menu. That is the walk's obstacle one level down: two
+  rules in one arm, not two jobs in one arm.
+- **Row 25**, rule 1 across a back edge, is 5 identical and 2 text. Both of
+  the two take a PROJECTION in the loop (`for i in [1, 2] { consume er.node
+  }`). The kernel refuses them and says "`er` (line 9) has a `consume` hole
+  at a loop's back edge it did not have at entry", because it compares hole
+  SETS at the back edge and the state records a taker per name and not per
+  hole. `Kernel::same_outside` already gives the checker's exact sentence for
+  a whole name; the hole case would need the hole to carry the line and the
+  taker that made it, which is a field every join and widen must merge. That
+  is a change to `State`, and it belongs to a slice that is judging rather
+  than to one that is deleting.
+
+**The menu is the obstacle for 27 programs, and it is bigger than the census
+made it look.** The close-out priced the menus at 81 lines and called them
+"the smallest of everything the deletion track owes". They are the smallest to
+WRITE and the largest to BE OWED: eleven of the fourteen rows the census marks
+`the same` lose one or more `fix:` lines the day their rule goes, and no
+kernel refusal carries one. Nothing here changes the recorded decision — the
+menus stay where the surface is — but the next slice cannot delete a `the
+same` row until the pass that restores them exists, and row 05 proves that
+pass cannot be written from the message alone.
+
+**Two pins are added, and the second is the one that stops a fourth attempt.**
+Both are `tests/unlicensed/` programs under
+`the_licence_is_per_program_and_these_are_the_counterexamples`, whose
+`Uncovered` row now carries the kernel's own wording when the two passes
+disagree.
+
+- `u12b_module_state_to_a_spawned_consume_parameter.vyrn` — row 12 through
+  `spawn`, refused identically by both passes. It holds the wording the
+  deletion spent.
+- `u25b_partial_take_across_iterations.vyrn` — row 25 over a projection,
+  refused by both passes in different words. It is why the rule stayed, and a
+  reader who reaches for `check_loop_reuse` again finds it pinned.
+
+**What the deletion costs, and it is new.** Row 12's rule is the first that
+has actually LEFT the checker, so it is the first that a knob can switch off:
+`VYRN_NO_PLACER=1 vyrn check` and `VYRN_NO_KERNEL=1 vyrn check` both accept
+`r12_module_state_to_a_consume_parameter.vyrn` now, and both refused it
+before. The knobs measure the two passes against each other and no build uses
+them, so nothing ships wrong today. What it says is that every rule this track
+deletes moves from "two passes state it" to "one pass states it, and a knob
+turns that pass off", and the next slice should either make `kernel_refuses`
+unconditional or record plainly that the knobs are not a supported build.
+`testsweep` is green, so no program a test writes is caught by the change.
+
+**The structural census, re-measured.** 1,009 / 723 / 2,360 / 81 / 3,651 /
+2,172 over 9,996 lines, against 1,045 / 723 / 2,360 / 81 / 3,656 / 2,187 over
+10,052. The rules the kernel gives lost 36 lines and the tests lost 15; the
+placement rows did not move, and nothing this slice deleted left any shared
+machinery without a caller — `globals` and `MoveCheck::in_scope` are both read
+by rules that stay. The two closures the close-out licensed for deletion
+(`lending` and `retains`, both empty over the corpus) are placement and not a
+rule, so they stay for the own-side track.
+
+**What now stands between the licence and the lines.** The walk is unchanged
+(1,929 lines of `stmt` and `expr`, which refuses and records in the same arm).
+Above it stand three things this slice measured and the ones before it did
+not:
+
+1. **the menu**, which 27 programs and eleven `the same` rows wait on;
+2. **seven wordings**, each one program: a use after a `drop` (row 06's
+   form), a hole at a back edge (row 25's), a `drop` after a take (row 20), a
+   drop of a borrow (row 21), a rebuilding receiver's second diagnostic (row
+   26), a return read out of a place that owns it (row 16), and a borrow put
+   into a constructor (row 19);
+3. **one arm with two rules in it**, `check_use`, where the licensed row and
+   the unlicensed one share a function.
+
+The licence was twenty-eight rules, then two, and it is one spent with none
+left that a program does not contradict. That is not a smaller licence than
+the slice before recorded. It is the same licence, measured against what a
+reader sees.
+
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
