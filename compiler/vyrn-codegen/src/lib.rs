@@ -1950,6 +1950,13 @@ pub fn emit(program: &Program) -> Result<String, String> {
     let owned_proto = &ownership.proto;
     // The per-node release decisions, one artifact (RFC-0114 §26 step 2).
     let plan = ownership.plan.clone();
+    // RFC-0125 §3 M3, the deletion slice: the core's own answers, folded once
+    // by the placer inside `own::analyze` above. Taken here, not per `Gen`,
+    // because the fold is one map over the whole program and every body reads
+    // the same one. `VYRN_PLAN_ROWS=1` leaves it empty (the placer skips the
+    // second build), and every reader below falls back to the plan.
+    let facts = vyrn_lower::core::facts();
+    let facts = facts.as_ref();
 
     let protocol_methods: HashMap<String, String> = program
         .protocols
@@ -1992,6 +1999,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
+            facts,
         );
         gi.log_level = program.log_level;
         gi.log_sink = program.log_sink.clone();
@@ -2085,6 +2093,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
+            facts,
         );
         gt.log_level = program.log_level;
         gt.log_sink = program.log_sink.clone();
@@ -2188,6 +2197,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
+            facts,
         );
         gen.log_level = program.log_level;
         gen.log_sink = program.log_sink.clone();
@@ -2241,6 +2251,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &plan,
+                facts,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -2304,6 +2315,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
                 &regex_globals,
                 &program.impls,
                 &plan,
+                facts,
             );
             gen.log_level = program.log_level;
             gen.log_sink = program.log_sink.clone();
@@ -2364,6 +2376,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
+            facts,
         );
         dgen.protocol_methods = protocol_methods.clone();
         dgen.globals = globals_map.clone();
@@ -2394,6 +2407,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
+            facts,
         );
         cgen.fnval_variants = fnval_registry.clone();
         cgen.emit_fnval_copy(&mut out)?;
@@ -2419,6 +2433,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
             &regex_globals,
             &program.impls,
             &plan,
+            facts,
         );
         cgen.protocol_methods = protocol_methods.clone();
         cgen.globals = globals_map.clone();
@@ -2617,6 +2632,13 @@ struct Gen<'a> {
     /// The per-node release decisions (RFC-0114 §26) — every site this
     /// lowering frees at is an address in here, and in nothing of its own.
     plan: &'a vyrn_frontend::own::ReleasePlan,
+    /// RFC-0125 §3 M3, the deletion slice: what the CORE says about the
+    /// tables this emitter has been moved off. `None` when the placer is not
+    /// installed (`VYRN_NO_PLACER=1`) or when `VYRN_PLAN_ROWS=1` asks for the
+    /// plan's answer instead — the bisect for a difference the flip would
+    /// otherwise hide. The direct backend carries the same field
+    /// ([`crate::direct`]'s `Cx::facts`), so the two read one source.
+    facts: Option<&'a vyrn_lower::core::Facts>,
     /// The registers holding those values, innermost call last. Pushed where the
     /// argument is EVALUATED and taken back where its call ends.
     arg_frees: Vec<(String, Type)>,
@@ -2766,9 +2788,11 @@ impl<'a> Gen<'a> {
         regex_globals: &'a HashMap<String, (String, String, u32)>,
         impls: &'a [vyrn_frontend::ast::ImplBlock],
         plan: &'a vyrn_frontend::own::ReleasePlan,
+        facts: Option<&'a vyrn_lower::core::Facts>,
     ) -> Self {
         Gen {
             plan,
+            facts,
             arg_frees: Vec::new(),
             tmp: 0,
             label: 0,
@@ -2821,6 +2845,147 @@ impl<'a> Gen<'a> {
             str_append: HashMap::new(),
             gappend: HashMap::new(),
         }
+    }
+
+    /// RFC-0114 R1′ read off the core (RFC-0125 §3 M3, the deletion slice):
+    /// does this frame release the unnamed receiver of the field read at
+    /// `node`, and around which holes?
+    ///
+    /// The core states it as a `St::Drop` of the name whose
+    /// `NameInfo::receiver` is this node, with the name's own hole set;
+    /// `compiler/vyrn-cli/tests/coretables.rs` proves it equal to R1′'s table
+    /// at every site in the corpus. The plan is still ACKNOWLEDGED, so §26's
+    /// finish check keeps counting the rows it placed — the acknowledgement
+    /// goes when the table does. The direct backend reads the same fact
+    /// through `Cx::receiver_row`.
+    fn receiver_row(&self, node: usize) -> Option<Vec<String>> {
+        let Some(f) = self.facts else {
+            return self
+                .plan
+                .receiver_free(node)
+                .then(|| self.plan.receiver_holes_at(node));
+        };
+        self.plan.acknowledge(node);
+        f.receivers.get(&self.plan.key_of(node)).cloned()
+    }
+
+    /// RFC-0114 M2 and exit-residue round eighteen read off the core
+    /// (RFC-0125 §3 M3, the deletion slice): does the store at `node` release
+    /// the value it displaces?
+    ///
+    /// The core states the plan's two tables as ONE answer (`St::Store`'s
+    /// `releases`), because both compiled backends read them as one — the
+    /// row, the `mentions_place` guard, and round eighteen's `fresh_str`
+    /// exception. A site the core states nothing for falls back to the plan:
+    /// RFC-0091 M2's `place at` rewrite BUILDS the store statements a user
+    /// container's `c[h] = v` becomes, the checker walks those, and the core
+    /// walks the source statement.
+    fn store_row(&self, node: usize) -> bool {
+        self.store_fact(node)
+            .unwrap_or_else(|| self.plan.store_owned_at(node))
+    }
+
+    /// The core's answer alone, or `None` where it states none — a body the
+    /// core could not lower, or a statement RFC-0091 M2's rewrite built. A
+    /// store to a NAME asks for it this way, because what it falls back to is
+    /// the plan's row AND the guards around it, not the row alone.
+    fn store_fact(&self, node: usize) -> Option<bool> {
+        let f = self.facts?;
+        let released = f.stores.get(&self.plan.key_of(node)).copied();
+        if released.is_some() {
+            self.plan.acknowledge(node);
+        }
+        released
+    }
+
+    /// Round twenty-eight read off the core (RFC-0125 §3 M3, the deletion
+    /// slice): does this statement discard an owned result the emission frees
+    /// rather than drops? The core states it as a `St::Drop` of the temporary
+    /// the statement's value bound, keyed by the `Stmt::Expr` node.
+    fn discarded_row(&self, node: usize) -> bool {
+        let Some(f) = self.facts else {
+            return self.plan.discarded_result(node);
+        };
+        // As `Gen::arg_drop_row`: a node this pass of the core states nothing
+        // for keeps the plan's answer.
+        f.discarded.contains(&self.plan.key_of(node)) || self.plan.discarded_result(node)
+    }
+
+    /// RFC-0114 M1 read off the core (RFC-0125 §3 M3, the deletion slice):
+    /// does the caller free this argument's value after the call or operator
+    /// above it? The core carries the key on the name the argument bound
+    /// ([`vyrn_lower::core::NameInfo`]'s `arg_drop`), which is where an
+    /// operator's operand gets one too — `a + b` is `@concat(a, b)` to the
+    /// plan.
+    fn arg_drop_row(&self, node: usize) -> bool {
+        let Some(f) = self.facts else {
+            return self.plan.arg_drop(node);
+        };
+        if f.arg_drops.contains(&self.plan.key_of(node)) {
+            self.plan.acknowledge(node);
+            return true;
+        }
+        // A node the core states nothing for keeps the plan's answer: a body
+        // the core cannot lower states no row at all, and `valuecount.vyrn`
+        // in the parity suite is one.
+        self.plan.arg_drop(node)
+    }
+
+    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the deletion
+    /// slice): the releases one edge of the join at `node` owes because
+    /// another edge took the name. The core states each as a `St::Drop` at a
+    /// `Site::Edge`, which is the join and the edge — a position in a branch
+    /// is not a key, and this is why the drop carries one.
+    fn edge_rows(&self, node: usize) -> Vec<(String, u32)> {
+        let Some(f) = self.facts else {
+            return self
+                .plan
+                .edge_releases_at(node)
+                .cloned()
+                .unwrap_or_default();
+        };
+        match f.edges.get(&self.plan.key_of(node)) {
+            Some(rows) => {
+                self.plan.acknowledge(node);
+                rows.clone()
+            }
+            // A join this pass of the core states nothing for — a body it
+            // could not lower — keeps the plan's rows.
+            None => self
+                .plan
+                .edge_releases_at(node)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Round forty's table read off the core (RFC-0125 §3 M3, the deletion
+    /// slice): the payload binders the arm at `(key, arm)` releases at its
+    /// end, each with the holes the arm left in it.
+    ///
+    /// The core names the binders (`Arm::frees`) and their holes and states
+    /// no release KIND, because a kind is a property of the type and not of
+    /// the site: the caller asks [`vyrn_frontend::own::Owned::release_kind`]
+    /// for it, which is the one table the placer itself derived the plan's
+    /// kinds from. An `if let` or a `?` builds arms of its own and consults
+    /// no table, so the core states `None` there and this reader keeps the
+    /// plan.
+    fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
+        let plan_rows = || {
+            self.plan.arm_payload_free(key, arm).map(|rows| {
+                rows.iter()
+                    .map(|(n, _, h)| (n.clone(), h.clone()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let Some(f) = self.facts else {
+            return plan_rows();
+        };
+        let Some(rows) = f.arms.get(&(self.plan.key_of(key), arm)) else {
+            return plan_rows();
+        };
+        self.plan.acknowledge(key);
+        (!rows.is_empty()).then(|| rows.clone())
     }
 
     /// Resolve a type to its structural form: substitute generic parameters for
@@ -6439,6 +6604,16 @@ impl<'a> Gen<'a> {
                 expr: fbase, field, ..
             } => {
                 let (v, ety) = self.gen_expr(fbase)?;
+                // RFC-0125 §3 M3, the deletion slice: R1′'s row and its hole
+                // set come from the core, asked ONCE for this read — the
+                // three arms below differ in what they emit, not in what they
+                // ask. The region gate stays the emitter's: whether an
+                // arena's memory is this path's to free is a property of
+                // where the code stands, not of the read.
+                let rrow = self.receiver_row(expr as *const Expr as usize);
+                let rfree = rrow.is_some()
+                    && (self.region_depth == 0
+                        || self.plan.receiver_malloc_at(expr as *const Expr as usize));
                 // `str.byteLength` is one load from the String header
                 // (RFC-0089 M1a; RFC-0058 named it, this made it O(1)).
                 // `.length` on a String is rejected by the checker.
@@ -6447,10 +6622,7 @@ impl<'a> Gen<'a> {
                         let len = self.str_len(&v);
                         // RFC-0114 R1′: an unnamed receiver this frame owns
                         // dies here — the header read was its last observer.
-                        if self.plan.receiver_free(expr as *const Expr as usize)
-                            && (self.region_depth == 0
-                                || self.plan.receiver_malloc_at(expr as *const Expr as usize))
-                        {
+                        if rfree {
                             self.emit(format!("call void @__vyrn_str_free(ptr {v})"));
                         }
                         return Ok((len, Type::Int));
@@ -6463,9 +6635,6 @@ impl<'a> Gen<'a> {
                     // frame owns dies after the count is read. `own` admits
                     // only silent kinds into the set, so `free_arg_temp` never
                     // meets a declared release here.
-                    let rfree = self.plan.receiver_free(expr as *const Expr as usize)
-                        && (self.region_depth == 0
-                            || self.plan.receiver_malloc_at(expr as *const Expr as usize));
                     match self.resolve(&ety) {
                         Type::ArrayN(_, n) => return Ok((format!("{n}"), Type::Int)),
                         Type::Array(_) => {
@@ -6517,20 +6686,13 @@ impl<'a> Gen<'a> {
                 // heap field stays out: `names_a_place` made the binding its
                 // owner. A `lazy` field stays out too: forcing it reads the
                 // record after this point.
-                let rh = self.plan.receiver_holes_at(expr as *const Expr as usize);
-                if self.plan.receiver_free(expr as *const Expr as usize)
-                    && (self.region_depth == 0
-                        || self.plan.receiver_malloc_at(expr as *const Expr as usize))
+                let rh = rrow.unwrap_or_default();
+                if rfree
                     && self.owned.release_kind(&fty).is_none()
                     && vyrn_frontend::types::deferred(&fty).is_none()
                 {
                     self.free_arg_temp(&v, &ety);
-                } else if !rh.is_empty()
-                    && self.plan.receiver_free(expr as *const Expr as usize)
-                    && (self.region_depth == 0
-                        || self.plan.receiver_malloc_at(expr as *const Expr as usize))
-                    && !self.terminated
-                {
+                } else if !rh.is_empty() && rfree && !self.terminated {
                     // RFC-0125 M3: the read TOOK a heap field (`let sels =
                     // parse(q).sels`), and the placer's row frees the rest of
                     // the receiver around that hole. The value is already in
@@ -15675,6 +15837,7 @@ mod tests {
             &rg,
             &[],
             &pl,
+            None,
         );
         let rec = |fs: &[Type]| {
             Type::Record(
