@@ -3439,6 +3439,91 @@ the eighteen added lines being the licence instrument in `mod tests` —
 `VYRN_DUMP_MOVECHECK=<dir>` writes every program the suite checks, so the
 sweep above is a command and not a one-off edit.
 
+**The reach slice (2026-09-04): a `test` body is a body, and the last
+acceptance goes.** The slice before left one program of the checker's own
+suite accepted with the checker off — `test "consumes twice"` — and named
+the reason: the core lowers FUNCTION instances, a `test` block is not one,
+so the body was never built and never judged. This slice closes that gap.
+It changes no rule and adds none.
+
+**What the core reaches now.** `Lowered::bodies` already held every `test`
+(RFC-0015) and `bench` (RFC-0055) body, with the rows the checker recorded
+against the REAL nodes since the third judgment's seventh slice, and
+`core::build_outside` already built one from them. Only the placer never
+asked. It asks now: after the instances, `augment` builds each of those
+bodies, judges every frame under it, places what the frame owes under the
+synthetic `test@<i>` / `bench@<i>` name the plan is already keyed by, and
+folds the body into the `Facts` an emitter reads by node. The per-body half of
+`augment` became one function, `place_frames`, so an instance and a body that
+is no function of the program take the same path — which is the whole content
+of the slice. What the core does NOT reach is unchanged: an `impl`
+projection's body, which `Lowered::places` holds and no placer builds.
+
+The corpus test judges the same bodies. It accepted 20,235 frames before and
+23,135 after: 2,900 frames of this corpus had never been judged by any pass of
+this RFC. The tally ends at 0 refused, 0 unlowered, and the ratchet stays at
+0.
+
+**The two programs the new reach refused, and they are one defect.** A
+whole-repo sweep over the 476 `.vyrn` files refuses exactly two more than its
+parent, and both say the same sentence:
+
+- `std/graphql.vyrn`, `test "gqlArgOf takes the declared argument and names
+  any other"`: `let args = gqlParseQuery("..").sels[0].args`.
+- `site/app/docshell.vyrn`, `test "the pager walks the tree the sidebar
+  prints"`: `let firstModule = docsTree("x")[0].rows[0].label`.
+
+Each reads a heap field out of an ELEMENT of a temporary nobody names. The
+binding takes the field, and the release walk cannot skip an element hole
+(`.sels.[].args`), so the plan releases the temporary whole and the binding
+dangles. The rule is not new and the reach is: the same two statements written
+inside a function are refused by the parent build, with the same sentence. Both
+are defects in the programs, and both are fixed by naming the temporary — `let
+doc = gqlParseQuery("..")` and then `doc.sels[0].args`, which is a borrow of a
+place somebody owns rather than a take out of one. The programs read better
+for it and no copy is made.
+
+**The re-measured licence: nineteen of ninety-three, and none of the nineteen
+is this judgment's.** The sweep is the previous slice's, run again:
+`VYRN_DUMP_MOVECHECK=<dir> cargo test -p vyrn-frontend movecheck` writes the
+93 programs the checker refuses, and each goes through `VYRN_NO_MOVECHECK=1
+vyrn check`. Thirty were accepted when the instrument was written, then
+twenty-three, then twenty; nineteen are now.
+
+- **sixteen** are `mod linear` — a `Stream` never disposed, or disposed twice.
+- **two** are `MoveCheck::check_exclusive` and **one** is
+  `MoveCheck::check_capture`.
+- **none** is the linear judgment's. The one that went is `test "consumes
+  twice"`, and the kernel now refuses it in the checker's own sentence: "`x` is
+  used here but was already consumed by `use_up(..)` on line 1".
+
+So no program the checker's own suite refuses for a linear reason survives the
+kernel. That was the licence's first rule and the last thing it was waiting
+for.
+
+**Are the linear judgment's rules deletable? Yes, and these are they.** The
+deletion slice listed twenty-eight rows of the refusals census — 01 to 21, 25
+to 29, 31 and 34 — as the rules the kernel gives with no checker and no flag:
+RFC-0089 rules 1, 2 and 4, RFC-0093's rule that a name with a hole is not used
+whole, RFC-0013's three module-state rules, RFC-0037's two closure rules,
+RFC-0125's rebuilding-receiver rule, and the discharge half of RFC-0075. Its
+licence was measured with one acceptance outstanding. The acceptance is gone,
+so the list stands as written and nothing was found to subtract from it. Those
+twenty-eight rules may leave `movecheck.rs`.
+
+Four rows stay, and none of them belongs to this judgment: row 22 (a `drop`
+after a hole, the hole test in the drop arm), row 23
+(`MoveCheck::check_exclusive`), row 24 (`MoveCheck::check_capture`) and row 30
+(`mod linear`). `VYRN_NO_MOVECHECK=1 vyrn check` still prints `ok` for all
+four census programs, and deleting a rule while the kernel accepts its program
+would ship the acceptance. Rows 32 and 33 are `checker.rs`'s and were never
+the move check's.
+
+What still stands between the licence and the LINES is unchanged, and neither
+half is a rule: the walk (`stmt` and `expr`, 1,929 lines, which refuses and
+records in the same arm) and the 81 lines of menu. The structural census did
+not move, because no line of `movecheck.rs` changed in this slice.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
