@@ -223,8 +223,11 @@ pub enum Rhs {
         /// Argument 0 is the receiver of a rebuilding builtin passed by name
         /// (`out.push(v)`): the call hands the buffer back through its result
         /// and the store after it puts it back, so the take changes no owner.
-        /// That is `movecheck::sinks`'s write-back exception, which stays the
-        /// checker's this slice (RFC-0125 §3 M3, the census).
+        ///
+        /// The rule under it — which builtin rebuilds its receiver — is
+        /// [`vyrn_frontend::prelude::rebuilds`], the one statement both this
+        /// pass and `movecheck::sinks` read. The exception itself is stated
+        /// here (RFC-0125 §3 M3, the checker's deletion path).
         write_back: bool,
         /// The producer type: what the callee answers at this site, with the
         /// call's own type arguments already substituted. `None` for a call
@@ -2758,13 +2761,7 @@ impl<'a> Builder<'a> {
         // A seeded row whose result is its receiver's own type hands the
         // buffer back through the result, so the receiver is taken by the
         // call (`movecheck::sinks`).
-        let rebuilds = prelude::signature(name).is_some_and(|sig| {
-            sig.params.first().is_some_and(|p| p.ty == sig.ret)
-                && matches!(
-                    sig.ret,
-                    Type::Array(_) | Type::SmallArray(..) | Type::Map(..)
-                )
-        });
+        let rebuilds = prelude::rebuilds(name);
         let caps: Vec<Capability> =
             if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
                 f.params.iter().map(|p| p.capability).collect()

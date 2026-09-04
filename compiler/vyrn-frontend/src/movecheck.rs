@@ -7541,9 +7541,7 @@ fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
     // used to leave `xs` reclaimed at the return while the result carried
     // its buffer out, and the caller received freed memory
     // (`rfcs/probes-0125/push-in-expression-position.vyrn`).
-    i == 0
-        && p.ty == f.ret
-        && matches!(f.ret, Type::Array(_) | Type::SmallArray(..) | Type::Map(..))
+    i == 0 && crate::prelude::rebuilds(name)
 }
 
 /// Every name `e` reads, root names only, in no particular order.

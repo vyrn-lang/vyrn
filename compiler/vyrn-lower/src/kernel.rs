@@ -702,8 +702,9 @@ impl<'b> Kernel<'b> {
     /// A take, told whether it is the receiver of a rebuilding builtin
     /// (`out.push(v)`): that one take changes no owner, because the store
     /// after the call puts the value back where it came from, so a `modify`
-    /// parameter may be its subject. The exception is `movecheck::sinks`'s
-    /// and stays the checker's this slice.
+    /// parameter may be its subject. The core states the exception
+    /// ([`crate::core::Rhs::Call::write_back`]) and the rule under it is
+    /// `prelude::rebuilds`, which `movecheck::sinks` reads too.
     fn take_arg(&self, st: &mut State, v: &Val, write_back: bool) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if !write_back {

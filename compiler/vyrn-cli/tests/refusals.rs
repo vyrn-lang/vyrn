@@ -1038,7 +1038,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 1047),
+        ("a rule the kernel now gives", 1045),
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2335),
         ("a fix menu", 81),

@@ -665,6 +665,24 @@ pub fn capability(name: &str, i: usize) -> Option<Capability> {
         .map(|p| p.capability)
 }
 
+/// Whether the seeded builtin `name` REBUILDS its receiver: its first
+/// parameter has the type it hands back, and that type is a container. Such
+/// a row gives the receiver's buffer back through its result — `push`,
+/// `reserve`, `append`, `copyFrom`, a map's `tally` — so the call TAKES the
+/// receiver (RFC-0125 M2, the first defect the kernel found).
+///
+/// Stated here because two passes ask the same question: `movecheck::sinks`
+/// asks it under rule 1, and `core::call` asks it when it lowers the call
+/// and marks the write-back exception. A rule is stated once (RFC-0125 §3
+/// M3, the checker's deletion path).
+pub fn rebuilds(name: &str) -> bool {
+    let Some(f) = signature(name) else {
+        return false;
+    };
+    f.params.first().is_some_and(|p| p.ty == f.ret)
+        && matches!(f.ret, Type::Array(_) | Type::SmallArray(..) | Type::Map(..))
+}
+
 /// Whether the result of `name` points **into** one of its arguments.
 ///
 /// Read off the body, which is where a projection says so: a row that yields

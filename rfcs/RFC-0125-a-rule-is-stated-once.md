@@ -1957,13 +1957,13 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 
 | kind | lines | share |
 |---|---|---|
-| a rule the kernel now gives | 930 | 9 per cent |
-| a rule only the checker gives | 840 | 8 per cent |
+| a rule the kernel now gives | 1,045 | 10 per cent |
+| a rule only the checker gives | 723 | 7 per cent |
 | placement rows for the engines | 2,335 | 23 per cent |
 | a fix menu | 81 | 1 per cent |
 | shared machinery | 3,656 | 37 per cent |
 | tests | 2,169 | 22 per cent |
-| **the file** | **10,011** | |
+| **the file** | **10,009** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
@@ -1982,7 +1982,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `enum Borrow` | 48 | a rule the kernel now gives | what a borrow is, in words — `core::BorrowKind::what` is this sentence |
 | `fn fixes(&self, root: &str, path: &str) -> Vec<String>` | 24 | a fix menu | the named ways out of a borrow error |
 | `enum TakeForm` | 18 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
-| `fn nothing_to_take(self) -> String` | 13 | a rule only the checker gives | `consume` with nothing to take (row 09) |
+| `fn nothing_to_take(self) -> String` | 13 | a rule the kernel now gives | `consume` with nothing to take (row 09) |
 | `fn drop_it(self) -> String` | 8 | a fix menu | the `drop` a take's menu offers |
 | `fn root_of(path: &str) -> &str` | 211 | shared machinery | the path algebra and the consumed table: overlap, reach, revival |
 | `impl MoveCheck<'_>` | 89 | shared machinery | one body, with its parameters and its return type |
@@ -1999,12 +1999,12 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn borrow_from(&self, value: &Expr) -> Option<Borrow>` | 68 | a rule the kernel now gives | the borrow status a `let` of a value gives its binding |
 | `fn payload_binding` | 60 | shared machinery | what a pattern's binders name, and whether an iterable is a place |
 | `fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic>` | 79 | a rule the kernel now gives | rule 1 asked of a path: is the storage still all there (rows 04, 06, 07) |
-| `fn check_take` | 57 | a rule only the checker gives | a take's refusals: an element, and a place the frame does not own (row 08) |
+| `fn check_take` | 57 | a rule the kernel now gives | a take's refusals: an element, and nothing to take — `core::take_prefix` states both (rows 08, 09) |
 | `fn check_handover(&self, arg: &Expr, callee: &str, line: usize) -> Result<(), Diagnostic>` | 123 | a rule the kernel now gives | rule 2 at the third exit: a borrow may not be consumed (rows 11, 12, 13, 14) |
 | `fn refuse_projected_arg` | 34 | a rule the kernel now gives | the refusal a projected argument to a `consume` parameter gets |
 | `fn arm_binder(&self, name: &str) -> bool` | 24 | shared machinery | an arm's binders, and whether a callee keeps a `fn` value |
 | `fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic>` | 132 | a rule the kernel now gives | rule 3: a return is owned (rows 15, 16, 18, 19, 28) |
-| `fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic` | 47 | a rule only the checker gives | the one exit every returned borrow leaves by, the exported function's own sentence with it (row 17) |
+| `fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic` | 47 | a rule the kernel now gives | the one exit every returned borrow leaves by, the exported function's own sentence with it (row 17) |
 | `fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize)` | 27 | placement rows for the engines | the retention and hand-over records the call graph is closed over |
 | `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 527 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
 | `fn ctor_valued(&self, e: &Expr) -> bool` | 57 | placement rows for the engines | what an expression builds: a variant, a String, a concatenation |
@@ -2027,7 +2027,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `pub fn mentions_place(e: &Expr, base: &str) -> bool` | 95 | shared machinery | whether a stored value mentions the place it is stored into |
 | `mod linear` | 645 | a rule only the checker gives | the must-use obligation: acquired once, disposed exactly once (rows 30, 31) |
 | `fn store_path(e: &Expr) -> Option<String>` | 27 | shared machinery | the place an expression names, as the store arms spell it |
-| `fn sinks(decl: &Declared, name: &str, i: usize) -> bool` | 26 | a rule the kernel now gives | whether a builtin's parameter takes its argument for good |
+| `fn sinks(decl: &Declared, name: &str, i: usize) -> bool` | 24 | a rule the kernel now gives | whether a builtin's parameter takes its argument for good |
 | `fn reads(e: &Expr) -> Vec<String>` | 141 | shared machinery | the names an expression reads, and the calls in it |
 | `pub fn element_path(e: &Expr) -> Option<(String, String)>` | 84 | shared machinery | the place spellings every rule above compares |
 | `fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic` | 13 | a fix menu | one diagnostic with its menu of fixes |
@@ -2036,10 +2036,11 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 
 Four things the structural census says, and the third is the finding.
 
-- **The rules are a tenth of the file.** 930 lines state a rule the kernel now
-  gives and 840 state one only the checker gives. Together they are 1,770
-  lines out of 10,011. Every argument about which rule closes next is an
-  argument about a sixth of `movecheck.rs`.
+- **The rules are a sixth of the file.** After this slice's three rule
+  commits, 1,045 lines state a rule the kernel gives and 723 state one only
+  the checker gives. Together they are 1,768 lines out of 10,009. Every
+  argument about which rule closes next is an argument about a sixth of
+  `movecheck.rs`, and about two lines in five of that sixth.
 - **The placement rows are more than twice the rules.** 2,335 lines write
   what `own.rs` reads. They are not a second opinion about a rule, so no
   kernel refusal takes them; the own-side track above does, table by table.
@@ -2087,6 +2088,23 @@ that drifts fails the build rather than the reading.
   carries the flag of the body that holds it, and the kernel words the
   return refusal as `movecheck::refuse_return` words it. One field and one
   branch.
+
+
+- **The `sinks` write-back exception** (row 26). The close-out recorded this
+  as "the core restates the first half and reads the plan for the second".
+  Neither half is the plan's now, and neither is restated. The rule under it
+  — which builtin hands its receiver's buffer back through its result — is
+  `prelude::rebuilds`, one function that `movecheck::sinks` and `core::call`
+  both read, so the predicate is written once instead of twice. The exception
+  itself is the core's (`Rhs::Call::write_back`), and the kernel exempts that
+  one take. The row was already `the same`; what moved is that a reader can
+  now find the rule in one place, which is what the deletion needs.
+
+- **Region escape** (rows 32, 33). Nothing is owed, and the census already
+  proved it: both programs are refused with `VYRN_NO_MOVECHECK=1`, because
+  `checker.rs`'s `region_store_guard` and `region_consume_guard` give them.
+  The rule is not the move check's, so it does not stand in the deletion's
+  way. The `Kernel::Elsewhere` rows assert this on every run.
 
 
 ### M4 — the runtime in Vyrn
