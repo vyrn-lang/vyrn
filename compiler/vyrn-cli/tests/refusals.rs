@@ -34,9 +34,11 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 20, 21 and 06, RFC-0125 §3 M3 — is refused by the kernel in both runs,
-//! and the two must still agree. The row is what stops the sentence moving
-//! after the deletion, so it stays in the census.
+//! 28 and 06, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
+//! two must still agree. The row is what stops the sentence moving after the
+//! deletion, so it stays in the census. Rows 20 and 21 read `Kernel::Same`
+//! and their sites STAYED: `examples/mustuse_abandoned.vyrn` is a program the
+//! two passes word differently, and it is not in this file's corpus.
 
 use std::path::{Path, PathBuf};
 
@@ -1435,7 +1437,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2360),
         ("a fix menu", 73),
-        ("shared machinery", 3613),
+        ("shared machinery", 3646),
         ("tests", 2069),
     ];
     assert_eq!(got, want, "the structural census has moved");

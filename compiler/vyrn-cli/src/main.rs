@@ -3083,6 +3083,13 @@ fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics
         // fix(es) applied` for a program it used to name — and the kernel
         // prints the same `fix:` menu, so the ways out are readable here too.
         Ok(program) => kernel_diagnostics(&program),
+        // A program the CHECKER refused is not asked of the kernel here. It
+        // should be — a rule that left is invisible in a file that also has a
+        // must-use error — and the reason it is not yet is that the kernel
+        // says things this pass deliberately does not (`r31`: a second
+        // `close(s)` is a use after a take AND a must-use disposed twice), so
+        // merging the two lists adds diagnostics rather than restoring them
+        // (RFC-0125 §3 M3, the menu slice).
         Err(d) => d,
     }
 }

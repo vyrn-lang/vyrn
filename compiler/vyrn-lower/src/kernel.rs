@@ -583,13 +583,26 @@ impl<'b> Kernel<'b> {
         // the place that owns it release it (RFC-0089 rule 4, RFC-0125 §3 M3,
         // row 21).
         if by == "a `drop`" {
+            // What the borrow IS, in `movecheck::Borrow::what`'s words: a
+            // second name for a parameter where the alias reads one, and the
+            // place otherwise. `examples/mustuse_abandoned.vyrn` is the
+            // program that needed the first — `let ops = self.ops` inside a
+            // `read self` method.
+            let kind = match &st.alias[n as usize] {
+                Some(Alias {
+                    root: Root::N(m), ..
+                }) => self.body.names[*m as usize]
+                    .borrow_kind
+                    .as_ref()
+                    .map(|b| b.what(s)),
+                _ => None,
+            }
+            .unwrap_or_else(|| "read out of a place that owns it".to_string());
             return self
                 .refuse_at::<()>(
                     self.here,
                     menu(
-                        format!(
-                            "`{s}` may not be dropped — it is read out of a place that owns it"
-                        ),
+                        format!("`{s}` may not be dropped — it is {kind}"),
                         vec![
                             format!(
                                 "`consume` the place where `{s}` is bound, so `{s}` takes the \

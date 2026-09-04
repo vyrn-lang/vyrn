@@ -191,8 +191,6 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     ("an element is not a place a take reaches", "row 08"),
     ("has nothing to take", "row 09"),
     ("may not be passed to a `consume` parameter via", "row 12"),
-    ("is dropped here but was already consumed by", "row 20"),
-    ("may not be dropped — it is read out of", "row 21"),
     ("may not be returned from a closure", "row 28"),
 ];
 
