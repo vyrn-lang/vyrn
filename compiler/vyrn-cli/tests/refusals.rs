@@ -353,10 +353,19 @@ fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/refusals")
 }
 
+/// Where the counterexamples below live.
+fn unlicensed_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/unlicensed")
+}
+
 /// The command's standard error, with the `fix:` and `note:` menu lines and
 /// the file prefix taken off, so what is left is the sentence.
 fn refusal(file: &str, kernel_mode: bool) -> (bool, String) {
-    let path = dir().join(file);
+    refusal_in(dir(), file, kernel_mode)
+}
+
+fn refusal_in(dir: PathBuf, file: &str, kernel_mode: bool) -> (bool, String) {
+    let path = dir.join(file);
     let mut cmd = vyrn();
     cmd.arg("check").arg(&path);
     if kernel_mode {
@@ -511,6 +520,176 @@ fn the_census_as_a_table() {
             Kernel::Elsewhere => "not the move check's".to_string(),
         };
         println!("| {n} | {} | {} | {says} | {k} |", r.rule, r.rfc);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The licence, measured per PROGRAM (RFC-0125 §3 M3, the deletion slice).
+//
+// The census above runs ONE program per rule, so its kernel column is a
+// measurement of that program and not of the rule. This table is the
+// correction: for seven of the rows the column says the kernel gives, here is
+// a second program the SAME rule refuses and the kernel accepts. A deletion
+// licensed by the column alone would ship each of these as a program the
+// compiler compiles.
+//
+// The two reasons are separate, and the `why` column says which.
+//
+//   - **heap**. The kernel places releases, so a value that owns no heap has
+//     no release and the kernel has no opinion about it. RFC-0089 rule 1 and
+//     RFC-0013 are rules about OWNERSHIP, which the checker applies to every
+//     value. `while i < 3 { take(x) }` over a record of `Int64`s is the
+//     smallest of them.
+//   - **spelling**. The value owns heap and the kernel still says nothing,
+//     because it does not read this spelling as a borrow: a prefix `consume`
+//     of a `read` parameter's field, a match arm's payload binder, a
+//     `for .. in consume` whose iterable names no place.
+//
+// This is a pin and not a wish. The day the kernel refuses one of these, this
+// test fails, the row's licence is real, and the rule may leave
+// `movecheck.rs`.
+// ---------------------------------------------------------------------------
+
+/// One program a census row's rule refuses and the kernel accepts.
+struct Uncovered {
+    file: &'static str,
+    row: &'static str,
+    says: &'static str,
+    why: &'static str,
+}
+
+const fn uncovered(
+    file: &'static str,
+    row: &'static str,
+    says: &'static str,
+    why: &'static str,
+) -> Uncovered {
+    Uncovered {
+        file,
+        row,
+        says,
+        why,
+    }
+}
+
+/// The counterexamples, one per rule the census column got wrong.
+fn counterexamples() -> Vec<Uncovered> {
+    vec![
+        uncovered(
+            "u04_whole_after_a_hole_heapless.vyrn",
+            "04",
+            "`p.name` was taken out of `p` here",
+            "heap",
+        ),
+        uncovered(
+            "u06_use_after_consume_heapless.vyrn",
+            "06, 07",
+            "`x.id` is used here but was already consumed by `take(..)` on line 8",
+            "heap",
+        ),
+        uncovered(
+            "u09_for_in_consume_with_nothing_to_take.vyrn",
+            "09",
+            "`consume` here has nothing to take — the loop already owns a container that is \
+             not a binding",
+            "spelling",
+        ),
+        uncovered(
+            "u11_prefix_consume_of_a_read_parameters_field.vyrn",
+            "11",
+            "`d` may not be consumed — it is a `read` parameter",
+            "spelling",
+        ),
+        uncovered(
+            "u12_module_state_to_a_consume_parameter_heapless.vyrn",
+            "12",
+            "module state `g` may not be passed to a `consume` parameter via `take(..)` — \
+             nothing may take ownership of module state (it lives for the whole module and is \
+             never dropped)",
+            "heap",
+        ),
+        uncovered(
+            "u13_an_arm_binder_to_a_consume_parameter.vyrn",
+            "13",
+            "`v` may not be passed to a `consume` parameter via `take(..)` — it is a second \
+             name for the `read` parameter `o`",
+            "spelling",
+        ),
+        uncovered(
+            "u25_consume_inside_a_loop_heapless.vyrn",
+            "25",
+            "`x` is consumed by `take(..)` inside a loop, so it would be used again on the \
+             next iteration",
+            "heap",
+        ),
+    ]
+}
+
+/// Each counterexample is refused by the checker and accepted by the kernel,
+/// so the rule above it may not leave `movecheck.rs`.
+#[test]
+fn the_licence_is_per_program_and_these_are_the_counterexamples() {
+    let mut bad: Vec<String> = Vec::new();
+    for u in counterexamples() {
+        let (ok, text) = refusal_in(unlicensed_dir(), u.file, false);
+        if ok {
+            bad.push(format!("{}: the checker accepted it", u.file));
+            continue;
+        }
+        let (_, msg) = split_head(&text);
+        let first = msg.lines().next().unwrap_or_default();
+        if first != u.says {
+            bad.push(format!(
+                "{} (row {}): the checker said `{first}` and the table says `{}`",
+                u.file, u.row, u.says
+            ));
+            continue;
+        }
+        let (kok, ktext) = refusal_in(unlicensed_dir(), u.file, true);
+        if !kok {
+            bad.push(format!(
+                "{} (row {}, {}): the kernel is supposed to accept it, and it said `{}`",
+                u.file,
+                u.row,
+                u.why,
+                ktext.lines().next().unwrap_or_default()
+            ));
+        }
+    }
+    assert!(bad.is_empty(), "the licence has moved: {}", bad.join("; "));
+}
+
+/// Every program under `tests/unlicensed/` is a counterexample, and every
+/// counterexample is a program.
+#[test]
+fn the_counterexamples_cover_their_directory() {
+    let mut on_disk: Vec<String> = std::fs::read_dir(unlicensed_dir())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+        .filter(|f| f.ends_with(".vyrn"))
+        .collect();
+    on_disk.sort();
+    let mut listed: Vec<String> = counterexamples()
+        .iter()
+        .map(|u| u.file.to_string())
+        .collect();
+    listed.sort();
+    assert_eq!(
+        on_disk, listed,
+        "a program with no row, or a row with no program"
+    );
+}
+
+/// The table for RFC-0125 §3 M3, printed from the rows above:
+/// `cargo test -p vyrn-cli --test refusals -- --ignored --nocapture
+/// the_counterexamples_as_a_table`.
+#[test]
+#[ignore]
+fn the_counterexamples_as_a_table() {
+    println!("| census row | the program | the checker's sentence | why the kernel says nothing |");
+    println!("|---|---|---|---|");
+    for u in counterexamples() {
+        println!("| {} | `{}` | {} | {} |", u.row, u.file, u.says, u.why);
     }
 }
 

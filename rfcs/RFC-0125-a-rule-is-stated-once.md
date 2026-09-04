@@ -3070,6 +3070,102 @@ restated — the kernel's answer handed to the second build directly. The two
 `std/graphql` receivers above are that shape exactly, and they cost no byte
 when they moved.
 
+**The deletion slice (2026-09-04): the licence is a measurement of a program,
+not of a rule, and no line went.** The slice above licensed twenty-eight of
+the thirty-four rows: run the row's program with `VYRN_NO_MOVECHECK=1`, read
+the exit code, and the kernel refuses it. This slice tried to spend that
+licence and could not. The licence is sound about each PROGRAM it names and
+says nothing about the RULE above it, because a row is one program and a rule
+is a set of them. Seven counterexamples say so, each a second program the
+same rule refuses and the kernel accepts, and each now a file under
+`compiler/vyrn-cli/tests/unlicensed/` with a test that pins it
+(`the_licence_is_per_program_and_these_are_the_counterexamples`).
+
+| census row | the rule | the counterexample | why the kernel says nothing |
+|---|---|---|---|
+| 04 | a name with a hole may not be used whole | the same program over `Person = { name: Int64, age: Int64 }` | heap |
+| 06, 07 | rule 1: a `consume` parameter takes ownership | `take(x)` then `x.id`, over `Token = { id: Int64 }` | heap |
+| 09 | `consume` with nothing to take | `for x in consume make()` — the LOOP form of the take | spelling |
+| 11 | rule 2: a prefix `consume` of a `read` parameter | `o.push(consume d.a)` where `d: read Bag` | spelling |
+| 12 | module state may not be taken: a `consume` parameter | the same program over a heapless module value | heap |
+| 13 | rule 2: a `read` parameter to a `consume` parameter | `match o { Some(v) => take(v) }` where `o: read Option<Array<Int64>>` | spelling |
+| 25 | rule 1 across a back edge | `while i < 3 { take(x) }`, over `Token = { id: Int64 }` | heap |
+
+**The two reasons, and only one of them is a wording gap.**
+
+- **Heap.** The kernel places releases. A value that owns no heap has no
+  release, so the kernel is not asked and has no opinion. RFC-0089 rule 1 and
+  RFC-0013 are rules about OWNERSHIP, and the checker asks them of every
+  value: `while i < 3 { take(x) }` is refused for a record of `Int64`s and
+  accepted by the kernel. Every census program carries a `String` or an
+  `Array`, because each was written to exercise a placement, so the whole
+  column was measured on the half of the language the kernel can see.
+- **Spelling.** The value owns heap and the kernel still says nothing,
+  because it does not read the spelling as a borrow. Three of them: a prefix
+  `consume` of a `read` parameter's field, a match arm's payload binder handed
+  to a `consume` parameter, and a `for .. in consume` whose iterable names no
+  place. The first two are use-after-free the checker catches and the kernel
+  does not, so they are holes in the kernel and not wording.
+
+**How the counterexamples were found, so the next slice can repeat it.**
+`movecheck.rs` has 83 unit tests of its own, and they are a corpus three times
+the census. The `run` helper was instrumented to write every program it checks
+to a directory, the suite was run once, and the 93 programs the checker
+refuses were each put through `VYRN_NO_MOVECHECK=1 vyrn check`. **Thirty of
+the ninety-three are accepted.** Sixteen are `mod linear`, two are
+`check_exclusive` and one is `check_capture` — three of the four rules the
+licence already keeps. The other eleven are the rows above. A census of thirty-four
+programs cannot see this, and neither can a corpus of programs that compile:
+`examples/`, `std/` and `site/` are all accepted by both passes by
+construction, so they measure nothing about a refusal.
+
+**What each rule that stayed waits on.** Rule 4 of the deletion is that a
+refusal must be byte-identical after it — the same sentence, the same line,
+the same `fix:` menu — because a rule whose refusal moves is not a rule that
+was stated elsewhere. Against that:
+
+- **rows 04, 06, 07, 12, 25** wait on the kernel judging a value that owns no
+  heap, which is a change to what the kernel IS and not a wording;
+- **rows 09 (the loop form), 11, 13** wait on the kernel reading three more
+  spellings as borrows. Two of the three are unsound today;
+- **rows 01, 02, 03, 10, 14, 16, 19, 20, 21, 27, 29, 31, 34** — every row the
+  census marks `its own words` — wait on the wording. Deleting one changes the
+  sentence a reader gets, which rule 4 refuses;
+- **row 05** waits on the menu, and it is the first rule that proves the menu
+  is not a function of the message. The refusal names the line the place was
+  WRITTEN at and the menu names the line the alias was BOUND at
+  (``fix: `t.xs.copy()` on line 7``), and the kernel's message carries only
+  the first. The recorded plan — "a small pass over a kernel refusal, keyed by
+  the rule the refusal names" — cannot be written for this row from the
+  message alone. A refusal would have to carry the binding's line;
+- **row 26** waits on a second diagnostic: the checker gives two for its
+  program and the kernel gives the first;
+- **rows 08 and 09 (the prefix form)** are the only two the kernel gives by
+  CONSTRUCTION rather than by measurement. `core::take_prefix` states both
+  from the syntax, reads no type and reaches every value, so no heapless
+  counterexample exists and none can. They still did not go, for two reasons
+  of size rather than of principle: they share one `else` arm with the loop
+  form, which is unlicensed, so the deletion is a condition and costs nine
+  lines more than it saves; and both carry a menu, so the pass row 05 shows
+  cannot be written in general would have to be written for them first;
+- **rows 22, 23, 24, 30** are unchanged: `check_exclusive`, `check_capture`,
+  `mod linear` and the hole test in the drop arm stay, and the corpus sweep
+  above adds nineteen more programs that say so.
+
+**The structural census did not move**, because no line of `movecheck.rs`
+changed: 1,045 / 723 / 2,360 / 81 / 3,656 / 2,169 over 10,034 lines, the same
+six numbers the slice before recorded. What changed is the number in front of
+them. The licence was twenty-eight rules; it is now two, and the two are the
+ones the previous slice moved into the core on purpose.
+
+**The lesson, and it is the one the flip taught in the other direction.** A
+rule is stated once when one pass states it for every program the other did.
+"The kernel refuses this program too" is a measurement of an intersection.
+The deletion needs the containment, and the containment is proved by finding
+no counterexample where a counterexample would be — which is what the sweep
+over the checker's own suite is for, and what the next deletion slice should
+run first.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

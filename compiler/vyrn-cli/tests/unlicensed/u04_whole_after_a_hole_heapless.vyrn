@@ -1,0 +1,15 @@
+// Row 04 of the refusals census, over a record that owns no heap.
+//
+// The census program's `Person` carries a `String`, so the kernel has a
+// release to place and refuses. Nothing here owns heap, so the kernel has no
+// release, no opinion, and prints `ok`. The rule is the same rule.
+type Person = { name: Int64, age: Int64 }
+
+fn take(n: consume Int64) -> Int64 { return n }
+
+fn main() -> Int64 {
+    let p = Person { name: 1, age: 2 }
+    let n = take(consume p.name)
+    let q = p
+    return n + q.age
+}
