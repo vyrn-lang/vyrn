@@ -6438,7 +6438,7 @@ impl<'a> Gen<'a> {
     /// reclaims it, exactly as [`Gen::free_str_temp`] stands aside there.
     fn gen_expr(&mut self, expr: &Expr) -> Result<(String, Type), String> {
         let r = self.gen_expr_inner(expr)?;
-        if self.plan.arg_drop(expr as *const Expr as usize) && self.region_depth == 0 {
+        if self.arg_drop_row(expr as *const Expr as usize) && self.region_depth == 0 {
             self.arg_frees.push((r.0.clone(), r.1.clone()));
         }
         if crate::observe::on() {
