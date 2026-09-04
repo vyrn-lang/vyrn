@@ -7868,9 +7868,27 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    /// The suite's own corpus, and the instrument that measures the deletion
+    /// licence with it (RFC-0125 §3 M3). These tests are three times the
+    /// census and they are the only corpus of programs the checker REFUSES:
+    /// `examples/`, `std/` and `site/` all compile, so they say nothing about
+    /// a refusal. `VYRN_DUMP_MOVECHECK=<dir> cargo test -p vyrn-frontend
+    /// movecheck` writes every program checked here to that directory,
+    /// `no_*` for the refused ones, and each of those through
+    /// `VYRN_NO_MOVECHECK=1 vyrn check` is the licence: a program the checker
+    /// refuses and the kernel accepts is a rule that may not leave this file.
     fn run(src: &str) -> Result<(), String> {
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        super::check(&program)
+        let r = super::check(&program);
+        if let Ok(dir) = std::env::var("VYRN_DUMP_MOVECHECK") {
+            let _ = std::fs::create_dir_all(&dir);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(src, &mut h);
+            let n = std::hash::Hasher::finish(&h);
+            let tag = if r.is_ok() { "ok" } else { "no" };
+            let _ = std::fs::write(format!("{dir}/{tag}_{n:016x}.vyrn"), src);
+        }
+        r
     }
 
     /// What `views` and `sinks` answer, now that both read a signature.

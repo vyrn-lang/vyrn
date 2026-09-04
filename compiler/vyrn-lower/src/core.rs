@@ -614,6 +614,42 @@ fn is_place_read(e: &Expr) -> bool {
     }
 }
 
+/// The two refusals a `consume` gets when what follows it names no place.
+/// `by_loop` picks the form's wording: `for x in consume xs` says the loop
+/// already owns a container, and a prefix `consume` says the value is already
+/// owned. Both are the checker's own sentences (`movecheck::TakeForm`), and
+/// both are stated from the SYNTAX, so no heapless counterexample to either
+/// exists (RFC-0125 §3 M3, rows 08 and 09).
+fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
+    if vyrn_frontend::movecheck::place_path(e).is_some() {
+        return Ok(());
+    }
+    if let Some((_, path)) = vyrn_frontend::movecheck::element_path(e) {
+        return refuse(
+            format!("`{path}` may not be taken — an element is not a place a take reaches"),
+            line,
+        );
+    }
+    let says = if by_loop {
+        "`consume` here has nothing to take — the loop already owns a container that is \
+         not a binding"
+    } else {
+        "`consume` here has nothing to take — the value is already owned, so there is no \
+         place to leave a hole in"
+    };
+    refuse(says.to_string(), line)
+}
+
+/// The scrutinee a binder borrows: its name, where the construct did not
+/// consume it. `None` for a consumed scrutinee, whose binders own what they
+/// name.
+fn borrow_root(sv: &Val, consuming: bool) -> Option<Name> {
+    match sv {
+        Val::Name(n) if !consuming => Some(*n),
+        _ => None,
+    }
+}
+
 /// The kind of an expression, for a gap's detail.
 fn expr_kind(e: &Expr) -> &'static str {
     match e {
@@ -1434,7 +1470,8 @@ impl<'a> Builder<'a> {
                 let (sv, consuming) = self.scrutinee(scrutinee, sid, out)?;
                 let mut t = Vec::new();
                 let mark = self.scope.len();
-                let binds = self.bind_pattern(pattern, &sty, consuming, *line, &mut t)?;
+                let from = borrow_root(&sv, consuming);
+                let binds = self.bind_pattern(pattern, &sty, consuming, *line, from, &mut t)?;
                 self.block(then_block, &mut t)?;
                 self.scope.truncate(mark);
                 let mut e = Vec::new();
@@ -1491,6 +1528,11 @@ impl<'a> Builder<'a> {
                     // instantiation's type arguments.
                     Err(g) => self.projected_elem(&ity).ok_or(g)?,
                 };
+                // The LOOP form of the take (RFC-0125 §3 M3, row 09): the
+                // same rule as the prefix form, at the other spelling.
+                if *consuming {
+                    take_names_a_place(iter, *line, true)?;
+                }
                 // The container: a name the loop reads, or one it takes.
                 let it = match iter {
                     Expr::Var { name, .. } if self.lookup(name).is_some() => {
@@ -1963,12 +2005,18 @@ impl<'a> Builder<'a> {
 
     /// Bind a pattern's names. Owned binders when the match consumed its
     /// scrutinee; borrowed places otherwise.
+    /// `from` is the scrutinee's name where the construct did not consume it:
+    /// a binder over a borrow is a second name for that borrow, and it
+    /// carries the same kind, so a take of it is refused in the same words
+    /// (RFC-0125 §3 M3, row 13). Without it `match o { Some(v) => take(v) }`
+    /// over a `read` parameter handed the caller's buffer away.
     fn bind_pattern(
         &mut self,
         p: &Pattern,
         sty: &Type,
         consuming: bool,
         line: usize,
+        from: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
         let decls = vyrn_frontend::types::decl_map(self.program);
@@ -2010,6 +2058,12 @@ impl<'a> Builder<'a> {
         for (name, ty) in payloads {
             let owned = consuming && self.owns(&ty);
             let n = self.name(&name, ty, owned, line);
+            if !owned {
+                if let Some(k) = from.and_then(|m| self.body.names[m as usize].borrow_kind.clone())
+                {
+                    self.body.names[n as usize].borrow_kind = Some(k);
+                }
+            }
             // `_` names nothing a body can read, so it never enters the
             // scope — but the payload is real, and a consumed scrutinee's arm
             // still owes its release. The plan's arm table names `_`
@@ -2394,21 +2448,37 @@ impl<'a> Builder<'a> {
     /// value that names no place at all is already owned, so there is no
     /// place to leave a hole in.
     fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
-        if vyrn_frontend::movecheck::place_path(e).is_none() {
-            if let Some((_, path)) = vyrn_frontend::movecheck::element_path(e) {
-                return refuse(
-                    format!("`{path}` may not be taken — an element is not a place a take reaches"),
-                    line,
-                );
-            }
-            return refuse(
-                "`consume` here has nothing to take — the value is already owned, so \
-                 there is no place to leave a hole in"
-                    .to_string(),
-                line,
-            );
-        }
+        take_names_a_place(e, line, false)?;
+        self.consume_names_a_borrow(e, line)?;
         self.take_place(e, out)
+    }
+
+    /// RFC-0125 §3 M3, row 11: a prefix `consume` of a BORROW hands somebody
+    /// else's buffer away. The caller owns a `read` or `modify` parameter
+    /// (RFC-0089 rule 2) and the frame that made a capture owns it
+    /// (RFC-0037), so neither may be emptied here. Stated where the keyword
+    /// is, as rows 08 and 09 above are: the write-back of RFC-0082's place
+    /// desugar (`s.dense.push(i)`) reaches [`Builder::take_place`] with no
+    /// `consume` in the program, and it changes no owner.
+    ///
+    /// The refusal names the ROOT, as `movecheck::check_take` names it, and
+    /// the borrow flag carries the heap gate the checker asks for: a record
+    /// of `Int64`s has no buffer to hand away.
+    fn consume_names_a_borrow(&self, e: &'a Expr, line: usize) -> Result<(), Gap> {
+        let Some((root, _)) = vyrn_frontend::movecheck::place_path(e) else {
+            return Ok(());
+        };
+        let Some(n) = self.lookup(&root) else {
+            return Ok(());
+        };
+        let info = &self.body.names[n as usize];
+        match &info.borrow_kind {
+            Some(k) if info.borrow => refuse(
+                format!("`{root}` may not be consumed — it is {}", k.what(&root)),
+                line,
+            ),
+            _ => Ok(()),
+        }
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
@@ -2583,8 +2653,14 @@ impl<'a> Builder<'a> {
                 for (i, arm) in arms.iter().enumerate() {
                     let mut body = Vec::new();
                     let mark = self.scope.len();
-                    let binds =
-                        self.bind_pattern(&arm.pattern, &sty, consuming, *line, &mut body)?;
+                    let binds = self.bind_pattern(
+                        &arm.pattern,
+                        &sty,
+                        consuming,
+                        *line,
+                        borrow_root(&sv, consuming),
+                        &mut body,
+                    )?;
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
@@ -2654,6 +2730,7 @@ impl<'a> Builder<'a> {
                     &ity,
                     consuming,
                     *line,
+                    borrow_root(&sv, consuming),
                     &mut fail,
                 )?;
                 self.close_streams(&mut fail);
@@ -2672,6 +2749,7 @@ impl<'a> Builder<'a> {
                     &ity,
                     consuming,
                     *line,
+                    borrow_root(&sv, consuming),
                     &mut ok,
                 )?;
                 ok.push(St::Store {

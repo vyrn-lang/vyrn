@@ -288,7 +288,7 @@ fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
         let i = &body.names[*p as usize];
         // The ownership question, not the release one: a `consume` parameter
         // of a record of `Int64`s is this body's (RFC-0089 rule 1).
-        if i.releases || !i.heap {
+        if i.releases || !i.borrow {
             st.own[*p as usize] = Own::Held;
         }
     }
@@ -311,10 +311,12 @@ fn all_names(body: &Body) -> Vec<Name> {
 impl<'b> Kernel<'b> {
     /// Whether the body OWNS what `n` holds — RFC-0089 rule 1, which is a
     /// rule about every value. A borrow is not owned; everything else the
-    /// body binds is, whatever its type owns.
+    /// body binds is, whatever its type owns: a value that owns no heap, and
+    /// a name holding static data (`let s = "a"`), which owes no release and
+    /// is still this frame's to hand over once.
     fn owned(&self, n: Name) -> bool {
         let i = &self.body.names[n as usize];
-        i.releases || !i.heap
+        i.releases || !i.borrow
     }
 
     /// Whether a held `n` owes a RELEASE at an exit — RFC-0114, which is a

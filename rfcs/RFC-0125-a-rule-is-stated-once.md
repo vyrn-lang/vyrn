@@ -3166,6 +3166,100 @@ no counterexample where a counterexample would be — which is what the sweep
 over the checker's own suite is for, and what the next deletion slice should
 run first.
 
+**The two-questions slice (2026-09-04): the seven counterexamples all refuse,
+and one program of the checker's own suite is left over.** The slice before
+found that the linear judgment judges only what it has a release to place, so
+half the language was outside it. This one separates the two questions the
+judgment was asking as one.
+
+**The two questions.** Whether the body OWNS what a name holds is RFC-0089
+rule 1, and that rule reaches every value: a `consume` parameter takes
+ownership of a record of `Int64`s exactly as it takes ownership of a `String`.
+Whether a held name owes a RELEASE is RFC-0114, and that question is about a
+heap buffer: a value that owns no heap owes nothing at any exit.
+`NameInfo.owned` is renamed `releases` and keeps the second meaning;
+`Kernel::owned` answers the first and `Kernel::releases` the second. The
+judgment now tracks the ownership state of every owned name and places a
+release only for the names that owe one. A borrow is the one thing that is
+neither: somebody else owns it, and the rules for it are unchanged.
+
+**What a take IS follows from the split.** A value that owes a release moves
+at every take, because the buffer has one owner: a rebinding, a literal part,
+a store, a `return`, a `consume` argument. A value that owes none moves only
+where a DECLARED `consume` parameter takes it. That is the author's word and
+not this pass's: a builtin sink (`xs.push(i)`) and a variant constructor
+(`Some(i)`) STORE their argument, and storing a value that owns no heap copies
+it, so the caller keeps its own. `movecheck` asks `owns_heap` at a sink and
+asks nothing at a declared parameter, and `Rhs::Call` now carries which kind
+of callee it is (`declared`). Measured against the checker, not assumed: `let
+b = a`, `Some(i)`, `xs.push(i)` and `Wrap { t: x }` over a heapless value are
+all accepted by both passes, and `take(consume x)` is refused by both.
+
+**All seven counterexamples now refuse, in the checker's words at the
+checker's line.** The pin test compares the two texts whole — the head, the
+sentence and its second line — because rule 4 of the deletion is that the
+refusal must be the same refusal.
+
+| census row | the counterexample | the cause | what closed it |
+|---|---|---|---|
+| 04 | a hole in `Person = { name: Int64, age: Int64 }`, then the whole | heap | the ownership state is tracked for a name that owes no release, holes included |
+| 06, 07 | `take(x)` then `x.id`, over `Token = { id: Int64 }` | heap | the same, and a read of a sub-place is now worded with the path it spells |
+| 09 | `for x in consume make()` — the LOOP form of the take | spelling | `core::take_names_a_place`, which both forms of the keyword now call |
+| 11 | `o.push(consume d.a)` where `d: read Bag` | spelling | `core::consume_names_a_borrow`, at the keyword |
+| 12 | a heapless module value to a `consume` parameter | heap | a read of module state is an alias of it whatever it holds |
+| 13 | `match o { Some(v) => take(v) }` where `o: read Option<..>` | spelling | a binder over a borrow inherits the borrow's kind (`bind_pattern`) |
+| 25 | `while i < 3 { take(x) }`, over `Token = { id: Int64 }` | heap | the back-edge rule reaches a name that owes no release |
+
+Two of the three spelling rows are stated in the CORE rather than in the
+kernel, beside rows 08 and 09's prefix form, and for the same reason: they are
+rules about the KEYWORD. `s.dense.push(i)` reaches the same core operation as
+`consume d.a` — RFC-0082's place desugar takes the receiver out and stores it
+back — with no `consume` in the program and no owner changed, so a kernel that
+refused the operation refused seventy-nine corpus programs. The keyword is
+where the rule is true, and that is where it is written.
+
+**The re-measured licence: twenty of ninety-three, and nineteen of the twenty
+are not this judgment's.** The sweep of the previous slice was repeated —
+`movecheck::tests::run` instrumented to dump every program it checks, the
+suite run once, the 93 refused programs each put through `VYRN_NO_MOVECHECK=1
+vyrn check`. Thirty were accepted when the sweep was written and twenty-three
+at this slice's parent; twenty are now.
+
+- **sixteen** are `mod linear` (a `Stream` never disposed, or disposed twice),
+  **two** are `check_exclusive` and **one** is `check_capture`. Those are
+  three of the four rules the licence already keeps, and none of them is the
+  linear judgment.
+- **one** is the whole remainder: `test "consumes twice" { let x = T { id: 1 }
+  let a = use_up(x) let b = use_up(x) .. }`. The kernel says nothing because
+  the core lowers FUNCTION instances and a `test` block is not one, so the
+  body is never built and never judged. That is a gap in what the core
+  reaches, not in what the judgment says, and it is the same program the
+  judgment refuses when it is written as a function.
+
+So the linear judgment now refuses every program the checker's own suite
+refuses for a linear reason, and the seven pinned counterexamples are pinned
+the other way round. The corpus tally stays at 0 and the whole-repo sweep over
+476 `.vyrn` files is byte-identical before and after: the same ninety files
+refused, with the same first line. No emitted byte moved either — the wasm
+manifest gate's own hashes for all 172 examples are the same before and after
+this slice — which is what a judgment should do: it decides whether a program
+compiles, not what it compiles to. (The committed manifest is behind the
+branch and was already so at this slice's parent, so the gate is red on both
+trees for a reason that is not this slice's; the comparison above is between
+the two runs' emitted columns.)
+
+**What the rules that stayed still wait on.** The heap and spelling reasons
+are both spent; what is left is the wording, and it is unchanged: every row
+the census marks `its own words` waits on a sentence a reader would lose, row
+05 waits on a menu that is not a function of the message, and row 26 waits on
+a second diagnostic. Rows 08, 09, 11 and 13 are now given by the core and rows
+04, 06, 07, 12 and 25 by the kernel, so nine rows changed column. Nothing was
+deleted from `movecheck.rs` in this slice. Its structural census moved by one
+number only: 1,045 / 723 / 2,360 / 81 / 3,656 / **2,187** over 10,052 lines,
+the eighteen added lines being the licence instrument in `mod tests` —
+`VYRN_DUMP_MOVECHECK=<dir>` writes every program the suite checks, so the
+sweep above is a command and not a one-off edit.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
