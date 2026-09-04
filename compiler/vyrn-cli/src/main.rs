@@ -3077,9 +3077,40 @@ fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics
     let opts = load_options(root_key);
     let resolver = make_resolver(root_key);
     match vyrn_frontend::load_warned(text, root_key, &opts, &resolver).0 {
-        Ok(_) => Vec::new(),
+        // A program the checker accepts may still be refused by the kernel,
+        // and every rule the deletion track moves is refused there and
+        // nowhere else (RFC-0125 §3 M3). Without this the tool answered `0
+        // fix(es) applied` for a program it used to name — and the kernel
+        // prints the same `fix:` menu, so the ways out are readable here too.
+        Ok(program) => kernel_diagnostics(&program),
         Err(d) => d,
     }
+}
+
+/// The kernel's refusals for `program`, as `movecheck`-stage diagnostics.
+///
+/// The same reading [`kernel_refuses`] prints, in the shape every other
+/// consumer of a diagnostic already takes. `file` is `None` for the root
+/// module, which is what tells `vyrn fix` an edit is its to make.
+fn kernel_diagnostics(
+    program: &vyrn_frontend::ast::Program,
+) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+    if !vyrn_lower::kernel_refuses() {
+        return Vec::new();
+    }
+    let _ = vyrn_frontend::own::analyze(program);
+    let mut refusals = vyrn_lower::take_refusals();
+    let mut seen = std::collections::HashSet::new();
+    refusals.retain(|r| seen.insert((r.file.clone(), r.line, r.message.clone())));
+    refusals
+        .into_iter()
+        .map(|r| {
+            let mut d =
+                vyrn_frontend::diagnostics::Diagnostic::error(r.line, 0, "movecheck", r.message);
+            d.file = r.file;
+            d
+        })
+        .collect()
 }
 
 /// The path a `.copy()` fix names, out of a diagnostic's menu.
