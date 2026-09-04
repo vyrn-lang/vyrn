@@ -3386,8 +3386,8 @@ recorded what that costs.
 | `float-to-int` | nothing — it answers, truncated toward zero | RFC-0002 | 3 | `interp` `native` `wasm` |
 | `where-scalar` | a scalar failing its named type's `where` predicate | RFC-0003 | 1 | `vyrn` |
 | `where-record` | a record failing its cross-field `where` predicate | RFC-0003 | 1 | `vyrn` |
-| `string-nul` | bytes holding a NUL, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
-| `string-utf8` | bytes that are not UTF-8, made into a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
+| `string-nul` | bytes holding a NUL, made into a String | RFC-0014 | 1 | `vyrn` |
+| `string-utf8` | bytes that are not UTF-8, made into a String | RFC-0014 | 1 | `vyrn` |
 | `file-nul` | a file holding a NUL, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
 | `file-utf8` | a file that is not UTF-8, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
 | `io-status` | nothing — it turns a host status into canonical Vyrn wording | RFC-0014 | 3 | `interp` `native` `vyrn` |
@@ -3396,14 +3396,15 @@ recorded what that costs.
 | `json-decode` | nothing — it accumulates `Issue`s, shape and `where` alike | RFC-0018 | 1 | `vyrn` |
 | `char-boundary` | a byte offset inside a multi-byte character | RFC-0046 | 1 | `vyrn` |
 
-**19 rows and 49 copies**, and it was 53 when this census was written. Fifteen
-rows are stated three times. Four are stated once, and they are the rows that
+**19 rows and 45 copies**, and it was 53 when this census was written. Thirteen
+rows are stated three times. Six are stated once, and they are the rows that
 went where §2.3 sends the rest: `json-decode` is `std/jsondec` plus the decoders
 `jsondec.rs` synthesizes per target type (RFC-0078 M3), `char-boundary` is nine
-lines of `std/strings`, and `where-scalar` and `where-record` are the generated
-constructor of the fourth slice below. All of them are ordinary Vyrn, so all
-three engines run the one body and the wording carries the module and the line
-it was stated on —
+lines of `std/strings`, `where-scalar` and `where-record` are the generated
+constructor of the fourth slice below, and `string-nul` and `string-utf8` are
+`std/text`'s `stringFault`, the fifth slice's. All of them are ordinary Vyrn, so
+all three engines run the one body and the wording carries the module and the
+line it was stated on —
 `substring: byte offset 4 is inside a multi-byte UTF-8 character
 (std/strings.vyrn:94)`. That is what a row looks like after it moves.
 
@@ -4127,6 +4128,112 @@ is worth stating: the `where` rows are the only ones whose rule is written in
 Vyrn by the USER. Every other row's rule is the compiler's, so moving it means
 writing it in Vyrn, and PLAN-0125-runtime §5.2 is why the interpreter cannot
 then call it. Finding 3 stands for the remaining fifteen rows.
+
+#### The third judgment's fifth slice (2026-09-04)
+
+The fourth slice built a constructor for the two rows whose rule the USER writes.
+This one takes the two rows whose rule the COMPILER writes and that the previous
+four slices kept naming as blocked: `string-nul` and `string-utf8`. They were
+blocked for one stated reason — "`stringFromBytes` must BUILD the String, which
+needs the `std/mem` primitives" — and the reason is about the build, not about
+the check. So this slice separates them.
+
+**Where the check lives: `std/text`, as an ordinary exported function.** The
+CHECK over the bytes is a pure predicate: it reads an `Array<UInt8>` and answers
+a number, allocating nothing and touching no primitive. So it takes the
+mechanism the census named — a Vyrn function the interpreter interprets and both
+emitters compile — and it takes it as an entry in `RT_MODULES` rather than as a
+generated function, because unlike a `where` clause its body is fixed and
+belongs to the compiler:
+
+```text
+fn stringFault(b: Array<UInt8>) -> Int64   0 fine, 1 a NUL byte, 2 not UTF-8
+```
+
+`std/text` rather than a new module, because the UTF-8 ranges were already
+written there. `decodeUtf8` has decided the same question since RFC-0078 M4b by
+first-byte dispatch, and that file's own doc called the arrangement "not
+duplicated, inverted": one implementation that keeps the codepoints, one per
+engine that throws them away. Both now call `utf8Width`, a new nine-branch
+function that is the single statement of what UTF-8 admits. Four statements of
+those ranges became one: Rust's `String::from_utf8` in the interpreter, Björn
+Höhrmann's DFA in `@__vyrn_utf8valid`, the same DFA again in `std/runtime`'s
+`utf8Valid`, and `decodeUtf8`'s own dispatch.
+
+**What each engine lost.** The interpreter's arm scanned for a NUL and then
+called `String::from_utf8`; it calls `stringFault` and keeps `from_utf8` only to
+BUILD, where it cannot fail and says so. The textual emitter decided the NUL rule
+by `@__vyrn_bytes_dup` answering null and the encoding rule by a call to
+`@__vyrn_utf8valid`; it calls `stringFault`, switches on the number and copies
+the bytes with a new `@__vyrn_bytes_copy`, which is `bytes_dup` without the scan
+— `bytes_dup` keeps the scan for `@tallyBytes`, whose rule is RFC-0116's and not
+this row's. `std/runtime`'s `strFromBytes` walked the bytes for a NUL and then
+walked the DFA; it takes the answer as an argument where the DFA table used to
+go, and its body is two comparisons, a `strNew` and a `copy`. The direct wasm
+backend was never a carrier — it called `strFromBytes` — and now what it calls
+is not one either.
+
+**The census.** `string-nul` and `string-utf8` each fall from three carriers to
+one, `vyrn`, and the table says **19 rows and 45 copies**. Six of the nineteen
+rows are stated once now. `tests/boundaries.rs` derives that sentence from its
+own table, so the count is still a measurement; all 19 rows answer the same
+bytes under `vyrn run`, `vyrn run --engine wasm` and a native binary, as they
+did before.
+
+**`file-nul` and `file-utf8` did not follow, and the reason is not the rule.**
+Their predicate is the same predicate. What differs is the value it would be
+asked about: in every engine a file read holds the raw buffer it just slurped —
+a `Vec<u8>`, a `char*`, an address in linear memory — and never an
+`Array<UInt8>`. Calling `stringFault` would mean materializing one, which is a
+copy of every file at every read, and in the interpreter a `Val` per byte. The
+wasm route is worse than that: its check is inside `std/runtime`'s
+`readFileFrom`, where an `Array<UInt8>` cannot be built at all without the
+primitives the fence exists to keep out. So the three DFA copies stay for the
+file rows, and they go where finding 3 and PLAN-0125-runtime §5.2 already send
+them — M4 step 3 for the native copy, M5 for the interpreter's. `io-status` is
+unchanged for finding 7's reason.
+
+**No engine disagreed.** The separation was the place a difference would have
+shown, so it was looked for rather than assumed. `tests/text.rs`'s malformed
+corpus — every lead byte against ten continuation bytes at three widths, the
+surrogate range, the overlong forms, every truncation of a valid sequence, the
+five-byte forms — is now judged by Rust's `std::str::from_utf8` instead of by
+the other Vyrn function, and every buffer agrees. That change was forced rather
+than optional: the old test compared `decodeUtf8` with `stringFromBytes`, and
+since both read `utf8Width` an agreement between them would prove nothing.
+
+The other half of the question is whether the check that MOVED agrees with the
+DFA that stayed, and the file rows make that answerable: `readFile` still walks
+the DFA in all three engines. A throwaway probe wrote each of 2,253 buffers —
+the same corpus, minus the NUL cases the file rows refuse for another reason —
+with `writeFileBytes`, read it back with `readFile`, and compared the verdict
+with `stringFromBytes`'s. Zero mismatches under `vyrn run`, `vyrn run --engine
+wasm` and a native binary. Nothing is committed for it because there is nothing
+to fix; the corpus that would find a difference is `tests/text.rs`'s and it runs
+on every build.
+
+**The cost, in module bytes.** A program that makes a `String` from bytes goes
+from 4,576 to 5,355 bytes, and a program that only formats an integer goes from
+5,072 to 5,851 — the same 779 bytes, +17.0 and +15.4 per cent. The second
+program pays because `std/runtime`'s `intStr` makes its digits into a `String`
+with `stringFromBytes`, which is the ONLY route from bytes to a `String` a Vyrn
+body has. That is also why `std/text` is `always` in `RT_MODULES` beside the
+runtime: the mention scan reads the modules loaded BEFORE the injection loop,
+and the runtime enters inside it, so no scan could see that mention. What the
+779 bytes buy is two Vyrn functions where there was one runtime loop and one DFA
+walk; the DFA and its 364-byte table stay, reached now only by the file readers.
+`rfcs/census/wasm-sha256.tsv` is NOT regenerated here, for the second slice's
+reason: a hash written in the commit that moved the bytes records nothing.
+`VYRN_WASM_MANIFEST=check` therefore fails on 169 of the 172 examples, where the
+fourth slice failed on 36: the three that are unchanged neither format an
+integer nor make a `String` from bytes, so the sweep leaves them exactly the
+module they had.
+
+**What the remaining constructor rows wait on.** `int-narrowing` and
+`float-to-int` are where the fourth slice left them: they refuse nothing, so a
+constructor has nothing to take, and their decisions are already
+`vyrn_frontend::validate`'s. The four `String` and I/O rows this slice did not
+take are M4's and M5's, not M6's.
 
 ### What each milestone is worth on its own
 

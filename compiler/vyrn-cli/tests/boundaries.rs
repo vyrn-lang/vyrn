@@ -138,16 +138,24 @@ pub const ROWS: &[Row] = &[
         carriers: &[Carrier::Vyrn],
     },
     // ---- what a String may hold ----------------------------------------
+    // One carrier each since RFC-0125 §3 M6's fifth slice of the third judgment:
+    // the CHECK over the bytes is `std/text`'s `stringFault`, one ordinary Vyrn
+    // function all three engines call, and each engine keeps only the BUILD,
+    // which allocates and therefore needs the primitives `std/mem` fences.
     Row {
         rule: "string-nul",
         rfc: "RFC-0014",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Vyrn],
+        carriers: &[Carrier::Vyrn],
     },
     Row {
         rule: "string-utf8",
         rfc: "RFC-0014",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Vyrn],
+        carriers: &[Carrier::Vyrn],
     },
+    // The file rows did NOT follow, and the reason is the argument rather than
+    // the rule: their bytes are never an `Array<UInt8>` in any engine — each
+    // holds the raw buffer it just slurped — so calling `stringFault` would
+    // materialize a copy of every file read.
     // ---- the I/O boundary ----------------------------------------------
     Row {
         rule: "file-nul",

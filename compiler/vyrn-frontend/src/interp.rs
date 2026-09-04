@@ -6717,26 +6717,47 @@ impl<'a> Interp<'a> {
                                     }
                                 }
                             }
-                            // Same NUL-then-UTF-8 ordering as `readFile`.
-                            if bytes.contains(&0) {
+                            // RFC-0125 §3 M6 (the third judgment's fifth slice):
+                            // the CHECK is `std/text`'s `stringFault`, the one
+                            // statement all three engines run, and this arm keeps
+                            // only the BUILD. The order is the check's, not this
+                            // engine's: 1 is a NUL, which RFC-0014 refuses before
+                            // it looks at the encoding, and 2 is bad UTF-8.
+                            let f = crate::loader::STRING_FAULT;
+                            if !self.funcs.contains_key(f) {
+                                return Err(format!(
+                                    "`stringFromBytes` is checked in Vyrn (`{f}`) and its module \
+                                     is not in the link — a std root is needed to call it"
+                                )
+                                .into());
+                            }
+                            let fault = match self.call(f, &vals[0..1])? {
+                                Val::Int(n) => n,
+                                Val::IntN { v, .. } => v,
+                                other => {
+                                    return Err(format!("`{f}` answered {other:?}").into());
+                                }
+                            };
+                            let msg = match fault {
+                                1 => Some("bnul"),
+                                2 => Some("butf8"),
+                                _ => None,
+                            };
+                            if let Some(m) = msg {
                                 return Ok(Val::Result(
                                     false,
                                     Box::new(Val::Str(std::rc::Rc::new(
-                                        crate::trap::io("bnul").to_string(),
+                                        crate::trap::io(m).to_string(),
                                     ))),
                                 ));
                             }
-                            match String::from_utf8(bytes) {
-                                Ok(s) => {
-                                    Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s)))))
-                                }
-                                Err(_) => Ok(Val::Result(
-                                    false,
-                                    Box::new(Val::Str(std::rc::Rc::new(
-                                        crate::trap::io("butf8").to_string(),
-                                    ))),
-                                )),
-                            }
+                            // Not a second verdict: `stringFault` has already
+                            // answered, so this cannot fail. Rust's `String` needs
+                            // UTF-8 to EXIST, which is the build's requirement and
+                            // not the language's rule.
+                            let s = String::from_utf8(bytes)
+                                .expect("`stringFault` answered 0 for these bytes");
+                            Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s)))))
                         }
                         other => Err(format!("stringFromBytes of non-Array {other:?}").into()),
                     },
@@ -9261,39 +9282,23 @@ mod tests {
         let _ = std::fs::remove_file(&nul);
     }
 
+    /// RFC-0125 §3 M6 (the third judgment's fifth slice): `stringFromBytes` is
+    /// checked by `std/text`'s `stringFault`, so a program built with no std root
+    /// cannot make a `String` from bytes and says which module is missing.
+    ///
+    /// This replaced three tests that ran the builtin here — the RFC-0014 M2
+    /// roundtrip law and the two refusals. They needed the module the interpreter
+    /// now calls, so their answers are pinned where a std root exists:
+    /// `tests/boundaries/string-nul.vyrn` and `string-utf8.vyrn` for the two
+    /// wordings under all three engines, and `tests/text.rs` for the roundtrip
+    /// over the whole codepoint corpus.
     #[test]
-    fn string_bytes_roundtrip_is_pinned() {
-        // RFC-0014 M2's pinned law: stringFromBytes(s.bytes()) == Ok(s).
-        let src = "fn main() -> Int64 { \
-                       let s = \"héllo ☕ wörld\" \
-                       let back = match stringFromBytes(bytes(s)) { \
-                           Ok(t) => t, \
-                           Err(e) => e, \
-                       } \
-                       if back == s { return 1 } \
-                       return 0 }";
-        assert_eq!(run(src).unwrap(), 1);
-    }
-
-    #[test]
-    fn string_from_bytes_rejects_invalid_utf8() {
-        // 0xFF is never valid UTF-8. Build it via an Array<UInt8> literal.
-        let src = "fn main() -> Int64 { \
-                       let b: Array<UInt8> = [104, 255] \
-                       let msg = match stringFromBytes(b) { Ok(s) => s, Err(e) => e } \
-                       if msg == \"bytes are not valid UTF-8\" { return 1 } \
-                       return 0 }";
-        assert_eq!(run(src).unwrap(), 1);
-    }
-
-    #[test]
-    fn string_from_bytes_rejects_nul() {
-        let src = "fn main() -> Int64 { \
-                       let b: Array<UInt8> = [104, 0, 105] \
-                       let msg = match stringFromBytes(b) { Ok(s) => s, Err(e) => e } \
-                       if msg == \"bytes contain a NUL byte\" { return 1 } \
-                       return 0 }";
-        assert_eq!(run(src).unwrap(), 1);
+    fn string_from_bytes_names_the_module_its_check_lives_in() {
+        let src = "fn main() -> Int64 { let b: Array<UInt8> = [104, 105] \
+                   return match stringFromBytes(b) { Ok(s) => 1, Err(e) => 0 } }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains(crate::loader::STRING_FAULT), "{e}");
+        assert!(e.contains("a std root is needed"), "{e}");
     }
 
     #[test]

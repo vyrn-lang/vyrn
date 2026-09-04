@@ -636,32 +636,31 @@ export fn strAppend(own: Int32, p: Int32, v: Int32) -> Int32 {
     return q
 }
 
-/// `str_from_bytes`: RFC-0014's `stringFromBytes`. The `len` bytes at `data`
-/// copied into a fresh String, or one of two canonical messages parity
-/// compares: an embedded NUL is refused BEFORE the UTF-8 check (a String is
-/// NUL-terminated, so it could not carry one), and the DFA at `table` decides
-/// the rest. The messages are `bnul` and `butf8`, interned by the emitter from
-/// `io_message`, so the wording stays one table; an `Err` is that address, not
-/// a heap copy, and nothing ever frees it. The buffer built for the bytes has
-/// no owner left on either failure, so both free it before they leave. The
-/// payloads are addresses as `Int64`, which is the `Result<String, String>`
-/// shape the caller reads (tag, one word, zero).
-export fn strFromBytes(data: Int32, len: Int32, table: Int32, bnul: Int32, butf8: Int32) -> Result<Int64, Int64> {
-    let buf = strNew(len, len)
-    let mut i: Int32 = 0
-    while i < len {
-        let c = load8(data + i)
-        if c == 0 {
-            free(buf - 8)
-            return Err(Int64(UInt32(bnul)))
-        }
-        store8(buf + i, c)
-        i = i + 1
+/// `str_from_bytes`: the BUILD half of RFC-0014's `stringFromBytes`. The `len`
+/// bytes at `data` copied into a fresh String, or one of two canonical messages
+/// parity compares. The messages are `bnul` and `butf8`, interned by the emitter
+/// from `io_message`, so the wording stays one table; an `Err` is that address,
+/// not a heap copy, and nothing ever frees it. The payloads are addresses as
+/// `Int64`, which is the `Result<String, String>` shape the caller reads (tag,
+/// one word, zero).
+///
+/// **It decides nothing.** RFC-0125 §3 M6 (the third judgment's fifth slice)
+/// made the CHECK one Vyrn function every engine calls — `std/text`'s
+/// `stringFault`, which reads the bytes and answers 0, 1 for an embedded NUL or
+/// 2 for bytes that are not UTF-8. The emitter runs it before this call and
+/// hands the answer in as `fault`, so the NUL scan and the DFA walk that stood
+/// here are gone and no buffer is built to be freed on a failure. `utf8Valid`
+/// stays for the FILE readers below, whose bytes are a slurped buffer and never
+/// an `Array<UInt8>`.
+export fn strFromBytes(data: Int32, len: Int32, fault: Int32, bnul: Int32, butf8: Int32) -> Result<Int64, Int64> {
+    if fault == 1 {
+        return Err(Int64(UInt32(bnul)))
     }
-    if !utf8Valid(buf, len, table) {
-        free(buf - 8)
+    if fault == 2 {
         return Err(Int64(UInt32(butf8)))
     }
+    let buf = strNew(len, len)
+    copy(buf, data, len)
     return Ok(Int64(UInt32(buf)))
 }
 
