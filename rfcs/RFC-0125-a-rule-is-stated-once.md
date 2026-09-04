@@ -2861,6 +2861,58 @@ says so.** It is not a wording gap and not a new rule; it is the same rule
 asked one stage later, and it belongs in the record because the next generic
 accessor a person writes will meet it.
 
+**The programs tests write (2026-09-04): four more, and the same finding
+again.** The twelfth was not the last. `fallible.rs` and `limits.rs` write four
+more programs to a scratch directory, and CI went red on all four platforms at
+once because a test binary is the only reader they have. Two shapes, and the
+RFCs settle both the same way — the program is wrong, and nothing in the
+compiler moved.
+
+| test | what it did | the rule |
+|---|---|---|
+| `fallible.rs` `a_failing_variant_propagates_with_its_payload_intact` | `fn pass(h: Http) -> Http { let b = h? .. }` | rule 3: `?` RETURNS the operand on the failing path, and `h` is a `read` parameter the caller still owns |
+| `fallible.rs` `a_generic_impl_serves_every_payload_type` | `fn twice(s: Slot<Int64>)` and `fn shout(s: Slot<String>)`, both `let v = s?` | the same, at both payload types |
+| `limits.rs` `polymorphic_recursion_is_refused_by_check_and_by_the_backends` | `let xs: Array<T> = [x]` and `P { a: x, b: x }` | rule 2: a `read` parameter stored into a literal |
+| `limits.rs` `an_ordinary_generic_still_compiles` | `return [x, x]` | rule 2: the array would hold the caller's buffer twice |
+
+**Why `?` is not the defect, which is the question worth the paragraph.**
+RFC-0080 says `?` propagates by copying the whole sum "byte for byte", and that
+is a `memcpy` of the AGGREGATE — the tag and the payload word. It is not a deep
+copy and was never meant to be one: `gen_try`'s own comment says the aggregate
+"travels on, box and all". That is sound exactly when the frame owns the
+operand, which is why `examples/fallible.vyrn` writes `fetch(code)?` over a
+temporary. Over a `read` parameter the caller owns the box too, and RFC-0089
+rule 3 is the sentence for it — "no borrowed returns", with `consume s` or
+`s.copy()` the two fixes. The kernel is the first pass to say so about `?`; the
+checker never did. The programs take `.copy()`, the corpus's `?` lowering is
+byte-identical, and the wasm manifest does not move.
+
+The nominal `?` reaches the same shape and the kernel does not refuse it: its
+failing arm returns a payload BINDER rather than the scrutinee, and a binder
+carries no `borrow_kind`. Recorded, not fixed here — it is the kernel's
+judgment, not the core's lowering, and `?` on a `consume` parameter is the
+other half of the same gap: the plan places a release of the scrutinee at the
+`try` exit that the propagating `return` then walks past, so `s?` under
+`consume s` is refused as "used after it was released". Neither is what CI was
+red about.
+
+**The hole is closed with the same pair of runs.** `tests/testsweep.rs` is
+the by-default sweep over the other corpus: it reads every
+`compiler/vyrn-cli/tests/*.rs`, lifts the Vyrn-looking string literals out —
+Rust escapes undone, a `format!`'s doubled braces halved, the file's own
+`const` preludes put back where their placeholders were — writes each to a
+scratch file, and runs `vyrn check` twice, once with the kernel and once with
+`VYRN_NO_KERNEL=1`. A program only the first refuses is the report. That pair
+is the whole filter, and it needs no list of exceptions: a fragment, a
+half-substituted template and a program written to BE refused all answer the
+same way twice. 169 lifted literals across 71 test sources are programs the
+compiler accepts; 0 are refused only by the kernel. Put the four defects back
+and it names three of them. The fourth is `limits.rs`'s monomorphization pair,
+which the limit refuses with the kernel off as well, so no pair of runs
+disagrees — that one is caught by its own assertion, which reads the message
+and does not find the needle. Ignored, like the other corpus walks:
+`cargo test -p vyrn-cli --test testsweep -- --ignored`.
+
 **The licence the next deletion slice needs.** For every row of the refusals
 census whose kernel column says the kernel gives it — `the same` or `its own
 words` — `VYRN_NO_MOVECHECK=1 vyrn check <program>` now exits non-zero with

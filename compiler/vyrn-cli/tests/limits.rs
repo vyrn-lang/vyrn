@@ -209,14 +209,21 @@ fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
 ///
 /// `check` is asserted alongside `emit-ir`, because the defect was as much that
 /// `check` did not predict the build as that the build never returned.
+///
+/// Both programs write `.copy()` where a `read` parameter reaches a literal,
+/// which is RFC-0089 rule 2 and not a concession to the limit: `mk` would
+/// otherwise give one buffer two owners. `examples/polyrecursion.vyrn` is the
+/// same program with the same fix and the comment that names the rule; these
+/// two were its stale copies (RFC-0125 §3 M3, the
+/// by-default sweep, the programs tests write).
 #[test]
 fn polymorphic_recursion_is_refused_by_check_and_by_the_backends() {
     let spine =
         "fn f<T>(x: T, n: Int64) -> Int64 {\n    if n <= 0 {\n        return 0\n    }\n    \
-                 let xs: Array<T> = [x]\n    return f(xs, n - 1)\n}\n\n\
+                 let xs: Array<T> = [x.copy()]\n    return f(xs, n - 1)\n}\n\n\
                  fn main() -> Int64 {\n    print(\"\\{f(1, 3)}\")\n    return 0\n}\n";
     let record = "type P<T> = { a: T, b: T }\n\n\
-                  fn mk<T>(x: T) -> P<T> {\n    return P { a: x, b: x }\n}\n\n\
+                  fn mk<T>(x: T) -> P<T> {\n    return P { a: x.copy(), b: x.copy() }\n}\n\n\
                   fn f<T>(x: T, n: Int64) -> Int64 {\n    if n <= 0 {\n        return 0\n    }\n    \
                   return f(mk(x), n - 1)\n}\n\n\
                   fn main() -> Int64 {\n    print(\"\\{f(1, 3)}\")\n    return 0\n}\n";
@@ -251,9 +258,13 @@ fn polymorphic_recursion_is_refused_by_check_and_by_the_backends() {
 /// The control for the other direction: an ordinary generic, instantiated the
 /// ordinary way, still compiles. A limit that refuses everything would pass the
 /// test above and be worthless.
+///
+/// `[x.copy(), x.copy()]` for rule 2 again, and here the array would hold the
+/// caller's buffer twice over (RFC-0125 §3 M3, the
+/// by-default sweep, the programs tests write).
 #[test]
 fn an_ordinary_generic_still_compiles() {
-    let src = "fn twice<T>(x: T) -> Array<T> {\n    return [x, x]\n}\n\n\
+    let src = "fn twice<T>(x: T) -> Array<T> {\n    return [x.copy(), x.copy()]\n}\n\n\
                fn main() -> Int64 {\n    let a = twice(1)\n    let b = twice(\"s\")\n    \
                print(\"\\{a.length}\\{b.length}\")\n    return 0\n}\n";
     let out = run("run", src, "genok");
