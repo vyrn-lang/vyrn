@@ -1599,7 +1599,7 @@ impl<'a> Builder<'a> {
                 if self.owns(&ty) {
                     let t = self.temp(ty, e.line());
                     self.bind(t, rhs, out);
-                    if self.own.plan.discarded_result(sid) {
+                    if self.discards(e) {
                         out.push(St::Drop(t, Site::Node(sid)));
                     }
                 } else {
@@ -1616,6 +1616,54 @@ impl<'a> Builder<'a> {
             Stmt::Region { body, .. } => self.block(body, out)?,
         }
         Ok(())
+    }
+
+    /// Round twenty-eight's rule, stated by the core rather than read off the
+    /// plan (RFC-0125 §3 M3, the derivation slice): a statement-position CALL
+    /// whose owned heap result nothing binds is this frame's to release right
+    /// after the call.
+    ///
+    /// The caller has already asked whether the type owns heap, which is the
+    /// first half of the rule. The screens here are the second, and each is a
+    /// value that is not this frame's: a lending call hands back a place
+    /// inside its argument, a variant constructor builds a value that
+    /// outlives the call in what it built, a `panic` returns to nobody, and
+    /// an `@`-spelled desugar is freed by the site that reads it (RFC-0096
+    /// M3). `own.rs` decided the same rule over a declared-types reading of
+    /// the program; the core asks the checker's own type, which is why this
+    /// is a second opinion and not a filter.
+    fn discards(&self, e: &Expr) -> bool {
+        let Expr::Call { name, .. } = e else {
+            return false;
+        };
+        !vyrn_frontend::ast::is_panic(name)
+            && !name.starts_with('@')
+            && !self.lends_name(name)
+            && !self.hands_back(name)
+            && !self.constructs(name)
+    }
+
+    /// Whether a seeded row's result IS one of its arguments: a return type
+    /// that is the same bare type parameter as a parameter's.
+    ///
+    /// `blackBox` is the row, written so an optimizer cannot see through it
+    /// (RFC-0055). No body spelling can say this — `prelude::lends` answers
+    /// for a row whose body yields a place INSIDE a parameter — so it is read
+    /// off the signature, exactly as `movecheck::arg_verdict` reads it. A
+    /// user function cannot reach here: rule 3 refuses returning a borrow.
+    fn hands_back(&self, name: &str) -> bool {
+        let Some(f) = prelude::signature(name) else {
+            return false;
+        };
+        matches!(&f.ret, Type::Param(r)
+            if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
+    }
+
+    /// Whether `name` constructs a sum value out of its arguments: a user
+    /// enum's variant, or one of the five the language declares itself
+    /// (`declared::Declared`'s own seed).
+    fn constructs(&self, name: &str) -> bool {
+        matches!(name, "Some" | "Ok" | "Err" | "Success" | "Failure") || self.is_variant(name)
     }
 
     /// What a field or element store displaces. The plan decides whether the
