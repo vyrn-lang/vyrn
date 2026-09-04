@@ -1536,3 +1536,249 @@ fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
     assert_eq!(plan(&Type::Str, &Type::Int), R::Refuse);
     assert_eq!(plan(&Type::Str, &Type::Param("T".into())), R::Refuse);
 }
+
+// ---------------------------------------------------------------------------
+// The coercion census — RFC-0125 §3 M6, the coercion ladder.
+//
+// §1 measures the ladder at "505 lines of one decision, and the two compiled
+// backends order its rungs differently". §2.7 puts it on the deletion list.
+// This is the list it is deleted from: one row per site that DECIDES something
+// about a coercion, the engine that carries it, and its code lines.
+//
+// The metric is CODE lines — non-blank and not a comment — over the site's whole
+// span, doc comment included. That is §1.1's own column, and it is what makes
+// §1's 505 comparable: the six ladder rows measure 533 the day this census is
+// written, and the difference is the observation hook RFC-0101 §1.5's shadow
+// added after §1 was measured.
+// ---------------------------------------------------------------------------
+
+/// One site that decides something about a coercion.
+struct CoercionSite {
+    /// The file, under `compiler/`.
+    file: &'static str,
+    /// The signature line, matched on whitespace-collapsed text. It must name
+    /// exactly one line of the file.
+    at: &'static str,
+    /// The engine that carries the decision, or `shared` for one statement all
+    /// of them ask.
+    engine: &'static str,
+    /// What it decides.
+    decides: &'static str,
+    /// Whether it is the RUNG ladder — the decision §1's 505 counts. The other
+    /// rows are in the census so a later reader does not go looking for them.
+    ladder: bool,
+    /// Its code lines, as the RFC records them.
+    code: usize,
+}
+
+fn coercion_census() -> Vec<CoercionSite> {
+    let site = |file, at, engine, decides, ladder, code| CoercionSite {
+        file,
+        at,
+        engine,
+        decides,
+        ladder,
+        code,
+    };
+    vec![
+        site(
+            "vyrn-codegen/src/lib.rs",
+            "pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {",
+            "shared",
+            "which rung a pair takes",
+            true,
+            49,
+        ),
+        site(
+            "vyrn-codegen/src/lib.rs",
+            "fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {",
+            "native",
+            "the rung, and the IR for it",
+            true,
+            104,
+        ),
+        site(
+            "vyrn-codegen/src/direct.rs",
+            "fn coerce(",
+            "wasm",
+            "the rung, and the wasm for it",
+            true,
+            177,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {",
+            "interp",
+            "the scalar targets that need no walk",
+            true,
+            19,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coerce_walk(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {",
+            "interp",
+            "the rung, by target type and value shape",
+            true,
+            112,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coercion_is_noop(&self, ty: &Type, v: &Val, depth: usize) -> bool {",
+            "interp",
+            "whether the walk would change the value",
+            true,
+            86,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coercion_is_identity(&self, ty: &Type, depth: usize) -> bool {",
+            "interp",
+            "whether a target type can change any value at all",
+            true,
+            35,
+        ),
+        site(
+            "vyrn-codegen/src/lib.rs",
+            "fn coerce_flow(",
+            "native",
+            "whether RFC-0020's containment proof skips the check",
+            false,
+            15,
+        ),
+        site(
+            "vyrn-frontend/src/checker.rs",
+            "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {",
+            "checker",
+            "whether a CONSTANT fails its target's predicate at compile time",
+            false,
+            44,
+        ),
+    ]
+}
+
+/// The span a site holds — `(first, last)`, one-based and inclusive, doc comment
+/// included — and its code lines.
+fn coercion_span(s: &CoercionSite) -> (usize, usize, usize) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(s.file);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", s.file));
+    let text = text.replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().collect();
+    let norm = |l: &str| l.split_whitespace().collect::<Vec<_>>().join(" ");
+    let want = norm(s.at);
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| norm(l) == want)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the anchor `{}` names {} lines of {}; a census row's anchor must name one",
+        s.at,
+        hits.len(),
+        s.file
+    );
+    let anchor = hits[0];
+    let mut first = anchor;
+    while first > 0 {
+        let t = lines[first - 1].trim_start();
+        if t.starts_with("//") || t.starts_with("#[") {
+            first -= 1;
+        } else {
+            break;
+        }
+    }
+    let (mut depth, mut open) = (0i32, false);
+    let mut last = None;
+    for (k, l) in lines.iter().enumerate().skip(anchor) {
+        for ch in l.chars() {
+            if ch == '{' {
+                depth += 1;
+                open = true;
+            } else if ch == '}' {
+                depth -= 1;
+                if open && depth == 0 {
+                    last = Some(k);
+                    break;
+                }
+            }
+        }
+        if last.is_some() {
+            break;
+        }
+    }
+    let last = last.unwrap_or_else(|| panic!("no closing brace for `{}` in {}", s.at, s.file));
+    let code = lines[first..=last]
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with("//")
+        })
+        .count();
+    (first + 1, last + 1, code)
+}
+
+/// The census's line counts, as RFC-0125 §3 M6 records them. The prose quotes
+/// these numbers, so they are asserted rather than described: a change to a
+/// ladder moves one, and the RFC's table moves with it.
+#[test]
+fn the_coercion_census_is_what_the_rfc_records() {
+    let census = coercion_census();
+    // The ladder's CARRIERS — the engines' own statements — and, separately, the
+    // one statement they can ask. §1's 505 is the first of the two.
+    let mut ladder = 0usize;
+    for s in &census {
+        let (_, _, code) = coercion_span(s);
+        assert_eq!(
+            code, s.code,
+            "`{}` in {} is {code} code lines and the census says {}",
+            s.at, s.file, s.code
+        );
+        if s.ladder && s.engine != "shared" {
+            ladder += code;
+        }
+    }
+    assert_eq!(
+        ladder, 533,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 533"
+    );
+    // The carriers that state the rung rule THEMSELVES, in the sense the
+    // boundary census of §3 M6's fifth slice uses: an engine that ASKS another
+    // site's statement is not a carrier, and `shared` is the statement rather
+    // than an engine.
+    let carriers: std::collections::BTreeSet<&str> = census
+        .iter()
+        .filter(|s| s.ladder && s.engine != "shared")
+        .map(|s| s.engine)
+        .collect();
+    assert_eq!(
+        carriers.len(),
+        3,
+        "the rung rule has {} carriers and the census says 3: {carriers:?}",
+        carriers.len()
+    );
+}
+
+/// The table for RFC-0125 §3 M6, printed from the census above:
+/// `cargo test -p vyrn-cli --test lowered -- --ignored --nocapture
+/// the_coercion_census_as_a_table`.
+#[test]
+#[ignore]
+fn the_coercion_census_as_a_table() {
+    println!("| site | rung ladder | engine | what it decides | code |");
+    println!("|---|---|---|---|---|");
+    for s in coercion_census() {
+        let (a, b, code) = coercion_span(&s);
+        let name = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
+        println!(
+            "| `{}` {a}-{b} `{name}` | {} | {} | {} | {code} |",
+            s.file,
+            if s.ladder { "yes" } else { "no" },
+            s.engine,
+            s.decides
+        );
+    }
+}
