@@ -455,18 +455,42 @@ fn run_corpus() {
                 }
             }
         }
-        // The module-state initializer (RFC-0013), which is a body and no
-        // function of the program (RFC-0125 §3 M6, finding 14). No build
-        // emits it as an instance and no pass verdict stands beside it; it
-        // is judged here so the lambdas it holds have a frame, which is what
-        // a stored source names. A `test` or `bench` body is a body too and
-        // is NOT here: the checker checks a CLONE of it, so no type is
-        // recorded for the nodes `own` and the lowering walk.
+        // The bodies that are no function of the program (RFC-0125 §3 M6,
+        // finding 14): the module-state initializer (RFC-0013), and every
+        // `test` (RFC-0015) and `bench` (RFC-0055) body. No build emits one
+        // as an instance and no pass verdict stands beside it; they are
+        // judged here so the lambdas they hold have a frame, which is what a
+        // stored source names.
         let mut outside: Vec<vyrn_lower::core::Body> = Vec::new();
         if !program.globals.is_empty() {
             match vyrn_lower::core::build_module_state(&program, &own, &lowered.globals) {
                 Ok(b) => outside.push(b),
                 Err(g) => *gaps.entry(g.what).or_default() += 1,
+            }
+        }
+        for ob in &lowered.bodies {
+            match vyrn_lower::core::build_outside(
+                &program,
+                &own,
+                &ob.name,
+                ob.module.clone(),
+                ob.block,
+                &ob.rows,
+            ) {
+                Ok(b) => outside.push(b),
+                Err(g) => {
+                    if show_gaps.as_deref().is_some_and(|w| g.what.contains(w)) {
+                        eprintln!(
+                            "  gap: {} {}:{} {} {}",
+                            slash(path),
+                            ob.name,
+                            g.line,
+                            g.what,
+                            g.detail
+                        );
+                    }
+                    *gaps.entry(g.what).or_default() += 1;
+                }
             }
         }
         // Every frame, outermost first: the judgment's slice. `top[i]` is
@@ -494,9 +518,10 @@ fn run_corpus() {
                 refs.push(f);
             }
         }
-        // The initializer's frames. Its own body is no instance, so it lands
-        // in no `top` slot; the lambdas it holds are keyed by the body the
-        // checker records them under, which is the empty name.
+        // The frames of the bodies that are no instance: they land in no
+        // `top` slot, and the lambdas they hold are keyed by the name the
+        // checker records them under — the empty one for the module-state
+        // initializer, `test@<i>` / `bench@<i>` for a test or a bench.
         for b in &outside {
             for f in b.frames() {
                 if let Some(line) = f

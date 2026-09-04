@@ -317,6 +317,29 @@ pub struct Lowered<'a> {
     /// set stays so the next engine that walks a lambda body can say which blocks
     /// those are without a second AST walk.
     pub lambda_bodies: std::collections::HashSet<usize>,
+    /// The `test` (RFC-0015) and `bench` (RFC-0055) bodies, in declaration
+    /// order, each body's rows under the synthetic `test@<i>` / `bench@<i>`
+    /// name the checker and `own` key it by.
+    ///
+    /// Outside every instantiation, like [`Lowered::globals`], and NOT
+    /// followed into the worklist, like [`Lowered::predicates`]: a test body
+    /// is no part of an artifact, so a generic it alone calls is an
+    /// instantiation no backend emits. The rows are here because a body the
+    /// judgment cannot see is a lambda with no frame, which is the half of
+    /// RFC-0125 §3 M6's finding 14 the third slice could not close.
+    pub bodies: Vec<OutsideBody<'a>>,
+}
+
+/// One body that is no function of the program: a `test` or a `bench`.
+#[derive(Debug, Clone)]
+pub struct OutsideBody<'a> {
+    /// `test@<i>` or `bench@<i>` — the name the checker checked it under and
+    /// the key `own`'s release plan uses.
+    pub name: String,
+    pub block: &'a vyrn_frontend::ast::Block,
+    pub module: Option<String>,
+    pub line: usize,
+    pub rows: Vec<Row<'a>>,
 }
 
 impl<'a> Lowered<'a> {
@@ -468,6 +491,33 @@ fn build<'a>(
         }
     }
     let predicates = pw.rows;
+    // The fourth root, and the second with no worklist attached: a `test` or
+    // `bench` body — see [`Lowered::bodies`].
+    let mut outside: Vec<OutsideBody<'a>> = Vec::new();
+    for (i, t) in program.tests.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&t.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("test@{i}"),
+            block: &t.body,
+            module: t.module.clone(),
+            line: t.line,
+            rows: w.rows,
+        });
+    }
+    for (i, b) in program.benches.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&b.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("bench@{i}"),
+            block: &b.body,
+            module: b.module.clone(),
+            line: b.line,
+            rows: w.rows,
+        });
+    }
     follow(
         "<module state>",
         std::mem::take(&mut gw.calls),
@@ -574,6 +624,7 @@ fn build<'a>(
         predicates,
         unresolved,
         lambda_bodies,
+        bodies: outside,
     }
 }
 

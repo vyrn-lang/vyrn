@@ -1665,9 +1665,11 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
     }
     *checker.in_test.borrow_mut() = true;
     for (i, t) in program.tests.iter().enumerate() {
-        // A synthetic Unit-returning function with an unspellable name; its body
-        // is a clone (the checker keys nothing on node identity — only ownership
-        // does, and that pass analyses the real body directly).
+        // A synthetic Unit-returning function with an unspellable name. The
+        // head is synthetic; the BODY handed to the checker is the real node
+        // (`function_body`), so the answers the checker records land on the
+        // nodes `own`, the lowering and the interpreter walk — RFC-0125 §3 M6,
+        // seventh slice. A clone left them untyped and a test body had no core.
         let synthetic = Function {
             name: format!("test@{i}"),
             exported: false,
@@ -1677,7 +1679,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             type_bounds: Default::default(),
             params: Vec::new(),
             ret: Type::Unit,
-            body: t.body.clone(),
+            body: Block { stmts: Vec::new() },
             line: t.line,
             col: 0,
             is_extern: false,
@@ -1685,7 +1687,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             is_gen: false,
             is_mut: false,
         };
-        if let Err(s) = checker.function(&synthetic) {
+        if let Err(s) = checker.function_body(&synthetic, &t.body) {
             let mut d = s;
             d.file = t.module.clone();
             out.push(d);
@@ -1730,7 +1732,7 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
             type_bounds: Default::default(),
             params: Vec::new(),
             ret: Type::Unit,
-            body: b.body.clone(),
+            body: Block { stmts: Vec::new() },
             line: b.line,
             col: 0,
             is_extern: false,
@@ -1738,7 +1740,7 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
             is_gen: false,
             is_mut: false,
         };
-        if let Err(s) = checker.function(&synthetic) {
+        if let Err(s) = checker.function_body(&synthetic, &b.body) {
             let mut d = s;
             d.file = b.module.clone();
             out.push(d);
@@ -3650,6 +3652,17 @@ impl<'a> Checker<'a> {
     }
 
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
+        self.function_body(f, &f.body)
+    }
+
+    /// Check `f` with `body` as its body. The two are the same node for an
+    /// ordinary function; they differ for a `test` (RFC-0015) or a `bench`
+    /// (RFC-0055), whose head is synthetic and whose body is the REAL node
+    /// the lowering and `own` walk. The checker keys its recorded answers by
+    /// node ADDRESS (RFC-0101 M1), so a body checked as a clone leaves the
+    /// real nodes untyped — which is why a test body had no core
+    /// (RFC-0125 §3 M6, seventh slice).
+    fn function_body(&self, f: &Function, body: &Block) -> Result<(), Diagnostic> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
         *self.in_gen.borrow_mut() = f.is_gen;
@@ -3674,7 +3687,7 @@ impl<'a> Checker<'a> {
         // `block` no longer propagates the first error via `?`; it pushes each
         // statement's error to the `errors` sink and continues, so every
         // statement-level error in the body is reported.
-        let returns = self.block(&f.body, &f.ret, &mut scope);
+        let returns = self.block(body, &f.ret, &mut scope);
         if f.ret != Type::Unit && !returns {
             // A missing-return diagnostic is reported alongside any body errors
             // (it is about the function as a whole, not one statement).
