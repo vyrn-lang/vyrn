@@ -1191,16 +1191,11 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     // beats one that needs the program to start.
     match vyrn_frontend::load(&source, &root_key, &opts, &resolver)
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
-        .and_then(|p| vyrn_frontend::interp::mounted_routes(&p))
+        .and_then(|p| mounted_routes_wasm(&root_key, &p))
     {
         Ok(mounted) => {
-            for r in mounted {
-                // A `surface(..)` stands for a whole subsystem; the directives
-                // above already list its members, one row each.
-                if r.prefix {
-                    continue;
-                }
-                let row = (r.method, r.path, r.procedure, "explicit".to_string());
+            for (method, path, procedure) in mounted {
+                let row = (method, path, procedure, "explicit".to_string());
                 if !rows.iter().any(|x| x.0 == row.0 && x.1 == row.1) {
                     rows.push(row);
                 }
@@ -1246,6 +1241,132 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
         println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
     ExitCode::SUCCESS
+}
+
+/// `vyrn routes`'s hand-written channel, on the compiled route (RFC-0125 §3 M5,
+/// the `mounted-routes` row) — the arguments of every `mount(..)` the program
+/// holds, read by RUNNING them.
+///
+/// The program itself never runs, and no request is served. A copy of it loses
+/// its `main` and gains one that hands each `mount(..)`'s three route lists to
+/// `std/http`'s `mountedRows` and prints what comes back; the copy compiles
+/// through the direct backend and runs in the embedded engine with its standard
+/// output captured. What a row MEANS lives beside `mount`, in Vyrn, so nothing
+/// here re-derives a path — this reads text.
+///
+/// A row is `kind derived`, and the two words after the kind are the method and
+/// the path every constructor writes first. A `Route`'s third word is the
+/// procedure the generator seeded it with; a stream or a socket has none. A
+/// `surface(..)` stands for a whole subsystem and is dropped here, because the
+/// directive channel already lists its members one row each.
+///
+/// The limits are the interpreter's, unchanged: an argument that names a local
+/// of its enclosing function cannot be lifted into the new `main`, and a
+/// `mount` that is not `std/http`'s four-argument one is not found. Either way
+/// the caller prints its note and keeps the derived rows.
+fn mounted_routes_wasm(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+) -> Result<Vec<(String, String, String)>, String> {
+    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
+    let mut prog = program.clone();
+    let mut calls: Vec<Vec<Expr>> = Vec::new();
+    for f in &mut prog.functions {
+        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+            // Top-level names are unique across a linked program, so `mount` is
+            // `std/http`'s or the program has none. Argument 0 is the request;
+            // the route lists are everything after it.
+            if let Expr::Call { name, args, .. } = e {
+                if name == "mount" && args.len() == 4 {
+                    calls.push(args[1..].to_vec());
+                }
+            }
+        });
+    }
+    if calls.is_empty() {
+        return Ok(Vec::new());
+    }
+    prog.functions
+        .retain(|f| !(f.name == "main" && f.module.is_none()));
+    prog.tests.clear();
+    prog.benches.clear();
+    let mut stmts: Vec<Stmt> = calls
+        .into_iter()
+        .map(|args| {
+            Stmt::Expr(Expr::Call {
+                name: "print".to_string(),
+                args: vec![Expr::Call {
+                    name: "mountedRows".to_string(),
+                    args,
+                    line: 0,
+                }],
+                line: 0,
+            })
+        })
+        .collect();
+    stmts.push(Stmt::Return {
+        value: Some(Expr::Int(0)),
+        line: 0,
+    });
+    prog.functions.push(Function {
+        name: "main".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        type_bounds: Default::default(),
+        params: Vec::new(),
+        ret: Type::Int,
+        body: Block { stmts },
+        line: 0,
+        col: 0,
+        is_extern: false,
+        is_export_extern: false,
+        is_gen: false,
+        is_mut: false,
+    });
+    let bytes = vyrn_codegen::direct::compile(&prog)?;
+    let out = wasmrun::run(
+        &bytes,
+        wasmrun::Run {
+            argv: vec![path.to_string()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: true,
+            capture_stderr: true,
+        },
+    )?;
+    if out.code != 0 {
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        let line = text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("error: ");
+        return Err(if line.is_empty() {
+            format!("the mounted router exited {}", out.code)
+        } else {
+            line.to_string()
+        });
+    }
+    let mut rows = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let Some((kind, derived)) = line.trim_end_matches('\r').split_once(' ') else {
+            continue;
+        };
+        if kind == "surface" {
+            continue;
+        }
+        let mut words = derived.split_whitespace();
+        let (Some(method), Some(route)) = (words.next(), words.next()) else {
+            continue;
+        };
+        let procedure = match kind {
+            "route" => words.next().unwrap_or("-"),
+            _ => "-",
+        };
+        rows.push((method.to_string(), route.to_string(), procedure.to_string()));
+    }
+    Ok(rows)
 }
 
 /// `vyrn routes --json` (RFC-0073 M4) — the merged wire table for external
@@ -2422,6 +2543,7 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
     let run = wasmrun::Run {
         argv: vec![key.clone(), json, type_name.to_string(), module.to_string()],
         stdin_prefix: Vec::new(),
+        capture_stdout: false,
         capture_stderr: true,
     };
     let out = match wasmrun::run(&bytes, run) {
@@ -5880,6 +6002,7 @@ fn run_wasm(path: &str, program: &vyrn_frontend::ast::Program, prog_args: &[Stri
     let run = wasmrun::Run {
         argv,
         stdin_prefix: Vec::new(),
+        capture_stdout: false,
         capture_stderr: false,
     };
     match wasmrun::run(&bytes, run) {
@@ -6010,6 +6133,7 @@ fn bodies_wasm(
         let run = wasmrun::Run {
             argv: vec![path.to_string()],
             stdin_prefix: format!("{k}\n").into_bytes(),
+            capture_stdout: false,
             capture_stderr: true,
         };
         let out = match wasmrun::run(&bytes, run) {

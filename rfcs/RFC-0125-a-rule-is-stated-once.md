@@ -3979,7 +3979,7 @@ deleted here, and `--engine interp` is still the default.
 | `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
 | `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | no — `serve_cmd` takes no engine, and `vyrn serve --engine wasm` silently serves from the interpreter | `interp::serve` holds ONE live instance across every request: `main` runs once and the module's state persists. A resident wasm instance the host calls into per request is not designed anywhere in this RFC or its plan |
-| `mounted-routes` | `vyrn routes`, for the hand-written channel | no | `interp::mounted_routes` evaluates the arguments of `mount(..)` before any program runs. The derived rows survive without it, and the command already prints a note when the channel fails |
+| `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | no, and there is nothing to profile: under the compiled route the time is wasmtime's | `vyrn_frontend::prof` counts interpreter steps. `check --profile` measures generation and survives while generation is interpreted |
 | `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, but the feature `wasm-gen` is OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s, it needs clang and a wasi sysroot, and it declines to the interpreter for a module reaching `writeFile`, `writeAtomic`, `renameFile` or `fsyncFile` | the largest row. `generate_interpreted` is both the reference and the fallback; deleting it makes clang a hard requirement of `vyrn check` |
@@ -4283,6 +4283,40 @@ reaches the user.
 It is slower, and the census row says so: 260 ms against 145 ms. That is the
 `test-bodies` shape — a 40-line program whose compile costs more than its run —
 and it is the price of one route instead of two.
+
+**`vyrn routes` reads its mounted router by running it.** The command has three
+channels and only the third needed an engine: a hand-written projection's
+`Route`/`Live`/`Socket` list is a VALUE, so the arguments of `mount(..)` have
+to be evaluated before the table can name them. `interp::mounted_routes`
+evaluated them in a fresh frame under the tree-walker.
+
+The compiled route does the same thing with a program instead of an evaluator.
+A copy of the loaded program loses its `main` and gains one that calls, per
+`mount(..)` site, `mountedRows(groups, live, sockets)` — the site's own three
+arguments, lifted — and prints what comes back. The copy compiles through the
+direct backend and runs in the embedded engine with its standard output
+captured. Nothing else of the program runs: no request is served and no `main`
+of the author's executes.
+
+`mountedRows` is new, and it is in `std/http` beside `mount` rather than in the
+CLI. That is the one-producer property the command already claims: the four
+kinds are the four `mount` resolves, and a row's text is the `derived` line its
+own constructor wrote and the mount audit's diagnostics already quote. The CLI
+reads `kind derived` lines. It does not know how a path is spelled.
+
+Its signature is `mount`'s minus the request, and that is what makes the lift
+safe: the arguments move into a call with the same parameter modes they had, so
+an argument list that mounts also reads. The two limits are the interpreter's,
+unchanged — an argument naming a local of its enclosing function cannot be
+lifted, and a `mount` that is not `std/http`'s four-argument one is not found.
+Either way the command prints the note it already had and the derived rows
+stand.
+
+`examples/bin/server.vyrn` prints the same twelve-row table under both routes,
+byte for byte, with the four explicit rows the third channel exists for; the 16
+tests of `tests/derived.rs` pass unchanged. The wall times are 2.61 s and
+2.79 s, and neither is about reading routes: both are the page and RPC
+generators running first.
 
 ### M6 — the other two judgments
 

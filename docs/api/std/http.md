@@ -429,10 +429,10 @@ protocol Frames { fn closeCode(self, Int64) -> Socket; fn subprotocol(self, Stri
 A socket's policy. Three options, all server-side, all with something under
 them — `heartbeat` is the fourth and is refused; see [`Socket`].
 
-## mount
+## mountedRows
 
 ```vyrn
-fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> Option<Response>
+fn mountedRows(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> String
 ```
 
 Resolve `req` against the mounted groups, in order, first match wins.
@@ -461,6 +461,25 @@ reason `live` was a third: Vyrn has no sum over two record types, and a
 `Socket` is deliberately not a `Live` — `retryAfter`/`resumable` mean nothing
 to a WebSocket and `closeCode`/`subprotocol`/`maxFrame` mean nothing to an
 event stream. An app with neither writes `[], []` and pays a word.
+Every row a `mount(..)` argument list carries, one per line — what a tool
+that reports a program's wire surface reads, without serving a request.
+
+`vyrn routes` is that tool (RFC-0125 §3 M5, the `mounted-routes` row). It
+evaluates the arguments of each `mount(..)` in a program and prints what
+they hold, so it needs the four kinds `mount` itself resolves and the
+`derived` line each constructor already wrote. It re-derives nothing: a
+path here is the text its constructor produced, which is the same text the
+mount audit's diagnostics quote.
+
+A line is a kind — `route`, `surface`, `stream` or `socket` — then a space,
+then that value's `derived`. The parameters are `mount`'s own, minus the
+request, so an argument list that mounts also reads.
+
+## mount
+
+```vyrn
+fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> Option<Response>
+```
 
 ## httpInput
 

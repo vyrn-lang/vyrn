@@ -29,6 +29,9 @@ use wasmtime::{Caller, Engine, Linker, Memory, Module, Store};
 /// the module trapped.
 pub struct Outcome {
     pub code: i32,
+    /// Standard output, when the caller asked for it to be captured; otherwise
+    /// empty and already written through.
+    pub stdout: Vec<u8>,
     /// Standard error, when the caller asked for it to be captured; otherwise
     /// empty and already written through.
     pub stderr: Vec<u8>,
@@ -41,6 +44,10 @@ pub struct Run {
     /// Bytes standard input serves BEFORE this process's own — the test
     /// harness hands the guest its body's index this way.
     pub stdin_prefix: Vec<u8>,
+    /// Keep the guest's standard output in [`Outcome::stdout`] instead of
+    /// writing it through — `vyrn routes` reads its answer out of it
+    /// (RFC-0125 §3 M5, the `mounted-routes` row).
+    pub capture_stdout: bool,
     /// Keep the guest's standard error in [`Outcome::stderr`] instead of
     /// writing it through — the test harness reads a trap's message out of it.
     pub capture_stderr: bool,
@@ -92,6 +99,7 @@ struct Host {
     argv: Vec<Vec<u8>>,
     environ: Vec<Vec<u8>>,
     stdin_prefix: Vec<u8>,
+    stdout: Option<Vec<u8>>,
     stderr: Option<Vec<u8>>,
     files: HashMap<i32, std::fs::File>,
     /// A directory opened for `fd_readdir` (RFC-0125 §3 M5): its entries as
@@ -173,6 +181,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
             })
             .collect(),
         stdin_prefix: run.stdin_prefix,
+        stdout: run.capture_stdout.then(Vec::new),
         stderr: run.capture_stderr.then(Vec::new),
         files: HashMap::new(),
         dirs: HashMap::new(),
@@ -211,6 +220,7 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
     let host = store.into_data();
     Ok(Outcome {
         code,
+        stdout: host.stdout.unwrap_or_default(),
         stderr: host.stderr.unwrap_or_default(),
     })
 }
@@ -357,10 +367,16 @@ fn link_wasi(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 bytes.extend_from_slice(c);
             }
             let ok = match fd {
-                1 => {
-                    let mut o = std::io::stdout().lock();
-                    o.write_all(&bytes).and_then(|()| o.flush()).is_ok()
-                }
+                1 => match &mut host.stdout {
+                    Some(buf) => {
+                        buf.extend_from_slice(&bytes);
+                        true
+                    }
+                    None => {
+                        let mut o = std::io::stdout().lock();
+                        o.write_all(&bytes).and_then(|()| o.flush()).is_ok()
+                    }
+                },
                 2 => {
                     write_err(host, &bytes);
                     true

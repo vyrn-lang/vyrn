@@ -70,7 +70,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "mounted-routes",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "from-json",
