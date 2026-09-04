@@ -2962,16 +2962,24 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // Pass 3: apply the foreign-decl renames (definition + owning module refs).
     // The renamed module's OWN namespace bindings guard its `ns.member(..)` call
     // sugar from the plain-name rewrite (pass 5 owns those references).
+    let mut renames_by_module: HashMap<&str, HashMap<String, String>> = HashMap::new();
     for ((target, original), s) in &foreign_renames {
-        if let Some(tm) = modules.iter_mut().find(|m| &m.key == target) {
-            let ns_names: HashSet<String> = ns_bindings
-                .get(&tm.key)
-                .into_iter()
-                .flatten()
-                .map(|(n, _)| n.clone())
-                .collect();
-            rename_decl_in_module(&mut tm.program, original, s, &ns_names);
-        }
+        renames_by_module
+            .entry(target.as_str())
+            .or_default()
+            .insert(original.clone(), s.clone());
+    }
+    for tm in modules.iter_mut() {
+        let Some(map) = renames_by_module.get(tm.key.as_str()) else {
+            continue;
+        };
+        let ns_names: HashSet<String> = ns_bindings
+            .get(&tm.key)
+            .into_iter()
+            .flatten()
+            .map(|(n, _)| n.clone())
+            .collect();
+        rename_decls_in_module(&mut tm.program, map, &ns_names);
     }
 
     // Pass 3b (RFC-0078 M2b): the injected module's enum VARIANT names in the
@@ -5113,50 +5121,47 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
     (out, ambiguous_only)
 }
 
-/// Rename a top-level *declaration* (its defining name) from `from` to `to` in
-/// module `p`, and rewrite that module's own references to it. Used to free a
-/// foreign name so a co-naming importer's stub can take it (RFC-0022).
-fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<String>) {
+/// Apply every rename `map` holds to module `p`: the top-level *declarations*
+/// themselves, and that module's own references to them. Used to free a foreign
+/// name so a co-naming importer's stub can take it (RFC-0022), and to give an
+/// injected runtime module's every declaration its reserved spelling
+/// (RFC-0078 M2b).
+///
+/// **One walk per module, not one per rename** (RFC-0125 §3 M4). The form
+/// before this took a single `from`/`to` and walked the whole module for it, so
+/// an injected module cost one full walk of itself per declaration it has —
+/// quadratic in the module, and `std/runtime` is 1,951 lines in every program
+/// now. Measured on a three-line program: 15.2 ms here, against 1.8 ms with the
+/// runtime modules absent.
+///
+/// One walk means what many meant because the renames cannot chain: a reserved
+/// spelling holds a `$`, a minted one a `__fromN`, and no name a module
+/// declares holds either, so no rename's target is another's source. The caller
+/// iterates a `HashMap` and always did, so an order-dependent answer was never
+/// sound to begin with.
+fn rename_decls_in_module(p: &mut Program, map: &HashMap<String, String>, ns: &HashSet<String>) {
     for t in &mut p.type_decls {
-        if t.name == from {
-            t.name = to.to_string();
-        }
+        t.name = ren(map, &t.name);
     }
     for f in &mut p.functions {
-        if f.name == from {
-            f.name = to.to_string();
-        }
+        f.name = ren(map, &f.name);
     }
     for pr in &mut p.protocols {
-        if pr.name == from {
-            pr.name = to.to_string();
-        }
+        pr.name = ren(map, &pr.name);
     }
-    let own_variants = own_variant_names(p);
-    // When the spelling being renamed IS one of this module's own enum
-    // variants — an injected module's reserved-spelling pass renaming `JStr`
-    // to `json$JStr` — the variant positions are the TARGETS of the rename
-    // and must follow it. The guard exists for the other direction: a
-    // non-variant decl (a private global, a protocol) sharing a variant's
-    // spelling, whose rename must leave the constructions alone.
-    let protected = if own_variants.contains(from) {
-        HashSet::new()
-    } else {
-        own_variants
-    };
     for c in &mut p.contracts {
-        if c.name == from {
-            c.name = to.to_string();
-        }
+        c.name = ren(map, &c.name);
     }
     for g in &mut p.globals {
-        if g.name == from {
-            g.name = to.to_string();
-        }
+        g.name = ren(map, &g.name);
     }
-    let map: HashMap<String, String> =
-        std::iter::once((from.to_string(), to.to_string())).collect();
-    rewrite_module_refs(p, &map, ns, &protected);
+    // The variant guard the one-rename form carried was a no-op and is dropped
+    // rather than generalized. It skipped a construction site whose name is one
+    // of this module's own variants; the form passed an EMPTY guard set exactly
+    // when the name being renamed WAS such a variant, and a non-empty one only
+    // when the single-entry map could not match a variant site at all. Either
+    // way the site followed the map, which is what an empty set here does.
+    rewrite_module_refs(p, map, ns, &HashSet::new());
 }
 
 #[cfg(test)]
