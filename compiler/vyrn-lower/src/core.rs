@@ -145,6 +145,24 @@ impl BorrowKind {
             BorrowKind::Capture => "a captured binding".to_string(),
         }
     }
+
+    /// The named ways out (RFC-0087 U2), in the order and the words
+    /// `movecheck::Borrow::fixes` names them: take ownership if this function
+    /// should have it, copy if both sides genuinely need a value. `path` is
+    /// what was read out of the binding — a `consume` goes on the parameter,
+    /// a `.copy()` on the path.
+    ///
+    /// A capture has no menu here: the frame that made it owns it, and the
+    /// checker answers that shape at the capture rather than at the take.
+    pub fn fixes(&self, path: &str) -> Vec<String> {
+        match self {
+            BorrowKind::Param { of, .. } => vec![
+                format!("declare the parameter `{of}: consume ..` if this function should own it"),
+                format!("`{path}.copy()` if both sides need a value"),
+            ],
+            BorrowKind::Capture => Vec::new(),
+        }
+    }
 }
 
 /// Where a statement stands, for a reader that looks a plan row up by node
@@ -624,20 +642,31 @@ fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
     if vyrn_frontend::movecheck::place_path(e).is_some() {
         return Ok(());
     }
-    if let Some((_, path)) = vyrn_frontend::movecheck::element_path(e) {
+    if let Some((root, path)) = vyrn_frontend::movecheck::element_path(e) {
+        // A container element is the one place that CAN hold a hole at run
+        // time, and `swapRemove` already spells it (RFC-0011).
         return refuse(
-            format!("`{path}` may not be taken — an element is not a place a take reaches"),
+            format!(
+                "`{path}` may not be taken — an element is not a place a take reaches\n  fix: \
+                 `{root}.swapRemove(..)` returns the element and leaves the container one shorter"
+            ),
             line,
         );
     }
-    let says = if by_loop {
-        "`consume` here has nothing to take — the loop already owns a container that is \
-         not a binding"
+    let (says, drop_it) = if by_loop {
+        (
+            "`consume` here has nothing to take — the loop already owns a container that is \
+             not a binding",
+            "drop the `consume`: the elements are already owned",
+        )
     } else {
-        "`consume` here has nothing to take — the value is already owned, so there is no \
-         place to leave a hole in"
+        (
+            "`consume` here has nothing to take — the value is already owned, so there is no \
+             place to leave a hole in",
+            "drop the `consume`: the value is already owned",
+        )
     };
-    refuse(says.to_string(), line)
+    refuse(format!("{says}\n  fix: {drop_it}"), line)
 }
 
 /// The scrutinee a binder borrows: its name, where the construct did not
@@ -2465,7 +2494,7 @@ impl<'a> Builder<'a> {
     /// the borrow flag carries the heap gate the checker asks for: a record
     /// of `Int64`s has no buffer to hand away.
     fn consume_names_a_borrow(&self, e: &'a Expr, line: usize) -> Result<(), Gap> {
-        let Some((root, _)) = vyrn_frontend::movecheck::place_path(e) else {
+        let Some((root, path)) = vyrn_frontend::movecheck::place_path(e) else {
             return Ok(());
         };
         let Some(n) = self.lookup(&root) else {
@@ -2473,10 +2502,16 @@ impl<'a> Builder<'a> {
         };
         let info = &self.body.names[n as usize];
         match &info.borrow_kind {
-            Some(k) if info.borrow => refuse(
-                format!("`{root}` may not be consumed — it is {}", k.what(&root)),
-                line,
-            ),
+            // The sentence names the ROOT and the menu names the PATH: a
+            // `consume` goes on the parameter, a `.copy()` on what was read
+            // out of it.
+            Some(k) if info.borrow => {
+                let mut msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
+                for f in k.fixes(&path) {
+                    msg.push_str(&format!("\n  fix: {f}"));
+                }
+                refuse(msg, line)
+            }
             _ => Ok(()),
         }
     }

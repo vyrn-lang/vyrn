@@ -161,6 +161,20 @@ struct State {
     alias: Vec<Option<Alias>>,
 }
 
+/// One refusal with its menu of ways out (RFC-0087 U2), in the shape
+/// `movecheck::menu` prints: the sentence, then one `fix:` line per way out.
+///
+/// A refusal is a head, a sentence and a menu, and a reader who loses a menu
+/// loses part of the refusal. So the kernel names the same ways out in the
+/// same words as the checker, which is what lets a rule leave the checker
+/// without the diagnostic moving (RFC-0125 §3 M3, the menu slice).
+fn menu(mut message: String, fixes: Vec<String>) -> String {
+    for f in fixes {
+        message.push_str(&format!("\n  fix: {f}"));
+    }
+    message
+}
+
 /// Whether two paths under one name overlap: equal, or one under the other.
 /// The empty path is the whole name.
 fn overlaps(a: &str, b: &str) -> bool {
@@ -487,11 +501,20 @@ impl<'b> Kernel<'b> {
             return Ok(());
         };
         let (s, here) = (self.src(n), self.here);
+        // The way out is a value of its own, read where the alias was bound —
+        // the place the alias reads, not the place the write named.
+        let src = self.src_text(st, n);
+        let at = self.body.names[n as usize].line;
         self.refuse_at(
             *l,
-            format!(
-                "`{place}` is written here while `{s}` still reads out of it\nline {here}: ... \
-                 and `{s}` is {what} again here"
+            menu(
+                format!(
+                    "`{place}` is written here while `{s}` still reads out of it\nline {here}: \
+                     ... and `{s}` is {what} again here"
+                ),
+                vec![format!(
+                    "`{src}.copy()` on line {at}, so `{s}` is a value of its own"
+                )],
             ),
         )
     }
@@ -526,7 +549,18 @@ impl<'b> Kernel<'b> {
                 } else {
                     format!("module state `{g}` may not be consumed by {by} — {never}")
                 };
-                return self.refuse_at::<()>(self.here, msg).unwrap_err();
+                // A return is the one of the three with a way out: the caller
+                // releases what it is handed, so it is handed a copy.
+                let fixes = if by == "a `return`" {
+                    vec![format!(
+                        "`{g}.copy()` — the caller releases what it is handed"
+                    )]
+                } else {
+                    Vec::new()
+                };
+                return self
+                    .refuse_at::<()>(self.here, menu(msg, fixes))
+                    .unwrap_err();
             }
         }
         let what = format!("it is read out of `{src}`, a place that owns it");
@@ -598,7 +632,13 @@ impl<'b> Kernel<'b> {
             ),
             Some((l, by)) if !by.is_empty() => self.refuse_at::<()>(
                 *l,
-                format!("`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} again here"),
+                menu(
+                    format!(
+                        "`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} \
+                         again here"
+                    ),
+                    vec![format!("`{s}.copy()` if both sides need a value")],
+                ),
             ),
             _ => self.refuse_at::<()>(here, format!("`{s}` is {what} here after it was released")),
         };
@@ -786,7 +826,29 @@ impl<'b> Kernel<'b> {
         } else {
             format!("`{s}` may not be stored into {by} — it is {what}")
         };
-        self.refuse_at::<()>(self.here, msg).unwrap_err()
+        // The ways out, as `movecheck::Borrow::fixes` and
+        // `movecheck::MoveCheck::fixes_here` name them. An `export extern fn`
+        // has one: its JS caller releases the String the call returns, so the
+        // signature refuses `consume` and only a copy is left (RFC-0089 M3b).
+        let capture = matches!(b, BorrowKind::Capture);
+        let fixes = if by == "a `return`" && capture {
+            vec![format!("`{s}.copy()` if the caller needs its own value")]
+        } else if capture {
+            Vec::new()
+        } else if self.body.export && by == "a `return`" {
+            vec![format!(
+                "`{s}.copy()` — an `export extern fn` owns its result"
+            )]
+        } else if self.body.export {
+            vec![format!(
+                "`{s}.copy()` — an `export extern fn` may not take ownership of a String its \
+                 JS caller releases"
+            )]
+        } else {
+            b.fixes(s)
+        };
+        self.refuse_at::<()>(self.here, menu(msg, fixes))
+            .unwrap_err()
     }
 
     /// A take of a name: it must be held, and it is gone afterwards. An
@@ -832,9 +894,17 @@ impl<'b> Kernel<'b> {
                     let (here, l) = (self.here, self.hole_line(st, *n, path));
                     return self.refuse_at(
                         l,
-                        format!(
-                            "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and `{s}` \
-                             is used as a whole here, with the hole still in it"
+                        menu(
+                            format!(
+                                "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and \
+                                 `{s}` is used as a whole here, with the hole still in it"
+                            ),
+                            vec![
+                                format!(
+                                    "`{s}{path}.copy()` on line {l} if `{s}` is still needed whole"
+                                ),
+                                format!("write `{s}{path}` back before this line"),
+                            ],
                         ),
                     );
                 }
