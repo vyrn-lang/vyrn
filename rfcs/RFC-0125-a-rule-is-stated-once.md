@@ -3246,6 +3246,77 @@ lowering — plus the three region functions, which are the plan's step 8. The
 emitter's runtime section was 4,205 lines before step 0 and is 387. Details
 under the plan's §6 table.*
 
+*The sweep reaches the data (2026-09-04, `track-ar`): a program that prints one
+integer went from 1,899 bytes on `main` to 2,489 here, +31.1 per cent, and the
+first thing measured was where. Not the function sweep: `Module::sweep` already
+walks the FINISHED call graph and drops every runtime function and every WASI
+import no export reaches, and the trivial program keeps six of the fifty
+runtime functions and two of the fifteen imports. Its code section is 1,047
+bytes against `main`'s 613 because the six functions it does reach are Vyrn
+with the language's own checks in them, where `main` emitted four hand-written
+wasm bodies with none. That is code this milestone bought on purpose. The DATA
+was the hole: 1,247 bytes of a 2,489-byte module, and 850 of them belonged to
+nothing the program could reach. Every literal of every linked module is
+interned while its body is lowered, and the emitter's `runtime` interns the
+UTF-8 DFA table, the six I/O wordings, the two fixed-clock keys and the eight
+trap rows before any body exists. The sweep took the functions and left their
+bytes: `intStr`'s proof sentence sat in a module that never formats an integer.*
+
+*`Module::sweep_pool` asks the same question of the pool. An entry is live when
+a surviving body pushes an address inside it, or when a live entry HOLDS one.
+Three things made the second clause necessary rather than tidy. The trap table
+is eight pairs of addresses and nothing but its own bytes names the rows, so a
+scan over instructions alone would have dropped every trap wording out from
+under a live `trapAt`. `intern` hands out `at + SHDR` rather than `at`, and a
+folded offset into a literal is inside it as well, so the test is containment
+and not equality. And a `Module::reserve` is not an entry at all — its bytes are
+zeros that no segment carries. The scan is conservative in the one safe
+direction: a constant that is not a pointer but lands inside an entry KEEPS that
+entry, which costs bytes and cannot change what the module does. Addresses do
+not move and `data_end` does not shift, so the memory map and `HEAP_BASE` are
+what they were; a dead entry becomes zeros, and `finish` already writes no
+segment for a run of them.*
+
+*What it is worth, in module bytes, against `main` and against this branch
+before the sweep:*
+
+| program | `main` | before | after |
+|---|---|---|---|
+| `print(1)` | 1,899 | 2,489 | **1,643** |
+| `nbody` | 10,620 | 11,680 | 11,057 |
+| `knucleotide` | 12,223 | 17,084 | 15,367 |
+| `vlog` | 63,995 | 71,254 | 69,828 |
+
+*The trivial program is 256 bytes UNDER `main`, which is the whole regression
+paid back and more: its data section is 401 bytes against 1,099. A real program
+keeps a larger share of the pool because it reaches more of it, and stays above
+`main` on CODE for the reason above. The two suites that emit the most modules
+did not move: `cargo test -p vyrn-cli --test lowered` 65.2 s to 60.7 s and
+`--test pages` 31.6 s to 33.0 s, which is noise either way. That is the honest
+answer to the other half of the report: the suites are slower on this branch
+because every module now LOADS, parses and checks `std/runtime` and `std/text`,
+and a module's byte count is not what a test run pays for. Nothing here touches
+that, and it is the next thing to measure.*
+
+*The `always` link of `std/text` stays. The mention scan reads the modules
+loaded before the injection loop, and the runtime enters inside it, so the scan
+cannot see that `intStr` mentions `stringFromBytes`. The ordering CAN change —
+a pass that recomputes the mention set and runs the table again is ten lines —
+and it was built and measured. It answers the same link: `std/runtime` is
+`always` and its `intStr` mentions `stringFromBytes` in every program, so the
+second pass injects `std/text` for every program too. What it changes is load
+order, and `nbody` came out 12 bytes different for no reason but shifted
+indices. So the entry keeps `always` and the sweep carries the cost, which is
+now zero bytes rather than 779.*
+
+*`rfcs/census/wasm-sha256.tsv` is NOT regenerated, for the second slice's
+reason: a hash written in the commit that moved the bytes records nothing.
+`VYRN_WASM_MANIFEST=check` fails on 172 of the 172 examples, where the third
+judgment's fifth slice failed on 169 — every module loses bytes, including the
+three that slice left untouched. Parity 41 of 41, residue green, fixtures and
+the corpus suites green, `vyrn run --engine wasm site/export.vyrn` byte-identical
+to the interpreter's export.*
+
 ### M5 — `vyrn run` is compiled
 
 `run`, `test` and `bench --check` execute the wasm in the embedded wasmtime.

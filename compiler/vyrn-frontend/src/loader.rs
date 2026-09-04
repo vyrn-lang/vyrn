@@ -717,6 +717,16 @@ pub struct RtModule {
     /// step 4); and `std/text`, because the runtime's own `intStr` mentions
     /// `stringFromBytes` and enters the load inside this loop, after the scan
     /// (RFC-0125 §3 M6, the third judgment's fifth slice).
+    ///
+    /// The scan's ORDER can change — a pass that recomputes the mention set and
+    /// runs the table again until nothing new arrives is ten lines — and it was
+    /// tried. It answers the same link: [`RUNTIME_SPEC`] is `always`, its
+    /// `intStr` mentions `stringFromBytes` in every program, so the second pass
+    /// injects `std/text` for every program too. What it changes is LOAD ORDER,
+    /// which every emitted module pays for in shifted indices, so the entry
+    /// keeps `always` and the direct backend's sweep carries the cost: a program
+    /// that formats no integer reaches neither function and carries neither
+    /// their code NOR their bytes (RFC-0125 §3 M4).
     pub always: bool,
 }
 
@@ -793,9 +803,12 @@ pub const RT_MODULES: &[RtModule] = &[
     // ONLY route from bytes to a `String` a Vyrn body has. So the check is in
     // every program's closure whatever the mention scan says, and the scan could
     // not see it anyway — it reads the modules loaded before this loop, and the
-    // runtime enters inside it. The price is the direct backend's to sweep: a
+    // runtime enters inside it. A second pass over the table WOULD see it, and
+    // would inject this module for every program all the same, for the reason
+    // [`RtModule::always`] records. The price is the direct backend's to sweep: a
     // program that formats no integer and makes no `String` from bytes reaches
-    // neither function and carries neither.
+    // neither function and carries neither — neither code nor bytes, since the
+    // sweep took the data too (RFC-0125 §3 M4).
     RtModule {
         spec: "std/text",
         prefix: "text$",

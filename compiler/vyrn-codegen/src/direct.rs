@@ -743,6 +743,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // 39 runtime helpers, 12 WASI imports, every function of every linked module —
     // because nothing knows what a program reaches until its bodies are walked.
     // This is where that is known.
+    //
+    // And the data with them: every literal of every linked module was interned
+    // on its way past, and `runtime` below interned the UTF-8 table, the six I/O
+    // wordings and the trap rows before a body existed. `Module::sweep_pool`
+    // asks the same question of those bytes (RFC-0125 §3 M4).
     m.sweep();
     abi_section(&mut m, &user, program);
     m.finish()
@@ -15547,7 +15552,7 @@ fn store_of(ll: &str) -> Instruction<'static> {
 /// beside it, so these are emitted. All forty of them, whether the program reaches one or not —
 /// and then [`wasm::Module::sweep`] (M2p) drops the ones no export reaches, which
 /// is why the whole table costs `fib.wasm` 290 bytes of code rather than 4,420.
-/// The data each interned on its way past is NOT swept.
+/// The data each interned on its way past is swept with them (RFC-0125 §3 M4).
 /// The runtime functions written in Vyrn (`std/runtime`, PLAN-0125-runtime §6
 /// steps 1 and 2): each by the name the module declares it under, with the
 /// wasm signature this emitter calls it with.
