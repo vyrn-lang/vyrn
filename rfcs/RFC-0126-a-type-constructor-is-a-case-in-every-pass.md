@@ -608,4 +608,9 @@ parity suite compares the same output it did before.
 - **`vyrn why --memory` calls a `??` result's type "unknown".** The verdict is
   right (`Option<Int64>` owns no heap) and the reason is not. The `??` desugar
   runs in the parser, so the reporter has no recorded type for the expression it
-  produces.
+  produces. **Taken, 2026-09-05.** The verdict was not always right either: a
+  `let t = s ?? "y"` of `String` was called "unknown … owns no heap" and its
+  release row went unreported. `declared::type_of` now reads the `match` the
+  parser spells for `??` with the one rule it already had for `?`
+  (`success_payload`): the scrutinee's `Option<T>`, `Result<T, _>` or Fallible
+  `success` payload. Pinned by `why_memory_types_a_nullish_result_as_its_payload`.
