@@ -42,11 +42,16 @@ pub struct NameInfo {
     /// The source spelling, or `@tN` for a temporary the naming pass minted.
     pub source: String,
     pub ty: Type,
-    /// Whether the kernel tracks this name: it owns heap or carries a must-use
-    /// obligation. A borrowed binding (a `read` parameter, a pattern binder of
-    /// a non-consuming match, a `for` variable over a container it does not
-    /// consume) is never owned, whatever its type.
-    pub owned: bool,
+    /// Whether a held value of this name owes a RELEASE at an exit: its type
+    /// owns heap, or it carries a must-use obligation. A borrowed binding (a
+    /// `read` parameter, a pattern binder of a non-consuming match, a `for`
+    /// variable over a container it does not consume) owes none, whatever its
+    /// type.
+    ///
+    /// This is RFC-0114's question, and it is not RFC-0089 rule 1's. A value
+    /// that owns no heap has no release and is still owned; the kernel asks
+    /// the two apart (`kernel::Kernel::releases` and `kernel::Kernel::owned`).
+    pub releases: bool,
     /// Whether the type owns heap.
     pub heap: bool,
     /// Whether the name is a borrow (RFC-0089 rule 2): its type owns heap,
@@ -237,6 +242,18 @@ pub enum Rhs {
         /// pass and `movecheck::sinks` read. The exception itself is stated
         /// here (RFC-0125 §3 M3, the checker's deletion path).
         write_back: bool,
+        /// Whether the callee DECLARES its capabilities: a function, a
+        /// method or a projection whose parameters the author wrote. A
+        /// `consume` on such a parameter is RFC-0089 rule 1 — it takes
+        /// ownership of whatever it is handed, heap or not.
+        ///
+        /// False for a builtin, a variant constructor and every other callee
+        /// whose capabilities this pass synthesizes. Such a call STORES its
+        /// argument, and storing a value that owns no heap copies it, so the
+        /// caller keeps its own (`movecheck::sinks` asks `owns_heap` there
+        /// and asks nothing at a declared parameter). RFC-0125 §3 M3, the
+        /// two-questions slice.
+        declared: bool,
         /// The producer type: what the callee answers at this site, with the
         /// call's own type arguments already substituted. `None` for a call
         /// the checker did not type.
@@ -431,7 +448,7 @@ impl Body {
 
     fn spell(&self, n: Name) -> String {
         let i = &self.names[n as usize];
-        if i.owned {
+        if i.releases {
             format!("{}!", i.source)
         } else {
             i.source.clone()
@@ -594,6 +611,42 @@ fn is_place_read(e: &Expr) -> bool {
         }
         Expr::Var { .. } => true,
         _ => false,
+    }
+}
+
+/// The two refusals a `consume` gets when what follows it names no place.
+/// `by_loop` picks the form's wording: `for x in consume xs` says the loop
+/// already owns a container, and a prefix `consume` says the value is already
+/// owned. Both are the checker's own sentences (`movecheck::TakeForm`), and
+/// both are stated from the SYNTAX, so no heapless counterexample to either
+/// exists (RFC-0125 §3 M3, rows 08 and 09).
+fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
+    if vyrn_frontend::movecheck::place_path(e).is_some() {
+        return Ok(());
+    }
+    if let Some((_, path)) = vyrn_frontend::movecheck::element_path(e) {
+        return refuse(
+            format!("`{path}` may not be taken — an element is not a place a take reaches"),
+            line,
+        );
+    }
+    let says = if by_loop {
+        "`consume` here has nothing to take — the loop already owns a container that is \
+         not a binding"
+    } else {
+        "`consume` here has nothing to take — the value is already owned, so there is no \
+         place to leave a hole in"
+    };
+    refuse(says.to_string(), line)
+}
+
+/// The scrutinee a binder borrows: its name, where the construct did not
+/// consume it. `None` for a consumed scrutinee, whose binders own what they
+/// name.
+fn borrow_root(sv: &Val, consuming: bool) -> Option<Name> {
+    match sv {
+        Val::Name(n) if !consuming => Some(*n),
+        _ => None,
     }
 }
 
@@ -922,14 +975,14 @@ impl<'a> Builder<'a> {
         self.proto.owns_heap(ty) || self.proto.must_use(ty) || self.proto.release_kind(ty).is_some()
     }
 
-    fn name(&mut self, source: &str, ty: Type, owned: bool, line: usize) -> Name {
+    fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
         let heap = self.proto.owns_heap(&ty);
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
-            owned,
+            releases,
             heap,
-            borrow: heap && !owned,
+            borrow: heap && !releases,
             borrow_kind: None,
             line,
             binding: None,
@@ -1286,7 +1339,7 @@ impl<'a> Builder<'a> {
                     });
                     return Ok(());
                 };
-                let old = if !self.body.names[n as usize].owned {
+                let old = if !self.body.names[n as usize].releases {
                     Old::Nothing
                 } else if releases {
                     Old::Released
@@ -1417,7 +1470,8 @@ impl<'a> Builder<'a> {
                 let (sv, consuming) = self.scrutinee(scrutinee, sid, out)?;
                 let mut t = Vec::new();
                 let mark = self.scope.len();
-                let binds = self.bind_pattern(pattern, &sty, consuming, *line, &mut t)?;
+                let from = borrow_root(&sv, consuming);
+                let binds = self.bind_pattern(pattern, &sty, consuming, *line, from, &mut t)?;
                 self.block(then_block, &mut t)?;
                 self.scope.truncate(mark);
                 let mut e = Vec::new();
@@ -1474,6 +1528,11 @@ impl<'a> Builder<'a> {
                     // instantiation's type arguments.
                     Err(g) => self.projected_elem(&ity).ok_or(g)?,
                 };
+                // The LOOP form of the take (RFC-0125 §3 M3, row 09): the
+                // same rule as the prefix form, at the other spelling.
+                if *consuming {
+                    take_names_a_place(iter, *line, true)?;
+                }
                 // The container: a name the loop reads, or one it takes.
                 let it = match iter {
                     Expr::Var { name, .. } if self.lookup(name).is_some() => {
@@ -1563,7 +1622,7 @@ impl<'a> Builder<'a> {
                     self.stream_loops.pop();
                     // The loop pulled the stream to its end, or a `break`
                     // left early: either way the loop closes it here.
-                    if self.body.names[it as usize].owned
+                    if self.body.names[it as usize].releases
                         && !self.placed.contains_key(&(Exit::Scrutinee, sid))
                     {
                         out.push(St::Drop(it, Site::None));
@@ -1583,7 +1642,7 @@ impl<'a> Builder<'a> {
                 // compiling backends emit its release as nothing under
                 // `region_depth`, and the plan notes it `Leak::Region`.
                 let info = &self.body.names[n as usize];
-                if !info.owned
+                if !info.releases
                     && matches!(
                         self.fate_of(&info.source, info.line),
                         Some(Fate::Leaked(Leak::Region))
@@ -1687,7 +1746,7 @@ impl<'a> Builder<'a> {
     /// function, innermost first.
     fn close_streams(&self, out: &mut Vec<St>) {
         for it in self.stream_loops.iter().rev() {
-            if self.body.names[*it as usize].owned {
+            if self.body.names[*it as usize].releases {
                 out.push(St::Drop(*it, Site::None));
             }
         }
@@ -1854,7 +1913,7 @@ impl<'a> Builder<'a> {
             Expr::Var { name, .. } if self.lookup(name).is_some() => {
                 let n = self.lookup(name).unwrap();
                 self.own_the_scrutinee(n, construct);
-                if !self.body.names[n as usize].owned {
+                if !self.body.names[n as usize].releases {
                     return Ok((Val::Name(n), false));
                 }
                 if self.own.plan.match_consumes(construct) {
@@ -1923,7 +1982,7 @@ impl<'a> Builder<'a> {
     /// placer would add where the plan places none.
     fn own_the_scrutinee(&mut self, n: Name, construct: usize) {
         let info = &self.body.names[n as usize];
-        if info.owned || !info.heap || info.borrow {
+        if info.releases || !info.heap || info.borrow {
             return;
         }
         let aliased = matches!(
@@ -1931,7 +1990,7 @@ impl<'a> Builder<'a> {
             Some(Fate::Leaked(Leak::Aliased { .. }))
         );
         if aliased && self.own.plan.match_consumes(construct) {
-            self.body.names[n as usize].owned = true;
+            self.body.names[n as usize].releases = true;
         }
     }
 
@@ -1940,18 +1999,24 @@ impl<'a> Builder<'a> {
     /// plan placed no release of the whole value after the construct. Where it
     /// did place one, the binders borrowed and the value is released whole.
     fn taken_by(&self, t: Name, construct: usize) -> bool {
-        self.body.names[t as usize].owned
+        self.body.names[t as usize].releases
             && !self.placed.contains_key(&(Exit::Scrutinee, construct))
     }
 
     /// Bind a pattern's names. Owned binders when the match consumed its
     /// scrutinee; borrowed places otherwise.
+    /// `from` is the scrutinee's name where the construct did not consume it:
+    /// a binder over a borrow is a second name for that borrow, and it
+    /// carries the same kind, so a take of it is refused in the same words
+    /// (RFC-0125 §3 M3, row 13). Without it `match o { Some(v) => take(v) }`
+    /// over a `read` parameter handed the caller's buffer away.
     fn bind_pattern(
         &mut self,
         p: &Pattern,
         sty: &Type,
         consuming: bool,
         line: usize,
+        from: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
         let decls = vyrn_frontend::types::decl_map(self.program);
@@ -1993,6 +2058,12 @@ impl<'a> Builder<'a> {
         for (name, ty) in payloads {
             let owned = consuming && self.owns(&ty);
             let n = self.name(&name, ty, owned, line);
+            if !owned {
+                if let Some(k) = from.and_then(|m| self.body.names[m as usize].borrow_kind.clone())
+                {
+                    self.body.names[n as usize].borrow_kind = Some(k);
+                }
+            }
             // `_` names nothing a body can read, so it never enters the
             // scope — but the payload is real, and a consumed scrutinee's arm
             // still owes its release. The plan's arm table names `_`
@@ -2055,7 +2126,7 @@ impl<'a> Builder<'a> {
             _ if owns => {
                 let v = self.val(e, out)?;
                 if let Val::Name(t) = v {
-                    if self.body.names[t as usize].owned && !self.after.contains(&t) {
+                    if self.body.names[t as usize].releases && !self.after.contains(&t) {
                         self.after.push(t);
                     }
                 }
@@ -2377,21 +2448,37 @@ impl<'a> Builder<'a> {
     /// value that names no place at all is already owned, so there is no
     /// place to leave a hole in.
     fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
-        if vyrn_frontend::movecheck::place_path(e).is_none() {
-            if let Some((_, path)) = vyrn_frontend::movecheck::element_path(e) {
-                return refuse(
-                    format!("`{path}` may not be taken — an element is not a place a take reaches"),
-                    line,
-                );
-            }
-            return refuse(
-                "`consume` here has nothing to take — the value is already owned, so \
-                 there is no place to leave a hole in"
-                    .to_string(),
-                line,
-            );
-        }
+        take_names_a_place(e, line, false)?;
+        self.consume_names_a_borrow(e, line)?;
         self.take_place(e, out)
+    }
+
+    /// RFC-0125 §3 M3, row 11: a prefix `consume` of a BORROW hands somebody
+    /// else's buffer away. The caller owns a `read` or `modify` parameter
+    /// (RFC-0089 rule 2) and the frame that made a capture owns it
+    /// (RFC-0037), so neither may be emptied here. Stated where the keyword
+    /// is, as rows 08 and 09 above are: the write-back of RFC-0082's place
+    /// desugar (`s.dense.push(i)`) reaches [`Builder::take_place`] with no
+    /// `consume` in the program, and it changes no owner.
+    ///
+    /// The refusal names the ROOT, as `movecheck::check_take` names it, and
+    /// the borrow flag carries the heap gate the checker asks for: a record
+    /// of `Int64`s has no buffer to hand away.
+    fn consume_names_a_borrow(&self, e: &'a Expr, line: usize) -> Result<(), Gap> {
+        let Some((root, _)) = vyrn_frontend::movecheck::place_path(e) else {
+            return Ok(());
+        };
+        let Some(n) = self.lookup(&root) else {
+            return Ok(());
+        };
+        let info = &self.body.names[n as usize];
+        match &info.borrow_kind {
+            Some(k) if info.borrow => refuse(
+                format!("`{root}` may not be consumed — it is {}", k.what(&root)),
+                line,
+            ),
+            _ => Ok(()),
+        }
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
@@ -2538,7 +2625,7 @@ impl<'a> Builder<'a> {
                         // yields a borrow makes the result one
                         // (`movecheck::names_a_place`, one arm is enough).
                         if then_borrows || else_borrows {
-                            self.body.names[res as usize].owned = false;
+                            self.body.names[res as usize].releases = false;
                             self.body.names[res as usize].borrow = true;
                         }
                     }
@@ -2566,15 +2653,21 @@ impl<'a> Builder<'a> {
                 for (i, arm) in arms.iter().enumerate() {
                     let mut body = Vec::new();
                     let mark = self.scope.len();
-                    let binds =
-                        self.bind_pattern(&arm.pattern, &sty, consuming, *line, &mut body)?;
+                    let binds = self.bind_pattern(
+                        &arm.pattern,
+                        &sty,
+                        consuming,
+                        *line,
+                        borrow_root(&sv, consuming),
+                        &mut body,
+                    )?;
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
                             // An arm that yields a borrow makes the result
                             // one (`movecheck::names_a_place`).
                             if self.borrows(&v) {
-                                self.body.names[res as usize].owned = false;
+                                self.body.names[res as usize].releases = false;
                                 self.body.names[res as usize].borrow = true;
                             }
                             body.push(St::Store {
@@ -2637,6 +2730,7 @@ impl<'a> Builder<'a> {
                     &ity,
                     consuming,
                     *line,
+                    borrow_root(&sv, consuming),
                     &mut fail,
                 )?;
                 self.close_streams(&mut fail);
@@ -2655,6 +2749,7 @@ impl<'a> Builder<'a> {
                     &ity,
                     consuming,
                     *line,
+                    borrow_root(&sv, consuming),
                     &mut ok,
                 )?;
                 ok.push(St::Store {
@@ -2733,6 +2828,8 @@ impl<'a> Builder<'a> {
                 args: vec![(sv.clone(), Capability::Consume)],
                 spawn: false,
                 write_back: false,
+                // A variant constructor: it stores the payload.
+                declared: false,
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
@@ -2802,7 +2899,7 @@ impl<'a> Builder<'a> {
                 let v = self.val(e, out)?;
                 match v {
                     Val::Name(t) => {
-                        if self.body.names[t as usize].owned {
+                        if self.body.names[t as usize].releases {
                             // Row 11b's rule, stated where the producer is
                             // known: a callee's own allocation.
                             let malloc = matches!(
@@ -2867,8 +2964,12 @@ impl<'a> Builder<'a> {
         // buffer back through the result, so the receiver is taken by the
         // call (`movecheck::sinks`).
         let rebuilds = prelude::rebuilds(name);
+        // Whether the capabilities below are the author's word or this
+        // pass's: the three branches that read a declaration set it.
+        let mut declared = false;
         let caps: Vec<Capability> =
             if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
+                declared = true;
                 f.params.iter().map(|p| p.capability).collect()
             } else if prelude::signature(name).is_some() {
                 let mut caps: Vec<Capability> = (0..args.len())
@@ -2879,8 +2980,10 @@ impl<'a> Builder<'a> {
                 }
                 caps
             } else if let Some(m) = method {
+                declared = true;
                 m.params.iter().map(|p| p.capability).collect()
             } else if let Some(p) = self.projection(name) {
+                declared = true;
                 p.params.iter().map(|p| p.capability).collect()
             } else if matches!(name, "Some" | "Ok" | "Err") || self.is_variant(name) {
                 vec![Capability::Consume; args.len()]
@@ -2959,7 +3062,7 @@ impl<'a> Builder<'a> {
                 let is_temp = !matches!(a, Expr::Var { .. } | Expr::Consume { .. });
                 if is_temp
                     && *cap != Capability::Consume
-                    && self.body.names[t as usize].owned
+                    && self.body.names[t as usize].releases
                     && self.own.plan.arg_drop(a as *const Expr as usize)
                 {
                     // The key stands whether or not `read_val` already queued
@@ -2983,6 +3086,7 @@ impl<'a> Builder<'a> {
             args: vs,
             spawn: false,
             write_back,
+            declared,
             ret,
         })
     }

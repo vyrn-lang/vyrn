@@ -533,24 +533,27 @@ fn the_census_as_a_table() {
 // licensed by the column alone would ship each of these as a program the
 // compiler compiles.
 //
-// The two reasons are separate, and the `why` column says which.
+// The two reasons were separate, and the `why` column says which one the row
+// was found by.
 //
-//   - **heap**. The kernel places releases, so a value that owns no heap has
-//     no release and the kernel has no opinion about it. RFC-0089 rule 1 and
+//   - **heap**. The kernel placed releases, so a value that owned no heap had
+//     no release and the kernel had no opinion about it. RFC-0089 rule 1 and
 //     RFC-0013 are rules about OWNERSHIP, which the checker applies to every
-//     value. `while i < 3 { take(x) }` over a record of `Int64`s is the
+//     value. `while i < 3 { take(x) }` over a record of `Int64`s was the
 //     smallest of them.
-//   - **spelling**. The value owns heap and the kernel still says nothing,
-//     because it does not read this spelling as a borrow: a prefix `consume`
+//   - **spelling**. The value owned heap and the kernel still said nothing,
+//     because it did not read that spelling as a borrow: a prefix `consume`
 //     of a `read` parameter's field, a match arm's payload binder, a
 //     `for .. in consume` whose iterable names no place.
 //
-// This is a pin and not a wish. The day the kernel refuses one of these, this
-// test fails, the row's licence is real, and the rule may leave
-// `movecheck.rs`.
+// **The pin has flipped** (RFC-0125 §3 M3, the two-questions slice): all seven
+// are refused by both passes now, so the test asserts the containment instead
+// of the gap. The two texts are compared WHOLE — the head, the sentence and
+// its second line — because rule 4 of the deletion is that a refusal must be
+// the same refusal after it. A row that starts to differ fails here.
 // ---------------------------------------------------------------------------
 
-/// One program a census row's rule refuses and the kernel accepts.
+/// One program a census row's rule refuses, and the kernel refuses too.
 struct Uncovered {
     file: &'static str,
     row: &'static str,
@@ -558,7 +561,7 @@ struct Uncovered {
     why: &'static str,
 }
 
-const fn uncovered(
+const fn covered(
     file: &'static str,
     row: &'static str,
     says: &'static str,
@@ -575,32 +578,32 @@ const fn uncovered(
 /// The counterexamples, one per rule the census column got wrong.
 fn counterexamples() -> Vec<Uncovered> {
     vec![
-        uncovered(
+        covered(
             "u04_whole_after_a_hole_heapless.vyrn",
             "04",
             "`p.name` was taken out of `p` here",
             "heap",
         ),
-        uncovered(
+        covered(
             "u06_use_after_consume_heapless.vyrn",
             "06, 07",
             "`x.id` is used here but was already consumed by `take(..)` on line 8",
             "heap",
         ),
-        uncovered(
+        covered(
             "u09_for_in_consume_with_nothing_to_take.vyrn",
             "09",
             "`consume` here has nothing to take — the loop already owns a container that is \
              not a binding",
             "spelling",
         ),
-        uncovered(
+        covered(
             "u11_prefix_consume_of_a_read_parameters_field.vyrn",
             "11",
             "`d` may not be consumed — it is a `read` parameter",
             "spelling",
         ),
-        uncovered(
+        covered(
             "u12_module_state_to_a_consume_parameter_heapless.vyrn",
             "12",
             "module state `g` may not be passed to a `consume` parameter via `take(..)` — \
@@ -608,14 +611,14 @@ fn counterexamples() -> Vec<Uncovered> {
              never dropped)",
             "heap",
         ),
-        uncovered(
+        covered(
             "u13_an_arm_binder_to_a_consume_parameter.vyrn",
             "13",
             "`v` may not be passed to a `consume` parameter via `take(..)` — it is a second \
              name for the `read` parameter `o`",
             "spelling",
         ),
-        uncovered(
+        covered(
             "u25_consume_inside_a_loop_heapless.vyrn",
             "25",
             "`x` is consumed by `take(..)` inside a loop, so it would be used again on the \
@@ -625,8 +628,9 @@ fn counterexamples() -> Vec<Uncovered> {
     ]
 }
 
-/// Each counterexample is refused by the checker and accepted by the kernel,
-/// so the rule above it may not leave `movecheck.rs`.
+/// Each counterexample is refused by the checker AND by the kernel, in the
+/// same words at the same line, which is the licence the census column could
+/// not give on its own.
 #[test]
 fn the_licence_is_per_program_and_these_are_the_counterexamples() {
     let mut bad: Vec<String> = Vec::new();
@@ -646,13 +650,17 @@ fn the_licence_is_per_program_and_these_are_the_counterexamples() {
             continue;
         }
         let (kok, ktext) = refusal_in(unlicensed_dir(), u.file, true);
-        if !kok {
+        if kok {
             bad.push(format!(
-                "{} (row {}, {}): the kernel is supposed to accept it, and it said `{}`",
-                u.file,
-                u.row,
-                u.why,
-                ktext.lines().next().unwrap_or_default()
+                "{} (row {}, found by {}): the kernel is supposed to refuse it and it said                  nothing",
+                u.file, u.row, u.why
+            ));
+            continue;
+        }
+        if ktext != text {
+            bad.push(format!(
+                "{} (row {}): the checker said `{text}` and the kernel said `{ktext}`",
+                u.file, u.row
             ));
         }
     }
@@ -686,7 +694,7 @@ fn the_counterexamples_cover_their_directory() {
 #[test]
 #[ignore]
 fn the_counterexamples_as_a_table() {
-    println!("| census row | the program | the checker's sentence | why the kernel says nothing |");
+    println!("| census row | the program | the checker's sentence | found by |");
     println!("|---|---|---|---|");
     for u in counterexamples() {
         println!("| {} | `{}` | {} | {} |", u.row, u.file, u.says, u.why);
@@ -1224,7 +1232,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("placement rows for the engines", 2360),
         ("a fix menu", 81),
         ("shared machinery", 3656),
-        ("tests", 2169),
+        ("tests", 2187),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
