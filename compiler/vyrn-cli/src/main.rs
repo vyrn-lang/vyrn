@@ -501,7 +501,7 @@ fn real_main() -> ExitCode {
         return bench_cmd(&path, rest, engine);
     }
     if cmd == "serve" {
-        return serve_cmd(&path, rest);
+        return serve_cmd(&path, rest, engine);
     }
     // `run` forwards any trailing arguments to the program as `args()`
     // (RFC-0014); the other commands take no extra arguments.
@@ -4709,11 +4709,289 @@ fn bench_verdicts(
     (out, regressed)
 }
 
+/// The doors `vyrn serve --engine wasm` knocks on, and the parked producer they
+/// pull (RFC-0125 §3 M6). The CLI appends this block to the served root before
+/// it loads it, so the checker, the move checker and the release planner judge
+/// every line of it exactly as they judge the program it serves.
+///
+/// Three things the compiled route lacked are here, and each is ordinary Vyrn
+/// rather than a new rule in an emitter:
+///
+/// - **A door for `handle`.** The direct backend exports `_start` and RFC-0012's
+///   `export extern fn` names and nothing else, so `handle` gets a wrapper that
+///   IS one. It is the shape `vyrn routes` already uses for `mountedRows`: a
+///   function the CLI writes, compiled with the program.
+/// - **Marshalling for `Request` and `Response`.** Neither crosses. Their FIELDS
+///   cross, one `export extern fn` call each, under RFC-0012's String ABI — so
+///   there is no encoding to agree on, no text to parse on the guest side, and
+///   no JSON reader linked into a served program to read a header map.
+/// - **A compiled `serveStream`.** It traps at the site in both emitters, and
+///   correctly: a compiled build has no accept loop. A SERVED build has one, so
+///   the CLI rewrites the call to `vyrnServePark` below, which boxes the
+///   producer into module state (RFC-0090 M3's `boxStream`) where the host can
+///   pull it a frame at a time (`pullAt`) and release it (`unboxStream`,
+///   `close`). Nothing about `vyrn run` or `vyrn build` changes.
+const SERVE_SHIM: &str = r#"
+// ---- `vyrn serve --engine wasm` (RFC-0125 §3 M6), appended by the CLI -------
+
+let mut vyrnServeMethod: String = ""
+let mut vyrnServePath: String = ""
+let mut vyrnServeInKeys: Array<String> = []
+let mut vyrnServeInVals: Array<String> = []
+let mut vyrnServeInBody: String = ""
+let mut vyrnServeStatus: Int64 = 0
+let mut vyrnServeType: String = ""
+let mut vyrnServeBody: String = ""
+let mut vyrnServeVary: String = ""
+let mut vyrnServeOutKeys: Array<String> = []
+let mut vyrnServeOutVals: Array<String> = []
+let mut vyrnServeLive: Int64 = 0
+let mut vyrnServeFrame: String = ""
+
+/// What `serveStream` becomes on the served route. The producer goes into one
+/// box and its address into module state, which is the only place a `Stream<T>`
+/// may rest: RFC-0075's linearity forbids a field, and `boxStream` is the door
+/// RFC-0090 M3 opened for exactly this.
+fn vyrnServePark(s: consume Stream<String>) {
+    if vyrnServeLive != 0 {
+        panic("serveStream: this request already opened a stream")
+    }
+    vyrnServeLive = boxStream(s)
+}
+
+/// One request's fields, one call each.
+export extern fn vyrnServeBegin() {
+    vyrnServeMethod = ""
+    vyrnServePath = ""
+    vyrnServeInKeys = []
+    vyrnServeInVals = []
+    vyrnServeInBody = ""
+}
+
+export extern fn vyrnServeMethodIs(s: String) {
+    vyrnServeMethod = s.copy()
+}
+
+export extern fn vyrnServePathIs(s: String) {
+    vyrnServePath = s.copy()
+}
+
+export extern fn vyrnServeHeaderIs(k: String, v: String) {
+    vyrnServeInKeys.push(k.copy())
+    vyrnServeInVals.push(v.copy())
+}
+
+export extern fn vyrnServeBodyIs(s: String) {
+    vyrnServeInBody = s.copy()
+}
+
+/// Call `handle` on the fields collected above and keep what it answered. The
+/// result says whether a producer is parked behind the response, which is what
+/// makes it a live answer rather than a buffered one (RFC-0074 M3a).
+export extern fn vyrnServeHandle() -> Bool {
+    let mut hs: Map<String, String> = [:]
+    let mut i = 0
+    while i < vyrnServeInKeys.length {
+        let k = vyrnServeInKeys[i].copy()
+        let v = vyrnServeInVals[i].copy()
+        hs[k] = v
+        i = i + 1
+    }
+    let req = Request {
+        method: vyrnServeMethod.copy(),
+        path: vyrnServePath.copy(),
+        headers: hs,
+        body: vyrnServeInBody.copy(),
+    }
+    let r = handle(req)
+    vyrnServeStatus = r.status
+    vyrnServeType = r.contentType.copy()
+    vyrnServeBody = r.body.copy()
+    vyrnServeVary = r.vary.copy()
+    vyrnServeOutKeys = []
+    vyrnServeOutVals = []
+    for k in r.headers.keys() {
+        if let Some(v) = r.headers[k] {
+            vyrnServeOutKeys.push(k.copy())
+            vyrnServeOutVals.push(v.copy())
+        }
+    }
+    return vyrnServeLive != 0
+}
+
+export extern fn vyrnServeStatusOf() -> Int64 {
+    return vyrnServeStatus
+}
+
+export extern fn vyrnServeTypeOf() -> String {
+    return vyrnServeType.copy()
+}
+
+export extern fn vyrnServeBodyOf() -> String {
+    return vyrnServeBody.copy()
+}
+
+export extern fn vyrnServeVaryOf() -> String {
+    return vyrnServeVary.copy()
+}
+
+export extern fn vyrnServeHeaderCount() -> Int64 {
+    return vyrnServeOutKeys.length
+}
+
+export extern fn vyrnServeHeaderKey(i: Int64) -> String {
+    return vyrnServeOutKeys[i].copy()
+}
+
+export extern fn vyrnServeHeaderValue(i: Int64) -> String {
+    return vyrnServeOutVals[i].copy()
+}
+
+/// One frame off the parked producer. `false` is the end of the stream, and the
+/// host answers it by closing. The box comes out of module state for the pull
+/// and goes back after it, because the step is ordinary Vyrn and may reach
+/// `serveStream` itself — the newest producer wins, as it does under the
+/// interpreter.
+export extern fn vyrnServeNext() -> Bool {
+    vyrnServeFrame = ""
+    if vyrnServeLive == 0 {
+        return false
+    }
+    let at = vyrnServeLive
+    vyrnServeLive = 0
+    let got: Option<String> = pullAt(at)
+    if vyrnServeLive == 0 {
+        vyrnServeLive = at
+    } else {
+        let old: Stream<String> = unboxStream(at)
+        close(old)
+    }
+    if let Some(f) = got {
+        vyrnServeFrame = f.copy()
+        return true
+    }
+    return false
+}
+
+export extern fn vyrnServeFrameOf() -> String {
+    return vyrnServeFrame.copy()
+}
+
+/// Release the producer. The host sends this when the stream ends and the first
+/// time a write to the client fails, which is how it learns the client is gone.
+export extern fn vyrnServeClose() {
+    if vyrnServeLive != 0 {
+        let at = vyrnServeLive
+        vyrnServeLive = 0
+        let s: Stream<String> = unboxStream(at)
+        close(s)
+    }
+}
+
+/// The entry point a served file need not have (RFC-0016). The CLI renames this
+/// to `main` when the program declares none, because the direct backend has no
+/// `_start` without one — and `_start` is what initializes module state.
+fn vyrnServeMain() -> Int64 {
+    return 0
+}
+"#;
+
+/// Turn a loaded program into the one the serving host runs: every `serveStream`
+/// call becomes `vyrnServePark`, and `vyrnServeMain` becomes `main` when the
+/// program has none of its own.
+///
+/// Both edits are name substitutions on the checked tree, which is why they are
+/// safe to make after the check: `vyrnServePark` declares the signature
+/// `serveStream` declares (`consume Stream<String>` to `Unit`), so every
+/// judgment that ran over the call — the move checker's, the release planner's —
+/// answers the same question about the same shape.
+fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
+    use vyrn_frontend::ast::Expr;
+    let has_main = program
+        .functions
+        .iter()
+        .any(|f| f.name == "main" && f.module.is_none());
+    for f in &mut program.functions {
+        if !has_main && f.name == "vyrnServeMain" {
+            f.name = "main".to_string();
+        }
+        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+            if let Expr::Call { name, args, .. } = e {
+                if name == "serveStream" && args.len() == 1 {
+                    *name = "vyrnServePark".to_string();
+                }
+            }
+        });
+    }
+}
+
+/// One request, one stream frame, or one release, answered by a resident
+/// instance (RFC-0125 §3 M6). The shape is `interp::serve`'s handler exactly, so
+/// the accept loop, the response writer and the stream pump below are the same
+/// code on both engines.
+fn serve_wasm_call(
+    res: &mut wasmrun::Resident,
+    call: vyrn_frontend::interp::ServeCall,
+) -> Result<vyrn_frontend::interp::ServeAnswer, String> {
+    use vyrn_frontend::interp::{ServeAnswer, ServeCall, ServeResponse};
+    match call {
+        ServeCall::Handle(req) => {
+            res.tell("vyrnServeBegin", &[])?;
+            res.tell("vyrnServeMethodIs", &[&req.method])?;
+            res.tell("vyrnServePathIs", &[&req.path])?;
+            for (k, v) in &req.headers {
+                res.tell("vyrnServeHeaderIs", &[k, v])?;
+            }
+            res.tell("vyrnServeBodyIs", &[&req.body])?;
+            let live = res.ask_bool("vyrnServeHandle")?;
+            let n = res.ask_int("vyrnServeHeaderCount")?;
+            let mut headers = Vec::with_capacity(n.max(0) as usize);
+            for i in 0..n {
+                headers.push((
+                    res.ask_text("vyrnServeHeaderKey", Some(i))?,
+                    res.ask_text("vyrnServeHeaderValue", Some(i))?,
+                ));
+            }
+            let resp = ServeResponse {
+                status: res.ask_int("vyrnServeStatusOf")?,
+                content_type: res.ask_text("vyrnServeTypeOf", None)?,
+                body: res.ask_text("vyrnServeBodyOf", None)?,
+                vary: res.ask_text("vyrnServeVaryOf", None)?,
+                headers,
+            };
+            Ok(if live {
+                ServeAnswer::Live(resp)
+            } else {
+                ServeAnswer::Buffered(resp)
+            })
+        }
+        ServeCall::Next => {
+            if res.ask_bool("vyrnServeNext")? {
+                Ok(ServeAnswer::Frame(Some(
+                    res.ask_text("vyrnServeFrameOf", None)?,
+                )))
+            } else {
+                Ok(ServeAnswer::Frame(None))
+            }
+        }
+        ServeCall::Close => {
+            res.tell("vyrnServeClose", &[])?;
+            Ok(ServeAnswer::Released)
+        }
+    }
+}
+
 /// `vyrn serve [file] [--port N]` (RFC-0016) — a hand-rolled HTTP/1.1 host on
-/// `std::net` (no crates), running the file's `handle` under the interpreter.
-/// Sequential accept loop, one request at a time: module state is race-free by
-/// construction. Default port 8080.
-fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
+/// `std::net` (no crates), running the file's `handle`. Sequential accept loop,
+/// one request at a time: module state is race-free by construction. Default
+/// port 8080.
+///
+/// `--engine wasm` (RFC-0125 §3 M6) serves the same file from the program's own
+/// wasm instead, on ONE resident instance: `_start` runs `main` and the module's
+/// initializers once, `proc_exit` unwinds the call and not the store, and every
+/// later request is a call through a door into a guest that still remembers what
+/// `main` wrote. Everything from `parse_request` outward is shared.
+fn serve_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
     // Optional `--port N` (default 8080).
     let mut port: u16 = 8080;
     let mut workers: Option<usize> = None;
@@ -4743,6 +5021,14 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         }
     }
 
+    if workers.is_some() && engine == Engine::Wasm {
+        eprintln!(
+            "serve: `--workers` is the interpreter's (RFC-0025) — the compiled route serves \
+             from one resident instance"
+        );
+        return ExitCode::from(2);
+    }
+
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -4750,10 +5036,22 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match load_program(path, &source) {
+    // The doors go in BEFORE the load, so nothing about them skips a judgment:
+    // appended text is the root module's own, and the checker reads it with the
+    // rest. Appending also leaves every line of the program where it was, so a
+    // diagnostic still points where the author looks.
+    let source = match engine {
+        Engine::Interp => source,
+        Engine::Wasm => format!("{source}\n{SERVE_SHIM}"),
+    };
+    let mut program = match load_program(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
+    if engine == Engine::Wasm {
+        serve_rewrite(&mut program);
+    }
+    let program = program;
     let _memo = shared_desugars(&program);
 
     // `vyrn serve` requires `fn handle(req: Request) -> Response` (exactly this
@@ -4829,6 +5127,53 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+
+    // The compiled route (RFC-0125 §3 M6): the program's own wasm, compiled once
+    // and instantiated once. `_start` initializes module state and runs `main`,
+    // and the store stays open behind it, so the doors read what `main` wrote.
+    if engine == Engine::Wasm {
+        let bytes = match vyrn_codegen::direct::compile(&program) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let run = wasmrun::Run {
+            argv: vec![path.to_string()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: false,
+            // The guest's own standard error is read per call: a trap inside a
+            // door writes its wording there and the serving loop logs THAT,
+            // rather than a wasm backtrace.
+            capture_stderr: true,
+            meter: false,
+        };
+        let mut res = match wasmrun::start(&bytes, &run) {
+            Ok((res, 0)) => res,
+            Ok((mut res, code)) => {
+                eprint!("{}", res.drain_err());
+                eprintln!("error: main returned {code}, aborting serve");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        use std::io::Write;
+        eprint!("{}", res.drain_err());
+        let _ = std::io::stdout().flush();
+        eprintln!("serving {file_label} on http://localhost:{actual_port}");
+        let mut call_handle = |call| serve_wasm_call(&mut res, call);
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut s) => serve_one(&mut s, &mut call_handle),
+                Err(_) => continue,
+            }
+        }
+        return ExitCode::SUCCESS;
     }
 
     // The interpreter thread owns one live `Interp` (module state persists); it
@@ -7025,5 +7370,137 @@ another bench   # trailing reason
         for foreign in ["", ":8080", "evil.example", "evil.example:8080", "[::1"] {
             assert!(!loopback_host(foreign), "{foreign}");
         }
+    }
+
+    /// The doors, in process, on ONE resident instance (RFC-0125 §3 M6).
+    ///
+    /// The three suites that spawn a real server prove this over TCP; this proves
+    /// it without one, which is what makes a failure readable — a `Handle` that
+    /// answers wrong here names the door rather than a 500 on a socket. It pins
+    /// the three things the compiled route lacked: `handle` has a door, a
+    /// `Request` and a `Response` cross it field by field, and a `serveStream`
+    /// parks a producer the host pulls afterwards.
+    ///
+    /// It also prints what one answer costs, with `--nocapture`. A number rather
+    /// than an assertion about time, because the machine carries other gates.
+    #[test]
+    fn the_serve_doors_answer_on_one_resident_instance() {
+        use vyrn_frontend::interp::{ServeAnswer, ServeCall, ServeRequest};
+        const SRC: &str = r#"
+let mut hits: Int64 = 0
+
+fn main() -> Int64 {
+    hits = 100
+    return 0
+}
+
+fn handle(req: Request) -> Response {
+    hits = hits + 1
+    if req.path == "/live" {
+        let xs: Array<String> = ["a", "b"]
+        serveStream(fromArray(xs))
+        return Response { status: 200, contentType: "text/event-stream", body: "p", vary: "", headers: [:] }
+    }
+    return Response { status: 200, contentType: "text/plain", body: "\{hits}", vary: "v", headers: ["X-Echo": req.method.copy()] }
+}
+"#;
+        let dir = std::env::temp_dir().join("vyrn-serve-doors");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("doors-{}.vyrn", std::process::id()));
+        let source = format!("{SRC}\n{SERVE_SHIM}");
+        std::fs::write(&file, &source).unwrap();
+        let key = file.to_string_lossy().replace('\\', "/");
+        let mut program = load_program(&key, &source).expect("the doors load and check");
+        serve_rewrite(&mut program);
+        let bytes = vyrn_codegen::direct::compile(&program).expect("the doors compile");
+        let run = wasmrun::Run {
+            argv: vec![key.clone()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: true,
+            capture_stderr: true,
+            meter: false,
+        };
+        let (mut res, code) = wasmrun::start(&bytes, &run).expect("start");
+        assert_eq!(code, 0, "main exits 0");
+
+        let ask = |path: &str| ServeRequest {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            headers: vec![("host".to_string(), "localhost".to_string())],
+            body: String::new(),
+        };
+
+        // `main` wrote 100 and the store outlived its exit, so the first answer
+        // is 101 and the second 102 — the property one fresh instance per
+        // request cannot have.
+        for want in ["101", "102"] {
+            match serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))) {
+                Ok(ServeAnswer::Buffered(r)) => {
+                    assert_eq!(r.status, 200);
+                    assert_eq!(r.content_type, "text/plain");
+                    assert_eq!(r.body, want);
+                    assert_eq!(r.vary, "v");
+                    assert_eq!(r.headers, vec![("X-Echo".to_string(), "GET".to_string())]);
+                }
+                other => panic!("expected a buffered answer, got {:?}", other.map(|_| ())),
+            }
+        }
+
+        // A parked producer: the answer is a header block, and the frames come
+        // one `Next` at a time until the producer ends.
+        match serve_wasm_call(&mut res, ServeCall::Handle(ask("/live"))) {
+            Ok(ServeAnswer::Live(r)) => {
+                assert_eq!(r.status, 200);
+                assert_eq!(r.body, "p", "the prologue crosses with the header block");
+            }
+            other => panic!("expected a live answer, got {:?}", other.map(|_| ())),
+        }
+        for want in [Some("a"), Some("b"), None] {
+            match serve_wasm_call(&mut res, ServeCall::Next) {
+                Ok(ServeAnswer::Frame(got)) => assert_eq!(got.as_deref(), want),
+                other => panic!("expected a frame, got {:?}", other.map(|_| ())),
+            }
+        }
+        match serve_wasm_call(&mut res, ServeCall::Close) {
+            Ok(ServeAnswer::Released) => {}
+            other => panic!("expected a release, got {:?}", other.map(|_| ())),
+        }
+        // And the instance keeps serving after a stream closed.
+        match serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))) {
+            Ok(ServeAnswer::Buffered(r)) => assert_eq!(r.body, "104"),
+            other => panic!("expected a buffered answer, got {:?}", other.map(|_| ())),
+        }
+
+        // What one answer costs on each engine, interleaved, over the same
+        // program and the same request. Printed rather than asserted: the two
+        // are the same order of magnitude and the machine carries other gates.
+        let n = 200;
+        let mut wasm = std::time::Duration::ZERO;
+        let mut interp = std::time::Duration::ZERO;
+        let plain = load_program(&key, SRC).expect("the program loads without the doors");
+        for _ in 0..3 {
+            let clock = std::time::Instant::now();
+            for _ in 0..n {
+                serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))).expect("answer");
+            }
+            wasm += clock.elapsed();
+            vyrn_frontend::interp::serve(&plain, |call_handle| {
+                // `main` has run, so this interpreter is where the compiled one
+                // was after `_start`.
+                let clock = std::time::Instant::now();
+                for _ in 0..n {
+                    call_handle(ServeCall::Handle(ask("/x"))).expect("answer");
+                }
+                interp += clock.elapsed();
+                Ok(())
+            })
+            .expect("the interpreter serves");
+        }
+        eprintln!(
+            "one answer: {:?} through the doors, {:?} under the interpreter",
+            wasm / (3 * n),
+            interp / (3 * n)
+        );
+        let _ = std::fs::remove_file(&file);
     }
 }
