@@ -403,7 +403,7 @@ pub enum Linear {
 /// lowering, not deciding. What is declared is the property.
 /// `Default` is the seed with no declared rows and no nominal declarations —
 /// what a program of built-ins alone would ask.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Owned {
     /// One row per `impl Owned for T`: the type key -> its flattened `release`.
     impls: HashMap<String, String>,
@@ -1572,7 +1572,7 @@ impl ReleasePlan {
 }
 
 /// Whole-program ownership facts.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Ownership {
     /// The per-node release decisions — see [`ReleasePlan`].
     pub plan: ReleasePlan,
@@ -1616,8 +1616,71 @@ pub struct Ownership {
     pub releases: HashMap<String, Vec<Release>>,
 }
 
+/// One analysis per build — RFC-0125 §3 M3, the repetition slice.
+///
+/// [`analyze`] runs the placer, which builds a core body for every instance of
+/// the LINKED program and judges it. Every command asks for the analysis twice:
+/// once so `kernel_refuses` prints this program's refusals, and once inside the
+/// engine that lowers or emits. The second answer is the first one recomputed,
+/// and the count is in §3 M3's table.
+///
+/// The guard BORROWS the program it caches for, so the program outlives the
+/// guard and no other `Program` can take that address while the entry is held.
+/// That is why an address is a sound key here, and it is the whole proof: a hit
+/// is the same program, so it is the same answer. Any other program analysed
+/// inside the guard — a generator's own, during a load — has a different
+/// address, misses, and is neither served from the cache nor written to it.
+///
+/// Opened by the CLI beside [`crate::project::Memo`], after the load and for
+/// the one program the command is about. Nothing else opens one, so a host that
+/// does not arm it analyses twice as before.
+pub struct Memo<'a> {
+    program: std::marker::PhantomData<&'a Program>,
+}
+
+thread_local! {
+    /// The program this memo answers for, or 0. An address, never dereferenced.
+    static MEMO_FOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MEMO: std::cell::RefCell<Option<Ownership>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+impl<'a> Memo<'a> {
+    /// Hold one analysis of `program` until the guard is dropped.
+    pub fn open(program: &'a Program) -> Memo<'a> {
+        MEMO_FOR.with(|p| p.set(program as *const Program as usize));
+        MEMO.with(|m| *m.borrow_mut() = None);
+        Memo {
+            program: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for Memo<'_> {
+    fn drop(&mut self) {
+        MEMO_FOR.with(|p| p.set(0));
+        MEMO.with(|m| *m.borrow_mut() = None);
+    }
+}
+
 /// Analyse ownership across a whole program.
 pub fn analyze(program: &Program) -> Ownership {
+    let key = program as *const Program as usize;
+    let memoed = MEMO_FOR.with(|p| p.get()) == key;
+    if memoed {
+        if let Some(o) = MEMO.with(|m| m.borrow().clone()) {
+            return o;
+        }
+    }
+    let ownership = analyze_now(program);
+    if memoed {
+        MEMO.with(|m| *m.borrow_mut() = Some(ownership.clone()));
+    }
+    ownership
+}
+
+fn analyze_now(program: &Program) -> Ownership {
     let proto = Owned::new(program);
     // What every `let` in the program still owns where its block ends, decided
     // by the pass that enforces the rules. One walk, one answer, no second
