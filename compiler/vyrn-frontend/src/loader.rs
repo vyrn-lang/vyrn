@@ -1006,9 +1006,13 @@ fn load_with_origins_inner(
     Warnings,
     ModuleGraph,
 ) {
-    match load_modules(root_source, root_path, opts, resolver) {
+    let read_parse = crate::prof::phase("load: read+parse+resolve");
+    let loaded = load_modules(root_source, root_path, opts, resolver);
+    drop(read_parse);
+    match loaded {
         Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new()),
         Ok((modules, root_key, origins, warnings)) => {
+            let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
             (link(modules, &root_key), origins, warnings, graph)
         }
@@ -1192,6 +1196,7 @@ fn load_modules(
         states.insert(key.to_string(), false);
         stack.push(key.to_string());
 
+        let _read = crate::prof::phase("read");
         let text = match source {
             Some(t) => t.to_string(),
             None => resolver.read(key).map_err(|e| {
@@ -1203,6 +1208,7 @@ fn load_modules(
                 )]
             })?,
         };
+        drop(_read);
         let is_root = key == root_key;
 
         // RFC-0053: register a synthesized module's `//@origin` table NOW, before
@@ -1311,9 +1317,13 @@ fn load_modules(
                 format!("{h:x}:{}", text.len())
             };
             MODULE_HASHES.with(|m| m.borrow_mut().insert(key.to_string(), hash.clone()));
-            if let Some(hit) = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned()) {
+            if let Some(hit) = {
+                let _p = crate::prof::phase("parse (cache hit)");
+                PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned())
+            } {
                 hit
             } else {
+                let _p = crate::prof::phase("parse");
                 let tokens = lexer::lex(&text).map_err(|mut d| {
                     if !is_root {
                         d.file = Some(key.to_string());
@@ -3553,7 +3563,10 @@ impl NsResolver<'_> {
 fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
     // RFC-0022: fold import aliases into the flat namespace up front.
+    let alias_span = crate::prof::phase("link: resolve_aliases");
     resolve_aliases(&mut modules, &mut errors, root_key);
+    drop(alias_span);
+    let index_span = crate::prof::phase("link: index");
 
     // ---- indexes over all modules ----------------------------------------
     // top-level name -> (module key, exported)
@@ -3675,6 +3688,8 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // `std/stream`, it just lost the flat namespace to `std/arrays`, and telling
     // the user to look in `std/arrays` sends them somewhere the fix is not.
     let clashed: HashSet<&str> = clashes.iter().map(|(n, _, _)| n.as_str()).collect();
+    drop(index_span);
+    let visible_span = crate::prof::phase("link: visibility");
 
     // ---- per-module import + visibility checks ---------------------------
     // RFC-0054's shadowing fact, gathered as the loop goes and handed to the
@@ -3948,10 +3963,12 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
         }
     }
 
+    drop(visible_span);
     if !errors.is_empty() {
         return Err(errors);
     }
 
+    let _merge = crate::prof::phase("link: merge");
     // ---- merge ------------------------------------------------------------
     // Root last so its injected builtins/log config win; imported modules'
     // injected decls are dropped.

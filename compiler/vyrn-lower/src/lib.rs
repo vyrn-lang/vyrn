@@ -385,9 +385,12 @@ impl<'a> Lowered<'a> {
 /// JSON codecs are ordinary Vyrn functions and are lowered like any other, which
 /// is only true if they are in the program when the checker runs over it here.
 pub fn lower(program: &Program) -> Lowered<'_> {
+    let _p = vyrn_frontend::prof::phase("lower");
     // The same analysis all three engines already share, asked once here so the
     // placement below is the only new thing in the form (RFC-0101 §1.4).
+    let own_span = vyrn_frontend::prof::phase("lower: own::analyze");
     let ownership = vyrn_frontend::own::analyze(program);
+    drop(own_span);
     lower_with(program, &ownership)
 }
 
@@ -397,8 +400,12 @@ pub fn lower_with<'a>(
     program: &'a Program,
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
+    let rec_span = vyrn_frontend::prof::phase("lower: checker::record");
     let recorded = checker::record(program);
+    drop(rec_span);
+    let build_span = vyrn_frontend::prof::phase("lower: build");
     let mut lowered = build(program, &recorded, ownership);
+    drop(build_span);
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });

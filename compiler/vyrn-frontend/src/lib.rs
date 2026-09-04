@@ -179,7 +179,10 @@ pub fn load(
 /// are ordinary Vyrn: move-checked below with everything else, and lowered by every
 /// backend as source it cannot tell apart from the user's.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
+    let check_span = prof::phase("check");
     let (mut diags, json_types, json_dec_types) = checker::check_accum_with_json_types(program);
+    drop(check_span);
+    let synth_span = prof::phase("synthesize");
     if diags.is_empty() {
         let types = types::decl_map(program);
         match jsonenc::encoders(&json_types, &types) {
@@ -211,7 +214,9 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     // checker refuses first — the wording comparison the deletion track
     // needs, and the licence table that says which rule may go. A knob for
     // that comparison, not a mode a program is built under.
+    drop(synth_span);
     if diags.is_empty() && !std::env::var("VYRN_NO_MOVECHECK").is_ok_and(|v| v == "1") {
+        let _p = prof::phase("movecheck");
         diags.extend(movecheck::check_accum(program));
     }
     // RFC-0125 M6, fourth slice: the floor row a judgment answers. The load
@@ -220,6 +225,7 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     // refusal is the one this program earns and not a second answer on top of
     // a type error. A no-op for every load that decided for itself.
     if diags.is_empty() {
+        let _p = prof::phase("floor");
         diags.extend(floor::decide(program));
     } else {
         // A program with errors gets its errors. Dropping the held decision
@@ -239,8 +245,10 @@ pub fn load_warned(
     Result<ast::Program, Vec<diagnostics::Diagnostic>>,
     loader::Warnings,
 ) {
+    let load_span = prof::phase("load (total)");
     let (loaded, origins, warnings, _graph) =
         loader::load_with_origins(root_source, root_path, opts, resolver);
+    drop(load_span);
     // RFC-0053: load/lex/parse diagnostics are already remapped by the loader.
     let program = match loaded {
         Ok(p) => p,

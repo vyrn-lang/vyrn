@@ -1276,6 +1276,7 @@ pub fn check_instantiations(program: &Program) -> Result<(), String> {
 }
 
 pub fn emit(program: &Program) -> Result<String, String> {
+    let _p = vyrn_frontend::prof::phase("emit (text IR)");
     set_gen_host(false);
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
