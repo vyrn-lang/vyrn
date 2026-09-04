@@ -1402,12 +1402,20 @@ impl<'b> Kernel<'b> {
     }
 
     /// Every owned name bound outside the loop must be as it was at entry.
+    ///
+    /// The entry is the join of the loop's edges after [`Self::widen`], so a
+    /// back edge that owes LESS than the entry — `Static` where the entry is
+    /// `Held`, a body that released the value and put a literal back — is
+    /// within it and not a difference. What is a difference is a name gone on
+    /// one and not the other, and a name the entry does not hold that a turn
+    /// would leave held for the next one.
     fn same_outside(&self, at: &State, entry: &State, inside: &[Name]) -> Result<(), Refusal> {
         for n in 0..self.body.names.len() as Name {
             if !self.owned(n) || inside.contains(&n) {
                 continue;
             }
-            if at.own[n as usize] != entry.own[n as usize] {
+            let within = at.own[n as usize] == Own::Static && entry.own[n as usize] == Own::Held;
+            if at.own[n as usize] != entry.own[n as usize] && !within {
                 if at.own[n as usize] == Own::Gone {
                     let s = self.src(n);
                     return match &at.taker[n as usize] {
