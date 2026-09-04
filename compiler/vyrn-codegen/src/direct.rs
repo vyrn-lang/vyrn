@@ -1351,6 +1351,28 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// Round twenty-seven's table read off the core (RFC-0125 §3 M3, the
+    /// deletion slice): did the construct at `node` TAKE its scrutinee, so
+    /// the boxes its binders came out of are its own to give back?
+    ///
+    /// The previous slice measured this row and left it alone: the core's
+    /// answer rested on the scrutinee binding's ownership, and round
+    /// twenty-seven's table is what made that binding `Aliased`. The core
+    /// states the ownership apart from the decision now
+    /// (`core::Builder::own_the_scrutinee`), and the six sites that
+    /// disagreed agree — `compiler/vyrn-cli/tests/coretables.rs` counts
+    /// them, and the count is zero. A site the core states nothing for
+    /// keeps the plan's answer.
+    fn match_consumes(&self, node: usize) -> bool {
+        let Some(f) = &self.facts else {
+            return self.plan.match_consumes(node);
+        };
+        match f.consuming.get(&self.plan.key_of(node)) {
+            Some(took) => *took,
+            None => self.plan.match_consumes(node),
+        }
+    }
+
     /// Round forty's table read off the core (RFC-0125 §3 M3, the
     /// deletion-preparation slice): the payload binders the arm at
     /// `(key, arm)` releases at its end, each with the holes the arm left in
@@ -13725,18 +13747,15 @@ impl<'p> Fn_<'_, 'p> {
     /// was here; `element_path` keeps every `@at` scrutinee out of the free.
     fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
         use vyrn_frontend::movecheck::{element_path, place_path};
-        // RFC-0125 §3 M3, the emitter-reads-the-core slice: NOT read off the
-        // core, and the measurement is in the RFC. The core states the rule
-        // — the construct took its scrutinee — but its answer rests on the
-        // scrutinee binding's own ownership, and round twenty-seven's table
-        // is what MAKES that binding `Aliased`. So a `let s = match o { .. }`
-        // reads as a borrow in the core and the boxes would stop being
-        // freed: six sites over three corpus programs, each one a leak.
-        // The rule needs a binding's ownership stated apart from the
-        // decision it feeds, and that is not this slice's.
+        // RFC-0125 §3 M3, the deletion slice: the third disjunct is the
+        // core's ([`Cx::match_consumes`]). The other two are structural —
+        // a `consume`, and a scrutinee that names no place — and the core
+        // states both of them too, at more sites than the plan's table
+        // named; they stay spelled here because they are this backend's
+        // own reading of the source and no table's.
         let consumed = matches!(scrutinee, Expr::Consume { .. })
             || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
-            || self.cx.plan.match_consumes(key);
+            || self.cx.match_consumes(key);
         let own_receiver = self.is_release
             && match scrutinee {
                 Expr::Consume { place, .. } => {

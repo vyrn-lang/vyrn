@@ -1760,6 +1760,7 @@ impl<'a> Builder<'a> {
         match e {
             Expr::Var { name, .. } if self.lookup(name).is_some() => {
                 let n = self.lookup(name).unwrap();
+                self.own_the_scrutinee(n, construct);
                 if !self.body.names[n as usize].owned {
                     return Ok((Val::Name(n), false));
                 }
@@ -1806,6 +1807,38 @@ impl<'a> Builder<'a> {
                     Val::Lit => Ok((Val::Lit, false)),
                 }
             }
+        }
+    }
+
+    /// RFC-0125 §3 M3, row 14: state a scrutinee's ownership APART from the
+    /// decision it feeds.
+    ///
+    /// The plan's note for `let o = tag(7)` in `let s = match o { Some(v) =>
+    /// v, .. }` is `Leak::Aliased`, and round twenty-seven's own table is
+    /// what makes it so: the construct hands the payload out, `s` reclaims
+    /// it, and `o` releases nothing. Read as "never owned", the note made
+    /// this pass bind `o` as a borrow, so the construct read its scrutinee
+    /// and the rule that asks whether it TOOK it answered no — resting on
+    /// the decision it feeds. The binding owns its value where it is bound,
+    /// and the take is here; so where a construct the plan calls consuming
+    /// names the binding, the value is this frame's and the take is stated.
+    ///
+    /// Stated at the take and nowhere else. A binding aliased by anything
+    /// but a consuming construct — `let t = s`, an arm handing the loop's
+    /// accumulator back — keeps the note's answer, because nothing in this
+    /// core takes it and an owned name nothing takes is a release the
+    /// placer would add where the plan places none.
+    fn own_the_scrutinee(&mut self, n: Name, construct: usize) {
+        let info = &self.body.names[n as usize];
+        if info.owned || !info.heap || info.borrow {
+            return;
+        }
+        let aliased = matches!(
+            self.fate_of(&info.source, info.line),
+            Some(Fate::Leaked(Leak::Aliased { .. }))
+        );
+        if aliased && self.own.plan.match_consumes(construct) {
+            self.body.names[n as usize].owned = true;
         }
     }
 

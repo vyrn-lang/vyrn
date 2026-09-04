@@ -41,14 +41,14 @@
 //! nothing for is a site a flipped emitter would stop releasing at, and a
 //! core answer the plan does not have is one it would release twice.
 //!
-//! One is COUNTED and not pinned, and the count is the finding.
-//! `St::Switch`'s `consuming` is not the plan's `consuming_matches`: it is
-//! the whole disjunction the emitter computes in `frees_boxes` — a
-//! `consume`, a scrutinee that names no place, or the table — narrowed to an
-//! owned scrutinee with no placed release after the construct. The two
-//! answer different questions, and six sites in the corpus answer them the
-//! other way round, so the emitter keeps reading the plan there (RFC-0125 §3
-//! M3, row 14).
+//! One is half COUNTED and half pinned. `St::Switch`'s `consuming` is not
+//! the plan's `consuming_matches`: it is the whole disjunction the emitter
+//! computes in `frees_boxes` — a `consume`, a scrutinee that names no place,
+//! or the table — narrowed to an owned scrutinee with no placed release
+//! after the construct. So the core says yes at sites the table does not
+//! name, and that direction is counted; a site the plan calls consuming and
+//! the core does not is a payload box the emitter would stop freeing, and
+//! that direction is pinned (RFC-0125 §3 M3, row 14).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -331,20 +331,26 @@ fn run() {
             }
         }
 
-        // No pin: `St::Switch`'s `consuming` is a different rule from the
-        // plan's `consuming_matches`, so the two directions are COUNTED and
-        // the emitter keeps reading the plan (RFC-0125 §3 M3, row 14). The
-        // second count is the one that decided it: a site the plan calls
-        // consuming and the core does not is a payload box the flipped
-        // emitter would stop freeing.
+        // `St::Switch`'s `consuming` is a WIDER rule than the plan's
+        // `consuming_matches`: it is the whole disjunction the emitter
+        // computes, a `consume` or a scrutinee that names no place
+        // included, so the core says yes at sites the table does not name
+        // and that direction is COUNTED. The other direction is PINNED
+        // (RFC-0125 §3 M3, row 14): a site the plan calls consuming and the
+        // core does not is a payload box the flipped emitter would stop
+        // freeing, and six such sites are what kept this row on the plan
+        // until the core stated a scrutinee's ownership apart from the
+        // decision it feeds.
         for (site, took) in &facts.consuming {
             *counted.entry("switch sites").or_default() += 1;
             if *took {
                 *counted.entry("consuming: core only").or_default() +=
                     usize::from(!own.plan.consuming_matches.contains(site));
-            } else {
-                *counted.entry("consuming: plan only").or_default() +=
-                    usize::from(own.plan.consuming_matches.contains(site));
+            } else if own.plan.consuming_matches.contains(site) {
+                diffs.push(format!(
+                    "{file}: site {site}: consuming: the plan took the                      scrutinee and the core did not (in {})",
+                    owner(site)
+                ));
             }
         }
 
