@@ -561,15 +561,9 @@ impl Owned {
     ///
     /// The match has no `_` arm on purpose. A new [`Type`] variant does not get
     /// to be silently unreclaimed; it has to say so.
-    /// Whether ANY type declares `impl Owned` — the coarse gate the receiver
-    /// filter uses before admitting a `Deep` producer.
-    pub fn declares_any(&self) -> bool {
-        !self.impls.is_empty()
-    }
-
     /// Whether releasing a value of `ty` could CALL a declared `impl Owned`
-    /// release — the per-type question the coarse [`Owned::declares_any`]
-    /// gates approximated (the upgrade the record-producer gate's comment
+    /// release — the per-type question a coarse "does ANY type declare one"
+    /// gate approximated (the upgrade the record-producer gate's comment
     /// named). A walk that cannot reach a declaration is silent whatever it
     /// frees, so a receiver temporary of such a type may die at its last
     /// read without user-visible timing. Conservative where it cannot see:
