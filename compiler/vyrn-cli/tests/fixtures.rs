@@ -78,7 +78,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "run-profile",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "gen-fn",

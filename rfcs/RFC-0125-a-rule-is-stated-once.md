@@ -3981,7 +3981,7 @@ deleted here, and `--engine interp` is still the default.
 | `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | no — `serve_cmd` takes no engine, and `vyrn serve --engine wasm` silently serves from the interpreter | `interp::serve` holds ONE live instance across every request: `main` runs once and the module's state persists. A resident wasm instance the host calls into per request is not designed anywhere in this RFC or its plan |
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
-| `run-profile` | `vyrn run --profile`, `vyrn check --profile` | no, and there is nothing to profile: under the compiled route the time is wasmtime's | `vyrn_frontend::prof` counts interpreter steps. `check --profile` measures generation and survives while generation is interpreted |
+| `run-profile` | `vyrn run --profile`, `vyrn check --profile` | yes, by replacement since the fifth slice below — the rows are phases rather than functions, and the count is wasmtime's fuel. A per-function table is not portable and the slice says why | `vyrn_frontend::prof` counts interpreter steps and keeps counting them for `--engine interp` and for `check --profile`, which measures generation. What the compiled route reports instead is five phases and one repeatable count: 85,759,742,333 operations for the site export, the same number twice |
 | `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, but the feature `wasm-gen` is OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s, it needs clang and a wasi sysroot, and it declines to the interpreter for a module reaching `writeFile`, `writeAtomic`, `renameFile` or `fsyncFile` | the largest row. `generate_interpreted` is both the reference and the fallback; deleting it makes clang a hard requirement of `vyrn check` |
 | `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | no — the interpreter IS the oracle the compiled route is compared against | after the deletion `VYRN_FIXTURES=write` records from the route under test, and the fixture gate is a self-comparison. The oracle becomes a reviewed diff plus `wasmhash`'s cross-platform bytes |
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
@@ -4317,6 +4317,53 @@ byte for byte, with the four explicit rows the third channel exists for; the 16
 tests of `tests/derived.rs` pass unchanged. The wall times are 2.61 s and
 2.79 s, and neither is about reading routes: both are the page and RPC
 generators running first.
+
+**`run --profile` is not ported. It is replaced, and the replacement says
+what it measures.** The census read `no` here with a reason no port can
+answer: `prof` charges a span in `Interp::call_capturing`, and the compiled
+route has no such place. The program is machine code by the time it runs. A
+per-function table would need the emitter to instrument bytes nobody ships,
+which is a profile of a different program.
+
+So the flag reports what the compiled route can see. Five phases —
+
+    phase           count         total
+    load                1       2.993 s
+    compile             1     239.99 ms
+    translate           1     447.39 ms
+    instantiate         1     159.00 µs
+    run                 1       4.255 s
+
+    85759742333 operation(s) executed
+
+— read off `site/export.vyrn`, which is the largest program in the tree.
+`load` is the front end and the generators; `compile` is the direct backend;
+`translate` is Cranelift; `run` is `_start`. The split is the one a reader
+wants, and it answers the question the interpreter's table answers by other
+means: three of those five rows are the compiler and one is the program.
+
+The count is the part worth having. It is wasmtime's fuel, read rather than
+spent — the store is given a budget nothing can exhaust and the balance at the
+exit is the answer — so it counts the guest's operations instead of timing
+them. That makes it the one column of a profile that does not move: the same
+program on the same input reports the same number on a loaded machine, on an
+idle one, and on somebody else's. `tests/cli.rs` pins exactly that by running
+one program twice and comparing the counts.
+
+Two things it costs. Fuel is a counter the guest decrements, so it needs its
+own `Engine` with `consume_fuel` on, which is why the flag is opt-in and the
+unprofiled route pays nothing; and the overhead itself is not quoted here,
+because the machine carried other worktrees' gates and three interleaved pairs
+of the site export moved between 7.6 s and 12.4 s in BOTH columns. The corpus's
+own programs run for milliseconds and could not have measured it either.
+
+The table is `prof`'s, the one `VYRN_BUILD_PROFILE=1` already prints (§3 M4): a
+phase of a run and a phase of a build are the same row, and the wording exists.
+`prof::charge` is new beside `prof::phase` and is the whole of the frontend's
+change — a caller that timed a span itself and already knows it is profiling.
+Under `--engine interp`, and for `check --profile`, nothing moves: the
+tree-walker's per-function rows are still what those print, and `check
+--profile` measures generation, which is interpreted.
 
 ### M6 — the other two judgments
 

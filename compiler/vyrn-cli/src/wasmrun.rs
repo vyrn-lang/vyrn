@@ -35,6 +35,8 @@ pub struct Outcome {
     /// Standard error, when the caller asked for it to be captured; otherwise
     /// empty and already written through.
     pub stderr: Vec<u8>,
+    /// The phases and the count, when [`Run::meter`] asked for them.
+    pub meter: Option<Meter>,
 }
 
 /// One run's inputs beyond the module.
@@ -51,6 +53,31 @@ pub struct Run {
     /// Keep the guest's standard error in [`Outcome::stderr`] instead of
     /// writing it through — the test harness reads a trap's message out of it.
     pub capture_stderr: bool,
+    /// Time the phases and count the guest's operations, into
+    /// [`Outcome::meter`] — `vyrn run --profile --engine wasm` (RFC-0125 §3 M5,
+    /// the `run-profile` row). It costs the run a fuel counter, so it is off
+    /// unless it was asked for.
+    pub meter: bool,
+}
+
+/// What a metered run measured.
+///
+/// Wall time for each phase the host owns, and one count. There is no
+/// per-function row and there cannot be one: the module is machine code by the
+/// time it runs, and neither wasmtime nor this host can attribute a sample to a
+/// Vyrn function without instrumenting the bytes — which would profile a program
+/// nobody ships.
+pub struct Meter {
+    /// Cranelift compiling the module.
+    pub translate: std::time::Duration,
+    /// Linking, instantiating, and reading the memory export.
+    pub instantiate: std::time::Duration,
+    /// `_start`, from the call to the exit.
+    pub run: std::time::Duration,
+    /// Operations the guest executed, as wasmtime counts them for fuel. It
+    /// counts rather than times, so it is the same number on every machine and
+    /// in every run of the same program on the same input.
+    pub fuel: u64,
 }
 
 // WASI preview1 errno values, by name.
@@ -115,9 +142,23 @@ struct Host {
 /// One engine for the process. Cranelift's default is speed, which is what the
 /// `wasmtime` CLI compiles with; no fuel, because a program is not a generator
 /// and has no budget (RFC-0076 M5 is about generators only).
-fn engine() -> &'static Engine {
-    static ENGINE: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
-    ENGINE.get_or_init(|| Engine::new(&wasmtime::Config::new()).unwrap_or_default())
+///
+/// The METERED engine is a second one, and it exists for the same reason it is
+/// second: fuel is a counter the guest decrements in every block, so a run that
+/// nobody asked to count must not pay for it. `vyrn run --profile --engine
+/// wasm` asks (RFC-0125 §3 M5).
+fn engine(metered: bool) -> &'static Engine {
+    static PLAIN: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+    static METERED: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+    if metered {
+        METERED.get_or_init(|| {
+            let mut cfg = wasmtime::Config::new();
+            cfg.consume_fuel(true);
+            Engine::new(&cfg).unwrap_or_default()
+        })
+    } else {
+        PLAIN.get_or_init(|| Engine::new(&wasmtime::Config::new()).unwrap_or_default())
+    }
 }
 
 /// Compile and run `bytes` as a WASI command.
@@ -127,8 +168,10 @@ fn engine() -> &'static Engine {
 /// terms (`error: ..` on fd 2, then `proc_exit(1)`) is an `Ok` with code 1,
 /// because that is the program's output and not this host's.
 pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
-    let engine = engine();
+    let engine = engine(run.meter);
+    let clock = std::time::Instant::now();
     let module = Module::new(engine, bytes).map_err(|e| format!("wasm: {e:?}"))?;
+    let translate = clock.elapsed();
     let mut linker: Linker<Host> = Linker::new(engine);
     link_wasi(&mut linker).map_err(|e| e.to_string())?;
     // A directly-emitted module imports only what it calls after `sweep`, so a
@@ -190,7 +233,13 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         started: std::time::Instant::now(),
         mem: None,
     };
+    let clock = std::time::Instant::now();
     let mut store = Store::new(engine, host);
+    // A budget nothing can exhaust: the counter is here to be READ, not to stop
+    // the program, so `--profile` must not turn a long run into a trap.
+    if run.meter {
+        store.set_fuel(u64::MAX).map_err(|e| e.to_string())?;
+    }
     let inst = linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("instantiate: {e}"))?;
@@ -201,6 +250,8 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
         Some(wasmtime::Extern::Memory(m)) => Some(m),
         _ => return Err("the module exports no memory".into()),
     };
+    let instantiate = clock.elapsed();
+    let clock = std::time::Instant::now();
     let code = match start.call(&mut store, ()) {
         // `_start` always ends in `proc_exit`; a plain return is exit 0 too.
         Ok(()) => 0,
@@ -217,11 +268,18 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
             }
         },
     };
+    let meter = run.meter.then(|| Meter {
+        translate,
+        instantiate,
+        run: clock.elapsed(),
+        fuel: u64::MAX - store.get_fuel().unwrap_or(u64::MAX),
+    });
     let host = store.into_data();
     Ok(Outcome {
         code,
         stdout: host.stdout.unwrap_or_default(),
         stderr: host.stderr.unwrap_or_default(),
+        meter,
     })
 }
 

@@ -232,19 +232,29 @@ pub struct Phase(&'static str, Instant);
 
 impl Drop for Phase {
     fn drop(&mut self) {
-        let span = self.1.elapsed();
-        let name = self.0;
-        PHASES.with(|p| {
-            let mut p = p.borrow_mut();
-            match p.iter_mut().find(|(n, _, _)| *n == name) {
-                Some(row) => {
-                    row.1 += span;
-                    row.2 += 1;
-                }
-                None => p.push((name, span, 1)),
-            }
-        });
+        charge(self.0, self.1.elapsed());
     }
+}
+
+/// Charge `span` to the phase `name`, from a caller that timed it itself.
+///
+/// [`phase`] is the pipeline's own hook and answers to `VYRN_BUILD_PROFILE`.
+/// This one answers to nobody, because its caller already knows it is
+/// profiling: `vyrn run --profile` on the compiled route (RFC-0125 §3 M5, the
+/// `run-profile` row). The tree-walker's per-function rows mean nothing there —
+/// nothing walks a tree — and the phases of the compile and of the run are what
+/// there is to report.
+pub fn charge(name: &'static str, span: Duration) {
+    PHASES.with(|p| {
+        let mut p = p.borrow_mut();
+        match p.iter_mut().find(|(n, _, _)| *n == name) {
+            Some(row) => {
+                row.1 += span;
+                row.2 += 1;
+            }
+            None => p.push((name, span, 1)),
+        }
+    });
 }
 
 /// Start timing `name`, or `None` when nothing is armed — the only cost an
