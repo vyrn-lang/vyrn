@@ -79,7 +79,7 @@ enum Engine {
     Wasm,
 }
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out] [--route wasm2c]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn run|test|bench --check --engine interp|wasm [file.vyrn]   (RFC-0125 M5: `wasm` compiles the program with the direct backend and runs it in the embedded wasmtime; `interp` is the default. Counts only BEFORE the file, like --profile)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out] [--route wasm2c]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Under the interpreter the rows are functions; under --engine wasm they are phases, with the operations the guest executed)\n       vyrn run|test|bench --check --engine interp|wasm [file.vyrn]   (RFC-0125 M5: `wasm` compiles the program with the direct backend and runs it in the embedded wasmtime; `interp` is the default. Counts only BEFORE the file, like --profile)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -567,13 +567,20 @@ fn real_main() -> ExitCode {
             // compile time, and on a generator-heavy program it is most of the
             // work — profiling only what happens after `load_program` would miss
             // it and say nothing was slow.
-            if want_profile {
+            // The interpreter's profiler counts what the tree-walker did, so
+            // it is armed only when the tree-walker is the engine. Under
+            // `--engine wasm` the load is TIMED instead, and it is the first
+            // row of the table `run_wasm` prints (RFC-0125 §3 M5, the
+            // `run-profile` row).
+            if want_profile && engine != Engine::Wasm {
                 vyrn_frontend::prof::start();
             }
+            let clock = std::time::Instant::now();
             let program = match load_program(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
+            let load = clock.elapsed();
             let _memo = shared_desugars(&program);
             // What `check` refuses, `run` refuses, under either engine: a
             // polymorphic recursion has no finite set of instances, and the
@@ -592,7 +599,7 @@ fn real_main() -> ExitCode {
                 }
             }
             if engine == Engine::Wasm {
-                return run_wasm(path, &program, &prog_args);
+                return run_wasm(path, &program, &prog_args, want_profile.then_some(load));
             }
             let out = vyrn_frontend::interp::run_with_args(&program, &prog_args);
             // The table goes to STDERR, and on the failing path too. A profile is
@@ -1191,16 +1198,11 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     // beats one that needs the program to start.
     match vyrn_frontend::load(&source, &root_key, &opts, &resolver)
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
-        .and_then(|p| vyrn_frontend::interp::mounted_routes(&p))
+        .and_then(|p| mounted_routes_wasm(&root_key, &p))
     {
         Ok(mounted) => {
-            for r in mounted {
-                // A `surface(..)` stands for a whole subsystem; the directives
-                // above already list its members, one row each.
-                if r.prefix {
-                    continue;
-                }
-                let row = (r.method, r.path, r.procedure, "explicit".to_string());
+            for (method, path, procedure) in mounted {
+                let row = (method, path, procedure, "explicit".to_string());
                 if !rows.iter().any(|x| x.0 == row.0 && x.1 == row.1) {
                     rows.push(row);
                 }
@@ -1246,6 +1248,130 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
         println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
     ExitCode::SUCCESS
+}
+
+/// `vyrn routes`'s hand-written channel, on the compiled route (RFC-0125 §3 M5,
+/// the `mounted-routes` row) — the arguments of every `mount(..)` the program
+/// holds, read by RUNNING them.
+///
+/// The program itself never runs, and no request is served. A copy of it loses
+/// its `main` and gains one that hands each `mount(..)`'s three route lists to
+/// `std/http`'s `mountedRows` and prints what comes back; the copy compiles
+/// through the direct backend and runs in the embedded engine with its standard
+/// output captured. What a row MEANS lives beside `mount`, in Vyrn, so nothing
+/// here re-derives a path — this reads text.
+///
+/// A row is `kind derived`, and the two words after the kind are the method and
+/// the path every constructor writes first. A `Route`'s third word is the
+/// procedure the generator seeded it with; a stream or a socket has none. A
+/// `surface(..)` stands for a whole subsystem and is dropped here, because the
+/// directive channel already lists its members one row each.
+///
+/// The limits are the interpreter's, unchanged: an argument that names a local
+/// of its enclosing function cannot be lifted into the new `main`, and a
+/// `mount` that is not `std/http`'s four-argument one is not found. Either way
+/// the caller prints its note and keeps the derived rows.
+fn mounted_routes_wasm(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+) -> Result<Vec<(String, String, String)>, String> {
+    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
+    let mut prog = program.clone();
+    let mut calls: Vec<Vec<Expr>> = Vec::new();
+    for f in &mut prog.functions {
+        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+            // Top-level names are unique across a linked program, so `mount` is
+            // `std/http`'s or the program has none. Argument 0 is the request;
+            // the route lists are everything after it.
+            if let Expr::Call { name, args, .. } = e {
+                if name == "mount" && args.len() == 4 {
+                    calls.push(args[1..].to_vec());
+                }
+            }
+        });
+    }
+    if calls.is_empty() {
+        return Ok(Vec::new());
+    }
+    prog.functions
+        .retain(|f| !(f.name == "main" && f.module.is_none()));
+    prog.tests.clear();
+    prog.benches.clear();
+    let mut stmts: Vec<Stmt> = calls
+        .into_iter()
+        .map(|args| {
+            Stmt::Expr(Expr::Call {
+                name: "print".to_string(),
+                args: vec![Expr::Call {
+                    name: "mountedRows".to_string(),
+                    args,
+                    line: 0,
+                }],
+                line: 0,
+            })
+        })
+        .collect();
+    stmts.push(Stmt::Return {
+        value: Some(Expr::Int(0)),
+        line: 0,
+    });
+    prog.functions.push(Function {
+        name: "main".to_string(),
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        type_bounds: Default::default(),
+        params: Vec::new(),
+        ret: Type::Int,
+        body: Block { stmts },
+        line: 0,
+        col: 0,
+        is_extern: false,
+        is_export_extern: false,
+        is_gen: false,
+        is_mut: false,
+    });
+    let bytes = vyrn_codegen::direct::compile(&prog)?;
+    let out = wasmrun::run(
+        &bytes,
+        wasmrun::Run {
+            argv: vec![path.to_string()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: true,
+            capture_stderr: true,
+            meter: false,
+        },
+    )?;
+    if out.code != 0 {
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        let line = text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("error: ");
+        return Err(if line.is_empty() {
+            format!("the mounted router exited {}", out.code)
+        } else {
+            line.to_string()
+        });
+    }
+    let mut rows = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut words = line.split_whitespace();
+        let (Some(method), Some(route)) = (words.next(), words.next()) else {
+            continue;
+        };
+        if method == "*" {
+            continue;
+        }
+        let procedure = match method {
+            "SSE" | "WS" => "-",
+            _ => words.next().unwrap_or("-"),
+        };
+        rows.push((method.to_string(), route.to_string(), procedure.to_string()));
+    }
+    Ok(rows)
 }
 
 /// `vyrn routes --json` (RFC-0073 M4) — the merged wire table for external
@@ -2403,22 +2529,53 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let args = vec![json, type_name.to_string(), module.to_string()];
-    match vyrn_frontend::interp::run_with_args(&program, &args) {
-        Ok(code) => ExitCode::from((code & 0xff) as u8),
-        Err(e) => {
-            // The trap carries the position of the `panic` in the converter
-            // above — a module the user never wrote and cannot open. The message
-            // is the whole answer, so the internal location is dropped and the
-            // INPUT file's name takes its place.
-            let msg = e
-                .split_once(" (from-json.vyrn:")
-                .map(|(m, _)| m)
-                .unwrap_or(e.as_str());
-            eprintln!("error: {path}: {msg}");
-            ExitCode::FAILURE
-        }
+    // The compiled route (RFC-0125 §3 M5, the `from-json` row): the converter is
+    // one constant program, so it compiles once per invocation through the direct
+    // backend and runs in the embedded wasmtime. Nothing about it is a user's
+    // choice, so there is no engine flag — this IS the engine. Standard output
+    // passes through; standard error is captured because the wording below
+    // rewrites it.
+    if let Err(code) = kernel_refuses(&program, &key) {
+        return code;
     }
+    let bytes = match vyrn_codegen::direct::compile(&program) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let run = wasmrun::Run {
+        argv: vec![key.clone(), json, type_name.to_string(), module.to_string()],
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        capture_stderr: true,
+        meter: false,
+    };
+    let out = match wasmrun::run(&bytes, run) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if out.code == 0 {
+        return ExitCode::SUCCESS;
+    }
+    // The trap carries the position of the `panic` in the converter above — a
+    // module the user never wrote and cannot open. The message is the whole
+    // answer, so the internal location is dropped and the INPUT file's name
+    // takes its place.
+    let text = String::from_utf8_lossy(&out.stderr).into_owned();
+    let msg = text
+        .trim_end_matches(['\n', '\r'])
+        .trim_start_matches("error: ");
+    let msg = msg
+        .split_once(" (from-json.vyrn:")
+        .map(|(m, _)| m)
+        .unwrap_or(msg);
+    eprintln!("error: {path}: {msg}");
+    ExitCode::from((out.code & 0xff) as u8)
 }
 
 /// The project's `main` plus its local (non-remote) imports, as file paths — the
@@ -5835,10 +5992,21 @@ fn write_response_vary(
 /// backend and run in the embedded wasmtime, with the arguments, streams and
 /// exit code `vyrn run` gives the interpreter. The kernel's refusals apply as
 /// they do to `build`, since this is the same route.
-fn run_wasm(path: &str, program: &vyrn_frontend::ast::Program, prog_args: &[String]) -> ExitCode {
+///
+/// `profile` carries the time the LOAD took, and asks for the rest: it is
+/// `Some` for `vyrn run --profile --engine wasm` (RFC-0125 §3 M5, the
+/// `run-profile` row), which reports phases and a count where the interpreter
+/// reports per-function rows. See [`wasm_profile`].
+fn run_wasm(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+    prog_args: &[String],
+    profile: Option<std::time::Duration>,
+) -> ExitCode {
     if let Err(code) = kernel_refuses(program, path) {
         return code;
     }
+    let clock = std::time::Instant::now();
     let bytes = match vyrn_codegen::direct::compile(program) {
         Ok(b) => b,
         Err(e) => {
@@ -5846,20 +6014,60 @@ fn run_wasm(path: &str, program: &vyrn_frontend::ast::Program, prog_args: &[Stri
             return ExitCode::FAILURE;
         }
     };
+    let compile = clock.elapsed();
     let mut argv = vec![path.to_string()];
     argv.extend(prog_args.iter().cloned());
     let run = wasmrun::Run {
         argv,
         stdin_prefix: Vec::new(),
+        capture_stdout: false,
         capture_stderr: false,
+        meter: profile.is_some(),
     };
     match wasmrun::run(&bytes, run) {
-        Ok(out) => ExitCode::from((out.code & 0xff) as u8),
+        Ok(out) => {
+            if let (Some(load), Some(meter)) = (profile, out.meter.as_ref()) {
+                wasm_profile(load, compile, meter);
+            }
+            ExitCode::from((out.code & 0xff) as u8)
+        }
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The profile of a compiled run, to standard error (RFC-0125 §3 M5, the
+/// `run-profile` row).
+///
+/// `--profile` under the interpreter names functions, because the tree-walker
+/// funnels every Vyrn call through one place and can charge a span there. The
+/// compiled route has no such place: the program is machine code, and a
+/// per-function table would need the emitter to instrument bytes no user runs.
+/// So this reports what is true instead of what the other engine reports — the
+/// four phases, and the operations the guest executed.
+///
+/// The count is wasmtime's fuel, read rather than spent: the store is given a
+/// budget nothing exhausts and the balance is the answer. It counts operations
+/// rather than timing them, so unlike every row above it, it is the same number
+/// on a loaded machine as on an idle one, and the same on someone else's.
+///
+/// The phase table is `vyrn_frontend::prof`'s, the one `VYRN_BUILD_PROFILE=1`
+/// prints (RFC-0125 §3 M4), because a phase of a run and a phase of a build are
+/// the same kind of row and the wording exists.
+fn wasm_profile(load: std::time::Duration, compile: std::time::Duration, meter: &wasmrun::Meter) {
+    vyrn_frontend::prof::charge("load", load);
+    vyrn_frontend::prof::charge("compile", compile);
+    vyrn_frontend::prof::charge("translate", meter.translate);
+    vyrn_frontend::prof::charge("instantiate", meter.instantiate);
+    vyrn_frontend::prof::charge("run", meter.run);
+    eprint!("{}", vyrn_frontend::prof::phase_table());
+    eprintln!(
+        "
+{} operation(s) executed",
+        meter.fuel
+    );
 }
 
 /// One `test` or `bench` body, as [`bodies_wasm`] runs it.
@@ -5981,7 +6189,9 @@ fn bodies_wasm(
         let run = wasmrun::Run {
             argv: vec![path.to_string()],
             stdin_prefix: format!("{k}\n").into_bytes(),
+            capture_stdout: false,
             capture_stderr: true,
+            meter: false,
         };
         let out = match wasmrun::run(&bytes, run) {
             Ok(out) => out,

@@ -495,3 +495,26 @@ placeholder-checked constructor per procedure, mounted under the base path its
 stem derives.
 
 Inspect the generated module with:  vyrn emit-gen <file>
+
+## mountedRows
+
+```vyrn
+fn mountedRows(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> String
+```
+
+Every row a `mount(..)` argument list carries, one per line — what a tool
+that reports a program's wire surface reads, without serving a request.
+
+`vyrn routes` is that tool (RFC-0125 §3 M5, the `mounted-routes` row). It
+evaluates the arguments of each `mount(..)` in a program and prints what
+they hold, so it needs what the four kinds `mount` resolves already carry:
+the `derived` policy line each constructor wrote, which is the same text the
+mount audit's diagnostics quote. Nothing here re-derives a path.
+
+A row is one `derived` line. Its first word is the method, and it says which
+kind wrote it: `SSE` for a stream, `WS` for a socket, `*` for a whole
+subsystem, and an HTTP method for a route — whose third word is the
+procedure the generator seeded it with.
+
+The parameters are `mount`'s own, minus the request, so an argument list
+that mounts also reads.

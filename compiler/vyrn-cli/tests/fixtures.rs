@@ -70,15 +70,15 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "mounted-routes",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "from-json",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "run-profile",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "gen-fn",
