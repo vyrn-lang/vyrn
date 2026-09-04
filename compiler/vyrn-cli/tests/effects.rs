@@ -970,6 +970,36 @@ fn run_corpus() {
     for (name, n) in &unknown {
         eprintln!("  unattributed {n:5}  {name}");
     }
+    // Finding 14, closed by the seventh slice: the judgment answers for every
+    // call in the corpus. The count is EXACT, not a bound — a new one is a
+    // call whose effects the judgment does not bound, which is a hole in the
+    // M6 gate and not a number to raise.
+    const UNATTRIBUTED: usize = 0;
+    assert_eq!(
+        unknown.values().sum::<usize>(),
+        UNATTRIBUTED,
+        "calls the judgment could not attribute; the first: {}",
+        unknown.keys().next().map(String::as_str).unwrap_or("none")
+    );
+    // An open set is a source the collection named and this corpus has no
+    // body for. Zero since the seventh slice.
+    const OPEN_SETS: usize = 0;
+    assert_eq!(
+        open.len(),
+        OPEN_SETS,
+        "function types whose closed set names a body the corpus does not have; the first: {}",
+        open.first().map(String::as_str).unwrap_or("none")
+    );
+    // An EMPTY set is an answer, not a hole: the program declares the type
+    // and holds no value of it, so the call cannot run. Six in this corpus,
+    // each named in RFC-0125 §3 M6's seventh slice.
+    const EMPTY_SETS: usize = 6;
+    assert_eq!(
+        empty_sets.len(),
+        EMPTY_SETS,
+        "function types no value of which exists in their program:\n{}",
+        empty_sets.join("\n")
+    );
     if std::env::var("VYRN_EFFECTS_MODULES").is_ok() {
         let mut by_module: BTreeMap<&str, Effects> = BTreeMap::new();
         for r in &rows {
