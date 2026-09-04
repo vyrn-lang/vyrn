@@ -1423,20 +1423,25 @@ struct CoercionSite {
     engine: &'static str,
     /// What it decides.
     decides: &'static str,
-    /// Whether it is the RUNG ladder — the decision §1's 505 counts. The other
-    /// rows are in the census so a later reader does not go looking for them.
+    /// Whether it is the RUNG ladder — the code §1's 505 counts. The other rows
+    /// are in the census so a later reader does not go looking for them.
     ladder: bool,
+    /// Whether it STATES the rung rule, rather than emitting a rung another site
+    /// placed. This is the column the milestone moves: an emitter that asks is
+    /// not a statement (RFC-0125 §2.3).
+    states_rung: bool,
     /// Its code lines, as the RFC records them.
     code: usize,
 }
 
 fn coercion_census() -> Vec<CoercionSite> {
-    let site = |file, at, engine, decides, ladder, code| CoercionSite {
+    let site = |file, at, engine, decides, ladder, states_rung, code| CoercionSite {
         file,
         at,
         engine,
         decides,
         ladder,
+        states_rung,
         code,
     };
     vec![
@@ -1446,22 +1451,25 @@ fn coercion_census() -> Vec<CoercionSite> {
             "shared",
             "which rung a pair takes",
             true,
+            true,
             49,
         ),
         site(
             "vyrn-codegen/src/lib.rs",
             "fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {",
             "native",
-            "the rung, and the IR for it",
+            "the IR for the rung the plan placed",
             true,
+            false,
             111,
         ),
         site(
             "vyrn-codegen/src/direct.rs",
             "fn coerce(",
             "wasm",
-            "the rung, and the wasm for it",
+            "the wasm for the rung the plan placed",
             true,
+            false,
             169,
         ),
         site(
@@ -1469,6 +1477,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {",
             "interp",
             "the scalar targets that need no walk",
+            true,
             true,
             19,
         ),
@@ -1478,6 +1487,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "interp",
             "the rung, by target type and value shape",
             true,
+            true,
             112,
         ),
         site(
@@ -1485,6 +1495,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "fn coercion_is_noop(&self, ty: &Type, v: &Val, depth: usize) -> bool {",
             "interp",
             "whether the walk would change the value",
+            true,
             true,
             86,
         ),
@@ -1494,6 +1505,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "interp",
             "whether a target type can change any value at all",
             true,
+            true,
             35,
         ),
         site(
@@ -1502,6 +1514,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "native",
             "whether RFC-0020's containment proof skips the check",
             false,
+            false,
             15,
         ),
         site(
@@ -1509,6 +1522,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {",
             "checker",
             "whether a CONSTANT fails its target's predicate at compile time",
+            false,
             false,
             44,
         ),
@@ -1604,20 +1618,19 @@ fn the_coercion_census_is_what_the_rfc_records() {
         ladder, 532,
         "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 532"
     );
-    // The carriers that state the rung rule THEMSELVES, in the sense the
-    // boundary census of §3 M6's fifth slice uses: an engine that ASKS another
-    // site's statement is not a carrier, and `shared` is the statement rather
-    // than an engine.
-    let carriers: std::collections::BTreeSet<&str> = census
+    // The separate statements of the rung rule, which is what the milestone
+    // moves: an engine that ASKS another site's statement is not one. It was
+    // four — the two emitters, the interpreter, and a plan nobody asked.
+    let statements: std::collections::BTreeSet<&str> = census
         .iter()
-        .filter(|s| s.ladder && s.engine != "shared")
+        .filter(|s| s.states_rung)
         .map(|s| s.engine)
         .collect();
     assert_eq!(
-        carriers.len(),
-        3,
-        "the rung rule has {} carriers and the census says 3: {carriers:?}",
-        carriers.len()
+        statements.len(),
+        2,
+        "the rung rule is stated {} times and the census says 2: {statements:?}",
+        statements.len()
     );
 }
 
@@ -1627,15 +1640,16 @@ fn the_coercion_census_is_what_the_rfc_records() {
 #[test]
 #[ignore]
 fn the_coercion_census_as_a_table() {
-    println!("| site | rung ladder | engine | what it decides | code |");
-    println!("|---|---|---|---|---|");
+    println!("| site | rung ladder | states the rung | engine | what it decides | code |");
+    println!("|---|---|---|---|---|---|");
     for s in coercion_census() {
         let (a, b, code) = coercion_span(&s);
         let name = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
         println!(
-            "| `{}` {a}-{b} `{name}` | {} | {} | {} | {code} |",
+            "| `{}` {a}-{b} `{name}` | {} | {} | {} | {} | {code} |",
             s.file,
             if s.ladder { "yes" } else { "no" },
+            if s.states_rung { "yes" } else { "no" },
             s.engine,
             s.decides
         );
