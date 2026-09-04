@@ -1140,7 +1140,9 @@ build` with the kernel's message printed as a diagnostic. The placer
 collects the refusals it meets (`core::augment`), and the CLI runs the
 analysis once more on the program it was given and drains them, so a
 generator's refusal is not charged to the program that ran it. Off by
-default while the five classes above stand in the corpus.
+default while the five classes above stand in the corpus. *The flag is gone
+since M3's default slice below: the refusal is the default, and
+`VYRN_NO_KERNEL=1` turns it off for a bisect.*
 
 ### M3 — the emitter reads the core
 
@@ -1516,8 +1518,9 @@ something else states. So each refusal site — a `menu(..)` or a
 `Diagnostic::error(..)` in `movecheck.rs`, and the two `region` guards the
 close-out above attributed to it — has one minimal refused program under
 `compiler/vyrn-cli/tests/refusals/`, and `tests/refusals.rs` runs each twice:
-`vyrn check` for the checker's sentence, and `VYRN_NO_MOVECHECK=1
-VYRN_KERNEL_STRICT=1 vyrn check` for the kernel's. The last column is
+`vyrn check` for the checker's sentence, and `VYRN_NO_MOVECHECK=1 vyrn
+check` for the kernel's (the second flag went with the default slice). The
+last column is
 asserted per row, in four values. *The same* means the kernel prints the
 checker's whole sentence at the same file and line, minus the `fix:` menu.
 *Its own words* means it refuses the program in a sentence of its own, so
@@ -2547,6 +2550,135 @@ this order of size:
 The next slice's first move is therefore not another rule. It is to split the
 walk: one traversal that refuses, one that records, so that a closed rule takes
 its call site with it.
+
+**The default slice (2026-09-04): a hard refusal refuses.** The slice before
+this one measured the obstacle in one line: on a program the kernel gives the
+checker's whole sentence for, `vyrn check` exits 1 with the checker's menu,
+`VYRN_NO_MOVECHECK=1 vyrn check` exits **0 and prints `ok`**, and only
+`VYRN_KERNEL_STRICT=1` on top of it exits 1. While that stood, no rule could
+leave `movecheck.rs`: deleting the checker's copy would ship a compiler that
+accepts a program both passes agree is wrong. This slice closes it.
+
+- **The refusal is the default.** `vyrn check`, `vyrn build` and `vyrn run`
+  exit non-zero and print the kernel's message with nothing set. `vyrn run`
+  under the interpreter is new here; `--engine wasm` and `build` asked
+  already. One program has one answer, whichever engine runs it.
+- **`VYRN_KERNEL_STRICT` is deleted, and `VYRN_NO_KERNEL=1` takes its place.**
+  Inverted rather than removed, because the two passes beside the kernel each
+  have exactly this knob — `VYRN_NO_MOVECHECK=1` and `VYRN_NO_PLACER=1` — and
+  a refusal that cannot be turned off cannot be bisected against the pass that
+  gives it. It is a bisect, not a mode: nothing is built under it.
+- **A gap is not a refusal, and the code says so once.** A gap is a construct
+  the core cannot lower: the core has no opinion about the program, and the
+  command goes on with the plan the analysis left. A refusal is an answer —
+  the program breaks a rule, and no placement repairs it. Only refusals are
+  collected, and only refusals fail a command (`core::take_refusals`, with
+  `core::Gap::rule` for the rules the core states itself).
+
+**What the corpus said when the default was flipped, and it was not the
+tally's.** The kernel corpus tally is 0 refused over 166 programs, and its
+corpus is `examples/*.vyrn` alone — not `examples/shelf/`, not `std/`, not
+`site/`, not `rfcs/`. The measurement here is every `.vyrn` file in the
+checkout, 466 of them: run `vyrn check` twice, once with the kernel and once
+without, and list what only the first refuses. **32 programs failed**, reaching
+20 refusal sites in nine files. Three of the sites were the kernel's fault,
+one the core's, and eleven the program's.
+
+**The three the kernel was wrong about.** Each is one probe under
+`rfcs/probes-0125/`, and each is a rule stated in the wrong place rather than a
+missing rule.
+
+| what the kernel said | where | why it was wrong | probe |
+|---|---|---|---|
+| `out` (line N) is bound inside a loop that would use it again on the next turn | `site/app/apidoc.vyrn`, `site/app/bench.vyrn`, `site/export.vyrn` | a `continue` was judged against the loop's entry BEFORE the entry widened, so a `continue` after the store that gives a `Static` accumulator its first value never agreed with it | `continue-after-the-first-store.vyrn` |
+| `rows` (line N) is bound inside a loop that would use it again on the next turn | `site/app/apidoc.vyrn` | the widened entry is the JOIN of the loop's edges, so a back edge that reset the name to a literal owes less than the entry and is within it, not different from it | `loop-entry-is-the-join.vyrn` |
+| `elseBody` (line N) is overwritten while still held — the old value is never released | `std/vyx.vyrn` | a `let` of `Body { nodes: [] }` is `Static` — a literal built from literals owns no heap — and a STORE of the same expression was not; the store reads the value's own state now | `store-over-a-static-name.vyrn` |
+
+The fourth was the core's rather than the kernel's: `spawn` attributed every
+argument to a `consume` parameter instead of reading the callee's, so
+`rfcs/bench-0104/p-spawn.vyrn` — which hands the same `read` array to both
+halves on purpose, and says so in its own comment — was refused. A `spawn` is
+a call that runs as a task, so it goes through the same lowering as a call.
+
+**The eleven the program was wrong about.** Every one is a rule the checker
+states and misses at this spelling, so the kernel is the second reader that
+caught it. None is a wording question.
+
+| program | what it did | the rule |
+|---|---|---|
+| `std/ui.vyrn` `uiHeadExpr` | `let mut out = if pageHeadCall.byteLength > 0 { pageHeadCall } else { "[]" }` | rule 2: one arm allocates and the other names a `read` parameter, so the binding is owned on one path and borrowed on the other |
+| `std/ui.vyrn` `uiScanAll` | `let mut scanErr = listed.err` | rule 2: the accumulator is an alias of a field somebody else owns until the first `+` |
+| `std/vyx.vyrn` `vyxIsDeclOf`, `vyxRenameAccessor` | `let bare = if t.startsWith("export ") { trim(..) } else { t }` | rule 2, the same shape as `uiHeadExpr` |
+| `std/vyx.vyrn`, the client-render emitter | `let dataName = if generic { "UiClientData" } else { dataType }` | rule 2, the same shape |
+| `std/vyx.vyrn` `vyxParseHead` | a second `title:` line replaced the first | a store leaves nothing behind: the first was never released |
+| `std/vyx.vyrn`, the component reader | `vyxUsesChildren([root])` | an array literal takes what it holds, so reading one flag moved the root into a temporary the call then released |
+| `examples/shelf/server/view.vyrn` `aboutPage` | `enRows[0]` into a table literal | rule 2: an element read out of an array the body owns |
+| `examples/shelf/server/view.vyrn` `bookRow`, `detailPage` | `None => tag` beside `Some(k) => t(k)` | rule 2, the arm shape again, over a `for` variable |
+| `examples/shelf/client/boot.vyrn` `tagViews` | `None => name` beside `Some(k) => t(k)` | the same |
+| `examples/bin/client/boot.vyrn`, `examples/shelf/client/boot.vyrn` | module state into a record literal | RFC-0013: nothing takes ownership of module state |
+| `examples/bin/client/boot.vyrn` `takeNav` | `let target = navTarget` then `navTarget = ""` | RFC-0090: the store ends every alias that reads out of the place |
+
+The fixes are `.copy()` in nine of them, one `drop` before the store that
+replaces a value, and one call to the per-node predicate the array-wrapping
+call was reaching for. After them the sweep is **0 programs over 466**: no
+`.vyrn` file in the checkout is refused by the kernel and accepted without it.
+
+**The licence the next deletion slice needs.** For every row of the refusals
+census whose kernel column says the kernel gives it — `the same` or `its own
+words` — `VYRN_NO_MOVECHECK=1 vyrn check <program>` now exits non-zero with
+the rule's sentence, and no flag is set. The pin is
+`the_census_is_what_the_two_passes_say`, which runs both passes over every row
+on every build and no longer sets a strict flag to do it; the table below is
+that run, read by exit code and first line.
+
+| # | rule | the kernel, with the checker off | exit |
+|---|---|---|---|
+| 01 | rule 2: an element read may not be stored | `@borrow` may not be passed to a `consume` parameter via `push(..)` — it is read out of `b.xs[..]`, a place that owns it | 1 |
+| 02 | rule 2: a field of a `read` parameter may not be stored | the same shape, over `h.meta[..]` | 1 |
+| 03 | rule 2: a projection is a borrow of its root | the same shape, over `d.title` | 1 |
+| 04 | a name with a hole may not be used whole | `p.name` was taken out of `p` here | 1 |
+| 05 | a write to a place ends every alias that reads out of it | `t.xs[..]` is written here while `before` still reads out of it | 1 |
+| 06 | rule 1: a `consume` parameter takes ownership | `x` is used here but was already consumed by `take(..)` on line 8 | 1 |
+| 07 | rule 1: a move into a binding, and a use of the source after it | `s` was moved here into the binding `t` | 1 |
+| 08 | `consume` reaches a field, never an element | `xs[0]` may not be taken — an element is not a place a take reaches | 1 |
+| 09 | `consume` with nothing to take | `consume` here has nothing to take | 1 |
+| 10 | module state may not be taken: a prefix `consume` | module state `names` may not be passed to a `consume` parameter via `take(..)` | 1 |
+| 11 | rule 2: a prefix `consume` of a `read` parameter | `ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` parameter | 1 |
+| 12 | module state may not be taken: a `consume` parameter | the same sentence as row 10 | 1 |
+| 13 | rule 2: a whole `read` parameter to a `consume` parameter | `ys` may not be passed to a `consume` parameter via `take(..)` | 1 |
+| 14 | rule 2: a projection to a `consume` parameter | `@borrow` ... read out of `d.title`, a place that owns it | 1 |
+| 15 | module state may not be taken: a `return` | `names` may not be returned — it is module state | 1 |
+| 16 | rule 2 at the return: a field of a `read` parameter | `@borrow` may not be returned — it is read out of `d.title` | 1 |
+| 17 | an exported function owns its result | `s` may not be returned from an exported function | 1 |
+| 18 | rule 2 at the return: a whole `read` parameter | `ys` may not be returned — it is a `read` parameter | 1 |
+| 19 | rule 2 through a wrapper | `s` may not be passed to a `consume` parameter via `Some(..)` | 1 |
+| 20 | rule 1 at the drop | `a` is released here but was already consumed by `take(..)` on line 6 | 1 |
+| 21 | rule 4 at the drop | `owned` may not be dropped — it is read out of `b.items` | 1 |
+| 25 | rule 1 across a back edge | `x` is consumed by `take(..)` inside a loop | 1 |
+| 26 | a rebuilding builtin takes its receiver | `mt` is read out of `h.meta` here — a place that owns it | 1 |
+| 27 | rule 2: a `read` parameter to a builtin that declares `consume` | `xs` may not be passed to a `consume` parameter via `fromArray(..)` | 1 |
+| 28 | a closure's result is its caller's | `s` may not be returned from a closure | 1 |
+| 29 | module state may not be taken: `for .. in consume` | module state `names` may not be consumed by a `drop` | 1 |
+| 31 | a must-use obligation is discharged exactly once | `s` is used here but was already consumed by `close(..)` on line 5 | 1 |
+| 34 | rule 2: a `read` parameter into a builtin's `consume` argument | `s` may not be passed to a `consume` parameter via `push(..)` | 1 |
+| 32, 33 | region escape | `checker.rs` gives both, and gave them before this slice | 1 |
+| 22, 23, 24, 30 | a `drop` after a hole; a `modify` borrow's exclusivity; a capture that outlives the call; a must-use obligation on every path | nothing: `vyrn check` prints `ok` | 0 |
+
+**The rules now safe to delete from `movecheck.rs`.** Twenty-eight of the
+thirty-four, rows 01–21, 25–29, 31 and 34: the kernel refuses each program
+with no checker and no flag, and the sentence a reader gets is the checker's
+minus the `fix:` menu (the rows that say `the same`) or the kernel's own words
+for the same rule (the rows that say `its own words`). Rows 32 and 33 are
+`checker.rs`'s and were never the move check's. What may NOT go is rows 22,
+23, 24 and 30 — `MoveCheck::check_exclusive`, `MoveCheck::check_capture`,
+`mod linear`, and the hole test in the drop arm — because `vyrn check` accepts
+all four programs with the checker off, and deleting the rule would ship the
+acceptance.
+
+Two things still stand between the licence and the lines, and neither is a
+rule: the walk (`stmt` and `expr`, 1,929 lines, which refuses and records in
+the same arm) and the 81 lines of menu. Both are the previous slice's finding,
+unchanged.
 
 ### M4 — the runtime in Vyrn
 
