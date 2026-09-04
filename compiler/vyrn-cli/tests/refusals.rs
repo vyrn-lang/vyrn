@@ -32,6 +32,11 @@
 //!   - [`Kernel::Elsewhere`] — the refusal is not the move check's at all: it
 //!     survives `VYRN_NO_MOVECHECK=1` because another pass gives it. Nothing
 //!     is owed here, and the close-out's attribution is corrected.
+//!
+//! A row whose site has already LEFT `movecheck.rs` — row 12, RFC-0125 §3 M3,
+//! the containment slice — is refused by the kernel in both runs, and the two
+//! must still agree. The row is what stops the sentence moving after the
+//! deletion, so it stays in the census.
 
 use std::path::{Path, PathBuf};
 
@@ -553,12 +558,17 @@ fn the_census_as_a_table() {
 // the same refusal after it. A row that starts to differ fails here.
 // ---------------------------------------------------------------------------
 
-/// One program a census row's rule refuses, and the kernel refuses too.
+/// One program a census row's rule refuses, and what the kernel says about it.
 struct Uncovered {
     file: &'static str,
     row: &'static str,
     says: &'static str,
     why: &'static str,
+    /// `None`: the kernel refuses it in the checker's words, whole. `Some(s)`:
+    /// the kernel refuses it and says `s` instead, so the row's rule may NOT
+    /// leave `movecheck.rs` — the sentence a reader gets would move (RFC-0125
+    /// §3 M3, the containment slice).
+    kernel: Option<&'static str>,
 }
 
 const fn covered(
@@ -572,6 +582,24 @@ const fn covered(
         row,
         says,
         why,
+        kernel: None,
+    }
+}
+
+/// The same, for a program whose two passes do not agree on the wording.
+const fn worded(
+    file: &'static str,
+    row: &'static str,
+    says: &'static str,
+    why: &'static str,
+    kernel: &'static str,
+) -> Uncovered {
+    Uncovered {
+        file,
+        row,
+        says,
+        why,
+        kernel: Some(kernel),
     }
 }
 
@@ -619,18 +647,36 @@ fn counterexamples() -> Vec<Uncovered> {
             "spelling",
         ),
         covered(
+            "u12b_module_state_to_a_spawned_consume_parameter.vyrn",
+            "12",
+            "module state `names` may not be passed to a `consume` parameter via `spawn \
+             take(..)` — nothing may take ownership of module state (it lives for the whole \
+             module and is never dropped)",
+            "spelling",
+        ),
+        covered(
             "u25_consume_inside_a_loop_heapless.vyrn",
             "25",
             "`x` is consumed by `take(..)` inside a loop, so it would be used again on the \
              next iteration",
             "heap",
         ),
+        worded(
+            "u25b_partial_take_across_iterations.vyrn",
+            "25",
+            "`er.node` is consumed by `consume` inside a loop, so it would be used again on \
+             the next iteration",
+            "spelling",
+            "`er` (line 9) has a `consume` hole at a loop's back edge it did not have at entry",
+        ),
     ]
 }
 
-/// Each counterexample is refused by the checker AND by the kernel, in the
-/// same words at the same line, which is the licence the census column could
-/// not give on its own.
+/// Each counterexample is refused by the checker AND by the kernel. A row with
+/// no `kernel` wording is refused in the same words at the same line, which is
+/// the licence the census column could not give on its own; a row that names
+/// one is refused in DIFFERENT words, which is why its census row's rule stays
+/// (RFC-0125 §3 M3, the containment slice).
 #[test]
 fn the_licence_is_per_program_and_these_are_the_counterexamples() {
     let mut bad: Vec<String> = Vec::new();
@@ -657,11 +703,27 @@ fn the_licence_is_per_program_and_these_are_the_counterexamples() {
             ));
             continue;
         }
-        if ktext != text {
-            bad.push(format!(
-                "{} (row {}): the checker said `{text}` and the kernel said `{ktext}`",
-                u.file, u.row
-            ));
+        let (_, kmsg) = split_head(&ktext);
+        match u.kernel {
+            // The licence: the same refusal, whole.
+            None => {
+                if ktext != text {
+                    bad.push(format!(
+                        "{} (row {}): the checker said `{text}` and the kernel said `{ktext}`",
+                        u.file, u.row
+                    ));
+                }
+            }
+            // The rule stays: the two passes refuse and word it differently.
+            Some(k) => {
+                let first = kmsg.lines().next().unwrap_or_default();
+                if first != k {
+                    bad.push(format!(
+                        "{} (row {}): the kernel is supposed to say `{k}` and it said `{first}`",
+                        u.file, u.row
+                    ));
+                }
+            }
         }
     }
     assert!(bad.is_empty(), "the licence has moved: {}", bad.join("; "));
@@ -694,10 +756,17 @@ fn the_counterexamples_cover_their_directory() {
 #[test]
 #[ignore]
 fn the_counterexamples_as_a_table() {
-    println!("| census row | the program | the checker's sentence | found by |");
-    println!("|---|---|---|---|");
+    println!("| census row | the program | the checker's sentence | found by | the kernel |");
+    println!("|---|---|---|---|---|");
     for u in counterexamples() {
-        println!("| {} | `{}` | {} | {} |", u.row, u.file, u.says, u.why);
+        let k = match u.kernel {
+            None => "the same, whole".to_string(),
+            Some(k) => format!("its own words: {k}"),
+        };
+        println!(
+            "| {} | `{}` | {} | {} | {k} |",
+            u.row, u.file, u.says, u.why
+        );
     }
 }
 
@@ -1072,11 +1141,6 @@ fn sections() -> Vec<Section> {
             "the walk over expressions: the same traversal does both jobs",
         ),
         sec(
-            "    fn reject_consume_global(",
-            Kernel,
-            "module state may not be taken (rows 10, 12, 15, 29)",
-        ),
-        sec(
             "pub fn mentions_place(e: &Expr, base: &str) -> bool {",
             Shared,
             "whether a stored value mentions the place it is stored into",
@@ -1227,12 +1291,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 1045),
+        ("a rule the kernel now gives", 1009),
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2360),
         ("a fix menu", 81),
-        ("shared machinery", 3656),
-        ("tests", 2187),
+        ("shared machinery", 3651),
+        ("tests", 2172),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
