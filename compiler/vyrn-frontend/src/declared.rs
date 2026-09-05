@@ -184,7 +184,7 @@ impl Declared {
                 .map(|n| (n.to_string(), None))
                 .collect();
         for d in decls.values() {
-            if let Type::Enum(vs) = &d.base {
+            if let Some(vs) = crate::types::declared_variants(&d.base) {
                 for v in vs {
                     // A generic enum's bare name is an incomplete type, and a
                     // variant two enums share names neither — both answer

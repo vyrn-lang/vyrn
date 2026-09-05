@@ -1888,7 +1888,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Enum variant -> (tag index, enum name), for construction.
     let mut variants: HashMap<String, (i64, String)> = HashMap::new();
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = vyrn_frontend::types::declared_variants(&t.base) {
             for (i, v) in vs.iter().enumerate() {
                 variants.insert(v.name.clone(), (i as i64, t.name.clone()));
             }
@@ -13532,14 +13532,13 @@ impl<'a> Gen<'a> {
             // as a header (the RFC-0026 corruption bug). A generic variant whose
             // payload is still an unresolved type parameter keeps the argument's
             // own type (the inline-monomorphized path).
-            let decl_payload: Vec<Type> = match self.types.get(&enum_name).map(|d| d.base.clone()) {
-                Some(Type::Enum(vs)) => vs
-                    .iter()
-                    .find(|v| v.name == name)
-                    .map(|v| v.payload.clone())
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
+            let decl_payload: Vec<Type> = self
+                .types
+                .get(&enum_name)
+                .and_then(|d| vyrn_frontend::types::declared_variants(&d.base))
+                .and_then(|vs| vs.iter().find(|v| v.name == name))
+                .map(|v| v.payload.clone())
+                .unwrap_or_default();
             // gen each payload, coercing to its declared type, boxing any wider
             // than a word.
             let mut payloads = Vec::new();

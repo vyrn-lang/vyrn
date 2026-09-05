@@ -335,7 +335,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         .collect();
     let mut variants: HashMap<String, Vec<(String, u64, Vec<Type>)>> = HashMap::new();
     for d in &program.type_decls {
-        if let Type::Enum(vs) = &d.base {
+        if let Some(vs) = vyrn_frontend::types::declared_variants(&d.base) {
             for (i, v) in vs.iter().enumerate() {
                 variants.entry(v.name.clone()).or_default().push((
                     d.name.clone(),

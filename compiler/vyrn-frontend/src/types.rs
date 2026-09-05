@@ -1715,6 +1715,38 @@ pub fn result_payloads(ty: &Type) -> Option<(&Type, &Type)> {
     }
 }
 
+/// Whether a type is one of the two BUILT-IN sums, whichever way it is spelled
+/// — RFC-0126 §8.15. `Option<T>` and `| None | Some(T)` are the same type, and
+/// so are `Result<T, E>` and `| Err(E) | Ok(T)`; [`option_payload`] and
+/// [`result_payloads`] are the two readings and this asks them both.
+///
+/// It reads as "alias" because that is where it is asked: a declaration's
+/// `base`. `type Maybe = Option<Int64>` names a sum it does not declare, and
+/// after M5 deletes the surface constructors its `base` is a variant list that
+/// looks exactly like a declaration's. The four names in those lists are
+/// RESERVED (`checker::RESERVED`), so nothing a user declares can answer `true`
+/// here.
+pub fn is_sum_alias(base: &Type) -> bool {
+    option_payload(base).is_some() || result_payloads(base).is_some()
+}
+
+/// The variants a declaration DECLARES, or `None` if it declares no variants —
+/// RFC-0126 §8.15. The one reading of `TypeDecl::base` as an enum, asked
+/// wherever a pass collects a module's constructor names.
+///
+/// An alias of a built-in sum is not a variant declaration. Its `base` is a
+/// variant list all the same, so a pass that matched `Type::Enum` on it would
+/// register `None`, `Some`, `Ok` and `Err` as that alias's own variants — and
+/// both emitters key a module-wide `variants` map by variant NAME, so two
+/// `Result` aliases in one program would each resolve to whichever was
+/// collected last.
+pub fn declared_variants(base: &Type) -> Option<&[EnumVariant]> {
+    match base {
+        Type::Enum(vs) if !is_sum_alias(base) => Some(vs),
+        _ => None,
+    }
+}
+
 /// What a `lazy T` field DEFERS, or `None` for an ordinary field (RFC-0085 M4a).
 ///
 /// The one spelling of "is this field forced when read", so the checker, the
@@ -2617,5 +2649,71 @@ pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         | Type::Logger
         | Type::Never
         | Type::Err => {}
+    }
+}
+
+#[cfg(test)]
+mod sum_alias_tests {
+    use super::*;
+
+    /// Parse `src` and answer the declaration named `name`.
+    fn decl_of(src: &str, name: &str) -> TypeDecl {
+        let toks = crate::lexer::lex(src).expect("lex");
+        let prog = crate::parser::parse(toks).expect("parse");
+        prog.type_decls
+            .into_iter()
+            .find(|t| t.name == name)
+            .expect("declaration")
+    }
+
+    /// The two `DeleteResult` aliases of RFC-0126 §8.14 — `examples/fullstack`'s
+    /// and `examples/shelf`'s — are the same declaration in two projects, and a
+    /// module-wide `variants` map keyed by variant NAME is what makes that a
+    /// collision. Neither DECLARES `Ok` or `Err`.
+    #[test]
+    fn a_result_alias_declares_no_variants() {
+        for src in [
+            "export type DeleteResult = Result<Bool, String>",
+            "type DeleteResult = Result<Int64, String>",
+        ] {
+            let d = decl_of(src, "DeleteResult");
+            assert!(is_sum_alias(&d.base), "{src}");
+            assert!(declared_variants(&d.base).is_none(), "{src}");
+        }
+    }
+
+    /// The same, spelled as the variant list `resolve` answers and M5 leaves
+    /// behind. This is the reading the guard exists for: the base is a
+    /// `Type::Enum` and it is still not a declaration.
+    #[test]
+    fn a_sum_spelled_as_its_variant_list_declares_no_variants() {
+        let types = HashMap::new();
+        for ty in [
+            Type::Option(Box::new(Type::Int)),
+            Type::Result(Box::new(Type::Bool), Box::new(Type::Str)),
+        ] {
+            let base = resolve(&ty, &types);
+            assert!(matches!(base, Type::Enum(_)), "{ty} resolves to an enum");
+            assert!(is_sum_alias(&base), "{ty}");
+            assert!(declared_variants(&base).is_none(), "{ty}");
+        }
+    }
+
+    /// A declared enum is unaffected, and `examples/enumcodec.vyrn` is the
+    /// corpus program that holds both in one module: `Shape` declares three
+    /// variants and `Lookup = Result<Shape, String>` declares none.
+    #[test]
+    fn a_declared_enum_still_declares_its_variants() {
+        let src = "type Shape =\n    | Circle(Int64)\n    | Rect(Int64, Int64)\n    | Nothing\ntype Lookup = Result<Shape, String>\n";
+        let shape = decl_of(src, "Shape");
+        assert!(!is_sum_alias(&shape.base));
+        let vs = declared_variants(&shape.base).expect("Shape declares variants");
+        assert_eq!(
+            vs.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+            ["Circle", "Rect", "Nothing"]
+        );
+        let lookup = decl_of(src, "Lookup");
+        assert!(is_sum_alias(&lookup.base));
+        assert!(declared_variants(&lookup.base).is_none());
     }
 }

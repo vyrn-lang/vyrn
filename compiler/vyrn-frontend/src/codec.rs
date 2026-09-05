@@ -734,7 +734,8 @@ fn codable(
         // Preserve a payload-enum's precise variant/payload offender; re-badge
         // any other structural rejection with the user's name.
         return r.map_err(|e| {
-            if matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()))
+            if crate::types::declared_variants(&d.base)
+                .is_some_and(|vs| vs.iter().any(|v| !v.payload.is_empty()))
                 || matches!(d.base, Type::Result(..))
             {
                 e

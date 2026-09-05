@@ -2493,7 +2493,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         let variants = module_variants.entry(m.key.clone()).or_default();
         for t in &m.program.type_decls {
             if t.line != 0 && t.exported {
-                if let Type::Enum(vs) = &t.base {
+                if let Some(vs) = crate::types::declared_variants(&t.base) {
                     for v in vs {
                         variants.insert(v.name.clone());
                     }
@@ -2645,7 +2645,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 continue; // parser-injected builtins are in every module
             }
             names.push(t.name.clone());
-            if let Type::Enum(vs) = &t.base {
+            if let Some(vs) = crate::types::declared_variants(&t.base) {
                 let vars = by_enum.entry(format!("{prefix}{}", t.name)).or_default();
                 for v in vs {
                     vars.insert(v.name.clone(), format!("{prefix}{}", v.name));
@@ -3018,7 +3018,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         };
         if let Some(tm) = modules.iter_mut().find(|m| &m.key == key) {
             for t in &mut tm.program.type_decls {
-                if t.line == 0 {
+                if t.line == 0 || crate::types::is_sum_alias(&t.base) {
                     continue;
                 }
                 if let Type::Enum(vs) = &mut t.base {
@@ -3671,7 +3671,7 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 continue;
             }
             register(&t.name, &m.key, t.exported, &mut clashes);
-            if let Type::Enum(vs) = &t.base {
+            if let Some(vs) = crate::types::declared_variants(&t.base) {
                 for v in vs {
                     variant_enum
                         .entry(v.name.clone())
@@ -4564,7 +4564,7 @@ thread_local! {
 fn own_variant_names(p: &Program) -> HashSet<String> {
     let mut out = HashSet::new();
     for t in &p.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             out.extend(vs.iter().map(|v| v.name.clone()));
         }
     }

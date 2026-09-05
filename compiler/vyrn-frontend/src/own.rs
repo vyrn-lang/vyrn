@@ -1675,7 +1675,7 @@ fn analyze_now(program: &Program) -> Ownership {
         .map(|s| s.to_string())
         .collect();
     for d in program.type_decls.iter() {
-        if let Type::Enum(vs) = &d.base {
+        if let Some(vs) = crate::types::declared_variants(&d.base) {
             constructs.extend(vs.iter().map(|v| v.name.clone()));
         }
     }

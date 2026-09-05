@@ -3205,9 +3205,10 @@ impl<'a> Builder<'a> {
 
     fn is_variant(&self, name: &str) -> bool {
         let decls = vyrn_frontend::types::decl_map(self.program);
-        decls
-            .values()
-            .any(|d| matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| v.name == name)))
+        decls.values().any(|d| {
+            vyrn_frontend::types::declared_variants(&d.base)
+                .is_some_and(|vs| vs.iter().any(|v| v.name == name))
+        })
     }
 }
 

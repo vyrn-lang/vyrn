@@ -2882,7 +2882,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut variant_lead = [false; 256];
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             for v in vs {
                 variants.insert(v.name.as_str());
                 if let Some(b) = v.name.as_bytes().first() {
@@ -8672,7 +8672,7 @@ impl<'a> Interp<'a> {
     /// any — used by `toJson` to recover an enum constructor's static type.
     fn enum_of_variant(&self, variant: &str) -> Option<String> {
         for (name, decl) in self.type_map.iter() {
-            if let Type::Enum(vs) = &decl.base {
+            if let Some(vs) = crate::types::declared_variants(&decl.base) {
                 if vs.iter().any(|v| v.name == variant) {
                     return Some(name.clone());
                 }

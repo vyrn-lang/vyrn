@@ -442,7 +442,7 @@ fn check_accum_inner(
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             for v in vs {
                 if RESERVED.contains(&v.name.as_str()) {
                     out.push(cerr!(t.line, "`{}` is a reserved name", v.name));
@@ -3315,7 +3315,7 @@ impl<'a> Checker<'a> {
             return Ok(());
         }
         // Enum declaration (RFC-0002 §4).
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             if t.predicate.is_some() {
                 return Err(cerr!(t.line, "an enum type cannot have a `where` clause"));
             }

@@ -1763,7 +1763,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             doc: t.doc.clone(),
             file: None,
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             // Variants carry no AST line; find the name token between this decl's
             // line and the next top-level declaration (or EOF).
             let until = lines
@@ -1930,7 +1930,7 @@ fn index_imported_symbols(
                     doc: t.doc.clone(),
                     file: Some(file.clone()),
                 });
-                if let Type::Enum(variants) = &t.base {
+                if let Some(variants) = crate::types::declared_variants(&t.base) {
                     for v in variants {
                         out.push(Symbol {
                             name: v.name.clone(),
@@ -2102,7 +2102,7 @@ fn namespace_members(
             doc: t.doc.clone(),
             file: file(target),
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             for v in variants {
                 out.push(Symbol {
                     name: v.name.clone(),
