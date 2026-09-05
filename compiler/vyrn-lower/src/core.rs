@@ -104,6 +104,16 @@ pub struct NameInfo {
     /// is the emitter's, because this pass lowers a `region` as an ordinary
     /// block.
     pub receiver_malloc: bool,
+    /// RFC-0075 M1: a parameter of a must-use type carries the obligation
+    /// into the callee, so a take of it is the callee's to make — `boxStream(s)`
+    /// is not a take of the caller's value. That is a rule about OWNERSHIP,
+    /// and the capability the parameter declares is still a fact about the
+    /// NAME: `read self` is a `read` parameter whether or not `Self` declares
+    /// `impl MustUse`. The two were one field until row 21 asked what an
+    /// undeclared `self` IS (RFC-0125 §3 M3, the corpus slice), and this is
+    /// the ownership half: it excepts the take, and [`NameInfo::borrow_kind`]
+    /// keeps the words.
+    pub must_use_param: bool,
 }
 
 /// The borrow a parameter's capability makes, or `None` for one that owns
@@ -812,10 +822,13 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         // A must-use type is the exception RFC-0075 M1 states: "a stream
         // PARAMETER carries the obligation into the callee", whatever the
         // capability says, so the callee is the one that disposes of it and
-        // `boxStream(s)` is not a take of the caller's value.
-        if !b.proto.must_use(&b.body.names[n as usize].ty.clone()) {
-            b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
-        }
+        // `boxStream(s)` is not a take of the caller's value. The exception is
+        // about the TAKE and it is recorded as such: the capability is still
+        // the parameter's, and a refusal about a second name for it says so
+        // (RFC-0125 §3 M3, row 21 over `examples/mustuse_abandoned.vyrn`).
+        b.body.names[n as usize].must_use_param =
+            b.proto.must_use(&b.body.names[n as usize].ty.clone());
+        b.body.names[n as usize].borrow_kind = param_borrow(p.capability, &p.name);
         b.scope.push((p.name.clone(), n));
         b.keyed(n, p as *const _ as usize);
         b.body.params.push(n);
@@ -1026,6 +1039,7 @@ impl<'a> Builder<'a> {
             arg_drop: None,
             holes: Vec::new(),
             receiver_malloc: false,
+            must_use_param: false,
         });
         (self.body.names.len() - 1) as Name
     }
@@ -1310,6 +1324,11 @@ impl<'a> Builder<'a> {
                     if self.body.names[n as usize].borrow {
                         self.body.names[n as usize].borrow_kind =
                             self.body.names[*m as usize].borrow_kind.clone();
+                        // The take exception travels with the words: a second
+                        // name for a must-use parameter is the callee's to
+                        // hand on, as the parameter is.
+                        self.body.names[n as usize].must_use_param =
+                            self.body.names[*m as usize].must_use_param;
                     }
                 }
                 self.bind(n, rhs, out);
@@ -2101,9 +2120,12 @@ impl<'a> Builder<'a> {
             let owned = consuming && self.owns(&ty);
             let n = self.name(&name, ty, owned, line);
             if !owned {
-                if let Some(k) = from.and_then(|m| self.body.names[m as usize].borrow_kind.clone())
-                {
-                    self.body.names[n as usize].borrow_kind = Some(k);
+                if let Some(m) = from {
+                    if let Some(k) = self.body.names[m as usize].borrow_kind.clone() {
+                        self.body.names[n as usize].borrow_kind = Some(k);
+                        self.body.names[n as usize].must_use_param =
+                            self.body.names[m as usize].must_use_param;
+                    }
                 }
             }
             // `_` names nothing a body can read, so it never enters the
@@ -2518,7 +2540,7 @@ impl<'a> Builder<'a> {
             // The sentence names the ROOT and the menu names the PATH: a
             // `consume` goes on the parameter, a `.copy()` on what was read
             // out of it.
-            Some(k) if info.borrow => {
+            Some(k) if info.borrow && !info.must_use_param => {
                 let mut msg = format!("`{root}` may not be consumed — it is {}", k.what(&root));
                 for f in k.fixes(&path) {
                     msg.push_str(&format!("\n  fix: {f}"));

@@ -3267,9 +3267,7 @@ fn kernel_diagnostics(
         return Vec::new();
     }
     let _ = vyrn_frontend::own::analyze(program);
-    let mut refusals = vyrn_lower::take_refusals();
-    let mut seen = std::collections::HashSet::new();
-    refusals.retain(|r| seen.insert((r.file.clone(), r.line, r.message.clone())));
+    let refusals = kernel_refusals();
     refusals
         .into_iter()
         .map(|r| {
@@ -3359,6 +3357,32 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
     }
 }
 
+/// Every refusal this program's kernel made, deduplicated and **in the order
+/// the source states them** (RFC-0125 §3 M3, the corpus slice).
+///
+/// The order a file's refusals come out in is a rule, and it is stated the same
+/// way in the other pass (`vyrn_frontend::movecheck::check_accum`): by line.
+/// The checker walked top-level functions before `impl` methods and this pass
+/// walks bodies in the lowering's order, so `examples/mustuse_abandoned.vyrn`
+/// gave the same two sentences swapped, and the whole standard error moved
+/// even where every sentence was identical. Neither walk order is a rule
+/// anybody wrote down; the source's is, and it is the only one a reader can
+/// predict. Files keep the order they were first named in, and two refusals on
+/// one line keep the walk's order, which is why the sort is stable.
+fn kernel_refusals() -> Vec<vyrn_lower::kernel::Refusal> {
+    let mut refusals = vyrn_lower::take_refusals();
+    let mut seen = std::collections::HashSet::new();
+    refusals.retain(|r| seen.insert((r.file.clone(), r.line, r.message.clone())));
+    let mut files: Vec<Option<String>> = Vec::new();
+    for r in &refusals {
+        if !files.contains(&r.file) {
+            files.push(r.file.clone());
+        }
+    }
+    refusals.sort_by_key(|r| (files.iter().position(|f| *f == r.file).unwrap_or(0), r.line));
+    refusals
+}
+
 /// A hard refusal by the kernel — a double free, a use after release, a join
 /// whose edges disagree, a rule the core states; not a missing release, which
 /// the placer repairs, and not a gap, which is a construct the core cannot
@@ -3382,9 +3406,7 @@ fn kernel_refuses(program: &vyrn_frontend::ast::Program, path: &str) -> Result<(
         return Ok(());
     }
     let _ = vyrn_frontend::own::analyze(program);
-    let mut refusals = vyrn_lower::take_refusals();
-    let mut seen = std::collections::HashSet::new();
-    refusals.retain(|r| seen.insert((r.file.clone(), r.line, r.message.clone())));
+    let refusals = kernel_refusals();
     if refusals.is_empty() {
         return Ok(());
     }

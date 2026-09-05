@@ -923,8 +923,12 @@ impl<'b> Kernel<'b> {
     ) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if !write_back {
-                if let Some(b) = &self.body.names[*n as usize].borrow_kind {
-                    if self.borrowed(*n) {
+                let i = &self.body.names[*n as usize];
+                if let Some(b) = &i.borrow_kind {
+                    // RFC-0075 M1: a must-use parameter is the callee's to
+                    // hand on, whatever its capability says, so this take is
+                    // not the caller's value leaving ([`NameInfo::must_use_param`]).
+                    if self.borrowed(*n) && !i.must_use_param {
                         return Err(self.param_take(*n, b));
                     }
                 }

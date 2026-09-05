@@ -844,8 +844,26 @@ fn projection_call(name: &str) -> bool {
 /// the first error wins — this is sound because every statement does its
 /// sub-expression checking *before* mutating `consumed`/`scope`, so after an
 /// error the flow state is consistent for the next statement.
+/// **The order a file's refusals come out in is the source's** (RFC-0125 §3
+/// M3, the corpus slice). This pass walks top-level functions before `impl`
+/// methods and the placer walks bodies in the lowering's order, so the same
+/// two sentences came out swapped and the whole standard error moved even
+/// where every sentence was identical. Neither walk order is a rule anybody
+/// wrote down; the source's is, and it is the only one a reader can predict.
+/// So both passes sort by line before they print, and the other statement of
+/// the same rule is `vyrn-cli`'s `kernel_refuses`. Files keep the order they
+/// were first named in — a module's refusals stay together — and two on one
+/// line keep the walk's order, which is why the sort is stable.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    run(program, Want::Check).diags
+    let mut diags = run(program, Want::Check).diags;
+    let mut files: Vec<Option<String>> = Vec::new();
+    for d in &diags {
+        if !files.contains(&d.file) {
+            files.push(d.file.clone());
+        }
+    }
+    diags.sort_by_key(|d| (files.iter().position(|f| *f == d.file).unwrap_or(0), d.line));
+    diags
 }
 
 /// Every place rule 2 refuses a **store** of a borrow, out of `program`.

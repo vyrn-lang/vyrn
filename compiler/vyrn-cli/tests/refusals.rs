@@ -37,8 +37,13 @@
 //! 28 and 06, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
 //! two must still agree. The row is what stops the sentence moving after the
 //! deletion, so it stays in the census. Rows 20 and 21 read `Kernel::Same`
-//! and their sites STAYED: `examples/mustuse_abandoned.vyrn` is a program the
-//! two passes word differently, and it is not in this file's corpus.
+//! and their sites STAYED. `examples/mustuse_abandoned.vyrn`, which is not in
+//! this file's corpus, said why: the two passes worded an undeclared `self`
+//! differently and ordered a file's refusals differently. Both are closed
+//! (RFC-0125 §3 M3, the corpus slice) and the sites stay all the same, because
+//! that program is refused by the must-use walk too — and the kernel is asked
+//! only of a program the checker ACCEPTED, so a rule that left would take its
+//! sentence out of that file altogether.
 
 use std::path::{Path, PathBuf};
 
@@ -1437,7 +1442,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2362),
         ("a fix menu", 73),
-        ("shared machinery", 3647),
+        ("shared machinery", 3665),
         ("tests", 2069),
     ];
     assert_eq!(got, want, "the structural census has moved");
