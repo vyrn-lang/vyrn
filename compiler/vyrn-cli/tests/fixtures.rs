@@ -66,7 +66,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "serve",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "mounted-routes",
