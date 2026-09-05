@@ -5909,6 +5909,28 @@ about the default engine rather than about tidying — and the first question is
 the only engine that answers a refusing generator correctly. It is M5's next
 slice rather than this one's.
 
+**Gates.** In §1.4's order, one at a time, in the foreground: `cargo fmt --all
+--check`, clean; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`
+with no filter, 548 passed and 74 ignored; the `kernel`, `coretables`, `typed`
+and `effects` suites with `--ignored` (1, 1, 1 and 2, at 33 s, 27 s, 59 s and
+66 s); `fixtures` with `--ignored`, 205 compared in 25 s; `vyrn-frontend`, 1,246
+— the same count as before the tests moved out of the lib; the workspace less
+`vyrn-cli` with `--skip _natively`, 1,422; `memory` with `--test-threads=1`, 10;
+parity in release with `--ignored`, 41 of 41 in 427 s; the residue ratchet,
+194 s; `VYRN_WASM_MANIFEST=check` on `wasmhash`, green on all 173 with no byte
+moved; the cross-engine generator test with a fresh `VYRN_GEN_CACHE_DIR` and
+`--features wasm-gen`, 12, and its corpus test with `--ignored`, all 24
+generators identical under both engines; `testsweep` with `--ignored`, 34 s;
+`vyrn doc --std -o ../docs/api --verify`, 41 files up to date; the site — `vyrn
+run site/export.vyrn out` writes its 82 routes and 14 assets in 225 s, and `vyrn
+test` is green over `export.vyrn` and `site/app`, 189 blocks; and
+`VYRN_SERVE_ENGINE=wasm` over `serve` (27), `rpc` (12) and `universal_pages`
+(9 still ignored, as the sixth slice left them).
+
+`fixtures` was also run in its two other modes: `VYRN_FIXTURES=write` re-recorded
+all 205 from the compiled route and moved zero bytes, and `VYRN_FIXTURES=interp`
+compared all 205 against the same files in 82 s.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
