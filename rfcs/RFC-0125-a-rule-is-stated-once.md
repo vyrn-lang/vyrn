@@ -4274,6 +4274,83 @@ with no byte moved; the generator test with a fresh `VYRN_GEN_CACHE_DIR` and
 --verify`, 41 files; and the site — 82 routes and 14 assets, and `vyrn test`
 green over `export.vyrn` and `site/app`.
 
+**Where the other three stop (2026-09-05).**
+
+Five tables were read from `own.rs` rather than derived. Two are gone. Each of
+the three left was read at the source, and each stops for a different reason.
+This is a record, not a plan: the next slice starts from the diagnosis.
+
+**`arg_drops` is not the kernel's answer.** The row is
+`movecheck::arg_verdict`, and that is a rule about DECLARATIONS: the
+parameter's capability at position `ix`, whether the callee constructs a
+variant, whether it retains that position, whether it lends, and whether its
+return is the same bare type parameter as the argument's. Beside it stands
+RFC-0096 M3's partition (`ArgVerdict::AlreadyFreed`), which is what stops the
+two release rules firing on one value. The core carries most of the per-call
+half already — `Rhs::Call`'s `declared` and `ctor`, and `Builder::lends_name` —
+but the three closures the verdict screens against (`lending`, `retains`,
+`param_escapers`) are post-passes over EVERY body of the program, computed
+once the walk has read them all, and the core builds one instance at a time.
+Hoisting those three out of `movecheck` to somewhere the core can ask before
+it builds is the work, and it is a relocation of a declaration rule rather
+than a derivation from the judgment.
+
+The half that IS the kernel's is already the placer's: the receiver a call or
+an operator borrowed a heap field out of (`NameInfo::producer`) becomes an
+argument-temporary row wherever the kernel finds it held, and it takes the
+same `Placed` route the two derived tables take. It is the only writer left in
+`place_frames` that still writes into the plan.
+
+One thing the next slice must not approximate: `direct.rs::expr` asks
+`arg_drop_row` at EVERY expression node it emits, so a key on a node that is
+not a call argument is a free the emitter performs at the next call. An
+over-wide derived set is a double free, not a leak — the set has to be exact
+before it is flipped.
+
+**`store_owned` is the kernel's shape, and the kernel does not report it
+yet.** `Kernel::owned` and `Kernel::releases` already answer "does this frame
+hold the value in the place this `St::Store` writes"; `own.rs` answers it per
+BINDING over an event stream, and the three repairs it carries — the
+exiting-take exemption, the shared-loop refusal, the final-gone veto — exist
+because a per-binding reading cannot order across a back edge. The kernel's
+per-path `Own::Held` and `Own::Gone` answer all three directly. What is
+missing is a way to say so: a `MissingKind` for a store, or the store's answer
+read off the placement walk's own state, so the placer hands the second build
+the answer the way it hands it the arm and the edge rows. Of the three this is
+the one whose derivation extends the kernel rather than moving a rule about
+declarations.
+
+**`consuming_matches` is already subsumed, and two reads inside the core hold
+it up.** Over the corpus the core's `St::Switch`'s `consuming` says yes at
+1,602 sites the table does not name, and at NO site does the table say yes
+where the core says no; both compiled emitters read the core's answer first
+and the plan's only where the core states none. What keeps the table alive is
+that the CORE asks it twice: `Builder::scrutinee` asks before minting the
+temporary that takes a named scrutinee, and `Builder::own_the_scrutinee` asks
+it beside `Leak::Aliased` to decide the binding owns what the construct takes.
+`Leak::Aliased` carries the LINE the alias was written at, and that line is
+the match's own, so "aliased by THIS construct" is within the core's reach.
+What is not within reach is the table's three screens — one loop context, no
+read of the row after the match, no read of the scrutinee's own NAME inside
+the window. The `$schema` double free (`dd440832`) was exactly one of those
+screens missing, so they are not droppable; they are a reachability question
+over the whole body, which is the kernel's shape and is stated nowhere the
+core can ask today.
+
+**What still stands in `own.rs`, and why.** After the two deletions it is
+4,987 lines. Three of the five tables and their folds; the per-binding
+`droppable` and per-exit `releases` rows every engine builds its runtime
+registry from; `Owned` — the declarations' answer to "does this type own heap"
+and "what is its release kind" — which the core and both emitters ask and
+nothing else states; and `Fate`, the per-binding note `vyrn why --memory`
+prints. `Fate` is the one with no successor: the core states where a release
+STANDS, and the report needs the reason a value is NOT reclaimed — borrowed,
+captured, aliased, region, escaped, holed. The kernel refuses most of those
+today rather than noting them, so the report the core would print is the
+kernel's refusal wording plus, for the names it accepts, the placement the
+placer wrote. Nothing reads that yet, and the report reads `own::analyze`'s
+notes until it does.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
