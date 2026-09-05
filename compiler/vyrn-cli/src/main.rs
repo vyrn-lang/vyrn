@@ -4121,7 +4121,7 @@ import {{ benchOne }} from \"std/bench\"
     //    `__vyrn_bench_body_<slot>` (declaration order). `blackBox` inside is fine:
     //    the program is already checked, and codegen — which we go to next without
     //    re-checking — lowers `blackBox` directly.
-    let selected: Vec<vyrn_frontend::ast::BenchDecl> = program
+    let selected: Vec<vyrn_frontend::ast::NamedBlock> = program
         .benches
         .iter()
         .filter(|b| b.module.is_none() && filter.is_none_or(|sub| b.name.contains(sub)))

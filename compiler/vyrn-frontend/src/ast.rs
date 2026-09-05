@@ -75,50 +75,43 @@ pub struct Program {
     /// shipped binary contains no tests, and the string pool / regex collection
     /// skip them by construction. Checked as Unit-returning function bodies;
     /// executed only by `vyrn test`.
-    pub tests: Vec<TestDecl>,
+    pub tests: Vec<NamedBlock>,
     /// `bench "name" { body }` declarations (RFC-0055). A separate field, exactly
     /// like [`Program::tests`]: `run`/`build`/`emit-ir` walk only `functions`, so a
     /// shipped binary contains no benches and the string pool / regex collection
     /// skip them by construction. Checked as Unit-returning function bodies
     /// (`blackBox` legal inside); executed only by `vyrn bench` (which lowers them
     /// to ordinary functions + a synthesized harness `main` before the backends).
-    pub benches: Vec<BenchDecl>,
+    pub benches: Vec<NamedBlock>,
 }
 
-/// A `bench "name" { body }` declaration (RFC-0055): a named block checked exactly
-/// like a Unit-returning function body under a synthetic name (`bench@<index>`) so
-/// movecheck/ownership/spawn analyses apply unchanged. Structurally identical to
-/// [`TestDecl`]; `vyrn bench` runs only the *root* module's (`None`-module) benches.
+/// A named block declaration: `test "name" { body }` (RFC-0015) and
+/// `bench "name" { body }` (RFC-0055) are the same declaration under two words.
+///
+/// Both are checked exactly like a Unit-returning function body under a
+/// synthetic unspellable name (`test@<index>` / `bench@<index>`) so
+/// movecheck/ownership/spawn analyses apply unchanged, and both are held in a
+/// [`Program`] field of their own so `run`/`build`/`emit-ir` never walk them: a
+/// shipped binary contains no tests and no benches, and the string pool and the
+/// regex collection skip both fields by construction.
+///
+/// The KEYWORD is what tells the two apart, in the parser and nowhere else, and
+/// the field is what tells a subcommand which to run. `vyrn test` runs only the
+/// root module's [`Program::tests`] and `vyrn bench` only its
+/// [`Program::benches`]; an imported module's still type-check and do not run.
+/// RFC-0127 §8 is the census that merged the two carriers and the reason the
+/// two words stay two.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BenchDecl {
-    /// The bench's display name (the string literal after `bench`).
+pub struct NamedBlock {
+    /// The display name — the string literal after `test` or `bench`. Unique per
+    /// file.
     pub name: String,
-    /// The block body — timed under `vyrn bench`, run once under `--check`.
+    /// The block body. Timed under `vyrn bench`, run once under `--check`.
     pub body: Block,
     /// `///` documentation (markdown), attached by the parser; `None` if absent.
     pub doc: Option<String>,
-    /// The module (file) this bench came from; `None` for the root. Set by the
-    /// loader. `vyrn bench` runs only `None`-module (root) benches.
-    pub module: Option<String>,
-    pub line: usize,
-}
-
-/// A `test "name" { body }` declaration (RFC-0015): a named block checked exactly
-/// like a Unit-returning function body and run by `vyrn test`. The `name` is a
-/// plain string (unique per file). Only the *root* module's tests are run by
-/// `vyrn test <root>`; an imported module's tests still type-check but do not
-/// run (they run when that module is itself the argument).
-#[derive(Debug, Clone, PartialEq)]
-pub struct TestDecl {
-    /// The test's display name (the string literal after `test`).
-    pub name: String,
-    /// The block body — checked/analysed under a synthetic unspellable function
-    /// name (`test@<index>`) so movecheck/ownership/spawn analyses apply unchanged.
-    pub body: Block,
-    /// `///` documentation (markdown), attached by the parser; `None` if absent.
-    pub doc: Option<String>,
-    /// The module (file) this test came from; `None` for the root. Set by the
-    /// loader. `vyrn test` runs only `None`-module (root) tests.
+    /// The module (file) this declaration came from; `None` for the root. Set by
+    /// the loader, and what "only the root module's" is asked of.
     pub module: Option<String>,
     pub line: usize,
 }

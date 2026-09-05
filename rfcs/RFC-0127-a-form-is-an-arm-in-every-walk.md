@@ -2,8 +2,9 @@
 
 - **Status:** Census closed (2026-09-05). The table is the deliverable and
   `compiler/vyrn-cli/tests/forms.rs` pins it. §5 ranks five collapses and records
-  the number that stopped four of them; §8 names the one the licence admits —
-  `test` and `bench` become one carrier. Two defects the census found are fixed
+  the number that stopped four of them; §8 takes the fifth — `test` and `bench`
+  are one carrier now, and the surface keeps both words. Two defects it found are
+  fixed
   in §6: five doc comments in `ast.rs` describe a surface the code stopped
   having, and the editor grammar colours `yield`, a word with no mention in any
   column of §3.4.
@@ -298,7 +299,7 @@ variant, the `keyword_or_ident` arm and the `token_name_and_text` row that
 not drifted. **A keyword is nearly free. The FORM behind it is what costs**, and
 §3.1 is where the language's weight is.
 
-43 mentions in four files for the contextual words — the words the lexer hands
+45 mentions in four files for the contextual words — the words the lexer hands
 back as identifiers and the parser reads by position.
 
 | word | lexer | parser | checker | fmt | all four |
@@ -308,8 +309,8 @@ back as identifiers and the parser reads by position.
 | `consume` | 0 | 5 | 0 | 0 | 5 |
 | `share` | 0 | 1 | 0 | 0 | 1 |
 | `gen` | 0 | 3 | 0 | 0 | 3 |
-| `test` | 0 | 2 | 0 | 0 | 2 |
-| `bench` | 0 | 2 | 0 | 0 | 2 |
+| `test` | 0 | 3 | 0 | 0 | 3 |
+| `bench` | 0 | 3 | 0 | 0 | 3 |
 | `panic` | 0 | 1 | 2 | 0 | 3 |
 | `from` | 0 | 2 | 0 | 0 | 2 |
 | `as` | 0 | 2 | 0 | 0 | 2 |
@@ -603,23 +604,34 @@ measure it again.
 
 ---
 
-## 8. The collapse the licence admits
+## 8. The collapse taken: `test` and `bench` are one carrier
 
 §5.1 ranked it first among the licensed and §4's two `decide` rows name it.
 RFC-0126 §8's M1 set the licence — zero bytes, every engine already agreeing, no
 diagnostic worse, one commit — and §5's table has exactly one row with a `no` in
-all three risk columns.
+all three risk columns. **Taken, 2026-09-05.**
 
-**The step.** `ast::BenchDecl` goes. `ast::TestDecl` becomes `ast::NamedBlock`:
-a named block declaration, which is what `test "n" { .. }` (RFC-0015) and
-`bench "n" { .. }` (RFC-0055) both are. `Program::tests` and `Program::benches`
-stay two `Vec` fields under the same two names, because two subcommands select
-them and §3.2's census counts the field.
+**What changed.** `ast::BenchDecl` is gone and `ast::TestDecl` is
+`ast::NamedBlock`: a named block declaration, which is what `test "n" { .. }`
+(RFC-0015) and `bench "n" { .. }` (RFC-0055) both are. `Program::tests` and
+`Program::benches` are two `Vec<NamedBlock>` fields under the same two names,
+because two subcommands select them and §3.2's census counts the field.
 
-**What must not change.** The surface keeps two words and the parser keeps two
-productions: a `test` and a `bench` are told apart by the keyword before the
-string, exactly as now. Every diagnostic either subcommand prints is untouched,
-because none of them names the struct.
+**One production, not two.** The two parser functions were byte-identical apart
+from one word inside one diagnostic — `Parser::bench_decl`'s doc comment said
+"Structurally identical to `Parser::test_decl`" and it was. `Parser::named_block`
+takes the word and both refusals keep the wording they had: "expected a test
+name string, found …" and "expected a bench name string, found …". The census
+did not predict this one; it is what a reader finds after the carrier merges and
+the two functions sit next to each other with nothing between them.
+
+**What did not change, and this is the point.** The surface keeps two words.
+`test` and `bench` stay two contextual starters, told apart by the keyword before
+the string, and both keep their rows in §3.4. `vyrn test` runs the root module's
+`tests` and `vyrn bench` its `benches`. `assert`/`assertEq` stay legal only in a
+test and `blackBox` only in a bench, because the checker knows which field it is
+walking. Every diagnostic either subcommand prints is untouched: none of them
+ever named the struct.
 
 **Why it is zero bytes, and not by luck.** Neither field is walked by `run`,
 `build` or `emit-ir`. `Program::tests`'s own doc says why the field exists: a
@@ -627,5 +639,42 @@ shipped binary contains no tests, and the string pool and the regex collection
 skip both fields by construction. So no emitted module can move, and
 `VYRN_WASM_MANIFEST=check` is what says so.
 
-The step is taken in the commit after this one, and this section records the
-result there.
+**Priced.** One struct and one function deleted. **35 lines out of the
+compiler** — `ast.rs` −7 (24 in, 31 out) and `parser.rs` −28 (17 in, 45 out) —
+and the doc comments are most of it, because the two carriers restated each
+other's fields and the two productions restated each other's body. Three call
+sites outside `ast.rs`: the parser's two callers and the CLI's selected-bench
+vector. §3.1, §3.2 and §3.3 do not move at all — not one cell — which §5.1 said
+in advance: the metric counts the FIELD and the fields stay. §3.4 moves by two,
+in the direction nobody predicted: `test` and `bench` each rise from 2 mentions
+to 3, because the merged production takes the word as an ARGUMENT where two
+productions each had it only as a position. The step deleted 35 lines and the
+census went UP. That is the metric being honest about what it measures — a name
+— and it is why the number above is a line count.
+
+**Gates.** In RFC-0125 §1.4's order, one at a time, in the foreground, with
+`TMP` and `TEMP` pointed at this worktree's own scratch directory:
+`cargo fmt --all --check`, clean; `cargo build --release`; `cargo test -p
+vyrn-cli` with no filter, 559 passed and 75 ignored over 76 suites (the census
+is 7 of the 559); the `kernel`, `coretables`, `typed` and `effects` suites with
+`--ignored` (1, 1, 1 and 2, at 123 s, 106 s, 198 s and 195 s); `fixtures` with
+`--ignored`, 70 s; `vyrn-frontend`, 1,249; the workspace less `vyrn-cli` with
+`--skip _natively`, 1,425; `vyrn-lsp` from its own directory, 100; `vyrn-genwasm`,
+3; `memory` with `--test-threads=1`, 10; parity in release with `--ignored`,
+41 of 41 in 254 s; the residue ratchet, 151 s; `VYRN_WASM_MANIFEST=check` on
+`wasmhash`, green — **no row moved, which is the zero-byte clause measured**;
+the cross-engine generator test with a fresh `VYRN_GEN_CACHE_DIR` and
+`--features wasm-gen`, 13, and its corpus test with `--ignored`, green;
+`testsweep` with `--ignored`, 103 s; `vyrn doc --std -o ../docs/api --verify`,
+41 files up to date; the site — `vyrn run site/export.vyrn out` writes 82 routes
+and 14 assets, and `vyrn test` is green over `export.vyrn` (35) and `site/app`
+(154, over 24 files; two of the 26 declare no test); the site's 57 node tests;
+the playground's 14; and — because §6.2 changed the grammar —
+`editor/vscode/test/`, 14 across three files.
+
+**The lesson, and it is the census's own.** A collapse the metric cannot see is
+still a collapse, and a metric that cannot see it is still the right metric.
+RFC-0126 §8.5 warned that a construction hidden behind a helper stops being
+counted; this is the other direction of the same warning. The number that
+describes this change is a struct, a function and 35 lines, and the census's own
+column of zeros is the honest way to say so.
