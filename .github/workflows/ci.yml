@@ -786,7 +786,7 @@ jobs:
         # corpus with an empty artifact cache, 20 s release against 98 s debug.
         working-directory: compiler
         run: |
-          cargo test --quiet -p vyrn-cli --release --features wasm-gen \
+          cargo test --quiet -p vyrn-cli --release \
             --test genwasm -- --ignored --nocapture
 
   bench:

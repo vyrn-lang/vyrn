@@ -68,15 +68,7 @@ fn run_in(dir: &Path, cmd: &str, root: &str) -> Run {
 /// Run one std module's inline `test` blocks and assert the green count.
 fn unit_tests_green(rel: &str, expected: &str) {
     let module = repo_dir(rel);
-    // These `test` blocks call the module's `gen fn`s, which no compiling route
-    // lowers (`tests/std_suite.rs`'s `GEN_TESTED`); the tree-walker is the one
-    // engine that runs a generator as ordinary code.
-    let out = vyrn()
-        .arg("test")
-        .args(["--engine", "interp"])
-        .arg(&module)
-        .output()
-        .expect("vyrn test");
+    let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{rel} unit tests failed:\n{combined}");

@@ -13,14 +13,18 @@ description = "The vyrn driver: check, run (interpret), or emit LLVM IR for a .v
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-lower = { path = "../vyrn-lower" }
 vyrn-codegen = { path = "../vyrn-codegen" }
-# RFC-0076: the embedded wasm engine that runs generators. An EXCLUDED crate
-# (it pulls in `wasmtime`), depended on OPTIONALLY, so `cargo build` and
-# `cargo test` keep resolving to path dependencies only — the property the
-# default workspace members were chosen for.
-vyrn-genwasm = { path = "../vyrn-genwasm", optional = true }
+# RFC-0076: the embedded wasm engine that runs generators. An EXCLUDED crate,
+# because nothing needs its own test suite to build or test the language — but
+# not an optional DEPENDENCY. It was one while the driver had two generation
+# engines to choose between; RFC-0125 §3 M5 leaves one, and the same crate also
+# serves the `vyrn_gen` imports a `test` block's generator is compiled against,
+# so a driver without it cannot run a generator at all. What the workspace
+# defends is "builds and tests with no LLVM, clang or sysroot" (../Cargo.toml),
+# and its dependencies are `vyrn-frontend`, `vyrn-codegen` and `wasmtime`.
+vyrn-genwasm = { path = "../vyrn-genwasm" }
 # RFC-0125 M5: `vyrn run --engine wasm` runs the program's wasm in this process.
-# The same crate, version and features `vyrn-genwasm` embeds, so a build with
-# `wasm-gen` on compiles it once. What the workspace defends is "builds and
+# The same crate, version and features `vyrn-genwasm` embeds, so one build
+# compiles it once. What the workspace defends is "builds and
 # tests with no LLVM, clang or sysroot" (../Cargo.toml), and this is pure Rust.
 wasmtime = { version = "47", default-features = false, features = [
     "cranelift",
@@ -28,19 +32,6 @@ wasmtime = { version = "47", default-features = false, features = [
     "std",
     "parallel-compilation",
 ] }
-
-[features]
-# ON since RFC-0125 §3 M5's tenth slice: every command runs a `gen fn` as
-# compiled wasm, the way `vyrn-lsp` already did. It was off while the engine
-# reached wasm through clang; since RFC-0076 M7 it emits the module directly, so
-# what the feature costs is a path crate whose own dependencies (`vyrn-frontend`,
-# `vyrn-codegen`, `wasmtime`) this binary already resolves. The ninth slice took
-# the default back off for one defect — a report beside a code quote came back
-# corrupted — and the tenth fixed it in `strAppend`, where it always was.
-# `--no-default-features` still builds the interpreted route, and
-# `VYRN_NO_WASM_GEN=1` picks it at run time.
-default = ["wasm-gen"]
-wasm-gen = ["dep:vyrn-genwasm"]
 
 # The host the compiled route runs in, and nothing else (see src/lib.rs).
 # `vyrn-frontend` dev-depends on it so its tests run a program the way the

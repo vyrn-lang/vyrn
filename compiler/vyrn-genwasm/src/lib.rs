@@ -393,6 +393,19 @@ fn wrapper_program(program: &Program) -> Option<Program> {
         line: 0,
     });
 
+    p.functions.push(func("main", Vec::new(), Type::Int, body));
+    prepare(&mut p)?;
+    Some(p)
+}
+
+/// Turn a program into one [`vyrn_codegen::direct::compile_gen_host`] can
+/// compile: clear every `is_gen`, then synthesize the entry points and decoders
+/// the structured builtins need.
+///
+/// Public because a `test` block that calls a generator is compiled the same way
+/// (RFC-0125 §3 M5): the driver adds its doors and hands the program here. There
+/// is one preparation, so the two callers cannot drift into two.
+pub fn prepare(p: &mut Program) -> Option<()> {
     // Every `gen fn`, not just the dispatched ones: a generator calls its
     // helpers, and in this repo those helpers are themselves `gen fn` (the
     // convention that keeps generation-only I/O out of shipped binaries).
@@ -402,13 +415,11 @@ fn wrapper_program(program: &Program) -> Option<Program> {
     for f in p.functions.iter_mut() {
         f.is_gen = false;
     }
-    p.functions.push(func("main", Vec::new(), Type::Int, body));
     // RFC-0076 M3b: the builtins that hand back a structured value get an entry
     // point plus the decoders it needs, synthesized before the emitter sees the
     // program (so the string pool, the ownership analysis and the array lowering
     // all cover them like any other function).
-    reflect_entries(&mut p)?;
-    Some(p)
+    reflect_entries(p)
 }
 
 /// Split the guest's stdout into its compile-time prints and the generated
@@ -872,6 +883,37 @@ struct Streams {
     argv: Vec<Vec<u8>>,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    gen: GenState,
+    /// The one linear memory, held here rather than looked up per call: when the
+    /// shim is a separate module (RFC-0076 M6) it is the SHIM that exports the
+    /// memory, and half the imports below are called from the other module.
+    mem: Option<wasmtime::Memory>,
+}
+
+impl GenHost for Streams {
+    fn gen(&mut self) -> &mut GenState {
+        &mut self.gen
+    }
+    fn memory(&self) -> Option<wasmtime::Memory> {
+        self.mem
+    }
+}
+
+/// What a store has to yield for [`link`] to serve the `vyrn_gen` imports.
+///
+/// Two implementors, and that is the point (RFC-0125 §3 M5): this crate's own
+/// generation run, and the driver's `test` run of a module whose doors reach a
+/// generator. The imports are one implementation either way, so the splice
+/// rules, the arena and the atom stream cannot differ by caller.
+pub trait GenHost {
+    fn gen(&mut self) -> &mut GenState;
+    fn memory(&self) -> Option<wasmtime::Memory>;
+}
+
+/// The host side of the `vyrn_gen` imports: the code arena, the atom stream and
+/// the stash, plus the declarations two of the three reflections read.
+#[derive(Default)]
+pub struct GenState {
     /// The bytes of the last served read or `render`, waiting for `fetch` to
     /// copy them into guest memory. The host never allocates on the guest's side
     /// of the wall.
@@ -890,14 +932,29 @@ struct Streams {
     /// answered on this thread — neither needs the resolver.
     types: std::collections::HashMap<String, vyrn_frontend::ast::TypeDecl>,
     contracts: Vec<vyrn_frontend::ast::ContractDecl>,
+    /// The line to the thread that holds the resolver, or `None` when there is
+    /// no generation to mediate — a `test` door, whose `readFile` and
+    /// `moduleInterface` are refused rather than served from somewhere else.
     caps: Option<Caps>,
-    /// The one linear memory, held here rather than looked up per call: when the
-    /// shim is a separate module (RFC-0076 M6) it is the SHIM that exports the
-    /// memory, and half the imports below are called from the other module.
-    mem: Option<wasmtime::Memory>,
 }
 
-impl Streams {
+impl GenState {
+    /// The declarations `contractOf` and `lex` reflect over, taken from the
+    /// program about to run.
+    pub fn new(p: &Program) -> Self {
+        GenState {
+            types: p
+                .type_decls
+                .iter()
+                .map(|t| (t.name.clone(), t.clone()))
+                .collect(),
+            contracts: p.contracts.clone(),
+            ..GenState::default()
+        }
+    }
+}
+
+impl GenState {
     /// The pieces a handle names, or the trap for a handle that names nothing.
     /// Unreachable from compiled code — every handle this sees came out of one
     /// of the imports below — but the arena is indexed by a guest-supplied
@@ -1071,13 +1128,216 @@ impl std::fmt::Display for Denied {
 
 impl std::error::Error for Denied {}
 
+/// Serve the `vyrn_gen` imports [`vyrn_codegen::direct::compile_gen_host`]
+/// emits, on any store that can hand over a [`GenState`] and the guest's memory.
+///
+/// One implementation for both callers (RFC-0125 §3 M5): this crate's own
+/// generation run, and the driver's `test` run of a module whose doors reach a
+/// generator. The splice rules, the identifier validation and the
+/// shortest-roundtrip float formatting are the interpreter's own either way —
+/// byte-identical by construction, not by testing.
+pub fn link<T: GenHost + 'static>(linker: &mut wasmtime::Linker<T>) -> wasmtime::Result<()> {
+    use wasmtime::{Caller, Error, Result};
+    // The mediated capabilities (RFC-0076 M2). `read` resolves, mediates, reads
+    // and stashes; `fetch` copies the stash into a buffer the GUEST allocated,
+    // so nothing on the host side has to allocate inside linear memory.
+    linker.func_wrap(
+        "vyrn_gen",
+        "read",
+        |mut caller: Caller<'_, T>, path: i32, mode: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = host.gen();
+            let path = cstr(data, path)?;
+            let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+            caps.req
+                .send((path, mode))
+                .map_err(|_| Error::msg("generator host is gone"))?;
+            match caps.resp.recv() {
+                Ok(Ok(Served::Bytes(status, bytes))) => {
+                    let len = bytes.len() as i64;
+                    streams.stash = bytes;
+                    Ok((status as i64) << 32 | len)
+                }
+                Ok(Ok(Served::Lit(_))) => Err(Error::msg("read answered with a literal")),
+                // A scoping violation unwinds out of `_start` instead of
+                // becoming an `Err` value — same as the interpreter's trap.
+                Ok(Err(msg)) => Err(Error::new(Denied(msg))),
+                Err(_) => Err(Error::msg("generator host is gone")),
+            }
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "fetch",
+        |mut caller: Caller<'_, T>, dest: i32| -> Result<()> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = host.gen();
+            let stash = std::mem::take(&mut streams.stash);
+            let slot = data
+                .get_mut(dest as usize..dest as usize + stash.len())
+                .ok_or_else(|| Error::msg("bad fetch destination"))?;
+            slot.copy_from_slice(&stash);
+            Ok(())
+        },
+    )?;
+
+    // The code-quote arena (RFC-0076 M3a). `Code` is an i64 handle and every
+    // operation on it happens here, so the splice rules, the string escaping and
+    // the float formatting are the interpreter's own — byte-identical by
+    // construction, not by testing.
+    linker.func_wrap(
+        "vyrn_gen",
+        "text",
+        |mut caller: Caller<'_, T>, s: i32| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = host.gen();
+            let text = cstr(data, s)?;
+            Ok(streams.intern(vec![CodePiece::Text(text)]))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "rawAt",
+        |mut caller: Caller<'_, T>, s: i32, path: i32, line: i64, col: i64| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = host.gen();
+            let text = cstr(data, s)?;
+            let path = cstr(data, path)?;
+            Ok(streams.intern(vec![CodePiece::Origin {
+                path,
+                line,
+                col,
+                text,
+            }]))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "splice",
+        |mut caller: Caller<'_, T>, tag: i32, bits: i64, p: i32, ctx: i64| -> Result<i64> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = host.gen();
+            let val = splice_value(tag, bits, p, data, streams)?;
+            // A splice violation — an identifier that is not one, a value of
+            // a type with no splice rule — is a trap under the interpreter,
+            // so it unwinds out of `_start` rather than becoming a value.
+            let pieces = vyrn_frontend::gen::gen_code_splice(&val, ctx)
+                .map_err(|m| Error::new(Denied(m)))?;
+            Ok(caller.data_mut().gen().intern(pieces))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "concat",
+        |mut caller: Caller<'_, T>, a: i64, b: i64| -> Result<i64> {
+            let s = caller.data_mut().gen();
+            let mut pieces = s.pieces(a)?.clone();
+            pieces.extend(s.pieces(b)?.iter().cloned());
+            Ok(s.intern(pieces))
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "render",
+        |mut caller: Caller<'_, T>, h: i64| -> Result<i64> {
+            let s = caller.data_mut().gen();
+            let text = vyrn_frontend::gen::render_code(s.pieces(h)?);
+            s.stash = text.into_bytes();
+            Ok(s.stash.len() as i64)
+        },
+    )?;
+
+    // Structured host results (RFC-0076 M3b). `reflect` computes a value of a
+    // known named type in the HOST — the lexer, the linker and the contract
+    // tables are compiler machinery and a guest-side copy would be a second
+    // answer — and leaves it as a flat atom stream the decoder pulls back.
+    linker.func_wrap(
+        "vyrn_gen",
+        "reflect",
+        |mut caller: Caller<'_, T>, kind: i64, arg: i32| -> Result<()> {
+            let (data, host) = guest_mem(&mut caller)?;
+            let streams = host.gen();
+            let arg = cstr(data, arg)?;
+            match kind {
+                // The one kind that needs the resolver, so it goes to the
+                // host thread and comes back as the compiler's own literal.
+                vyrn_codegen::REFLECT_MODULE_INTERFACE => {
+                    let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
+                    caps.req
+                        .send((arg, MODE_MODULE_INTERFACE))
+                        .map_err(|_| Error::msg("generator host is gone"))?;
+                    let lit = match caps.resp.recv() {
+                        Ok(Ok(Served::Lit(lit))) => lit,
+                        Ok(Ok(Served::Bytes(..))) => {
+                            return Err(Error::msg("moduleInterface answered with bytes"))
+                        }
+                        // An unreadable module or a load failure is a trap
+                        // under the interpreter too, so it unwinds out of
+                        // `_start` rather than becoming a value.
+                        Ok(Err(msg)) => return Err(Error::new(Denied(msg))),
+                        Err(_) => return Err(Error::msg("generator host is gone")),
+                    };
+                    streams.stream(&Type::Named("ModuleInterface".into()), &lit)
+                }
+                // A contract is a declaration the generator's own module
+                // closure carries, so this needs nothing from the host thread.
+                vyrn_codegen::REFLECT_CONTRACT_OF => {
+                    let decl = streams
+                        .contracts
+                        .iter()
+                        .find(|c| c.name == arg)
+                        .ok_or_else(|| {
+                            Error::new(Denied(format!(
+                                "`contractOf` needs a declared contract name; `{arg}` is not \
+                                     a contract"
+                            )))
+                        })?;
+                    let lit = vyrn_frontend::schema_reflect::contract_info_lit(decl);
+                    streams.stream(&Type::Named("ContractInfo".into()), &lit)
+                }
+                vyrn_codegen::REFLECT_LEX => {
+                    let lit = vyrn_frontend::gen::gen_lex_tokens_lit(&arg);
+                    streams.stream(&Type::Array(Box::new(Type::Named("Token".into()))), &lit)
+                }
+                other => Err(Error::msg(format!("bad reflect kind {other}"))),
+            }
+        },
+    )?;
+    linker.func_wrap(
+        "vyrn_gen",
+        "nextInt",
+        |mut caller: Caller<'_, T>| -> Result<i64> {
+            match caller.data_mut().gen().next_atom()? {
+                Atom::Int(n) => Ok(*n),
+                Atom::Str(_) => Err(Error::msg("reflected value: expected an Int atom")),
+            }
+        },
+    )?;
+    // Length, then `fetch` — the M2 stash protocol, so the host still never
+    // allocates inside guest memory.
+    linker.func_wrap(
+        "vyrn_gen",
+        "nextStr",
+        |mut caller: Caller<'_, T>| -> Result<i64> {
+            let s = caller.data_mut().gen();
+            let bytes = match s.next_atom()? {
+                Atom::Str(b) => b.clone(),
+                Atom::Int(_) => return Err(Error::msg("reflected value: expected a Str atom")),
+            };
+            s.stash = bytes;
+            Ok(s.stash.len() as i64)
+        },
+    )?;
+    Ok(())
+}
+
 /// The guest's linear memory and its store data, together — every host import
 /// that touches a pointer needs both, and `data_and_store_mut` is the only way
 /// to hold them at once.
-fn guest_mem<'a>(
-    caller: &'a mut wasmtime::Caller<'_, Streams>,
-) -> wasmtime::Result<(&'a mut [u8], &'a mut Streams)> {
-    let Some(mem) = caller.data().mem else {
+fn guest_mem<'a, T: GenHost>(
+    caller: &'a mut wasmtime::Caller<'_, T>,
+) -> wasmtime::Result<(&'a mut [u8], &'a mut T)> {
+    let Some(mem) = caller.data().memory() else {
         return Err(wasmtime::Error::msg("generator has no memory"));
     };
     Ok(mem.data_and_store_mut(caller))
@@ -1108,7 +1368,7 @@ fn splice_value(
     bits: i64,
     p: i32,
     data: &[u8],
-    streams: &Streams,
+    streams: &GenState,
 ) -> wasmtime::Result<Spliced> {
     Ok(match tag {
         vyrn_codegen::TAG_STR => Spliced::Str(cstr(data, p)?),
@@ -1492,221 +1752,7 @@ fn run_wasm(
     let engine = wasm_engine();
     let mut linker: Linker<Streams> = Linker::new(engine);
     let wasi = "wasi_snapshot_preview1";
-
-    // The mediated capabilities (RFC-0076 M2). `read` resolves, mediates, reads
-    // and stashes; `fetch` copies the stash into a buffer the GUEST allocated,
-    // so nothing on the host side has to allocate inside linear memory.
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "read",
-            |mut caller: Caller<'_, Streams>, path: i32, mode: i32| -> Result<i64> {
-                let (data, streams) = guest_mem(&mut caller)?;
-                let path = cstr(data, path)?;
-                let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
-                caps.req
-                    .send((path, mode))
-                    .map_err(|_| Error::msg("generator host is gone"))?;
-                match caps.resp.recv() {
-                    Ok(Ok(Served::Bytes(status, bytes))) => {
-                        let len = bytes.len() as i64;
-                        streams.stash = bytes;
-                        Ok((status as i64) << 32 | len)
-                    }
-                    Ok(Ok(Served::Lit(_))) => Err(Error::msg("read answered with a literal")),
-                    // A scoping violation unwinds out of `_start` instead of
-                    // becoming an `Err` value — same as the interpreter's trap.
-                    Ok(Err(msg)) => Err(Error::new(Denied(msg))),
-                    Err(_) => Err(Error::msg("generator host is gone")),
-                }
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "fetch",
-            |mut caller: Caller<'_, Streams>, dest: i32| -> Result<()> {
-                let (data, streams) = guest_mem(&mut caller)?;
-                let stash = std::mem::take(&mut streams.stash);
-                let slot = data
-                    .get_mut(dest as usize..dest as usize + stash.len())
-                    .ok_or_else(|| Error::msg("bad fetch destination"))?;
-                slot.copy_from_slice(&stash);
-                Ok(())
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-
-    // The code-quote arena (RFC-0076 M3a). `Code` is an i64 handle and every
-    // operation on it happens here, so the splice rules, the string escaping and
-    // the float formatting are the interpreter's own — byte-identical by
-    // construction, not by testing.
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "text",
-            |mut caller: Caller<'_, Streams>, s: i32| -> Result<i64> {
-                let (data, streams) = guest_mem(&mut caller)?;
-                let text = cstr(data, s)?;
-                Ok(streams.intern(vec![CodePiece::Text(text)]))
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "rawAt",
-            |mut caller: Caller<'_, Streams>,
-             s: i32,
-             path: i32,
-             line: i64,
-             col: i64|
-             -> Result<i64> {
-                let (data, streams) = guest_mem(&mut caller)?;
-                let text = cstr(data, s)?;
-                let path = cstr(data, path)?;
-                Ok(streams.intern(vec![CodePiece::Origin {
-                    path,
-                    line,
-                    col,
-                    text,
-                }]))
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "splice",
-            |mut caller: Caller<'_, Streams>,
-             tag: i32,
-             bits: i64,
-             p: i32,
-             ctx: i64|
-             -> Result<i64> {
-                let (data, streams) = guest_mem(&mut caller)?;
-                let val = splice_value(tag, bits, p, data, streams)?;
-                // A splice violation — an identifier that is not one, a value of
-                // a type with no splice rule — is a trap under the interpreter,
-                // so it unwinds out of `_start` rather than becoming a value.
-                let pieces = vyrn_frontend::gen::gen_code_splice(&val, ctx)
-                    .map_err(|m| Error::new(Denied(m)))?;
-                Ok(caller.data_mut().intern(pieces))
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "concat",
-            |mut caller: Caller<'_, Streams>, a: i64, b: i64| -> Result<i64> {
-                let s = caller.data_mut();
-                let mut pieces = s.pieces(a)?.clone();
-                pieces.extend(s.pieces(b)?.iter().cloned());
-                Ok(s.intern(pieces))
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "render",
-            |mut caller: Caller<'_, Streams>, h: i64| -> Result<i64> {
-                let s = caller.data_mut();
-                let text = vyrn_frontend::gen::render_code(s.pieces(h)?);
-                s.stash = text.into_bytes();
-                Ok(s.stash.len() as i64)
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-
-    // Structured host results (RFC-0076 M3b). `reflect` computes a value of a
-    // known named type in the HOST — the lexer, the linker and the contract
-    // tables are compiler machinery and a guest-side copy would be a second
-    // answer — and leaves it as a flat atom stream the decoder pulls back.
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "reflect",
-            |mut caller: Caller<'_, Streams>, kind: i64, arg: i32| -> Result<()> {
-                let (data, streams) = guest_mem(&mut caller)?;
-                let arg = cstr(data, arg)?;
-                match kind {
-                    // The one kind that needs the resolver, so it goes to the
-                    // host thread and comes back as the compiler's own literal.
-                    vyrn_codegen::REFLECT_MODULE_INTERFACE => {
-                        let caps = streams.caps.as_ref().ok_or_else(|| Error::msg("no host"))?;
-                        caps.req
-                            .send((arg, MODE_MODULE_INTERFACE))
-                            .map_err(|_| Error::msg("generator host is gone"))?;
-                        let lit = match caps.resp.recv() {
-                            Ok(Ok(Served::Lit(lit))) => lit,
-                            Ok(Ok(Served::Bytes(..))) => {
-                                return Err(Error::msg("moduleInterface answered with bytes"))
-                            }
-                            // An unreadable module or a load failure is a trap
-                            // under the interpreter too, so it unwinds out of
-                            // `_start` rather than becoming a value.
-                            Ok(Err(msg)) => return Err(Error::new(Denied(msg))),
-                            Err(_) => return Err(Error::msg("generator host is gone")),
-                        };
-                        streams.stream(&Type::Named("ModuleInterface".into()), &lit)
-                    }
-                    // A contract is a declaration the generator's own module
-                    // closure carries, so this needs nothing from the host thread.
-                    vyrn_codegen::REFLECT_CONTRACT_OF => {
-                        let decl = streams
-                            .contracts
-                            .iter()
-                            .find(|c| c.name == arg)
-                            .ok_or_else(|| {
-                                Error::new(Denied(format!(
-                                    "`contractOf` needs a declared contract name; `{arg}` is not \
-                                     a contract"
-                                )))
-                            })?;
-                        let lit = vyrn_frontend::schema_reflect::contract_info_lit(decl);
-                        streams.stream(&Type::Named("ContractInfo".into()), &lit)
-                    }
-                    vyrn_codegen::REFLECT_LEX => {
-                        let lit = vyrn_frontend::gen::gen_lex_tokens_lit(&arg);
-                        streams.stream(&Type::Array(Box::new(Type::Named("Token".into()))), &lit)
-                    }
-                    other => Err(Error::msg(format!("bad reflect kind {other}"))),
-                }
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "nextInt",
-            |mut caller: Caller<'_, Streams>| -> Result<i64> {
-                match caller.data_mut().next_atom()? {
-                    Atom::Int(n) => Ok(*n),
-                    Atom::Str(_) => Err(Error::msg("reflected value: expected an Int atom")),
-                }
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
-    // Length, then `fetch` — the M2 stash protocol, so the host still never
-    // allocates inside guest memory.
-    linker
-        .func_wrap(
-            "vyrn_gen",
-            "nextStr",
-            |mut caller: Caller<'_, Streams>| -> Result<i64> {
-                let s = caller.data_mut();
-                let bytes = match s.next_atom()? {
-                    Atom::Str(b) => b.clone(),
-                    Atom::Int(_) => return Err(Error::msg("reflected value: expected a Str atom")),
-                };
-                s.stash = bytes;
-                Ok(s.stash.len() as i64)
-            },
-        )
-        .map_err(|e| EngineError::Failed(e.to_string()))?;
+    link(&mut linker).map_err(|e| EngineError::Failed(e.to_string()))?;
 
     // fd_write(fd, iovs, iovs_len, nwritten) — the only import that does work.
     linker
@@ -1853,9 +1899,12 @@ fn run_wasm(
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     // argv[0] is the program name, which `args()` (argv[1..]) skips.
     let mut world = Streams {
-        caps: Some(caps),
-        types,
-        contracts,
+        gen: GenState {
+            caps: Some(caps),
+            types,
+            contracts,
+            ..GenState::default()
+        },
         ..Streams::default()
     };
     world.argv.push(b"gen\0".to_vec());
@@ -1947,6 +1996,7 @@ fn run_wasm(
     // stream is checked here: an unread atom means the decoder walked a shorter
     // type than the encoder did.
     streams
+        .gen
         .drained()
         .map_err(|e| EngineError::Failed(e.to_string()))?;
     // The wrapper framed the result between two marker lines; everything ahead

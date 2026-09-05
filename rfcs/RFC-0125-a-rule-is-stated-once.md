@@ -5381,7 +5381,7 @@ deleted here, and `--engine interp` is still the default.
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
 | `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | yes, since the ninth slice below — the tests that RUN a program are integration tests now (`vyrn-frontend/tests/loader_run.rs` and `jsondec_run.rs`, 108 of them), and they compile with the direct backend and run in the driver's WASI host, which `vyrn-cli` exposes as a library target | neither of the two options in this column, because the second one cannot be built: a unit test INSIDE `vyrn-frontend` that dev-depends on a backend compiles a SECOND copy of `vyrn-frontend`, and the two `Program` types are different types. So the tests left the lib target rather than the crate — what reads the loader's insides stays a unit test, what runs a program is behaviour and is stated from outside. The crate's test count is the same 1,246, and the shipped crate still depends on nothing |
 | `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | yes, since the fourth slice below — both engines print ``error: extern `jsNow` is not available on this target`` on standard error and exit 1. The third slice read `worse` here: the compiled route trapped with `error: error while executing at wasm backtrace:`, the one output difference in 204 programs | the embedded host answers the `vyrn` namespace with `interp::extern_unavailable`'s sentence, as native's C stub already did. No emitted byte changes |
-| `gen-fn-at-run-time` | seven `std` modules and `site/app/apidoc.vyrn`, whose own `test` blocks call the module's `gen fn`s | no — RFC-0021 runs a generator at generation time and no compiling route lowers a call to one, so the direct backend refuses the body by name ("no lowering for the call `roundTrip`") and a native build would too. Found by the eleventh slice below, by moving the default | the machinery exists — `vyrn-genwasm` compiles a generator module by clearing `is_gen` and setting `checker::set_gen_host` — but pointing it at `vyrn test` compiles every test file in gen-host mode, and a body reaching `moduleInterface` or `contractOf` then wants three atom-stream imports the embedded host does not define. A slice with a decision in it. Until it is taken this is what `--engine interp` is for, and `interp.rs` cannot go |
+| `gen-fn-at-run-time` | seven `std` modules and `site/app/apidoc.vyrn`, whose own `test` blocks call the module's `gen fn`s | yes, since the fourteenth slice below — a `test` door that reaches a `gen fn` makes `vyrn test` compile the whole module as a GENERATOR HOST, which is the preparation and the emitter RFC-0076's engine already used. The eleventh slice read `no` here: no compiling route lowered a call to a generator, so the direct backend refused the body by name ("no lowering for the call `roundTrip`") | the two candidate rules were priced by what they transfer. Compiling the module as a generator host transfers NOTHING — the generator is ordinary code in the same module — while lowering the call site as a host call would need a general two-way marshaller for every parameter and return type a tested generator uses. RFC-0076 M3b built that walk once, for three known named types; the tested generators take records, arrays and enums. A file whose doors reach no generator is compiled exactly as before, so an ordinary `test` file pays for none of it |
 | `site-export` | CI's Site job | yes, and this is new — the frame-limit refusal M5's second slice recorded is gone, and the compiled route writes the same 241 files | 187.30 s against 13.89 s, medians of three interleaved runs, and the 241 files are byte-identical |
 
 #### How the third column was proved
@@ -7230,6 +7230,207 @@ default is the compiled route, the suites say which of them needs the other one
 and why, parity compares the two compiling routes, and the generation bridge no
 longer names an interpreter type. `interp.rs` still compiles, still runs, and
 is still what `--engine interp` selects.
+
+#### The fourteenth slice (2026-09-05): a `test` block is generation
+
+The eleventh slice named one census row as the whole blocker, and this slice
+takes the decision it asked for. **A `test` door that reaches a `gen fn` makes
+`vyrn test` compile the module as a GENERATOR HOST.** Nothing else changes:
+`vyrn run` still refuses a run-time call to a generator by name, and a file
+whose doors reach no generator is compiled exactly as before.
+
+**Two rules were available, and they were priced by what they transfer.** The
+first lowers the CALL SITE as a host call: the driver runs the generator through
+`vyrn-genwasm` and splices its answer back. The second compiles the whole file
+as a generator host: the generator is ordinary code in the same module and the
+call is a call.
+
+The first one has to move a value across the wall in both directions, for every
+parameter and return type a tested generator has. RFC-0076 M3b wrote that walk
+once, for three KNOWN NAMED types, and it is the most delicate code in the
+engine — a host encoder and a synthesized decoder that agree because both read
+`record_fields`. The tested generators are not three known types: `vhCheck`
+takes a `HintPolicy`, `converted` takes a `Json`, `vyxPageInterface` answers a
+`ModuleInterface`. So the first rule is a general marshaller, and the second
+transfers nothing at all. The second one is taken.
+
+**What it cost, by the line.** The preparation and the emitter already existed:
+`vyrn-genwasm` cleared `is_gen`, synthesized the reflect entries and their
+decoders, and called `vyrn_codegen::direct::compile_gen_host`. All of that was
+private to one function that also builds a `main` dispatching on `args()`. It is
+`vyrn_genwasm::prepare` now — the same eight lines, named — and `wrapper_program`
+calls it. The ten `vyrn_gen` imports were a `Linker<Streams>` inside the
+generation run; they are `vyrn_genwasm::link`, generic over a `GenHost` store,
+and `Streams` is one implementor. The driver's `wasmrun::Host` is the other.
+
+So the driver's own new code is a question and two calls:
+
+```rust
+let reach = vyrn_codegen::direct::gen_reach(&prog);
+let generation = (0..bodies.len()).any(|k| reach.contains(&format!("__vyrn_body_{k}")));
+```
+
+`gen_reach` is the closure the direct backend already computed to decide which
+functions it skips. It is public now, and asked rather than repeated, so the
+door's answer is the backend's own.
+
+**Why the cost to an ordinary program is nothing.** The mode is per FILE and the
+question is asked of the DOORS. A `test` file that names no generator compiles
+through `direct::compile` as before, imports none of the ten names, and keeps
+`readFile` on WASI rather than on the mediated import. That was the reason the
+eleventh slice would not take "compile every test file in gen-host mode": a test
+must not pay for imports it never calls.
+
+**The `wasm-gen` feature is gone from `vyrn-cli`.** It chose between two
+generation engines. There is one, and the same crate now also serves the imports
+a `test` block's generator is compiled against, so a driver without it cannot
+run a generator in either place. `vyrn-genwasm` is an excluded crate and a
+required dependency; the workspace property is unchanged, because its
+dependencies are `vyrn-frontend`, `vyrn-codegen` and `wasmtime` and none of them
+is clang. `VYRN_NO_WASM_GEN=1` still picks the interpreted generation route at
+run time. CI's generator job drops `--features wasm-gen`.
+
+**The eight files, on the compiled route, byte for byte.**
+
+| file | blocks | compiled == interpreted |
+|---|---|---|
+| `std/von` | 17 | identical |
+| `std/tw` | 20 | identical |
+| `std/icons` | 26 | identical |
+| `std/i18n` | 19 | identical |
+| `std/ui` | 11 | identical |
+| `std/vyx-hints` | 29 | identical |
+| `std/vyx` | 57 | identical |
+| `site/app/apidoc.vyrn` | 7 | on the default engine |
+
+`GEN_TESTED` is empty and gone; `tests/std_suite.rs` runs every std module on
+the default engine. The five topic suites (`hints`, `pages`, `tw`, `von`, `vyx`)
+lose one `--engine interp` each. Census row 16 reads `yes`.
+
+#### The fifteenth slice (2026-09-05): the pool is N stores
+
+RFC-0025's `--workers N` was N interpreters, and the eleventh slice recorded it
+as the tree-walker's on both `serve` and `dev`. It is N resident instances now,
+over ONE Cranelift compile: `wasmrun::Compiled` is a translated module and
+`start_on` instantiates it, so a pool costs an instantiation per worker rather
+than a translation.
+
+**The handler shape did not move.** `serve_pool_wasm` has
+`interp::serve_pool`'s signature, so the spmc channel, the accept loop,
+`serve_one` and `dev_serve_one` are the same code on both engines and the two
+call sites choose between the two pools in one `if`. What differs is the thing
+behind `call_handle`: `serve_call` on an `Interp`, `serve_wasm_call` on a
+`Resident`.
+
+**`main` runs once, and that is a rule the gate already proved.** The
+tree-walker runs module state and `main` on a setup interpreter, drops it, and
+gives each worker a fresh one that only initializes globals. The compiled route
+does the same with two programs: the setup instance runs the program as
+written, and the workers run a copy whose `main` returns 0 and does nothing
+else, so `_start` still initializes each instance's module state (RFC-0013) and
+no worker repeats `main`'s effects. What one instance holds and another does not
+is unreachable from a request, because `refuse_workers_if_stateful` has already
+refused a `handle` that reads or writes module state. That refusal is unchanged
+and its wording is unchanged; it is simply no longer an interpreter's.
+
+`tests/serve.rs`'s three pool tests run on the DEFAULT engine now —
+`engine_args` no longer forces `--engine interp` when it sees `--workers`, and
+the isolation-gate test asks for no engine at all. All three pass on both
+columns: 27 tests with the default, 27 under `VYRN_SERVE_ENGINE=interp`.
+
+#### Why the deletion still does not follow (2026-09-05)
+
+The eleventh slice named three things that reach the tree-walker, and said two
+of them were decisions rather than obstacles. Both decisions are taken: a `test`
+block's generator is compiled (the fourteenth slice) and the pool is N stores
+(the fifteenth). `GEN_TESTED` is gone, the three pool tests run on the default
+engine, and every gate in the table below is green. The deletion is still not
+taken, and the row that stops it is named here the way the eleventh slice named
+its own.
+
+**The blocker: the playground RUNS the tree-walker in a browser tab.**
+
+| where | what names the interpreter |
+|---|---|
+| `compiler/vyrn-play/src/lib.rs:297` | `play_run` calls `interp::run_with_args` |
+| `compiler/vyrn-frontend/src/playhost.rs` | 105 lines of host boundary that only the interpreter reads |
+| `site/public/play-wasm.js`, `site/public/play.js` | the page's Run button, and the `{ stdout, stderr, exitCode }` it renders |
+
+`vyrn-play` is `vyrn-frontend` compiled to `wasm32-unknown-unknown`. It cannot
+instantiate a wasm module — it IS one — so the compiled route cannot be moved
+inside it. The port is real and has a shape: `play_run` answers the module's
+BYTES, and the page runs them with `web/wasi-min.js`, which already runs a
+`vyrn build --target wasm` module in a browser and already answers
+`{ exitCode, stdout, stderr }`. Three things stand in the way of it being one
+line. `runVyrn` takes no stdin and no clock, and the playground supplies both
+(`arm_host(stdin, now_ms)`). `vyrn-play` would gain `vyrn-codegen` and
+`vyrn-lower`, and the page DOWNLOADS this module — it is built `opt-level = "z"`
+for that reason. And the gate is a browser, not `cargo test`. That is a slice
+with a decision, a host and a gate in it, which is the same sentence the
+eleventh slice wrote about `gen fn` at run time, and the fourteenth slice is
+what that sentence is worth.
+
+**Three more name it, and each is one deletion on the day the row above
+closes.**
+
+| where | what |
+|---|---|
+| `compiler/vyrn-frontend/src/gen.rs:538` | `generate` falls through to `interp::generate_interpreted` when the engine declines. No program in this repo declines, so the fall-through becomes a refusal — but `VYRN_NO_WASM_GEN=1` goes with it, and `tests/genwasm.rs` is a DIFFERENTIAL suite whose second column is that variable. It and CI's generator job are rewritten, not edited |
+| `compiler/vyrn-cli/src/main.rs` | `Engine::Interp` (three sites), `interp::{run_with_args, run_tests, run_benches, serve, serve_pool}` — and `ServeCall`, `ServeAnswer`, `ServeRequest`, `ServeResponse`, which are the DRIVER's protocol types and are declared in `interp.rs`. They move rather than go |
+| `compiler/vyrn-lsp/src/main.rs:301` | `#[cfg(feature = "wasm-gen")]` around `vyrn_genwasm::install()`. The same argument the fourteenth slice made for `vyrn-cli`: an LSP built without it would have no generation engine at all |
+
+The mechanical remainder is `tests/lowered.rs:706` (one `interp::run`), fourteen
+`Carrier::Interp` rows in `tests/boundaries.rs`, the `VYRN_FIXTURES=interp`
+column in `tests/fixtures.rs`, `--engine interp` in the usage text, and
+`interp.rs` itself — 11,105 lines, of which 2,858 are its own `mod tests`.
+
+**The tree is not half-deleted.** `interp.rs` still compiles, still runs, and is
+still what `--engine interp` selects. What changed is that no SUITE needs it: the
+std sweep, the five topic suites and the three pool tests all run on the default
+engine, and the second columns that remain (`VYRN_FIXTURES=interp`,
+`VYRN_SERVE_ENGINE=interp`, `VYRN_NO_WASM_GEN=1`) are second opinions rather
+than the only opinion.
+
+#### The two slices' gates (2026-09-05)
+
+One table for the fourteenth and fifteenth slices, run in §1.4's order, one at a
+time, in the foreground, with `TMP` and `TEMP` pointed at a shallow scratch
+directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 551 passed, 74 ignored — the same counts the eleventh slice's table records |
+| `kernel` `--ignored` | 1, 27 s |
+| `coretables` `--ignored` | 1, 26 s |
+| `typed` `--ignored` | 1, 47 s |
+| `effects` `--ignored` | 2, 56 s |
+| `fixtures` `--ignored` | 205 compared, 18 s |
+| `fixtures` `--ignored`, `VYRN_FIXTURES=interp` | 205 compared, 56 s |
+| `vyrn-frontend` | 1,246 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,422 |
+| `vyrn-lsp`'s own tests | 99 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 173 s |
+| the residue ratchet | 199 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, no byte moved |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 25 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files, 9.4 s |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks |
+| `serve` / `rpc` / `universal_pages` | 27, 12, 9 ignored — and 27 and 12 again under `VYRN_SERVE_ENGINE=interp` |
+
+`--features wasm-gen` is off the `genwasm` command because the feature is gone;
+CI's generator job says the same.
+
+The workspace's `compiler/**/*.rs`, excluding `target`, is 204,164 lines to
+204,318 — up 154. `vyrn-genwasm` is up 50 (281 added, 231 removed) and every one
+of those moved: `prepare` and `link` are the two halves that were private to one
+function. `vyrn-cli`'s `main.rs` is up 106 and `wasmrun.rs` up 66, which is the
+pool and the translated module. The seven test files are down 65 between them.
 
 ### M6 — the other two judgments
 

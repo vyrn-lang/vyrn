@@ -6,12 +6,11 @@
 //! each test compares the engine against the reference rather than against a
 //! transcript nobody would notice going stale.
 //!
-//! `wasm-gen` is ON in the default build since RFC-0125 §3 M5's tenth slice, so
-//! these compare two engines rather than the interpreter with itself. They need
-//! no clang and no wasi sysroot: RFC-0076 M7 emits the generator's module
-//! directly. Under `--no-default-features` both runs are the interpreter and
-//! every assertion still holds, which is the shape a test of an optional engine
-//! has to have.
+//! The engine is in every build since RFC-0125 §3 M5's fourteenth slice — the
+//! driver has one generation engine, and the same crate serves the `vyrn_gen`
+//! imports a `test` block's generator is compiled against — so these compare two
+//! engines rather than the interpreter with itself. They need no clang and no
+//! wasi sysroot: RFC-0076 M7 emits the generator's module directly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -769,14 +768,6 @@ fn editing_a_generator_recompiles_its_artifact() {
 #[test]
 #[ignore = "compiles every generator in the corpus twice: cargo test -p vyrn-cli --test genwasm -- --ignored"]
 fn every_generator_example_emits_the_same_source_under_both_engines() {
-    // Without the feature both columns are the interpreter and the whole thing
-    // agrees with itself. Loudly, because a silent skip is exactly the failure
-    // mode this test exists to close.
-    assert!(
-        cfg!(feature = "wasm-gen"),
-        "build with --features wasm-gen, or this compares the interpreter to itself"
-    );
-
     let corpus = generator_examples();
     assert!(
         corpus.len() >= 10,

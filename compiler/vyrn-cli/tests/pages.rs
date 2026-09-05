@@ -1409,15 +1409,7 @@ fn two_slugs_reaching_one_helper_name_are_a_diagnostic() {
 #[test]
 fn std_ui_unit_tests_run_green() {
     let module = repo_file("std/ui.vyrn");
-    // These `test` blocks call the module's `gen fn`s, which no compiling route
-    // lowers (`tests/std_suite.rs`'s `GEN_TESTED`); the tree-walker is the one
-    // engine that runs a generator as ordinary code.
-    let out = vyrn()
-        .arg("test")
-        .args(["--engine", "interp"])
-        .arg(&module)
-        .output()
-        .expect("vyrn test");
+    let out = vyrn().arg("test").arg(&module).output().expect("vyrn test");
     let combined =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     assert!(
