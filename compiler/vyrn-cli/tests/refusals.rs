@@ -1101,7 +1101,7 @@ fn sections() -> Vec<Section> {
         sec(
             "pub struct ExitEv {",
             Rows,
-            "the event records: exits, reads, consuming matches, arm payloads, \
+            "the event records: exits, reads, consuming matches, \
              stores, Rule N edges, place stores",
         ),
         sec(
@@ -1296,9 +1296,9 @@ fn sections() -> Vec<Section> {
             "an arm that yields a place, and what naming one costs",
         ),
         sec(
-            "    fn value_cannot_alias(&self, e: &Expr, root: &str) -> bool {",
+            "    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {",
             Rows,
-            "Rule N's edge guard, the mention guard, and what a call may forward",
+            "the mention guard, and what a call may forward",
         ),
         sec(
             "    fn carries_param_storage(&self, e: &Expr) -> bool {",
@@ -1521,9 +1521,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 723),
-        ("placement rows for the engines", 2378),
+        ("placement rows for the engines", 2295),
         ("a fix menu", 73),
-        ("shared machinery", 3779),
+        ("shared machinery", 3571),
         ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");

@@ -1347,34 +1347,20 @@ impl<'a> Cx<'a> {
         self.plan.arg_drop(node)
     }
 
-    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the
-    /// emitter-reads-the-core slice): the releases one edge of the join at
-    /// `node` owes because another edge took the name. The core states each
-    /// as a `St::Drop` at a `Site::Edge`, which is the join and the edge —
-    /// a position in a branch is not a key, and this is why the drop carries
-    /// one. A sub-place row (`d.line`) keeps its spelling, because the
-    /// temporary the core takes it into is spelled for the place it took.
+    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the derivation
+    /// slice): the releases one edge of the join at `node` owes because
+    /// another edge took the name. The core states each as a `St::Drop` at a
+    /// `Site::Edge`, which is the join and the edge — a position in a branch
+    /// is not a key, and this is why the drop carries one. The kernel's
+    /// `equalize` is the one statement of the rule, and `own.rs` states none.
     fn edge_rows(&self, node: usize) -> Vec<(String, u32)> {
-        let Some(f) = &self.facts else {
-            return self
-                .plan
-                .edge_releases_at(node)
-                .cloned()
-                .unwrap_or_default();
+        let Some(f) = self.facts.as_ref() else {
+            return Vec::new();
         };
-        match f.edges.get(&self.plan.key_of(node)) {
-            Some(rows) => {
-                self.plan.acknowledge(node);
-                rows.clone()
-            }
-            // A join this pass of the core states nothing for — a body it
-            // could not lower — keeps the plan's rows.
-            None => self
-                .plan
-                .edge_releases_at(node)
-                .cloned()
-                .unwrap_or_default(),
-        }
+        f.edges
+            .get(&self.plan.key_of(node))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Round twenty-seven's table read off the core (RFC-0125 §3 M3, the
@@ -1404,27 +1390,13 @@ impl<'a> Cx<'a> {
     /// `(key, arm)` releases at its end, each with the holes the arm left in
     /// it. The core states them as the trailing run of `St::Drop` in
     /// `Arm::body`, with `NameInfo::holes` on each binder;
-    /// `compiler/vyrn-cli/tests/coretables.rs` proves it equal to the plan's
-    /// rows at every site in the corpus. The plan is acknowledged for §26's
-    /// finish check, as [`Cx::receiver_row`] acknowledges R1′'s.
+    /// Since RFC-0125 §3 M3's derivation slice the rows are the kernel's own
+    /// answer over the core, and `own.rs` states none: the core answers at
+    /// every switch it lowers — a `match`, an `if let` and a `?` alike — and
+    /// a site with no answer is a body no core was built for.
     fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
-        let Some(f) = &self.facts else {
-            return self.plan.arm_payload_free(key, arm).map(|rows| {
-                rows.iter()
-                    .map(|(n, _, h)| (n.clone(), h.clone()))
-                    .collect()
-            });
-        };
-        // A site this pass of the core does not state (an `if let`, a `?`)
-        // keeps reading the plan; `match` is the reader this slice flips.
-        let Some(rows) = f.arms.get(&(self.plan.key_of(key), arm)) else {
-            return self.plan.arm_payload_free(key, arm).map(|rows| {
-                rows.iter()
-                    .map(|(n, _, h)| (n.clone(), h.clone()))
-                    .collect()
-            });
-        };
-        self.plan.acknowledge(key);
+        let f = self.facts.as_ref()?;
+        let rows = f.arms.get(&(self.plan.key_of(key), arm))?;
         // The kind the core carries beside each binder is the interpreter's
         // reader; this backend reads the release off the type itself.
         (!rows.is_empty()).then(|| {

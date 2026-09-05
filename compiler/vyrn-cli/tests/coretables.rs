@@ -13,13 +13,14 @@
 //! added its rows) against the plan's answer at the same site. A difference
 //! is printed with program, function and site.
 //!
-//! Two tables are pinned at zero differences, and the emitter reads the core
-//! for both:
+//! One table is pinned at zero differences, and the emitter reads the core
+//! for it: `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
+//! whose `NameInfo::receiver` names the `Expr::Field` node.
 //!
-//!   - `arm_frees`, from a `St::Drop` of a payload binder at the end of
-//!     `Arm::body`, with `NameInfo::holes` as the row's hole set;
-//!   - `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
-//!     whose `NameInfo::receiver` names the `Expr::Field` node.
+//! `arm_frees` is DERIVED and no longer diffed: `own.rs` states no arm table
+//! since RFC-0125 §3 M3's derivation slice, so the kernel's answer is the
+//! only one and this test counts it. What a wrong answer fails is the
+//! residue ratchet and the memory suite, which measure.
 //!
 //! **The derivation slice (RFC-0125 §3 M3) changed what a difference MEANS
 //! for a table the core derives.** While the core read the plan, a diff was a
@@ -52,18 +53,13 @@
 //!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
 //!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
 //!     bound;
-//!   - `edge_releases`, from a `St::Drop` at a `Site::Edge`.
+//!   - `edge_releases`, from a `St::Drop` at a `Site::Edge` — DERIVED and no
+//!     longer diffed since the derivation slice, for the reason `arm_frees`
+//!     is not.
 //!
 //! The diff is structural in both directions: a plan row the core states
 //! nothing for is a site a flipped emitter would stop releasing at, and a
 //! core answer the plan does not have is one it would release twice.
-//!
-//! One more is pinned since the deletion slice, and it is the native
-//! emitter's alone: the arm table's release KIND. `direct.rs` derived the
-//! shape from the binder's type all along; `lib.rs` emitted the row's stored
-//! `DropKind`. The core states no kind, so the flip has the native emitter
-//! ask `Owned::release_kind` — and [`arm_kinds`] asserts that answer equals
-//! the plan's row at every arm the core frees a binder in.
 //!
 //! One is half COUNTED and half pinned. `St::Switch`'s `consuming` is not
 //! the plan's `consuming_matches`: it is the whole disjunction the emitter
@@ -117,65 +113,6 @@ fn corpus() -> Vec<PathBuf> {
     names.sort();
     assert!(!names.is_empty(), "no examples found");
     names
-}
-
-/// The one thing the NATIVE emitter needs from the arm table that the direct
-/// emitter does not: the release KIND.
-///
-/// RFC-0125 §3 M3, the deletion slice. `direct.rs` derives the shape of an
-/// arm payload's release from the binder's TYPE (`rel_for`), so the plan's
-/// stored `DropKind` was never its reader. `lib.rs` emitted the row's own
-/// `kind`. The core states no kind — a kind is a property of the type, not of
-/// the site — so the flip has the native emitter ask
-/// [`vyrn_frontend::own::Owned::release_kind`], which is the table the placer
-/// itself derived the plan's kinds from. This walks every arm the core frees
-/// a binder in and asserts the two answers are one, so the census's column is
-/// asserted rather than argued.
-fn arm_kinds(
-    body: &vyrn_lower::core::Body,
-    stmts: &[St],
-    own: &vyrn_frontend::own::Ownership,
-    file: &str,
-    diffs: &mut Vec<String>,
-    counted: &mut BTreeMap<&'static str, usize>,
-) {
-    for s in stmts {
-        match s {
-            St::If { then, els, .. } => {
-                arm_kinds(body, then, own, file, diffs, counted);
-                arm_kinds(body, els, own, file, diffs, counted);
-            }
-            St::Loop(b) | St::Block { body: b, .. } => {
-                arm_kinds(body, b, own, file, diffs, counted)
-            }
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    arm_kinds(body, &a.body, own, file, diffs, counted);
-                    let Some(frees) = &a.frees else { continue };
-                    let Some(rows) = own.plan.arm_payload_free(a.site, a.index) else {
-                        continue;
-                    };
-                    for b in frees {
-                        let info = &body.names[*b as usize];
-                        let Some((_, kind, _)) = rows.iter().find(|(n, _, _)| *n == info.source)
-                        else {
-                            continue;
-                        };
-                        *counted.entry("arm release kinds").or_default() += 1;
-                        let from_ty = own.proto.release_kind(&info.ty);
-                        if from_ty.as_ref() != Some(kind) {
-                            diffs.push(format!(
-                                "{file}: site {} arm {}: arm kind: plan {kind:?}, \
-                                 the type says {from_ty:?}",
-                                a.site, a.index
-                            ));
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Every producer type the core carries, and every one it does not.
@@ -258,46 +195,13 @@ fn run() {
                 .is_some_and(|f| built.contains(f) || f.is_empty())
         };
 
-        for ((site, arm), core_says) in &facts.arms {
+        // RFC-0125 §3 M3, the derivation slice: `own.rs` states no arm
+        // table any more, so there is nothing left to diff here. What the
+        // core frees is counted, and the ratchet (`residue`) and the memory
+        // suite are what a wrong answer fails.
+        for core_says in facts.arms.values() {
             *counted.entry("arm_frees").or_default() += 1;
-            // The plan's row may name a binder no arm of this shape drops;
-            // only the binders the core released are compared, by name.
-            // The KIND travels with each binder since the deletion slice:
-            // the interpreter reads round forty's answer off the core and
-            // has no type of its own to ask (RFC-0125 §3 M3).
-            let want: Vec<(String, Vec<String>, Option<vyrn_frontend::own::DropKind>)> = own
-                .plan
-                .arm_payload_free(*site, *arm)
-                .map(|rows| {
-                    rows.iter()
-                        .filter(|(n, _, _)| core_says.iter().any(|(c, _, _)| c == n))
-                        .map(|(n, k, h)| (n.clone(), h.clone(), Some(k.clone())))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if want != *core_says {
-                diffs.push(format!(
-                    "{file}: site {site} arm {arm}: arm_frees: \
-                     core {core_says:?}, plan {want:?}"
-                ));
-            }
-        }
-
-        // The other direction, over the sites the core STATES an answer for
-        // (a `match`; an `if let` or a `?` arm states none and the emitter
-        // keeps reading the plan there): a row the plan placed and the core
-        // leaves out is a site the flipped emitter would stop freeing at.
-        for ((site, arm), rows) in own.plan.arm_frees.iter() {
-            let Some(core_says) = facts.arms.get(&(*site, *arm)) else {
-                continue;
-            };
-            for (n, _, h) in rows {
-                if !core_says.iter().any(|(cn, ch, _)| cn == n && ch == h) {
-                    diffs.push(format!(
-                        "{file}: site {site} arm {arm}: arm_frees:                          the plan frees `{n}` {h:?} and the core does not"
-                    ));
-                }
-            }
+            *counted.entry("arm binders freed").or_default() += core_says.len();
         }
 
         // The plan's own totals, so the census can be read off this test.
@@ -317,10 +221,6 @@ fn run() {
             (
                 "arg_drops (plan)",
                 own.plan.arg_drops.iter().filter(|a| reached(a)).count(),
-            ),
-            (
-                "edge_releases (plan)",
-                own.plan.edge_releases.keys().filter(|a| reached(a)).count(),
             ),
         ] {
             *counted.entry(what).or_default() += n;
@@ -381,29 +281,13 @@ fn run() {
             }
         }
 
-        for (join, core_rows) in &facts.edges {
+        // RFC-0125 §3 M3, the derivation slice: Rule N's rows are the
+        // kernel's `equalize` and nothing else, so there is no second answer
+        // to diff. Counted; a wrong one fails the ratchet and the memory
+        // suite.
+        for rows in facts.edges.values() {
             *counted.entry("edge_releases").or_default() += 1;
-            let mut core_rows = core_rows.clone();
-            core_rows.sort();
-            let mut plan_rows = own
-                .plan
-                .edge_releases
-                .get(join)
-                .cloned()
-                .unwrap_or_default();
-            plan_rows.sort();
-            if core_rows != plan_rows {
-                diffs.push(format!(
-                    "{file}: join {join}: edge_releases: core {core_rows:?},                      plan {plan_rows:?}"
-                ));
-            }
-        }
-        for (join, plan_rows) in own.plan.edge_releases.iter().filter(|(a, _)| reached(a)) {
-            if !facts.edges.contains_key(join) && !plan_rows.is_empty() {
-                diffs.push(format!(
-                    "{file}: join {join}: edge_releases: the plan owes                      {plan_rows:?} and the core states none"
-                ));
-            }
+            *counted.entry("edge rows").or_default() += rows.len();
         }
 
         for (node, core_holes) in &facts.receivers {
@@ -500,7 +384,6 @@ fn run() {
             };
             for body in top.frames() {
                 producers(&body.stmts, &mut produced);
-                arm_kinds(body, &body.stmts, &own, &file, &mut diffs, &mut counted);
             }
         }
     }
@@ -524,7 +407,7 @@ fn run() {
     }
     for (class, ds) in &classes {
         eprintln!("  {:6} DIFF {class}", ds.len());
-        for d in ds.iter().take(4) {
+        for d in ds.iter().take(40) {
             eprintln!("           {d}");
         }
     }

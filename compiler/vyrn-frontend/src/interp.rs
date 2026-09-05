@@ -2753,7 +2753,6 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     // Identities are `Stmt` node addresses — unique program-wide, so the
     // per-function maps flatten into one.
     let ownership = crate::own::analyze(program);
-    let arm_frees = ownership.plan.arm_frees.clone();
     let droppable: HashMap<usize, crate::own::DropKind> =
         ownership.droppable.into_values().flatten().collect();
     let funcs: HashMap<&str, &Function> = program
@@ -2817,7 +2816,6 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         variant_lead,
         variants,
         droppable,
-        arm_frees,
         boxes: RefCell::new(HashMap::new()),
         next_box: std::cell::Cell::new(1),
         log_level: program.log_level,
@@ -2886,10 +2884,6 @@ struct Interp<'a> {
     /// Droppable `let` bindings (by `Stmt` node address) and their reclamation
     /// kind — the ownership analysis shared with the native backend.
     droppable: HashMap<usize, crate::own::DropKind>,
-    /// Round forty's arm table, `(match, arm) -> [(binder, kind)]`: the
-    /// payload binders an arm never moved, released at the arm's end. Only a
-    /// declared release is observable in this engine; the buffers are `Rc`s.
-    arm_frees: HashMap<(usize, u32), Vec<(String, crate::own::DropKind, Vec<String>)>>,
     /// The boxed streams (RFC-0075 M2c, re-hosted by RFC-0090 M3): what
     /// `boxStream` moved out of the program and `unboxStream` moves back in, keyed by
     /// the address it handed back. The compiled backends `malloc` one header and
@@ -7504,17 +7498,11 @@ impl<'a> Interp<'a> {
     /// them. The compiled backends free the buffers too; here they are `Rc`s,
     /// so only a declared release and what a `Deep` walk reaches can be seen.
     fn release_arm_binders(&self, key: usize, arm: usize, scope: &[Frame]) -> Result<(), Ctrl> {
-        // RFC-0125 §3 M3, the deletion slice: the core's answer where it
-        // states one, the plan's where it does not — an `if let` or a `?`,
-        // whose arms the core builds and consults no table for, and a run
-        // with no placer installed. This is the fallback rule the slice
-        // states once: where the core answers, the answer stands; where it
-        // does not, the site reads exactly what it read before the flip.
-        let core = crate::own::core_arm_rows(key, arm as u32);
-        let Some(rows) = core
-            .as_ref()
-            .or_else(|| self.arm_frees.get(&(key, arm as u32)))
-        else {
+        // RFC-0125 §3 M3, the derivation slice: the core's answer, and no
+        // other. The kernel judges every arm the core lowers — a `match`, an
+        // `if let` and a `?` alike — so a site it states nothing for is a
+        // body no core was built for, and there is no second table to ask.
+        let Some(rows) = crate::own::core_arm_rows(key, arm as u32) else {
             return Ok(());
         };
         if self.region_depth.get() != 0 {
@@ -7522,7 +7510,7 @@ impl<'a> Interp<'a> {
         }
         // The row's holes are not read: a buffer here is an `Rc`, and what
         // a take handed out keeps its own count.
-        for (name, kind, _) in rows {
+        for (name, kind, _) in &rows {
             let Some(v) = scope.last().and_then(|f| f.get(name)).map(|s| s.v.clone()) else {
                 continue;
             };

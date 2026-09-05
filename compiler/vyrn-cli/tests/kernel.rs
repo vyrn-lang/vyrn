@@ -359,16 +359,6 @@ fn run_corpus() {
                                     .is_some_and(|d| d.split(',').any(|w| tag.contains(w)))
                                 {
                                     eprintln!("{}", body.render());
-                                    let arms: Vec<String> = own
-                                        .plan
-                                        .arm_frees
-                                        .iter()
-                                        .filter(|((at, _), _)| {
-                                            own.plan.owners.get(at) == Some(&inst.func.name)
-                                        })
-                                        .map(|((_, arm), k)| format!("arm {arm}: {k:?}"))
-                                        .collect();
-                                    eprintln!("  plan arm frees: {}", arms.join("; "));
                                     let rel: Vec<String> = inst
                                         .releases
                                         .iter()

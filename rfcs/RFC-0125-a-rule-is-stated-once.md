@@ -4315,6 +4315,234 @@ One blessed snapshot moved and it is `projection.lowered`, whose inline tags
 renumber because the load runs one analysis more than it did. The whole-stderr
 snapshot over the 1,023 moved ONE line across the four commits, and it is the
 one this record names.
+**The arm slice (2026-09-05): the kernel states round forty, and `own.rs`
+states it no more.**
+
+`own.rs` held five per-node tables the core READ instead of deriving:
+`arg_drops`, `store_owned`, `consuming_matches`, `edge_releases` and
+`arm_frees`. Each is a rule stated twice — once by `movecheck`'s facts folded
+in `own::analyze`, once by the kernel's judgment over the core — and the
+`$schema` double free lived in one of them. This slice closes the last of the
+five to be read that way, and the first to be deleted: the arm table.
+
+**What the derivation is.** The kernel already answers the question. Placement
+mode reports a `MissingKind::ArmBinder` wherever an owned payload binder is
+still held where its arm ends (`kernel::binders_end`). The core's first build
+used to state the plan's rows as `St::Drop`s, so the kernel saw those binders
+gone and reported nothing; the rows the emitters read were the fold's. The
+first build now states none, the judgment reports every held binder, and the
+second build reads them back out of the core's own `Placed` table. Nothing
+here asks `own.rs`, and the answer an emitter frees by is the answer the
+kernel refuses a leak by.
+
+**What that let go.** `ReleasePlan::arm_frees` and `arm_payload_free`;
+`own::analyze`'s fold and its `VYRN_ARM_DUMP`; `movecheck::ArmPayloadEv`,
+`Facts::arm_payloads`, its sink, and the per-arm screens that fed it — one
+binder, a silent release kind, an arm value that cannot alias the binder, and
+`facts()`'s lending/retention/escaper post-screen. The interpreter's own copy
+of the table went with it. Every reader — `direct.rs`, `lib.rs`, `interp.rs` —
+had a core-first read with a plan fallback since the deletion slice; the
+fallback is gone, because there is nothing to fall back to.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/own.rs` | 5,124 | 5,074 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 9,864 | 9,758 |
+| `compiler/vyrn-frontend/src/interp.rs` | 11,662 | 11,650 |
+| `compiler/vyrn-codegen/src/lib.rs` | 19,161 | 19,151 |
+| `compiler/vyrn-codegen/src/direct.rs` | 16,765 | 16,751 |
+| `compiler/vyrn-lower/src/core.rs` | 3,972 | 4,017 |
+
+The structural census over `movecheck.rs` moves with it: placement rows
+2,378 → 2,335, shared machinery 3,682 → 3,619.
+
+**The core states an arm now, whatever the arm is.** An `if let` and a `?`
+used to build arms the core recorded no releases for (`Arm::frees: None`), and
+their rows were the plan's. They state their own now, from the same table, so
+`facts.arms` covers every switch the core lowers and a site with no answer is
+a body no core was built for.
+
+**The defect the derivation found, and who was right.** Over the corpus the
+kernel's set is a strict SUBSET of the fold's: it adds nothing, and it drops
+358 rows at five sites — `std/runtime:intStr`, `std/num:asciiStr`,
+`std/json:spaces`, `std/von:vonModule` and `regexredux.vyrn:compiled`, counted
+once per program that links them. Every one is the same shape: an arm that
+ends in a `panic`.
+
+```
+Err(why) => panic("`\{pattern}`: \{why}"),
+```
+
+A `panic` traps, the arm ends there, and `binders_end` never runs — so the
+kernel says the arm owes nothing. The fold said it owed a release, and the
+emitters wrote it after the trap:
+
+```wat
+    i32.const 8258712
+    call 10       ;; @panicAt
+    unreachable
+    local.get 8   ;; <- the fold's release of the binder
+    i32.const 8
+    i32.sub
+    call 3        ;; free
+```
+
+The kernel is right, and the four instructions were unreachable. This is the
+one thing in this slice that moves an emitted byte: 105 of the 173 recorded
+modules lose those instructions, because `intStr` and `asciiStr` are in the
+std closure of most of them. `rfcs/census/wasm-sha256.tsv` is re-recorded, and
+the diff of one module (`sizedints.vyrn`, 3,967 → 3,963 lines of wat) is the
+whole of what changed.
+
+**The two knobs shrink.** `VYRN_NO_PLACER=1` and `VYRN_PLAN_ROWS=1` put the
+emitters back on the plan, and the plan has no arm table now: under either,
+an arm payload is not freed. They are bisects for a byte difference, not modes
+anything is built under, and this is the first row where a bisect can no
+longer answer.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` set
+to a shallow path outside the checkout: `cargo fmt --all --check`, clean;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` with no filter,
+548 passed and 74 ignored; the `kernel`, `coretables`, `typed` and `effects`
+suites with `--ignored` (1, 1, 1 and 2, at 95 s, 79 s, 171 s and 161 s);
+`fixtures` with `--ignored`, 205 compared in 49 s; `vyrn-frontend`, green;
+the workspace less `vyrn-cli` with `--skip _natively`, 1,425; `vyrn-genwasm`
+on its own, 3; `memory` with `--test-threads=1`, 10; parity in release with
+`--ignored`, 41 of 41 in 353 s; the residue ratchet, 210 s;
+`VYRN_WASM_MANIFEST=write` then `=check` on `wasmhash`, 105 of 173 hashes
+re-recorded and green after; the cross-engine generator test with a fresh
+`VYRN_GEN_CACHE_DIR` and `--features wasm-gen`, 12; `testsweep` with
+`--ignored`, 105 s; `vyrn doc --std -o ../docs/api --verify`, 41 files up to
+date; and the site — `vyrn run site/export.vyrn out` writes its 82 routes and
+14 assets in 386 s, and `vyrn test` is green over `export.vyrn` and
+`site/app`, 189 blocks.
+
+**The edge slice (2026-09-05): Rule N is `equalize`, and the fold that agreed
+with it is gone.**
+
+The second of the five. `own::fold_edge_releases` folded `movecheck`'s
+`EdgeRel` events into a per-join table, the core read the table to place its
+`St::Drop`s at a `Site::Edge`, and the placer added to the same table what the
+kernel found the fold had missed. The kernel's `equalize` is the rule: where
+one live edge of a join has taken a name another still holds, the holding
+edges release it, and a hole one edge has and another lacks is released as a
+sub-place. The core reads the kernel's rows now, out of its own `Placed`
+table, and `own.rs` states none.
+
+**Nothing moved.** The corpus test had counted the two answers equal at 52
+joins in each direction for two slices, and `VYRN_WASM_MANIFEST=check` is
+green on all 173 modules: not one emitted byte. The derivation is a deletion
+and nothing else.
+
+**What that let go.** `ReleasePlan::edge_releases` and `edge_releases_at`;
+`fold_edge_releases` and its two vetoes; `movecheck::EdgeRel`,
+`Facts::edge_releases`, its sink and the three places that filled it — the
+`if` statement's, the `match`'s and the `if` EXPRESSION's, each with its own
+guard about which edge may release what. With the match sink went the
+per-arm `arm_heap` vector and the `all_binders` set it read, and with all
+three went `MoveCheck::value_cannot_alias`, Rule N's structural edge guard,
+whose last caller had been the arm table deleted in the slice above. Both
+compiled emitters' `edge_rows` lost their plan fallback.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/own.rs` | 5,074 | 4,987 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 9,758 | 9,573 |
+| `compiler/vyrn-codegen/src/lib.rs` | 19,151 | 19,139 |
+| `compiler/vyrn-codegen/src/direct.rs` | 16,751 | 16,737 |
+| `compiler/vyrn-lower/src/core.rs` | 4,017 | 4,032 |
+
+The structural census over `movecheck.rs` moves again: placement rows
+2,335 → 2,295, shared machinery 3,619 → 3,474.
+
+**Gates.** As the slice above, and all green: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`, 548 and 74
+ignored; `kernel`, `coretables`, `typed`, `effects` with `--ignored` (1, 1, 1,
+2 at 100 s, 83 s, 205 s, 194 s); `fixtures` with `--ignored`, 205 in 61 s; the
+workspace less `vyrn-cli` with `--skip _natively`, 1,425; `vyrn-genwasm`, 3;
+`memory` with `--test-threads=1`, 10; parity in release with `--ignored`, 41
+of 41 in 277 s; the residue ratchet, 219 s; `VYRN_WASM_MANIFEST=check`, green
+with no byte moved; the generator test with a fresh `VYRN_GEN_CACHE_DIR` and
+`--features wasm-gen`, 12; `testsweep` with `--ignored`, 79 s; `vyrn doc --std
+--verify`, 41 files; and the site — 82 routes and 14 assets, and `vyrn test`
+green over `export.vyrn` and `site/app`.
+
+**Where the other three stop (2026-09-05).**
+
+Five tables were read from `own.rs` rather than derived. Two are gone. Each of
+the three left was read at the source, and each stops for a different reason.
+This is a record, not a plan: the next slice starts from the diagnosis.
+
+**`arg_drops` is not the kernel's answer.** The row is
+`movecheck::arg_verdict`, and that is a rule about DECLARATIONS: the
+parameter's capability at position `ix`, whether the callee constructs a
+variant, whether it retains that position, whether it lends, and whether its
+return is the same bare type parameter as the argument's. Beside it stands
+RFC-0096 M3's partition (`ArgVerdict::AlreadyFreed`), which is what stops the
+two release rules firing on one value. The core carries most of the per-call
+half already — `Rhs::Call`'s `declared` and `ctor`, and `Builder::lends_name` —
+but the three closures the verdict screens against (`lending`, `retains`,
+`param_escapers`) are post-passes over EVERY body of the program, computed
+once the walk has read them all, and the core builds one instance at a time.
+Hoisting those three out of `movecheck` to somewhere the core can ask before
+it builds is the work, and it is a relocation of a declaration rule rather
+than a derivation from the judgment.
+
+The half that IS the kernel's is already the placer's: the receiver a call or
+an operator borrowed a heap field out of (`NameInfo::producer`) becomes an
+argument-temporary row wherever the kernel finds it held, and it takes the
+same `Placed` route the two derived tables take. It is the only writer left in
+`place_frames` that still writes into the plan.
+
+One thing the next slice must not approximate: `direct.rs::expr` asks
+`arg_drop_row` at EVERY expression node it emits, so a key on a node that is
+not a call argument is a free the emitter performs at the next call. An
+over-wide derived set is a double free, not a leak — the set has to be exact
+before it is flipped.
+
+**`store_owned` is the kernel's shape, and the kernel does not report it
+yet.** `Kernel::owned` and `Kernel::releases` already answer "does this frame
+hold the value in the place this `St::Store` writes"; `own.rs` answers it per
+BINDING over an event stream, and the three repairs it carries — the
+exiting-take exemption, the shared-loop refusal, the final-gone veto — exist
+because a per-binding reading cannot order across a back edge. The kernel's
+per-path `Own::Held` and `Own::Gone` answer all three directly. What is
+missing is a way to say so: a `MissingKind` for a store, or the store's answer
+read off the placement walk's own state, so the placer hands the second build
+the answer the way it hands it the arm and the edge rows. Of the three this is
+the one whose derivation extends the kernel rather than moving a rule about
+declarations.
+
+**`consuming_matches` is already subsumed, and two reads inside the core hold
+it up.** Over the corpus the core's `St::Switch`'s `consuming` says yes at
+1,602 sites the table does not name, and at NO site does the table say yes
+where the core says no; both compiled emitters read the core's answer first
+and the plan's only where the core states none. What keeps the table alive is
+that the CORE asks it twice: `Builder::scrutinee` asks before minting the
+temporary that takes a named scrutinee, and `Builder::own_the_scrutinee` asks
+it beside `Leak::Aliased` to decide the binding owns what the construct takes.
+`Leak::Aliased` carries the LINE the alias was written at, and that line is
+the match's own, so "aliased by THIS construct" is within the core's reach.
+What is not within reach is the table's three screens — one loop context, no
+read of the row after the match, no read of the scrutinee's own NAME inside
+the window. The `$schema` double free (`dd440832`) was exactly one of those
+screens missing, so they are not droppable; they are a reachability question
+over the whole body, which is the kernel's shape and is stated nowhere the
+core can ask today.
+
+**What still stands in `own.rs`, and why.** After the two deletions it is
+4,987 lines. Three of the five tables and their folds; the per-binding
+`droppable` and per-exit `releases` rows every engine builds its runtime
+registry from; `Owned` — the declarations' answer to "does this type own heap"
+and "what is its release kind" — which the core and both emitters ask and
+nothing else states; and `Fate`, the per-binding note `vyrn why --memory`
+prints. `Fate` is the one with no successor: the core states where a release
+STANDS, and the report needs the reason a value is NOT reclaimed — borrowed,
+captured, aliased, region, escaped, holed. The kernel refuses most of those
+today rather than noting them, so the report the core would print is the
+kernel's refusal wording plus, for the names it accepts, the placement the
+placer wrote. Nothing reads that yet, and the report reads `own::analyze`'s
+notes until it does.
 
 ### M4 — the runtime in Vyrn
 
