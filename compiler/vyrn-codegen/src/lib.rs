@@ -777,6 +777,11 @@ pub(crate) fn gen_host() -> bool {
 
 pub(crate) fn set_gen_host(on: bool) {
     GEN_HOST.with(|g| g.set(on));
+    // The checker asks the same question about the same program: a generator
+    // host's bodies are generation code even though `is_gen` was cleared to make
+    // them compilable. One flag, set in one place (RFC-0125 §3 M5, the ninth
+    // slice).
+    vyrn_frontend::checker::set_gen_host(on);
 }
 
 /// RFC-0101 M1: what each compiled backend decides an expression's type is.
@@ -1152,9 +1157,12 @@ pub const LIST_DIR_KINDS_NO_LOWERING: &str =
      run` or with `--target wasm`";
 
 /// The atom-stream primitives the synthesized decoders are written against.
-pub const GEN_REFLECT: &str = "__vyrnGenReflect";
-pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
-pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+///
+/// Declared by the checker, which types a call to one when this thread is a
+/// generator host, and re-exported here because the emitters lower them and
+/// `vyrn-genwasm` writes the decoders that call them. One name, one signature,
+/// one place (RFC-0125 §3 M5, the ninth slice).
+pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT};
 
 /// `@__vyrn_code_splice`'s value tags — which interpreter `Val` the host is to
 /// rebuild from the word it was handed. Exactly the set the splice rule accepts

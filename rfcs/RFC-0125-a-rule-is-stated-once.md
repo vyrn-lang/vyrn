@@ -4664,7 +4664,7 @@ deleted here, and `--engine interp` is still the default.
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | yes, by replacement since the fifth slice below — the rows are phases rather than functions, and the count is wasmtime's fuel. A per-function table is not portable and the slice says why | `vyrn_frontend::prof` counts interpreter steps and keeps counting them for `--engine interp` and for `check --profile`, which measures generation. What the compiled route reports instead is five phases and one repeatable count: 85,759,742,333 operations for the site export, the same number twice |
-| `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, but the feature `wasm-gen` is OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s, it needs clang and a wasi sysroot, and it declines to the interpreter for a module reaching `writeFile`, `writeAtomic`, `renameFile` or `fsyncFile` | the largest row. `generate_interpreted` is both the reference and the fallback; deleting it makes clang a hard requirement of `vyrn check` |
+| `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | yes, since the ninth slice below — `wasm-gen` is ON in `vyrn-cli`'s default build, so every command runs a generator as compiled wasm the way `vyrn-lsp` already did. No clang and no wasi sysroot: RFC-0076 M7 emits the generator's module directly | the largest row, and three defects were under it — an `Int64` argument declined (66 calls over this corpus, every element of every `.vyx` page), the wrapper's generation-only names read as ordinary code so the checker recorded `<type error>` under them, and the atom-stream primitives had a signature in the emitter and none in the checker. `generate_interpreted` stays as a decline path that no program in this repo takes, and `VYRN_NO_WASM_GEN=1` still picks it |
 | `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | no — the interpreter IS the oracle the compiled route is compared against | after the deletion `VYRN_FIXTURES=write` records from the route under test, and the fixture gate is a self-comparison. The oracle becomes a reviewed diff plus `wasmhash`'s cross-platform bytes |
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
@@ -5718,6 +5718,66 @@ stays open.
 `bench` blocks, under both engines: every one byte-identical on stdout, stderr
 and the exit code, which is what the `test-bodies` and `bench-check` rows
 claimed and still claim.
+
+**`gen-fn` was one feature flag and three defects behind it.**
+
+RFC-0076's engine runs a `gen fn` as compiled wasm. `vyrn-lsp` turned it on by
+default; `vyrn-cli` did not, because the engine reached wasm through clang and a
+wasi sysroot, and `vyrn check` may not need a C toolchain. RFC-0076 M7 removed
+that reason: the engine emits the generator's module directly. What the feature
+costs the default build now is one path crate whose own dependencies —
+`vyrn-frontend`, `vyrn-codegen`, `wasmtime` — this binary already resolves. The
+workspace rule is that the language builds and tests with no LLVM, no clang and
+no sysroot, not that the resolve is small. So `default = ["wasm-gen"]`, and
+`vyrn-genwasm` joins `vyrn-lsp` as excluded from the workspace MEMBERS — nothing
+needs its own test suite — while staying in the resolve.
+
+Turning the flag on made the row's real state readable, and it was not "yes".
+Three defects sat under it.
+
+**One: an `Int64` argument declined.** Arguments travel as argv, which is what
+lets one compiled artifact serve every call. Only `String` was written, so a
+generator with an `Int64` parameter was declined and the interpreter ran it. The
+element generators take `line` and `col` as `Int64`, so EVERY element of every
+`.vyx` page took the interpreted path: 66 declines over this repo's corpus, and
+the only declines there were. An `Int64` is decimal in argv now and `parse` reads
+it back inside the guest at the parameter's declared type. The corpus declines
+are 0.
+
+**Two: the host's bodies read as ordinary code.** The compiled program is the
+generator's module with `is_gen` cleared, because a `gen fn` has no runtime
+lowering. The checker reads the same flag, so it also concluded the bodies were
+not generation: `lex`, `moduleInterface`, `contractOf` and the `Code` and `Token`
+types were refused with "only available during generation", and every node under
+a refusal recorded `<type error>`. The emitter has its own lowering for all of
+them and emitted a correct module regardless. What the errors cost was the
+RECORD — the join types the emitters read (the eighth slice above) among them —
+and, in a debug build, `vyrn_lower`'s own lint, which failed the run. The context
+is a property of the PROGRAM and not of one function, so it is stated once:
+`checker::set_gen_host`, a thread flag, set by `vyrn_codegen::set_gen_host`,
+which the two gen-host emitters already bracket their whole compile with. It only
+ever enables a generation-only name; nothing reads it to refuse.
+
+**Three: two signatures for three names.** `__vyrnGenReflect`,
+`__vyrnGenNextInt` and `__vyrnGenNextStr` are the atom-stream primitives the
+synthesized decoders call. The emitters lowered them by name and the checker had
+never heard of them. They are declared in the checker now, which types a call to
+one only under `set_gen_host`, and re-exported from `vyrn-codegen` where the
+emitters and `vyrn-genwasm` read them. One name, one signature, one place.
+
+| | before | after |
+|---|---|---|
+| `wasm-gen` in `vyrn-cli` | off | on |
+| what the engine needs | clang and a wasi sysroot | neither, since RFC-0076 M7 |
+| an `Int64` parameter | declined; 66 calls over the corpus | served |
+| a generation-only name in the host | refused, `<type error>` under it | typed |
+| the three primitives | a signature in the emitter, none in the checker | one signature, in the checker |
+
+`generate_interpreted` is not deleted. It stays as the decline path, which no
+program in this repo now takes, and `VYRN_NO_WASM_GEN=1` and
+`--no-default-features` still pick it. The cross-engine `genwasm` suite is 12 of
+12 with a fresh `VYRN_GEN_CACHE_DIR`, and it compares two engines now rather
+than the interpreter with itself.
 
 ### M6 — the other two judgments
 
@@ -7557,7 +7617,7 @@ shape has no business in the frontend. The rule stays where its inputs are.
 
 **The census, after.** This is the table
 `the_coercion_census_is_what_the_rfc_records` asserts, printed from the test's
-own rows (`cargo test -p vyrn-cli --test lowered — --ignored --nocapture
+own rows (`cargo test -p vyrn-cli --test lowered -- --ignored --nocapture
 the_coercion_census_as_a_table`), so the prose and the tree cannot drift apart
 by one edit. The two rows that did not move are in the census above.
 

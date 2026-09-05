@@ -16,11 +16,13 @@
 # installed. Crates are judged one at a time, on what they cost and what a
 # self-hosted Vyrn would have to do about them later.
 #
-# `vyrn-lsp` and `vyrn-genwasm` are EXCLUDED because they are heavy and neither
-# is needed to build or test the language: `lsp-server`/`lsp-types` for the
-# former, the generator engine for the latter (RFC-0076). `vyrn-cli` and
-# `vyrn-lsp` depend on `vyrn-genwasm` OPTIONALLY, behind a feature spelled
-# `wasm-gen` in each, so it enters the resolve only when asked for.
+# `vyrn-lsp` and `vyrn-genwasm` are EXCLUDED as MEMBERS: nothing needs their own
+# test suites to build or test the language. `vyrn-genwasm` is still in the
+# default resolve since RFC-0125 §3 M5's ninth slice, because `vyrn-cli`'s
+# `wasm-gen` feature is on by default — every command runs a `gen fn` as
+# compiled wasm. It costs the build nothing new: its dependencies are
+# `vyrn-frontend`, `vyrn-codegen` and `wasmtime`, all of which `vyrn-cli`
+# already resolves, and none of them is clang. `--no-default-features` drops it.
 #
 # `wasmtime` itself is in the default resolve since RFC-0125 M5: `vyrn-cli`
 # embeds it to run a program's wasm (`vyrn run --engine wasm`). It is pure

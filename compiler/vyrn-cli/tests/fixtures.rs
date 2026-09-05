@@ -82,7 +82,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "gen-fn",
-        verdict: "partial",
+        verdict: "yes",
     },
     Census {
         capability: "fixture-oracle",

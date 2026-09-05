@@ -30,8 +30,14 @@ wasmtime = { version = "47", default-features = false, features = [
 ] }
 
 [features]
-# `cargo build --features wasm-gen` opts into running generators as compiled
-# wasm instead of interpreting them.
+# ON since RFC-0125 §3 M5's ninth slice: every command runs a `gen fn` as
+# compiled wasm, the way `vyrn-lsp` already did. It was off while the engine
+# reached wasm through clang; since RFC-0076 M7 it emits the module directly, so
+# what the feature costs is a path crate whose own dependencies (`vyrn-frontend`,
+# `vyrn-codegen`, `wasmtime`) this binary already resolves. `--no-default-features`
+# still builds the interpreted route, and `VYRN_NO_WASM_GEN=1` picks it at run
+# time.
+default = ["wasm-gen"]
 wasm-gen = ["dep:vyrn-genwasm"]
 
 [[bin]]
