@@ -188,46 +188,24 @@ fn fixed_env_i64(key: &str) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
-// The host boundary, in the two shapes it has.
+// The host boundary.
 //
-// Everywhere with an operating system underneath — native, `wasm32-wasip1` —
-// output is a file descriptor, input is stdin, and the clock is `std::time`.
-// `wasm32-unknown-unknown` (the browser playground, `compiler/vyrn-play`) has
-// none of the three: writes to stdout go nowhere, stdin is always empty, and
-// `std::time::SystemTime::now` PANICS. So each one is named once here and
-// switched once, and every call site below is spelled the same in both.
-//
-// Nothing about a native build changes: the `cfg` arms below expand to the
-// `println!`, `read_until` and `SystemTime` calls that were written inline.
+// One shape now. There was a second — `wasm32-unknown-unknown`, where the
+// browser playground ran this interpreter and had no stdout, no stdin and a
+// clock that PANICS — and RFC-0125 M5 took it away: the playground compiles the
+// program and the page runs the module, so the only host under this file is one
+// with an operating system underneath.
 // ---------------------------------------------------------------------------
 
 /// One line of program output. `print`'s only sink.
 macro_rules! vyrn_out {
     ($($arg:tt)*) => {{
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        crate::playhost::out_line(format_args!($($arg)*));
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         println!($($arg)*);
     }};
 }
 
-/// Raw bytes to stdout: no newline, no formatting, no line buffering promise
-/// beyond what the handle already gives (RFC-0111).
-///
-/// THE PLAYGROUND CANNOT DO THIS FAITHFULLY, and says so rather than pretending.
-/// Its stdout is a `String` shown in a web page, so bytes that are not UTF-8
-/// have no representation there; they arrive as U+FFFD. That is the same class
-/// of limit as the playground having no filesystem — a display surface is not a
-/// byte sink — and it is the only engine where `writeStdout` is lossy. The
-/// interpreter, the native binary and the WASI module all write the bytes.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn vyrn_out_bytes(bytes: &[u8]) {
-    crate::playhost::out_text(&String::from_utf8_lossy(bytes));
-}
-
 /// Raw bytes to stdout (RFC-0111). Shares the process handle with `print`, so
 /// the two interleave in call order.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn vyrn_out_bytes(bytes: &[u8]) {
     use std::io::Write as _;
     let out = std::io::stdout();
@@ -259,15 +237,11 @@ fn byte_vec(v: &Val, who: &str) -> Result<Vec<u8>, Ctrl> {
 /// One line of log output, kept off stdout (RFC-0008).
 macro_rules! vyrn_err {
     ($($arg:tt)*) => {{
-        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-        crate::playhost::err_line(format_args!($($arg)*));
-        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
         eprintln!($($arg)*);
     }};
 }
 
 /// The next raw line of stdin: bytes up to and including `\n`, or empty at EOF.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn host_read_line() -> Vec<u8> {
     use std::io::BufRead;
     // Locking the global stdin per call still streams: the buffer lives in the
@@ -283,13 +257,7 @@ fn host_read_line() -> Vec<u8> {
     buf
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn host_read_line() -> Vec<u8> {
-    crate::playhost::read_line()
-}
-
 /// Milliseconds since the Unix epoch, from the host clock.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn host_epoch_millis() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -297,23 +265,12 @@ fn host_epoch_millis() -> i64 {
         .unwrap_or(0)
 }
 
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn host_epoch_millis() -> i64 {
-    crate::playhost::now_ms()
-}
-
 /// Nanoseconds since the Unix epoch, from the host clock.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn host_epoch_nanos() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as i64)
         .unwrap_or(0)
-}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn host_epoch_nanos() -> i64 {
-    crate::playhost::now_ms().saturating_mul(1_000_000)
 }
 
 /// Whether an `std::fs::rename` failure is a cross-device (`EXDEV`) rename —
@@ -1192,7 +1149,6 @@ pub fn run_with_args(program: &Program, args: &[String]) -> Result<i64, String> 
 ///
 /// A dedicated thread is how a hosted platform gets that room, because the OS
 /// main-thread stack is only ~1 MB on Windows.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, String> {
     // RFC-0101 M4's release trace is per thread, and the program runs on this
     // one. Nothing is carried unless a caller asked for the trace, which is the
@@ -1233,16 +1189,6 @@ fn on_deep_stack(f: impl FnOnce() -> Result<i64, String> + Send) -> Result<i64, 
         crate::prof::adopt(rows.into_inner().unwrap_or_default());
     }
     out
-}
-
-/// `wasm32-unknown-unknown` has one thread and cannot make another, so the room
-/// is reserved at LINK time instead: `compiler/vyrn-play` passes
-/// `-z stack-size` for the whole module and measures what depth that buys.
-/// [`CALL_DEPTH_LIMIT`] is the same number here as everywhere else, which is what
-/// makes "too deep" the same diagnostic in a browser as in a terminal.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn on_deep_stack(f: impl FnOnce() -> Result<i64, String>) -> Result<i64, String> {
-    f()
 }
 
 fn run_inner(program: &Program, prog_args: &[String]) -> Result<i64, String> {

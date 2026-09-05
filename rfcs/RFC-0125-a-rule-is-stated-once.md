@@ -6721,6 +6721,112 @@ of those moved: `prepare` and `link` are the two halves that were private to one
 function. `vyrn-cli`'s `main.rs` is up 106 and `wasmrun.rs` up 66, which is the
 pool and the translated module. The seven test files are down 65 between them.
 
+#### The sixteenth slice (2026-09-05): the playground compiles
+
+The fifteenth slice named one row that stopped the deletion, and it was a
+browser tab. This slice closes it. `play_run` is gone; `play_compile` answers the
+program's own wasm module — the bytes `vyrn build --target wasm` writes — and
+`site/public/play-worker.js` runs those with `web/wasi-min.js`. The page shows
+the same `{ exitCode, stdout, stderr }` it always showed.
+
+**The port is the shape the fifteenth slice named, and the three obstacles cost
+less than it read.**
+
+- **A module cannot instantiate a module.** `vyrn-play` IS one, so the running
+  moves OUT of it rather than in. The crate gains one dependency,
+  `vyrn-codegen`, and one call: `direct::compile(&program)`. `vyrn-lower` comes
+  with it and is not named.
+- **The clock was not a problem at all.** `wasi-min.js` backs `clock_time_get`
+  with `Date.now()`, so a browser tab already has the clock the tree-walker had
+  to be handed. `arm_host(stdin, now_ms)` had one caller and no successor.
+- **Stdin was eleven lines.** `fd_read` answered immediate EOF because a page
+  had no descriptor to read; `runVyrn(bytes, { stdin })` now takes a string or a
+  `Uint8Array` and serves it in order. The playground's standard-input box is
+  the first caller, and `web/README.md` says so where it used to say a page has
+  no stdin.
+
+**The two answers, told apart by one byte.** The calling convention hands back
+one buffer, and `play_compile` puts either a module or the JSON of a program that
+did not compile in it. A module begins with the wasm magic and JSON begins with
+`{`, so the page reads the first byte and needs no second entry point, no length
+pair and no framing. Nothing else in the convention moved.
+
+**A run stopped deciding what the checker says.** `run_json` used to answer the
+warnings with the output, because it had loaded the program anyway. The page
+already asks the checker after every edit, so the success path calls `recheck()`
+and the diagnostics pane has one source again.
+
+#### What the browser measured
+
+Run in Chrome against `out/` served by `scripts/devserve.py`, which sends
+`Cache-Control: no-store`, so every number below includes a fresh fetch.
+
+| | before | after |
+|---|---|---|
+| `play.wasm` | 3,120,388 bytes | 3,728,684 bytes |
+| the whole worker round trip, `hello` | 15 ms | 370 to 680 ms |
+| fetch and instantiate `play.wasm` | — | 220 ms |
+| `play_compile`, `hello` | — | 24 ms cold, 18 ms warm |
+| the program's own module | — | 1,660 bytes |
+| `runVyrn` on it | — | 1 ms |
+
+The module is up 608,296 bytes, 19.5%, for a backend — `opt-level = "z"` and LTO
+keep what `direct::compile` reaches and drop the rest. The round trip is up
+because it now fetches 3.6 MB with no cache and compiles a program; the RUN is
+1 ms against the tree-walker's whole 15. The deletion the next slice takes gives
+most of the size back, because the tree-walker is in this module too.
+
+#### The ceiling that stopped being the browser's
+
+`play-worker.js` used to explain, in a paragraph, that a reader's program had hit
+V8's native stack at a MEASURED 466 nested calls rather than the language's
+1,000, because an interpreter frame cost ~8.5 KB of it. A compiled Vyrn call is
+one wasm frame. Measured here, `down(5000)` answers
+
+    error: call depth exceeds 1000
+
+on standard error with exit 1 — the language's own limit, the same wording
+`vyrn run` gives it. The browser's ceiling is no longer reachable by recursion,
+and the sentence about it is gone from the worker and from the page's tooltip.
+
+What is left of that story is the COMPILER's own recursion, which a deeply
+nested program still reaches: `return ((((…1…))))` compiles at 200 levels and
+throws a `RangeError` at 1,000, where `vyrn run` compiles it. The worker still
+catches that and still says whose ceiling it was, in one sentence about the
+compiler rather than about the program.
+
+`site/test/playlimits.test.mjs` follows. It read `CALL_DEPTH_LIMIT` out of
+`interp.rs`, which has not declared it since the eleventh slice's neighbourhood,
+and it compared two prose copies of a measurement no source held. It reads
+`trap.rs` now, and the recursion test is a real pair: the tooltip says
+"recursion stops at 1,000 calls" and the constant says `1_000`. The third test,
+the one that compared the tooltip's 466 to the worker's 466, is deleted with the
+number.
+
+#### What was verified in a browser
+
+The page, not a harness: the trap template through the Run button
+(`before` on stdout, `error: this is a trap (play.vyrn:5)` on stderr, `exit 1`);
+the input template with three lines typed into the standard-input box
+(`0: one` … `3 line(s)`, exit 0); a program that does not compile ("This program
+did not compile.", two diagnostics, status `Did not compile`); and the index's
+hero editor, which mounts the same `mountPlay` on a smaller root and printed
+`admitted at 30`. The site's node tests are green: 56, including the two
+`playlimits` checks that survive.
+
+#### Gates
+
+`cargo fmt --all --check` clean; `cargo build --release -p vyrn-cli` ok;
+`cargo test -p vyrn-cli` 551 passed, 74 ignored — the counts the fifteenth
+slice's table records; `vyrn-frontend` 1,246; `vyrn-play`'s own tests 12; the
+site export 82 routes, 14 assets; the site's node tests 56. The full table is the
+next slice's, because the next slice is the deletion.
+
+`compiler/**/*.rs` less `target` is 204,318 lines to 204,106 — down 212.
+`playhost.rs` is all 105 of its lines; `interp.rs` is down 54, which is the six
+`cfg` pairs at its host boundary collapsing to the one host that is left;
+`vyrn-play/src/lib.rs` is down 48; `vyrn-frontend/src/lib.rs` is down 5.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

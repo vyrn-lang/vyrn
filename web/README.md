@@ -16,12 +16,17 @@ or random one adds `clock_time_get`, `random_get` and the `environ_*` pair
 (RFC-0043's injected fixed values). Thirteen are declared and the module keeps
 only the ones its own code reaches, so the count above is a fact about each
 module rather than about the backend. The input syscalls get **graceful
-degradation**, not file access: a page has no argv, no stdin, and no
-filesystem, so `args()` returns an empty array, `readLine()` returns `None`
-(immediate EOF), and `readFile`/`writeFile` return their canonical `Err`
-payloads (``error: cannot read `path` `` wording, same bytes as the other
-backends) — an input-using module loads and runs, it just sees an empty world.
-Real browser input is the `extern` story (RFC-0012, below). stdout/stderr
+degradation**, not file access: a page has no argv and no filesystem, so
+`args()` returns an empty array and `readFile`/`writeFile` return their
+canonical `Err` payloads (``error: cannot read `path` `` wording, same bytes as
+the other backends) — an input-using module loads and runs, it just sees an
+empty world. **Stdin is the exception**, because a page can have it:
+`runVyrn(bytes, { stdin })` takes a string or a `Uint8Array` and `fd_read`
+serves it in order, so `readLine()` reads those lines and answers `None` only
+after the last one. That is what the playground's standard-input box is
+(`site/public/play-worker.js`). Without it, `readLine()` is `None` from the
+first call. Everything else a browser could offer is the `extern` story
+(RFC-0012, below). stdout/stderr
 stream into the page; `proc_exit` unwinds `_start` and reports the exit code;
 a genuine wasm trap surfaces as an error. Trap parity holds all the way here:
 division by zero prints the canonical `error: division by zero` to the page's

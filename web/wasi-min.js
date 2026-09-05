@@ -10,15 +10,17 @@
 // reads the RFC-0043 injected clock itself instead of through the C shim's
 // `getenv` — environ_sizes_get and environ_get. Those get GRACEFUL DEGRADATION, not file
 // access: the page has no argv and no filesystem, so `args()` sees zero
-// arguments, `readLine()` sees immediate EOF (`None`), and `readFile`/
-// `writeFile` fail with their canonical `Err` payloads — the module loads and
-// runs, it just sees an empty world. Real browser input is the `extern` story
+// arguments and `readFile`/`writeFile` fail with their canonical `Err` payloads
+// — the module loads and runs, it just sees an empty world. STDIN is the one
+// exception, because a page can have it: `hooks.stdin` is served to `fd_read`,
+// and `readLine()` reads EOF only when the host gave none. Real browser input is the `extern` story
 // (RFC-0012). Anything else is out of scope on purpose — if the import surface
 // ever grows, the instantiate error names the missing function.
 //
 // Usage:
 //   const { exitCode, stdout, stdoutRaw, stderr, exports } = await runVyrn(bytes, {
 //     onStdout: line => ..., onStderr: line => ...,   // optional, per-chunk
+//     stdin: "one line then another",              // optional; EOF without it
 //     extern: {                                        // optional (RFC-0012 M1)
 //       jsLog: (msg) => console.log(msg),              //   String param decoded
 //       jsNow: () => Date.now() / 1000,                //   Float64 return
@@ -147,6 +149,15 @@ export async function runVyrn(wasmBytes, hooks = {}) {
   // Every stdout write, as bytes, in order (RFC-0111). The page joins them
   // for a caller that wants the file the program actually wrote.
   const stdoutBytes = [];
+  // Standard input, and how far the module has read into it. `hooks.stdin` is a
+  // string or a Uint8Array; nothing is EOF from the first read.
+  const stdinBytes =
+    typeof hooks.stdin === "string"
+      ? new TextEncoder().encode(hooks.stdin)
+      : hooks.stdin instanceof Uint8Array
+        ? hooks.stdin
+        : new Uint8Array(0);
+  let stdinAt = 0;
 
   // fd_write(fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno
   // Decodes the iovec array out of linear memory and appends to the right
@@ -291,10 +302,26 @@ export async function runVyrn(wasmBytes, hooks = {}) {
       return ERRNO_SUCCESS;
     },
     environ_get: () => ERRNO_SUCCESS, // the count is 0, so there is nothing to write
-    // Reading stdin yields immediate EOF (0 bytes) → `readLine()` is `None`.
-    fd_read: (fd, _iovsPtr, _iovsLen, nreadPtr) => {
+    // Standard input is `hooks.stdin` — a string or a Uint8Array — and immediate
+    // EOF when the host supplies none, which is what `readLine()` reads as
+    // `None`. A page HAS input to give (the playground has a stdin box beside
+    // the editor); what it has never had is a file descriptor, so the bytes are
+    // handed over up front and this serves them in order.
+    fd_read: (fd, iovsPtr, iovsLen, nreadPtr) => {
       if (fd !== 0) return ERRNO_BADF;
-      new DataView(memory.buffer).setUint32(nreadPtr, 0, true);
+      const view = new DataView(memory.buffer);
+      let read = 0;
+      for (let i = 0; i < iovsLen && stdinAt < stdinBytes.length; i++) {
+        const base = view.getUint32(iovsPtr + i * 8, true);
+        const len = view.getUint32(iovsPtr + i * 8 + 4, true);
+        const take = Math.min(len, stdinBytes.length - stdinAt);
+        new Uint8Array(memory.buffer, base, take).set(
+          stdinBytes.subarray(stdinAt, stdinAt + take)
+        );
+        stdinAt += take;
+        read += take;
+      }
+      view.setUint32(nreadPtr, read, true);
       return ERRNO_SUCCESS;
     },
     fd_fdstat_set_flags: () => ERRNO_SUCCESS,

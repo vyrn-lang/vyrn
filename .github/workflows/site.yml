@@ -259,7 +259,12 @@ jobs:
         # directory: `.cargo/config.toml` there sets the linker's stack size,
         # and cargo reads that file from the working directory upward, so a
         # `--manifest-path` build from elsewhere silently gets wasm-ld's 1 MB
-        # default and overflows a tenth of the way to the interpreter's limit.
+        # default, which the compiler's own recursion overflows on a deeply
+        # nested program.
+        #
+        # RFC-0125 M5: this module COMPILES and no longer runs. It answers the
+        # program's own wasm module, which the page instantiates with
+        # `web/wasi-min.js`, so `vyrn-codegen` builds for this target too.
         #
         # `writeFile` takes a String, so the export cannot copy a wasm module;
         # this one lands straight in the output.
@@ -272,8 +277,10 @@ jobs:
           ls -l ../../out/play.wasm
 
       - name: The playground's own checks
-        # The span offsets, the diagnostics shape and the exit codes, on the
-        # host where a failure is readable.
+        # The span offsets, the diagnostics shape, and which of the two answers
+        # `play_compile` gives, on the host where a failure is readable. WHAT the
+        # emitted module then does is the compiled route's rule, and the parity
+        # suite in `vyrn-cli` is where that is stated.
         working-directory: compiler/vyrn-play
         run: cargo test --release
 
