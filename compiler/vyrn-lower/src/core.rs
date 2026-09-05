@@ -2057,21 +2057,28 @@ impl<'a> Builder<'a> {
         let decls = vyrn_frontend::types::decl_map(self.program);
         let rt = vyrn_frontend::types::resolve(sty, &decls);
         let payloads: Vec<(String, Type)> = match p {
-            Pattern::None | Pattern::Other => Vec::new(),
-            Pattern::Some(n) | Pattern::Success(n) => match &rt {
+            Pattern::Other => Vec::new(),
+            Pattern::Success(n) => match &rt {
                 Type::Option(t) => vec![(n.clone(), (**t).clone())],
                 Type::Result(t, _) => vec![(n.clone(), (**t).clone())],
                 _ => return gap("a `Some` pattern on a non-option", line),
             },
-            Pattern::Ok(n) => match &rt {
-                Type::Result(t, _) => vec![(n.clone(), (**t).clone())],
-                _ => return gap("an `Ok` pattern on a non-result", line),
-            },
-            Pattern::Err(n) | Pattern::Failure(n) => match &rt {
+            Pattern::Failure(n) => match &rt {
                 Type::Result(_, e) => vec![(n.clone(), (**e).clone())],
                 Type::Option(_) => Vec::new(),
                 _ => return gap("an `Err` pattern on a non-result", line),
             },
+            // Since RFC-0126 §8 the built-in sums' arms are variant patterns
+            // too, and the SCRUTINEE says which half of the sum a name names.
+            Pattern::Variant(v, names) if matches!(rt, Type::Option(_) | Type::Result(..)) => {
+                match (&rt, v.as_str()) {
+                    (_, "None") => Vec::new(),
+                    (Type::Option(t), "Some") => vec![(names[0].clone(), (**t).clone())],
+                    (Type::Result(t, _), "Ok") => vec![(names[0].clone(), (**t).clone())],
+                    (Type::Result(_, e), "Err") => vec![(names[0].clone(), (**e).clone())],
+                    _ => return gap("a variant pattern on a built-in sum", line),
+                }
+            }
             Pattern::Variant(v, names) => match &rt {
                 Type::Enum(variants) => {
                     let Some(var) = variants.iter().find(|x| x.name == *v) else {

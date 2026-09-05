@@ -2745,9 +2745,11 @@ impl MoveCheck<'_> {
                 .map(|t| crate::types::resolve(t, self.decl.decls())),
             p,
         ) {
-            (Some(Type::Option(t)), Pattern::Some(_)) => vec![Some(*t)],
-            (Some(Type::Result(t, _)), Pattern::Ok(_) | Pattern::Success(_)) => vec![Some(*t)],
-            (Some(Type::Result(_, e)), Pattern::Err(_) | Pattern::Failure(_)) => vec![Some(*e)],
+            (Some(Type::Option(t)), Pattern::Variant(v, _)) if v == "Some" => vec![Some(*t)],
+            (Some(Type::Result(t, _)), Pattern::Variant(v, _)) if v == "Ok" => vec![Some(*t)],
+            (Some(Type::Result(_, e)), Pattern::Variant(v, _)) if v == "Err" => vec![Some(*e)],
+            (Some(Type::Result(t, _)), Pattern::Success(_)) => vec![Some(*t)],
+            (Some(Type::Result(_, e)), Pattern::Failure(_)) => vec![Some(*e)],
             (Some(Type::Enum(vs)), Pattern::Variant(name, _)) => vs
                 .iter()
                 .find(|v| &v.name == name)
@@ -3397,22 +3399,24 @@ impl MoveCheck<'_> {
                 // `Err(e) => e`, so the spelled Result unwraps screen both
                 // (round thirty-seven, which first screened both for
                 // `Success` too and un-fixed contractquery).
-                let both_sides = arms.first().is_some_and(|a| {
-                    matches!(
-                        (&a.pattern, &a.body),
-                        (Pattern::Ok(b) | Pattern::Err(b), ArmBody::Expr(Expr::Var { name, .. }))
-                            if b == name
-                    )
-                });
+                let arm_unwraps = |a: &MatchArm, names: &[&str]| {
+                    let Pattern::Variant(v, binds) = &a.pattern else {
+                        return false;
+                    };
+                    let ArmBody::Expr(Expr::Var { name, .. }) = &a.body else {
+                        return false;
+                    };
+                    names.contains(&v.as_str()) && binds.first().is_some_and(|b| b == name)
+                };
+                let both_sides = arms.first().is_some_and(|a| arm_unwraps(a, &["Ok", "Err"]));
                 let unwraps = both_sides
                     || arms.first().is_some_and(|a| {
-                        matches!(
-                            (&a.pattern, &a.body),
-                            (
-                                Pattern::Success(b) | Pattern::Some(b),
-                                ArmBody::Expr(Expr::Var { name, .. })
-                            ) if b == name
-                        )
+                        arm_unwraps(a, &["Some"])
+                            || matches!(
+                                (&a.pattern, &a.body),
+                                (Pattern::Success(b), ArmBody::Expr(Expr::Var { name, .. }))
+                                    if b == name
+                            )
                     });
                 if !unwraps {
                     // Round thirty-nine, the other safe shape: EVERY arm
@@ -7709,10 +7713,9 @@ fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<St
 
 pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
-        Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => vec![b],
         Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter().map(|s| s.as_str()).collect(),
-        Pattern::None | Pattern::Other => vec![],
+        Pattern::Other => vec![],
     }
 }
 

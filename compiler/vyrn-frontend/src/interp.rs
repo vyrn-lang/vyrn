@@ -5328,11 +5328,13 @@ impl<'a> Interp<'a> {
                     self.stmt(s, scope)?;
                 }
                 let v = self.expr(&p.place, scope)?;
-                if let Pattern::Some(b) = pattern {
-                    scope
-                        .last_mut()
-                        .unwrap()
-                        .insert(b.clone(), Slot::untyped(v));
+                if let Pattern::Variant(_, binds) = pattern {
+                    if let Some(b) = binds.first() {
+                        scope
+                            .last_mut()
+                            .unwrap()
+                            .insert(b.clone(), Slot::untyped(v));
+                    }
                 }
                 self.block(then_block, scope)
             }
@@ -7676,10 +7678,19 @@ impl<'a> Interp<'a> {
     /// `if let`, and the `while let` desugar so all three bind identically.
     fn match_pattern(pattern: &Pattern, sv: &Val) -> Option<Vec<(String, Val)>> {
         match (pattern, sv) {
-            (Pattern::Some(b), Val::Option(Some(v))) => Some(vec![(b.clone(), (**v).clone())]),
-            (Pattern::None, Val::Option(None)) => Some(vec![]),
-            (Pattern::Ok(b), Val::Result(true, v)) => Some(vec![(b.clone(), (**v).clone())]),
-            (Pattern::Err(b), Val::Result(false, v)) => Some(vec![(b.clone(), (**v).clone())]),
+            // Since RFC-0126 §8 the four built-in arms are variant patterns, and
+            // the VALUE is what says a name is a tag — the same question this
+            // function already asked of a declared enum's variant.
+            (Pattern::Variant(n, binds), Val::Option(Some(v))) if n == "Some" => {
+                Some(vec![(binds[0].clone(), (**v).clone())])
+            }
+            (Pattern::Variant(n, _), Val::Option(None)) if n == "None" => Some(vec![]),
+            (Pattern::Variant(n, binds), Val::Result(true, v)) if n == "Ok" => {
+                Some(vec![(binds[0].clone(), (**v).clone())])
+            }
+            (Pattern::Variant(n, binds), Val::Result(false, v)) if n == "Err" => {
+                Some(vec![(binds[0].clone(), (**v).clone())])
+            }
             // The `??` desugar's type-agnostic pair (RFC-0079): tag first, sum
             // second, which is the whole point of having them.
             (Pattern::Success(b), Val::Option(Some(v)) | Val::Result(true, v)) => {

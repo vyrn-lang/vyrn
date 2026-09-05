@@ -3010,14 +3010,6 @@ impl<'a> Gen<'a> {
         vyrn_frontend::types::record_fields(&t, self.types)
     }
 
-    /// The widest payload count of the named enum (0 if not an enum).
-    fn enum_arity(&self, enum_name: &str) -> usize {
-        match self.types.get(enum_name).map(|d| &d.base) {
-            Some(Type::Enum(vs)) => vs.iter().map(|v| v.payload.len()).max().unwrap_or(0),
-            _ => 0,
-        }
-    }
-
     /// The fully-applied type of a just-constructed enum variant. For a generic
     /// enum (`enum E<T>`, the injected `LoadResult<T>`), the concrete type
     /// arguments are inferred by unifying the variant's declared payload types
@@ -3064,6 +3056,133 @@ impl<'a> Gen<'a> {
             &vyrn_frontend::types::substitute(ty, self.subst),
             self.types,
         )
+    }
+
+    /// RFC-0126 §8.4's `words(t)` under this emitter's substitution.
+    fn payload_words(&self, ty: &Type) -> usize {
+        payload_words_of(
+            &vyrn_frontend::types::substitute(ty, self.subst),
+            self.types,
+        )
+    }
+
+    /// The payload slot count of the sum `ty` — the shape's members less the tag.
+    fn sum_slots(&self, ty: &Type) -> usize {
+        match self.resolve(ty) {
+            Type::Option(t) => self.payload_words(&t),
+            Type::Result(a, b) => self.payload_words(&a).max(self.payload_words(&b)),
+            Type::Enum(vs) => vs
+                .iter()
+                .map(|v| self.variant_slots(&v.payload))
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    /// The slots one variant's payloads occupy, laid out consecutively.
+    fn variant_slots(&self, payload: &[Type]) -> usize {
+        payload.iter().map(|p| self.payload_words(p)).sum()
+    }
+
+    /// A user enum's slot count: the widest variant's, by §8.4.
+    fn enum_slots(&self, vs: &[EnumVariant]) -> usize {
+        vs.iter()
+            .map(|v| self.variant_slots(&v.payload))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The aggregate member index the `i`th payload of a variant starts at
+    /// (member 0 is the tag).
+    fn payload_slot(&self, payload: &[Type], i: usize) -> usize {
+        1 + self.variant_slots(&payload[..i])
+    }
+
+    /// Build a sum aggregate of type `ty`: the tag, then `words` in the payload
+    /// slots, zero-filled to the shape's slot count. One statement of the
+    /// insertvalue chain every construction site used to write out (§8.4).
+    fn build_sum(&mut self, ty: &Type, tag: &str, words: &[String]) -> String {
+        let ll = self.llt(ty);
+        let slots = self.sum_slots(ty);
+        let t = self.fresh_tmp();
+        self.emit(format!("{t} = insertvalue {ll} undef, i64 {tag}, 0"));
+        let mut cur = t;
+        for i in 0..slots {
+            let w = words.get(i).map(String::as_str).unwrap_or("0");
+            let t = self.fresh_tmp();
+            self.emit(format!("{t} = insertvalue {ll} {cur}, i64 {w}, {}", i + 1));
+            cur = t;
+        }
+        cur
+    }
+
+    /// The sum type a `None`/`Some`/`Ok`/`Err` is BUILT at. The constructor
+    /// knows only its own half — `Ok(5)` names no error type — and since M2 a
+    /// sum's slot count is the widest variant's, so a constructor whose position
+    /// names the whole sum takes the position's shape. Without one, `fallback`
+    /// is the constructor's own reading, which is what it always was.
+    fn built_sum_ty(&mut self, fallback: Type) -> Type {
+        let Some(want) = self.expect.last().cloned() else {
+            return fallback;
+        };
+        // Nothing to gain when the two already lower alike, and the constructor's
+        // own reading is the more concrete of the two.
+        if self.llt(&want) == self.llt(&fallback) {
+            return fallback;
+        }
+        // A payload the instance has not fixed has no shape at all — taking the
+        // position's spelling then would declare a binder at `void`.
+        let solved = |g: &Self, t: &Type| !matches!(g.resolve(t), Type::Param(_));
+        let take = match (self.resolve(&want), &fallback) {
+            (Type::Option(i), Type::Option(_)) => solved(self, &i),
+            (Type::Result(a, b), Type::Result(..)) => solved(self, &a) && solved(self, &b),
+            _ => false,
+        };
+        if take {
+            want
+        } else {
+            fallback
+        }
+    }
+
+    /// A CONSTANT sum aggregate: tag `tag`, then `words`, zero-filled to the
+    /// slot count. No instruction — an LLVM constant an incoming `phi` edge can
+    /// name.
+    fn build_sum_const(&self, ty: &Type, tag: i64, words: &[&str]) -> String {
+        let mut s = format!("{{ i64 {tag}");
+        for i in 0..self.sum_slots(ty) {
+            let w = words.get(i).copied().unwrap_or("0");
+            s.push_str(&format!(", i64 {w}"));
+        }
+        s.push_str(" }");
+        s
+    }
+
+    /// A CONSTANT sum aggregate with every payload slot zero — what `None` and a
+    /// nullary variant are.
+    fn const_sum(&self, ty: &Type, tag: i64) -> String {
+        self.build_sum_const(ty, tag, &[])
+    }
+
+    /// The `i64` tag of a sum aggregate.
+    fn sum_tag(&mut self, ty: &Type, v: &str) -> String {
+        let ll = self.llt(ty);
+        let t = self.fresh_tmp();
+        self.emit(format!("{t} = extractvalue {ll} {v}, 0"));
+        t
+    }
+
+    /// The payload slots of a sum aggregate, from member `from` for `n` words.
+    fn sum_words(&mut self, ty: &Type, v: &str, from: usize, n: usize) -> Vec<String> {
+        let ll = self.llt(ty);
+        (0..n)
+            .map(|i| {
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = extractvalue {ll} {v}, {}", from + i));
+                t
+            })
+            .collect()
     }
 
     /// Coerce a value of type `from` to type `to`, emitting a field-by-field
@@ -3143,6 +3262,18 @@ impl<'a> Gen<'a> {
                 };
                 let (v, _) = self.coerce(op, from, &decl.base)?;
                 self.emit_validation(&decl, &v)?;
+                Ok((v, to.clone()))
+            }
+            // Two shapes of one sum (RFC-0126 §8.4): the tag, then the slots
+            // both shapes have — a variant the narrower shape could not hold is
+            // a variant it never carried, so nothing can be lost. The rest of
+            // the target's slots are zero, which is what an unfilled slot is
+            // everywhere else.
+            Rung::Reshape => {
+                let tag = self.sum_tag(from, &op);
+                let ns = self.sum_slots(from).min(self.sum_slots(to));
+                let words = self.sum_words(from, &op, 1, ns);
+                let v = self.build_sum(to, &tag, &words);
                 Ok((v, to.clone()))
             }
             // A function value flowing between fn-typed spellings (RFC-0037):
@@ -4134,10 +4265,8 @@ impl<'a> Gen<'a> {
                 }
                 Ok(cur)
             }
-            Type::Option(inner) => self.copy_sum(v, &[(Some("1"), vec![*inner])]),
-            Type::Result(ok, err) => {
-                self.copy_sum(v, &[(Some("1"), vec![*ok]), (Some("0"), vec![*err])])
-            }
+            Type::Option(inner) => self.copy_sum(ty, v, &[("1", *inner)]),
+            Type::Result(ok, err) => self.copy_sum(ty, v, &[("1", *ok), ("0", *err)]),
             Type::Enum(vs) => self.copy_enum(v, &vs),
             // A handle names something; copying it names the same thing. A
             // `Task<T>`/`lazy T` is a promise, which is the same shape.
@@ -4343,8 +4472,8 @@ impl<'a> Gen<'a> {
                 }
                 Ok(())
             }
-            Type::Option(inner) => self.release_sum(v, &[(Some("1"), *inner)]),
-            Type::Result(ok, err) => self.release_sum(v, &[(Some("1"), *ok), (Some("0"), *err)]),
+            Type::Option(inner) => self.release_sum(ty, v, &[("1", *inner)]),
+            Type::Result(ok, err) => self.release_sum(ty, v, &[("1", *ok), ("0", *err)]),
             Type::Enum(vs) => self.release_enum(v, &vs, true),
             // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
             // The captures are one heap block, read by value at the construction
@@ -4368,31 +4497,25 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Whether an `Option`/`Result` payload of type `ty` is a pointer to a block
-    /// rather than the word itself — the question [`decode_payload`] answers by
-    /// construction and a release has to ask out loud. Phase 3 measured that the
-    /// two encodings coexist: a `String` rides in the word, and a record does not.
+    /// Whether a sum payload of type `ty` is a pointer to a block rather than the
+    /// slots themselves — the question [`decode_payload`] answers by construction
+    /// and a release has to ask out loud. Since M2 it is asked of every sum, so
+    /// the enum's own release reads the same rule the built-in sums do: a
+    /// `String` rides in the word, a two-word value rides in two slots, and a
+    /// record wider than that does not.
     fn payload_boxed(&mut self, ty: &Type) -> bool {
         if matches!(
             self.resolve(ty),
-            Type::Int
-                | Type::Bool
-                | Type::Str
-                | Type::Fn(..)
-                | Type::Unit
-                | Type::Never
-                | Type::Param(_)
+            Type::Int | Type::Bool | Type::Str | Type::Unit | Type::Never | Type::Param(_)
         ) {
             return false;
         }
-        self.llt(ty) != "i64"
+        self.payload_words(ty) == 1 && self.llt(ty) != "i64"
     }
 
-    /// The release of an `Option`/`Result`: one payload, selected by the `i1` tag.
-    fn release_sum(&mut self, v: &str, arms: &[(Option<&str>, Type)]) -> Result<(), String> {
-        let sll = "{ i1, i64, i64 }";
-        let tag = self.fresh_tmp();
-        self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
+    /// The release of an `Option`/`Result`: one payload, selected by the tag.
+    fn release_sum(&mut self, sty: &Type, v: &str, arms: &[(&str, Type)]) -> Result<(), String> {
+        let tag = self.sum_tag(sty, v);
         let end_l = self.fresh_label("rel.sum.end");
         for (want, pty) in arms {
             // Round twenty-nine: a payload that owns no heap can still TRAVEL
@@ -4403,20 +4526,18 @@ impl<'a> Gen<'a> {
             let hit_l = self.fresh_label("rel.sum.hit");
             let miss_l = self.fresh_label("rel.sum.miss");
             let is = self.fresh_tmp();
-            self.emit(format!("{is} = icmp eq i1 {tag}, {}", want.unwrap_or("1")));
+            self.emit(format!("{is} = icmp eq i64 {tag}, {want}"));
             self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
             self.emit_label(&hit_l);
-            let w0 = self.fresh_tmp();
-            let w1 = self.fresh_tmp();
-            self.emit(format!("{w0} = extractvalue {sll} {v}, 1"));
-            self.emit(format!("{w1} = extractvalue {sll} {v}, 2"));
-            let pv = self.decode_payload(&w0, &w1, pty);
+            let n = self.payload_words(pty);
+            let words = self.sum_words(sty, v, 1, n);
+            let pv = self.decode_payload(&words, pty);
             self.deep_release(&pv, pty)?;
-            // A payload wider than a word is a pointer to a block the sum owns,
-            // exactly as `encode_payload` allocated it.
+            // A payload wider than its slots is a pointer to a block the sum
+            // owns, exactly as `encode_payload` allocated it.
             if self.payload_boxed(pty) {
                 let q = self.fresh_tmp();
-                self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+                self.emit(format!("{q} = inttoptr i64 {} to ptr", words[0]));
                 self.emit(format!("call void @__vyrn_free(ptr {q})"));
             }
             self.emit_term(format!("br label %{end_l}"));
@@ -4457,24 +4578,22 @@ impl<'a> Gen<'a> {
     /// values are that function's to give back, and only the boxes they
     /// travelled in are left for this walk (RFC-0096).
     fn release_enum(&mut self, v: &str, vs: &[EnumVariant], payloads: bool) -> Result<(), String> {
-        let arity = vs.iter().map(|x| x.payload.len()).max().unwrap_or(0);
-        let ell = enum_ll(arity);
+        let ell = enum_ll(self.enum_slots(vs));
         let tag = self.fresh_tmp();
         self.emit(format!("{tag} = extractvalue {ell} {v}, 0"));
         let end_l = self.fresh_label("rel.enum.end");
         for var in vs {
             // A slot is releasable when its VALUE owns heap — or when the
-            // slot itself is BOXED, which `unbox_payload`'s criterion decides
-            // (any payload that is not an `i64` word travels in a box). The
-            // two are different questions: a `Bool` payload owns nothing and
-            // is boxed anyway (an i1 is not a word), and gating the walk on
-            // ownership alone leaked that box on every release — one 1-byte
-            // block per `JBool` in the corpus, exit-residue round seven's
-            // smallest specimen.
+            // slot itself is BOXED, which `payload_boxed` decides (since M2 the
+            // same rule for every sum). The two are different questions: a
+            // `Bool` payload owns nothing and is boxed anyway (an i1 is not a
+            // word), and gating the walk on ownership alone leaked that box on
+            // every release — one 1-byte block per `JBool` in the corpus,
+            // exit-residue round seven's smallest specimen.
             if !var
                 .payload
                 .iter()
-                .any(|p| self.owns_heap(p) || self.llt(p) != "i64")
+                .any(|p| self.owns_heap(p) || self.payload_boxed(p))
             {
                 continue;
             }
@@ -4488,20 +4607,27 @@ impl<'a> Gen<'a> {
             self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
             self.emit_label(&hit_l);
             for (j, pty) in var.payload.iter().enumerate() {
-                let boxed = self.llt(pty) != "i64";
+                let boxed = self.payload_boxed(pty);
                 if !self.owns_heap(pty) && !boxed {
                     continue;
                 }
-                let w = self.fresh_tmp();
-                self.emit(format!("{w} = extractvalue {ell} {v}, {}", j + 1));
+                let at = self.payload_slot(&var.payload, j);
+                let nw = self.payload_words(pty);
+                let words: Vec<String> = (0..nw)
+                    .map(|k| {
+                        let w = self.fresh_tmp();
+                        self.emit(format!("{w} = extractvalue {ell} {v}, {}", at + k));
+                        w
+                    })
+                    .collect();
                 if payloads && self.owns_heap(pty) {
-                    let pv = self.unbox_payload(&w, pty);
+                    let pv = self.decode_payload(&words, pty);
                     self.deep_release(&pv, pty)?;
                 }
                 // A boxed payload's block is the enum's too.
                 if boxed {
                     let q = self.fresh_tmp();
-                    self.emit(format!("{q} = inttoptr i64 {w} to ptr"));
+                    self.emit(format!("{q} = inttoptr i64 {} to ptr", words[0]));
                     self.emit(format!("call void @__vyrn_free(ptr {q})"));
                 }
             }
@@ -4513,39 +4639,37 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    /// The copy of an `Option`/`Result`: one payload, selected by the `i1` tag.
-    /// `arms` pairs the tag value to test against with the payload types it
+    /// The copy of an `Option`/`Result`: one payload, selected by the tag.
+    /// `arms` pairs the tag value to test against with the payload type it
     /// carries (one, for both built-in sums).
-    fn copy_sum(&mut self, v: &str, arms: &[(Option<&str>, Vec<Type>)]) -> Result<String, String> {
-        let sll = "{ i1, i64, i64 }";
-        let slot = self.fresh_alloca(sll);
+    fn copy_sum(&mut self, sty: &Type, v: &str, arms: &[(&str, Type)]) -> Result<String, String> {
+        let sll = self.llt(sty);
+        let slot = self.fresh_alloca(&sll);
         self.emit(format!("store {sll} {v}, ptr {slot}"));
-        let tag = self.fresh_tmp();
-        self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
+        let tag = self.sum_tag(sty, v);
         let end_l = self.fresh_label("cp.sum.end");
-        for (want, payload) in arms {
-            let pty = &payload[0];
+        for (want, pty) in arms {
             if !self.owns_heap(pty) {
                 continue;
             }
             let hit_l = self.fresh_label("cp.sum.hit");
             let miss_l = self.fresh_label("cp.sum.miss");
             let is = self.fresh_tmp();
-            self.emit(format!("{is} = icmp eq i1 {tag}, {}", want.unwrap_or("1")));
+            self.emit(format!("{is} = icmp eq i64 {tag}, {want}"));
             self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
             self.emit_label(&hit_l);
-            let w0 = self.fresh_tmp();
-            let w1 = self.fresh_tmp();
-            self.emit(format!("{w0} = extractvalue {sll} {v}, 1"));
-            self.emit(format!("{w1} = extractvalue {sll} {v}, 2"));
-            let pv = self.decode_payload(&w0, &w1, pty);
+            let n = self.payload_words(pty);
+            let words = self.sum_words(sty, v, 1, n);
+            let pv = self.decode_payload(&words, pty);
             let cv = self.deep_copy(&pv, pty)?;
-            let (n0, n1) = self.encode_payload(&cv, pty);
-            let a = self.fresh_tmp();
-            let b = self.fresh_tmp();
-            self.emit(format!("{a} = insertvalue {sll} {v}, i64 {n0}, 1"));
-            self.emit(format!("{b} = insertvalue {sll} {a}, i64 {n1}, 2"));
-            self.emit(format!("store {sll} {b}, ptr {slot}"));
+            let nw = self.encode_payload(&cv, pty);
+            let mut cur = v.to_string();
+            for (i, w) in nw.iter().enumerate() {
+                let t = self.fresh_tmp();
+                self.emit(format!("{t} = insertvalue {sll} {cur}, i64 {w}, {}", i + 1));
+                cur = t;
+            }
+            self.emit(format!("store {sll} {cur}, ptr {slot}"));
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&miss_l);
         }
@@ -4559,8 +4683,7 @@ impl<'a> Gen<'a> {
     /// The copy of a user enum: the payload slots of the live variant, and only
     /// the ones whose declared type owns something.
     fn copy_enum(&mut self, v: &str, vs: &[EnumVariant]) -> Result<String, String> {
-        let arity = vs.iter().map(|x| x.payload.len()).max().unwrap_or(0);
-        let ell = enum_ll(arity);
+        let ell = enum_ll(self.enum_slots(vs));
         let slot = self.fresh_alloca(&ell);
         self.emit(format!("store {ell} {v}, ptr {slot}"));
         let tag = self.fresh_tmp();
@@ -4584,17 +4707,25 @@ impl<'a> Gen<'a> {
                 if !self.owns_heap(pty) {
                     continue;
                 }
-                let w = self.fresh_tmp();
-                self.emit(format!("{w} = extractvalue {ell} {cur}, {}", j + 1));
-                let pv = self.unbox_payload(&w, pty);
+                let at = self.payload_slot(&var.payload, j);
+                let n = self.payload_words(pty);
+                let words: Vec<String> = (0..n)
+                    .map(|k| {
+                        let w = self.fresh_tmp();
+                        self.emit(format!("{w} = extractvalue {ell} {cur}, {}", at + k));
+                        w
+                    })
+                    .collect();
+                let pv = self.decode_payload(&words, pty);
                 let cv = self.deep_copy(&pv, pty)?;
-                let nw = self.box_payload(&cv, pty);
-                let next = self.fresh_tmp();
-                self.emit(format!(
-                    "{next} = insertvalue {ell} {cur}, i64 {nw}, {}",
-                    j + 1
-                ));
-                cur = next;
+                for (k, nw) in self.encode_payload(&cv, pty).iter().enumerate() {
+                    let next = self.fresh_tmp();
+                    self.emit(format!(
+                        "{next} = insertvalue {ell} {cur}, i64 {nw}, {}",
+                        at + k
+                    ));
+                    cur = next;
+                }
             }
             self.emit(format!("store {ell} {cur}, ptr {slot}"));
             self.emit_term(format!("br label %{end_l}"));
@@ -5470,7 +5601,7 @@ impl<'a> Gen<'a> {
                     _ => unreachable!(),
                 };
                 if box_some || box_zero {
-                    let sll = "{ i1, i64, i64 }";
+                    let sll = self.llt(&t);
                     let tag = self.fresh_tmp();
                     let w = self.fresh_tmp();
                     self.emit(format!("{tag} = extractvalue {sll} {v}, 0"));
@@ -5478,11 +5609,13 @@ impl<'a> Gen<'a> {
                     let word = if box_some && box_zero {
                         w
                     } else {
+                        let one = self.fresh_tmp();
+                        self.emit(format!("{one} = icmp eq i64 {tag}, 1"));
                         let sel = self.fresh_tmp();
                         if box_some {
-                            self.emit(format!("{sel} = select i1 {tag}, i64 {w}, i64 0"));
+                            self.emit(format!("{sel} = select i1 {one}, i64 {w}, i64 0"));
                         } else {
-                            self.emit(format!("{sel} = select i1 {tag}, i64 0, i64 {w}"));
+                            self.emit(format!("{sel} = select i1 {one}, i64 0, i64 {w}"));
                         }
                         sel
                     };
@@ -6113,11 +6246,10 @@ impl<'a> Gen<'a> {
                     if map_lookup && self.droppable.get(&key).is_none() && self.region_depth == 0 {
                         if let Type::Option(inner) = &sr {
                             if self.payload_boxed(inner) {
+                                let sll = self.llt(&sr);
                                 let w0 = self.fresh_tmp();
                                 let q = self.fresh_tmp();
-                                self.emit(format!(
-                                    "{w0} = extractvalue {{ i1, i64, i64 }} {sv}, 1"
-                                ));
+                                self.emit(format!("{w0} = extractvalue {sll} {sv}, 1"));
                                 self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
                                 self.emit(format!("call void @__vyrn_free(ptr {q})"));
                             }
@@ -6503,25 +6635,19 @@ impl<'a> Gen<'a> {
             Expr::Var { name, .. } => {
                 // `None` is a constant Option aggregate, not a variable.
                 if name == "None" {
-                    return Ok((
-                        "{ i1 0, i64 0, i64 0 }".into(),
-                        Type::Option(Box::new(Type::Int)),
-                    ));
+                    // Since M2 an `Option`'s slot count follows its payload
+                    // (RFC-0126 §8.4), so the shape a bare `None` takes is the
+                    // expectation's when there is one. Without an expectation
+                    // the checker has fixed nothing, and `Option<Int64>` is the
+                    // one-slot shape it always was.
+                    let oty = self.built_sum_ty(Type::Option(Box::new(Type::Int)));
+                    return Ok((self.const_sum(&oty, 0), oty));
                 }
                 // A nullary enum variant, e.g. `Empty`.
                 if let Some((tag, enum_name)) = self.variants.get(name).cloned() {
-                    let arity = self.enum_arity(&enum_name);
-                    let ll = enum_ll(arity);
-                    let mut cur = "undef".to_string();
-                    let t = self.fresh_tmp();
-                    self.emit(format!("{t} = insertvalue {ll} {cur}, i64 {tag}, 0"));
-                    cur = t;
-                    for slot in 1..=arity {
-                        let t = self.fresh_tmp();
-                        self.emit(format!("{t} = insertvalue {ll} {cur}, i64 0, {slot}"));
-                        cur = t;
-                    }
-                    return Ok((cur, Type::Named(enum_name)));
+                    let ety = Type::Named(enum_name);
+                    let cur = self.build_sum(&ety, &tag.to_string(), &[]);
+                    return Ok((cur, ety));
                 }
                 let Some((slot, ty)) = self.lookup(name) else {
                     // A `fn`-typed PARAMETER used as a VALUE (RFC-0037 × RFC-0023):
@@ -6968,19 +7094,12 @@ impl<'a> Gen<'a> {
         } else {
             v
         };
-        let a = self.fresh_tmp();
-        let b = self.fresh_tmp();
-        let c = self.fresh_tmp();
-        self.emit(format!(
-            "{a} = insertvalue {{ i1, i64, i64 }} undef, i1 {pred_i1}, 0"
-        ));
-        self.emit(format!(
-            "{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {word}, 1"
-        ));
-        self.emit(format!(
-            "{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 0, 2"
-        ));
-        Ok((c, Type::Option(Box::new(Type::Named(name.to_string())))))
+        // The predicate answers an `i1`; the tag is a slot-wide integer.
+        let tag = self.fresh_tmp();
+        self.emit(format!("{tag} = zext i1 {pred_i1} to i64"));
+        let oty = Type::Option(Box::new(Type::Named(name.to_string())));
+        let c = self.build_sum(&oty, &tag, &[word]);
+        Ok((c, oty))
     }
 
     /// Build a record value (`insertvalue` per field, in declared field order).
@@ -7199,12 +7318,13 @@ impl<'a> Gen<'a> {
             Type::Result(ok, err) => (*ok, *err),
             _ => (Type::Int, Type::Int),
         };
-        let tag = self.fresh_tmp();
-        self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {sv}, 0"));
+        let tag = self.sum_tag(&sty, &sv);
         let one_l = self.fresh_label("m.one");
         let zero_l = self.fresh_label("m.zero");
         let end_l = self.fresh_label("m.end");
-        self.emit_term(format!("br i1 {tag}, label %{one_l}, label %{zero_l}"));
+        let is_one = self.fresh_tmp();
+        self.emit(format!("{is_one} = icmp eq i64 {tag}, 1"));
+        self.emit_term(format!("br i1 {is_one}, label %{one_l}, label %{zero_l}"));
 
         // tag == 1 arm (Some / Ok)
         self.emit_label(&one_l);
@@ -7214,7 +7334,7 @@ impl<'a> Gen<'a> {
             .unwrap();
         let one_pf = self.arm_row(key, one_ix as u32);
         let (one_val, one_t) =
-            self.gen_arm_body(&sv, &arms[one_ix], &one_ty, free_boxes, one_pf)?;
+            self.gen_arm_body(&sv, &sty, &arms[one_ix], &one_ty, free_boxes, one_pf)?;
         if !self.terminated {
             self.emit_edge_releases(ers, one_ix as u32);
         }
@@ -7229,7 +7349,7 @@ impl<'a> Gen<'a> {
             .unwrap();
         let zero_pf = self.arm_row(key, zero_ix as u32);
         let (zero_val, zero_t) =
-            self.gen_arm_body(&sv, &arms[zero_ix], &zero_ty, free_boxes, zero_pf)?;
+            self.gen_arm_body(&sv, &sty, &arms[zero_ix], &zero_ty, free_boxes, zero_pf)?;
         if !self.terminated {
             self.emit_edge_releases(ers, zero_ix as u32);
         }
@@ -7325,8 +7445,7 @@ impl<'a> Gen<'a> {
         free_boxes: bool,
         key: usize,
     ) -> Result<(String, Type), String> {
-        let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
-        let ell = enum_ll(arity);
+        let ell = enum_ll(self.enum_slots(evs));
         let tag = self.fresh_tmp();
         self.emit(format!("{tag} = extractvalue {ell} {sv}, 0"));
         let end_l = self.fresh_label("me.end");
@@ -7377,18 +7496,25 @@ impl<'a> Gen<'a> {
                 let payload_tys = &evs[*idx].payload;
                 for (i, bind) in binds.iter().enumerate() {
                     let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
-                    let raw = self.fresh_tmp();
-                    self.emit(format!("{raw} = extractvalue {ell} {sv}, {}", i + 1));
-                    let v = self.unbox_payload(&raw, &pty);
+                    let at = self.payload_slot(payload_tys, i);
+                    let nw = self.payload_words(&pty);
+                    let words: Vec<String> = (0..nw)
+                        .map(|k| {
+                            let w = self.fresh_tmp();
+                            self.emit(format!("{w} = extractvalue {ell} {sv}, {}", at + k));
+                            w
+                        })
+                        .collect();
+                    let v = self.decode_payload(&words, &pty);
                     let ll = self.llt(&pty);
                     let slot = self.declare(bind, &pty);
                     self.emit(format!("store {ll} {v}, ptr {slot}"));
                     bind_slots.push((bind.clone(), slot.clone(), pty.clone()));
                     // A consumed scrutinee's boxes are this match's to give
                     // back once the value is out — see `gen_match`'s note.
-                    if free_boxes && v != raw {
+                    if free_boxes && self.payload_boxed(&pty) {
                         let q = self.fresh_tmp();
-                        self.emit(format!("{q} = inttoptr i64 {raw} to ptr"));
+                        self.emit(format!("{q} = inttoptr i64 {} to ptr", words[0]));
                         self.emit(format!("call void @__vyrn_free(ptr {q})"));
                     }
                 }
@@ -7605,15 +7731,16 @@ impl<'a> Gen<'a> {
             "{o} = call {optll} @{sym}({{ i64, i64 }} {fv}, i64 {cw}, i64 {gw}, i1 0)"
         ));
         let ot = self.fresh_tmp();
+        let some = self.fresh_tmp();
         self.emit(format!("{ot} = extractvalue {optll} {o}, 0"));
-        self.emit_term(format!("br i1 {ot}, label %{some_l}, label %{ended_l}"));
+        self.emit(format!("{some} = icmp eq i64 {ot}, 1"));
+        self.emit_term(format!("br i1 {some}, label %{some_l}, label %{ended_l}"));
 
         self.emit_label(&some_l);
-        let w0 = self.fresh_tmp();
-        let w1 = self.fresh_tmp();
-        self.emit(format!("{w0} = extractvalue {optll} {o}, 1"));
-        self.emit(format!("{w1} = extractvalue {optll} {o}, 2"));
-        let v = self.decode_payload(&w0, &w1, elem);
+        let oty = Type::Option(Box::new(elem.clone()));
+        let nw = self.payload_words(elem);
+        let words = self.sum_words(&oty, &o, 1, nw);
+        let v = self.decode_payload(&words, elem);
         self.emit(format!("store {ell} {v}, ptr {stage}"));
         self.emit_term(format!("br label %{done_l}"));
 
@@ -7730,40 +7857,6 @@ impl<'a> Gen<'a> {
         cur_v
     }
 
-    /// Encode a payload of type `ty` into the single `i64` slot that *enum*
-    /// aggregates carry. Values that fit in a word (`Int`) pass through; wider
-    /// values (`Ref`, `String`, records) are boxed on the heap and represented by
-    /// their pointer. (The box is not reclaimed — a safe leak.)
-    fn box_payload(&mut self, v: &str, ty: &Type) -> String {
-        let ll = self.llt(ty);
-        if ll == "i64" {
-            return v.to_string();
-        }
-        let size = self.fresh_tmp();
-        let p = self.fresh_tmp();
-        self.emit(format!(
-            "{size} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"
-        ));
-        self.emit(format!("{p} = call ptr @__vyrn_malloc(i64 {size})"));
-        self.emit(format!("store {ll} {v}, ptr {p}"));
-        let iv = self.fresh_tmp();
-        self.emit(format!("{iv} = ptrtoint ptr {p} to i64"));
-        iv
-    }
-
-    /// Decode an enum's `i64` payload slot back into a value of type `ty`.
-    fn unbox_payload(&mut self, slot: &str, ty: &Type) -> String {
-        let ll = self.llt(ty);
-        if ll == "i64" {
-            return slot.to_string();
-        }
-        let p = self.fresh_tmp();
-        let v = self.fresh_tmp();
-        self.emit(format!("{p} = inttoptr i64 {slot} to ptr"));
-        self.emit(format!("{v} = load {ll}, ptr {p}"));
-        v
-    }
-
     /// Coerce a `Some`/`Ok`/`Err` payload into the type the enclosing expectation
     /// asks for, BEFORE it is encoded into the aggregate's words. The checker
     /// already reports these constructors at the expected payload type (its
@@ -7788,39 +7881,60 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Encode an Option/Result payload into the aggregate's two words `(w0, w1)`.
-    /// A `Ref` (two words) fits inline with no heap box; scalars use `w0`; wider
-    /// types (records/enums) are boxed and the pointer stored in `w0`.
-    fn encode_payload(&mut self, v: &str, ty: &Type) -> (String, String) {
+    /// Encode a payload of type `ty` into the `words(ty)` slots it rides in
+    /// (RFC-0126 §8.4) — for EVERY sum, built-in or declared, since M2. Five
+    /// cases: an `i64` is the word; a `Bool` and a `String` are cast into one;
+    /// a two-word value (a stored `fn`, a `Ref`, a record of two words) fills
+    /// two slots with no heap; everything else is boxed and the slot holds the
+    /// pointer. The box is the sum's own — `release_sum`/`release_enum` give it
+    /// back, and `payload_boxed` is the question they ask.
+    fn encode_payload(&mut self, v: &str, ty: &Type) -> Vec<String> {
         match self.resolve(ty) {
-            Type::Int => (v.to_string(), "0".into()),
+            Type::Int => vec![v.to_string()],
             Type::Bool => {
                 let w = self.fresh_tmp();
                 self.emit(format!("{w} = zext i1 {v} to i64"));
-                (w, "0".into())
+                vec![w]
             }
             Type::Str => {
                 let w = self.fresh_tmp();
                 self.emit(format!("{w} = ptrtoint ptr {v} to i64"));
-                (w, "0".into())
+                vec![w]
             }
-            // A stored function value (RFC-0037) is a two-word
-            // `{ i64, i64 }` aggregate — it fits inline with no heap box.
-            Type::Fn(..) => {
+            _ if self.payload_words(ty) == 2 => {
                 let w0 = self.fresh_tmp();
                 let w1 = self.fresh_tmp();
                 self.emit(format!("{w0} = extractvalue {{ i64, i64 }} {v}, 0"));
                 self.emit(format!("{w1} = extractvalue {{ i64, i64 }} {v}, 1"));
-                (w0, w1)
+                vec![w0, w1]
             }
-            _ => (self.box_payload(v, ty), "0".into()),
+            _ => {
+                let ll = self.llt(ty);
+                // Anything already an `i64` word IS the slot — a sized 64-bit
+                // integer, and `Code` on the generator-host path.
+                if ll == "i64" {
+                    return vec![v.to_string()];
+                }
+                let size = self.fresh_tmp();
+                let p = self.fresh_tmp();
+                self.emit(format!(
+                    "{size} = ptrtoint ptr getelementptr ({ll}, ptr null, i64 1) to i64"
+                ));
+                self.emit(format!("{p} = call ptr @__vyrn_malloc(i64 {size})"));
+                self.emit(format!("store {ll} {v}, ptr {p}"));
+                let iv = self.fresh_tmp();
+                self.emit(format!("{iv} = ptrtoint ptr {p} to i64"));
+                vec![iv]
+            }
         }
     }
 
-    /// Decode two Option/Result payload words back into a value of type `ty`.
-    fn decode_payload(&mut self, w0: &str, w1: &str, ty: &Type) -> String {
+    /// Decode a payload's slots back into a value of type `ty` — [`encode_payload`]
+    /// read backwards, and the same five cases.
+    fn decode_payload(&mut self, words: &[String], ty: &Type) -> String {
+        let w0 = words[0].clone();
         match self.resolve(ty) {
-            Type::Int => w0.to_string(),
+            Type::Int => w0,
             Type::Bool => {
                 let v = self.fresh_tmp();
                 self.emit(format!("{v} = trunc i64 {w0} to i1"));
@@ -7831,7 +7945,8 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{v} = inttoptr i64 {w0} to ptr"));
                 v
             }
-            Type::Fn(..) => {
+            _ if self.payload_words(ty) == 2 => {
+                let w1 = &words[1];
                 let a = self.fresh_tmp();
                 let b = self.fresh_tmp();
                 self.emit(format!(
@@ -7840,15 +7955,27 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{b} = insertvalue {{ i64, i64 }} {a}, i64 {w1}, 1"));
                 b
             }
-            _ => self.unbox_payload(w0, ty),
+            _ => {
+                let ll = self.llt(ty);
+                if ll == "i64" {
+                    return w0;
+                }
+                let p = self.fresh_tmp();
+                let v = self.fresh_tmp();
+                self.emit(format!("{p} = inttoptr i64 {w0} to ptr"));
+                self.emit(format!("{v} = load {ll}, ptr {p}"));
+                v
+            }
         }
     }
 
     /// Emit an arm body, binding the payload (decoded to `payload_ty`) if the
     /// pattern binds a name.
+    #[allow(clippy::too_many_arguments)]
     fn gen_arm_body(
         &mut self,
         sv: &str,
+        sty: &Type,
         arm: &MatchArm,
         payload_ty: &Type,
         free_boxes: bool,
@@ -7857,11 +7984,9 @@ impl<'a> Gen<'a> {
         self.scope.push(Vec::new());
         let mut bind_slot: Option<(String, String)> = None;
         if let Some(bind) = pattern_binding(&arm.pattern) {
-            let w0 = self.fresh_tmp();
-            let w1 = self.fresh_tmp();
-            self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {sv}, 1"));
-            self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {sv}, 2"));
-            let v = self.decode_payload(&w0, &w1, payload_ty);
+            let nw = self.payload_words(payload_ty);
+            let words = self.sum_words(sty, sv, 1, nw);
+            let v = self.decode_payload(&words, payload_ty);
             let ll = self.llt(payload_ty);
             let slot = self.declare(bind, payload_ty);
             self.emit(format!("store {ll} {v}, ptr {slot}"));
@@ -7871,15 +7996,9 @@ impl<'a> Gen<'a> {
             // `readDoc`'s `match parseJson(src)` left one 16-byte Result box
             // per `fromJson` (exit-residue round thirteen; the enum path's
             // twin landed in round eight).
-            if free_boxes
-                && v != w0
-                && !matches!(
-                    self.resolve(payload_ty),
-                    Type::Bool | Type::Str | Type::Fn(..)
-                )
-            {
+            if free_boxes && self.payload_boxed(payload_ty) {
                 let q = self.fresh_tmp();
-                self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+                self.emit(format!("{q} = inttoptr i64 {} to ptr", words[0]));
                 self.emit(format!("call void @__vyrn_free(ptr {q})"));
             }
         }
@@ -7971,7 +8090,7 @@ impl<'a> Gen<'a> {
         // The binder aliases the place — a handle copy, never drop-tracked,
         // exactly as a pattern payload binds.
         let (pv, pty) = self.gen_expr(&p.place)?;
-        if let Pattern::Some(bind) = pattern {
+        if let Some(bind) = pattern_binding(pattern) {
             let ll = self.llt(&pty);
             let slot = self.declare(bind, &pty);
             self.emit(format!("store {ll} {pv}, ptr {slot}"));
@@ -8018,16 +8137,12 @@ impl<'a> Gen<'a> {
                 Ok(m)
             }
             Type::Option(_) | Type::Result(..) => {
-                let tag = self.fresh_tmp();
-                self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {sv}, 0"));
+                let tag = self.sum_tag(sr, sv);
                 // `Some`/`Ok` match tag 1; `None`/`Err` match tag 0.
-                if pattern_is_one(pattern) {
-                    Ok(tag)
-                } else {
-                    let n = self.fresh_tmp();
-                    self.emit(format!("{n} = xor i1 {tag}, true"));
-                    Ok(n)
-                }
+                let want = i32::from(pattern_is_one(pattern));
+                let m = self.fresh_tmp();
+                self.emit(format!("{m} = icmp eq i64 {tag}, {want}"));
+                Ok(m)
             }
             other => Err(format!(
                 "if-let scrutinee is not an Option/Result/enum: {other:?}"
@@ -8041,8 +8156,7 @@ impl<'a> Gen<'a> {
         match sr {
             Type::Enum(evs) => {
                 if let Pattern::Variant(vname, binds) = pattern {
-                    let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
-                    let ell = enum_ll(arity);
+                    let ell = enum_ll(self.enum_slots(evs));
                     let idx = evs
                         .iter()
                         .position(|v| &v.name == vname)
@@ -8050,9 +8164,16 @@ impl<'a> Gen<'a> {
                     let payload_tys = evs[idx].payload.clone();
                     for (i, bind) in binds.iter().enumerate() {
                         let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
-                        let raw = self.fresh_tmp();
-                        self.emit(format!("{raw} = extractvalue {ell} {sv}, {}", i + 1));
-                        let v = self.unbox_payload(&raw, &pty);
+                        let at = self.payload_slot(&payload_tys, i);
+                        let nw = self.payload_words(&pty);
+                        let words: Vec<String> = (0..nw)
+                            .map(|k| {
+                                let w = self.fresh_tmp();
+                                self.emit(format!("{w} = extractvalue {ell} {sv}, {}", at + k));
+                                w
+                            })
+                            .collect();
+                        let v = self.decode_payload(&words, &pty);
                         let ll = self.llt(&pty);
                         let slot = self.declare(bind, &pty);
                         self.emit(format!("store {ll} {v}, ptr {slot}"));
@@ -8060,24 +8181,23 @@ impl<'a> Gen<'a> {
                 }
                 Ok(())
             }
+            // The tag the pattern names decides which half it binds, and
+            // `pattern_is_one` is the one place that reading lives.
             Type::Option(inner) => {
-                if let Pattern::Some(bind) = pattern {
+                if let (true, Some(bind)) = (pattern_is_one(pattern), pattern_binding(pattern)) {
                     let pty = (**inner).clone();
-                    self.bind_or_payload(sv, bind, &pty);
+                    self.bind_or_payload(sv, sr, bind, &pty);
                 }
                 Ok(())
             }
             Type::Result(ok, err) => {
-                match pattern {
-                    Pattern::Ok(bind) => {
-                        let pty = (**ok).clone();
-                        self.bind_or_payload(sv, bind, &pty);
-                    }
-                    Pattern::Err(bind) => {
-                        let pty = (**err).clone();
-                        self.bind_or_payload(sv, bind, &pty);
-                    }
-                    _ => {}
+                if let Some(bind) = pattern_binding(pattern) {
+                    let pty = if pattern_is_one(pattern) {
+                        (**ok).clone()
+                    } else {
+                        (**err).clone()
+                    };
+                    self.bind_or_payload(sv, sr, bind, &pty);
                 }
                 Ok(())
             }
@@ -8085,14 +8205,12 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Decode an Option/Result payload from `sv`'s two words into a fresh binder
+    /// Decode an Option/Result payload out of `sv`'s slots into a fresh binder
     /// (the `if let` counterpart of a `match` arm's binding).
-    fn bind_or_payload(&mut self, sv: &str, bind: &str, pty: &Type) {
-        let w0 = self.fresh_tmp();
-        let w1 = self.fresh_tmp();
-        self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {sv}, 1"));
-        self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {sv}, 2"));
-        let v = self.decode_payload(&w0, &w1, pty);
+    fn bind_or_payload(&mut self, sv: &str, sty: &Type, bind: &str, pty: &Type) {
+        let nw = self.payload_words(pty);
+        let words = self.sum_words(sty, sv, 1, nw);
+        let v = self.decode_payload(&words, pty);
         let ll = self.llt(pty);
         let slot = self.declare(bind, pty);
         self.emit(format!("store {ll} {v}, ptr {slot}"));
@@ -8113,27 +8231,40 @@ impl<'a> Gen<'a> {
             Type::Result(ok, _) => *ok,
             _ => Type::Int,
         };
-        let tag = self.fresh_tmp();
-        self.emit(format!("{tag} = extractvalue {{ i1, i64, i64 }} {agg}, 0"));
+        // The propagated value is the WHOLE sum, byte for byte, which is only
+        // sound if the two are the same shape. Since M2 a sum's slot count
+        // follows its widest payload (RFC-0126 §8.4), so the two can differ and
+        // the width is checked rather than assumed — the same check, in the same
+        // words, the direct backend's `try_` already made.
+        let rll = self.llt(&self.fn_ret.clone());
+        let sll = self.llt(&aty);
+        if rll != sll {
+            return Err(format!(
+                "`?` on `{aty}` in a function returning `{}` is not supported",
+                self.fn_ret
+            ));
+        }
+        let tag = self.sum_tag(&aty, &agg);
         let ok_l = self.fresh_label("try.ok");
         let prop_l = self.fresh_label("try.prop");
-        self.emit_term(format!("br i1 {tag}, label %{ok_l}, label %{prop_l}"));
+        let is_ok = self.fresh_tmp();
+        self.emit(format!("{is_ok} = icmp eq i64 {tag}, 1"));
+        self.emit_term(format!("br i1 {is_ok}, label %{ok_l}, label %{prop_l}"));
 
-        // propagate: the enclosing function returns Option/Result ({ i1, i64, i64 }).
+        // propagate: the enclosing function returns this very sum, so its own
+        // shape is what the `ret` names.
         self.emit_label(&prop_l);
         // Free in-scope owned temporaries before the early return, exactly as
         // `return` does (the propagated aggregate never aliases one — a value
         // that escapes into it is not droppable by definition).
         self.emit_all_drops(ExitKind::Try, at);
         self.emit_modify_copyout();
-        self.emit_term(format!("ret {{ i1, i64, i64 }} {agg}"));
+        self.emit_term(format!("ret {sll} {agg}"));
 
         self.emit_label(&ok_l);
-        let w0 = self.fresh_tmp();
-        let w1 = self.fresh_tmp();
-        self.emit(format!("{w0} = extractvalue {{ i1, i64, i64 }} {agg}, 1"));
-        self.emit(format!("{w1} = extractvalue {{ i1, i64, i64 }} {agg}, 2"));
-        let v = self.decode_payload(&w0, &w1, &ok_ty);
+        let nw = self.payload_words(&ok_ty);
+        let words = self.sum_words(&aty, &agg, 1, nw);
+        let v = self.decode_payload(&words, &ok_ty);
         // A boxed success payload (any type wider than a word) travelled in a
         // block the `?` is the last to see WHEN THE OPERAND IS A TEMPORARY:
         // the call's result is consumed here, no row anywhere names it, and
@@ -8145,12 +8276,9 @@ impl<'a> Gen<'a> {
         // all.
         let operand_is_place = vyrn_frontend::movecheck::place_path(expr).is_some()
             || vyrn_frontend::movecheck::element_path(expr).is_some();
-        if !operand_is_place
-            && v != w0
-            && !matches!(self.resolve(&ok_ty), Type::Bool | Type::Str | Type::Fn(..))
-        {
+        if !operand_is_place && self.payload_boxed(&ok_ty) {
             let q = self.fresh_tmp();
-            self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
+            self.emit(format!("{q} = inttoptr i64 {} to ptr", words[0]));
             self.emit(format!("call void @__vyrn_free(ptr {q})"));
         }
         Ok((v, ok_ty))
@@ -11244,28 +11372,19 @@ impl<'a> Gen<'a> {
             self.emit_label(&none_l);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
+            let oty = Type::Option(Box::new(Type::Str));
+            let sll = self.llt(&oty);
+            let none_v = self.const_sum(&oty, 0);
             let w0 = self.fresh_tmp();
-            let s0 = self.fresh_tmp();
-            let s1 = self.fresh_tmp();
-            let s2 = self.fresh_tmp();
             self.emit(format!("{w0} = ptrtoint ptr {p} to i64"));
-            self.emit(format!(
-                "{s0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-            ));
-            self.emit(format!(
-                "{s1} = insertvalue {{ i1, i64, i64 }} {s0}, i64 {w0}, 1"
-            ));
-            self.emit(format!(
-                "{s2} = insertvalue {{ i1, i64, i64 }} {s1}, i64 0, 2"
-            ));
+            let s2 = self.build_sum(&oty, "1", &[w0]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {{ i1 0, i64 0, i64 0 }}, %{none_l} ], \
-                 [ {s2}, %{ok_l} ]"
+                "{r} = phi {sll} [ {none_v}, %{none_l} ], [ {s2}, %{ok_l} ]"
             ));
-            return Ok((r, Type::Option(Box::new(Type::Str))));
+            return Ok((r, oty));
         }
         // `listDir`/`moduleInterface` (RFC-0021) are interpreter/generation-time
         // builtins. `moduleInterface` is compile-time reflection (it never has a
@@ -11375,43 +11494,23 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{msg} = call ptr @__vyrn_read_err(ptr {path}, i32 {stphi})"
             ));
+            let rty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+            let sll = self.llt(&rty);
             let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!(
-                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
-            ));
-            self.emit(format!(
-                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
-            ));
-            self.emit(format!(
-                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
-            ));
+            let e2 = self.build_sum(&rty, "0", &[ew]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
             let ow = self.fresh_tmp();
-            let o0 = self.fresh_tmp();
-            let o1 = self.fresh_tmp();
-            let o2 = self.fresh_tmp();
             self.emit(format!("{ow} = ptrtoint ptr {buf} to i64"));
-            self.emit(format!(
-                "{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-            ));
-            self.emit(format!(
-                "{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {ow}, 1"
-            ));
-            self.emit(format!(
-                "{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 0, 2"
-            ));
+            let o2 = self.build_sum(&rty, "1", &[ow]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
+                "{r} = phi {sll} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
             ));
-            return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
+            return Ok((r, rty));
         }
         // RFC-0111: the byte sink. Same status protocol as `writeFile` and the
         // same error renderer, so the message is byte-identical to the other
@@ -11438,30 +11537,21 @@ impl<'a> Gen<'a> {
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
             self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
+            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let sll = self.llt(&rty);
+            let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!(
-                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
-            ));
-            self.emit(format!(
-                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
-            ));
-            self.emit(format!(
-                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
-            ));
+            let e2 = self.build_sum(&rty, "0", &[ew]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
-                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+                "{r} = phi {sll} [ {e2}, %{err_l} ], [ {ok_v}, %{ok_l} ]"
             ));
-            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+            return Ok((r, rty));
         }
         // RFC-0111: `print` for bytes. No status to check — the shim answers
         // nothing, for the reason `print` answers nothing.
@@ -11494,20 +11584,12 @@ impl<'a> Gen<'a> {
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
             self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
+            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let sll = self.llt(&rty);
+            let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!(
-                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
-            ));
-            self.emit(format!(
-                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
-            ));
-            self.emit(format!(
-                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
-            ));
+            let e2 = self.build_sum(&rty, "0", &[ew]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
             self.emit_term(format!("br label %{end_l}"));
@@ -11515,10 +11597,9 @@ impl<'a> Gen<'a> {
             let r = self.fresh_tmp();
             // Ok(true): tag 1, payload word0 = 1 (Bool true zext).
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
-                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+                "{r} = phi {sll} [ {e2}, %{err_l} ], [ {ok_v}, %{ok_l} ]"
             ));
-            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+            return Ok((r, rty));
         }
         // RFC-0044: atomic overwrite (`__vyrn_rename_file`, status 0 ok / 1 io /
         // 2 cross-device). The message is rendered by `@__vyrn_rename_err` from
@@ -11543,30 +11624,21 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{msg} = call ptr @__vyrn_rename_err(ptr {to}, i32 {st})"
             ));
+            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let sll = self.llt(&rty);
+            let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!(
-                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
-            ));
-            self.emit(format!(
-                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
-            ));
-            self.emit(format!(
-                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
-            ));
+            let e2 = self.build_sum(&rty, "0", &[ew]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
-                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+                "{r} = phi {sll} [ {e2}, %{err_l} ], [ {ok_v}, %{ok_l} ]"
             ));
-            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+            return Ok((r, rty));
         }
         // RFC-0044: flush a file to stable storage (`__vyrn_fsync_file`, 0 ok /
         // 1 io). The error reuses the write-error renderer (fsync is a durability
@@ -11584,30 +11656,21 @@ impl<'a> Gen<'a> {
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
             self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
+            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let sll = self.llt(&rty);
+            let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!(
-                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
-            ));
-            self.emit(format!(
-                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
-            ));
-            self.emit(format!(
-                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
-            ));
+            let e2 = self.build_sum(&rty, "0", &[ew]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], \
-                 [ {{ i1 1, i64 1, i64 0 }}, %{ok_l} ]"
+                "{r} = phi {sll} [ {e2}, %{err_l} ], [ {ok_v}, %{ok_l} ]"
             ));
-            return Ok((r, Type::Result(Box::new(Type::Bool), Box::new(Type::Str))));
+            return Ok((r, rty));
         }
         if name == "readFileBytes" {
             // Binary read (M2): no UTF-8/NUL rules — the whole point of bytes.
@@ -11630,20 +11693,17 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{msg} = call ptr @__vyrn_read_err(ptr {path}, i32 1)"
             ));
+            let bty = Type::Result(
+                Box::new(Type::Array(Box::new(Type::IntN {
+                    bits: 8,
+                    signed: false,
+                }))),
+                Box::new(Type::Str),
+            );
+            let sll = self.llt(&bty);
             let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!(
-                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
-            ));
-            self.emit(format!(
-                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
-            ));
-            self.emit(format!(
-                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
-            ));
+            let e2 = self.build_sum(&bty, "0", &[ew]);
             let err_end = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
@@ -11669,27 +11729,16 @@ impl<'a> Gen<'a> {
                 bits: 8,
                 signed: false,
             }));
-            let (w0, w1) = self.encode_payload(&a2, &elem_ty);
-            let o0 = self.fresh_tmp();
-            let o1 = self.fresh_tmp();
-            let o2 = self.fresh_tmp();
-            self.emit(format!(
-                "{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-            ));
-            self.emit(format!(
-                "{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {w0}, 1"
-            ));
-            self.emit(format!(
-                "{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 {w1}, 2"
-            ));
+            let words = self.encode_payload(&a2, &elem_ty);
+            let o2 = self.build_sum(&bty, "1", &words);
             let ok_end = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_end} ], [ {o2}, %{ok_end} ]"
+                "{r} = phi {sll} [ {e2}, %{err_end} ], [ {o2}, %{ok_end} ]"
             ));
-            return Ok((r, Type::Result(Box::new(elem_ty), Box::new(Type::Str))));
+            return Ok((r, bty));
         }
         if name == "stringFromBytes" {
             // RFC-0125 §3 M6 (the third judgment's fifth slice): the CHECK is
@@ -11751,20 +11800,11 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "call void @llvm.memcpy.p0.p0.i64(ptr {msg}, ptr {src}, i64 {mlen}, i1 false)"
             ));
+            let rty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+            let sll = self.llt(&rty);
             let ew = self.fresh_tmp();
-            let e0 = self.fresh_tmp();
-            let e1 = self.fresh_tmp();
-            let e2 = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
-            self.emit(format!(
-                "{e0} = insertvalue {{ i1, i64, i64 }} undef, i1 0, 0"
-            ));
-            self.emit(format!(
-                "{e1} = insertvalue {{ i1, i64, i64 }} {e0}, i64 {ew}, 1"
-            ));
-            self.emit(format!(
-                "{e2} = insertvalue {{ i1, i64, i64 }} {e1}, i64 0, 2"
-            ));
+            let e2 = self.build_sum(&rty, "0", &[ew]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
             // The BUILD, and nothing else: `stringFault` has already answered, so
@@ -11776,26 +11816,15 @@ impl<'a> Gen<'a> {
                 "{buf} = call ptr @__vyrn_bytes_copy(ptr {data}, i64 {len})"
             ));
             let ow = self.fresh_tmp();
-            let o0 = self.fresh_tmp();
-            let o1 = self.fresh_tmp();
-            let o2 = self.fresh_tmp();
             self.emit(format!("{ow} = ptrtoint ptr {buf} to i64"));
-            self.emit(format!(
-                "{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-            ));
-            self.emit(format!(
-                "{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {ow}, 1"
-            ));
-            self.emit(format!(
-                "{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 0, 2"
-            ));
+            let o2 = self.build_sum(&rty, "1", &[ow]);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
+                "{r} = phi {sll} [ {e2}, %{err_l} ], [ {o2}, %{ok_l} ]"
             ));
-            return Ok((r, Type::Result(Box::new(Type::Str), Box::new(Type::Str))));
+            return Ok((r, rty));
         }
         // (`contains`, `startsWith` and `endsWith` are `std/strpred` — RFC-0078
         // M4c. They were `strstr` and two `strncmp` shapes here, ~50 lines with a
@@ -11982,6 +12011,10 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{val} = select i1 {isneg}, i64 {negval}, i64 {acc}"
             ));
+            // The tag is a slot-wide integer since M2, and `hasdigit` is a
+            // predicate — widened on this edge, where it is live.
+            let tagw = self.fresh_tmp();
+            self.emit(format!("{tagw} = zext i1 {hasdigit} to i64"));
             self.emit_term(format!("br label %{build_l}"));
             // fail: a non-digit character.
             self.emit_label(&fail_l);
@@ -11991,23 +12024,12 @@ impl<'a> Gen<'a> {
             let tag = self.fresh_tmp();
             let v = self.fresh_tmp();
             self.emit(format!(
-                "{tag} = phi i1 [ {hasdigit}, %{done_l} ], [ false, %{fail_l} ]"
+                "{tag} = phi i64 [ {tagw}, %{done_l} ], [ 0, %{fail_l} ]"
             ));
             self.emit(format!(
                 "{v} = phi i64 [ {val}, %{done_l} ], [ 0, %{fail_l} ]"
             ));
-            let o0 = self.fresh_tmp();
-            let o1 = self.fresh_tmp();
-            let o2 = self.fresh_tmp();
-            self.emit(format!(
-                "{o0} = insertvalue {{ i1, i64, i64 }} undef, i1 {tag}, 0"
-            ));
-            self.emit(format!(
-                "{o1} = insertvalue {{ i1, i64, i64 }} {o0}, i64 {v}, 1"
-            ));
-            self.emit(format!(
-                "{o2} = insertvalue {{ i1, i64, i64 }} {o1}, i64 0, 2"
-            ));
+            let o2 = self.build_sum(&Type::Option(Box::new(Type::Int)), &tag, &[v]);
             // Backpatch the loop phis' back-edge values (emitted before cont).
             for line in self.body.iter_mut() {
                 if line.contains("{PNEXT}") {
@@ -12842,19 +12864,11 @@ impl<'a> Gen<'a> {
                     let v = self.fresh_tmp();
                     self.emit(format!("{ep} = getelementptr {vll}, ptr {vals}, i64 {idx}"));
                     self.emit(format!("{v} = load {vll} , ptr {ep}"));
-                    let (w0, w1) = self.encode_payload(&v, &val);
-                    let s0 = self.fresh_tmp();
-                    let s1 = self.fresh_tmp();
-                    let s2 = self.fresh_tmp();
-                    self.emit(format!(
-                        "{s0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-                    ));
-                    self.emit(format!(
-                        "{s1} = insertvalue {{ i1, i64, i64 }} {s0}, i64 {w0}, 1"
-                    ));
-                    self.emit(format!(
-                        "{s2} = insertvalue {{ i1, i64, i64 }} {s1}, i64 {w1}, 2"
-                    ));
+                    let oty = Type::Option(Box::new(val.clone()));
+                    let sll = self.llt(&oty);
+                    let none_v = self.const_sum(&oty, 0);
+                    let words = self.encode_payload(&v, &val);
+                    let s2 = self.build_sum(&oty, "1", &words);
                     let some_end = self.cur_block.clone();
                     self.emit_term(format!("br label %{end_l}"));
                     self.emit_label(&none_l);
@@ -12862,10 +12876,9 @@ impl<'a> Gen<'a> {
                     self.emit_label(&end_l);
                     let r = self.fresh_tmp();
                     self.emit(format!(
-                        "{r} = phi {{ i1, i64, i64 }} [ {s2}, %{some_end} ], \
-                         [ {{ i1 0, i64 0, i64 0 }}, %{none_l} ]"
+                        "{r} = phi {sll} [ {s2}, %{some_end} ], [ {none_v}, %{none_l} ]"
                     ));
-                    return Ok((r, Type::Option(Box::new(val))));
+                    return Ok((r, oty));
                 }
                 _ => return Err("at on a non-Array value".into()),
             }
@@ -12999,7 +13012,9 @@ impl<'a> Gen<'a> {
             self.emit(format!("{sp} = call ptr @__vyrn_stream_box(i64 {av})"));
             let (has, stage) = self.emit_stream_next(&sp, &elem)?;
             let ell = self.llt(&elem);
-            let optll = self.llt(&Type::Option(Box::new(elem.clone())));
+            let oty = Type::Option(Box::new(elem.clone()));
+            let optll = self.llt(&oty);
+            let nv = self.const_sum(&oty, 0);
             let some_l = self.fresh_label("psome");
             let none_l = self.fresh_label("pnone");
             let join_l = self.fresh_label("pjoin");
@@ -13007,24 +13022,17 @@ impl<'a> Gen<'a> {
             self.emit_label(&some_l);
             let ev = self.fresh_tmp();
             self.emit(format!("{ev} = load {ell}, ptr {stage}"));
-            let (w0, w1) = self.encode_payload(&ev, &elem);
-            let a = self.fresh_tmp();
-            let bb = self.fresh_tmp();
-            let cc = self.fresh_tmp();
-            self.emit(format!("{a} = insertvalue {optll} undef, i1 1, 0"));
-            self.emit(format!("{bb} = insertvalue {optll} {a}, i64 {w0}, 1"));
-            self.emit(format!("{cc} = insertvalue {optll} {bb}, i64 {w1}, 2"));
+            let words = self.encode_payload(&ev, &elem);
+            let cc = self.build_sum(&oty, "1", &words);
             self.emit_term(format!("br label %{join_l}"));
             self.emit_label(&none_l);
-            let nv = self.fresh_tmp();
-            self.emit(format!("{nv} = insertvalue {optll} undef, i1 0, 0"));
             self.emit_term(format!("br label %{join_l}"));
             self.emit_label(&join_l);
             let res = self.fresh_tmp();
             self.emit(format!(
                 "{res} = phi {optll} [ {cc}, %{some_l} ], [ {nv}, %{none_l} ]"
             ));
-            return Ok((res, Type::Option(Box::new(elem))));
+            return Ok((res, oty));
         }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Loads the `{ptr,len,cap}` header from the binding's slot;
@@ -13066,28 +13074,19 @@ impl<'a> Gen<'a> {
                     "{lenp} = getelementptr {sa_ll}, ptr {slot}, i64 0, i32 0"
                 ));
                 self.emit(format!("store i64 {nl}, ptr {lenp}"));
-                let (w0, w1) = self.encode_payload(&v, &elem);
-                let s0 = self.fresh_tmp();
-                let s1 = self.fresh_tmp();
-                let s2 = self.fresh_tmp();
-                self.emit(format!(
-                    "{s0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-                ));
-                self.emit(format!(
-                    "{s1} = insertvalue {{ i1, i64, i64 }} {s0}, i64 {w0}, 1"
-                ));
-                self.emit(format!(
-                    "{s2} = insertvalue {{ i1, i64, i64 }} {s1}, i64 {w1}, 2"
-                ));
+                let oty = Type::Option(Box::new(elem.clone()));
+                let sll = self.llt(&oty);
+                let none_v = self.const_sum(&oty, 0);
+                let words = self.encode_payload(&v, &elem);
+                let s2 = self.build_sum(&oty, "1", &words);
                 let some_end = self.cur_block.clone();
                 self.emit_term(format!("br label %{end_l}"));
                 self.emit_label(&end_l);
                 let r = self.fresh_tmp();
                 self.emit(format!(
-                    "{r} = phi {{ i1, i64, i64 }} [ {{ i1 0, i64 0, i64 0 }}, %{none_l} ], \
-                     [ {s2}, %{some_end} ]"
+                    "{r} = phi {sll} [ {none_v}, %{none_l} ], [ {s2}, %{some_end} ]"
                 ));
-                return Ok((r, Type::Option(Box::new(elem))));
+                return Ok((r, oty));
             }
             let elem = match self.resolve(&aty) {
                 Type::Array(inner) => *inner,
@@ -13124,27 +13123,18 @@ impl<'a> Gen<'a> {
                 "{nh} = insertvalue {{ ptr, i64, i64 }} {hdr}, i64 {nl}, 1"
             ));
             self.emit(format!("store {{ ptr, i64, i64 }} {nh}, ptr {slot}"));
-            let (w0, w1) = self.encode_payload(&v, &elem);
-            let s0 = self.fresh_tmp();
-            let s1 = self.fresh_tmp();
-            let s2 = self.fresh_tmp();
-            self.emit(format!(
-                "{s0} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-            ));
-            self.emit(format!(
-                "{s1} = insertvalue {{ i1, i64, i64 }} {s0}, i64 {w0}, 1"
-            ));
-            self.emit(format!(
-                "{s2} = insertvalue {{ i1, i64, i64 }} {s1}, i64 {w1}, 2"
-            ));
+            let oty = Type::Option(Box::new(elem.clone()));
+            let sll = self.llt(&oty);
+            let none_v = self.const_sum(&oty, 0);
+            let words = self.encode_payload(&v, &elem);
+            let s2 = self.build_sum(&oty, "1", &words);
             let some_end = self.cur_block.clone();
             self.emit_term(format!("br label %{end_l}"));
             // merge: None aggregate from the empty path, Some from the other.
             self.emit_label(&end_l);
             let r = self.fresh_tmp();
             self.emit(format!(
-                "{r} = phi {{ i1, i64, i64 }} [ {{ i1 0, i64 0, i64 0 }}, %{none_l} ], \
-                 [ {s2}, %{some_end} ]"
+                "{r} = phi {sll} [ {none_v}, %{none_l} ], [ {s2}, %{some_end} ]"
             ));
             return Ok((r, Type::Option(Box::new(elem))));
         }
@@ -13526,13 +13516,10 @@ impl<'a> Gen<'a> {
                 .get(vname)
                 .cloned()
                 .ok_or_else(|| "built-in `Value` enum is not registered".to_string())?;
-            let ll = enum_ll(self.enum_arity(&enum_name));
-            let payload = self.box_payload(&v, &ty);
-            let a = self.fresh_tmp();
-            let b = self.fresh_tmp();
-            self.emit(format!("{a} = insertvalue {ll} undef, i64 {tag}, 0"));
-            self.emit(format!("{b} = insertvalue {ll} {a}, i64 {payload}, 1"));
-            return Ok((b, Type::Named(enum_name)));
+            let ety = Type::Named(enum_name);
+            let words = self.encode_payload(&v, &ty);
+            let b = self.build_sum(&ety, &tag.to_string(), &words);
+            return Ok((b, ety));
         }
         // list(Array<T, N>) -> Array<T>: copy the fixed value aggregate into a
         // heap buffer and wrap it as a growable `{ ptr, len, cap }` triple.
@@ -13602,20 +13589,13 @@ impl<'a> Gen<'a> {
             }
             let (v, ty) = r?;
             let (v, ty) = self.coerce_into_payload(v, ty, payload_expect.as_ref())?;
-            let (w0, w1) = self.encode_payload(&v, &ty);
-            let a = self.fresh_tmp();
-            let b = self.fresh_tmp();
-            let c = self.fresh_tmp();
-            self.emit(format!(
-                "{a} = insertvalue {{ i1, i64, i64 }} undef, i1 1, 0"
-            ));
-            self.emit(format!(
-                "{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {w0}, 1"
-            ));
-            self.emit(format!(
-                "{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 {w1}, 2"
-            ));
-            return Ok((c, Type::Option(Box::new(ty))));
+            // The SHAPE is the expectation's when it names one — a `Result`'s
+            // slot count is the wider of its two halves, and since M2 that is
+            // not always this payload's (RFC-0126 §8.4).
+            let oty = self.built_sum_ty(Type::Option(Box::new(ty.clone())));
+            let words = self.encode_payload(&v, &ty);
+            let c = self.build_sum(&oty, "1", &words);
+            return Ok((c, oty));
         }
         // `Ok(x)` / `Err(e)` — the payload may be any type (encoded like Some).
         // The *other* type parameter is unknown at the constructor (a placeholder
@@ -13641,31 +13621,22 @@ impl<'a> Gen<'a> {
             }
             let (v, ty) = r?;
             let (v, ty) = self.coerce_into_payload(v, ty, payload_expect.as_ref())?;
-            let (w0, w1) = self.encode_payload(&v, &ty);
-            let a = self.fresh_tmp();
-            let b = self.fresh_tmp();
-            let c = self.fresh_tmp();
-            self.emit(format!(
-                "{a} = insertvalue {{ i1, i64, i64 }} undef, i1 {tag}, 0"
-            ));
-            self.emit(format!(
-                "{b} = insertvalue {{ i1, i64, i64 }} {a}, i64 {w0}, 1"
-            ));
-            self.emit(format!(
-                "{c} = insertvalue {{ i1, i64, i64 }} {b}, i64 {w1}, 2"
-            ));
             let out = if name == "Ok" {
-                Type::Result(Box::new(ty), Box::new(Type::Int))
+                Type::Result(Box::new(ty.clone()), Box::new(Type::Int))
             } else {
-                Type::Result(Box::new(Type::Int), Box::new(ty))
+                Type::Result(Box::new(Type::Int), Box::new(ty.clone()))
             };
+            // The SHAPE is the expectation's when it names one — a `Result`'s
+            // slot count is the wider of its two halves, and the placeholder
+            // half above is not it (RFC-0126 §8.4).
+            let out = self.built_sum_ty(out);
+            let words = self.encode_payload(&v, &ty);
+            let c = self.build_sum(&out, &tag.to_string(), &words);
             return Ok((c, out));
         }
 
         // enum variant with payload(s): `Circle(x)`, `Rect(w, h)`
         if let Some((tag, enum_name)) = self.variants.get(name).cloned() {
-            let arity = self.enum_arity(&enum_name);
-            let ll = enum_ll(arity);
             // The variant's DECLARED payload types. Each argument is coerced into
             // its declared type *before* boxing, so the boxed representation is
             // exactly the one `match` unboxes. This is load-bearing for wide
@@ -13708,22 +13679,12 @@ impl<'a> Gen<'a> {
                     _ => (v, ty),
                 };
                 arg_tys.push(ty.clone());
-                payloads.push(self.box_payload(&v, &ty));
-            }
-            let mut cur = "undef".to_string();
-            let t = self.fresh_tmp();
-            self.emit(format!("{t} = insertvalue {ll} {cur}, i64 {tag}, 0"));
-            cur = t;
-            for slot in 1..=arity {
-                let val = payloads
-                    .get(slot - 1)
-                    .cloned()
-                    .unwrap_or_else(|| "0".into());
-                let t = self.fresh_tmp();
-                self.emit(format!("{t} = insertvalue {ll} {cur}, i64 {val}, {slot}"));
-                cur = t;
+                payloads.extend(self.encode_payload(&v, &ty));
             }
             let applied = self.applied_enum_type(&enum_name, name, &arg_tys);
+            // The slots are the variant's payloads laid end to end (§8.4), so
+            // the words this loop collected ARE the aggregate's leading slots.
+            let cur = self.build_sum(&applied, &tag.to_string(), &payloads);
             return Ok((cur, applied));
         }
 
@@ -14267,21 +14228,20 @@ impl<'a> Gen<'a> {
 /// Whether a pattern matches the tag-1 variant (`Some`/`Ok`). Only used on the
 /// Option/Result path; user-enum variants go through `gen_match_enum`.
 fn pattern_is_one(p: &Pattern) -> bool {
-    matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_))
+    matches!(p, Pattern::Success(_))
+        || matches!(p, Pattern::Variant(v, _) if v == "Some" || v == "Ok")
 }
 
 /// The name a pattern binds its payload to, if any.
 fn pattern_binding(p: &Pattern) -> Option<&str> {
     match p {
-        Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => Some(b),
         // `??`'s pair (RFC-0079). `Failure` binds on the `Option` path too, where
         // the payload type is the `Type::Int` placeholder `gen_match` passes for
         // a tag-0 `Option` arm: a dead `alloca`+`store` of a word nothing reads,
         // which is cheaper than teaching this type-free helper about types.
         Pattern::Success(b) | Pattern::Failure(b) => Some(b),
-        // Variants route through gen_match_enum, not this Option/Result helper.
         Pattern::Variant(_, b) => b.first().map(|s| s.as_str()),
-        Pattern::None | Pattern::Other => None,
+        Pattern::Other => None,
     }
 }
 
@@ -14641,13 +14601,9 @@ fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
 /// The names a refutable pattern binds.
 fn pattern_names(p: &Pattern) -> Vec<String> {
     match p {
-        Pattern::Some(n)
-        | Pattern::Ok(n)
-        | Pattern::Err(n)
-        | Pattern::Success(n)
-        | Pattern::Failure(n) => vec![n.clone()],
+        Pattern::Success(n) | Pattern::Failure(n) => vec![n.clone()],
         Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 
@@ -15555,10 +15511,27 @@ pub enum Rung {
     FloatCross,
     /// A record used as a differently shaped record: rebuilt field by field.
     Rebuild,
+    /// One sum used at another shape of ITSELF — the same variant names, a
+    /// different slot count. Since RFC-0126 §8.4 a sum's slot count follows its
+    /// widest payload, so `Validation<Unit>` and `Validation<Point>` are two
+    /// shapes of one enum, and a bare `None` is built at the narrowest `Option`
+    /// there is. The tag and the slots both shapes have move; the rest is zero.
+    Reshape,
     /// The bits are already right.
     Identity,
     /// No rung handles this pair.
     Refuse,
+}
+
+/// The variant names of a sum, in tag order — `None` for anything else. The
+/// key [`coerce_plan`] compares when it asks whether two sums are one sum.
+pub(crate) fn sum_variants(ty: &Type) -> Option<Vec<String>> {
+    match ty {
+        Type::Option(_) => Some(vec!["None".into(), "Some".into()]),
+        Type::Result(..) => Some(vec!["Err".into(), "Ok".into()]),
+        Type::Enum(vs) => Some(vs.iter().map(|v| v.name.clone()).collect()),
+        _ => None,
+    }
 }
 
 /// An arm of an engine's `coerce` could not destructure the pair the plan sent
@@ -15633,6 +15606,14 @@ pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) ->
     if llt_of(from, types) == llt_of(to, types) {
         return Rung::Identity;
     }
+    // Two shapes of one sum (RFC-0126 §8.4). The variant NAMES decide it, so a
+    // generic enum at two instantiations qualifies and two different enums that
+    // happen to be the same width do not.
+    if let (Some(a), Some(b)) = (sum_variants(&rf), sum_variants(&rt)) {
+        if a == b {
+            return Rung::Reshape;
+        }
+    }
     match (
         vyrn_frontend::types::record_fields(&rf, types),
         vyrn_frontend::types::record_fields(&rt, types),
@@ -15685,10 +15666,17 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // statement-position `panic` has nothing to drop, and a `void` join is
         // already the "no value to merge" case both merges test for.
         Type::Unit | Type::Never => "void".into(),
-        // Option/Result both lower to { tag, payload }; payload is i64.
-        // { tag, word0, word1 } — two payload words so a `Ref` (which is two
-        // words) fits inline without a heap box.
-        Type::Option(_) | Type::Result(..) => "{ i1, i64, i64 }".into(),
+        // RFC-0126 §8.4: one shape rule for every sum. `{ i64 tag, i64 slot.. }`,
+        // where the slot count is the widest variant's payload WIDTH — so
+        // `Option<Int64>` is two words where it was three, and `Option<fn>` is
+        // three because a stored `fn` needs two and rides inline. The tag is the
+        // enum's `i64` rather than the sums' old `i1`: it costs no bytes (the
+        // first member padded to 8 either way) and it makes one shape serve both,
+        // which is what M4 needs when `resolve` starts answering `Enum` here.
+        Type::Option(ref t) => enum_ll(payload_words_of(t, types)),
+        Type::Result(ref a, ref b) => {
+            enum_ll(payload_words_of(a, types).max(payload_words_of(b, types)))
+        }
         // A growable array is { ptr data, i64 len, i64 cap }.
         Type::Array(_) => "{ ptr, i64, i64 }".into(),
         // A `Stream<T>` (RFC-0075 M2b) is a tagged header over two producers,
@@ -15738,12 +15726,10 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
             let inner: Vec<String> = fields.iter().map(|f| llt_of(&f.ty, types)).collect();
             format!("{{ {} }}", inner.join(", "))
         }
-        // A user enum is { i64 tag, i64 payload0, ... } — one payload slot per
-        // the widest variant (payloads are i64 in native).
-        Type::Enum(vs) => {
-            let arity = vs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
-            enum_ll(arity)
-        }
+        // A user enum is { i64 tag, i64 slot0, ... } — RFC-0126 §8.4's slot
+        // count, which is the widest variant's payload WIDTH and not its arity:
+        // a payload two words wide rides in two slots instead of a heap box.
+        Type::Enum(ref vs) => enum_ll(enum_slots_of(vs, types)),
         // RFC-0076 M3a: on the generator-host path `Code` (RFC-0054) is an
         // opaque i64 HANDLE into the host's piece arena — the one `Named`
         // that survives `resolve` undeclared. i64 is also what makes it
@@ -15778,15 +15764,59 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
     }
 }
 
-/// The LLVM aggregate type for an enum with `arity` payload slots:
-/// `{ i64 }` (tag only) for arity 0, `{ i64, i64 }` for arity 1, and so on.
-fn enum_ll(arity: usize) -> String {
+/// The LLVM aggregate type for a sum with `slots` payload words:
+/// `{ i64 }` (tag only) for 0, `{ i64, i64 }` for 1, and so on.
+fn enum_ll(slots: usize) -> String {
     let mut s = String::from("{ i64");
-    for _ in 0..arity {
+    for _ in 0..slots {
         s.push_str(", i64");
     }
     s.push_str(" }");
     s
+}
+
+/// RFC-0126 §8.4's `words(t)`: how many `i64` slots a payload of type `t` rides
+/// in. Two for the shapes that ARE `{ i64, i64 }` — a stored `fn`, a `lazy`, a
+/// record of exactly two words — and one for everything else, where a value
+/// wider than its slots is boxed and the slot holds the pointer.
+///
+/// It is a STRUCTURAL test rather than `llt_of(t) == "{ i64, i64 }"`, which is
+/// how §8.4 writes it, and the difference is TERMINATION. `llt_of` of a sum asks
+/// this question about the sum's payloads, so asking `llt_of` back from here
+/// loops the moment a type reaches itself — `type R = { a: Int64, b: Option<R> }`
+/// is legal, and it overflowed the stack.
+///
+/// The two readings differ in one place, and it is the place §8.7 already
+/// measured: a payload that is itself a ONE-SLOT SUM prints `{ i64, i64 }` and
+/// rides in one slot, boxed, which is what both conventions did for a nested sum
+/// before. Nothing else prints that shape.
+pub(crate) fn payload_words_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> usize {
+    // A member that prints `i64`. Structural, so it cannot descend anywhere.
+    let word = |t: &Type| {
+        matches!(
+            vyrn_frontend::types::resolve(t, types),
+            Type::Int | Type::IntN { bits: 64, .. }
+        )
+    };
+    match vyrn_frontend::types::resolve(ty, types) {
+        // A stored `fn` value (RFC-0037), and the deferral that lowers to one.
+        Type::Fn(..) | Type::Lazy(_) => 2,
+        Type::Record(fs) if fs.len() == 2 && fs.iter().all(|f| word(&f.ty)) => 2,
+        _ => 1,
+    }
+}
+
+/// The slots one variant's payloads occupy, laid out consecutively.
+fn variant_slots_of(payload: &[Type], types: &HashMap<String, TypeDecl>) -> usize {
+    payload.iter().map(|p| payload_words_of(p, types)).sum()
+}
+
+/// A user enum's slot count: the widest variant's, by §8.4.
+fn enum_slots_of(vs: &[EnumVariant], types: &HashMap<String, TypeDecl>) -> usize {
+    vs.iter()
+        .map(|v| variant_slots_of(&v.payload, types))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Make an identifier safe to embed in an LLVM local name.
@@ -15921,10 +15951,16 @@ mod tests {
             ("Float64", Type::Float),
             ("Float32", Type::Float32),
             ("String", Type::Str),
-            ("Option/Result", Type::Option(Box::new(Type::Int))),
+            // Since RFC-0126 §8.4 the built-in sums print the enum rows: one
+            // slot for a one-word payload, two when the widest is two words.
+            ("Enum1", Type::Option(Box::new(Type::Int))),
             (
-                "Option/Result",
+                "Enum1",
                 Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+            ),
+            (
+                "Enum2",
+                Type::Option(Box::new(Type::Fn(Vec::new(), Box::new(Type::Int)))),
             ),
             ("Array", Type::Array(Box::new(Type::Str))),
             ("Map", Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
@@ -15949,7 +15985,7 @@ mod tests {
             assert_eq!(&g.llt(ty), want, "llt({name}) drifted from layout::SHAPES");
         }
         // The enum arities, which come from the same helper `llt` calls.
-        for (name, arity) in [("Enum0", 0), ("Enum1", 1), ("Enum3", 3)] {
+        for (name, arity) in [("Enum0", 0), ("Enum1", 1), ("Enum2", 2), ("Enum3", 3)] {
             let want = layout::SHAPES.iter().find(|(n, _)| *n == name).unwrap().1;
             assert_eq!(enum_ll(arity), want, "enum_ll({arity}) drifted");
         }
@@ -17109,7 +17145,7 @@ mod tests {
         let ir = emit(&p).unwrap();
         assert!(ir.contains("il.then"), "if-let then block: {ir}");
         assert!(
-            ir.contains("extractvalue { i1, i64, i64 }"),
+            ir.contains("extractvalue { i64, i64 }"),
             "tag/payload extraction: {ir}"
         );
     }
@@ -17884,7 +17920,7 @@ mod tests {
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
             block_at(&ir, &label_like(&ir, "ncall"))
-                .contains("call { i1, i64, i64 } @__vyrn_fndispatch_"),
+                .contains("call { i64, i64 } @__vyrn_fndispatch_"),
             "the step must be called from inside the loop: {ir}"
         );
         assert_eq!(stream_closes(&ir), 1, "{ir}");
@@ -18373,11 +18409,11 @@ mod tests {
                    fn main() -> Int64 { return match f() { Some(x) => x, None => 0 }; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
-            ir.contains("insertvalue { i1, i64, i64 }"),
+            ir.contains("insertvalue { i64, i64 }"),
             "Some should build an aggregate: {ir}"
         );
         assert!(
-            ir.contains("extractvalue { i1, i64, i64 }"),
+            ir.contains("extractvalue { i64, i64 }"),
             "match should extract: {ir}"
         );
         assert!(
@@ -18758,7 +18794,7 @@ mod tests {
             "? should have a propagate block: {ir}"
         );
         assert!(
-            ir.contains("ret { i1, i64, i64 }"),
+            ir.contains("ret { i64, i64 }"),
             "? should propagate the aggregate: {ir}"
         );
     }
@@ -18779,7 +18815,7 @@ mod tests {
         let prop = ir.find("try.prop").expect("propagate block present");
         let ret = prop
             + ir[prop..]
-                .find("ret { i1, i64, i64 }")
+                .find("ret { i64, i64 }")
                 .expect("propagate returns");
         assert!(
             ir[prop..ret].contains("call void @__vyrn_str_free(ptr"),
@@ -18900,7 +18936,7 @@ mod tests {
         // inline on match (insertvalue into { i64, i64 }) rather than loaded from
         // a box.
         assert!(
-            ir.contains("insertvalue { i1, i64, i64 }"),
+            ir.contains("insertvalue { i64, i64 }"),
             "widened aggregate: {ir}"
         );
         assert!(
@@ -18959,7 +18995,7 @@ mod tests {
         let src = "fn main() -> Int64 { let mut a: Array<Int64> = [1, 2, 3]; \
                    let p = match a.pop() { Some(x) => x, None => -1 }; return p; }";
         let ir = emit(&check(src).unwrap()).unwrap();
-        assert!(ir.contains("phi { i1, i64, i64 }"), "None/Some merge: {ir}");
+        assert!(ir.contains("phi { i64, i64 }"), "None/Some merge: {ir}");
         assert!(
             ir.contains("insertvalue { ptr, i64, i64 }"),
             "header write-back: {ir}"

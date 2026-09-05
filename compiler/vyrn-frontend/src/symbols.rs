@@ -2474,14 +2474,10 @@ fn collect_lets_expr(
                 // desugar's `@`-prefixed binder is unspellable and never
                 // surfaces.
                 let (head, payloads): (Option<&str>, &[String]) = match &arm.pattern {
-                    ast::Pattern::Some(b) => (Some("Some"), std::slice::from_ref(b)),
-                    ast::Pattern::Ok(b) => (Some("Ok"), std::slice::from_ref(b)),
-                    ast::Pattern::Err(b) => (Some("Err"), std::slice::from_ref(b)),
                     ast::Pattern::Variant(head, payloads) => (Some(head.as_str()), payloads),
-                    ast::Pattern::None
-                    | ast::Pattern::Other
-                    | ast::Pattern::Success(_)
-                    | ast::Pattern::Failure(_) => (None, &[]),
+                    ast::Pattern::Other | ast::Pattern::Success(_) | ast::Pattern::Failure(_) => {
+                        (None, &[])
+                    }
                 };
                 for (k, b) in payloads.iter().enumerate() {
                     let prefix: Vec<&str> = match head {

@@ -2228,7 +2228,7 @@ impl<'a> Checker<'a> {
             return Ok(None);
         }
         self.refuse_chained_projection(&args[0], scope, line)?;
-        if !matches!(pattern, crate::ast::Pattern::Some(_)) {
+        if !matches!(pattern, crate::ast::Pattern::Variant(v, _) if v == "Some") {
             return Err(cerr!(
                 line,
                 "an optional place is tested for its hit — write \
@@ -5554,10 +5554,9 @@ impl<'a> Checker<'a> {
         let mut result: Option<Type> = expected.cloned();
         for arm in arms {
             let (tag, bind): (&str, Option<&str>) = match &arm.pattern {
-                Pattern::Some(b) => ("Some", Some(b)),
-                Pattern::None => ("None", None),
-                Pattern::Ok(b) => ("Ok", Some(b)),
-                Pattern::Err(b) => ("Err", Some(b)),
+                // Since RFC-0126 §8 the four built-in arms are variant patterns
+                // like any other, and the SCRUTINEE is what says a name is a tag.
+                Pattern::Variant(v, binds) => (v.as_str(), binds.first().map(|b| b.as_str())),
                 // The `??` desugar's two patterns (RFC-0079): they take whichever
                 // tag the scrutinee's own shape names, which is the one thing the
                 // parser could not do. `Failure` binds only on the `Result` path
@@ -5568,12 +5567,6 @@ impl<'a> Checker<'a> {
                     want[1],
                     matches!(sty, Type::Result(..)).then_some(b.as_str()),
                 ),
-                Pattern::Variant(n, _) => {
-                    return Err(cerr!(
-                        line,
-                        "pattern `{n}` does not match scrutinee of type {sty}"
-                    ))
-                }
                 // The refutable-`let` desugar's default arm (RFC-0121) belongs
                 // to an enum `match`; an Option/Result scrutinee spells both
                 // tags, so nothing produces it here.
@@ -5586,6 +5579,9 @@ impl<'a> Checker<'a> {
                     line,
                     "pattern `{tag}` does not match scrutinee of type {sty}"
                 ));
+            }
+            if let Pattern::Variant(v, binds) = &arm.pattern {
+                sum_arm_arity(v, binds.len(), line)?;
             }
             if seen.contains(&tag) {
                 return Err(cerr!(line, "duplicate `{tag}` arm"));
@@ -5900,20 +5896,15 @@ impl<'a> Checker<'a> {
             return Ok(binds.into_iter().zip(ev.payload.iter().cloned()).collect());
         }
         let (tag, bind): (&str, Option<String>) = match pattern {
-            Pattern::Some(b) => ("Some", Some(b.clone())),
-            Pattern::None => ("None", None),
-            Pattern::Ok(b) => ("Ok", Some(b.clone())),
-            Pattern::Err(b) => ("Err", Some(b.clone())),
+            // §8's one spelling again: the name, and what it binds.
+            Pattern::Variant(v, binds) => {
+                sum_arm_arity(v, binds.len(), line)?;
+                (v.as_str(), binds.first().cloned())
+            }
             // `??` desugars to a `match`, never to an `if let`/`while let`, so
             // these cannot reach here.
             Pattern::Success(_) | Pattern::Failure(_) => {
                 unreachable!("the `??` patterns are produced only inside a `match`")
-            }
-            Pattern::Variant(n, _) => {
-                return Err(cerr!(
-                    line,
-                    "pattern `{n}` does not match scrutinee of type {sty}"
-                ))
             }
             // Produced only inside the refutable-`let` desugar's `match`
             // (RFC-0121); an `if let` never carries it.
@@ -11058,6 +11049,21 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
     }
 }
 
+/// The payload count a built-in sum's variant name carries: `None` binds
+/// nothing and the other three bind one. A declared enum states its own arity in
+/// its declaration and is checked against that; these four have no declaration,
+/// so the rule is here (RFC-0126 §8).
+fn sum_arm_arity(name: &str, binds: usize, line: usize) -> Result<(), Diagnostic> {
+    let want = usize::from(name != "None");
+    if binds != want {
+        return Err(cerr!(
+            line,
+            "variant `{name}` has {want} payload(s), but the pattern binds {binds}"
+        ));
+    }
+    Ok(())
+}
+
 /// The names a pattern binds — `Some(x)`, `Ok(e)`, `Circle(w, h)`.
 ///
 /// A match arm's binder shadows a module global for the length of that arm, and
@@ -11068,13 +11074,9 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
 /// purity violation; it is a coincidence.
 fn pattern_binders(p: &Pattern) -> Vec<String> {
     match p {
-        Pattern::Some(n)
-        | Pattern::Ok(n)
-        | Pattern::Err(n)
-        | Pattern::Success(n)
-        | Pattern::Failure(n) => vec![n.clone()],
+        Pattern::Success(n) | Pattern::Failure(n) => vec![n.clone()],
         Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 

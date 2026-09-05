@@ -1011,13 +1011,9 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
 fn pattern_binder_names(p: &crate::ast::Pattern) -> Vec<&String> {
     use crate::ast::Pattern;
     match p {
-        Pattern::Some(b)
-        | Pattern::Ok(b)
-        | Pattern::Err(b)
-        | Pattern::Success(b)
-        | Pattern::Failure(b) => vec![b],
+        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter().collect(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 
@@ -1025,13 +1021,9 @@ fn pattern_binder_names(p: &crate::ast::Pattern) -> Vec<&String> {
 fn pattern_binder_names_mut(p: &mut crate::ast::Pattern) -> Vec<&mut String> {
     use crate::ast::Pattern;
     match p {
-        Pattern::Some(b)
-        | Pattern::Ok(b)
-        | Pattern::Err(b)
-        | Pattern::Success(b)
-        | Pattern::Failure(b) => vec![b],
+        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter_mut().collect(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 

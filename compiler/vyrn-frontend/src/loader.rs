@@ -3528,14 +3528,10 @@ impl NsResolver<'_> {
                                 inner.insert(b.clone());
                             }
                         }
-                        Pattern::Some(b)
-                        | Pattern::Ok(b)
-                        | Pattern::Err(b)
-                        | Pattern::Success(b)
-                        | Pattern::Failure(b) => {
+                        Pattern::Success(b) | Pattern::Failure(b) => {
                             inner.insert(b.clone());
                         }
-                        Pattern::None | Pattern::Other => {}
+                        Pattern::Other => {}
                     }
                     match &mut arm.body {
                         ArmBody::Expr(e) => self.walk_expr(e, &mut inner),
@@ -4327,6 +4323,13 @@ fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usi
     }
 }
 
+/// The four variant names the built-in sums answer to. They are patterns like
+/// any other since RFC-0126 §8, and unlike a declared enum's variant they name
+/// no declaration — so a walk that collects free names must not collect them.
+fn is_sum_arm(name: &str) -> bool {
+    matches!(name, "Some" | "None" | "Ok" | "Err")
+}
+
 fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(String, usize)>) {
     match e {
         Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
@@ -4402,22 +4405,20 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
                 let mut inner = locals.clone();
                 match &arm.pattern {
                     Pattern::Variant(v, binds) => {
-                        // The variant constructor is a reference; its binds are new locals.
-                        if !inner.contains(v) {
+                        // The variant constructor is a reference; its binds are
+                        // new locals. The four built-in sum names are not: they
+                        // have no declaration to refer to (RFC-0126 §8).
+                        if !inner.contains(v) && !is_sum_arm(v) {
                             out.push((v.clone(), *line));
                         }
                         for b in binds {
                             inner.insert(b.clone());
                         }
                     }
-                    Pattern::Some(b)
-                    | Pattern::Ok(b)
-                    | Pattern::Err(b)
-                    | Pattern::Success(b)
-                    | Pattern::Failure(b) => {
+                    Pattern::Success(b) | Pattern::Failure(b) => {
                         inner.insert(b.clone());
                     }
-                    Pattern::None | Pattern::Other => {}
+                    Pattern::Other => {}
                 }
                 match &arm.body {
                     ArmBody::Expr(e) => scope_expr(e, *line, &inner, out),
