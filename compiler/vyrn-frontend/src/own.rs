@@ -1648,13 +1648,71 @@ thread_local! {
 
 impl<'a> Memo<'a> {
     /// Hold one analysis of `program` until the guard is dropped.
+    ///
+    /// The load has already made that analysis — the ownership stage judges
+    /// every program it checks (RFC-0125 §3 M3, the accumulation slice) — so
+    /// the guard ADOPTS it rather than making a second one, which is what keeps
+    /// the count at "one analysis per build". See [`offer`] for why the offered
+    /// answer is this program's.
     pub fn open(program: &'a Program) -> Memo<'a> {
         MEMO_FOR.with(|p| p.set(program as *const Program as usize));
-        MEMO.with(|m| *m.borrow_mut() = None);
+        MEMO.with(|m| *m.borrow_mut() = take_offer(program));
         Memo {
             program: std::marker::PhantomData,
         }
     }
+}
+
+thread_local! {
+    /// The analysis the ownership stage made during the load, and the address
+    /// of the function table it was made for. See [`offer`].
+    static OFFERED: std::cell::RefCell<Option<(usize, Ownership)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The key an offer is filed under: the program's function table, which is a
+/// heap buffer the load allocates and `load_warned` MOVES rather than
+/// reallocates, so it is the one thing about a program that is the same before
+/// and after it is handed to a tool.
+fn table_key(program: &Program) -> usize {
+    program.functions.as_ptr() as usize
+}
+
+/// Offer the analysis of `program` to whoever loaded it — RFC-0125 §3 M3, the
+/// accumulation slice.
+///
+/// The ownership stage runs the placer to ask the kernel, and that IS the
+/// analysis every engine wants next. Without the offer the tool analysed a
+/// second time (`vyrn check site/export.vyrn`, 8.5 s to 11.7 s), because
+/// [`Memo`] keys on the program's own address and `load_warned` moves the
+/// program out.
+///
+/// Two things make the offer this program's and no other's. It is filed at the
+/// END of the one stage every load runs, so the slot holds the LAST program
+/// checked, which is the root the load is about to return; a generator's own
+/// load files earlier and is overwritten. And it is filed under [`table_key`],
+/// which the taker checks, so a tool that loaded nothing takes nothing. The
+/// slot is emptied when it is taken and when the next load files over it.
+pub fn offer(program: &Program, o: Ownership) {
+    OFFERED.with(|s| *s.borrow_mut() = Some((table_key(program), o)));
+}
+
+/// Withdraw an offer — the program it was made for is not being handed on, so
+/// nothing may take it and its function table is about to be freed.
+pub fn forget_offer() {
+    OFFERED.with(|s| *s.borrow_mut() = None);
+}
+
+/// The offered analysis, if it was made for `program`.
+fn take_offer(program: &Program) -> Option<Ownership> {
+    OFFERED.with(|s| {
+        let mine = s
+            .borrow()
+            .as_ref()
+            .is_some_and(|(k, _)| *k == table_key(program));
+        mine.then(|| s.borrow_mut().take().map(|(_, o)| o))
+            .flatten()
+    })
 }
 
 impl Drop for Memo<'_> {
@@ -2371,6 +2429,31 @@ pub fn install_arm_rows(f: ArmRows) {
 /// the core states no answer.
 pub fn core_arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
     ARM_ROWS.get().and_then(|f| f(key, arm))
+}
+
+/// The hard refusals the kernel made about the program the placer just judged,
+/// drained, as diagnostics — RFC-0125 §3 M3, the accumulation slice.
+///
+/// The third slot of the same shape as [`Placer`] and [`ArmRows`], and for the
+/// same reason: the kernel lives in `vyrn-lower`, this crate sits below it, and
+/// a refusal has to reach the one list a file's refusals come out in
+/// ([`crate::movecheck::refusals`]). Draining is the point — the loader runs a
+/// generator by loading a whole program of its own, and each such load takes
+/// its own refusals with it, so what is left is this program's.
+pub type Refusals = fn() -> Vec<crate::diagnostics::Diagnostic>;
+
+static REFUSALS: std::sync::OnceLock<Refusals> = std::sync::OnceLock::new();
+
+/// Install the kernel's refusal drain. The first installation wins.
+pub fn install_refusals(f: Refusals) {
+    let _ = REFUSALS.set(f);
+}
+
+/// What the kernel refuses about the program just analysed. Empty where
+/// nothing is installed — a host that never linked the lowering, or
+/// `VYRN_NO_KERNEL=1`, which the drain itself answers for.
+pub fn kernel_refusals() -> Vec<crate::diagnostics::Diagnostic> {
+    REFUSALS.get().map(|f| f()).unwrap_or_default()
 }
 
 /// RFC-0114 untake: the bindings whose value was taken and then provably

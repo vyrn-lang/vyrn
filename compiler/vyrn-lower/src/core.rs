@@ -3572,6 +3572,34 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
 }
 
+/// The same refusals as `movecheck`-stage diagnostics, deduplicated, for the
+/// one list a file's refusals come out in
+/// (`vyrn_frontend::movecheck::refusals`, RFC-0125 §3 M3, the accumulation
+/// slice). Installed into `own::analyze`'s slot by [`crate::install`].
+///
+/// A refusal reaches the same rule through more than one instance of the same
+/// generic body, and a reader is owed one sentence per program mistake, so the
+/// file, the line and the message are the identity. `file` is `None` for the
+/// root module, which is what tells `vyrn fix` an edit is its to make. Ordering
+/// is the caller's: it orders the two passes' lists together.
+pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+    if !refuses() {
+        let _ = take_refusals();
+        return Vec::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    take_refusals()
+        .into_iter()
+        .filter(|r| seen.insert((r.file.clone(), r.line, r.message.clone())))
+        .map(|r| {
+            let mut d =
+                vyrn_frontend::diagnostics::Diagnostic::error(r.line, 0, "movecheck", r.message);
+            d.file = r.file;
+            d
+        })
+        .collect()
+}
+
 /// RFC-0125 M3, first slice: the releases the plan did not place, placed.
 ///
 /// For every function instance the core can be built for, the kernel walks

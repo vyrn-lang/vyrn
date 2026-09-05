@@ -44,6 +44,11 @@ pub fn install() {
     // answer off the core through this slot, because `vyrn-frontend` sits
     // below this crate and cannot call into it.
     vyrn_frontend::own::install_arm_rows(core::arm_rows);
+    // RFC-0125 §3 M3, the accumulation slice: the kernel's own refusals into
+    // the one list a file's refusals come out in, so a rule that has left
+    // `movecheck.rs` is stated wherever that list is read — `vyrn check`, the
+    // editor, `vyrn fix`.
+    vyrn_frontend::own::install_refusals(core::refusal_diagnostics);
     // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);

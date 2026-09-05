@@ -36,14 +36,13 @@
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
 //! 28 and 06, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
 //! two must still agree. The row is what stops the sentence moving after the
-//! deletion, so it stays in the census. Rows 20 and 21 read `Kernel::Same`
-//! and their sites STAYED. `examples/mustuse_abandoned.vyrn`, which is not in
-//! this file's corpus, said why: the two passes worded an undeclared `self`
-//! differently and ordered a file's refusals differently. Both are closed
-//! (RFC-0125 §3 M3, the corpus slice) and the sites stay all the same, because
-//! that program is refused by the must-use walk too — and the kernel is asked
-//! only of a program the checker ACCEPTED, so a rule that left would take its
-//! sentence out of that file altogether.
+//! deletion, so it stays in the census.
+//!
+//! A census row is one program with one error in it, which is what makes it a
+//! census and what it cannot see. Accumulation — a file with two kinds of error
+//! — is pinned separately, below the rows: see
+//! [`a_file_with_a_must_use_error_still_gets_its_ownership_refusals`] and
+//! [`the_kernel_does_not_say_again_what_the_checker_said_about_the_same_binding`].
 
 use std::path::{Path, PathBuf};
 
@@ -935,6 +934,78 @@ fn the_counterexamples_as_a_table() {
 }
 
 // ---------------------------------------------------------------------------
+// Accumulation (RFC-0125 §3 M3, the accumulation slice).
+//
+// The two passes are one list, and the two programs below are the pair that
+// priced it. A file with a must-use error AND an ownership one used to be
+// asked of the kernel not at all, so a rule that left took its sentence out of
+// that file rather than moving it; and a plain merge said one mistake twice.
+// Both are pinned here because both are invisible in a program with one error
+// in it, which every census row is.
+// ---------------------------------------------------------------------------
+
+/// Every diagnostic a file earns, one per `file:line:col:` head.
+fn heads(dir: PathBuf, file: &str) -> Vec<String> {
+    let path = dir.join(file);
+    let out = vyrn().arg("check").arg(&path).output().expect("vyrn check");
+    String::from_utf8_lossy(&out.stderr)
+        .replace("\r\n", "\n")
+        .lines()
+        .filter(|l| !l.starts_with(' '))
+        .map(|l| split_head(l).1)
+        .collect()
+}
+
+/// A file with two kinds of error in it gets both, and a rule that leaves
+/// `movecheck.rs` keeps its sentence there.
+///
+/// `examples/mustuse_abandoned.vyrn` is the only program of the corpus that
+/// breaks a must-use obligation AND an ownership rule. The must-use walk is in
+/// `movecheck.rs` too, so the load used to fail before the kernel was ever
+/// asked: rows 20 and 21 were licensed by the corpus and could not leave,
+/// because leaving would have REMOVED their two sentences from this file
+/// instead of moving them. Six diagnostics, and the two the rules give are
+/// named.
+#[test]
+fn a_file_with_a_must_use_error_still_gets_its_ownership_refusals() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples")
+        .canonicalize()
+        .unwrap();
+    let got = heads(dir, "mustuse_abandoned.vyrn");
+    assert_eq!(got.len(), 6, "{got:#?}");
+    assert!(
+        got.iter().any(|d| d
+            == "`ops` may not be dropped — it is a second name for the `read` parameter `self`"),
+        "{got:#?}"
+    );
+    assert!(
+        got.iter()
+            .any(|d| d == "`b` is dropped here but was already consumed by `finish(..)` on line 60"),
+        "{got:#?}"
+    );
+}
+
+/// One mistake gets one sentence, whichever pass states it.
+///
+/// The kernel refuses `r31`'s second `close(s)` as a use after a take, and the
+/// must-use walk refuses `s` as an obligation discharged twice. They are one
+/// mistake, and the checker never printed both — `examples/expected/*.stderr`
+/// was recorded before the first rule left this file and holds one sentence for
+/// each such program. So the driver drops a kernel refusal about a binding the
+/// file already refuses. Measured over the corpus, this is what six programs
+/// turn on, `r31` among them.
+#[test]
+fn the_kernel_does_not_say_again_what_the_checker_said_about_the_same_binding() {
+    let got = heads(dir(), "r31_stream_disposed_twice.vyrn");
+    assert_eq!(
+        got,
+        vec!["`s` is a `Stream` and is disposed more than once".to_string()],
+        "{got:#?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The structural census of `movecheck.rs` (RFC-0125 §3 M3, the checker's
 // deletion path).
 //
@@ -1444,7 +1515,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2375),
         ("a fix menu", 73),
-        ("shared machinery", 3671),
+        ("shared machinery", 3762),
         ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");

@@ -856,14 +856,105 @@ fn projection_call(name: &str) -> bool {
 /// line keep the walk's order, which is why the sort is stable.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
     let mut diags = run(program, Want::Check).diags;
+    in_source_order(&mut diags);
+    diags
+}
+
+/// Put a file's refusals in the order the source states them — see
+/// [`check_accum`], which is where the rule is written down.
+fn in_source_order(diags: &mut [Diagnostic]) {
     let mut files: Vec<Option<String>> = Vec::new();
-    for d in &diags {
+    for d in diags.iter() {
         if !files.contains(&d.file) {
             files.push(d.file.clone());
         }
     }
     diags.sort_by_key(|d| (files.iter().position(|f| *f == d.file).unwrap_or(0), d.line));
+}
+
+/// **Every ownership refusal a program earns, the checker's and the kernel's,
+/// as ONE list** — RFC-0125 §3 M3, the accumulation slice. The one driver, and
+/// the only entry point a tool should use: `vyrn check` and the editor call it,
+/// so a rule that has left this file is stated in both.
+///
+/// Three rules make the list, and each of them is a defect that was measured.
+///
+/// 1. **The kernel judges every program the core can lower**, not only one the
+///    checker accepted. It used to be asked after the load returned `Ok`, so a
+///    file with a must-use error and a use after a take printed the checker's
+///    sentence beside the must-use one — and would have printed NEITHER the day
+///    the rule left, because a deleted rule with no second statement removes the
+///    sentence rather than moving it. `examples/mustuse_abandoned.vyrn` is that
+///    file. The core lowers every body now, so the condition is the one the
+///    lowering itself has: the program type-checks, which is what the callers
+///    gate on.
+/// 2. **The kernel speaks about a binding the checker was silent about, and
+///    nowhere else.** Where the checker spoke, its sentence stands — at its
+///    line, with its menu, in the wording the census pins. This is the rule
+///    that keeps the merge from ADDING: measured over the corpus, six programs
+///    gain a second sentence about a binding the checker had already refused,
+///    and every one of them is one mistake said twice — `xs` moved into
+///    `fromArray(..)` and then read, refused by the checker at the move and by
+///    the kernel at the read; a `Task` joined twice, refused as a must-use
+///    obligation discharged twice and as a use after a take. The checker never
+///    printed those pairs (`examples/expected/*.stderr` was recorded before
+///    the first rule left and holds one sentence each), so printing them now
+///    would be new noise and not a restored refusal. So a kernel refusal about
+///    a binding this file already refuses is dropped, and so is one at a line
+///    it already refuses.
+/// 3. **The order is the source's**, for the whole list at once — the rule
+///    [`check_accum`] states, applied after the two passes are one.
+///
+/// The cost of rule 2, stated so the next reader does not have to measure it
+/// again: a binding gets ONE refusal from these two passes together. Where the
+/// checker refuses a binding for one reason and the kernel would refuse it for
+/// another, the reader is told once. That is the conservative direction — the
+/// program is refused either way, and no rule that leaves this file can make
+/// a binding silent.
+///
+/// `VYRN_NO_MOVECHECK=1` stands the checker aside so the kernel's own sentence
+/// is reachable, which is the licence table's instrument, and it belongs here
+/// now that this is the only place both passes are asked.
+pub fn refusals(program: &Program) -> Vec<Diagnostic> {
+    let mut diags = if std::env::var("VYRN_NO_MOVECHECK").is_ok_and(|v| v == "1") {
+        Vec::new()
+    } else {
+        run(program, Want::Check).diags
+    };
+    // Runs the placer, which builds and judges a core body for every instance
+    // — under the ownership memo this is the analysis the build already made.
+    crate::own::offer(program, crate::own::analyze(program));
+    let mut said: HashSet<(Option<String>, String)> = HashSet::new();
+    let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
+    for d in &diags {
+        lines.insert((d.file.clone(), d.line));
+        if let Some(s) = subject(&d.message) {
+            said.insert((d.file.clone(), s.to_string()));
+        }
+    }
+    diags.extend(crate::own::kernel_refusals().into_iter().filter(|d| {
+        !lines.contains(&(d.file.clone(), d.line))
+            && !subject(&d.message).is_some_and(|s| said.contains(&(d.file.clone(), s.to_string())))
+    }));
+    in_source_order(&mut diags);
     diags
+}
+
+/// The binding a refusal is about: the root of the first path its message
+/// quotes.
+///
+/// A read of the sentence rather than a field beside it, because both passes
+/// already write the subject first and in backticks — ``` `b` is dropped here
+/// ```, ``` `s.byteLength` is used here ```, ``` module state `names` may not
+/// ``` — and a field would have to be filled at every one of the refusal sites
+/// in this file and in the kernel, which is two lists to keep in step instead
+/// of none. A message that quotes nothing has no subject and is never
+/// suppressed.
+fn subject(message: &str) -> Option<&str> {
+    let rest = message.split_once('`')?.1;
+    let path = rest.split_once('`')?.0;
+    let root = root_of(path);
+    (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
 }
 
 /// Every place rule 2 refuses a **store** of a borrow, out of `program`.
