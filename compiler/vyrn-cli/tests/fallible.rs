@@ -99,12 +99,20 @@ fn rejects(name: &str, src: &str, needle: &str) {
 /// because `?` copies the whole sum instead of taking it apart, so a failing
 /// variant with a payload arrives at the caller as itself. Rust routes exactly
 /// this through `FromResidual` and rebuilds it.
+///
+/// `h.copy()?` rather than `h?`, and the `.copy()` is the rule rather than a
+/// detour: the failing path RETURNS the operand, and `h` is a `read` parameter
+/// the caller still owns, so RFC-0089 rule 3 offers `consume h` or `h.copy()`
+/// and nothing else. The copy is what `examples/fallible.vyrn` gets for free by
+/// writing `fetch(code)?` over a temporary. What the test asserts is untouched:
+/// the sum still propagates whole, payload and all (RFC-0125 §3 M3, the
+/// by-default sweep, the programs tests write).
 #[test]
 fn a_failing_variant_propagates_with_its_payload_intact() {
     let src = format!(
         "{PRELUDE}
 fn pass(h: Http) -> Http {{
-    let b = h?
+    let b = h.copy()?
     return Body(\"[\" + b + \"]\")
 }}
 
@@ -127,6 +135,10 @@ fn main() -> Int64 {{
 /// M1 and M2 compose with M3 without anything being said about it: the impl head
 /// binds `T`, `Output` is that same `T`, and the operator monomorphizes per
 /// payload type the way any generic call does.
+///
+/// `s.copy()?` for the reason above, at both payload types: `Slot<String>` owns
+/// heap and `Slot<Int64>` does not, and rule 3 asks the question of the
+/// parameter rather than of the payload.
 #[test]
 fn a_generic_impl_serves_every_payload_type() {
     let src = "\
@@ -149,12 +161,12 @@ impl<T> Fallible for Slot<T> {
 }
 
 fn twice(s: Slot<Int64>) -> Slot<Int64> {
-    let v = s?
+    let v = s.copy()?
     return Full(v * 2)
 }
 
 fn shout(s: Slot<String>) -> Slot<String> {
-    let v = s?
+    let v = s.copy()?
     return Full(v + \"!\")
 }
 

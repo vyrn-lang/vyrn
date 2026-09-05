@@ -102,8 +102,10 @@ export fn createPaste(req: CreateReq) -> PasteResult {
     let id = deriveId(req.body, req.title)
     store.pastes.push(Paste { id: id, title: req.title.copy(), body: req.body.copy(), lang: req.lang.copy(), created: created })
     // The counter is now just a total-created tally (no longer the stamp source).
-    // Module-state's validated `Created` field takes an already-typed value.
-    let bumped: Created = store.counter + 1
+    // Named through `Created`'s own constructor, which is where the `where`
+    // predicate runs (RFC-0125 section 3 M6): the boundary would run it either
+    // way, and writing it makes the producer the one the judgment names.
+    let bumped = Created(store.counter + 1)
     store.counter = bumped
     persist.saveStore(snapshot())
     // The just-created paste is the one we appended — the last element. (Two

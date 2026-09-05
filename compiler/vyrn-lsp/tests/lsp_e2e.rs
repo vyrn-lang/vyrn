@@ -5459,3 +5459,86 @@ fn a_pin_the_build_refuses_is_refused_in_the_editor() {
     );
     let _ = client.child.kill();
 }
+
+// ===========================================================================
+// The editor asks the kernel — RFC-0125 §3 M3, the accumulation slice.
+// ===========================================================================
+
+/// A rule that has LEFT `movecheck.rs` is still shown in the editor, in the
+/// same words `vyrn check` uses.
+///
+/// Seven rules are stated by the kernel alone. `vyrn-lsp` depended only on
+/// `vyrn-frontend`, and the kernel lives in `vyrn-lower`, so every one of them
+/// went silent here the day it left: the editor accepted a program the build
+/// refuses. Row 12 of the refusals census is the pin — module state handed to
+/// a `consume` parameter — and the assertion is the TEXT, because a sentence
+/// that reaches the editor in other words is a second rule.
+#[test]
+fn a_rule_that_left_the_checker_is_still_shown_in_the_editor() {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../vyrn-cli/tests/unlicensed/u12_module_state_to_a_consume_parameter_heapless.vyrn"
+    ));
+    let src = std::fs::read_to_string(path).expect("row 12's program should exist");
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&path), "vyrn", &src);
+    let diags = read_diags_for(&mut client, "u12_module_state");
+    let list = diags["params"]["diagnostics"].as_array().unwrap();
+    let said: Vec<&str> = list.iter().filter_map(|d| d["message"].as_str()).collect();
+    assert_eq!(
+        said,
+        vec![
+            "module state `g` may not be passed to a `consume` parameter via `take(..)` \
+             — nothing may take ownership of module state (it lives for the whole module \
+             and is never dropped)"
+        ],
+        "the editor says what `vyrn check` says"
+    );
+    assert_eq!(list[0]["range"]["start"]["line"].as_u64(), Some(10));
+    let _ = client.child.kill();
+}
+
+/// What one keystroke costs on the site's own modules.
+///
+/// The driver asks the kernel of every program the core can lower, and the
+/// editor re-checks on every edit, so the measurement that matters is a
+/// `didChange` to `publishDiagnostics` round trip on a real file. The budget is
+/// the 97 ms one (RFC-0084).
+///
+/// `#[ignore]`d: it is a measurement, not an assertion.
+/// `cargo test --manifest-path compiler/vyrn-lsp/Cargo.toml --release --
+/// --ignored --nocapture keystroke_cost`
+#[test]
+#[ignore]
+fn keystroke_cost_on_the_sites_own_modules() {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    for name in ["bench.vyrn", "guide.vyrn", "chart.vyrn", "docs.vyrn"] {
+        let path = root.join("site/app").join(name);
+        let src = std::fs::read_to_string(&path).expect("a site module");
+        let uri = file_uri(&path);
+        let mut client = rfc33_client();
+        did_open(&mut client, &uri, "vyrn", &src);
+        let _ = read_diags_for(&mut client, name);
+
+        let n = 10;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let text = format!("{src}\n// {i}\n");
+            client.send(&serde_json::json!({
+                "jsonrpc": "2.0", "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": { "uri": uri, "version": 2 + i },
+                    "contentChanges": [ { "text": text } ]
+                }
+            }));
+            let _ = read_diags_for(&mut client, name);
+        }
+        let per = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        println!(
+            "keystroke {name}: {per:.1} ms over {} lines",
+            src.lines().count()
+        );
+        let _ = client.child.kill();
+    }
+}

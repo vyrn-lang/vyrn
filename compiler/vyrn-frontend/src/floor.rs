@@ -10,37 +10,58 @@
 //! requirement(closure(entry)) ⊆ capabilities(target)
 //! ```
 //!
-//! **Presence, not reachability.** A module REQUIRES `fs` because a call to
-//! `readFile` is written in it, not because that call runs. The check must not
-//! depend on control flow, and M0's census found the shipped runtime already
-//! behaves this way: under wasmtime an `extern` import fails at INSTANTIATION,
-//! so a program that never reaches the call still cannot start.
+//! **A carrier is a call, and one declaration.** The scan below FINDS every
+//! carrier and writes every refusal: the carrier it quotes and the line it
+//! quotes are the scan's. The VERDICT on a call is the effect judgment's
+//! (RFC-0125 §2.2), which can CLEAR a carrier and never add one, so a call no
+//! instance of the module reaches is not refused. That is reachability
+//! (RFC-0125 §3 M6, finding 8), and the artifact agrees: the direct backend
+//! (RFC-0077) emits an `extern` import only for a call it reaches, so a floor
+//! that refused an unreached declaration refused a program whose artifact
+//! never asks the host for anything (finding 7, decided in the sixth slice).
+//! The one carrier no effect set holds is the `logging { sink: file(..) }`
+//! DECLARATION, and [`carried`] decides it alone.
 //!
 //! **The vocabulary is four capabilities** — [`Capability::Fs`],
-//! [`Capability::Stdin`], [`Capability::Args`], [`Capability::Extern`]. The
+//! [`Capability::Stdin`], [`Capability::Args`], [`Capability::Extern`] — and
+//! it is the lattice's rows read through [`Capability::of`], not a second
+//! list. The
 //! universal reaches of M0's table (stdout/stderr, the clock, entropy, threads)
 //! are not tracked at all: every target answers yes, so a row for them would say
-//! nothing. `listDir` and `serveStream` are not tracked either, and for the
-//! opposite reason — M0's finding 5 — no compiled target has them, so they keep
-//! the refusals they already have (a missing lowering, a runtime trap) rather
-//! than becoming a per-target row that is `no` three times.
+//! nothing. `serveStream` is not tracked either, and for the opposite reason —
+//! M0's finding 5 — no compiled target has it, so it keeps the runtime trap it
+//! already has rather than becoming a per-target row that is `no` three times.
+//! `listDir` was in the same case until RFC-0125 M5 lowered it over
+//! `fd_readdir`: a WASI host lists, a page answers `BADF`, so it is an `fs`
+//! carrier like `readFile` (RFC-0125 §3 M6 finding 6).
 
 use crate::artifacts::{Artifact, ArtifactMap, Target};
 use crate::ast::{LogSink, Program};
 use crate::diagnostics::Diagnostic;
 
 /// A way out of the program that some target lacks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Capability {
     /// The filesystem: `readFile`, `readFileBytes`, `writeFile`,
-    /// `writeFileBytes`, `renameFile`, `fsyncFile`, and the
-    /// `logging { sink: file(..) }` declaration.
+    /// `writeFileBytes`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds`
+    /// — all eight judged — and the `logging { sink: file(..) }` declaration,
+    /// which is no call and stays the pass's.
+    ///
+    /// `fsyncFile` is in this row rather than one of its own. M0 split it out
+    /// because it behaves differently (the direct backend has no lowering for
+    /// it, so a wasm build is refused outright), but that is a missing
+    /// lowering — a filed regression — and not a second capability. The floor
+    /// names the capability; the backend keeps its own refusal. `listDir` and
+    /// `listDirKinds` are the same case on the native target
+    /// (`NATIVE_UNSUPPORTED`), and on a page they degrade to the canonical
+    /// `Err` the floor exists to refuse.
     Fs,
     /// Standard input: `readLine`.
     Stdin,
     /// The command line: `args`.
     Args,
-    /// A host function imported by name: an `extern fn` DECLARATION.
+    /// A host function imported by name: a CALL to an `extern fn` import
+    /// (RFC-0125 §3 M6, sixth slice, finding 7 — it was the declaration).
     Extern,
 }
 
@@ -95,6 +116,34 @@ impl Capability {
             Capability::Extern => "no host to import from",
         }
     }
+
+    /// The capability an effect needs, or `None` when the effect is no
+    /// capability of this vocabulary.
+    ///
+    /// This is the floor's whole vocabulary, and it is the LATTICE's rows read
+    /// through one match rather than a second list of builtin names (RFC-0125
+    /// §3 M6, sixth slice). `fs` is three effect rows. `None` covers the two
+    /// opposite cases RFC-0103 M2 records: an effect every target has —
+    /// `alloc`, `write-output`, the clock, entropy, `spawn`, `trap` — so a row
+    /// for it would refuse nothing; and one no compiled target has — `serve` —
+    /// or that exists only in the generator — `gen-only`.
+    pub fn of(e: crate::effects::Effect) -> Option<Capability> {
+        use crate::effects::Effect;
+        Some(match e {
+            Effect::FsRead | Effect::FsWrite | Effect::FsList => Capability::Fs,
+            Effect::ReadInput => Capability::Stdin,
+            Effect::Args => Capability::Args,
+            Effect::Extern => Capability::Extern,
+            Effect::Alloc
+            | Effect::WriteOutput
+            | Effect::Clock
+            | Effect::Random
+            | Effect::Serve
+            | Effect::Spawn
+            | Effect::Trap
+            | Effect::GenOnly => return None,
+        })
+    }
 }
 
 /// The capabilities a target HAS. Rust constants, not configuration: this is the
@@ -121,25 +170,43 @@ pub struct Carried {
     /// 1-based line of the carrier, or `0` for a declaration the AST keeps no
     /// line for (the `logging` block).
     pub line: usize,
+    /// Whether the effect judgment answers for this carrier: true for a CALL,
+    /// false for a declaration. Set by the scan, which is the only place that
+    /// knows which it found (RFC-0125 §3 M6, sixth slice).
+    pub judged: bool,
 }
 
-/// `(builtin, capability)` — the calls that reach out of the program.
+/// The host imports `program` declares: an `extern fn` whose name is not one of
+/// RFC-0043's host-boundary externs.
 ///
-/// `fsyncFile` is in the `fs` row rather than a row of its own. M0 split it out
-/// because it behaves differently (the direct backend has no lowering for it, so
-/// a wasm build is refused outright), but that is a missing lowering — a filed
-/// regression — and not a second capability. The floor names the capability;
-/// the backend keeps its own refusal.
-const CALLS: &[(&str, Capability)] = &[
-    ("readFile", Capability::Fs),
-    ("readFileBytes", Capability::Fs),
-    ("writeFile", Capability::Fs),
-    ("writeFileBytes", Capability::Fs),
-    ("renameFile", Capability::Fs),
-    ("fsyncFile", Capability::Fs),
-    ("readLine", Capability::Stdin),
-    ("args", Capability::Args),
-];
+/// `extern fn` is two things and only one of them is a capability. M0's census
+/// missed it: `hostNowMillis` and its two neighbours are not host imports at
+/// all — the C runtime shim implements them on every target, which is why
+/// `std/time` is in every native server's closure and a clock example is a
+/// three-way parity citizen. An `export extern fn` is not here either: it has a
+/// body and is an ordinary function that is additionally callable from a page.
+pub fn extern_imports(program: &Program) -> std::collections::HashSet<String> {
+    program
+        .functions
+        .iter()
+        .filter(|f| f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none())
+        .map(|f| f.name.clone())
+        .collect()
+}
+
+/// The capability a call to `name` carries, if any — the one reading of a call
+/// site, which [`carried`] and `vyrn_lower::effects::reaches` both make.
+///
+/// A builtin carries what its lattice row carries ([`Capability::of`]). A call
+/// to a host import carries `extern`; `externs` is [`extern_imports`] for the
+/// program the call is in, because an import is a declaration of that program
+/// and no fixed list of names can hold it.
+pub fn call_carrier(name: &str, externs: &std::collections::HashSet<String>) -> Option<Capability> {
+    if let Some(c) = crate::effects::atom(name).and_then(Capability::of) {
+        return Some(c);
+    }
+    externs.contains(name).then_some(Capability::Extern)
+}
 
 /// Every capability `program` carries, in a stable order.
 ///
@@ -154,42 +221,22 @@ const CALLS: &[(&str, Capability)] = &[
 /// separate `Program` fields that no build walks. A shipped binary contains
 /// neither, so neither can make one need a capability.
 pub fn carried(program: &mut Program) -> Vec<Carried> {
-    fn visit(e: &mut crate::ast::Expr, out: &mut Vec<Carried>) {
+    let externs = extern_imports(program);
+    let visit = |e: &mut crate::ast::Expr, out: &mut Vec<Carried>| {
         let crate::ast::Expr::Call { name, line, .. } = e else {
             return;
         };
-        if let Some((_, cap)) = CALLS.iter().find(|(n, _)| n == name) {
+        if let Some(cap) = call_carrier(name, &externs) {
             out.push(Carried {
-                cap: *cap,
+                cap,
                 carrier: name.clone(),
                 line: *line,
+                judged: true,
             });
         }
-    }
+    };
 
     let mut out: Vec<Carried> = Vec::new();
-
-    // An `extern fn` IMPORT is carried by the DECLARATION, not by the call:
-    // under wasmtime the module with an unanswered import never instantiates, so
-    // a program that never calls it still cannot start (M0's finding 3). An
-    // `export extern fn` carries nothing — it has a body and is an ordinary
-    // function that is additionally callable from a page.
-    //
-    // RFC-0043's host-boundary externs carry nothing either, and M0's census
-    // missed it: `hostNowMillis` and its two neighbours are not host imports at
-    // all — the C runtime shim implements them on every target, which is why
-    // `std/time` is in every native server's closure and a clock example is a
-    // three-way parity citizen. `extern fn` is two things, and only one of them
-    // is a capability.
-    for f in &program.functions {
-        if f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none() {
-            out.push(Carried {
-                cap: Capability::Extern,
-                carrier: f.name.clone(),
-                line: f.line,
-            });
-        }
-    }
 
     // The one capability carried by a DECLARATION (M0's finding 4). It is here
     // because it is the one `fs` reach that degrades SILENTLY in a page: the
@@ -199,6 +246,7 @@ pub fn carried(program: &mut Program) -> Vec<Carried> {
             cap: Capability::Fs,
             carrier: format!("logging {{ sink: file(\"{path}\") }}"),
             line: 0,
+            judged: false,
         });
     }
 
@@ -247,6 +295,33 @@ pub type Graph = Vec<(String, Vec<String>, Vec<Carried>)>;
 /// SHORTEST one that reaches the offending module: the author never saw hop
 /// three, and showing them the longest way round would not help.
 pub fn objection(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Diagnostic> {
+    let (artifact, key, c, parent) = locate(modules, root, map)?;
+    Some(refusal(artifact, key, c, &parent, map))
+}
+
+/// What the floor would object to, without writing the diagnostic.
+///
+/// The loader asks before it refuses (RFC-0125 §3 M6, fourth slice): a row a
+/// judgment answers cannot be decided inside the load, because the judgment
+/// needs a checked program, so that objection is deferred to [`decide`] and
+/// every other one is made where it always was.
+pub fn objected(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Carried> {
+    locate(modules, root, map).map(|(_, _, c, _)| c.clone())
+}
+
+/// The artifact, the module, the carrier and each module's first parent — what
+/// both [`objection`] and [`objected`] read, walked once.
+#[allow(clippy::type_complexity)]
+fn locate<'a>(
+    modules: &'a Graph,
+    root: &'a str,
+    map: &'a ArtifactMap,
+) -> Option<(
+    &'a Artifact,
+    &'a str,
+    &'a Carried,
+    std::collections::HashMap<&'a str, &'a str>,
+)> {
     let artifact = map.artifact_for(root)?;
     let has = capabilities(artifact.target);
 
@@ -284,9 +359,124 @@ pub fn objection(modules: &Graph, root: &str, map: &ArtifactMap) -> Option<Diagn
         let Some(c) = carried.iter().find(|c| !has.contains(&c.cap)) else {
             continue;
         };
-        return Some(refusal(artifact, key, c, &parent, map));
+        return Some((artifact, key, c, parent));
     }
     None
+}
+
+/// A judgment that says which capability each module of a CHECKED program
+/// reaches — RFC-0125 §3 M6, fourth slice.
+///
+/// The effect judgment (RFC-0125 §2.2) is in `vyrn-lower`, which depends on
+/// this crate and cannot be named from it, so the shape is the placer's
+/// ([`crate::own::Placer`]): a function pointer the CLI installs at start-up.
+/// The module key is the load's, `""` for the root.
+pub type Judge = fn(&Program) -> Vec<(String, Capability)>;
+
+static JUDGE: std::sync::OnceLock<Judge> = std::sync::OnceLock::new();
+
+/// Install the judgment. The first installation wins; a second is ignored.
+pub fn install_judge(f: Judge) {
+    let _ = JUDGE.set(f);
+}
+
+/// `VYRN_NO_JUDGE=1` — the bisect knob that stands RFC-0125 M6's judgments
+/// aside. It still restores two things, and the sixth slice says which. The
+/// floor goes back to PRESENCE: the scan's carriers are refused whether or not
+/// an instance reaches them, inside the load and before every type error, which
+/// is the rule and the order of RFC-0103 M2. The generation fence goes back to
+/// its own list of two cells in `checker::gen_refused` (RFC-0125 §3 M6, fifth
+/// slice). One knob, because the two are one milestone and a bisect that needs
+/// two is a worse bisect.
+pub fn no_judge() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("VYRN_NO_JUDGE").is_ok_and(|v| v == "1"))
+}
+
+/// The installed judgment, unless [`no_judge`] stood it aside.
+fn judge() -> Option<Judge> {
+    if no_judge() {
+        return None;
+    }
+    JUDGE.get().copied()
+}
+
+/// Whether a judgment is installed and answers for this carrier.
+///
+/// The carrier and not the capability, because one capability has both kinds:
+/// `fs` is carried by CALLS a judgment decides and by the `logging { sink:
+/// file(..) }` DECLARATION, which is no effect and stays the pass's (RFC-0125
+/// §3 M6, finding 10). Judging by capability would defer the declaration's
+/// refusal to after the check for no gain.
+pub fn is_judged(c: &Carried) -> bool {
+    judge().is_some() && c.judged
+}
+
+/// A floor decision the load could not make, held until the program is checked.
+struct Pending {
+    graph: Graph,
+    root: String,
+    map: ArtifactMap,
+    origins: crate::origin::OriginMaps,
+}
+
+thread_local! {
+    static PENDING: std::cell::RefCell<Option<Pending>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Hold this load's floor decision for [`decide`]. Called by the loader in
+/// place of the refusal, and only when the objection is on a judged row.
+pub fn defer(graph: Graph, root: String, map: ArtifactMap, origins: crate::origin::OriginMaps) {
+    PENDING.with(|p| {
+        *p.borrow_mut() = Some(Pending {
+            graph,
+            root,
+            map,
+            origins,
+        })
+    });
+}
+
+/// Forget a held decision. The loader calls it at the start of every outermost
+/// load, so a deferral nobody checked cannot answer for the next program.
+pub fn forget() {
+    PENDING.with(|p| *p.borrow_mut() = None);
+}
+
+/// The floor's objection to a program whose row a judgment answers, made after
+/// the check — RFC-0125 §3 M6, fourth slice.
+///
+/// `None` for every load that decided for itself, which is every load whose
+/// first objection is not a judged row.
+///
+/// The judgment can only CLEAR a row: a module keeps its carrier when the
+/// judgment confirms the module reaches the capability, and loses it when no
+/// instance of that module does. That is presence giving way to reachability
+/// (RFC-0125 §3 M6 finding 8) for these rows and for nothing else, and the
+/// words of the refusal are still the scan's — the carrier it found and the
+/// line it found it on.
+pub fn decide(program: &Program) -> Option<Diagnostic> {
+    let mut p = PENDING.with(|p| p.borrow_mut().take())?;
+    let judge = judge()?;
+    let reached = judge(program);
+    for (key, _, carried) in &mut p.graph {
+        carried.retain(|c| {
+            !c.judged
+                || reached
+                    .iter()
+                    .any(|(m, rc)| *rc == c.cap && (m == key || (m.is_empty() && *key == p.root)))
+        });
+    }
+    let mut d = objection(&p.graph, &p.root, &p.map)?;
+    if d.file.as_deref() == Some(p.root.as_str()) {
+        d.file = None;
+    }
+    if !p.origins.is_empty() {
+        p.origins.remap(&mut d);
+    }
+    Some(d)
 }
 
 /// The diagnostic RFC-0103 §3 specifies: what was refused, the chain that
@@ -438,6 +628,8 @@ mod tests {
             ("readFileBytes(\"a\")", Capability::Fs),
             ("renameFile(\"a\", \"b\")", Capability::Fs),
             ("fsyncFile(\"a\")", Capability::Fs),
+            ("listDir(\"a\")", Capability::Fs),
+            ("listDirKinds(\"a\")", Capability::Fs),
             ("readLine()", Capability::Stdin),
             ("args()", Capability::Args),
         ] {
@@ -458,18 +650,27 @@ mod tests {
         assert!(caps("logging { sink: stdout }\nfn main() -> Int64 {\n    return 0\n}").is_empty());
     }
 
-    /// The DECLARATION carries `extern`, not the call: an unanswered import
-    /// stops instantiation before any line runs. An `export extern fn` has a
-    /// body and carries nothing.
+    /// The CALL carries `extern`, not the declaration — RFC-0125 §3 M6, sixth
+    /// slice, finding 7. The direct backend emits an import only for a call it
+    /// reaches, so a declaration nothing calls asks the host for nothing. An
+    /// `export extern fn` has a body and carries nothing at all.
     #[test]
-    fn an_extern_import_is_carried_by_its_declaration() {
+    fn an_extern_import_is_carried_by_the_call() {
         assert_eq!(
-            caps("extern fn jsAdd(a: Int64, b: Int64) -> Int64\nfn main() -> Int64 {\n    return 0\n}"),
+            caps(
+                "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\
+                 fn main() -> Int64 {\n    return jsAdd(1, 2)\n}"
+            ),
             vec![(Capability::Extern, "jsAdd".into())]
         );
         assert!(caps(
-            "export extern fn twice(a: Int64) -> Int64 {\n    return a + a\n}\n\
+            "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\
              fn main() -> Int64 {\n    return 0\n}"
+        )
+        .is_empty());
+        assert!(caps(
+            "export extern fn twice(a: Int64) -> Int64 {\n    return a + a\n}\n\
+             fn main() -> Int64 {\n    return twice(2)\n}"
         )
         .is_empty());
     }
@@ -515,6 +716,7 @@ mod tests {
                             cap: *cap,
                             carrier: carrier.to_string(),
                             line: 7,
+                            judged: true,
                         })
                         .collect(),
                 )

@@ -665,24 +665,19 @@ int __vyrn_write_file_bytes(const char* path, const char* data, unsigned long lo
 
 /* writeStdout (RFC-0111): raw bytes to fd 1, no newline, no formatting.
 
-   THE WINDOWS TRAP. C stdio opens stdout in TEXT mode, where fwrite turns a
-   0x0A into 0x0D 0x0A. For `print` that is the platform's own newline and it is
-   correct. For a packed pixel row it is corruption that no line-ending
-   normalisation can undo, because nothing downstream can tell which 0x0D 0x0A
-   was a real pair of pixels. So stdout goes to binary mode for the write and
-   back afterwards -- back, because a `print` after a `writeStdout` must still
-   get the platform's newline. Every other platform is binary already and the
-   guard compiles to nothing. */
+   It used to flush before and after every call and, on Windows, switch stdout
+   to binary mode and back around each one -- a system call or three per
+   write, which made the byte sink unusable for a 60-byte line (RFC-0125 §1,
+   the output-path trio). stdout is binary from `main` now, on every platform,
+   and the write is one buffered fwrite; stdio flushes at exit, and `print`
+   shares the buffer so the two keep their order.
+
+   The consequence, on purpose: `print` writes a bare 0x0A on Windows too,
+   which is what the interpreter and every other platform have always
+   written. The 0x0D 0x0A that text mode used to add was the one byte-level
+   difference between engines the parity harness had to normalise away. */
 void __vyrn_write_stdout(const char* data, unsigned long long len) {
-#if defined(_WIN32)
-    fflush(stdout);
-    int prev = _setmode(_fileno(stdout), _O_BINARY);
-#endif
     fwrite(data, 1, (size_t)len, stdout);
-    fflush(stdout);
-#if defined(_WIN32)
-    if (prev != -1) _setmode(_fileno(stdout), prev);
-#endif
 }
 
 /* writeFile: create/truncate + write all bytes. Status 0 ok / 1 io-error. A
@@ -1092,6 +1087,10 @@ extern int vyrn_entry(void);
 int main(int argc, char** argv) {
     __vyrn_argc = argc;
     __vyrn_argv = argv;
+#if defined(_WIN32)
+    /* Binary stdout, once: see __vyrn_write_stdout. */
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     int code = vyrn_entry();
     __vyrn_join_all();
     return code;
@@ -1107,7 +1106,7 @@ int main(int argc, char** argv) {
 ///
 /// Both halves belong to somebody, and neither is respelled here: the symbol is
 /// [`crate::extern_symbol`]'s (this crate emits the call that must resolve to
-/// it) and the wording is [`vyrn_frontend::interp::extern_unavailable`]'s (the
+/// it) and the wording is [`vyrn_frontend::trap::extern_unavailable`]'s (the
 /// interpreter raises it, and parity compares the two byte-for-byte). The driver
 /// used to write both by hand, third copies of each.
 ///
@@ -1139,7 +1138,7 @@ pub fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
         s.push_str(&format!(
             "void {sym}(void) {{ fputs(\"error: {msg}\\n\", stderr); exit(1); }}\n",
             sym = crate::extern_symbol(&f.name),
-            msg = vyrn_frontend::interp::extern_unavailable(&f.name),
+            msg = vyrn_frontend::trap::extern_unavailable(&f.name),
         ));
     }
     s
@@ -1326,6 +1325,13 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
     } else {
         "wasmtime"
     };
+    discovered_tool_from(start, Path::new(exe))
+}
+
+/// The `tools/` walk every discovered tool takes: the first `tools/*/<rel>` that
+/// exists, walking up from `start`, the entries of each `tools/` sorted so the
+/// pick is deterministic when several versions are unpacked side by side.
+fn discovered_tool_from(start: &Path, rel: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let tools = dir.join("tools");
         if !tools.is_dir() {
@@ -1338,7 +1344,7 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
         };
         let mut hits: Vec<PathBuf> = entries
             .flatten()
-            .map(|e| e.path().join(exe))
+            .map(|e| e.path().join(rel))
             .filter(|p| p.exists())
             .collect();
         hits.sort();
@@ -1348,6 +1354,95 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+/// The wasm2c route's tools (RFC-0125 §2.5, measured in §3 M1; PLAN-0125-runtime
+/// §6 step 3): `wasm2c` from a wabt release, with the wasm-rt headers and
+/// runtime sources that release lays out around it.
+///
+/// Discovered, never pinned, the way clang is: `$VYRN_WASM2C` names the
+/// executable, else the `tools/` walk finds `tools/wabt-*/bin/wasm2c`. The
+/// version is what `wasm2c --version` prints, recorded by `vyrn deps` beside
+/// clang's. CI has no wabt, so a consumer that finds nothing skips, as the
+/// native route skips without clang.
+pub struct Wasm2c {
+    pub exe: PathBuf,
+    pub version: String,
+    /// `include/`, where `wasm-rt.h` is.
+    pub include: PathBuf,
+    /// `share/wabt/wasm2c/`: `wasm-rt-impl.h`, `wasm-rt-impl.c` and
+    /// `wasm-rt-mem-impl.c`, compiled into every binary the route links.
+    pub runtime: PathBuf,
+    pub why: &'static str,
+}
+
+/// The wabt release layout around a `wasm2c` executable: `bin/wasm2c`,
+/// `include/wasm-rt.h`, `share/wabt/wasm2c/wasm-rt-impl.c`. An executable with
+/// no runtime beside it is `Err`, not "absent": the route cannot link without
+/// the runtime, and a silent fall-through would report the tool missing when
+/// it is there.
+pub fn wasm2c_from(start: &Path) -> Result<Option<Wasm2c>, String> {
+    let exe = if cfg!(windows) {
+        "wasm2c.exe"
+    } else {
+        "wasm2c"
+    };
+    let (exe, why) = match env_path("VYRN_WASM2C") {
+        Some(p) => (p, "override: environment"),
+        None => match discovered_tool_from(start, &Path::new("bin").join(exe)) {
+            Some(p) => (p, "discovered: tools/"),
+            None => return Ok(None),
+        },
+    };
+    let root = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let include = root.join("include");
+    let runtime = root.join("share").join("wabt").join("wasm2c");
+    if !include.join("wasm-rt.h").exists() || !runtime.join("wasm-rt-impl.c").exists() {
+        return Err(format!(
+            "the wasm2c at {} has no wabt release layout around it (include/wasm-rt.h and              share/wabt/wasm2c/wasm-rt-impl.c beside bin/); the route links that runtime",
+            exe.display()
+        ));
+    }
+    let version = Command::new(&exe)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| first_line(&o.stdout))
+        .unwrap_or_else(|| UNKNOWN_VERSION.to_string());
+    Ok(Some(Wasm2c {
+        exe,
+        version,
+        include,
+        runtime,
+        why,
+    }))
+}
+
+/// simde, the header library wasm2c's output includes for SIMD (RFC-0075's
+/// lanes are `v128` in the C): the directory that holds `simde/`, so that
+/// `-I<dir>` resolves `<simde/wasm/simd128.h>`. `$VYRN_SIMDE` names it, else
+/// the `tools/` walk finds `tools/simde/`. The version is not probed: a header
+/// library reports none, and the release is recorded in RFC-0125 §3 M1.
+pub fn simde_from(start: &Path) -> Option<(PathBuf, &'static str)> {
+    let marker = Path::new("simde").join("wasm").join("simd128.h");
+    if let Some(p) = env_path("VYRN_SIMDE").filter(|p| p.join(&marker).exists()) {
+        return Some((p, "override: environment"));
+    }
+    let hit = discovered_tool_from(start, &marker)?;
+    // Back from `simde/wasm/simd128.h` to the directory that holds `simde/`.
+    let dir = hit.ancestors().nth(3)?.to_path_buf();
+    Some((dir, "discovered: tools/"))
+}
+
+/// The WASI host the wasm2c route links (RFC-0125 §2.4's two-hundred-line
+/// host): the fifteen imports `direct.rs` declares, each doing what the CLI's
+/// embedded engine does in `wasmrun.rs`. `VYRN_W2C_HEADER` is defined by the
+/// driver to the header wasm2c wrote.
+pub const WASI_HOST_C: &str = include_str!("wasi_host.c");
 
 /// Turn a missing tool from a SKIP into a failure when `VYRN_REQUIRE_TOOLS` is
 /// set, and return it unchanged otherwise.
@@ -1729,7 +1824,7 @@ mod tests {
             "the stub must define the symbol codegen calls: {stubs}"
         );
         assert!(
-            stubs.contains(&vyrn_frontend::interp::extern_unavailable("jsBeep")),
+            stubs.contains(&vyrn_frontend::trap::extern_unavailable("jsBeep")),
             "the stub must print the interpreter's trap verbatim: {stubs}"
         );
         // RFC-0043 host-boundary externs are implemented by RUNTIME_SHIM on

@@ -111,7 +111,34 @@ fn main() -> Int64 {
         None => 0 - 1,
     }
     print("head \{got} \{none}")
+    // A join whose arms carry the SAME type in two SHAPES: an array VALUE in
+    // one arm and an array LITERAL in the other. `Array<String>` is
+    // `{ptr,len,cap}` and `["z"]` is `[1 x ptr]`, so a join that reads its type
+    // off an arm reads one of the two and the other arm feeds the merge a value
+    // of the wrong shape. Native refused to link this (`'%t20' defined with
+    // type '{ ptr, i64, i64 }' but expected '[1 x ptr]'`) and, with an EMPTY
+    // literal in the second arm, linked and printed a pointer where the String
+    // belonged. The interpreter and the wasm backend were right about all three
+    // spellings. The type is the checker's for the join, and every arm coerces
+    // into it.
+    let names: Array<String> = ["a", "b"]
+    let picked = match pick {
+        Some(n) => names,
+        None => ["z"],
+    }
+    print("picked \{picked.length} \{picked[0]}")
+    let branched = if picked.length > 1 { picked } else { ["y"] }
+    print("branched \{branched.length} \{branched[0]}")
+    // The empty literal is the silent half: `[]` has the growable shape
+    // already, so the merge linked and the ELEMENT type came from the arm that
+    // answered last.
+    let widened = match pick {
+        Some(n) => branched,
+        None => [],
+    }
+    print("widened \{widened.length} \{widened[0]}")
 
+    drop widened
     drop arr
     drop map
     drop small

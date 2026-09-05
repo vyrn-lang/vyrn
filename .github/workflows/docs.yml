@@ -1,0 +1,47 @@
+name: Docs
+
+# The one check that runs on EVERY pull request.
+#
+# `ci.yml` ignores `rfcs/**`, `**.md` and `editor/**`, so a pull request that
+# touches only a design record starts no CI run and reports no check at all.
+# `main` requires eleven checks (RFC-0125 M0), and a check that never reports
+# is a check that never passes. This workflow has no path filter, so it
+# reports on every pull request, docs-only ones included, and what it runs is
+# the gate those pull requests skipped: `rfcs/README.md` is derived from
+# `rfcs/`, or it is wrong (`compiler/vyrn-cli/tests/rfc_index.rs`).
+#
+# It does not make the eleven report. A docs-only pull request still shows
+# them as expected and never run; which checks `main` requires is a setting on
+# the repository, not a line here, and RFC-0125 M0 records the choice.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rfc-index:
+    name: the RFC index agrees with the directory
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: The RFC index gate
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test rfc_index

@@ -6,11 +6,12 @@
 //! each test compares the engine against the reference rather than against a
 //! transcript nobody would notice going stale.
 //!
-//! These are meaningful only when the binary is built with `--features
-//! wasm-gen` (and with a wasi sysroot present); without it both runs are the
-//! interpreter and the tests pass by agreeing with themselves. That is
-//! deliberate — the engine is optional, and a test that failed without it would
-//! make the default build red.
+//! `wasm-gen` is ON in the default build since RFC-0125 §3 M5's tenth slice, so
+//! these compare two engines rather than the interpreter with itself. They need
+//! no clang and no wasi sysroot: RFC-0076 M7 emits the generator's module
+//! directly. Under `--no-default-features` both runs are the interpreter and
+//! every assertion still holds, which is the shape a test of an optional engine
+//! has to have.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -317,21 +318,21 @@ fn reflection_outside_a_generator_is_still_the_same_error() {
     }
 }
 
-/// `listDir` is the one the checker does NOT gate, and both backends word it the
-/// same way.
+/// `listDir` is the one the checker does NOT gate: the native backend refuses
+/// it in a user's sentence, and the wasm target builds it.
 ///
 /// It has a runtime under `vyrn run` — the interpreter lists the real filesystem
 /// (`list_dir_is_not_generation_only`) — so the front end cannot refuse the call
-/// the way it refuses the three above. What is missing is a LOWERING, in the two
-/// compiling backends, so each refuses it itself. Before RFC-0096's addendum the
-/// direct backend said `direct backend: no lowering for the call 'listDir'` —
-/// this file's own words about its own gaps, in a user's diagnostic — where the
-/// text-IR backend already said the sentence below. One constant serves both now
-/// (`vyrn_codegen::LIST_DIR_NO_LOWERING`), so neither can drift.
+/// the way it refuses the three above. The direct backend lowers it over
+/// `fd_readdir` (RFC-0125 §3 M5; `examples/listdir.vyrn` pins the output). The
+/// text-IR backend has no lowering and says so itself, from
+/// `vyrn_codegen::LIST_DIR_NO_LOWERING` rather than in the emitter's own words
+/// about its own gaps (RFC-0096's addendum).
 #[test]
-fn list_dir_is_refused_in_the_same_words_by_both_backends() {
-    let want = "`listDir` runs in the interpreter / at generation time (RFC-0021); it has no \
-                native or wasm lowering in v1 — use it in a `gen fn` or under `vyrn run`";
+fn list_dir_is_refused_natively_and_built_for_wasm() {
+    let want = "`listDir` runs in the interpreter, at generation time and on the wasm target \
+                (RFC-0021, RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, \
+                under `vyrn run` or with `--target wasm`";
     let f = std::env::temp_dir().join(format!("vyrn_listdir_{}.vyrn", std::process::id()));
     std::fs::write(
         &f,
@@ -341,25 +342,33 @@ fn list_dir_is_refused_in_the_same_words_by_both_backends() {
          }\n",
     )
     .unwrap();
-    for target in [&[][..], &["--target", "wasm"][..]] {
-        let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-            .arg("build")
-            .arg(&f)
-            .args(target)
-            .output()
-            .unwrap();
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        assert!(!out.status.success(), "{target:?} compiled: {err}");
-        assert!(
-            err.contains(want),
-            "unexpected refusal for {target:?}: {err}"
-        );
-        assert!(
-            !err.contains("no lowering for the call"),
-            "the emitter's own words reached the user for {target:?}: {err}"
-        );
-    }
+    let native = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(&f)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&native.stderr).to_string();
+    assert!(!native.status.success(), "native compiled: {err}");
+    assert!(err.contains(want), "unexpected native refusal: {err}");
+    assert!(
+        !err.contains("no lowering for the call"),
+        "the emitter's own words reached the user: {err}"
+    );
+    let wasm = f.with_extension("wasm");
+    let built = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("build")
+        .arg(&f)
+        .args(["--target", "wasm", "-o"])
+        .arg(&wasm)
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "the wasm target refused `listDir`: {}",
+        String::from_utf8_lossy(&built.stderr)
+    );
     let _ = std::fs::remove_file(&f);
+    let _ = std::fs::remove_file(&wasm);
 }
 
 /// A value that has no splice rule in its hole's position aborts generation with
@@ -403,6 +412,78 @@ fn a_splice_with_no_rule_traps_identically() {
         String::from_utf8_lossy(&wasm.stderr).contains("not a valid non-keyword identifier"),
         "unexpected failure: {}",
         String::from_utf8_lossy(&wasm.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An accumulator whose FIRST value came out of a CALL, beside a second one
+/// spliced into a code quote.
+///
+/// `note` returns `""` — a data-segment literal — through a call the plan says
+/// transfers, so the accumulator's append shadow started at "this buffer is
+/// mine" and the first `+` grew the literal IN PLACE, over the next literal's
+/// header in the string pool. The header that literal then carried sent the
+/// next concatenation copying megabytes out of the data segment, which is how
+/// `std/graphql`'s `sdl` — written in exactly this shape — came back with its
+/// report spliced into the middle of the document and repeated four times in
+/// front of it. The flag is advisory now and the all-ones capacity decides
+/// (`std/runtime.vyrn`'s `strAppend`, and its copy in the textual backend).
+#[test]
+fn an_accumulator_seeded_by_a_call_does_not_grow_a_literal_in_place() {
+    let dir = std::env::temp_dir().join(format!("vyrn_m5_seeded_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "fn note(tag: String) -> String {\n\
+         \x20   if tag == \"loud\" {\n\
+         \x20       return \"// loud\\n\"\n\
+         \x20   }\n\
+         \x20   return \"\"\n\
+         }\n\
+         export gen fn mk(tag: String) -> String {\n\
+         \x20   let mut doc = \"# head\\n\"\n\
+         \x20   let mut notes = note(tag)\n\
+         \x20   doc = doc + \"type a\\n\"\n\
+         \x20   notes = notes + \"// the note\\n\"\n\
+         \x20   notes = notes + note(tag)\n\
+         \x20   return notes + render(vyrn\"export fn text() -> String { return \\{doc} }\")\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.vyrn"),
+        "import { mk } from \"./gen\"\n\
+         import { text } from mk(\"quiet\")\n\
+         fn main() -> Int64 { print(text()) return 0 }\n",
+    )
+    .unwrap();
+
+    let main = dir.join("main.vyrn");
+    let interp = emit_gen(&main, false);
+    let wasm = emit_gen(&main, true);
+    assert!(
+        interp.status.success() && wasm.status.success(),
+        "generation failed:\n{}{}",
+        String::from_utf8_lossy(&interp.stderr),
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    let out = String::from_utf8_lossy(&wasm.stdout).to_string();
+    assert_eq!(
+        String::from_utf8_lossy(&interp.stdout),
+        out,
+        "the wasm engine's emitted source diverged from the interpreter's"
+    );
+    // The document is the whole point: it is the accumulator's neighbour in the
+    // string pool, and it came back with the note in it.
+    assert!(
+        out.contains("return \"# head\\ntype a\\n\""),
+        "the spliced document is not intact:\n{out}"
+    );
+    assert_eq!(
+        out.matches("// the note").count(),
+        1,
+        "one note, once:\n{out}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -686,7 +767,7 @@ fn editing_a_generator_recompiles_its_artifact() {
 /// the guest is compiled by cranelift and a debug cranelift is the whole
 /// difference. Run it in release.
 #[test]
-#[ignore = "needs clang + wasi sysroot: cargo test -p vyrn-cli --release --features wasm-gen --test genwasm -- --ignored"]
+#[ignore = "compiles every generator in the corpus twice: cargo test -p vyrn-cli --test genwasm -- --ignored"]
 fn every_generator_example_emits_the_same_source_under_both_engines() {
     // Without the feature both columns are the interpreter and the whole thing
     // agrees with itself. Loudly, because a silent skip is exactly the failure

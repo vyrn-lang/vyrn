@@ -7,6 +7,8 @@
 //! these functions, so a behaviour that is wrong here is wrong in the editor and
 //! a behaviour that is right here only has wiring left to get wrong.
 
+mod common;
+
 use vyrn_frontend::contracts::{
     contract_completions, contract_fixes, contract_member_hover, contract_status, discovered_roles,
     edit_distance, load_contract, role_for, roles_from_manifest, synthesized_members, MemberStatus,
@@ -520,8 +522,7 @@ fn edit_distance_matches_the_vyrn_one() {
     let path = root.to_string_lossy().replace('\\', "/");
     let program = vyrn_frontend::load(&body, &path, &opts(), &Disk)
         .unwrap_or_else(|d| panic!("the cross-check program must compile: {d:?}"));
-    let disagreements =
-        vyrn_frontend::interp::run(&program).expect("the cross-check program must run");
+    let disagreements = common::run_compiled(&program).expect("the cross-check program must run");
     assert_eq!(
         disagreements, 0,
         "std/strings:editDistance and contracts::edit_distance disagree on {disagreements} of {} pairs",

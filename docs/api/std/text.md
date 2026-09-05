@@ -39,12 +39,14 @@ float route had to be a builtin. The string half needs no new view at all.
 is the validated inverse, so decoding is expressible today — which is why this
 file needs no compiler change of any kind, unlike `std/num`, which needed two.
 
-**The validator is not duplicated, it is inverted.** `stringFromBytes` walks
-Björn Höhrmann's DFA (`utf8d_table`, shared between the textual and direct
-wasm backends since RFC-0077 M2g) to decide validity and throws the
-codepoints away. `decodeUtf8` below decides the same question by first-byte
-dispatch and keeps them. The two must agree on every byte string, and the test
-asserts exactly that rather than trusting the tables to match.
+**The validator is not inverted any more, it is the same function.**
+`stringFromBytes` used to walk Björn Höhrmann's DFA in each engine and throw
+the codepoints away, while `decodeUtf8` decided the same question by
+first-byte dispatch and kept them — two statements the test compared. RFC-0125
+§3 M6's fifth slice made the check one Vyrn function every engine calls, so
+`stringFault` and `decodeUtf8` now share `utf8Width` and cannot disagree.
+`tests/text.rs` compares BOTH against Rust's `std::str::from_utf8` for that
+reason: an oracle inside this file would compare the file with itself.
 
 **One deliberate disagreement, and it is not about UTF-8.** `stringFromBytes`
 rejects an interior NUL *before* it looks at UTF-8 (RFC-0014's rule: a Vyrn
@@ -71,6 +73,54 @@ NOT a validator plus a decoder: the ranges that make a form overlong are the
 same ranges the codepoint arithmetic uses, so checking and building are one
 pass. Bails at the first bad byte — a partial decode has no caller, and
 `stringFromBytes`, the oracle, is all-or-nothing too.
+
+## utf8Width
+
+```vyrn
+fn utf8Width(b: Array<UInt8>, i: Int64) -> Int64
+```
+
+The width of the UTF-8 sequence that starts at `i` in `b`, or 0 when the
+bytes there start none — RFC-0125 §3 M6, the third judgment's fifth slice.
+
+**The one statement of what UTF-8 admits.** `decodeUtf8` above asks it and
+then does the codepoint arithmetic; `stringFault` below asks it and steps.
+Before this slice the same ranges were written four times: here, and once
+per engine behind `stringFromBytes` — Rust's `String::from_utf8` in the
+interpreter, Björn Höhrmann's DFA in the textual emitter's
+`@__vyrn_utf8valid`, and the same DFA again in `std/runtime`'s `utf8Valid`
+for the wasm route. The engines call this now and none of them decides.
+
+`w` is the width (0 = this byte starts no sequence) and `lo`/`hi` bound the
+FIRST continuation byte. Those bounds are the whole of the overlong and
+out-of-range story: 0xE0 demands 0xA0+ (below that the value fits in two
+bytes), 0xED stops at 0x9F (above it is a surrogate), 0xF0 demands 0x90+
+and 0xF4 stops at 0x8F (past U+10FFFF). A width of 0 covers 0x80..0xC1 (a
+lone continuation, and the two overlong two-byte leads) and 0xF5..0xFF.
+
+## stringFault
+
+```vyrn
+fn stringFault(b: Array<UInt8>) -> Int64
+```
+
+What is wrong with `b` if it were made into a `String`: 0 nothing, 1 a NUL
+byte, 2 not UTF-8 — RFC-0125 §3 M6, the third judgment's fifth slice.
+
+**This is the CHECK half of `stringFromBytes`, and all three engines call
+it.** The census's `string-nul` and `string-utf8` rows had three carriers
+because the check and the BUILD were one function per engine, and the build
+needs the raw-memory primitives `std/mem` fences. The check needs none: it
+reads bytes and answers a number. So it is ordinary Vyrn, reached the way
+`char-boundary` and `json-decode` are, and each engine keeps only its
+build.
+
+The NUL scan runs over the WHOLE array before the encoding is looked at,
+because RFC-0014 orders the two: a `String` is NUL-terminated, so bytes
+holding one are not representable rather than badly encoded, and
+`[0xFF, 0x00]` is a NUL error and not an encoding error. ASCII is stepped
+here rather than through `utf8Width`, so the digits `intStr` hands in cost
+no call.
 
 ## chars
 

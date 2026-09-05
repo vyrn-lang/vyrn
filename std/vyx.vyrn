@@ -1796,7 +1796,10 @@ export gen fn vyxCompileComponent(compName: String, source: String, dir: String)
     for r in consume roots {
         root = r
     }
-    let takesChildren = vyxUsesChildren([root])
+    // The node itself, not `[root]`: an array literal takes ownership of what
+    // it holds, so wrapping the root to read one flag off it moved the root
+    // into a temporary the call then released (RFC-0125 §3 M3).
+    let takesChildren = vyxNodeUsesChildren(root)
     return VyxComp {
         name: compName.copy(),
         fnName: fnName,
@@ -2679,13 +2682,13 @@ gen fn vyxMergeImports(comps: Array<VyxComp>) -> VyxMerge {
                     selCol.push(oC)
                     selCount.push(1)
                 } else {
-                    let mut cur = selNames[si]
+                    let mut cur = selNames[si].copy()
                     for nm in imp.names {
                         if includes(cur, nm) == false {
                             cur.push(nm.copy())
                         }
                     }
-                    selNames[si] = cur.copy()
+                    selNames[si] = cur
                     selCount[si] = selCount[si] + 1
                 }
             }
@@ -3140,7 +3143,7 @@ type VyxPageShape = { paramNames: Array<String>, paramTypes: Array<String>, hasL
 /// leading `export`. Unlike the `startsWith("fn load")` test it replaced, this
 /// requires the whole name, so `fn dataFor()` is not mistaken for `fn data()`.
 fn vyxIsDeclOf(t: String, name: String) -> Bool {
-    let bare = if t.startsWith("export ") { trim(vyxSlice(bytes(t), 7, bytes(t).length)) } else { t }
+    let bare = if t.startsWith("export ") { trim(vyxSlice(bytes(t), 7, bytes(t).length)) } else { t.copy() }
     return bare.startsWith("fn " + name + "(") || bare.startsWith("fn " + name + " (")
 }
 
@@ -3588,7 +3591,7 @@ fn vyxUpperFirst(s: String) -> String {
 /// A contract accessor's declaration line, rewritten to its private name and
 /// stripped of `export` — `export fn head() -> Head {` => `fn uiPgHead() -> Head {`.
 fn vyxRenameAccessor(t: String, name: String) -> String {
-    let bare = if t.startsWith("export ") { trim(vyxSlice(bytes(t), 7, bytes(t).length)) } else { t }
+    let bare = if t.startsWith("export ") { trim(vyxSlice(bytes(t), 7, bytes(t).length)) } else { t.copy() }
     let bb = bytes(bare)
     let open = vyxFind(bb, bytes("("), 0)
     if open < 0 {
@@ -3672,6 +3675,9 @@ fn vyxParseHead(body: String, srcFile: String) -> VyxHead {
             // blank / comment
         } else if t.startsWith("title:") {
             hasTitle = true
+            // A second `title:` line replaces the first, so the first is
+            // released here: a store leaves nothing behind (RFC-0125 §3 M3).
+            drop titleExpr
             titleExpr = trim(vyxSlice(bytes(t), 6, bytes(t).length))
         } else if t.startsWith("stylesheet ") {
             items.push(VyxHeadItem { kind: "stylesheet", expr: trim(vyxSlice(bytes(t), 11, bytes(t).length)) })
@@ -4224,7 +4230,7 @@ fn vyxEmitClientRender(hasLoad: Bool, paramNames: Array<String>, dataType: Strin
     // A loader page: decode the data (aliasing a generic spelling) and, for a
     // dynamic route, the params.
     let generic = dataType.contains("<")
-    let dataName = if generic { "UiClientData" } else { dataType }
+    let dataName = if generic { "UiClientData" } else { dataType.copy() }
     let mut out = ""
     if generic {
         out = "type UiClientData = " + dataType + "\n"

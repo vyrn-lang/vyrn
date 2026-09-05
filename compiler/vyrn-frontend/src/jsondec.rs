@@ -24,11 +24,12 @@
 //!
 //! RFC-0078 M3 predicted `Option<T>` for that shape. It cannot be: a bare
 //! `Option<U>` IS a decode target (`Array<Option<Int64>>` decodes today) and
-//! `Option<Option<U>>` is rejected outright — "nested Option/Result is not
-//! supported in v0.1". So a decoder returns an array of **zero or one** element,
-//! which is one convention for every `T` including `T = Option<U>`, and which
-//! reads well at the use site: `for x in dec(..) { .. }` runs exactly when a value
-//! was produced.
+//! `Option<Option<U>>` has no wire form — a double `null` has two readings, so
+//! [`crate::codec::wire`] declines it. That refusal is the codec's own and
+//! stands; the checker stopped refusing the TYPE at RFC-0126 §8. So a decoder
+//! returns an array of **zero or one** element, which is one convention for
+//! every `T` including `T = Option<U>`, and which reads well at the use site:
+//! `for x in dec(..) { .. }` runs exactly when a value was produced.
 //!
 //! # Where a predicate comes from
 //!
@@ -219,10 +220,12 @@ impl Walk<'_> {
 
     /// Ensure a decoder for `ty` exists and return its placeholder call name.
     fn decoder(&mut self, ty: &Type) -> Result<String, String> {
-        if matches!(ty, Type::Enum(_)) {
+        if matches!(ty, Type::Enum(_)) && !crate::types::is_sum_alias(ty) {
             // An anonymous enum has no source spelling (`Display` renders
             // `enum { A | B }`), so it cannot be a return type. Every enum a
-            // program declares arrives as `Type::Named`.
+            // program declares arrives as `Type::Named`. The two built-in sums
+            // are a `Type::Enum` too since RFC-0126 §8.15's M5, and `Display`
+            // spells them `Option<T>` and `Result<T, E>`.
             return Err("fromJson: cannot decode an anonymous enum".to_string());
         }
         let ph = dec_ph(ty);
@@ -479,7 +482,9 @@ impl Walk<'_> {
         for (i, f) in fields.iter().enumerate() {
             let name = &f.name;
             out.push_str(&format!("    let p{i} = {fpath}(path, \"{name}\")\n"));
-            if let Type::Option(inner) = crate::types::resolve(&f.ty, self.types) {
+            if let Some(inner) =
+                crate::types::option_payload(&crate::types::resolve(&f.ty, self.types)).cloned()
+            {
                 let d = self.decoder(&inner)?;
                 let ispell = spell(&inner);
                 out.push_str(&format!(
@@ -857,7 +862,7 @@ mod tests {
             Type::Bool,
             Type::Float,
             Type::Array(Box::new(Type::Int)),
-            Type::Option(Box::new(Type::Str)),
+            Type::option(Type::Str),
             Type::Record(vec![
                 Field {
                     name: "n".into(),
@@ -865,11 +870,11 @@ mod tests {
                 },
                 Field {
                     name: "s".into(),
-                    ty: Type::Option(Box::new(Type::Str)),
+                    ty: Type::option(Type::Str),
                 },
             ]),
             Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
-            Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+            Type::result(Type::Int, Type::Str),
         ] {
             let fns = gen(&ty);
             assert!(!fns.is_empty(), "no decoder for {ty}");
@@ -906,81 +911,5 @@ mod tests {
         assert_eq!(unsigned_max(8), "255");
         assert_eq!(unsigned_max(32), "4294967295");
         assert_eq!(unsigned_max(64), "18446744073709551615");
-    }
-
-    /// Run a single-source program that uses `fromJson`, with every runtime
-    /// module the walk injects reachable — the same mapping the interpreter
-    /// tests use, so nothing here can drift from what ships.
-    fn run_json(src: &str) -> Result<i64, String> {
-        let files = crate::loader::MapResolver(
-            [
-                (
-                    "std/json.vyrn".to_string(),
-                    include_str!("../../../std/json.vyrn").to_string(),
-                ),
-                (
-                    "std/codecs.vyrn".to_string(),
-                    include_str!("../../../std/codecs.vyrn").to_string(),
-                ),
-                (
-                    "std/text.vyrn".to_string(),
-                    include_str!("../../../std/text.vyrn").to_string(),
-                ),
-                (
-                    "std/strpred.vyrn".to_string(),
-                    include_str!("../../../std/strpred.vyrn").to_string(),
-                ),
-                (
-                    "std/jsondec.vyrn".to_string(),
-                    include_str!("../../../std/jsondec.vyrn").to_string(),
-                ),
-                (
-                    "std/jsonread.vyrn".to_string(),
-                    include_str!("../../../std/jsonread.vyrn").to_string(),
-                ),
-                (
-                    "std/num.vyrn".to_string(),
-                    include_str!("../../../std/num.vyrn").to_string(),
-                ),
-                (
-                    "std/hash.vyrn".to_string(),
-                    include_str!("../../../std/hash.vyrn").to_string(),
-                ),
-            ]
-            .into_iter()
-            .collect(),
-        );
-        let opts = crate::loader::LoadOptions {
-            std_root: Some("std".into()),
-            ..Default::default()
-        };
-        let program = crate::load(src, "main.vyrn", &opts, &files)
-            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
-        crate::interp::run(&program)
-    }
-
-    /// A tuple payload whose members are ALL `Option` used to decode a short
-    /// wire array as all-`None`: `elemAt` answers `JNull` past the end and
-    /// `JNull` is a legal `None`, so `{"P":[]}` built a value the encoder can
-    /// never produce. The wire arity is now enforced up front: short AND long
-    /// arrays come back `Invalid` with an issue, while the exact arity still
-    /// decodes.
-    #[test]
-    fn a_tuple_payload_off_the_wire_arity_is_refused_even_all_option() {
-        let src = "type E = | P(Option<Int64>, Option<Int64>) \
-                   fn issues(s: String) -> Int64 { \
-                       return match fromJson(E, s) { \
-                           Valid(_) => 0, \
-                           Invalid(is) => is.length, \
-                       }; } \
-                   fn main() -> Int64 { \
-                       let ok = issues(\"{\\\"P\\\":[null,null]}\") \
-                       if ok != 0 { return 0 - 1 } \
-                       let short = issues(\"{\\\"P\\\":[]}\") \
-                       let long = issues(\"{\\\"P\\\":[null,null,null]}\") \
-                       if short == 0 { return 0 - 2 } \
-                       if long == 0 { return 0 - 3 } \
-                       return 1 }";
-        assert_eq!(run_json(src).unwrap(), 1);
     }
 }

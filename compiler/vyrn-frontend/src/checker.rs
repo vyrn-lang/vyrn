@@ -115,6 +115,62 @@ thread_local! {
     /// disguised as memory hygiene.
     static CHECK_MEMO: std::cell::RefCell<(u64, HashMap<(String, String, String), Vec<Diagnostic>>)> =
         std::cell::RefCell::new((0, HashMap::new()));
+
+    /// Whether this thread is checking a GENERATOR HOST — the program RFC-0076's
+    /// engine compiles so it can run a `gen fn` as wasm (RFC-0125 §3 M5, the
+    /// ninth slice).
+    ///
+    /// That program is the generator's module with `is_gen` cleared, because a
+    /// `gen fn` has no runtime lowering. Clearing it also told this checker the
+    /// bodies were ordinary code, so `lex`, `moduleInterface`, `contractOf` and
+    /// the `Code` and `Token` types were refused as "only available during
+    /// generation" and every node under them recorded `<type error>`. The
+    /// emitter has its own lowering for all of them and emitted a correct
+    /// module anyway; what the errors cost was the RECORD — the join types the
+    /// emitters read (RFC-0125 M5, the eighth slice) among them — and, in a
+    /// debug build, `vyrn_lower`'s own lint, which failed the run.
+    ///
+    /// So the context is stated once, here, for the whole program: this is
+    /// generation, whatever an individual `is_gen` says. It only ever ENABLES a
+    /// generation-only name; nothing reads it to refuse.
+    static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark this thread as checking a generator host, or stop. Set by
+/// `vyrn_codegen::set_gen_host`, which the two gen-host emitters bracket their
+/// whole compile with — so the checker's answer and the emitter's lowering come
+/// from one flag rather than two.
+pub fn set_gen_host(on: bool) {
+    GEN_HOST.with(|g| g.set(on));
+}
+
+/// Whether a body is checked as generation code: its own `gen fn` marker, or a
+/// whole-program generator host.
+fn in_gen_of(f: &Function) -> bool {
+    f.is_gen || GEN_HOST.with(|g| g.get())
+}
+
+/// The atom-stream primitives a generator host's synthesized decoders are
+/// written against (RFC-0076 M3b): one call that starts a reflected answer, and
+/// two that take the next atom off it. `vyrn-codegen` re-exports these names and
+/// lowers the calls in place; they are declared HERE so the checker and the
+/// emitter read one signature rather than two (RFC-0125 §3 M5, the ninth
+/// slice). They exist only under [`set_gen_host`], so no program can name them.
+pub const GEN_REFLECT: &str = "__vyrnGenReflect";
+pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
+pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+
+/// What one of those three answers, at that arity.
+fn gen_host_primitive(name: &str, argc: usize) -> Option<Type> {
+    if !GEN_HOST.with(|g| g.get()) {
+        return None;
+    }
+    match (name, argc) {
+        (GEN_REFLECT, 2) => Some(Type::Unit),
+        (GEN_NEXT_INT, 0) => Some(Type::Int),
+        (GEN_NEXT_STR, 0) => Some(Type::Str),
+        _ => None,
+    }
 }
 
 /// A cheap hash over everything a function body may refer to by name: every
@@ -442,7 +498,7 @@ fn check_accum_inner(
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             for v in vs {
                 if RESERVED.contains(&v.name.as_str()) {
                     out.push(cerr!(t.line, "`{}` is a reserved name", v.name));
@@ -962,7 +1018,10 @@ fn check_accum_inner(
         // resolution to travel from the checker instead, which needs call-site
         // identity — designed in RFC-0084 and deliberately not built.
         let ok_target = match &imp.ty {
-            Type::Int | Type::Bool | Type::Str | Type::Option(_) | Type::Result(..) => true,
+            Type::Int | Type::Bool | Type::Str => true,
+            // The two built-in sums, whichever way they are spelled
+            // (RFC-0126 §8.15): `impl<T> Show for Option<T>` keys `Option`.
+            _ if crate::types::is_sum_alias(&imp.ty) => true,
             Type::Named(n) | Type::App(n, _) => matches!(
                 types.get(n).map(|d| &d.base),
                 Some(Type::Enum(_) | Type::Record(_))
@@ -1087,6 +1146,7 @@ fn check_accum_inner(
         gen_fns: &gen_fns,
         cur_fn: RefCell::new(String::new()),
         stored_sources: RefCell::new(Vec::new()),
+        arg_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
         spawn_sites: RefCell::new(Vec::new()),
         json_types: RefCell::new(Vec::new()),
@@ -1208,7 +1268,7 @@ fn check_accum_inner(
 
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
-        *checker.in_gen.borrow_mut() = f.is_gen;
+        *checker.in_gen.borrow_mut() = in_gen_of(f);
         *checker.here.borrow_mut() = f.module.clone();
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
@@ -1320,6 +1380,7 @@ fn check_accum_inner(
     //    flows through a stored value passed the inline check; catch it here.
     let effects = StoredFnEffects {
         sources: checker.stored_sources.borrow().clone(),
+        arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
     };
     if !effects.calls.is_empty() {
@@ -1665,9 +1726,11 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
     }
     *checker.in_test.borrow_mut() = true;
     for (i, t) in program.tests.iter().enumerate() {
-        // A synthetic Unit-returning function with an unspellable name; its body
-        // is a clone (the checker keys nothing on node identity — only ownership
-        // does, and that pass analyses the real body directly).
+        // A synthetic Unit-returning function with an unspellable name. The
+        // head is synthetic; the BODY handed to the checker is the real node
+        // (`function_body`), so the answers the checker records land on the
+        // nodes `own`, the lowering and the interpreter walk — RFC-0125 §3 M6,
+        // seventh slice. A clone left them untyped and a test body had no core.
         let synthetic = Function {
             name: format!("test@{i}"),
             exported: false,
@@ -1677,7 +1740,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             type_bounds: Default::default(),
             params: Vec::new(),
             ret: Type::Unit,
-            body: t.body.clone(),
+            body: Block { stmts: Vec::new() },
             line: t.line,
             col: 0,
             is_extern: false,
@@ -1685,7 +1748,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             is_gen: false,
             is_mut: false,
         };
-        if let Err(s) = checker.function(&synthetic) {
+        if let Err(s) = checker.function_body(&synthetic, &t.body) {
             let mut d = s;
             d.file = t.module.clone();
             out.push(d);
@@ -1730,7 +1793,7 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
             type_bounds: Default::default(),
             params: Vec::new(),
             ret: Type::Unit,
-            body: b.body.clone(),
+            body: Block { stmts: Vec::new() },
             line: b.line,
             col: 0,
             is_extern: false,
@@ -1738,7 +1801,7 @@ fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>
             is_gen: false,
             is_mut: false,
         };
-        if let Err(s) = checker.function(&synthetic) {
+        if let Err(s) = checker.function_body(&synthetic, &b.body) {
             let mut d = s;
             d.file = b.module.clone();
             out.push(d);
@@ -1808,6 +1871,17 @@ thread_local! {
 pub struct Recorded {
     /// The static type of every expression the checker typed.
     pub node_types: HashMap<usize, Type>,
+    /// The static type of every JOIN — a `match` or an `if` used as an
+    /// expression — as the checker gave it, before any instantiation
+    /// substitutes for it.
+    ///
+    /// It is a subset of [`Recorded::node_types`] and it is named apart
+    /// because of who reads it: an EMITTER, which has no key but the node's
+    /// address and used to reconcile a join's type from its arms instead
+    /// (RFC-0125 §3 M5). The whole map is too large to hand an emitter and
+    /// an address alone cannot say which nodes are joins, so the recording
+    /// wrapper — which holds the `&Expr` — separates them here.
+    pub joins: HashMap<usize, Type>,
     /// Every place the checker SOLVES a type parameter: a generic call and a
     /// generic record literal. The name is the callee or the record, and the
     /// arguments are in its own type-parameter order where they are solved.
@@ -1974,6 +2048,12 @@ struct Checker<'a> {
     /// RFC-0037 defunctionalization sources collected during checking: every
     /// lambda literal or named function that flows into a stored fn value.
     stored_sources: RefCell<Vec<StoredSource>>,
+    /// RFC-0023's ARGUMENT position: every lambda literal and every bare
+    /// function name handed straight to a `fn`-typed parameter. Not a
+    /// defunctionalization source — the position is monomorphized and the
+    /// value gets no tag — so it is a list of its own; see
+    /// [`StoredFnEffects::arg_sources`].
+    arg_sources: RefCell<Vec<StoredSource>>,
     /// RFC-0037: each call through a stored (non-parameter) fn-typed binding,
     /// as (enclosing function, signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
@@ -2218,7 +2298,7 @@ impl<'a> Checker<'a> {
             return Ok(None);
         }
         self.refuse_chained_projection(&args[0], scope, line)?;
-        if !matches!(pattern, crate::ast::Pattern::Some(_)) {
+        if !matches!(pattern, crate::ast::Pattern::Variant(v, _) if v == "Some") {
             return Err(cerr!(
                 line,
                 "an optional place is tested for its hit — write \
@@ -2389,14 +2469,12 @@ impl<'a> Checker<'a> {
         }
         let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
         match self.base(ty) {
-            Type::Option(t)
-            | Type::ArrayN(t, _)
+            Type::ArrayN(t, _)
             | Type::Array(t)
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
             | Type::Task(t)
             | Type::Stream(t) => deeper(&t),
-            Type::Result(a, b) => deeper(&a).or_else(|| deeper(&b)),
             Type::Map(k, v) => deeper(&k).or_else(|| deeper(&v)),
             Type::Record(fs) => fs.iter().find_map(|f| deeper(&f.ty)),
             Type::Enum(vs) => vs
@@ -2424,8 +2502,7 @@ impl<'a> Checker<'a> {
         fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
             match ty {
                 Type::Stream(_) => true,
-                Type::Option(i)
-                | Type::Array(i)
+                Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
                 | Type::Task(i)
@@ -2433,7 +2510,7 @@ impl<'a> Checker<'a> {
                 // A `lazy T` field stores a T (forced on read), so a stream
                 // behind it is exactly the storage the scope rule forbids.
                 | Type::Lazy(i) => walk(i, types, seen),
-                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
+                Type::Map(a, b) | Type::Merge(a, b) => {
                     walk(a, types, seen) || walk(b, types, seen)
                 }
                 Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
@@ -2480,15 +2557,12 @@ impl<'a> Checker<'a> {
                 // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
                 // position a stored function value is kept out of.
                 Type::Fn(..) | Type::Lazy(_) => true,
-                Type::Option(i)
-                | Type::Array(i)
+                Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
                 | Type::Task(i)
                 | Type::Partial(i) => walk(i, types, seen),
-                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
-                }
+                Type::Map(a, b) | Type::Merge(a, b) => walk(a, types, seen) || walk(b, types, seen),
                 Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
                 Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
                 Type::Enum(vs) => vs
@@ -2573,17 +2647,16 @@ impl<'a> Checker<'a> {
         // DeleteResult = Result<Bool, String>`) is interchangeable with its
         // resolved form — it carries no `where` obligation of its own.
         let transparent = |b: &Type| {
-            matches!(
-                b,
-                Type::Result(..)
-                    | Type::Option(..)
-                    | Type::Map(..)
+            crate::types::is_sum_alias(b)
+                || matches!(
+                    b,
+                    Type::Map(..)
                     | Type::Array(_)
                     | Type::ArrayN(..)
                     // A named function type (`type Middleware = fn(..) -> ..`,
                     // RFC-0037) is interchangeable with its structural form.
                     | Type::Fn(..)
-            )
+                )
         };
         if let Type::Named(n) = to {
             if let Some(d) = self.types.get(n) {
@@ -2607,10 +2680,16 @@ impl<'a> Checker<'a> {
             }
         }
         // Option/Result are covariant in their payloads (values are immutable).
-        if let (Type::Option(a), Type::Option(b)) = (from, to) {
+        if let (Some(a), Some(b)) = (
+            crate::types::option_payload(from),
+            crate::types::option_payload(to),
+        ) {
             return self.assignable_d(a, b, depth + 1);
         }
-        if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
+        if let (Some((a, e1)), Some((b, e2))) = (
+            crate::types::result_payloads(from),
+            crate::types::result_payloads(to),
+        ) {
             return self.assignable_d(a, b, depth + 1) && self.assignable_d(e1, e2, depth + 1);
         }
         // A Map is covariant in its value type (keys recurse the same way;
@@ -2942,11 +3021,6 @@ impl<'a> Checker<'a> {
                 for a in args {
                     self.ensure_type_exists(a, line)?;
                 }
-            }
-            Type::Option(inner) => self.ensure_type_exists(inner, line)?,
-            Type::Result(ok, err) => {
-                self.ensure_type_exists(ok, line)?;
-                self.ensure_type_exists(err, line)?;
             }
             Type::Record(fields) => {
                 for f in fields {
@@ -3296,7 +3370,7 @@ impl<'a> Checker<'a> {
             return Ok(());
         }
         // Enum declaration (RFC-0002 §4).
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             if t.predicate.is_some() {
                 return Err(cerr!(t.line, "an enum type cannot have a `where` clause"));
             }
@@ -3316,12 +3390,12 @@ impl<'a> Checker<'a> {
         // codable `Result`/`Option` can be named and handed to `fromJson`/
         // `jsonSchema` by name (RFC-0024's RPC ripple). No `where` clause (its
         // payloads carry their own refinements); the payload types must exist.
-        if matches!(t.base, Type::Result(..) | Type::Option(..)) {
+        if crate::types::is_sum_alias(&t.base) {
             if t.predicate.is_some() {
                 return Err(cerr!(
                     t.line,
                     "a `{}` alias cannot have a `where` clause",
-                    if matches!(t.base, Type::Result(..)) {
+                    if crate::types::result_payloads(&t.base).is_some() {
                         "Result"
                     } else {
                         "Option"
@@ -3650,9 +3724,20 @@ impl<'a> Checker<'a> {
     }
 
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
+        self.function_body(f, &f.body)
+    }
+
+    /// Check `f` with `body` as its body. The two are the same node for an
+    /// ordinary function; they differ for a `test` (RFC-0015) or a `bench`
+    /// (RFC-0055), whose head is synthetic and whose body is the REAL node
+    /// the lowering and `own` walk. The checker keys its recorded answers by
+    /// node ADDRESS (RFC-0101 M1), so a body checked as a clone leaves the
+    /// real nodes untyped — which is why a test body had no core
+    /// (RFC-0125 §3 M6, seventh slice).
+    fn function_body(&self, f: &Function, body: &Block) -> Result<(), Diagnostic> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
-        *self.in_gen.borrow_mut() = f.is_gen;
+        *self.in_gen.borrow_mut() = in_gen_of(f);
         self.errors.borrow_mut().clear();
         // Module state (RFC-0013) sits BELOW every frame: a local (param/let/for)
         // with the same name shadows a global, since `lookup` walks frames from
@@ -3674,7 +3759,7 @@ impl<'a> Checker<'a> {
         // `block` no longer propagates the first error via `?`; it pushes each
         // statement's error to the `errors` sink and continues, so every
         // statement-level error in the body is reported.
-        let returns = self.block(&f.body, &f.ret, &mut scope);
+        let returns = self.block(body, &f.ret, &mut scope);
         if f.ret != Type::Unit && !returns {
             // A missing-return diagnostic is reported alongside any body errors
             // (it is about the function as a whole, not one statement).
@@ -4306,8 +4391,7 @@ impl<'a> Checker<'a> {
                         | Type::SmallArray(..)
                         | Type::Map(..)
                         | Type::Task(_)
-                ) || (matches!(t, Type::Option(_) | Type::Result(..))
-                    && crate::own::owns_heap(&t, &self.types))
+                ) || (crate::types::is_sum_alias(&t) && crate::own::owns_heap(&t, &self.types))
                 {
                     return Ok(false);
                 }
@@ -4387,10 +4471,7 @@ impl<'a> Checker<'a> {
                 Type::Enum(vs) => vs
                     .iter()
                     .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                Type::Option(inner) => walk(inner, types, seen),
-                Type::Result(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
-                }
+                Type::Merge(a, b) => walk(a, types, seen) || walk(b, types, seen),
                 Type::Omit(b, _) | Type::Pick(b, _) | Type::Partial(b) => walk(b, types, seen),
                 // A stored function value (RFC-0037) may hold heap captures
                 // (a snapshotted String/Array/record), so treat it as
@@ -4505,6 +4586,9 @@ impl<'a> Checker<'a> {
         RECORD.with(|r| {
             let mut r = r.borrow_mut();
             r.node_types.insert(key, t.clone());
+            if matches!(expr, Expr::Match { .. } | Expr::IfExpr { .. }) {
+                r.joins.insert(key, t.clone());
+            }
             if let Some(call) = pending {
                 r.node_substs.insert(key, call);
             }
@@ -4629,7 +4713,9 @@ impl<'a> Checker<'a> {
                     // The type RETURNED is the one written, so the binding keeps
                     // its name.
                     return match expected.map(|t| self.base(t)) {
-                        Some(Type::Option(_)) => Ok(expected.unwrap().clone()),
+                        Some(b) if crate::types::option_payload(&b).is_some() => {
+                            Ok(expected.unwrap().clone())
+                        }
                         _ => Err(cerr!(
                             line,
                             "cannot infer the type of `None`; \
@@ -4981,7 +5067,7 @@ impl<'a> Checker<'a> {
                         "`{name}` is built from {base}, but the argument is {aty}"
                     ));
                 }
-                Ok(Type::Option(Box::new(Type::Named(name.clone()))))
+                Ok(Type::option(Type::Named(name.clone())))
             }
             Expr::Spawn { name, args, line } => {
                 let (params, ret) = self
@@ -5096,7 +5182,7 @@ impl<'a> Checker<'a> {
                 // used to check `ok` in 0.1 s, run correctly under the
                 // interpreter, and then die `LLVM ERROR: out of memory` after
                 // clang had run for over two minutes.
-                if elems.len() > crate::interp::ARRAY_LIT_LIMIT {
+                if elems.len() > crate::trap::ARRAY_LIT_LIMIT {
                     return Err(cerr!(
                         line,
                         "this array literal has {} elements, past the limit of {}\n  \
@@ -5105,7 +5191,7 @@ impl<'a> Checker<'a> {
                          note: a table this long belongs in a file the program reads, not in \
                          the program",
                         elems.len(),
-                        crate::interp::ARRAY_LIT_LIMIT
+                        crate::trap::ARRAY_LIT_LIMIT
                     ));
                 }
                 let small_cap = match expected {
@@ -5423,28 +5509,37 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, Diagnostic> {
         let ety = self.expr(expr, scope, None, fn_ret)?;
         let ret = fn_ret.ok_or_else(|| cerr!(line, "`?` can only be used inside a function"))?;
-        match &ety {
-            Type::Option(t) => match ret {
-                Type::Option(_) => Ok((**t).clone()),
-                _ => Err(cerr!(
+        // The two built-in sums are read through their payloads, and the
+        // DECLARED `Fallible` is read after them (RFC-0126 §8.15). Both are a
+        // variant list now, so the ORDER is the rule: `?` on an `Option` or a
+        // `Result` is the built-in propagation, and a declared sum reaches the
+        // protocol below it.
+        if let Some(t) = crate::types::option_payload(&ety) {
+            return match crate::types::option_payload(ret) {
+                Some(_) => Ok(t.clone()),
+                None => Err(cerr!(
                     line,
                     "`?` on an Option requires the function to return Option, \
                      but it returns {ret}"
                 )),
-            },
-            Type::Result(t, e) => match ret {
-                Type::Result(_, re) if self.assignable(e, re) => Ok((**t).clone()),
-                Type::Result(_, re) => Err(cerr!(
+            };
+        }
+        if let Some((t, e)) = crate::types::result_payloads(&ety) {
+            return match crate::types::result_payloads(ret) {
+                Some((_, re)) if self.assignable(e, re) => Ok(t.clone()),
+                Some((_, re)) => Err(cerr!(
                     line,
                     "`?` propagates error {e}, but the function returns \
                      Result<_, {re}>"
                 )),
-                _ => Err(cerr!(
+                None => Err(cerr!(
                     line,
                     "`?` on a Result requires the function to return Result, \
                      but it returns {ret}"
                 )),
-            },
+            };
+        }
+        match &ety {
             other => {
                 let key = crate::types::type_key(other)
                     .filter(|k| self.impls.contains(&(FALLIBLE.to_string(), k.clone())));
@@ -5503,113 +5598,26 @@ impl<'a> Checker<'a> {
         // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
         let sty = match &raw_sty {
             Type::Named(n) => match self.types.get(n) {
-                Some(d)
-                    if d.predicate.is_none()
-                        && matches!(d.base, Type::Result(..) | Type::Option(..)) =>
-                {
+                Some(d) if d.predicate.is_none() && crate::types::is_sum_alias(&d.base) => {
                     crate::types::resolve(&raw_sty, self.types)
                 }
                 _ => raw_sty.clone(),
             },
             _ => raw_sty.clone(),
         };
-        // A user enum dispatches to its own (N-variant) checker.
-        if let Type::Enum(evs) = self.base(&sty) {
-            return self
-                .check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos);
-        }
-        // The two patterns an Option/Result scrutinee requires.
-        let want: [&str; 2] = match &sty {
-            Type::Option(_) => ["Some", "None"],
-            Type::Result(_, _) => ["Ok", "Err"],
-            other => {
-                return Err(cerr!(
-                    line,
-                    "`match` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
-            }
-        };
-        let mut seen: Vec<&str> = Vec::new();
-        let mut result: Option<Type> = expected.cloned();
-        for arm in arms {
-            let (tag, bind): (&str, Option<&str>) = match &arm.pattern {
-                Pattern::Some(b) => ("Some", Some(b)),
-                Pattern::None => ("None", None),
-                Pattern::Ok(b) => ("Ok", Some(b)),
-                Pattern::Err(b) => ("Err", Some(b)),
-                // The `??` desugar's two patterns (RFC-0079): they take whichever
-                // tag the scrutinee's own shape names, which is the one thing the
-                // parser could not do. `Failure` binds only on the `Result` path
-                // — an `Option`'s tag-0 has no payload — which is exactly what
-                // this per-arm `Option<&str>` seam is for.
-                Pattern::Success(b) => (want[0], Some(b)),
-                Pattern::Failure(b) => (
-                    want[1],
-                    matches!(sty, Type::Result(..)).then_some(b.as_str()),
-                ),
-                Pattern::Variant(n, _) => {
-                    return Err(cerr!(
-                        line,
-                        "pattern `{n}` does not match scrutinee of type {sty}"
-                    ))
-                }
-                // The refutable-`let` desugar's default arm (RFC-0121) belongs
-                // to an enum `match`; an Option/Result scrutinee spells both
-                // tags, so nothing produces it here.
-                Pattern::Other => {
-                    return Err(cerr!(line, "the default arm belongs to an enum `match`"))
-                }
-            };
-            if !want.contains(&tag) {
-                return Err(cerr!(
-                    line,
-                    "pattern `{tag}` does not match scrutinee of type {sty}"
-                ));
-            }
-            if seen.contains(&tag) {
-                return Err(cerr!(line, "duplicate `{tag}` arm"));
-            }
-            seen.push(tag);
-
-            let mut inner_scope = scope.clone();
-            if let Some(name) = bind {
-                let bty = self.binding_type(&sty, tag);
-                inner_scope.push(HashMap::new());
-                inner_scope.last_mut().unwrap().insert(
-                    name.to_string(),
-                    Binding {
-                        ty: bty,
-                        mutable: false,
-                    },
-                );
-            }
-            match &arm.body {
-                ArmBody::Expr(e) => {
-                    let bty = self.expr(e, &inner_scope, result.as_ref(), fn_ret)?;
-                    self.unify_arm(&mut result, bty, line)?;
-                }
-                // A block arm (RFC-0118): statement position only, checked as
-                // the block it is, contributing no type — the expression arms
-                // beside it still unify among themselves.
-                ArmBody::Block(b) => {
-                    self.arm_block(b, stmt_pos, line, &mut inner_scope, fn_ret)?;
-                }
-            }
-        }
-        if !want.iter().all(|w| seen.contains(w)) {
+        // EVERY sum goes to the N-variant checker. Since RFC-0126 §8.11's M4b
+        // `base` answers `Enum` for an `Option` and a `Result` too, so the
+        // two-tag path that stood here — its own `want` table, its own
+        // exhaustiveness message and its own arm loop, sixty lines of it — is
+        // the enum's path, and a built-in sum gets the wording a declared enum
+        // already had.
+        let Type::Enum(evs) = self.base(&sty) else {
             return Err(cerr!(
                 line,
-                "`match` must cover both `{}` and `{}`",
-                want[0],
-                want[1]
+                "`match` scrutinee must be an Option, Result, or enum, found {sty}"
             ));
-        }
-        // A statement match whose arms are all blocks yields nothing, which is
-        // exactly what its position consumes.
-        if stmt_pos && result.is_none() {
-            return Ok(Type::Unit);
-        }
-        result.ok_or_else(|| cerr!(line, "empty `match`"))
+        };
+        self.check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos)
     }
 
     /// Check one block arm (RFC-0118): legal only in statement position, and
@@ -5683,6 +5691,28 @@ impl<'a> Checker<'a> {
                 // pattern-matches at all; `??` does, so it stops here, and it says
                 // so in the source's own words rather than naming a pattern nobody
                 // wrote.
+                // A two-variant sum is what `??` was written for, and since
+                // RFC-0126 §8.11's M4b that includes the two built-in ones,
+                // which reach here as `| None | Some(T)` and `| Err(E) | Ok(T)`.
+                // The pair names a TAG: variant 1 succeeds, variant 0 fails.
+                // Anything wider has no success side as a PATTERN — that would
+                // be a wildcard over N-1 variants, and `Pattern` has none — so
+                // it says so in the source's own words.
+                Pattern::Success(b) | Pattern::Failure(b)
+                    if crate::types::option_payload(&Type::Enum(evs.to_vec())).is_some()
+                        || crate::types::result_payloads(&Type::Enum(evs.to_vec())).is_some() =>
+                {
+                    let at = usize::from(matches!(arm.pattern, Pattern::Success(_)));
+                    let v = &evs[at];
+                    (
+                        v.name.clone(),
+                        if v.payload.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![b.clone()]
+                        },
+                    )
+                }
                 Pattern::Success(_) | Pattern::Failure(_) => {
                     return Err(cerr!(
                         line,
@@ -5815,12 +5845,13 @@ impl<'a> Checker<'a> {
 
     /// The type bound by pattern `tag` when matching a value of type `sty`.
     fn binding_type(&self, sty: &Type, tag: &str) -> Type {
-        match (sty, tag) {
-            (Type::Option(t), "Some") => (**t).clone(),
-            (Type::Result(t, _), "Ok") => (**t).clone(),
-            (Type::Result(_, e), "Err") => (**e).clone(),
-            _ => Type::Unit,
+        match tag {
+            "Some" => crate::types::option_payload(sty).cloned(),
+            "Ok" => crate::types::result_payloads(sty).map(|(t, _)| t.clone()),
+            "Err" => crate::types::result_payloads(sty).map(|(_, e)| e.clone()),
+            _ => None,
         }
+        .unwrap_or(Type::Unit)
     }
 
     /// Resolve a scrutinee's type through a transparent Option/Result/enum alias
@@ -5829,13 +5860,7 @@ impl<'a> Checker<'a> {
     fn resolve_scrutinee(&self, raw: &Type) -> Type {
         match raw {
             Type::Named(n) => match self.types.get(n) {
-                Some(d)
-                    if d.predicate.is_none()
-                        && matches!(
-                            d.base,
-                            Type::Result(..) | Type::Option(..) | Type::Enum(..)
-                        ) =>
-                {
+                Some(d) if d.predicate.is_none() && matches!(d.base, Type::Enum(..)) => {
                     crate::types::resolve(raw, self.types)
                 }
                 _ => raw.clone(),
@@ -5879,20 +5904,15 @@ impl<'a> Checker<'a> {
             return Ok(binds.into_iter().zip(ev.payload.iter().cloned()).collect());
         }
         let (tag, bind): (&str, Option<String>) = match pattern {
-            Pattern::Some(b) => ("Some", Some(b.clone())),
-            Pattern::None => ("None", None),
-            Pattern::Ok(b) => ("Ok", Some(b.clone())),
-            Pattern::Err(b) => ("Err", Some(b.clone())),
+            // §8's one spelling again: the name, and what it binds.
+            Pattern::Variant(v, binds) => {
+                sum_arm_arity(v, binds.len(), line)?;
+                (v.as_str(), binds.first().cloned())
+            }
             // `??` desugars to a `match`, never to an `if let`/`while let`, so
             // these cannot reach here.
             Pattern::Success(_) | Pattern::Failure(_) => {
                 unreachable!("the `??` patterns are produced only inside a `match`")
-            }
-            Pattern::Variant(n, _) => {
-                return Err(cerr!(
-                    line,
-                    "pattern `{n}` does not match scrutinee of type {sty}"
-                ))
             }
             // Produced only inside the refutable-`let` desugar's `match`
             // (RFC-0121); an `if let` never carries it.
@@ -5900,15 +5920,15 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, "the default arm belongs to an enum `match`"))
             }
         };
-        let want: [&str; 2] = match sty {
-            Type::Option(_) => ["Some", "None"],
-            Type::Result(_, _) => ["Ok", "Err"],
-            other => {
-                return Err(cerr!(
-                    line,
-                    "`if let` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
-            }
+        let want: [&str; 2] = if crate::types::option_payload(sty).is_some() {
+            ["Some", "None"]
+        } else if crate::types::result_payloads(sty).is_some() {
+            ["Ok", "Err"]
+        } else {
+            return Err(cerr!(
+                line,
+                "`if let` scrutinee must be an Option, Result, or enum, found {sty}"
+            ));
         };
         if !want.contains(&tag) {
             return Err(cerr!(
@@ -6935,7 +6955,7 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
-            return Ok(Type::Option(Box::new(Type::Str)));
+            return Ok(Type::option(Type::Str));
         }
         if name == "readFile" {
             if args.len() != 1 {
@@ -6952,7 +6972,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`readFile` needs a String path, found {t}"));
             }
-            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Str, Type::Str));
         }
         // `listDir(path) -> Result<Array<String>, String>` (RFC-0021 family): the
         // entry names directly under `path` (no `.`/`..`, unsorted-by-OS order the
@@ -7041,10 +7061,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`{name}` needs a String path, found {t}"));
             }
-            return Ok(Type::Result(
-                Box::new(Type::Array(Box::new(Type::Str))),
-                Box::new(Type::Str),
-            ));
+            return Ok(Type::result(Type::Array(Box::new(Type::Str)), Type::Str));
         }
         // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
         // reflection over a module's exported surface. It is generation-ONLY —
@@ -7056,7 +7073,7 @@ impl<'a> Checker<'a> {
         // `vyrn build --target wasm` printed `direct backend: no lowering for
         // the call`, which is an emitter's own words in a user's diagnostic.
         // `listDir` is NOT gated with it — that one has a runtime under `vyrn
-        // run` (see [`COMPTIME_FORBIDDEN`]), and only the compiling backends
+        // run` (see the lattice's `gen` column), and only the compiling backends
         // lack a lowering for it.
         if name == "moduleInterface" {
             if !*self.in_gen.borrow() {
@@ -7210,7 +7227,7 @@ impl<'a> Checker<'a> {
                     return Err(cerr!(line, "`writeFile` needs String arguments, found {t}"));
                 }
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0111: the byte sink. `writeFile` for bytes that are not text —
         // same create/truncate/write-all, same `Result<Bool, String>`, same
@@ -7249,7 +7266,7 @@ impl<'a> Checker<'a> {
                     "`writeFileBytes` needs an Array<UInt8>, found {b}"
                 ));
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0111: `print` for bytes. No result, for `print`'s reason — a
         // write to a closed stdout is not a condition a Vyrn program can act
@@ -7302,7 +7319,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0044: flush a file's contents to stable storage (the optional
         // power-durability upgrade over `writeAtomic`'s crash-consistency).
@@ -7321,7 +7338,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`fsyncFile` needs a String path, found {t}"));
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
         if name == "readFileBytes" {
@@ -7342,12 +7359,12 @@ impl<'a> Checker<'a> {
                     "`readFileBytes` needs a String path, found {t}"
                 ));
             }
-            return Ok(Type::Result(
-                Box::new(Type::Array(Box::new(Type::IntN {
+            return Ok(Type::result(
+                Type::Array(Box::new(Type::IntN {
                     bits: 8,
                     signed: false,
-                }))),
-                Box::new(Type::Str),
+                })),
+                Type::Str,
             ));
         }
         if name == "stringFromBytes" {
@@ -7372,7 +7389,7 @@ impl<'a> Checker<'a> {
                     "`stringFromBytes` needs an Array<UInt8>, found {t}"
                 ));
             }
-            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Str, Type::Str));
         }
 
         // (`len(String)` was removed — see the migration hint above; its byte
@@ -7565,7 +7582,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`parse` needs a String, found {t}"));
             }
-            return Ok(Type::Option(Box::new(Type::Int)));
+            return Ok(Type::option(Type::Int));
         }
 
         // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
@@ -7573,6 +7590,36 @@ impl<'a> Checker<'a> {
         // none to grow. `append` is a byte copy of the source's elements in
         // the compiled backends, so an element type that owns heap is refused
         // — copying such an element by bytes would give two arrays one buffer.
+        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. The
+        // elements are FORGOTTEN, not released, so an element type that owns
+        // heap is refused the way `append` refuses it.
+        if name == "@clear" {
+            if args.len() != 1 {
+                return Err(cerr!(
+                    line,
+                    "`clear` takes no arguments, got {}",
+                    args.len() - 1
+                ));
+            }
+            let at = self.expr(&args[0], scope, None, fn_ret)?;
+            let elem = match self.base(&at) {
+                Type::Array(inner) => (*inner).clone(),
+                Type::Err => return Ok(Type::Err),
+                other => {
+                    return Err(cerr!(
+                        line,
+                        "`clear` needs a growable Array as its receiver, found {other}"
+                    ))
+                }
+            };
+            if crate::own::owns_heap(&elem, &self.types) {
+                return Err(cerr!(
+                    line,
+                    "`clear` forgets its elements without releasing them, and `{elem}` owns heap — pop each element in a loop instead"
+                ));
+            }
+            return Ok(at);
+        }
         if name == "@reserve" {
             if args.len() != 2 {
                 return Err(cerr!(
@@ -7855,7 +7902,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(&args[1], &key, line)?;
-                return Ok(Type::Option(val));
+                return Ok(Type::option(*val));
             }
             let elem = match self.base(&at) {
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
@@ -7960,10 +8007,10 @@ impl<'a> Checker<'a> {
             {
                 return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
             }
-            let Type::Option(inner) = self.base(&ret) else {
+            let Some(inner) = crate::types::option_payload(&self.base(&ret)).cloned() else {
                 return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
             };
-            return Ok(Type::Stream(inner));
+            return Ok(Type::Stream(Box::new(inner)));
         }
         // RFC-0075 M2c, re-hosted by RFC-0090 M3. `boxStream(s)` moves a
         // stream into one heap box and hands back its address, `unboxStream(a)` takes
@@ -8022,7 +8069,7 @@ impl<'a> Checker<'a> {
             };
             let ok = match name {
                 "unboxStream" => matches!(self.base(exp), Type::Stream(_)),
-                _ => matches!(self.base(exp), Type::Option(_)),
+                _ => crate::types::option_payload(&self.base(exp)).is_some(),
             };
             if !ok {
                 return Err(cerr!(line, "`{name}` answers a `{want}`, not {exp}"));
@@ -8093,7 +8140,7 @@ impl<'a> Checker<'a> {
             let elem = self.mut_array_receiver(&args[0], scope, line, name, "pop")?;
             return Ok(match elem {
                 Type::Err => Type::Err,
-                t => Type::Option(Box::new(t)),
+                t => Type::option(t),
             });
         }
         // `a.swapRemove(i)` (RFC-0011) — O(1) unordered remove: move the last
@@ -8497,22 +8544,15 @@ impl<'a> Checker<'a> {
             }
             // Resolved, as `Ok`/`Err` below do: `type MaybeAge = Option<Age>` is
             // a named Option, and the payload's refinement rides on `Age`.
-            let inner_expected = match expected.map(|t| self.base(t)) {
-                Some(Type::Option(t)) => Some((*t).clone()),
-                _ => None,
-            };
+            let inner_expected = expected
+                .map(|t| self.base(t))
+                .and_then(|b| crate::types::option_payload(&b).cloned());
             let aty = self.expr(&args[0], scope, inner_expected.as_ref(), fn_ret)?;
             // The expectation still names the payload's SHAPE when its element
             // type is an unsolved parameter, so it is handed to the payload
             // either way. It is not the answer there — the payload is (see
             // [`Checker::mentions_open_param`]).
             let inner_expected = inner_expected.filter(|want| !self.is_open_param(want));
-            if matches!(
-                crate::types::resolve(&aty, self.types),
-                Type::Option(_) | Type::Result(..)
-            ) {
-                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
-            }
             if let Some(want) = &inner_expected {
                 if !self.coercible(&aty, want) {
                     return Err(cerr!(
@@ -8521,9 +8561,9 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(&args[0], want, line)?;
-                return Ok(Type::Option(Box::new(want.clone())));
+                return Ok(Type::option(want.clone()));
             }
-            return Ok(Type::Option(Box::new(aty)));
+            return Ok(Type::option(aty));
         }
 
         // built-in: Ok(x) / Err(e) — need the other type parameter from context.
@@ -8534,23 +8574,16 @@ impl<'a> Checker<'a> {
             // Resolve a named alias (`type DeleteResult = Result<..>`) so the
             // expected `Result<T, E>` is visible for payload inference (RFC-0024).
             let expected_res = expected.map(|e| crate::types::resolve(e, self.types));
-            let want = match &expected_res {
-                Some(Type::Result(t, e)) => Some(
-                    (name == "Ok")
-                        .then(|| (**t).clone())
-                        .unwrap_or_else(|| (**e).clone()),
-                ),
-                _ => None,
-            };
+            let res_pair = expected_res
+                .as_ref()
+                .and_then(crate::types::result_payloads)
+                .map(|(t, e)| (t.clone(), e.clone()));
+            let want = res_pair
+                .as_ref()
+                .map(|(t, e)| if name == "Ok" { t.clone() } else { e.clone() });
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
-            if matches!(
-                crate::types::resolve(&aty, self.types),
-                Type::Option(_) | Type::Result(..)
-            ) {
-                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
-            }
-            let (mut t, mut e) = match &expected_res {
-                Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
+            let (mut t, mut e) = match res_pair {
+                Some(pair) => pair,
                 _ => {
                     return Err(cerr!(
                         line,
@@ -8575,7 +8608,7 @@ impl<'a> Checker<'a> {
                     "`{name}` payload is {aty} but {want_ty} was expected"
                 ));
             }
-            return Ok(Type::Result(Box::new(t), Box::new(e)));
+            return Ok(Type::result(t, e));
         }
 
         // enum variant construction with payload(s): `Circle(r)`, `Rect(w, h)`.
@@ -8927,6 +8960,12 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
+        if let Some(t) = gen_host_primitive(name, args.len()) {
+            for a in args {
+                self.expr(a, scope, None, fn_ret)?;
+            }
+            return Ok(t);
+        }
         let (params, ret) = self
             .sigs
             .get(name)
@@ -9042,22 +9081,7 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            // The v0.1 "no nested Option/Result" rule holds through inference
-            // too: `wrap(Some(1))` with `fn wrap<T>(x: T) -> Option<T>` must
-            // not materialize an Option<Option<Int>>.
             let rty = crate::types::substitute(ret, &subst);
-            let nested = params
-                .iter()
-                .map(|p| crate::types::substitute(p, &subst))
-                .chain(std::iter::once(rty.clone()))
-                .any(|t| has_nested_wrap(&t, self.types));
-            if nested {
-                return Err(cerr!(
-                    line,
-                    "nested Option/Result is not supported in v0.1 \
-                     (inferred through `{name}`)"
-                ));
-            }
             // RFC-0101 M1: `subst` is complete here and dies at the end of this
             // block. This is the one place the type arguments of a generic call
             // exist, and both backends re-solve them afterwards.
@@ -9215,6 +9239,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if ret == Type::Unit {
+                    let sig = crate::types::substitute(expected_fn, subst);
+                    self.record_arg_fn(&sig, None, Some(*lline));
                     return Ok(());
                 }
                 if ret_known {
@@ -9232,6 +9258,8 @@ impl<'a> Checker<'a> {
                     // Infer the generic return parameter (`U`) from the body type.
                     self.unify(&ret, &body_ty, subst, *lline)?;
                 }
+                let sig = crate::types::substitute(expected_fn, subst);
+                self.record_arg_fn(&sig, None, Some(*lline));
                 Ok(())
             }
             // A bare name: either a pass-through `fn`-typed parameter, or a named
@@ -9308,6 +9336,11 @@ impl<'a> Checker<'a> {
                     }
                 }
                 self.unify(&ret, &sig.1, subst, line)?;
+                self.record_arg_fn(
+                    &crate::types::substitute(expected_fn, subst),
+                    Some(vn),
+                    None,
+                );
                 Ok(())
             }
             // Any other expression of `fn` type (RFC-0037): a field read, an
@@ -9557,6 +9590,33 @@ impl<'a> Checker<'a> {
             lambda: None,
         });
         Ok(exp.clone())
+    }
+
+    /// Record the function a `fn`-typed ARGUMENT hands its callee — RFC-0125
+    /// §3 M6, seventh slice.
+    ///
+    /// The set is closed the way RFC-0037's is: [`Self::check_fn_arg`] accepts
+    /// a lambda literal, a bare function name, or an expression of `fn` type,
+    /// and only the first two are new functions — the third forwards a value
+    /// some other position already collected. `sig` is the parameter's type
+    /// under everything the call has solved, so a generic `fn(T) -> U` is
+    /// recorded as the concrete signature the instance calls through.
+    fn record_arg_fn(&self, sig: &Type, named: Option<&str>, lambda_line: Option<usize>) {
+        self.arg_sources.borrow_mut().push(StoredSource {
+            sig: self.base(sig),
+            named: named.map(str::to_string),
+            // The spawn fields are the spawn analysis's, and it reads
+            // `sources` alone; the judgment reads the two a frame is keyed by
+            // (see `StoredFnEffects::arg_sources`).
+            lambda: lambda_line.map(|line| StoredLambda {
+                defined_in: self.cur_fn.borrow().clone(),
+                line,
+                calls: HashSet::new(),
+                touches_global: None,
+                forbidden: false,
+                nested_sigs: Vec::new(),
+            }),
+        });
     }
 
     /// The RFC-0037 gate on using a named function as a value: generic,
@@ -9897,17 +9957,23 @@ impl<'a> Checker<'a> {
                     Ok(())
                 }
             },
-            Type::Option(inner) => match aty {
-                Type::Option(a) => self.unify(inner, a, subst, line),
-                _ => Err(cerr!(line, "expected Option, found {aty}")),
-            },
-            Type::Result(pt, pe) => match aty {
-                Type::Result(at, ae) => {
-                    self.unify(pt, at, subst, line)?;
-                    self.unify(pe, ae, subst, line)
+            _ if crate::types::option_payload(pty).is_some() => {
+                let inner = crate::types::option_payload(pty).expect("an Option payload");
+                match crate::types::option_payload(aty) {
+                    Some(a) => self.unify(inner, a, subst, line),
+                    None => Err(cerr!(line, "expected Option, found {aty}")),
                 }
-                _ => Err(cerr!(line, "expected Result, found {aty}")),
-            },
+            }
+            _ if crate::types::result_payloads(pty).is_some() => {
+                let (pt, pe) = crate::types::result_payloads(pty).expect("Result payloads");
+                match crate::types::result_payloads(aty) {
+                    Some((at, ae)) => {
+                        self.unify(pt, at, subst, line)?;
+                        self.unify(pe, ae, subst, line)
+                    }
+                    None => Err(cerr!(line, "expected Result, found {aty}")),
+                }
+            }
             Type::App(pn, pargs) => match aty {
                 Type::App(an, aargs) if pn == an && pargs.len() == aargs.len() => {
                     for (p, a) in pargs.iter().zip(aargs) {
@@ -10201,40 +10267,6 @@ fn type_mentions_self(ty: &Type) -> bool {
     found
 }
 
-/// Apply `f` to `ty` and to every type nested inside it.
-/// Whether a type contains a directly nested `Option`/`Result` (the v0.1
-/// prohibition), anywhere inside it.
-fn has_nested_wrap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
-    // `wrapped` resolves too: a transparent alias IS the Option/Result it
-    // names everywhere else (`resolve_scrutinee`, `assignable`), so
-    // `type M = Option<Int64>` cannot launder a nesting past the ban either.
-    let wrapped = |t: &Type| {
-        matches!(
-            crate::types::resolve(t, types),
-            Type::Option(_) | Type::Result(..)
-        )
-    };
-    match ty {
-        Type::Option(t) => wrapped(t) || has_nested_wrap(t, types),
-        Type::Result(a, b) => {
-            wrapped(a) || wrapped(b) || has_nested_wrap(a, types) || has_nested_wrap(b, types)
-        }
-        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Task(t) => {
-            has_nested_wrap(t, types)
-        }
-        Type::Map(k, v) => has_nested_wrap(k, types) || has_nested_wrap(v, types),
-        Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty, types)),
-        // A named type reaches here only unresolved (a generic parameter's
-        // bound, or a depth-capped `resolve`); descend when naming it made a
-        // difference, and stop when it did not — that is the cycle guard.
-        Type::Named(_) | Type::App(..) => {
-            let r = crate::types::resolve(ty, types);
-            &r != ty && has_nested_wrap(&r, types)
-        }
-        _ => false,
-    }
-}
-
 /// The line of the statement a literal's range error is attributed to. The
 /// literal `Expr` variants carry no line of their own ([`Expr::line`] answers
 /// 0 for them), so the checker records the enclosing statement's line as it
@@ -10494,32 +10526,34 @@ fn contains_spawn(b: &Block) -> bool {
     b.stmts.iter().any(stmt)
 }
 
-/// Builtins a `gen fn` (RFC-0021) may not use at generation time: they observe
-/// or mutate the outside world in a way the deterministic, cache-keyed sandbox
-/// cannot mediate. `readFile`/`listDir`/`moduleInterface` are deliberately
-/// ABSENT — they route through the loader's resolver at generation time and are
-/// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
-const COMPTIME_FORBIDDEN: &[&str] = &[
-    "writeFile",
-    "writeFileBytes",
-    "writeStdout",
-    "renameFile",
-    "fsyncFile",
-    "readLine",
-    "args",
-    "readFileBytes",
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error",
-];
+/// The `gen` column of the lattice table, as RFC-0021's fence asks it — the
+/// reason the sandbox may not run `name`, or `None`.
+///
+/// The list this replaced (`COMPTIME_FORBIDDEN`, deleted) was the column
+/// written a second time, and the two had drifted: `print` was allowed where
+/// `writeStdout` was refused, which is one effect with two verdicts (RFC-0125
+/// §3 M6 finding 4), and the clock was reported as an extern although
+/// RFC-0103 M2 says it is not one (finding 13). The column is stated once now,
+/// in [`crate::effects`], derived from the table in RFC-0125 §3 M6.
+///
+/// `VYRN_NO_JUDGE=1` is the fourth slice's bisect knob and stands this
+/// milestone's judgments aside — here, the two cells this slice changed — so a
+/// refusal that is new can be told from one that is not.
+fn gen_refused(name: &str) -> Option<String> {
+    if crate::floor::no_judge() && crate::trap::host_boundary_extern(name).is_none() {
+        // The list's own answer: `print` was not on it.
+        return (name != "print")
+            .then(|| crate::effects::gen_refusal(name))
+            .flatten();
+    }
+    crate::effects::gen_refusal(name)
+}
 
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
 /// `gen fn` — and everything it transitively calls — must be pure enough to run
 /// deterministically in the compiler's interpreter at generation time: no
-/// `extern`, `spawn`, module state, or the [`COMPTIME_FORBIDDEN`] effect
-/// builtins. Because a `gen fn` may be *used* as an import target anywhere it is
+/// `extern`, `spawn`, module state, or an atom the lattice's `gen` column
+/// refuses ([`gen_refused`]). Because a `gen fn` may be *used* as an import target anywhere it is
 /// visible, the restriction is enforced on EVERY `gen fn` unconditionally (v1:
 /// simpler and sound than a whole-program "reached as a generation target"
 /// analysis; a `gen fn` called only at runtime pays the same discipline, which
@@ -10535,10 +10569,20 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
+    // RFC-0103 M2's host-boundary rule: `hostNowMillis` and its two neighbours
+    // are not host imports — the runtime shim implements them on every target —
+    // so the fence must not call them "the extern" (RFC-0125 §3 M6 finding 13).
+    // They are atoms of the `clock` and `random` rows and the table refuses them
+    // there, in the row's own words. Under the bisect knob they are externs
+    // again, which is what the list did.
     let extern_fns: std::collections::HashSet<&str> = program
         .functions
         .iter()
-        .filter(|f| f.is_extern)
+        .filter(|f| {
+            f.is_extern
+                && (crate::floor::no_judge()
+                    || crate::trap::host_boundary_extern(&f.name).is_none())
+        })
         .map(|f| f.name.as_str())
         .collect();
     let global_names: std::collections::HashSet<String> =
@@ -10575,8 +10619,8 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             return Some("reads or writes module state".to_string());
         }
         for c in expand(fn_calls(&f.body)) {
-            if COMPTIME_FORBIDDEN.contains(&c.as_str()) {
-                return Some(format!("calls `{c}`"));
+            if let Some(why) = gen_refused(&c) {
+                return Some(why);
             }
             if extern_fns.contains(c.as_str()) {
                 return Some(format!("calls the extern `{c}`"));
@@ -10585,8 +10629,8 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         None
     };
     const HINT: &str = "generators run at compile time — they may not use `extern`, `spawn`, \
-                        module state, `writeFile`, `readLine`, `args`, `readFileBytes`, or logging \
-                        sinks";
+                        module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, \
+                        the clock, entropy, or logging sinks";
     // Whether a function violates purity on its own, and the call edges out of
     // it, computed ONCE per function and shared by every generator's search.
     // Both are functions of the body alone — nothing about them depends on which
@@ -10681,15 +10725,43 @@ pub struct StoredLambda {
 #[derive(Debug, Clone, Default)]
 pub struct StoredFnEffects {
     pub sources: Vec<StoredSource>,
+    /// The functions handed to a `fn`-typed PARAMETER at a call site — a
+    /// lambda literal or a bare function name, checked by
+    /// [`Checker::check_fn_arg`] and monomorphized there (RFC-0023).
+    ///
+    /// A list of its own, and not part of [`sources`](Self::sources), because
+    /// the two positions are different things: a stored value carries a
+    /// defunctionalization tag and one enum variant, and an argument carries
+    /// neither. The spawn and `--workers` analyses read `sources` alone, so
+    /// their verdicts do not move. What reads BOTH is the effect judgment
+    /// (RFC-0125 §2.2): a parameter's call reaches whatever a caller handed
+    /// it, whichever route the value took. Before this list, whether a source
+    /// was collected turned on how the parameter's type was SPELLED — a named
+    /// alias (`f: Bump`) went through the stored path and a bare `fn(..)` did
+    /// not — which is RFC-0125 §3 M6's finding 14.
+    ///
+    /// Only `sig`, `named` and a lambda's `defined_in`/`line` are filled: the
+    /// rest of [`StoredLambda`] is the spawn analysis's, and the spawn
+    /// analysis does not read this list.
+    pub arg_sources: Vec<StoredSource>,
     /// `(function, signature)` for each call through a stored fn value.
     pub calls: Vec<(String, Type)>,
+}
+
+impl StoredFnEffects {
+    /// Every function a value of some `fn` type may be, whichever position it
+    /// came from — what the effect judgment joins over.
+    pub fn every_source(&self) -> impl Iterator<Item = &StoredSource> {
+        self.sources.iter().chain(self.arg_sources.iter())
+    }
 }
 
 /// Whether two collected fn signatures could describe the same stored value.
 /// Structural equality, loosened so a generic `Type::Param` matches anything
 /// (a stored fn type inside a generic function is collected pre-substitution;
-/// matching loosely keeps the effect union conservative).
-fn fn_sigs_match(a: &Type, b: &Type) -> bool {
+/// matching loosely keeps the effect union conservative). Public because the
+/// effect judgment (RFC-0125 §2.2) joins over the same sources.
+pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
     if matches!(a, Type::Param(_)) || matches!(b, Type::Param(_)) {
         return true;
     }
@@ -10699,11 +10771,27 @@ fn fn_sigs_match(a: &Type, b: &Type) -> bool {
                 && ap.iter().zip(bp).all(|(x, y)| fn_sigs_match(x, y))
                 && fn_sigs_match(ar, br)
         }
-        (Type::Option(x), Type::Option(y))
-        | (Type::Array(x), Type::Array(y))
+        (Type::Array(x), Type::Array(y))
         | (Type::Task(x), Type::Task(y))
         | (Type::Stream(x), Type::Stream(y)) => fn_sigs_match(x, y),
-        (Type::Result(x1, x2), Type::Result(y1, y2)) | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
+        (Type::Map(x1, x2), Type::Map(y1, y2)) => fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2),
+        // The two built-in sums, read through their payloads (RFC-0126 §8.15):
+        // a nested `Param` matches loosely through a payload the way it does
+        // through an `Array`'s element. A DECLARED enum still compares equal,
+        // which is the reading it had before the collapse.
+        _ if crate::types::option_payload(a).is_some()
+            && crate::types::option_payload(b).is_some() =>
+        {
+            fn_sigs_match(
+                crate::types::option_payload(a).expect("an Option payload"),
+                crate::types::option_payload(b).expect("an Option payload"),
+            )
+        }
+        _ if crate::types::result_payloads(a).is_some()
+            && crate::types::result_payloads(b).is_some() =>
+        {
+            let (x1, x2) = crate::types::result_payloads(a).expect("Result payloads");
+            let (y1, y2) = crate::types::result_payloads(b).expect("Result payloads");
             fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2)
         }
         _ => a == b,
@@ -10992,6 +11080,21 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
     }
 }
 
+/// The payload count a built-in sum's variant name carries: `None` binds
+/// nothing and the other three bind one. A declared enum states its own arity in
+/// its declaration and is checked against that; these four have no declaration,
+/// so the rule is here (RFC-0126 §8).
+fn sum_arm_arity(name: &str, binds: usize, line: usize) -> Result<(), Diagnostic> {
+    let want = usize::from(name != "None");
+    if binds != want {
+        return Err(cerr!(
+            line,
+            "variant `{name}` has {want} payload(s), but the pattern binds {binds}"
+        ));
+    }
+    Ok(())
+}
+
 /// The names a pattern binds — `Some(x)`, `Ok(e)`, `Circle(w, h)`.
 ///
 /// A match arm's binder shadows a module global for the length of that arm, and
@@ -11002,13 +11105,9 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
 /// purity violation; it is a coincidence.
 fn pattern_binders(p: &Pattern) -> Vec<String> {
     match p {
-        Pattern::Some(n)
-        | Pattern::Ok(n)
-        | Pattern::Err(n)
-        | Pattern::Success(n)
-        | Pattern::Failure(n) => vec![n.clone()],
+        Pattern::Success(n) | Pattern::Failure(n) => vec![n.clone()],
         Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 
@@ -11449,24 +11548,20 @@ mod tests {
     /// Every log level is reserved, and every log level is an effect.
     ///
     /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside three long
-    /// lists here — `RESERVED`, `SPAWN_FORBIDDEN`, `COMPTIME_FORBIDDEN` — mixed
-    /// among dozens of unrelated builtin names. They cannot read
-    /// [`ast::LOG_LEVELS`] directly, because splicing a const array into an
-    /// array literal costs more than it saves and would make three readable
-    /// lists unreadable.
+    /// lists here — `RESERVED` and `SPAWN_FORBIDDEN` — mixed among dozens of
+    /// unrelated builtin names. They cannot read [`ast::LOG_LEVELS`] directly,
+    /// because splicing a const array into an array literal costs more than it
+    /// saves and would make two readable lists unreadable.
     ///
     /// So this compares them instead. A sixth level added to `ast::LOG_LEVELS`
     /// and to the dispatch, but not to these lists, is a level that logs while
     /// counting as neither an effect nor a reserved word: `spawn` would let it
     /// cross a task boundary, and a `gen fn` would be allowed to call it at
-    /// compile time.
+    /// compile time. The third list was the generation fence's, and it is the
+    /// lattice's `write-output` row now (RFC-0125 §3 M6, fifth slice).
     #[test]
     fn every_log_level_is_reserved_and_forbidden_where_effects_are() {
-        for list in [
-            ("RESERVED", RESERVED),
-            ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN),
-            ("COMPTIME_FORBIDDEN", COMPTIME_FORBIDDEN),
-        ] {
+        for list in [("RESERVED", RESERVED), ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN)] {
             let (what, names) = list;
             let missing: Vec<&str> = crate::ast::LOG_LEVELS
                 .iter()
@@ -11477,6 +11572,14 @@ mod tests {
                 missing.is_empty(),
                 "{what} does not hold every log level — missing: {}",
                 missing.join(", ")
+            );
+        }
+        // The generation fence reads the lattice's `gen` column now (RFC-0125
+        // §3 M6, fifth slice), so the third list is the `write-output` row.
+        for lvl in crate::ast::LOG_LEVELS {
+            assert!(
+                crate::effects::gen_refusal(lvl).is_some(),
+                "`{lvl}` is a log level a `gen fn` may call"
             );
         }
     }
@@ -12242,7 +12345,9 @@ mod tests {
              fn main() -> Int64 { if let Ok(v) = f() { return v } return 0 }",
         )
         .unwrap_err();
-        assert!(bad.contains("does not match scrutinee"), "{bad}");
+        // The enum path's wording, since RFC-0126 §8.11's M4b took every sum
+        // to it: a name that is not one of the scrutinee's variants.
+        assert!(bad.contains("is not a variant of"), "{bad}");
     }
 
     #[test]
@@ -12484,6 +12589,23 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("not comptime-pure"), "{e}");
         assert!(e.contains("`writeFile`"), "{e}");
+    }
+
+    /// RFC-0125 M6 finding 4: `write-output` is one effect and its `gen` cell
+    /// is one cell. The fence used to refuse `writeStdout` and allow `print`,
+    /// which is one effect with two verdicts. A generator is re-run only when
+    /// its cache key changes, so a `print` in a `gen fn` is silent on a cache
+    /// hit, and the same build prints or does not print by the state of the
+    /// cache.
+    #[test]
+    fn gen_fn_using_print_is_rejected() {
+        let src = "gen fn g() -> String { print(\"hi\") return \"\" } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains("not comptime-pure") && e.contains("`print`"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -12924,8 +13046,11 @@ mod tests {
 
     #[test]
     fn rfc0043_host_clock_extern_is_rejected_in_a_generator() {
-        // A gen fn reaching the clock extern (what `now()` wraps) is not
-        // comptime-pure — pinned via the existing extern rule.
+        // A gen fn reaching the clock is not comptime-pure, and the reason is
+        // the lattice's `clock` row. It used to be "calls the extern
+        // `hostNowMillis`", which RFC-0103 M2 says is wrong: the three
+        // host-boundary names are not host imports at all, because the runtime
+        // shim implements them on every target (RFC-0125 §3 M6 finding 13).
         let e = check_src(
             "extern fn hostNowMillis() -> Int64 \
              fn now() -> Int64 { return hostNowMillis() } \
@@ -12934,9 +13059,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            e.contains("not comptime-pure") && e.contains("extern"),
+            e.contains("not comptime-pure") && e.contains("which reads the clock"),
             "{e}"
         );
+        assert!(!e.contains("the extern `hostNowMillis`"), "{e}");
     }
 
     #[test]
@@ -13460,13 +13586,17 @@ mod tests {
     /// `get` rot out of `movecheck`'s view list. One list was updated when a
     /// builtin was deleted, a second was not, and a `Slots<String>` leaked
     /// silently for two milestones. `SPAWN_FORBIDDEN` has been pinned since
-    /// `afree` left; `COMPTIME_FORBIDDEN` reads the same way and was pinned by
-    /// nothing.
+    /// `afree` left; the generation fence's list read the same way and was
+    /// pinned by nothing. The list is gone and the fence reads the lattice's
+    /// `gen` column, so this asks the column instead.
     #[test]
     fn comptime_forbidden_names_are_reserved() {
-        for n in COMPTIME_FORBIDDEN {
+        for (n, _) in crate::effects::ATOMS {
+            if crate::effects::gen_allows(n) {
+                continue;
+            }
             assert!(
-                RESERVED.contains(n),
+                RESERVED.contains(n) || crate::trap::host_boundary_extern(n).is_some(),
                 "`{n}` is forbidden inside a `gen fn` but is not a name the \
                  compiler owns — it now forbids any user function spelled that way"
             );
@@ -13483,14 +13613,17 @@ mod tests {
         assert!(e.contains("expects 1 argument(s) besides `self`"), "{e}");
     }
 
+    /// Inference may now materialize an `Option<Option<..>>` (RFC-0126 §8):
+    /// `T` solves to `Option<Int64>` here, which the v0.1 rule refused. All
+    /// three engines already boxed the inner sum in the outer's payload word —
+    /// `examples/nestedsum.vyrn` runs the shape on every one of them.
     #[test]
-    fn rejects_nested_option_via_generic_inference() {
+    fn accepts_nested_option_via_generic_inference() {
         let src = "fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
                    fn main() -> Int64 { \
                        let o = wrap(Some(1)) \
                        return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     #[test]
@@ -13701,7 +13834,7 @@ mod tests {
         let src = "fn main() -> Int64 { let o: Option<Int64> = Some(1); \
                    return match o { Some(x) => x }; }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("cover both"), "{e}");
+        assert!(e.contains("missing variant `None`"), "{e}");
     }
 
     #[test]
@@ -13741,7 +13874,7 @@ mod tests {
         let src = "fn main() -> Int64 { let o: Option<Int64> = Some(1); \
                    return match o { Ok(x) => x, None => 0 }; }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("does not match"), "{e}");
+        assert!(e.contains("is not a variant of"), "{e}");
     }
 
     // ---- generic functions ---------------------------------------------
@@ -15159,7 +15292,7 @@ mod tests {
 
     /// `listDir` is NOT gated with them, and the asymmetry is deliberate: it
     /// lists the real filesystem under `vyrn run` (which is why
-    /// [`COMPTIME_FORBIDDEN`] omits it and the interpreter serves it), so the
+    /// the lattice's `gen` column allows it and the interpreter serves it), so the
     /// front end has nothing to refuse. Only the two compiling backends lack a
     /// lowering, and each says so itself.
     #[test]
@@ -15856,15 +15989,15 @@ mod tests {
     }
 
     /// A transparent alias IS the Option it names, so `Option<M>` for
-    /// `type M = Option<Int64>` is the nested wrap the v0.1 rule refuses when
-    /// written directly.
+    /// `type M = Option<Int64>` is a nesting — accepted since RFC-0126 §8. The
+    /// alias is kept as a case because it is the one spelling where the nesting
+    /// is invisible until `resolve` runs.
     #[test]
-    fn a_transparent_alias_cannot_launder_a_nested_option() {
+    fn a_transparent_alias_may_name_a_nested_option() {
         let src = "type M = Option<Int64> \
                    fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
                    fn main() -> Int64 { let m: M = None let w = wrap(m) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     /// The owned-container walk under `copy` is unbounded (cycle-guarded): an
@@ -15986,14 +16119,14 @@ mod tests {
         assert!(check_src(bad).is_err());
     }
 
-    /// Direct construction cannot launder a nested wrap through a transparent
-    /// alias either: the payload resolves before the prohibition checks it.
+    /// Direct construction of a nesting whose inner layer hides behind a
+    /// transparent alias. Paired with the inference case above, so both routes
+    /// to a nested sum stay covered (RFC-0126 §8).
     #[test]
-    fn some_refuses_a_payload_alias_that_names_an_option() {
+    fn some_accepts_a_payload_alias_that_names_an_option() {
         let src = "type M = Option<Int64> \
                    fn main() -> Int64 { let m: M = None let w = Some(m) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     /// A parameter bounded by a NON-first protocol dispatches through the

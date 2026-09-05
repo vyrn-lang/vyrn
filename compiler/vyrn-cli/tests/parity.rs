@@ -58,23 +58,33 @@ fn examples_interp_native_parity() {
     assert!(!names.is_empty(), "no examples found in {}", dir.display());
 
     let mut failures: Vec<String> = Vec::new();
-    let mut skipped = 0usize;
+    // Three reasons an example is not compared, counted apart, because the summary
+    // line used to call all of them "known divergent" while that list was empty.
+    // A refusal is a program `vyrn check` rejects on purpose, asserted by
+    // `expected_check_failures_do_fail`; host-only is `extern` into a namespace
+    // only a browser supplies, asserted by `wasm_only_examples_trap_identically`.
+    let (mut divergent, mut refused, mut host_only) = (0usize, 0usize, 0usize);
 
     for path in &names {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         if let Some((_, why)) = KNOWN_DIVERGENT.iter().find(|(n, _)| *n == name) {
             eprintln!("SKIP  {name}  ({why})");
-            skipped += 1;
+            divergent += 1;
             continue;
         }
         if let Some((_, why, _)) = EXPECTED_CHECK_FAILURE.iter().find(|(n, ..)| *n == name) {
             eprintln!("SKIP  {name}  (expected check failure: {why})");
-            skipped += 1;
+            refused += 1;
             continue;
         }
         if let Some((_, why)) = WASM_ONLY.iter().find(|(n, _)| *n == name) {
             eprintln!("SKIP  {name}  (wasm-only: {why})");
-            skipped += 1;
+            host_only += 1;
+            continue;
+        }
+        if let Some((_, why)) = NATIVE_UNSUPPORTED.iter().find(|(n, _)| *n == name) {
+            eprintln!("SKIP  {name}  (no native lowering: {why})");
+            host_only += 1;
             continue;
         }
 
@@ -178,10 +188,14 @@ fn examples_interp_native_parity() {
         eprintln!("ok    {name}");
     }
 
+    let skipped = divergent + refused + host_only;
     eprintln!(
-        "\nparity: {} checked, {} skipped (known divergent), {} failed",
+        "\nparity: {} checked, {} skipped ({} refused by `vyrn check`, {} host-only or native-unsupported, {} known divergent), {} failed",
         names.len() - skipped,
         skipped,
+        refused,
+        host_only,
+        divergent,
         failures.len()
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
@@ -748,7 +762,7 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
                 "{what}: interp vs {other} exit"
             );
         }
-        let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
+        let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
         if what == "over" {
             assert!(
                 runtime_err(&w.stderr).contains(&format!("call depth exceeds {limit}")),
@@ -829,6 +843,14 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
 /// substitution is even solved), and a further generic solved from a generic
 /// call's RESULT type — `firstOf(twice(41))` can only fix `A` if the call
 /// reports `Pair<Int64, Int64>` rather than its record shape.
+///
+/// The `.copy()` calls are RFC-0089 rule 2, and the kernel is what made them
+/// necessary (RFC-0125 §3 M3, the default slice). The checker types the
+/// GENERIC body, where `T` owns heap or does not according to nothing; the
+/// kernel judges the instance, where `T` is `String`. Without them `wrap`
+/// stores one `read` parameter into two fields of the same record and
+/// `firstOf` returns a field of a `read` parameter — a double free and a lend,
+/// visible only after substitution.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
@@ -841,7 +863,7 @@ fn a_specialization_discovered_from_another_gets_the_index_its_callers_named() {
 type Pair<A, B> = { first: A, second: B }
 
 fn wrap<T>(x: T) -> Pair<T, T> {
-    return Pair { first: x, second: x }
+    return Pair { first: x.copy(), second: x.copy() }
 }
 
 fn twice<T>(x: T) -> Pair<T, T> {
@@ -849,7 +871,7 @@ fn twice<T>(x: T) -> Pair<T, T> {
 }
 
 fn firstOf<A, B>(p: Pair<A, B>) -> A {
-    return p.first
+    return p.first.copy()
 }
 
 fn main() -> Int64 {

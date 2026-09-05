@@ -1,0 +1,13 @@
+// RFC-0093: `consume p.name` leaves a hole, so `p` may not be used whole.
+type Person = { name: String, age: Int64 }
+
+fn take(s: consume String) -> Int64 { return s.byteLength }
+fn keep(p: consume Person) -> Int64 { return p.age }
+
+fn main() -> Int64 {
+    let p = Person { name: "n", age: 1 }
+    let a = take(consume p.name)
+    let b = keep(p)
+    print(a + b)
+    return 0
+}

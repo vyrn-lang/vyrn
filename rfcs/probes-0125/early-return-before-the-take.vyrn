@@ -1,0 +1,30 @@
+// RFC-0125 M2 probe: an accumulator grown by write-backs in a loop, with an
+// early `return Err` inside the loop before the final `return Ok(xs)`.
+let turns = 200000
+
+fn build(n: Int64, stop: Int64) -> Result<Array<Int64>, String> {
+    let mut xs: Array<Int64> = []
+    let mut i = 0
+    while i < n {
+        if i == stop {
+            return Err("stopped")
+        }
+        xs = xs.push(i)
+        i = i + 1
+    }
+    return Ok(xs)
+}
+
+fn main() -> Int64 {
+    let mut t = 0
+    let mut total = 0
+    while t < turns {
+        total = total + match build(64, 40) {
+            Ok(xs) => xs.length,
+            Err(e) => e.byteLength,
+        }
+        t = t + 1
+    }
+    print(total)
+    return 0
+}

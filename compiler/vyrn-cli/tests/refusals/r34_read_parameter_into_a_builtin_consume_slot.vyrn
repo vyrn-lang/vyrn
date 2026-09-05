@@ -1,0 +1,13 @@
+// A builtin argument that declares `consume` takes what it is handed, and a
+// `read` parameter is the caller's (RFC-0089 rule 2).
+fn addTo(out: modify Array<String>, s: String) -> Int64 {
+    out.push(s)
+    return out.length
+}
+
+fn main() -> Int64 {
+    let mut xs: Array<String> = []
+    let n = addTo(xs, "a".copy())
+    print(n)
+    return 0
+}

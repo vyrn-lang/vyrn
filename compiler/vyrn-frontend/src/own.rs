@@ -273,6 +273,13 @@ pub struct Release {
     /// WHOLE value, hole fields included. False everywhere else, and the
     /// emission skips the holes as it always has.
     pub full: bool,
+    /// RFC-0125 M3: the holes THIS row walks around, when the placer decided
+    /// them for this exit rather than the analysis for the binding. `None`
+    /// means the binding's own set (the `holes` table). The placer sets it
+    /// where a name is held with a hole at an exit the analysis placed
+    /// nothing at: the hole set at that exit is the kernel's state there,
+    /// which may differ from the binding's set on another path.
+    pub holes: Option<Vec<String>>,
 }
 
 /// How a droppable binding is reclaimed at block exit.
@@ -396,7 +403,7 @@ pub enum Linear {
 /// lowering, not deciding. What is declared is the property.
 /// `Default` is the seed with no declared rows and no nominal declarations —
 /// what a program of built-ins alone would ask.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Owned {
     /// One row per `impl Owned for T`: the type key -> its flattened `release`.
     impls: HashMap<String, String>,
@@ -501,11 +508,18 @@ impl Owned {
             // container working: `resolve` leaves a `Param` alone and leaves an
             // undeclared `Named` as `Unit`, so `Array<T>` in `map`, `filter`,
             // `fold` and `std/slots` carries no obligation.
-            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Option(e) => {
-                self.linear_kind(&e)
+            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => self.linear_kind(&e),
+            Type::Map(a, b) => self.linear_kind(&a).or_else(|| self.linear_kind(&b)),
+            // The two built-in sums, read through their variant lists since
+            // RFC-0126 §8.11's M4b. A DECLARED enum is left alone for the reason
+            // the record field is: `impl MustUse for Order` is how an author says
+            // one holding a `Txn` must be discharged.
+            ref r if crate::types::option_payload(r).is_some() => {
+                self.linear_kind(crate::types::option_payload(r).unwrap())
             }
-            Type::Map(a, b) | Type::Result(a, b) => {
-                self.linear_kind(&a).or_else(|| self.linear_kind(&b))
+            ref r if crate::types::result_payloads(r).is_some() => {
+                let (a, b) = crate::types::result_payloads(r).unwrap();
+                self.linear_kind(a).or_else(|| self.linear_kind(b))
             }
             _ => None,
         }
@@ -554,15 +568,9 @@ impl Owned {
     ///
     /// The match has no `_` arm on purpose. A new [`Type`] variant does not get
     /// to be silently unreclaimed; it has to say so.
-    /// Whether ANY type declares `impl Owned` — the coarse gate the receiver
-    /// filter uses before admitting a `Deep` producer.
-    pub fn declares_any(&self) -> bool {
-        !self.impls.is_empty()
-    }
-
     /// Whether releasing a value of `ty` could CALL a declared `impl Owned`
-    /// release — the per-type question the coarse [`Owned::declares_any`]
-    /// gates approximated (the upgrade the record-producer gate's comment
+    /// release — the per-type question a coarse "does ANY type declare one"
+    /// gate approximated (the upgrade the record-producer gate's comment
     /// named). A walk that cannot reach a declaration is silent whatever it
     /// frees, so a receiver temporary of such a type may die at its last
     /// read without user-visible timing. Conservative where it cannot see:
@@ -588,9 +596,8 @@ impl Owned {
             | Type::ArrayN(t, _)
             | Type::SmallArray(t, _)
             | Type::Stream(t)
-            | Type::Option(t)
             | Type::Partial(t) => self.reaches_declared_in(&t, seen),
-            Type::Result(a, b) | Type::Merge(a, b) => {
+            Type::Merge(a, b) => {
                 self.reaches_declared_in(&a, seen) || self.reaches_declared_in(&b, seen)
             }
             Type::Map(k, v) => {
@@ -729,13 +736,10 @@ impl Owned {
             // stored at all. So an aggregate holds what it holds, and rule 4
             // says releasing it releases those places.
             //
-            // Two rows, and only two. Census §14 is the whole reason: `Option`
-            // and `Result` are how this language is told to write a fallible
-            // function, so a String built inside one had no owner in the
-            // RECOMMENDED style.
-            t @ (Type::Option(_) | Type::Result(..)) => {
-                owns_heap(&t, &self.types).then(|| DropKind::Deep(t))
-            }
+            // Census §14's two rows are the enum's row now: since RFC-0126
+            // §8.11's M4b a built-in sum RESOLVES to `| None | Some(T)` and
+            // `| Err(E) | Ok(T)`, so it takes the arm below, with the guard a
+            // declared enum already had.
             // A stored function value (RFC-0037) is `{ tag, captures }` and the
             // capture block IS heap — one `malloc` per evaluation of the lambda,
             // which is census §16. Phase 10b releases it: the block is one
@@ -855,14 +859,13 @@ fn self_referring_past(
         }
         let mut deeper = |t: &Type| go(t, types, stops, seen);
         match ty {
-            Type::Option(t)
-            | Type::Array(t)
+            Type::Array(t)
             | Type::ArrayN(t, _)
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
             | Type::Task(t)
             | Type::Stream(t) => deeper(t),
-            Type::Result(a, b) | Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
+            Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
             Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, stops, seen)),
             Type::Enum(vs) => vs
                 .iter()
@@ -930,62 +933,24 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             | Type::Map(..)
             | Type::Stream(_)
             | Type::Task(_) => true,
-            // A SUM whose payload is wider than one word travels BOXED in the
-            // boxing representation, and that box is heap whatever else the
-            // payload holds — `Option<Handle>` is three words behind one
-            // pointer (round twenty-nine, the same argument the recursive-name
-            // rule above already made: the representation's box IS heap). The
-            // word-class four (`Int`, `Bool`, `Str`, `Fn`) mirror the
-            // emitter's `payload_boxed`.
-            Type::Option(t) => {
-                !matches!(
-                    crate::types::resolve(&t, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || deeper(&t)
-            }
             Type::ArrayN(t, _) | Type::Lazy(t) => deeper(&t),
-            Type::Result(a, b) => {
-                !matches!(
-                    crate::types::resolve(&a, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || !matches!(
-                    crate::types::resolve(&b, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || deeper(&a)
-                    || deeper(&b)
-            }
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
+            // A SUM whose payload travels BOXED owns that box whatever else the
+            // payload holds — `Option<Handle>` is three words behind one pointer
+            // (round twenty-nine, the same argument the recursive-name rule above
+            // already made: the representation's box IS heap).
+            //
+            // One question, asked once, of every sum — `types::payload_boxed`,
+            // which is the emitter's own rule. It was written out here four
+            // times, as a hand-kept word list, and RFC-0126 §8.9 moved the rule
+            // out from under it: a payload two words wide rides in its slots now
+            // and the list still called it boxed (§8.11 recorded the drift).
+            // Since §8.11's M4b there is one arm as well as one rule: the two
+            // built-in sums resolve to their variant lists.
             Type::Enum(vs) => vs.iter().any(|v| {
-                v.payload.iter().any(|t| {
-                    !matches!(
-                        crate::types::resolve(t, types),
-                        Type::Int
-                            | Type::Bool
-                            | Type::Str
-                            | Type::Fn(..)
-                            | Type::Unit
-                            | Type::Never
-                            | Type::Param(_)
-                    ) || deeper(t)
-                })
+                v.payload
+                    .iter()
+                    .any(|t| crate::types::payload_boxed(t, types) || deeper(t))
             }),
             // A stored function value (RFC-0037) is `{ tag, captures }` and the
             // capture block IS heap — one `malloc` per evaluation of the lambda,
@@ -1154,7 +1119,7 @@ pub fn holes_under(holes: &[String], name: &str) -> Vec<String> {
 /// question about the expression's SHAPE, and a call's answer is its callee's:
 /// the position may retain the value, or take it, or hand it back. That verdict
 /// is [`crate::movecheck::ArgVerdict`], read per position and closed over the
-/// call graph, and [`Ownership::arg_drops`] is what the backends ask. A String
+/// call graph, and [`ReleasePlan::arg_drops`] is what the backends ask. A String
 /// `+` records its operands there under the name `@concat`, so an operand a
 /// call produced takes the same rule and the same guards as a call argument
 /// (`rfcs/census-call-arguments.md` §9, finding 3) — and the two rules
@@ -1311,11 +1276,6 @@ pub struct ReleasePlan {
     /// alias owns the payload, and the box was nobody's. See the fold in
     /// `analyze`.
     pub consuming_matches: std::collections::HashSet<usize>,
-    /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
-    /// bindings to release on one edge because another edge consumed them —
-    /// `(name, edge)`, 0/1 for an `if`'s then/else, the arm's source index
-    /// for a `match`. See [`fold_edge_releases`].
-    pub edge_releases: HashMap<usize, Vec<(String, u32)>>,
     /// RFC-0114 R1′: the `Expr::Field` nodes whose unnamed receiver this
     /// frame owns — freed right after the read (the header for a projection,
     /// the whole record deep after a scalar field).
@@ -1326,10 +1286,12 @@ pub struct ReleasePlan {
     /// extended from match scrutinees to receivers). The `@`-spelled
     /// producers route through the arena lexically and stay region-gated.
     pub receiver_malloc: std::collections::HashSet<usize>,
-    /// Round forty: `(match id, arm index) -> kind` — the arm's unmoved
-    /// payload binder, released at the arm's end. See
-    /// [`crate::movecheck::ArmPayloadEv`].
-    pub arm_frees: HashMap<(usize, u32), DropKind>,
+    /// RFC-0125 M3: for a receiver in [`ReleasePlan::receiver_frees`] one of
+    /// whose heap fields the read TOOK (`let sels = parse(q).sels`), the
+    /// holes the free walks around — the taken field. The analysis kept such
+    /// a receiver out of the set because a whole walk would free what the
+    /// binding took; the placer puts it in with its hole.
+    pub receiver_holes: HashMap<usize, Vec<String>>,
     /// §26's finish check: which function each row above lives in, so
     /// [`ReleasePlan::unconsumed`] can skip rows whose owner an emission
     /// never reached — dead code alarms nobody, a missed site in emitted
@@ -1398,6 +1360,23 @@ impl ReleasePlan {
         at
     }
 
+    /// The node a plan row is keyed by, for a reader that holds its own
+    /// answer and needs only the key (RFC-0125 §3 M3, the
+    /// deletion-preparation slice).
+    pub fn key_of(&self, at: usize) -> usize {
+        self.resolve(at)
+    }
+
+    /// Record that the emission considered the rows at `at`, without asking
+    /// what they say. An emitter that takes its answer from the core still
+    /// owes §26's finish check an acknowledgement, or every row it no longer
+    /// reads is counted as a decision the emission walked past. The
+    /// acknowledgement goes when the tables go.
+    pub fn acknowledge(&self, at: usize) {
+        let at = self.resolve(at);
+        self.taken.borrow_mut().insert(at);
+    }
+
     /// RFC-0114 M1: does the caller release this argument after the call?
     /// A hit is recorded as consumed — see [`ReleasePlan::unconsumed`].
     pub fn arg_drop(&self, at: usize) -> bool {
@@ -1448,16 +1427,6 @@ impl ReleasePlan {
         hit
     }
 
-    /// RFC-0114 Rule N: the releases one edge of this join owes.
-    pub fn edge_releases_at(&self, at: usize) -> Option<&Vec<(String, u32)>> {
-        let at = self.resolve(at);
-        let ers = self.edge_releases.get(&at);
-        if ers.is_some() {
-            self.taken.borrow_mut().insert(at);
-        }
-        ers
-    }
-
     /// RFC-0114 R1′: does this frame own (and free) the unnamed receiver?
     pub fn receiver_free(&self, at: usize) -> bool {
         let at = self.resolve(at);
@@ -1468,20 +1437,19 @@ impl ReleasePlan {
         hit
     }
 
+    /// RFC-0125 M3: the holes a receiver's free walks around, when the read
+    /// took a field out of it. Empty for every receiver the analysis placed.
+    pub fn receiver_holes_at(&self, at: usize) -> Vec<String> {
+        self.receiver_holes
+            .get(&self.resolve(at))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Round fifty-seven: is this receiver's block a CALLEE allocation —
     /// malloc-side even inside a `region`?
     pub fn receiver_malloc_at(&self, at: usize) -> bool {
         self.receiver_malloc.contains(&self.resolve(at))
-    }
-
-    /// Round forty: the release owed to this arm's unmoved payload binder.
-    pub fn arm_payload_free(&self, at: usize, arm: u32) -> Option<&DropKind> {
-        let at = self.resolve(at);
-        let r = self.arm_frees.get(&(at, arm));
-        if r.is_some() {
-            self.taken.borrow_mut().insert(at);
-        }
-        r
     }
 
     /// §26's loudness: every planned row whose owner WAS emitted and that no
@@ -1498,15 +1466,10 @@ impl ReleasePlan {
         emitted: &std::collections::HashSet<String>,
     ) -> Vec<(String, &'static str)> {
         let taken = self.taken.borrow();
-        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 5] = [
+        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 3] = [
             ("an argument drop", Box::new(self.arg_drops.iter())),
             ("a store release", Box::new(self.store_owned.iter())),
-            ("an edge release", Box::new(self.edge_releases.keys())),
             ("a receiver free", Box::new(self.receiver_frees.iter())),
-            (
-                "an arm payload",
-                Box::new(self.arm_frees.keys().map(|k| &k.0)),
-            ),
         ];
         let mut out: Vec<(String, &'static str)> = Vec::new();
         for (label, it) in classes {
@@ -1529,7 +1492,7 @@ impl ReleasePlan {
 }
 
 /// Whole-program ownership facts.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Ownership {
     /// The per-node release decisions — see [`ReleasePlan`].
     pub plan: ReleasePlan,
@@ -1564,12 +1527,6 @@ pub struct Ownership {
     /// lowering an explicit `drop x` asks the SAME question the automatic path
     /// asked, instead of keeping a second copy of the answer.
     pub proto: Owned,
-    /// Every call-argument temporary in the program, with the callee's verdict
-    /// on it (`rfcs/census-call-arguments.md`). The rows a backend acts on are
-    /// the [`crate::movecheck::ArgVerdict::Released`] ones, which is what
-    /// [`Ownership::arg_drops`] hands back; the rest are here so the census's
-    /// own table can be re-derived from the compiler instead of from a harness.
-    pub arg_temps: Vec<crate::movecheck::ArgTemp>,
     /// Per function: [`droppable`](Ownership::droppable)'s rows PLACED — every
     /// step, at the exit that runs it, in the order it runs (RFC-0101 M4).
     ///
@@ -1579,44 +1536,88 @@ pub struct Ownership {
     pub releases: HashMap<String, Vec<Release>>,
 }
 
-impl Ownership {
-    /// Every argument temporary the CALLER releases after the call, keyed by the
-    /// argument expression's node address — the key a backend releases by, the
-    /// way `droppable` is keyed by the `Stmt::Let`'s.
+/// One analysis per build — RFC-0125 §3 M3, the repetition slice.
+///
+/// [`analyze`] runs the placer, which builds a core body for every instance of
+/// the LINKED program and judges it. Every command asks for the analysis twice:
+/// once so `kernel_refuses` prints this program's refusals, and once inside the
+/// engine that lowers or emits. The second answer is the first one recomputed,
+/// and the count is in §3 M3's table.
+///
+/// The guard BORROWS the program it caches for, so the program outlives the
+/// guard and no other `Program` can take that address while the entry is held.
+/// That is why an address is a sound key here, and it is the whole proof: a hit
+/// is the same program, so it is the same answer. Any other program analysed
+/// inside the guard — a generator's own, during a load — has a different
+/// address, misses, and is neither served from the cache nor written to it.
+///
+/// Opened by the CLI beside [`crate::project::Memo`], after the load and for
+/// the one program the command is about. Nothing else opens one, so a host that
+/// does not arm it analyses twice as before.
+pub struct Memo<'a> {
+    program: std::marker::PhantomData<&'a Program>,
+}
+
+thread_local! {
+    /// The program this memo answers for, or 0. An address, never dereferenced.
+    static MEMO_FOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MEMO: std::cell::RefCell<Option<Ownership>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+impl<'a> Memo<'a> {
+    /// Hold one analysis of `program` until the guard is dropped.
     ///
-    /// Only a `String` today. Both backends free one out of a register with a
-    /// helper each already has ([`str_temporary`]'s), and every other kind wants
-    /// the walking release, which needs a PLACE and therefore a slot to spill
-    /// into. The rows for those kinds are recorded and left alone: a leak, which
-    /// is what they are today.
-    ///
-    /// **A wider kind has one more question to ask first.** A seeded row may
-    /// hand a CONTAINER back — `@push` answers `Array<T>` and its receiver is
-    /// the same `Array<T>` — so freeing at the call would free a buffer the
-    /// result still names. No `Array` is a `FreeStr`, so no such row can reach
-    /// this filter; `movecheck::arg_verdict` answers the same question for a row
-    /// that hands back a bare type parameter, which `blackBox` does.
-    pub fn arg_drops(&self) -> std::collections::HashSet<usize> {
-        // EVERY `Released` temporary, whatever its kind (RFC-0114 M1). This
-        // carried `&& s.kind == DropKind::FreeStr` for as long as the emitters
-        // could only free a String — so a call-argument tree, array or record
-        // was analysed, verdicted, and then thrown away here, which is why
-        // `check(make(depth))` leaked 313.9 MB against the interpreter's 8.5.
-        // Both backends free by TYPE now, through the same `release_kind`
-        // table this filter used to consult, so the filter is the leak.
-        self.plan.arg_drops.clone()
+    /// The load makes an analysis of its own — the ownership stage judges every
+    /// program it checks (RFC-0125 §3 M3, the accumulation slice) — and this
+    /// guard does NOT adopt it. It cannot: a projection is inlined into its
+    /// caller's block with a per-inline tag (`project.rs`), so the analysis the
+    /// load made names bindings `@p26.h` and the lowering a tool runs next
+    /// names them `@p31.h`. A plan whose rows are keyed by those names then
+    /// places nothing, and `examples/genref.vyrn` leaked a block that the
+    /// residue ratchet had recorded clean. Adoption is worth about a third of
+    /// `vyrn check site/export.vyrn` and it needs the inline to be memoized
+    /// across the load and the command, which the project memo is not.
+    pub fn open(program: &'a Program) -> Memo<'a> {
+        MEMO_FOR.with(|p| p.set(program as *const Program as usize));
+        MEMO.with(|m| *m.borrow_mut() = None);
+        Memo {
+            program: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for Memo<'_> {
+    fn drop(&mut self) {
+        MEMO_FOR.with(|p| p.set(0));
+        MEMO.with(|m| *m.borrow_mut() = None);
     }
 }
 
 /// Analyse ownership across a whole program.
 pub fn analyze(program: &Program) -> Ownership {
+    let key = program as *const Program as usize;
+    let memoed = MEMO_FOR.with(|p| p.get()) == key;
+    if memoed {
+        if let Some(o) = MEMO.with(|m| m.borrow().clone()) {
+            return o;
+        }
+    }
+    let ownership = analyze_now(program);
+    if memoed {
+        MEMO.with(|m| *m.borrow_mut() = Some(ownership.clone()));
+    }
+    ownership
+}
+
+fn analyze_now(program: &Program) -> Ownership {
     let proto = Owned::new(program);
     // What every `let` in the program still owns where its block ends, decided
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let mut facts = crate::movecheck::facts(program);
     let mut store_owned = fold_store_owned(&facts);
-    let edge_releases = fold_edge_releases(&facts);
     let revived = fold_revived(&facts);
     let store_fresh = facts.fresh_stores;
     let exit_sites = std::mem::take(&mut facts.exit_sites);
@@ -1632,7 +1633,7 @@ pub fn analyze(program: &Program) -> Ownership {
         .map(|s| s.to_string())
         .collect();
     for d in program.type_decls.iter() {
-        if let Type::Enum(vs) = &d.base {
+        if let Some(vs) = crate::types::declared_variants(&d.base) {
             constructs.extend(vs.iter().map(|v| v.name.clone()));
         }
     }
@@ -1852,6 +1853,7 @@ pub fn analyze(program: &Program) -> Ownership {
                         exit: if ex.is_try { Exit::Try } else { Exit::Return },
                         line: 0,
                         full: false,
+                        holes: None,
                     },
                 ));
                 early
@@ -1954,6 +1956,21 @@ pub fn analyze(program: &Program) -> Ownership {
     // the same loop context as the match (per-iteration freshness) — the
     // match may free the boxes its arms extract, exactly as it does for a
     // temporary scrutinee.
+    //
+    // An arm hands the payload out two ways, and the row spells them
+    // differently. `JObj(fs) => fs` is an ALIAS — `note_arm_value` reads the
+    // arm's place path and writes `Gone::Aliased`. `JObj(fs) => f(fs)` is a
+    // MOVE — the call takes the binder, and the take lands on the scrutinee's
+    // own row, because a binder read resolves there. Both give the payload
+    // away, so both are this upgrade's case: reading only the first left the
+    // second a match whose binder is a BORROW and whose scrutinee is still
+    // held, and the placer then added a deep release of a value the arm had
+    // already given to the callee (RFC-0125 §3 M5, the seventh slice's
+    // `$schema` double free). The three screens below are what makes the
+    // second sound, and they are the same three: nothing reads the row after
+    // the match, no read of the scrutinee's own NAME inside the window — so a
+    // move of `o` ITSELF rather than of a binder is refused here — and one
+    // loop context.
     let consuming_matches: std::collections::HashSet<usize> = {
         use crate::movecheck::EvKind;
         let mut init_loops: HashMap<usize, &Vec<u32>> = HashMap::new();
@@ -1968,7 +1985,10 @@ pub fn analyze(program: &Program) -> Ownership {
             .filter(|c| {
                 matches!(
                     lets.get(&c.key).and_then(|r| r.gone.as_ref()),
-                    Some(crate::movecheck::Gone::Aliased { .. })
+                    Some(
+                        crate::movecheck::Gone::Aliased { .. }
+                            | crate::movecheck::Gone::Moved { .. }
+                    )
                 ) && init_loops.get(&c.key).is_some_and(|l| **l == c.loops)
                     && !facts.mentions.iter().any(|m| {
                         m.key == c.key
@@ -2150,29 +2170,6 @@ pub fn analyze(program: &Program) -> Ownership {
             owners.insert(ps.id, ps.owner.clone());
         }
     }
-    for er in &facts.edge_releases {
-        if edge_releases.contains_key(&er.if_key) {
-            owners.insert(er.if_key, er.owner.clone());
-        }
-    }
-    // Round forty: unmoved payload binders of temp-scrutinee matches —
-    // pre-screened in movecheck (silence, single binder, no alias).
-    let arm_frees: HashMap<(usize, u32), DropKind> = facts
-        .arm_payloads
-        .iter()
-        .map(|a| ((a.match_id, a.arm_ix), a.kind.clone()))
-        .collect();
-    if std::env::var("VYRN_ARM_DUMP").is_ok() {
-        for a in &facts.arm_payloads {
-            eprintln!(
-                "arm-free: fn={} match={:x} arm={} kind={:?}",
-                a.owner, a.match_id, a.arm_ix, a.kind
-            );
-        }
-    }
-    for a in &facts.arm_payloads {
-        owners.insert(a.match_id, a.owner.clone());
-    }
     for (k, n, owner) in &facts.receiver_temps {
         if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
             eprintln!(
@@ -2185,7 +2182,6 @@ pub fn analyze(program: &Program) -> Ownership {
         }
     }
     let plan = ReleasePlan {
-        arm_frees,
         arg_drops: facts
             .arg_temps
             .iter()
@@ -2197,15 +2193,15 @@ pub fn analyze(program: &Program) -> Ownership {
         malloc_scrutinees,
         consuming_matches,
         discarded_results,
-        edge_releases,
         receiver_frees,
         receiver_malloc,
+        receiver_holes: HashMap::new(),
         owners,
         taken: Default::default(),
         alias: Default::default(),
         alias_log: Default::default(),
     };
-    Ownership {
+    let mut ownership = Ownership {
         plan,
         owned_fns,
         droppable,
@@ -2213,9 +2209,95 @@ pub fn analyze(program: &Program) -> Ownership {
         holes,
         notes,
         proto,
-        arg_temps: facts.arg_temps,
         releases,
+    };
+    // RFC-0125 M3: the placer, when one is installed, adds the release rows
+    // this analysis owes and did not place. It runs the lowering, which runs
+    // this analysis, so it is not re-entered.
+    if let Some(place) = PLACER.get() {
+        if !PLACING.with(|p| p.get()) {
+            PLACING.with(|p| p.set(true));
+            place(program, &mut ownership);
+            PLACING.with(|p| p.set(false));
+        }
     }
+    ownership
+}
+
+/// The plan's key for a `for` variable, which has no `let` node: the heap
+/// buffer of its spelling in the statement (RFC-0125 M3). Not the `String`'s
+/// own address: that is the first field of `Stmt::ForIn`, at offset 0 under
+/// a niche-encoded discriminant, so it equals the statement's address, which
+/// is the container row's key — and the two rows overwrote each other.
+pub fn for_var_key(var: &str) -> usize {
+    var.as_ptr() as usize
+}
+
+/// A pass that adds release rows to a finished analysis — RFC-0125 M3's
+/// placer over the named core, which lives in `vyrn-lower` and cannot be
+/// named from here.
+pub type Placer = fn(&Program, &mut Ownership);
+
+static PLACER: std::sync::OnceLock<Placer> = std::sync::OnceLock::new();
+
+thread_local! {
+    static PLACING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Install the placer. The first installation wins; a second is ignored.
+pub fn install_placer(f: Placer) {
+    let _ = PLACER.set(f);
+}
+
+/// RFC-0125 §3 M3, the deletion slice: round forty's answer read off the
+/// CORE, for the one engine that cannot name `vyrn-lower` — the interpreter.
+///
+/// The two compiled backends call `vyrn_lower::core::facts()` themselves;
+/// this crate sits below that one, so the core hands its answer down through
+/// a slot instead. The slot is not a placement table: it holds no rows, it
+/// answers from the core's own fold, and it goes when [`ReleasePlan`] does.
+/// `None` is "this pass states no answer here" — an `if let` or a `?`, whose
+/// arms the core builds and consults no table for — and a reader falls back
+/// to the plan there, as every other reader of the core does.
+pub type ArmRows = fn(usize, u32) -> Option<Vec<(String, DropKind, Vec<String>)>>;
+
+static ARM_ROWS: std::sync::OnceLock<ArmRows> = std::sync::OnceLock::new();
+
+/// Install the core's arm answer. The first installation wins.
+pub fn install_arm_rows(f: ArmRows) {
+    let _ = ARM_ROWS.set(f);
+}
+
+/// The core's payload releases for one arm, or `None` where nothing is
+/// installed (`VYRN_NO_PLACER=1`, a host that never linked the lowering) or
+/// the core states no answer.
+pub fn core_arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
+    ARM_ROWS.get().and_then(|f| f(key, arm))
+}
+
+/// The hard refusals the kernel made about the program the placer just judged,
+/// drained, as diagnostics — RFC-0125 §3 M3, the accumulation slice.
+///
+/// The third slot of the same shape as [`Placer`] and [`ArmRows`], and for the
+/// same reason: the kernel lives in `vyrn-lower`, this crate sits below it, and
+/// a refusal has to reach the one list a file's refusals come out in
+/// ([`crate::movecheck::refusals`]). Draining is the point — the loader runs a
+/// generator by loading a whole program of its own, and each such load takes
+/// its own refusals with it, so what is left is this program's.
+pub type Refusals = fn() -> Vec<crate::diagnostics::Diagnostic>;
+
+static REFUSALS: std::sync::OnceLock<Refusals> = std::sync::OnceLock::new();
+
+/// Install the kernel's refusal drain. The first installation wins.
+pub fn install_refusals(f: Refusals) {
+    let _ = REFUSALS.set(f);
+}
+
+/// What the kernel refuses about the program just analysed. Empty where
+/// nothing is installed — a host that never linked the lowering, or
+/// `VYRN_NO_KERNEL=1`, which the drain itself answers for.
+pub fn kernel_refusals() -> Vec<crate::diagnostics::Diagnostic> {
+    REFUSALS.get().map(|f| f()).unwrap_or_default()
 }
 
 /// RFC-0114 untake: the bindings whose value was taken and then provably
@@ -2303,70 +2385,6 @@ fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<us
             continue;
         }
         out.insert(*key);
-    }
-    out
-}
-
-/// RFC-0114 Rule N (edge normalization, R5). The walker hands over every `if`
-/// that consumed a binding on exactly one branch with both branches reaching
-/// the join; this fold keeps a candidate only when the value at the other edge
-/// is provably this frame's to release:
-///
-/// - every write into the binding, anywhere, is OWNING — a binding ever
-///   assigned a projection may hold a borrow at the edge, and no walk-order
-///   argument survives a loop's back edge, so one non-owning write refuses
-///   the binding outright;
-/// - the binding's final verdict is a plain take — borrowed, lent, captured,
-///   aliased or holed refuses, exactly as [`fold_store_owned`] refuses.
-///
-/// The loop cases need no rule of their own: a binding declared outside a
-/// loop and conditionally consumed inside it is already refused by the
-/// checker's next-iteration reuse rule, so a candidate inside a loop is
-/// re-initialized every iteration before the `if` is reached.
-///
-/// Refusal is the leak direction, which is today's behaviour.
-fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(String, u32)>> {
-    use crate::movecheck::{EvKind, Gone};
-    let vetoed: std::collections::HashSet<usize> = facts
-        .lets
-        .iter()
-        .filter(|(_, r)| {
-            !matches!(
-                r.gone,
-                None | Some(Gone::Moved { .. })
-                    | Some(Gone::Dropped { .. })
-                    | Some(Gone::Returned { .. })
-            )
-        })
-        .map(|(k, _)| *k)
-        .collect();
-    let mut all_owning: HashMap<usize, bool> = HashMap::new();
-    for ev in &facts.store_events {
-        if let EvKind::Write { owning, .. } = ev.kind {
-            *all_owning.entry(ev.key).or_insert(true) &= owning;
-        }
-    }
-
-    let mut out: HashMap<usize, Vec<(String, u32)>> = HashMap::new();
-    for er in &facts.edge_releases {
-        // A row with NO write events is vacuously all-owning: it is an `if
-        // let` scrutinee temporary, whose payload binder can be taken on one
-        // branch like any binding — `if .. { header = l } else { .. }` inside
-        // a line loop leaked one payload per untaken line (round twenty).
-        // The row minting already refused borrows, parameters and module
-        // state (`names_a_place`), so a write-less row's value is this
-        // frame's own.
-        if vetoed.contains(&er.key) || !all_owning.get(&er.key).copied().unwrap_or(true) {
-            continue;
-        }
-        out.entry(er.if_key)
-            .or_default()
-            .push((er.name.clone(), er.edge));
-    }
-    // The walker's bucket iteration is hash-ordered; the emitted IR must not be.
-    for v in out.values_mut() {
-        v.sort();
-        v.dedup();
     }
     out
 }
@@ -2501,12 +2519,22 @@ fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSe
 /// value WITH — an alloca name, a wasm place, a scope entry. What it never does
 /// again is decide the order, or derive a boundary index to find where its own
 /// frames stop.
-pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, bool)>> {
-    let mut out: HashMap<(Exit, usize), Vec<(usize, bool)>> = HashMap::new();
+///
+/// The second element is the hole set the step walks around, when the row
+/// carries its own: round fifty-two's `full` is the empty set, and the
+/// placer's rows (RFC-0125 M3) carry the kernel's set at that exit. `None`
+/// leaves the binding's own set in force.
+pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> {
+    let mut out: HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> = HashMap::new();
     for r in steps {
+        let holes = if r.full {
+            Some(Vec::new())
+        } else {
+            r.holes.clone()
+        };
         out.entry((r.exit, r.site))
             .or_default()
-            .push((r.binding, r.full));
+            .push((r.binding, holes));
     }
     out
 }
@@ -2609,6 +2637,7 @@ impl Place<'_> {
                 exit,
                 line: l.line,
                 full: false,
+                holes: None,
             })
             .collect();
         self.out.extend(steps);
@@ -4062,6 +4091,21 @@ pub(crate) mod tests {
 
     // ---- census §14 at a `match`: the scrutinee and its payload ----------
 
+    /// `Option<T>`'s row as `release_kind` records it since RFC-0126 §8.11's M4b:
+    /// the RESOLVED type, which is the variant list `resolve` answers.
+    fn opt_row(t: Type) -> DropKind {
+        DropKind::Deep(Type::Enum(vec![
+            EnumVariant {
+                name: "None".to_string(),
+                payload: Vec::new(),
+            },
+            EnumVariant {
+                name: "Some".to_string(),
+                payload: vec![t],
+            },
+        ]))
+    }
+
     /// Census §14 at the third construct that walks a temporary. No arm keeps
     /// the scrutinee — both hand back a number — so the match is its last owner
     /// and releases it. `Stmt::IfLet` has had this row since Phase 10a and
@@ -4072,10 +4116,7 @@ pub(crate) mod tests {
         let src = "fn maybe(n: Int64) -> Option<String> { return Some(\"x\") } \
                    fn main() -> Int64 { let d = match maybe(1) { \
                    Some(s) => s.byteLength, None => 0, } return Int64(d) }";
-        assert_eq!(
-            drop_kinds(src, "main"),
-            vec![DropKind::Deep(Type::Option(Box::new(Type::Str)))]
-        );
+        assert_eq!(drop_kinds(src, "main"), vec![opt_row(Type::Str)]);
     }
 
     /// The other half of one rule. An arm that hands its payload out gives the
@@ -4505,10 +4546,7 @@ pub(crate) mod tests {
             Some(Linear::Declared("Txn".into()))
         );
         assert_eq!(
-            owned.linear_kind(&Type::Option(Box::new(Type::Map(
-                Box::new(Type::Str),
-                Box::new(txn)
-            )))),
+            owned.linear_kind(&Type::option(Type::Map(Box::new(Type::Str), Box::new(txn)))),
             Some(Linear::Declared("Txn".into()))
         );
         assert_eq!(
@@ -4688,7 +4726,7 @@ pub(crate) mod tests {
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                        let o = pick(a, b); return 0; }";
         let (o, _) = analyze_src(src);
-        let want = DropKind::Deep(Type::Option(Box::new(Type::Str)));
+        let want = opt_row(Type::Str);
         assert_eq!(o.owned_fns.get("pick"), Some(&want));
         assert_eq!(drop_kinds(src, "main"), vec![want]);
     }

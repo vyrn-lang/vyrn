@@ -1623,7 +1623,7 @@ gen fn httpFields(name: String, iface: ModuleInterface) -> Array<HttpField> {
                 if depth == 1 && tk.kind == "ident" && i + 2 < toks.length {
                     let nx = toks[i + 1]
                     if nx.kind == "punct" && nx.text == ":" {
-                        out.push(HttpField { name: tk.text, numeric: httpIsNumeric(toks[i + 2], iface) })
+                        out.push(HttpField { name: tk.text.copy(), numeric: httpIsNumeric(toks[i + 2], iface) })
                     }
                 }
                 i = i + 1
@@ -1854,4 +1854,47 @@ test "two mounts on one pattern shadow within their own list" {
     // A distinct pattern stays reachable.
     let x = httpWithMethod(httpRoute("/x", httpNoRun, "sseTwo"), "GET")
     assertEq(httpSelfShadow(a, x, "a", "b"), "")
+}
+
+// ---- reading a mount, without mounting -------------------------------------
+//
+// Appended at the END of this file, and that is not a filing decision. A
+// `panic` carries its own line into the emitted data (RFC-0090's trap tail), so
+// a function inserted above `httpCheckMount` rewrites the bytes of every
+// program that links this module and nothing about those programs changed. The
+// `wasmhash` manifest (RFC-0125 §2.6) reports exactly that, and it is right to.
+
+/// Every row a `mount(..)` argument list carries, one per line — what a tool
+/// that reports a program's wire surface reads, without serving a request.
+///
+/// `vyrn routes` is that tool (RFC-0125 §3 M5, the `mounted-routes` row). It
+/// evaluates the arguments of each `mount(..)` in a program and prints what
+/// they hold, so it needs what the four kinds `mount` resolves already carry:
+/// the `derived` policy line each constructor wrote, which is the same text the
+/// mount audit's diagnostics quote. Nothing here re-derives a path.
+///
+/// A row is one `derived` line. Its first word is the method, and it says which
+/// kind wrote it: `SSE` for a stream, `WS` for a socket, `*` for a whole
+/// subsystem, and an HTTP method for a route — whose third word is the
+/// procedure the generator seeded it with.
+///
+/// The parameters are `mount`'s own, minus the request, so an argument list
+/// that mounts also reads.
+export fn mountedRows(groups: Array<Array<Route>>, live: Array<Live>, sockets: Array<Socket>) -> String {
+    let mut out = ""
+    for g in groups {
+        for r in g {
+            out = out + r.derived + "
+"
+        }
+    }
+    for l in live {
+        out = out + l.derived + "
+"
+    }
+    for w in sockets {
+        out = out + w.derived + "
+"
+    }
+    return out
 }

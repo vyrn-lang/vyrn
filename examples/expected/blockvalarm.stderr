@@ -1,0 +1,1 @@
+blockvalarm.vyrn:5:0: a `match` used as a value has single-expression arms; a block arm needs statement position (RFC-0118)

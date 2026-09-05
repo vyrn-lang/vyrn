@@ -44,6 +44,11 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "copies its source's elements by bytes",
     ),
     (
+        "clearowned.vyrn",
+        "RFC-0115 addendum: `clear` forgets its elements, so an element type          that owns heap is refused — forgetting one leaks it",
+        "forgets its elements without releasing them",
+    ),
+    (
         "floatkey.vyrn",
         "RFC-0117: float keys are refused by name — NaN != NaN breaks the          reflexivity a key needs",
         "does neither well",
@@ -222,13 +227,22 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser
-/// page supplies the `vyrn` import namespace, so three-way output parity cannot
-/// apply — wasmtime provides WASI, not `vyrn`. Excluded from the parity loop;
-/// instead [`wasm_only_examples_trap_identically`] asserts the decided
-/// non-wasm semantics: interp and native both produce the canonical
-/// `error: extern `name` is not available on this target` trap, byte-identical
-/// to each other. The real browser behavior is exercised by `web/externdemo.html`.
-/// KNOWN_DIVERGENT stays empty — this list is about *hosts*, not divergence.
+/// page supplies the `vyrn` import namespace. The real browser behavior is
+/// exercised by `web/externdemo.html`. KNOWN_DIVERGENT stays empty — this list
+/// is about *hosts*, not divergence.
+///
+/// It names the harnesses that drive an OUTSIDE tool, and only those: the
+/// parity loop's wasm column is the `wasmtime` CLI and the route loop's is
+/// wasm2c, and neither knows the namespace, so neither can be compared with the
+/// other two engines. `parity::wasm_only_examples_trap_identically` asserts the
+/// decided non-wasm semantics instead: interp and native both produce the
+/// canonical `error: extern `name` is not available on this target` trap,
+/// byte-identical to each other.
+///
+/// `tests/fixtures.rs` does NOT skip this list. Its engine is the embedded host
+/// in `vyrn-cli`'s own `wasmrun`, which answers the `vyrn` namespace with that
+/// same sentence, so a reached `extern` fails identically on all three engines
+/// (RFC-0125 §3 M5, the fourth slice).
 ///
 /// The cost of that exclusion is on record: because nothing here ever *built* one
 /// of these to wasm either, the direct backend reached 87 of 87 with no lowering
@@ -238,6 +252,34 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
 pub const WASM_ONLY: &[(&str, &str)] = &[(
     "externdemo.vyrn",
     "calls `extern` fns; only the browser provides the `vyrn` namespace",
+)];
+
+/// Examples the interpreter and the wasm target run and the text-IR backend
+/// refuses (`vyrn_codegen::LIST_DIR_NO_LOWERING`). Excluded from the parity
+/// loop's native column; the fixture gate (`fixtures.rs`) compares their wasm
+/// output with the interpreter's recording, and `residue-baseline.tsv` carries
+/// their `skip` row.
+/// Project entries under `examples/*/` that `vyrn check` must REFUSE, with the
+/// text the refusal must contain. `EXPECTED_CHECK_FAILURE` is the precedent and
+/// lists single files; a project's entry point is refused by its artifact's
+/// floor (RFC-0103), which a single file never has. `tests/floor.rs` asserts
+/// each; the corpus harnesses that walk project entries skip them.
+pub const EXPECTED_PROJECT_CHECK_FAILURE: &[(&str, &str, &str)] = &[
+    (
+        "leak/client/boot.vyrn",
+        "RFC-0103 M2's gate: the browser artifact reaches a file reader three          hops away, and the chain is the diagnostic",
+        "`readFile` needs `fs`; target `browser` has no filesystem",
+    ),
+    (
+        "listing/client/boot.vyrn",
+        "RFC-0125 M6 finding 6: a browser artifact that lists a directory degrades          to the canonical `Err` on a page, so the floor's `fs` row carries `listDir`",
+        "`listDir` needs `fs`; target `browser` has no filesystem",
+    ),
+];
+
+pub const NATIVE_UNSUPPORTED: &[(&str, &str)] = &[(
+    "listdir.vyrn",
+    "`listDir` has no native lowering; the wasm target lists over `fd_readdir` (RFC-0125 §3 M5)",
 )];
 
 pub fn examples_dir() -> PathBuf {

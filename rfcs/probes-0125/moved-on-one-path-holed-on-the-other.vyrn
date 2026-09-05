@@ -1,0 +1,35 @@
+// RFC-0125 M2 probe: a binding returned whole on one path and drained by a
+// `consume` of one field on the other. The plan's fate is "moved into the
+// return", so it places no release; the kernel says the other path leaves
+// the untaken field held at the block's end.
+let turns = 200000
+
+type Val = { value: Array<Int64>, note: String }
+
+fn make(i: Int64) -> Val {
+    return Val {
+        value: [i, i + 1, i + 2],
+        note: "note-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+    }
+}
+
+fn pick(i: Int64) -> Val {
+    let v = make(i)
+    if i < 0 {
+        return v
+    }
+    let xs = consume v.value
+    return Val { value: xs, note: "" }
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        let p = pick(i)
+        total = total + p.value.length
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

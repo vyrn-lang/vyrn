@@ -1,0 +1,2 @@
+protocol_conformance.vyrn:33:8: `impl Shape for Sq` does not match protocol `Shape` — it declares `fn area(self) -> Int64`, this provides `fn area(self) -> Bool`
+protocol_conformance.vyrn:38:8: `impl Shape for Sq` does not match protocol `Shape` — it declares `fn scale(self, Int64) -> Sq`, this provides `fn scale(self, String) -> Sq`

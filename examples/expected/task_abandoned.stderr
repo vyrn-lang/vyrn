@@ -1,0 +1,8 @@
+task_abandoned.vyrn:20:0: `t` is a `Task` and is never disposed
+  note: a task must be joined with `t.join()`, which yields its result, forwarded by returning it, or released with `drop t`, which waits for it and discards the result — on every path
+task_abandoned.vyrn:28:0: `t` is a `Task` and is disposed more than once
+  note: a task must be joined with `t.join()`, which yields its result, forwarded by returning it, or released with `drop t`, which waits for it and discards the result — on every path
+task_abandoned.vyrn:37:0: `t` is a `Task` and is never disposed
+  note: a task must be joined with `t.join()`, which yields its result, forwarded by returning it, or released with `drop t`, which waits for it and discards the result — on every path
+task_abandoned.vyrn:50:0: `t` is a `Task` and is never disposed
+  note: a task must be joined with `t.join()`, which yields its result, forwarded by returning it, or released with `drop t`, which waits for it and discards the result — on every path

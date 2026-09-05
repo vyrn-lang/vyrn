@@ -124,6 +124,16 @@ fn bin_port() -> u16 {
     }
 }
 
+/// `--engine wasm` when the environment asks for it (RFC-0125 §3 M6). The whole
+/// suite then runs against the compiled route — one set of assertions rather
+/// than two, because a served program must answer the same on both engines.
+fn engine_args() -> Vec<String> {
+    match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
+        Ok("wasm") => vec!["--engine".to_string(), "wasm".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 fn spawn_bin_server() -> Result<u16, String> {
     let server = repo_file("examples/bin/server.vyrn");
     let dir = std::env::temp_dir().join(format!("vyrn_upages_{}", std::process::id()));
@@ -131,6 +141,7 @@ fn spawn_bin_server() -> Result<u16, String> {
     std::fs::create_dir_all(dir.join("data")).unwrap();
     let mut child = vyrn()
         .arg("serve")
+        .args(engine_args())
         .arg(&server)
         .arg("--port")
         .arg("0")

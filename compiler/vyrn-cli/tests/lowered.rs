@@ -388,74 +388,6 @@ enum InstRule {
 // than firing zero times — §3 M2's own precedent, applied to itself for the
 // second time.
 
-/// Why an engine's boundary ladder took a rung the plan does not place —
-/// RFC-0101 §1.5's shadow.
-///
-/// Same discipline as [`Rule`]: a difference that fits a rule is a fact this
-/// file records, and one that fits none fails the run. **Every rule here is
-/// about ORDER, or about a rung one ladder does not have** — which is what M6's
-/// second phase predicted from reading the two ladders against each other, and
-/// it is why the plan does not try to be both of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum RungRule {
-    /// The textual ladder's resize rung is guarded by the TARGET being a sized
-    /// integer rather than by the pair differing, so `Int16 -> Int16` takes it
-    /// and emits nothing. A rung that does no work is not a decision about the
-    /// value; the plan places [`Rung::Identity`] there.
-    SizedTargetRung,
-    /// The direct ladder's numeric rung answers for EVERY integer pair, equal or
-    /// not — and it must, because it has to come before that ladder's shape
-    /// shortcut: `llt` prints `i8` for `Int8` and `UInt8` alike, so a shortcut
-    /// reached first would swallow the one pair whose bits genuinely move. This
-    /// is §1.5's order difference, and the reason is written at the rung.
-    NumericBeforeShape,
-    /// The direct ladder has no function-value rung at all: the structural
-    /// spelling and every named alias share the `{ i64, i64 }` shape, so its
-    /// shape shortcut answers first. The textual one re-tags explicitly.
-    FnByShape,
-    /// A type PARAMETER still spelled `T` on one side. The direct ladder
-    /// substitutes before its first rung (§1.5's first row) and the textual one
-    /// does not, so a pair like `String -> T` matches no guard there and falls
-    /// off the end.
-    ///
-    /// **It is a spelling, not a hole, and two programs say so.** A value can
-    /// only reach a `T` position if the checker solved `T` to its type: an
-    /// `Int64` flowing into a `T` the receiver fixed at a refined `Age` is
-    /// rejected — "type parameter `T` is both Age and Int64" — with a bare
-    /// generic and with an associated type alike. So `from` and `to` here are
-    /// one type under two spellings, the identity is right, and the validation
-    /// the textual ladder would appear to be skipping is one the checker has
-    /// already made unreachable. Both programs were written and both came back
-    /// green (RFC-0101 §3 M6's third phase).
-    ParamSpelling,
-}
-
-/// Which rule, if any, explains `took` where the plan places `planned`. `None`
-/// means the gate fails.
-///
-/// The pair is an argument because one rule is about the TYPES rather than the
-/// rungs: a `Refuse` the textual ladder walked past is a spelling when a type
-/// parameter is involved and a program that compiles on one target only when it
-/// is not.
-fn rung_rule(
-    site: Site,
-    from: &Type,
-    to: &Type,
-    planned: vyrn_codegen::Rung,
-    took: vyrn_codegen::Rung,
-) -> Option<RungRule> {
-    use vyrn_codegen::Rung as R;
-    match (site, planned, took) {
-        (Site::Native, R::Identity, R::Resize) => Some(RungRule::SizedTargetRung),
-        (Site::Wasm, R::Identity, R::Resize) => Some(RungRule::NumericBeforeShape),
-        (Site::Wasm, R::FnRetag, R::Identity) => Some(RungRule::FnByShape),
-        (Site::Native, R::Refuse, R::Identity) if mentions_param(from) || mentions_param(to) => {
-            Some(RungRule::ParamSpelling)
-        }
-        _ => None,
-    }
-}
-
 /// Why the interpreter's release sequence differs from the placement both
 /// compiled backends now read — RFC-0101 M4.
 ///
@@ -575,14 +507,27 @@ fn deep(t: &Type, decls: &HashMap<String, TypeDecl>, depth: usize) -> Type {
     let t = resolve(t, decls);
     let d = |x: &Type| Box::new(deep(x, decls, depth + 1));
     match &t {
-        Type::Option(a) => Type::Option(d(a)),
         Type::Array(a) => Type::Array(d(a)),
         Type::Stream(a) => Type::Stream(d(a)),
         Type::Task(a) => Type::Task(d(a)),
         Type::ArrayN(a, n) => Type::ArrayN(d(a), *n),
         Type::SmallArray(a, n) => Type::SmallArray(d(a), *n),
-        Type::Result(a, b) => Type::Result(d(a), d(b)),
         Type::Map(a, b) => Type::Map(d(a), d(b)),
+        // Since RFC-0126 §8.11's M4b `resolve` answers `Enum` for the two
+        // built-in sums, so an alias whose payload is a name comes back with the
+        // name still in it unless the walk descends here.
+        Type::Enum(vs) => Type::Enum(
+            vs.iter()
+                .map(|v| vyrn_frontend::ast::EnumVariant {
+                    name: v.name.clone(),
+                    payload: v
+                        .payload
+                        .iter()
+                        .map(|p| deep(p, decls, depth + 1))
+                        .collect(),
+                })
+                .collect(),
+        ),
         Type::Fn(ps, r) => Type::Fn(ps.iter().map(|p| deep(p, decls, depth + 1)).collect(), d(r)),
         Type::App(n, args) => Type::App(
             n.clone(),
@@ -635,14 +580,22 @@ fn defaulted(a: &Type, b: &Type) -> bool {
             return true;
         }
         match (a, b) {
-            (Type::Option(x), Type::Option(y))
-            | (Type::Array(x), Type::Array(y))
+            (Type::Array(x), Type::Array(y))
             | (Type::Stream(x), Type::Stream(y))
             | (Type::Task(x), Type::Task(y)) => walk(x, y),
             (Type::ArrayN(x, _), Type::ArrayN(y, _))
             | (Type::SmallArray(x, _), Type::SmallArray(y, _)) => walk(x, y),
-            (Type::Result(x1, x2), Type::Result(y1, y2))
-            | (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),
+            (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),
+            // The resolved form of every sum since RFC-0126 §8.11's M4b — an
+            // `Option` and a `Result` reach here as variant lists, and the
+            // defaulted half is a payload rather than a type argument.
+            (Type::Enum(v1), Type::Enum(v2)) if v1.len() == v2.len() => {
+                v1.iter().zip(v2).all(|(x, y)| {
+                    x.name == y.name
+                        && x.payload.len() == y.payload.len()
+                        && x.payload.iter().zip(&y.payload).all(|(p, q)| walk(p, q))
+                })
+            }
             (Type::App(n1, a1), Type::App(n2, a2)) if n1 == n2 && a1.len() == a2.len() => {
                 a1.iter().zip(a2).all(|(x, y)| walk(x, y))
             }
@@ -853,7 +806,6 @@ fn gate() {
         (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
         usize,
     > = Default::default();
-    let mut rung_rules: std::collections::BTreeMap<RungRule, usize> = Default::default();
     #[allow(clippy::type_complexity)]
     let mut unruled: std::collections::BTreeMap<
         (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
@@ -1010,20 +962,14 @@ fn gate() {
                 t.rungs_planned += 1;
                 continue;
             }
-            match rung_rule(c.site, &c.from, &c.to, planned, c.rung) {
-                Some(r) => *rung_rules.entry(r).or_insert(0) += 1,
-                None => {
-                    t.rungs_unruled += 1;
-                    if planned == vyrn_codegen::Rung::Refuse || c.rung == vyrn_codegen::Rung::Refuse
-                    {
-                        t.rungs_terminal += 1;
-                    }
-                    unruled
-                        .entry((c.site, planned, c.rung))
-                        .or_default()
-                        .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
-                }
+            t.rungs_unruled += 1;
+            if planned == vyrn_codegen::Rung::Refuse || c.rung == vyrn_codegen::Rung::Refuse {
+                t.rungs_terminal += 1;
             }
+            unruled
+                .entry((c.site, planned, c.rung))
+                .or_default()
+                .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
         }
 
         // Half zero, and RFC-0101 M2's own gate: the lowering's worklist against
@@ -1203,12 +1149,8 @@ fn gate() {
 
     eprintln!("  RFC-0101 M4: {rel_lambda} release steps placed inside a lambda body");
     eprintln!(
-        "  RFC-0101 §1.5: {} boundary crossings took the planned rung, {} took another          by a named rule {:?}, {} by none ({} of them terminal)",
-        t.rungs_planned,
-        rung_rules.values().sum::<usize>(),
-        rung_rules,
-        t.rungs_unruled,
-        t.rungs_terminal
+        "  RFC-0101 §1.5: {} boundary crossings took the planned rung, {} took another          ({} of them terminal)",
+        t.rungs_planned, t.rungs_unruled, t.rungs_terminal
     );
     for ((site, planned, took), n) in &ladder {
         eprintln!("    ladder {site:?}: plan {planned:?}, took {took:?} x{n}");
@@ -1393,21 +1335,22 @@ fn gate() {
     );
 
     // RFC-0101 §1.5's shadow, and the TERMINAL rung first, because it is the one
-    // difference that is a program compiling on one target only: the textual
-    // ladder falls through to identity where the direct one refuses. A pair the
-    // plan refuses and an engine walked past is either a type parameter's
-    // spelling (`RungRule::ParamSpelling`, with the two programs that prove it)
-    // or a hole, and nothing else in this repository asks.
+    // difference that is a program compiling on one target only: a pair one
+    // ladder refuses and the other walks past. Both ladders ask the plan now
+    // (RFC-0125 §3 M6, the coercion ladder), so the count is zero by
+    // construction — and this is what says so out loud if an emitter grows a
+    // rung of its own again.
     assert_eq!(
         t.rungs_terminal, 0,
-        "{} boundary crossings are at the end of one ladder and not the other, with          no rule to explain them — see the UNRULED lines above",
+        "{} boundary crossings are at the end of one ladder and not the other —          see the UNRULED lines above",
         t.rungs_terminal
     );
-    // …and then the rest of the ladder. Every crossing takes the planned rung or
-    // one of the four named differences, all of which are ORDER (§1.5).
+    // …and then the rest of the ladder. Every crossing takes the planned rung.
+    // The four named differences RFC-0101 §1.5 recorded — an order, and a rung
+    // one ladder did not have — went with the guards that produced them.
     assert_eq!(
         t.rungs_unruled, 0,
-        "{} boundary crossings took a rung the plan does not place and no rule          explains — see the UNRULED lines above",
+        "{} boundary crossings took a rung the plan does not place — see the          UNRULED lines above",
         t.rungs_unruled
     );
     // The floor under both: a shadow that observes nothing asserts nothing.
@@ -1444,73 +1387,10 @@ fn gate() {
     );
 }
 
-/// RFC-0101 §1.5's shadow, broken on purpose — in both directions, which is
-/// what M4's placement gate established a gate has to do before it is worth
-/// anything.
-///
-/// The corpus run above is green, and a green run over four rules proves the
-/// rules FIRE; it does not prove they are narrow. These are the cases that must
-/// still fail, and each one is a real difference wearing a rule's shape.
-#[test]
-fn the_ladder_rules_refuse_what_they_are_not_about() {
-    use vyrn_codegen::Rung as R;
-    let t = Type::Named("T".into());
-    let p = Type::Param("T".into());
-    let s = Type::Str;
-
-    // THE TERMINAL RUNG, and the reason it is gated first: the textual ladder
-    // walking past a pair the plan refuses is a spelling ONLY where a type
-    // parameter is in it. The same walk-past between two concrete types is a
-    // value reinterpreted on one target and a compile error on the other, and
-    // it has no rule.
-    assert_eq!(
-        rung_rule(Site::Native, &s, &p, R::Refuse, R::Identity),
-        Some(RungRule::ParamSpelling)
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Refuse, R::Identity),
-        None,
-        "a refused pair with no type parameter in it is the hole, not a spelling"
-    );
-    // …and in the other direction: the DIRECT ladder refusing is its declared
-    // end, but the textual one reaching `Refuse` would mean it grew an end it
-    // does not have.
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Identity, R::Refuse),
-        None
-    );
-
-    // Every other rule is about ONE engine's ladder, so the same pair of rungs
-    // at the other engine is a real difference. Swapping the site must not be
-    // explained.
-    assert_eq!(
-        rung_rule(Site::Wasm, &s, &t, R::FnRetag, R::Identity),
-        Some(RungRule::FnByShape)
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::FnRetag, R::Identity),
-        None,
-        "the textual ladder HAS a function rung; skipping it is not the shape shortcut"
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Identity, R::Resize),
-        Some(RungRule::SizedTargetRung)
-    );
-    assert_eq!(
-        rung_rule(Site::Wasm, &s, &t, R::Identity, R::Resize),
-        Some(RungRule::NumericBeforeShape)
-    );
-    // A rung nothing explains, at either engine.
-    assert_eq!(rung_rule(Site::Wasm, &s, &t, R::Heapify, R::Identity), None);
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Validate, R::Identity),
-        None,
-        "a validation skipped is the defect class this whole gate exists for"
-    );
-}
-
 /// The plan itself, at the pairs the corpus does not reach — the ends of the
-/// ladder, which is where the two engines disagree.
+/// ladder, which is where the two engines used to disagree. It is stated once
+/// and both emitters ask it now (RFC-0125 §3 M6), so what this pins is the
+/// ORDER, which is the half of the rule a green corpus cannot see.
 #[test]
 fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
     use vyrn_codegen::Rung as R;
@@ -1535,4 +1415,264 @@ fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
     // disagree about what that means.
     assert_eq!(plan(&Type::Str, &Type::Int), R::Refuse);
     assert_eq!(plan(&Type::Str, &Type::Param("T".into())), R::Refuse);
+}
+
+// ---------------------------------------------------------------------------
+// The coercion census — RFC-0125 §3 M6, the coercion ladder.
+//
+// §1 measures the ladder at "505 lines of one decision, and the two compiled
+// backends order its rungs differently". §2.7 puts it on the deletion list.
+// This is the list it is deleted from: one row per site that DECIDES something
+// about a coercion, the engine that carries it, and its code lines.
+//
+// The metric is CODE lines — non-blank and not a comment — over the site's whole
+// span, doc comment included. That is §1.1's own column, and it is what makes
+// §1's 505 comparable: the six ladder rows measured 533 the day this census was
+// written, and the difference is the observation hook RFC-0101 §1.5's shadow
+// added after §1 was measured.
+// ---------------------------------------------------------------------------
+
+/// One site that decides something about a coercion.
+struct CoercionSite {
+    /// The file, under `compiler/`.
+    file: &'static str,
+    /// The signature line, matched on whitespace-collapsed text. It must name
+    /// exactly one line of the file.
+    at: &'static str,
+    /// The engine that carries the decision, or `shared` for one statement all
+    /// of them ask.
+    engine: &'static str,
+    /// What it decides.
+    decides: &'static str,
+    /// Whether it is the RUNG ladder — the code §1's 505 counts. The other rows
+    /// are in the census so a later reader does not go looking for them.
+    ladder: bool,
+    /// Whether it STATES the rung rule, rather than emitting a rung another site
+    /// placed. This is the column the milestone moves: an emitter that asks is
+    /// not a statement (RFC-0125 §2.3).
+    states_rung: bool,
+    /// Its code lines, as the RFC records them.
+    code: usize,
+}
+
+fn coercion_census() -> Vec<CoercionSite> {
+    let site = |file, at, engine, decides, ladder, states_rung, code| CoercionSite {
+        file,
+        at,
+        engine,
+        decides,
+        ladder,
+        states_rung,
+        code,
+    };
+    vec![
+        site(
+            "vyrn-codegen/src/lib.rs",
+            "pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {",
+            "shared",
+            "which rung a pair takes",
+            true,
+            true,
+            54,
+        ),
+        site(
+            "vyrn-codegen/src/lib.rs",
+            "fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {",
+            "native",
+            "the IR for the rung the plan placed",
+            true,
+            false,
+            118,
+        ),
+        site(
+            "vyrn-codegen/src/direct.rs",
+            "fn coerce(",
+            "wasm",
+            "the wasm for the rung the plan placed",
+            true,
+            false,
+            192,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coerce(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {",
+            "interp",
+            "the scalar targets that need no walk",
+            true,
+            true,
+            19,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coerce_walk(&self, v: Val, ty: &Type) -> Result<Val, Ctrl> {",
+            "interp",
+            "the rung, by target type and value shape",
+            true,
+            true,
+            114,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coercion_is_noop(&self, ty: &Type, v: &Val, depth: usize) -> bool {",
+            "interp",
+            "whether the walk would change the value",
+            true,
+            true,
+            92,
+        ),
+        site(
+            "vyrn-frontend/src/interp.rs",
+            "fn coercion_is_identity(&self, ty: &Type, depth: usize) -> bool {",
+            "interp",
+            "whether a target type can change any value at all",
+            true,
+            true,
+            35,
+        ),
+        site(
+            "vyrn-codegen/src/lib.rs",
+            "fn coerce_flow(",
+            "native",
+            "whether RFC-0020's containment proof skips the check",
+            false,
+            false,
+            15,
+        ),
+        site(
+            "vyrn-frontend/src/checker.rs",
+            "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {",
+            "checker",
+            "whether a CONSTANT fails its target's predicate at compile time",
+            false,
+            false,
+            44,
+        ),
+    ]
+}
+
+/// The span a site holds — `(first, last)`, one-based and inclusive, doc comment
+/// included — and its code lines.
+fn coercion_span(s: &CoercionSite) -> (usize, usize, usize) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(s.file);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", s.file));
+    let text = text.replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().collect();
+    let norm = |l: &str| l.split_whitespace().collect::<Vec<_>>().join(" ");
+    let want = norm(s.at);
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| norm(l) == want)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the anchor `{}` names {} lines of {}; a census row's anchor must name one",
+        s.at,
+        hits.len(),
+        s.file
+    );
+    let anchor = hits[0];
+    let mut first = anchor;
+    while first > 0 {
+        let t = lines[first - 1].trim_start();
+        if t.starts_with("//") || t.starts_with("#[") {
+            first -= 1;
+        } else {
+            break;
+        }
+    }
+    let (mut depth, mut open) = (0i32, false);
+    let mut last = None;
+    for (k, l) in lines.iter().enumerate().skip(anchor) {
+        for ch in l.chars() {
+            if ch == '{' {
+                depth += 1;
+                open = true;
+            } else if ch == '}' {
+                depth -= 1;
+                if open && depth == 0 {
+                    last = Some(k);
+                    break;
+                }
+            }
+        }
+        if last.is_some() {
+            break;
+        }
+    }
+    let last = last.unwrap_or_else(|| panic!("no closing brace for `{}` in {}", s.at, s.file));
+    let code = lines[first..=last]
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with("//")
+        })
+        .count();
+    (first + 1, last + 1, code)
+}
+
+/// The census's line counts, as RFC-0125 §3 M6 records them. The prose quotes
+/// these numbers, so they are asserted rather than described: a change to a
+/// ladder moves one, and the RFC's table moves with it.
+#[test]
+fn the_coercion_census_is_what_the_rfc_records() {
+    let census = coercion_census();
+    // The ladder's CARRIERS — the engines' own statements — and, separately, the
+    // one statement they can ask. §1's 505 is the first of the two.
+    let mut ladder = 0usize;
+    for s in &census {
+        let (_, _, code) = coercion_span(s);
+        assert_eq!(
+            code, s.code,
+            "`{}` in {} is {code} code lines and the census says {}",
+            s.at, s.file, s.code
+        );
+        if s.ladder && s.engine != "shared" {
+            ladder += code;
+        }
+    }
+    assert_eq!(
+        ladder, 570,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 570"
+    );
+    // The separate statements of the rung rule, which is what the milestone
+    // moves: an engine that ASKS another site's statement is not one. It was
+    // four — the two emitters, the interpreter, and a plan nobody asked.
+    let statements: std::collections::BTreeSet<&str> = census
+        .iter()
+        .filter(|s| s.states_rung)
+        .map(|s| s.engine)
+        .collect();
+    assert_eq!(
+        statements.len(),
+        2,
+        "the rung rule is stated {} times and the census says 2: {statements:?}",
+        statements.len()
+    );
+}
+
+/// The table for RFC-0125 §3 M6, printed from the census above:
+/// `cargo test -p vyrn-cli --test lowered -- --ignored --nocapture
+/// the_coercion_census_as_a_table`.
+#[test]
+#[ignore]
+fn the_coercion_census_as_a_table() {
+    println!("| site | rung ladder | states the rung | engine | what it decides | code |");
+    println!("|---|---|---|---|---|---|");
+    for s in coercion_census() {
+        let (a, b, code) = coercion_span(&s);
+        let name = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
+        println!(
+            "| `{}` {a}-{b} `{name}` | {} | {} | {} | {} | {code} |",
+            s.file,
+            if s.ladder { "yes" } else { "no" },
+            if s.states_rung { "yes" } else { "no" },
+            s.engine,
+            s.decides
+        );
+    }
 }

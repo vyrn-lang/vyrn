@@ -605,12 +605,32 @@ pub fn wire(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> Resul
     // it has no wire form in either direction. An `Option<Result<..>>` /
     // `Option<Enum>` DOES (RFC-0024): a payload enum never encodes as `null`, so
     // the wire form stays unambiguous.
-    if let Type::Option(inner) = ty {
-        if matches!(crate::types::resolve(inner, types), Type::Option(_)) {
+    if let Some(inner) = crate::types::option_payload(ty) {
+        if crate::types::option_payload(&crate::types::resolve(inner, types)).is_some() {
             return Err(ty.clone());
         }
     }
     let r = crate::types::resolve(ty, types);
+    // The two built-in sums keep wire forms the enum does not have, and since
+    // RFC-0126 §8.11's M4b `resolve` answers `Enum` for both — so this is where
+    // the codec reads them back. It is §8.6's guard, arriving where the RFC said
+    // it would: an `Option` is `null` or the value, and a `Result` lists `Ok`
+    // first, because a wire tag is a NAME and not an index (§8.1).
+    if let Some(inner) = crate::types::option_payload(&r) {
+        return Ok(Wire::Option(inner.clone()));
+    }
+    if let Some((t, e)) = crate::types::result_payloads(&r) {
+        return Ok(Wire::Enum(vec![
+            EnumVariant {
+                name: "Ok".to_string(),
+                payload: vec![t.clone()],
+            },
+            EnumVariant {
+                name: "Err".to_string(),
+                payload: vec![e.clone()],
+            },
+        ]));
+    }
     match r {
         Type::Int => Ok(Wire::Int),
         Type::IntN { bits, signed } => Ok(Wire::IntN { bits, signed }),
@@ -618,7 +638,6 @@ pub fn wire(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> Resul
         Type::Float32 => Ok(Wire::Float32),
         Type::Bool => Ok(Wire::Bool),
         Type::Str => Ok(Wire::Str),
-        Type::Option(inner) => Ok(Wire::Option(*inner)),
         Type::Array(inner) => Ok(Wire::Array(*inner)),
         Type::ArrayN(inner, n) => {
             if decode {
@@ -639,19 +658,6 @@ pub fn wire(ty: &Type, types: &HashMap<String, TypeDecl>, decode: bool) -> Resul
         },
         Type::Record(fields) => Ok(Wire::Record(fields)),
         Type::Enum(vs) => Ok(Wire::Enum(vs)),
-        // `Result<T, E>` flows through as the two-variant single-payload enum
-        // `{"Ok":<T>}` / `{"Err":<E>}` (RFC-0024) — so it IS that enum here, and
-        // every consumer gets the tagging rule once instead of four times.
-        Type::Result(t, e) => Ok(Wire::Enum(vec![
-            EnumVariant {
-                name: "Ok".to_string(),
-                payload: vec![*t],
-            },
-            EnumVariant {
-                name: "Err".to_string(),
-                payload: vec![*e],
-            },
-        ])),
         // Everything else is off the wire in v1: the vectors, `Ref`, `Task`,
         // `Stream`, `SmallArray`, `Template`, `Logger`, `Fn`, `Param`, `Unit`,
         // `ConstInt`, `Never`, `Err` — and any name that did not resolve.
@@ -728,8 +734,8 @@ fn codable(
         // Preserve a payload-enum's precise variant/payload offender; re-badge
         // any other structural rejection with the user's name.
         return r.map_err(|e| {
-            if matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()))
-                || matches!(d.base, Type::Result(..))
+            if crate::types::declared_variants(&d.base)
+                .is_some_and(|vs| vs.iter().any(|v| !v.payload.is_empty()))
             {
                 e
             } else {
@@ -843,8 +849,6 @@ mod tests {
             Type::Str,
             Type::Unit,
             Type::Named("R".into()),
-            Type::Option(b(Type::Int)),
-            Type::Result(b(Type::Int), b(Type::Str)),
             Type::Record(vec![Field {
                 name: "a".into(),
                 ty: Type::Int,
@@ -957,7 +961,7 @@ mod tests {
         for t in &seeds {
             let b = || Box::new(t.clone());
             all.extend([
-                Type::Option(b()),
+                Type::option(t.clone()),
                 Type::Array(b()),
                 Type::ArrayN(b(), 3),
                 Type::Lazy(b()),
@@ -975,11 +979,8 @@ mod tests {
         let pairs: Vec<Type> = all[..12].to_vec();
         for a in &pairs {
             for c in &pairs {
-                all.push(Type::Result(Box::new(a.clone()), Box::new(c.clone())));
-                all.push(Type::Option(Box::new(Type::Result(
-                    Box::new(a.clone()),
-                    Box::new(c.clone()),
-                ))));
+                all.push(Type::result(a.clone(), c.clone()));
+                all.push(Type::option(Type::result(a.clone(), c.clone())));
             }
         }
         assert!(all.len() > 500, "coverage shrank to {}", all.len());
@@ -1053,13 +1054,13 @@ mod tests {
                 module: None,
                 doc: None,
                 type_params: Vec::new(),
-                base: Type::Option(Box::new(Type::Int)),
+                base: Type::option(Type::Int),
                 predicate: None,
                 line: 0,
             },
         );
-        let aliased = Type::Option(Box::new(Type::Named("MaybeInt".into())));
-        let bare = Type::Option(Box::new(Type::Option(Box::new(Type::Int))));
+        let aliased = Type::option(Type::Named("MaybeInt".into()));
+        let bare = Type::option(Type::option(Type::Int));
         for ty in [&aliased, &bare] {
             assert!(encodable(ty, &types).is_err(), "{ty} encodes");
             assert!(decodable(ty, &types).is_err(), "{ty} decodes");
@@ -1206,11 +1207,17 @@ mod tests {
 fn type_display(ty: &Type) -> String {
     match ty {
         Type::Named(n) => n.clone(),
-        Type::Result(..) => "Result".to_string(),
+        // The two built-in sums, read through their payloads (RFC-0126 §8.15):
+        // a `Result` names itself and an `Option` spells its payload the same
+        // way, whichever way the sum was built.
+        _ if crate::types::result_payloads(ty).is_some() => "Result".to_string(),
         Type::Task(_) => "Task".to_string(),
         Type::Logger => "Logger".to_string(),
         Type::ArrayN(inner, n) => format!("Array<{}, {}>", type_display(inner), n),
-        Type::Option(inner) => format!("Option<{}>", type_display(inner)),
+        _ if crate::types::option_payload(ty).is_some() => format!(
+            "Option<{}>",
+            type_display(crate::types::option_payload(ty).expect("an Option payload"))
+        ),
         Type::Unit => "Unit".to_string(),
         other => format!("{other}"),
     }

@@ -1,0 +1,16 @@
+// RFC-0125 M5: a rebuilding builtin takes its receiver, so the receiver must
+// be a value of its own and not a read out of a place that owns it.
+type Head = { meta: Array<String> }
+
+fn withOne(h: Head, s: String) -> Head {
+    let mut mt = h.meta
+    mt.push(s)
+    return Head { meta: mt }
+}
+
+fn main() -> Int64 {
+    let h = Head { meta: ["a"] }
+    let g = withOne(h, "b".copy())
+    print(g.meta.length + h.meta.length)
+    return 0
+}

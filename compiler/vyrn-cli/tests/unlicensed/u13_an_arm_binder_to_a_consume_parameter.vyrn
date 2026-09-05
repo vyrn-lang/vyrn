@@ -1,0 +1,18 @@
+// Row 13's family of the refusals census, at a spelling the kernel does not
+// reach. The value owns heap, so this is not the heap reason: a match arm's
+// payload binder over a `read` parameter is a borrow, and the kernel does not
+// say so.
+fn take(xs: consume Array<Int64>) -> Int64 {
+    let n = xs.length
+    drop xs
+    return n
+}
+
+fn go(o: read Option<Array<Int64>>) -> Int64 {
+    return match o {
+        Some(v) => take(v),
+        None => 0,
+    }
+}
+
+fn main() -> Int64 { return 0 }

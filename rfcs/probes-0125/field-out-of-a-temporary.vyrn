@@ -1,0 +1,30 @@
+// RFC-0125 M2 probe: a field taken out of a temporary nobody names. The
+// binding takes the field; the kernel says the rest of the temporary is
+// never released.
+let turns = 200000
+
+type Parsed = { root: String, sels: Array<String>, err: String }
+
+fn parseDoc(i: Int64) -> Parsed {
+    return Parsed {
+        root: "root-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+        sels: ["a", "b"],
+        err: "err-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+    }
+}
+
+fn count(i: Int64) -> Int64 {
+    let sels = parseDoc(i).sels
+    return sels.length
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        total = total + count(i)
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

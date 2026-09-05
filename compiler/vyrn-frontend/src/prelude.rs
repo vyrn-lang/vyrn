@@ -43,7 +43,7 @@
 //!
 //! ## What is deliberately NOT here
 //!
-//! - **Effects.** `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` are 29 rows and no
+//! - **Effects.** `SPAWN_FORBIDDEN` and the lattice's `gen` column are 29 rows and no
 //!   signature in this language carries an effect. That is a language feature,
 //!   not a milestone.
 //! - **Arity and parameter types.** The checker's per-builtin arms already
@@ -169,7 +169,7 @@ fn rows() -> Vec<Function> {
     use Type::{Bool, Float, Int, Str, Unit};
     let t = || Type::Param("T".to_string());
     let arr = |e: Type| Type::Array(Box::new(e));
-    let opt = |e: Type| Type::Option(Box::new(e));
+    let opt = |e: Type| Type::option(e);
     let stm = |e: Type| Type::Stream(Box::new(e));
     let u8s = || {
         arr(Type::IntN {
@@ -239,7 +239,7 @@ fn rows() -> Vec<Function> {
             "stringFromBytes",
             &[],
             &[("b", Read, u8s())],
-            Type::Result(Box::new(Str), Box::new(Str)),
+            Type::result(Str, Str),
             &[],
         ),
         row("floatBits", &[], &[("x", Read, Float)], Int, &[]),
@@ -294,6 +294,10 @@ fn rows() -> Vec<Function> {
             arr(t()),
             &[],
         ),
+        // `xs.clear()` (RFC-0115 addendum, RFC-0125 §1): the length goes to
+        // zero and the buffer stays, so the next fill reuses it. Heapless
+        // elements only — forgetting an element that owns heap would leak it.
+        row("@clear", &["T"], &[("self", Read, arr(t()))], arr(t()), &[]),
         row(
             "@append",
             &["T"],
@@ -500,21 +504,21 @@ fn rows() -> Vec<Function> {
             "readFile",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(Str), Box::new(Str)),
+            Type::result(Str, Str),
             &[],
         ),
         row(
             "readFileBytes",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(u8s()), Box::new(Str)),
+            Type::result(u8s(), Str),
             &[],
         ),
         row(
             "writeFileBytes",
             &[],
             &[("p", Read, Str), ("b", Read, u8s())],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row("writeStdout", &[], &[("b", Read, u8s())], Type::Unit, &[]),
@@ -522,21 +526,21 @@ fn rows() -> Vec<Function> {
             "writeFile",
             &[],
             &[("p", Read, Str), ("s", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row(
             "renameFile",
             &[],
             &[("from", Read, Str), ("to", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row(
             "fsyncFile",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         // ---- the generation-time results (RFC-0021, RFC-0071) ---------------
@@ -551,14 +555,14 @@ fn rows() -> Vec<Function> {
         // belong to is empty by construction, and the row is about facts.
         //
         // `listDir` also has a runtime: `vyrn run` lists the real filesystem
-        // (`COMPTIME_FORBIDDEN` deliberately omits it, and so does the
+        // (the lattice's `gen` column allows it, and so does the
         // interpreter's generation-only refusal). Only the two compiling
         // backends have no lowering for it.
         row(
             "listDir",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            Type::result(arr(Str), Str),
             &[],
         ),
         // `listDirKinds` (RFC-0119): the same listing, each directory entry's
@@ -568,7 +572,7 @@ fn rows() -> Vec<Function> {
             "listDirKinds",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            Type::result(arr(Str), Str),
             &[],
         ),
         row(
@@ -659,6 +663,24 @@ pub fn capability(name: &str, i: usize) -> Option<Capability> {
     signature(name)
         .and_then(|f| f.params.get(i))
         .map(|p| p.capability)
+}
+
+/// Whether the seeded builtin `name` REBUILDS its receiver: its first
+/// parameter has the type it hands back, and that type is a container. Such
+/// a row gives the receiver's buffer back through its result — `push`,
+/// `reserve`, `append`, `copyFrom`, a map's `tally` — so the call TAKES the
+/// receiver (RFC-0125 M2, the first defect the kernel found).
+///
+/// Stated here because two passes ask the same question: `movecheck::sinks`
+/// asks it under rule 1, and `core::call` asks it when it lowers the call
+/// and marks the write-back exception. A rule is stated once (RFC-0125 §3
+/// M3, the checker's deletion path).
+pub fn rebuilds(name: &str) -> bool {
+    let Some(f) = signature(name) else {
+        return false;
+    };
+    f.params.first().is_some_and(|p| p.ty == f.ret)
+        && matches!(f.ret, Type::Array(_) | Type::SmallArray(..) | Type::Map(..))
 }
 
 /// Whether the result of `name` points **into** one of its arguments.

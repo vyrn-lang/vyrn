@@ -1,0 +1,37 @@
+// `xs.clear()` (RFC-0115 addendum): the length goes to zero and the buffer
+// stays, so the next fill reuses it. Reverse-complement built a fresh array
+// per sixty-byte output line and threw it away — a free, then a growth chain
+// of four, eight, sixteen, thirty-two, sixty-four through realloc, eight
+// allocator calls per line (RFC-0125 §1.4). With `clear` a line is a fill.
+//
+// The interpreter clears a vector; whether the buffer is kept is the compiled
+// backends' fact, and it shows up only as time. What every engine agrees on
+// is what this program prints.
+
+fn fill(xs: consume Array<UInt8>, from: Int64, n: Int64) -> Array<UInt8> {
+    let mut out = xs
+    let mut i = 0
+    while i < n {
+        out.push(UInt8(from + i))
+        i = i + 1
+    }
+    return out
+}
+
+fn main() -> Int64 {
+    let mut w: Array<UInt8> = []
+    w = fill(w, 65, 3)
+    print(w.length)
+    print(w[2])
+    w.clear()
+    print(w.length)
+    w = fill(w, 97, 5)
+    print(w.length)
+    print(w[0])
+    print(w[4])
+    // Clearing an empty array is a no-op, and clearing twice is too.
+    w.clear()
+    w.clear()
+    print(w.length)
+    return 0
+}

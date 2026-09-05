@@ -160,8 +160,8 @@ pub fn type_key(ty: &Type) -> Option<String> {
         Type::Bool => Some("Bool".to_string()),
         Type::Str => Some("String".to_string()),
         Type::Named(n) => Some(n.clone()),
-        Type::Option(_) => Some("Option".to_string()),
-        Type::Result(..) => Some("Result".to_string()),
+        _ if option_payload(ty).is_some() => Some("Option".to_string()),
+        _ if result_payloads(ty).is_some() => Some("Result".to_string()),
         Type::App(n, _) => Some(n.clone()),
         _ => None,
     }
@@ -573,7 +573,7 @@ fn base_spelling(ty: &Type) -> &'static str {
         Type::Bool => "Bool",
         Type::Str => "String",
         Type::Record(_) => "record",
-        Type::Enum(_) => "enum",
+        Type::Enum(_) if !is_sum_alias(ty) => "enum",
         _ => "?",
     }
 }
@@ -1067,7 +1067,7 @@ fn record_schema(fields: &[Field], cx: &mut SchemaCx) -> String {
         .collect();
     let required: Vec<String> = fields
         .iter()
-        .filter(|f| !matches!(forced(&f.ty), Type::Option(_)))
+        .filter(|f| option_payload(&forced(&f.ty)).is_none())
         .map(|f| format!("\"{}\"", f.name))
         .collect();
     let req = if required.is_empty() {
@@ -1194,8 +1194,7 @@ fn num_lit(e: &Expr) -> Option<String> {
 pub fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
     f(ty);
     match ty {
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -1203,7 +1202,7 @@ pub fn walk_type(ty: &Type, f: &mut impl FnMut(&Type)) {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => walk_type(a, f),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             walk_type(a, f);
             walk_type(b, f);
         }
@@ -1250,8 +1249,7 @@ pub fn type_depth(ty: &Type) -> usize {
         ts.max().unwrap_or(0)
     }
     1 + match ty {
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -1260,9 +1258,7 @@ pub fn type_depth(ty: &Type) -> usize {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => type_depth(a),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
-            type_depth(a).max(type_depth(b))
-        }
+        Type::Merge(a, b) | Type::Map(a, b) => type_depth(a).max(type_depth(b)),
         Type::App(_, args) => deepest(args.iter().map(type_depth)),
         Type::Record(fields) => deepest(fields.iter().map(|f| type_depth(&f.ty))),
         Type::Enum(variants) => deepest(
@@ -1372,8 +1368,7 @@ fn size_go(
     };
     let d = depth + 1;
     let ok = match t {
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -1382,7 +1377,7 @@ fn size_go(
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => size_go(a, types, budget, n, d, seen),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             size_go(a, types, budget, n, d, seen) && size_go(b, types, budget, n, d, seen)
         }
         Type::App(_, args) => args.iter().all(|a| size_go(a, types, budget, n, d, seen)),
@@ -1421,11 +1416,6 @@ pub fn mentions_param(ty: &Type) -> bool {
 pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     match ty {
         Type::Param(t) => subst.get(t).cloned().unwrap_or_else(|| ty.clone()),
-        Type::Option(inner) => Type::Option(Box::new(substitute(inner, subst))),
-        Type::Result(a, b) => Type::Result(
-            Box::new(substitute(a, subst)),
-            Box::new(substitute(b, subst)),
-        ),
         Type::App(name, args) => Type::App(
             name.clone(),
             args.iter().map(|a| substitute(a, subst)).collect(),
@@ -1494,6 +1484,70 @@ pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
 
 pub fn resolve(ty: &Type, types: &HashMap<String, TypeDecl>) -> Type {
     resolve_d(ty, types, 0)
+}
+
+/// RFC-0126 §8.4's `words(t)`: how many `i64` slots a payload of type `t` rides
+/// in inside a sum. Two for the shapes that ARE `{ i64, i64 }` — a stored `fn`,
+/// a `lazy`, a record of exactly two words — and one for everything else, where
+/// a value wider than its slots is boxed and the slot holds the pointer.
+///
+/// It is a STRUCTURAL test rather than `llt_of(t) == "{ i64, i64 }"`, which is
+/// how §8.4 writes it, and the difference is TERMINATION. `llt_of` of a sum asks
+/// this question about the sum's payloads, so asking `llt_of` back from here
+/// loops the moment a type reaches itself — `type R = { a: Int64, b: Option<R> }`
+/// is legal, and it overflowed the stack.
+///
+/// The two readings differ in one place, and it is the place §8.7 already
+/// measured: a payload that is itself a ONE-SLOT SUM prints `{ i64, i64 }` and
+/// rides in one slot, boxed, which is what both conventions did for a nested sum
+/// before. Nothing else prints that shape.
+///
+/// It lives here, and not in the emitter that reads it back as a shape, because
+/// [`payload_boxed`] below is the same fact and `own` asks that one.
+pub fn payload_words(ty: &Type, types: &HashMap<String, TypeDecl>) -> usize {
+    // A member that prints `i64`. Structural, so it cannot descend anywhere.
+    let word = |t: &Type| matches!(resolve(t, types), Type::Int | Type::IntN { bits: 64, .. });
+    match resolve(ty, types) {
+        // A stored `fn` value (RFC-0037), and the deferral that lowers to one.
+        Type::Fn(..) | Type::Lazy(_) => 2,
+        Type::Record(fs) if fs.len() == 2 && fs.iter().all(|f| word(&f.ty)) => 2,
+        _ => 1,
+    }
+}
+
+/// Whether a sum payload of type `t` travels BOXED — a pointer in the slot
+/// rather than the value in it — so the sum owns one heap block per live payload
+/// whatever the payload itself holds.
+///
+/// **One statement of the rule** (RFC-0126 §8.11, M4a). It was three, all in
+/// `own::owns_heap`: one for `Option`, two for `Result` and one for `Enum`, each
+/// naming the word class by hand as `Int`, `Bool`, `Str`, `Fn`. That list ran
+/// two rules together — a payload two words WIDE rides in its slots, and a
+/// one-word payload rides in the word when the word is what it is — and §8.9
+/// moved the first of them. `Fn` was in the list for the width and `Int` for the
+/// word; a `lazy` and a record of two `Int64`s are two words and were in
+/// neither, so `owns_heap` called a payload the emitter puts inline heap-owning.
+///
+/// `Gen::payload_boxed` and `Fn_::word2` are the same rule asked of the LLVM
+/// shape, which is theirs to know. The two answers differ at one type the
+/// emitter names and the language cannot — `Code` on the generator-host path,
+/// which lowers to `i64` and rides in the word. This answers "boxed" there,
+/// which is the conservative half: it registers a release row that frees
+/// nothing.
+pub fn payload_boxed(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    if payload_words(ty, types) == 2 {
+        return false;
+    }
+    !matches!(
+        resolve(ty, types),
+        Type::Int
+            | Type::IntN { bits: 64, .. }
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Never
+            | Type::Param(_)
+    )
 }
 
 /// The fields of `ty` if it (resolves to) a record; otherwise `None`.
@@ -1573,7 +1627,7 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
                 fs.into_iter()
                     .map(|f| Field {
                         name: f.name,
-                        ty: Type::Option(Box::new(f.ty)),
+                        ty: Type::option(f.ty),
                     })
                     .collect(),
             ),
@@ -1588,7 +1642,76 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
         // the three places that must see it: the field READ (which forces), the
         // codec (which forces too) and reflection.
         Type::Lazy(inner) => Type::Fn(Vec::new(), Box::new(resolve_d(inner, types, depth + 1))),
+        // RFC-0126 §8.11 M4b: the two built-in sums ARE enums, and this is where
+        // they say so. §8.1's variant lists, in tag order — `None` and `Err` are
+        // variant 0, because `??`'s parser desugar names them that way without a
+        // type. Every consumer that resolves a type reads the sum through
+        // [`option_payload`] and [`result_payloads`], which answer for the
+        // surface spelling and for this one alike.
         other => other.clone(),
+    }
+}
+
+/// What an `Option<T>` carries, whichever way the sum is spelled — RFC-0126
+/// §8.11's M4b. `Type::Option(T)` is the surface spelling; `| None | Some(T)` is
+/// what [`resolve`] answers for it, and what a user who writes those two variants
+/// out gets. One reader, so a consumer never has to know which it was handed.
+pub fn option_payload(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Enum(vs) => match vs.as_slice() {
+            [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
+                s.payload.first()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What a `Result<T, E>` carries — `(T, E)`, ok first — whichever way the sum is
+/// spelled. [`option_payload`]'s twin, and the tag order is §8.1's: `Err` is
+/// variant 0.
+pub fn result_payloads(ty: &Type) -> Option<(&Type, &Type)> {
+    match ty {
+        Type::Enum(vs) => match vs.as_slice() {
+            [e, o] if e.name == "Err" && o.name == "Ok" => {
+                Some((o.payload.first()?, e.payload.first()?))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a type is one of the two BUILT-IN sums, whichever way it is spelled
+/// — RFC-0126 §8.15. `Option<T>` and `| None | Some(T)` are the same type, and
+/// so are `Result<T, E>` and `| Err(E) | Ok(T)`; [`option_payload`] and
+/// [`result_payloads`] are the two readings and this asks them both.
+///
+/// It reads as "alias" because that is where it is asked: a declaration's
+/// `base`. `type Maybe = Option<Int64>` names a sum it does not declare, and
+/// after M5 deletes the surface constructors its `base` is a variant list that
+/// looks exactly like a declaration's. The four names in those lists are
+/// RESERVED (`checker::RESERVED`), so nothing a user declares can answer `true`
+/// here.
+pub fn is_sum_alias(base: &Type) -> bool {
+    option_payload(base).is_some() || result_payloads(base).is_some()
+}
+
+/// The variants a declaration DECLARES, or `None` if it declares no variants —
+/// RFC-0126 §8.15. The one reading of `TypeDecl::base` as an enum, asked
+/// wherever a pass collects a module's constructor names.
+///
+/// An alias of a built-in sum is not a variant declaration. Its `base` is a
+/// variant list all the same, so a pass that matched `Type::Enum` on it would
+/// register `None`, `Some`, `Ok` and `Err` as that alias's own variants — and
+/// both emitters key a module-wide `variants` map by variant NAME, so two
+/// `Result` aliases in one program would each resolve to whichever was
+/// collected last.
+pub fn declared_variants(base: &Type) -> Option<&[EnumVariant]> {
+    match base {
+        Type::Enum(vs) if !is_sum_alias(base) => Some(vs),
+        _ => None,
     }
 }
 
@@ -1688,14 +1811,14 @@ mod struct_key_tests {
         ("String", "8084a51b3c649e88"),
         ("Bool", "49f411f0a1a7f719"),
         ("R", "6dc9d47663615470"),
-        ("Option<Int64>", "3cca7115ecddc468"),
+        ("Option<Int64>", "6f617664e3df370a"),
         ("Array<Int64>", "d9c366f005660b4f"),
         ("Array<Int64, 4>", "789ccf35c7706c73"),
         ("{ a: Int64 }", "9410e46ed45e2516"),
         ("{ b: Int64 }", "b1e8f1e6073bf44e"),
         ("{ a: String }", "71a7ba0548c213ff"),
         ("enum { A }", "4312633fc2f748cb"),
-        ("Result<Int64, String>", "2a121af6953f575a"),
+        ("Result<Int64, String>", "56958aa3efc9473c"),
         ("Map<String, Int64>", "4986ea0126622a62"),
         ("Box<Int64>", "9969edc012fba3aa"),
     ];
@@ -1721,7 +1844,7 @@ mod struct_key_tests {
             ("String", Type::Str),
             ("Bool", Type::Bool),
             ("R", Type::Named("R".into())),
-            ("Option<Int64>", Type::Option(b(Type::Int))),
+            ("Option<Int64>", Type::option(Type::Int)),
             ("Array<Int64>", Type::Array(b(Type::Int))),
             ("Array<Int64, 4>", Type::ArrayN(b(Type::Int), 4)),
             (
@@ -1752,10 +1875,7 @@ mod struct_key_tests {
                     payload: vec![Type::Int],
                 }]),
             ),
-            (
-                "Result<Int64, String>",
-                Type::Result(b(Type::Int), b(Type::Str)),
-            ),
+            ("Result<Int64, String>", Type::result(Type::Int, Type::Str)),
             ("Map<String, Int64>", Type::Map(b(Type::Str), b(Type::Int))),
             ("Box<Int64>", Type::App("Box".into(), vec![Type::Int])),
         ]
@@ -1845,10 +1965,7 @@ mod struct_key_tests {
         // The hazard is real before it is ruled out: these two DO collide under
         // the readable mangle, so a generator that missed them would prove
         // nothing.
-        assert_eq!(
-            Type::Option(Box::new(Type::Int)).to_string(),
-            "Option<Int64>"
-        );
+        assert_eq!(Type::option(Type::Int).to_string(), "Option<Int64>");
 
         for round in 0..2 {
             let base: Vec<Type> = if round == 0 {
@@ -1860,7 +1977,7 @@ mod struct_key_tests {
             for t in &base {
                 let b = || Box::new(t.clone());
                 seeds.extend([
-                    Type::Option(b()),
+                    Type::option(t.clone()),
                     Type::Array(b()),
                     Type::ArrayN(b(), 4),
                     Type::ArrayN(b(), 8),
@@ -1882,7 +1999,7 @@ mod struct_key_tests {
             for a in &pairs {
                 for c in &pairs {
                     seeds.extend([
-                        Type::Result(Box::new(a.clone()), Box::new(c.clone())),
+                        Type::result(a.clone(), c.clone()),
                         Type::Map(Box::new(a.clone()), Box::new(c.clone())),
                         Type::App("P".into(), vec![a.clone(), c.clone()]),
                         Type::Fn(vec![a.clone(), c.clone()], Box::new(Type::Unit)),
@@ -2326,17 +2443,6 @@ pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         Type::Param(t) => {
             subst.entry(t.clone()).or_insert_with(|| aty.clone());
         }
-        Type::Option(p) => {
-            if let Type::Option(a) = aty {
-                solve_param(p, a, subst);
-            }
-        }
-        Type::Result(p1, p2) => {
-            if let Type::Result(a1, a2) = aty {
-                solve_param(p1, a1, subst);
-                solve_param(p2, a2, subst);
-            }
-        }
         Type::App(pn, pa) => {
             if let Type::App(an, aa) = aty {
                 if pn == an && pa.len() == aa.len() {
@@ -2485,5 +2591,68 @@ pub fn solve_param(pty: &Type, aty: &Type, subst: &mut HashMap<String, Type>) {
         | Type::Logger
         | Type::Never
         | Type::Err => {}
+    }
+}
+
+#[cfg(test)]
+mod sum_alias_tests {
+    use super::*;
+
+    /// Parse `src` and answer the declaration named `name`.
+    fn decl_of(src: &str, name: &str) -> TypeDecl {
+        let toks = crate::lexer::lex(src).expect("lex");
+        let prog = crate::parser::parse(toks).expect("parse");
+        prog.type_decls
+            .into_iter()
+            .find(|t| t.name == name)
+            .expect("declaration")
+    }
+
+    /// The two `DeleteResult` aliases of RFC-0126 §8.14 — `examples/fullstack`'s
+    /// and `examples/shelf`'s — are the same declaration in two projects, and a
+    /// module-wide `variants` map keyed by variant NAME is what makes that a
+    /// collision. Neither DECLARES `Ok` or `Err`.
+    #[test]
+    fn a_result_alias_declares_no_variants() {
+        for src in [
+            "export type DeleteResult = Result<Bool, String>",
+            "type DeleteResult = Result<Int64, String>",
+        ] {
+            let d = decl_of(src, "DeleteResult");
+            assert!(is_sum_alias(&d.base), "{src}");
+            assert!(declared_variants(&d.base).is_none(), "{src}");
+        }
+    }
+
+    /// The same, spelled as the variant list `resolve` answers and M5 leaves
+    /// behind. This is the reading the guard exists for: the base is a
+    /// `Type::Enum` and it is still not a declaration.
+    #[test]
+    fn a_sum_spelled_as_its_variant_list_declares_no_variants() {
+        let types = HashMap::new();
+        for ty in [Type::option(Type::Int), Type::result(Type::Bool, Type::Str)] {
+            let base = resolve(&ty, &types);
+            assert!(matches!(base, Type::Enum(_)), "{ty} resolves to an enum");
+            assert!(is_sum_alias(&base), "{ty}");
+            assert!(declared_variants(&base).is_none(), "{ty}");
+        }
+    }
+
+    /// A declared enum is unaffected, and `examples/enumcodec.vyrn` is the
+    /// corpus program that holds both in one module: `Shape` declares three
+    /// variants and `Lookup = Result<Shape, String>` declares none.
+    #[test]
+    fn a_declared_enum_still_declares_its_variants() {
+        let src = "type Shape =\n    | Circle(Int64)\n    | Rect(Int64, Int64)\n    | Nothing\ntype Lookup = Result<Shape, String>\n";
+        let shape = decl_of(src, "Shape");
+        assert!(!is_sum_alias(&shape.base));
+        let vs = declared_variants(&shape.base).expect("Shape declares variants");
+        assert_eq!(
+            vs.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+            ["Circle", "Rect", "Nothing"]
+        );
+        let lookup = decl_of(src, "Lookup");
+        assert!(is_sum_alias(&lookup.base));
+        assert!(declared_variants(&lookup.base).is_none());
     }
 }

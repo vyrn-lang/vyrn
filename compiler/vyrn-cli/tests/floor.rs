@@ -14,6 +14,8 @@
 //! it is a list of single files; a project does not fit it, so the assertion is
 //! here instead.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -87,6 +89,28 @@ fn the_leak_example_is_refused_with_the_full_chain() {
 
     let (ok, err) = check(&leak.join("server/main.vyrn"));
     assert!(ok, "the native artifact reaches the same module:\n{err}");
+}
+
+/// Every project entry the registry says must be refused, is — with the text
+/// it names. `examples/listing` is RFC-0125 M6's prediction program for
+/// finding 6: a browser artifact that lists a directory.
+#[test]
+fn every_registered_project_entry_is_refused() {
+    for (entry, why, needle) in common::EXPECTED_PROJECT_CHECK_FAILURE {
+        let (ok, err) = check(&repo_dir("examples").join(entry));
+        assert!(!ok, "{entry} should be refused ({why}):\n{err}");
+        assert!(
+            err.contains(needle),
+            "{entry}: expected `{needle}` in:\n{err}"
+        );
+    }
+    let (_, err) = check(&repo_dir("examples/listing/client/boot.vyrn"));
+    assert!(
+        err.contains(
+            "artifact `app` (browser) cannot include `client/boot.vyrn`: it reaches the filesystem"
+        ),
+        "{err}"
+    );
 }
 
 /// The floor fires for a declared ENTRY POINT and for nothing else. A module in
@@ -384,4 +408,149 @@ fn the_shim_implemented_externs_are_not_a_capability() {
     );
     let (ok, err) = check(&dir.join("main.vyrn"));
     assert!(ok, "a clock is not a host import:\n{err}");
+}
+
+/// RFC-0125 M6, fourth and fifth slices: the `stdin`, `args` and `fs` rows are
+/// decided by the effect judgment, and the refusal is the pass's own words.
+/// `VYRN_NO_JUDGE=1` puts every row back in the pass, and the two texts must be
+/// one text — which is what "the rule moved, the refusal did not" means.
+#[test]
+fn a_moved_row_refuses_in_the_words_the_pass_used() {
+    const STDIN: &str = "fn main() -> Int64 {\n    \
+         let line = match readLine() { Some(s) => s, None => \"\", }\n    \
+         print(line)\n    return 0\n}\n";
+    const ARGS: &str =
+        "fn main() -> Int64 {\n    let a = args()\n    print(a[0])\n    return 0\n}\n";
+    const READ: &str = "fn main() -> Int64 {\n    \
+         let t = match readFile(\"a.txt\") { Ok(s) => s, Err(e) => e, }\n    \
+         print(t)\n    return 0\n}\n";
+    const LIST: &str = "fn main() -> Int64 {\n    \
+         let d = match listDir(\".\") { Ok(v) => 1, Err(e) => 0, }\n    \
+         print(d.toString())\n    return 0\n}\n";
+    for (name, body) in [
+        ("stdin", STDIN),
+        ("args", ARGS),
+        ("fsread", READ),
+        ("fslist", LIST),
+    ] {
+        let dir = scratch(name);
+        write(&dir, "client/boot.vyrn", body);
+        write(
+            &dir,
+            "vyrn.json",
+            "{ \"name\": \"p\", \"artifacts\": { \
+              \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }\n",
+        );
+        let entry = dir.join("client/boot.vyrn");
+        let (ok, judged) = check(&entry);
+        assert!(
+            !ok,
+            "{name}: the browser artifact must be refused:\n{judged}"
+        );
+        let out = vyrn()
+            .env("VYRN_NO_JUDGE", "1")
+            .arg("check")
+            .arg(&entry)
+            .output()
+            .expect("run check");
+        let pass = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "{name}: {pass}");
+        assert_eq!(judged, pass, "{name}: the judgment changed the refusal");
+    }
+}
+
+/// RFC-0125 M6, sixth slice, finding 7 decided: the `extern` row is carried by
+/// the CALL and not by the declaration. The two prediction programs stand here
+/// beside each other.
+///
+/// `unused.vyrn` declares a host import and calls nothing. The direct backend
+/// (RFC-0077) emits no `(import "vyrn" ..)` for it, so the artifact asks the
+/// host for nothing and runs: `vyrn run --engine wasm unused.vyrn` prints and
+/// exits 0. The floor accepts it now; it used to refuse a program that runs.
+///
+/// `used.vyrn` calls it. The backend emits the import, a plain wasmtime cannot
+/// instantiate the module and a native build traps at the call, so the artifact
+/// does need a host. The floor refuses it in the words it always used, and
+/// `VYRN_NO_JUDGE=1` gives the same bytes: for this row presence and
+/// reachability are one answer whenever a call is written at all.
+///
+/// A dead ORDINARY function that calls the import is refused too, and by both
+/// rules: `lower` instantiates every non-generic function, so the judgment sees
+/// `dead` exactly as the scan does.
+#[test]
+fn an_unreached_host_import_is_no_capability() {
+    const UNUSED: &str = "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\n\
+         fn main() -> Int64 {\n    print(\"no host needed\")\n    return 0\n}\n";
+    const USED: &str = "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\n\
+         fn main() -> Int64 {\n    let x = jsAdd(1, 2)\n    print(x.toString())\n    return 0\n}\n";
+    const DEAD: &str = "extern fn jsAdd(a: Int64, b: Int64) -> Int64\n\n\
+         fn dead() -> Int64 {\n    return jsAdd(1, 2)\n}\n\n\
+         fn main() -> Int64 {\n    print(\"alive\")\n    return 0\n}\n";
+    const MANIFEST: &str = "{ \"name\": \"p\", \"artifacts\": { \
+         \"app\": { \"entry\": \"host.vyrn\", \"target\": \"native\" } } }\n";
+
+    let dir = scratch("externunused");
+    write(&dir, "vyrn.json", MANIFEST);
+    write(&dir, "host.vyrn", UNUSED);
+    let entry = dir.join("host.vyrn");
+    let (ok, err) = check(&entry);
+    assert!(ok, "an import nothing calls is no capability:\n{err}");
+
+    for (name, body) in [("used", USED), ("dead", DEAD)] {
+        write(&dir, "host.vyrn", body);
+        let (ok, judged) = check(&entry);
+        assert!(!ok, "{name}: a native artifact has no host:\n{judged}");
+        assert!(
+            judged.contains("`jsAdd` needs `extern`; target `native` has no host to import from"),
+            "{name}: {judged}"
+        );
+        let out = vyrn()
+            .env("VYRN_NO_JUDGE", "1")
+            .arg("check")
+            .arg(&entry)
+            .output()
+            .expect("run check");
+        let pass = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        assert!(!out.status.success(), "{name}: {pass}");
+        assert_eq!(judged, pass, "{name}: the judgment changed the refusal");
+    }
+}
+
+/// RFC-0125 M6, fifth slice: `fs` moved, and the `logging { sink: file(..) }`
+/// carrier did not move with it. The sink is a DECLARATION and no effect set
+/// holds it (finding 10), so the pass keeps deciding it — inside the load,
+/// before the check, where every declaration row is decided.
+#[test]
+fn the_log_sink_is_a_declaration_the_judgment_does_not_clear() {
+    let dir = scratch("logsink");
+    write(
+        &dir,
+        "client/boot.vyrn",
+        "logging { sink: file(\"app.log\") }\n\nfn main() -> Int64 {\n    \
+         info(\"up\")\n    return 0\n}\n",
+    );
+    write(
+        &dir,
+        "vyrn.json",
+        "{ \"name\": \"p\", \"artifacts\": {           \"app\": { \"entry\": \"client/boot.vyrn\", \"target\": \"browser\" } } }\n",
+    );
+    let entry = dir.join("client/boot.vyrn");
+    let (ok, judged) = check(&entry);
+    assert!(!ok, "a page cannot write a log file:\n{judged}");
+    assert!(
+        judged.contains("logging { sink: file(\"app.log\") }"),
+        "{judged}"
+    );
+    let out = vyrn()
+        .env("VYRN_NO_JUDGE", "1")
+        .arg("check")
+        .arg(&entry)
+        .output()
+        .expect("run check");
+    let pass =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{pass}");
+    assert_eq!(judged, pass, "the judgment touched a declaration");
 }

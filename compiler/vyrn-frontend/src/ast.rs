@@ -189,7 +189,7 @@ pub fn is_surface_builtin(name: &str) -> bool {
 ///   READ AS DATA by `vyrn-frontend/tests/primitives.rs`, which scans both files
 ///   for literals to enumerate what each engine implements and compares that to
 ///   RFC-0078's census. A predicate is invisible to a text scan.
-/// - `checker.rs`'s `RESERVED`, `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` hold
+/// - `checker.rs`'s `RESERVED` and `SPAWN_FORBIDDEN`, and the lattice's `gen` column, hold
 ///   the five among dozens of unrelated names, where splicing a const array in
 ///   costs more than it saves. `every_log_level_is_reserved_and_forbidden_where_effects_are`
 ///   compares them to this table instead.
@@ -509,8 +509,7 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
                 collect_params(a, out);
             }
         }
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -518,7 +517,7 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => collect_params(a, out),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             collect_params(a, out);
             collect_params(b, out);
         }
@@ -827,12 +826,6 @@ pub enum Type {
     Unit,
     /// A named validated type; resolved against the program's [`TypeDecl`]s.
     Named(String),
-    /// A built-in optional (RFC-0005). The inner type is a scalar or validated
-    /// scalar in v0.1.
-    Option(Box<Type>),
-    /// A built-in result (RFC-0005): `Result<T, E>`. Both payloads are scalar or
-    /// validated scalars in v0.1.
-    Result(Box<Type>, Box<Type>),
     /// A structural record type (RFC-0002): an ordered set of named fields.
     /// Compatibility is by shape (width subtyping), not name.
     Record(Vec<Field>),
@@ -890,11 +883,16 @@ pub enum Type {
     /// stream would still answer `.length`), and a library type would have to be
     /// spelled with an `Array` base, so `let a: Array<T> = s` would launder the
     /// obligation away. Neither is a runtime concern — both are about what the
-    /// checker will accept — so the *lowering* is `Array<T>`'s exactly, in all
-    /// three engines: `{ ptr data, i64 len, i64 cap }`, `Val::Array`, the same
-    /// indexed walk for `for … in`. RFC-0083's `F32x4` is the opposite case (a
-    /// value with a new representation and no ownership); this is a resource
-    /// with a new *rule* and no new representation.
+    /// checker will accept.
+    ///
+    /// **M1's representation WAS `Array<T>`'s exactly** — `{ ptr data, i64 len,
+    /// i64 cap }`, `Val::Array`, the same indexed walk for `for … in` — and M2b
+    /// ended that in all three engines, because a pull-based producer has no
+    /// buffer to point at. `llt_of` answers `{ ptr, i64, i64, i64, i64, i64 }`,
+    /// a six-word header tagged over the two producers, and the interpreter
+    /// holds a `Val::Stream` of its own. RFC-0126 §6 records the correction: the
+    /// claim above outlived the code by an RFC, and a reader pricing the
+    /// collapse of this constructor from it would have priced a free one.
     ///
     /// M1's only producer is `fromArray`, so the sequence is eager. M2's
     /// `unfold`/`channel` are what make it pull-based; nothing in the obligation
@@ -956,6 +954,42 @@ pub enum Type {
 }
 
 impl Type {
+    /// `Option<T>` as the variant list it IS — RFC-0126 §8.1, and §8.15's M5
+    /// deleted the constructor that used to spell it. `None` is variant 0 and
+    /// `Some` is variant 1, which is the TAG order `Pattern::Failure` and
+    /// `Pattern::Success` have named since RFC-0079's `??` desugar.
+    ///
+    /// [`Display`](std::fmt::Display) prints this back as `Option<T>`, and
+    /// [`crate::types::option_payload`] reads it back, so nothing above the AST
+    /// has to know the sum lost a spelling.
+    pub fn option(t: Type) -> Type {
+        Type::Enum(vec![
+            EnumVariant {
+                name: "None".to_string(),
+                payload: Vec::new(),
+            },
+            EnumVariant {
+                name: "Some".to_string(),
+                payload: vec![t],
+            },
+        ])
+    }
+
+    /// `Result<T, E>` as the variant list it IS. [`Type::option`]'s twin, and
+    /// the tag order is the same rule: `Err` is variant 0.
+    pub fn result(ok: Type, err: Type) -> Type {
+        Type::Enum(vec![
+            EnumVariant {
+                name: "Err".to_string(),
+                payload: vec![err],
+            },
+            EnumVariant {
+                name: "Ok".to_string(),
+                payload: vec![ok],
+            },
+        ])
+    }
+
     /// Every variant of this enum, as a value.
     ///
     /// The lock a coverage test needs, and it has two halves that only work
@@ -984,8 +1018,6 @@ impl Type {
         "Str",
         "Unit",
         "Named",
-        "Option",
-        "Result",
         "Record",
         "Omit",
         "Pick",
@@ -1025,8 +1057,6 @@ impl Type {
             Type::Str => "Str",
             Type::Unit => "Unit",
             Type::Named(_) => "Named",
-            Type::Option(_) => "Option",
-            Type::Result(..) => "Result",
             Type::Record(_) => "Record",
             Type::Omit(..) => "Omit",
             Type::Pick(..) => "Pick",
@@ -1073,8 +1103,6 @@ impl std::fmt::Display for Type {
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
             Type::Named(n) | Type::Param(n) => write!(f, "{n}"),
-            Type::Option(t) => write!(f, "Option<{t}>"),
-            Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, fld) in fields.iter().enumerate() {
@@ -1089,10 +1117,32 @@ impl std::fmt::Display for Type {
             Type::Pick(b, keys) => write!(f, "Pick<{b}, {}>", keys.join(", ")),
             Type::Merge(a, b) => write!(f, "Merge<{a}, {b}>"),
             Type::Partial(b) => write!(f, "Partial<{b}>"),
-            Type::Enum(vs) => {
-                let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
-                write!(f, "enum {{ {} }}", names.join(" | "))
-            }
+            // The two built-in sums keep their SPELLING whichever way they were
+            // built. Since RFC-0126 §8.11's M4b `resolve` answers `| None |
+            // Some(T)` for an `Option<T>`, and a diagnostic that named it that
+            // way would be naming a shape at a user who wrote a name. It is
+            // §8.6's third guard, and it stands whether or not the constructors
+            // still exist.
+            Type::Enum(vs) => match vs.as_slice() {
+                [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
+                    match s.payload.first() {
+                        Some(t) => write!(f, "Option<{t}>"),
+                        None => write!(f, "enum {{ None | Some }}"),
+                    }
+                }
+                [e, o]
+                    if e.name == "Err"
+                        && o.name == "Ok"
+                        && e.payload.len() == 1
+                        && o.payload.len() == 1 =>
+                {
+                    write!(f, "Result<{}, {}>", o.payload[0], e.payload[0])
+                }
+                _ => {
+                    let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
+                    write!(f, "enum {{ {} }}", names.join(" | "))
+                }
+            },
             Type::App(n, args) => {
                 let rendered: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "{n}<{}>", rendered.join(", "))
@@ -1437,15 +1487,10 @@ pub struct MatchArm {
 /// A pattern in a `match` arm. v0.1 supports the `Option` and `Result` variants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    /// `Some(name)` — binds the payload to `name`.
-    Some(String),
-    /// `None`.
-    None,
-    /// `Ok(name)` — binds the success payload.
-    Ok(String),
-    /// `Err(name)` — binds the error payload.
-    Err(String),
-    /// A user-enum variant pattern: `Circle(r)`, `Rect(w, h)`, or `Empty`.
+    /// A variant pattern: `Circle(r)`, `Rect(w, h)`, `Empty` — and, since
+    /// RFC-0126 §8, `Some(x)`, `None`, `Ok(x)` and `Err(e)` too. The parser
+    /// spells all of them one way; the SCRUTINEE decides what a name means, as
+    /// it always did for a declared enum.
     Variant(String, Vec<String>),
     /// The tag-1 arm — `Some` *or* `Ok`, whichever the scrutinee turns out to
     /// be. Unspellable in source; produced only by the `??` desugar (RFC-0079),

@@ -1,0 +1,3 @@
+mapkeyborrowed.vyrn:21:0: `ks[i]` may not be stored into `m` — it is a `read` parameter
+  fix: declare the parameter `ks: consume ..` if this function should own it
+  fix: `ks[i].copy()` if both sides need a value

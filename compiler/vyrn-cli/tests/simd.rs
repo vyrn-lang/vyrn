@@ -187,11 +187,14 @@ fn a_vector_load_is_bounds_checked_once_on_wasm_too() {
         "four lanes out of the one load:\n{body}"
     );
     // And the one check BRANCHES to the trap: a check that computes a condition
-    // and drops it reads exactly like this one from the counts alone.
+    // and drops it reads exactly like this one from the counts alone. The trap
+    // it reaches is the function's one trap site (RFC-0125 M1), so the arm
+    // parks the table row and the offending lane and branches out; the call to
+    // `trapAt` stands once, after the body (RFC-0125 §2.3).
     let arm = &body[body.find("i32.or").expect("no span check at all")..];
     let arm = &arm[..arm.find("\n      end").expect("unterminated check")];
     assert!(
-        arm.contains("if ") && arm.contains("select") && arm.contains("call "),
+        arm.contains("if ") && arm.contains("select") && arm.contains("br "),
         "the check's branch must reach the trap, naming the first lane out of \
          range:\n{arm}"
     );

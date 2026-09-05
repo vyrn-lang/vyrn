@@ -152,30 +152,31 @@ fn run(
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
 ) -> Result<GenOutput, EngineError> {
-    // String-only, because the arguments travel as argv rather than being baked
-    // into the module — which is what lets ONE compiled artifact serve every
-    // call. Every generator in this repo takes constant paths and names.
+    // Eagerly, because the key no longer names the target: an artifact compiled
+    // for a sibling generator would be a cache HIT here, and dispatching to a
+    // name the wrapper never emitted is a trap rather than a decline.
+    let target = match program.functions.iter().find(|f| f.name == fn_name) {
+        Some(f) if dispatchable(f) && f.params.len() == args.len() => f,
+        _ => return Err(decline("the generator is not one this path serves")),
+    };
+
+    // The arguments travel as argv rather than being baked into the module —
+    // which is what lets ONE compiled artifact serve every call, whatever the
+    // constants are. So each one is WRITTEN here and read back in the wrapper
+    // at the parameter's declared type ([`wrapper_program`]).
     //
     // argv[0] is the generator's NAME, which `main` dispatches on: the artifact
     // is one per MODULE, not one per generator, so it has to be told which of
     // the module's generators this call wants.
     let mut argv: Vec<String> = vec![fn_name.to_string()];
-    argv.extend(
-        args.iter()
-            .map(|a| match a {
-                ConstVal::Str(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| decline("a non-String constant argument"))?,
-    );
-
-    // Eagerly, because the key no longer names the target: an artifact compiled
-    // for a sibling generator would be a cache HIT here, and dispatching to a
-    // name the wrapper never emitted is a trap rather than a decline.
-    match program.functions.iter().find(|f| f.name == fn_name) {
-        Some(f) if dispatchable(f) && f.params.len() == args.len() => {}
-        _ => return Err(decline("the generator is not one this path serves")),
+    for (a, p) in args.iter().zip(&target.params) {
+        argv.push(match (a, &p.ty) {
+            (ConstVal::Str(s), Type::Str) => s.clone(),
+            // Decimal, which is what `parse` reads (RFC-0046) and what the
+            // interpreter would have passed as the value itself.
+            (ConstVal::Int(n), Type::Int) => n.to_string(),
+            _ => return Err(decline("a constant argument this path cannot write")),
+        });
     }
 
     let t = std::time::Instant::now();
@@ -298,8 +299,20 @@ fn serve(
 /// nothing in this repo does it, and a wrong answer is worse than a slow one.
 /// `exported` because the loader only ever resolves a generator import to an
 /// exported `gen fn`, so anything else could not be asked for.
+///
+/// A parameter is served when its type can be WRITTEN into argv and read back
+/// at that type inside the guest: `String` is itself, and `Int64` is decimal
+/// through the `parse` builtin. Every other type declines. The element
+/// generators (`<div>`, `Icon`) take `line` and `col` as `Int64`, so before
+/// `Int64` was served every element on a `.vyx` page ran under the interpreter
+/// — 66 declines over this repo's corpus, and the only ones there were.
 fn dispatchable(f: &Function) -> bool {
-    f.is_gen && f.exported && f.ret == Type::Str && f.params.iter().all(|par| par.ty == Type::Str)
+    f.is_gen
+        && f.exported
+        && f.ret == Type::Str
+        && f.params
+            .iter()
+            .all(|par| matches!(par.ty, Type::Str | Type::Int))
 }
 
 /// The program actually compiled: the generator's module with `is_gen` cleared,
@@ -352,7 +365,11 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                         "print",
                         vec![call(
                             &f.name,
-                            (0..f.params.len()).map(|i| argv(i + 1)).collect(),
+                            f.params
+                                .iter()
+                                .enumerate()
+                                .map(|(i, par)| at_type(argv(i + 1), &par.ty))
+                                .collect(),
                         )],
                     )),
                     Stmt::Expr(call("print", vec![Expr::Str(RESULT_END.into())])),
@@ -471,6 +488,33 @@ fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function
         is_export_extern: false,
         is_gen: false,
         is_mut: false,
+    }
+}
+
+/// One `args()[i]` — a String — read back at the parameter's declared type.
+///
+/// `String` is itself. `Int64` is `match parse(s) { Some(v) => v, None => 0 }`:
+/// [`dispatchable`] and `run` agree on what argv can carry, so the `None` arm
+/// is unreachable and `0` is there to give the `match` a type rather than to be
+/// read. Anything else would have declined before the wrapper is built.
+fn at_type(e: Expr, ty: &Type) -> Expr {
+    use vyrn_frontend::ast::{ArmBody, MatchArm, Pattern};
+    if *ty == Type::Str {
+        return e;
+    }
+    Expr::Match {
+        scrutinee: Box::new(call("parse", vec![e])),
+        arms: vec![
+            MatchArm {
+                pattern: Pattern::Variant("Some".into(), vec!["v".into()]),
+                body: ArmBody::Expr(var("v")),
+            },
+            MatchArm {
+                pattern: Pattern::Variant("None".into(), Vec::new()),
+                body: ArmBody::Expr(Expr::Int(0)),
+            },
+        ],
+        line: 0,
     }
 }
 
@@ -630,7 +674,13 @@ impl Decoders {
         if !self.made.insert(name.clone()) {
             return Some(name);
         }
-        let body = match vyrn_frontend::types::resolve(ty, &self.types) {
+        let resolved = vyrn_frontend::types::resolve(ty, &self.types);
+        // RFC-0126 §8.13: a resolved `Option<T>` is a variant list and no longer
+        // its own constructor, so the payload comes from the reader rather than
+        // from the spelling. A DECLARED enum of other variants reads `None` here
+        // and still declines, which is what this path served before.
+        let opt = vyrn_frontend::types::option_payload(&resolved).cloned();
+        let body = match resolved {
             // The length, then that many elements.
             Type::Array(inner) => {
                 let elem = self.decode(&inner)?;
@@ -697,8 +747,8 @@ impl Decoders {
                 ]
             }
             // One tag atom, then the payload only when it is there.
-            Type::Option(inner) => {
-                let some = self.decode(&inner)?;
+            _ if opt.is_some() => {
+                let some = self.decode(&opt.clone()?)?;
                 vec![
                     Stmt::If {
                         cond: Expr::Binary {
@@ -754,7 +804,14 @@ fn mangle(ty: &Type) -> Option<String> {
     Some(match ty {
         Type::Named(n) => n.clone(),
         Type::Array(t) => format!("Arr_{}", mangle(t)?),
-        Type::Option(t) => format!("Opt_{}", mangle(t)?),
+        // The built-in `Option`, whichever way it is spelled (RFC-0126 §8.15).
+        // The reflection channel's other end reads the same payload, in
+        // `encode`, and the two agree because they walk one type through one
+        // reader.
+        _ if vyrn_frontend::types::option_payload(ty).is_some() => format!(
+            "Opt_{}",
+            mangle(vyrn_frontend::types::option_payload(ty).expect("an Option payload"))?
+        ),
         Type::Str => "Str".into(),
         Type::Int => "Int".into(),
         Type::Bool => "Bool".into(),
@@ -910,7 +967,12 @@ fn encode(
     out: &mut Vec<Atom>,
 ) -> Result<(), String> {
     let wrong = || format!("cannot encode {lit:?} as {ty}");
-    match vyrn_frontend::types::resolve(ty, types) {
+    let resolved = vyrn_frontend::types::resolve(ty, types);
+    // RFC-0126 §8.13, as in `Decoders::materialize`: a resolved `Option<T>` is a
+    // variant list, so the payload comes from the reader. Both sides read it the
+    // same way, which is what keeps the atom stream one walk of one type.
+    let opt = vyrn_frontend::types::option_payload(&resolved).cloned();
+    match resolved {
         Type::Str => match lit {
             Expr::Str(s) => out.push(Atom::Str(s.clone().into_bytes())),
             _ => return Err(wrong()),
@@ -924,10 +986,10 @@ fn encode(
             _ => return Err(wrong()),
         },
         // `Some(x)` / `None` — one presence atom, then the payload if there is one.
-        Type::Option(inner) => match lit {
+        _ if opt.is_some() => match lit {
             Expr::Call { name, args, .. } if name == "Some" && args.len() == 1 => {
                 out.push(Atom::Int(1));
-                encode(&inner, &args[0], types, out)?;
+                encode(&opt.clone().ok_or_else(wrong)?, &args[0], types, out)?;
             }
             Expr::Var { name, .. } if name == "None" => out.push(Atom::Int(0)),
             _ => return Err(wrong()),

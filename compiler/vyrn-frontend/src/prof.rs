@@ -200,6 +200,89 @@ fn ms(d: Duration) -> String {
     }
 }
 
+// ---- Build phases (RFC-0125 §3 M4) -----------------------------------------
+//
+// The profiler above measures a RUN. The M4 question is about a BUILD: every
+// program now links `std/runtime` and `std/text`, and the suites that emit
+// hundreds of modules pay for that hundreds of times. To decide whether the
+// front end is the cost you have to see the build split into its phases, so
+// this is the same idea one level up — a name, a count and a total, armed by
+// `VYRN_BUILD_PROFILE=1` and silent otherwise.
+//
+// ponytail: flat, additive, first-seen order. No nesting and no tree. A phase
+// here is a whole stage of the pipeline, and the stages do not overlap, so a
+// caller/callee split would say nothing a sum does not.
+
+thread_local! {
+    /// `(name, total, count)` in first-seen order — the order a build runs its
+    /// phases in, which is the order a reader wants them.
+    static PHASES: RefCell<Vec<(&'static str, Duration, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Whether build phases are being timed. Read once: an env lookup per phase on
+/// a hot loader path would be measuring the measurement.
+pub fn phases_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VYRN_BUILD_PROFILE").is_ok_and(|v| v != "0"))
+}
+
+/// One open phase. Charges its span on drop, so an early `return` inside the
+/// phase still records it.
+pub struct Phase(&'static str, Instant);
+
+impl Drop for Phase {
+    fn drop(&mut self) {
+        charge(self.0, self.1.elapsed());
+    }
+}
+
+/// Charge `span` to the phase `name`, from a caller that timed it itself.
+///
+/// [`phase`] is the pipeline's own hook and answers to `VYRN_BUILD_PROFILE`.
+/// This one answers to nobody, because its caller already knows it is
+/// profiling: `vyrn run --profile` on the compiled route (RFC-0125 §3 M5, the
+/// `run-profile` row). The tree-walker's per-function rows mean nothing there —
+/// nothing walks a tree — and the phases of the compile and of the run are what
+/// there is to report.
+pub fn charge(name: &'static str, span: Duration) {
+    PHASES.with(|p| {
+        let mut p = p.borrow_mut();
+        match p.iter_mut().find(|(n, _, _)| *n == name) {
+            Some(row) => {
+                row.1 += span;
+                row.2 += 1;
+            }
+            None => p.push((name, span, 1)),
+        }
+    });
+}
+
+/// Start timing `name`, or `None` when nothing is armed — the only cost an
+/// ordinary build pays.
+pub fn phase(name: &'static str) -> Option<Phase> {
+    phases_on().then(|| Phase(name, Instant::now()))
+}
+
+/// The phase table, and it clears what it reports. Empty when nothing is armed.
+pub fn phase_table() -> String {
+    let rows: Vec<(&'static str, Duration, u64)> =
+        PHASES.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    if rows.is_empty() {
+        return String::new();
+    }
+    let width = rows.iter().map(|r| r.0.len()).max().unwrap_or(5).max(5);
+    let mut out = format!("{:<width$}  {:>8}  {:>12}\n", "phase", "count", "total");
+    for (name, total, count) in &rows {
+        out.push_str(&format!(
+            "{:<width$}  {:>8}  {:>12}\n",
+            name,
+            count,
+            ms(*total)
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,6 +8,11 @@
 /// letting a payload out of a NAMED scrutinee gave one buffer two owners, and
 /// keeping nothing out of a temporary one gave it none.
 ///
+/// An arm hands its payload out two ways, and the third arrangement — the arm
+/// that hands it to a CALL that consumes it, rather than naming it — is the one
+/// RFC-0125 §3 M5's seventh slice found still wrong. The scrutinee kept a deep
+/// release of a value the callee already owned.
+///
 /// The interpreter reference-counts and was right about every line here, so
 /// three-way parity is the whole gate: a double free aborts the native build
 /// before its output flushes and corrupts the wasm free list.
@@ -15,6 +20,24 @@
 type Node =
     | Leaf(Int64)
     | Bunch(Array<Int64>, String)
+
+/// A DECLARED release, because the program that found the third arrangement had
+/// one: `std/json`'s `Json`, whose scrutinee row is a `Release` rather than a
+/// structural walk.
+type Wrap =
+    | Empty
+    | Words(Array<String>)
+
+impl Owned for Wrap {
+    fn release(consume self) {
+        match consume self {
+            Empty => {}
+            Words(ws) => {
+                drop ws
+            }
+        }
+    }
+}
 
 type Doc = { title: String, body: String }
 
@@ -70,6 +93,28 @@ fn nested(n: Int64) -> Option<Node> {
 
 fn width(s: String) -> Int64 {
     return Int64(s.byteLength)
+}
+
+fn words(n: Int64) -> Array<String> {
+    let mut xs: Array<String> = []
+    xs.push("w-\{n}")
+    xs.push("x-\{n}")
+    return xs
+}
+
+/// The callee an arm gives its payload to: it consumes the array and hands it
+/// back, so the value has exactly one owner from the arm onward.
+fn takeWords(ws: consume Array<String>) -> Array<String> {
+    return ws
+}
+
+/// The give out of a `consume` PARAMETER, in RETURN position —
+/// `std/openapi`'s `oaWithId`, and the shape the `$schema` fault was found on.
+fn unwrapWords(w: consume Wrap) -> Array<String> {
+    return match w {
+        Empty => emptyStrs(),
+        Words(ws) => takeWords(ws),
+    }
 }
 
 /// A payload out by `return`, over a temporary — the shape a named scrutinee is
@@ -171,6 +216,20 @@ fn main() -> Int64 {
         None => 0,
     }
     print("call=\{n}")
+
+    // The third arrangement: the arm gives its payload to a call that CONSUMES
+    // it. The give is the CALL's, not the arm's, and reading only the arm's own
+    // spelling left the scrutinee a deep release of a buffer the callee owned.
+    // Once out of a named local, once out of a `consume` parameter in return
+    // position.
+    let wo = Words(words(2))
+    let w1 = match wo {
+        Empty => emptyStrs(),
+        Words(ws) => takeWords(ws),
+    }
+    print("give=\{w1.length}/\{w1[0]}")
+    let w2 = unwrapWords(Words(words(3)))
+    print("giveret=\{w2.length}/\{w2[1]}")
 
     // The wrapped lend. `got` names an element `attrs` still holds, so neither
     // the binding nor the match below it may release one.

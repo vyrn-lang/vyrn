@@ -844,6 +844,7 @@ dependencies = [
  "vyrn-frontend",
  "vyrn-genwasm",
  "vyrn-lower",
+ "wasmtime",
 ]
 
 [[package]]
@@ -859,6 +860,10 @@ dependencies = [
 [[package]]
 name = "vyrn-frontend"
 version = "0.0.0"
+dependencies = [
+ "vyrn-cli",
+ "vyrn-codegen",
+]
 
 [[package]]
 name = "vyrn-genwasm"

@@ -14,7 +14,10 @@ appendreserve	clean
 args	clean
 argsdemo	clean
 arrays	clean
-assoctype	clean
+# assoctype: the generic `valueOr` returns `Output` and now copies (RFC-0089
+# rule 2 refused the borrow it returned); the analysis reads the generic body,
+# says "the return type T owns no heap", and the caller releases nothing.
+assoctype	leak	1
 assoctype_unbound	skip
 autorelease	clean
 autovalidate	clean
@@ -27,6 +30,7 @@ branchtypes	clean
 bytecount	clean
 bytesrange	clean
 capturefn	clean
+clearowned	skip
 clidemo	other
 clifail	other
 clock	clean
@@ -205,3 +209,4 @@ vlog	clean
 vondemo	clean
 vyxdemo	clean
 wirekey	clean
+listdir	skip

@@ -566,7 +566,7 @@ pub struct OptionalProjection {
 /// result is an `Option<T>`, where the plain kind names the place's type
 /// bare. The checker enforces the body shape this classification implies.
 pub fn is_optional(f: &Function) -> bool {
-    matches!(f.ret, crate::ast::Type::Option(_))
+    crate::types::option_payload(&f.ret).is_some()
 }
 
 /// [`inline`] for an optional projection: split the body into its four
@@ -1011,13 +1011,9 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
 fn pattern_binder_names(p: &crate::ast::Pattern) -> Vec<&String> {
     use crate::ast::Pattern;
     match p {
-        Pattern::Some(b)
-        | Pattern::Ok(b)
-        | Pattern::Err(b)
-        | Pattern::Success(b)
-        | Pattern::Failure(b) => vec![b],
+        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter().collect(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 
@@ -1025,13 +1021,9 @@ fn pattern_binder_names(p: &crate::ast::Pattern) -> Vec<&String> {
 fn pattern_binder_names_mut(p: &mut crate::ast::Pattern) -> Vec<&mut String> {
     use crate::ast::Pattern;
     match p {
-        Pattern::Some(b)
-        | Pattern::Ok(b)
-        | Pattern::Err(b)
-        | Pattern::Success(b)
-        | Pattern::Failure(b) => vec![b],
+        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
         Pattern::Variant(_, binds) => binds.iter_mut().collect(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 
@@ -1220,8 +1212,10 @@ fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
 /// after its children, so a substituted expression is never re-walked.
 ///
 /// `pub(crate)` since census U5: the loader stamps every `panic` with its source
-/// site and needs the same complete walk this one already is.
-pub(crate) fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
+/// site and needs the same complete walk this one already is. `pub` since
+/// RFC-0125 M5: `vyrn test --engine wasm` rewrites a body's test-only builtins
+/// before the direct backend sees them, and needs the same walk again.
+pub fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
     for s in &mut b.stmts {
         walk_stmt(s, f);
     }
@@ -1380,7 +1374,7 @@ pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr))
 
 /// [`walk_program`] over a bare expression — a global's initializer or a
 /// refinement predicate, neither of which is a block.
-pub(crate) fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     let mut b = Block {
         stmts: vec![Stmt::Expr(std::mem::replace(e, Expr::Int(0)))],
     };

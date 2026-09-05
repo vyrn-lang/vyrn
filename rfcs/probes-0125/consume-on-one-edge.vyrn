@@ -1,0 +1,39 @@
+// RFC-0125 M2 probe: a `consume` of a sub-place on one edge of an `if`. The
+// plan releases the binding minus the hole on every path; the kernel says
+// the path that did not take it leaks what it left.
+let turns = 200000
+
+type Line = { text: String, n: Int64 }
+type Decoded = { ok: Bool, line: Line, err: String }
+
+fn decode(i: Int64) -> Decoded {
+    return Decoded {
+        ok: i % 2 == 0,
+        line: Line { text: "line-" + i.toString() + "-with-enough-length-to-live-on-the-heap", n: i },
+        err: "",
+    }
+}
+
+fn keep(l: consume Line) -> Int64 {
+    return l.n
+}
+
+fn turn(i: Int64) -> Int64 {
+    let d = decode(i)
+    if d.ok {
+        return keep(consume d.line)
+    } else {
+        return d.err.byteLength
+    }
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        total = total + turn(i)
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

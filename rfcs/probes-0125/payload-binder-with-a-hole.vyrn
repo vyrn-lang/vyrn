@@ -1,0 +1,36 @@
+// RFC-0125 M2 probe: a payload binder of a consuming match, one of whose
+// fields the arm takes. The plan's arm table frees a binder whole or not at
+// all; the kernel says the rest of the binder is never released.
+let turns = 200000
+
+type Reply = { status: Int64, body: String, headers: Map<String, String> }
+
+fn handle(i: Int64) -> Option<Reply> {
+    let mut hs: Map<String, String> = [:]
+    hs["content-type"] = "text/plain; charset=utf-8; padding-padding-" + i.toString()
+    return Some(Reply {
+        status: 200,
+        body: "body-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+        headers: hs,
+    })
+}
+
+fn reply(i: Int64) -> String {
+    let r = handle(i)
+    return match consume r {
+        Some(res) => consume res.body,
+        None => "",
+    }
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        let s = reply(i)
+        total = total + s.byteLength
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

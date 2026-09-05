@@ -1,0 +1,45 @@
+// RFC-0125 M3 probe: `consume-on-one-edge` with the binding read AFTER the
+// join (`recordsFrom` in vlog, `rpcApplyConfig` in `std/rpc`). The two
+// edges reach the join with different holes, so the edge that did not take
+// releases the sub-place there (an edge row spelled `d.line`), and the
+// block's own release of `d` walks around `line` on both paths. Peak
+// working set at 200,000 and 400,000 turns with the placer: 4.2 MB and
+// 4.1 MB natively, 12.6 MB and 12.7 MB under wasmtime.
+let turns = 200000
+
+type Line = { text: String, n: Int64 }
+type Decoded = { ok: Bool, line: Line, err: String }
+
+fn decode(i: Int64) -> Decoded {
+    return Decoded {
+        ok: i % 2 == 0,
+        line: Line { text: "line-" + i.toString() + "-with-enough-length-to-live-on-the-heap", n: i },
+        err: "err-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+    }
+}
+
+fn keep(l: consume Line) -> Int64 {
+    return l.n
+}
+
+fn turn(i: Int64) -> Int64 {
+    let d = decode(i)
+    let mut n = 0
+    if d.ok {
+        n = keep(consume d.line)
+    } else {
+        n = 1
+    }
+    return n + d.err.byteLength
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        total = total + turn(i)
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

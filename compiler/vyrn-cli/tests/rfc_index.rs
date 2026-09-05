@@ -45,13 +45,10 @@
 //!   anchor is not.
 //!
 //! CI NOTE. `ci.yml` carries `paths-ignore: ['rfcs/**', '**.md', 'editor/**']`,
-//! so a commit touching ONLY `rfcs/` runs no workflow and this gate does not
-//! fire on it — the same one-directional gate `docs/api/` has, and for the same
-//! trade. It is caught late rather than never: the next commit that builds runs
-//! it, and it runs on every `main` push that touches anything else. The gate is
-//! here rather than in a docs-only workflow because it is a two-line-per-check
-//! read of a directory, and a workflow of its own would be more machinery than
-//! the thing it guards.
+//! so a commit touching ONLY `rfcs/` runs none of its jobs. This gate runs on
+//! every pull request from `.github/workflows/docs.yml` instead, which has no
+//! path filter (RFC-0125 M0): a docs-only PR reports this check and nothing
+//! else. The workspace suite runs it a second time on every commit that builds.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

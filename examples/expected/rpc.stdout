@@ -1,0 +1,4 @@
+usersById -> user7 (age 30)
+usersCreate -> id 1000 Ada
+usersDel -> ok
+usersDel -> refused: cannot delete the root user

@@ -1,0 +1,20 @@
+{"Circle":5}
+{"Rect":[2,3]}
+"Nothing"
+{"Ok":{"Rect":[4,6]}}
+{"Err":"not found"}
+{"hero":{"Circle":9},"props":[{"Rect":[1,1]},"Nothing"],"hint":{"Rect":[7,8]}}
+{"hero":"Nothing","props":[]}
+--- decode ok ---
+{"Circle":5}
+{"Rect":[2,3]}
+"Nothing"
+--- decode errors ---
+json.type |  | expected one of `Circle`, `Rect`, `Nothing`, found string
+json.type |  | expected one of `Circle`, `Rect`, `Nothing`, found object
+json.type |  | expected one of `Circle`, `Rect`, `Nothing`, found string
+json.type |  | expected one of `Circle`, `Rect`, `Nothing`, found object
+json.type | Circle | expected integer, found string
+json.type | Rect | expected array, found number
+validate | Circle | validation failed for `Radius`
+json.type |  | expected one of `Ok`, `Err`, found string

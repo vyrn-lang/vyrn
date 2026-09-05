@@ -7,6 +7,16 @@ description = "Vyrn front end: lexer, parser, AST, type checker, and a tree-walk
 
 [dependencies]
 
+# NOTHING, and that is the point: the front end is what every other crate reads,
+# so it reads no one. Tests are the exception — RFC-0125 §3 M5's `library-run`
+# row runs a linked program on the compiled route, which is the direct backend
+# plus the driver's WASI host, so the two are DEV-dependencies. Cargo allows the
+# cycle back to `vyrn-cli` for a dev-dependency; the shipped crate keeps an empty
+# list above.
+[dev-dependencies]
+vyrn-codegen = { path = "../vyrn-codegen" }
+vyrn-cli = { path = "../vyrn-cli", default-features = false }
+
 [lib]
 name = "vyrn_frontend"
 path = "src/lib.rs"

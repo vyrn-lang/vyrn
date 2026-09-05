@@ -37,8 +37,7 @@ fn mark_member_type_params(ty: &mut Type) {
                 mark_member_type_params(a);
             }
         }
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -46,7 +45,7 @@ fn mark_member_type_params(ty: &mut Type) {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => mark_member_type_params(a),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             mark_member_type_params(a);
             mark_member_type_params(b);
         }
@@ -123,6 +122,7 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // order. Both rebuild like `push`, so a statement writes back through the
     // receiver place.
     ("reserve", "@reserve"),
+    ("clear", "@clear"),
     ("append", "@append"),
     // `dst.copyFrom(src)` (RFC-0115): overwrite `dst`'s elements with `src`'s,
     // reusing the buffer — the refill loop fannkuch hand-wrote, as one copy.
@@ -424,31 +424,31 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
             Field {
                 name: "min".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "max".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "multipleOf".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "minLength".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "maxLength".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "pattern".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
         ]),
         predicate: None,
@@ -691,7 +691,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
         ]),
         predicate: None,
@@ -714,7 +714,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
             Field {
                 name: "open".to_string(),
@@ -3348,7 +3348,7 @@ impl Parser {
                 self.eat(&Tok::Lt)?;
                 let inner = self.type_()?;
                 self.eat(&Tok::Gt)?;
-                Type::Option(Box::new(inner))
+                Type::option(inner)
             }
             "Result" => {
                 self.eat(&Tok::Lt)?;
@@ -3356,7 +3356,7 @@ impl Parser {
                 self.eat(&Tok::Comma)?;
                 let err = self.type_()?;
                 self.eat(&Tok::Gt)?;
-                Type::Result(Box::new(ok), Box::new(err))
+                Type::result(ok, err)
             }
             // Compile-time transformers (RFC-0002 §7).
             "Omit" | "Pick" => {
@@ -4165,6 +4165,7 @@ impl Parser {
                 if let Expr::Call { name, args, .. } = &e {
                     if name == "@push"
                         || name == "@reserve"
+                        || name == "@clear"
                         || name == "@append"
                         || name == "@copyFrom"
                         || name == "@tally"
@@ -5370,11 +5371,11 @@ impl Parser {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Ok("@t".to_string()),
+                            pattern: Pattern::Variant("Ok".into(), vec!["@t".to_string()]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Err("@e".to_string()),
+                            pattern: Pattern::Variant("Err".into(), vec!["@e".to_string()]),
                             body: ArmBody::Expr(var("Missing")),
                         },
                     ],
@@ -5404,11 +5405,11 @@ impl Parser {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Ok("@t".to_string()),
+                            pattern: Pattern::Variant("Ok".into(), vec!["@t".to_string()]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Err("@e".to_string()),
+                            pattern: Pattern::Variant("Err".into(), vec!["@e".to_string()]),
                             body: ArmBody::Expr(default),
                         },
                     ],
@@ -5539,14 +5540,6 @@ impl Parser {
         Ok(Expr::StructLit { name, fields, line })
     }
 
-    /// Parse the `(name)` that binds a pattern's payload.
-    fn pattern_binding(&mut self) -> Result<String, Diagnostic> {
-        self.eat(&Tok::LParen)?;
-        let bind = self.expect_ident()?;
-        self.eat(&Tok::RParen)?;
-        Ok(bind)
-    }
-
     fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
         let line = self.line();
         let mut name = self.expect_ident()?;
@@ -5573,30 +5566,24 @@ impl Parser {
             }
             return Ok(Pattern::Variant(name, binds));
         }
-        match name.as_str() {
-            "Some" => Ok(Pattern::Some(self.pattern_binding()?)),
-            "Ok" => Ok(Pattern::Ok(self.pattern_binding()?)),
-            "Err" => Ok(Pattern::Err(self.pattern_binding()?)),
-            "None" => Ok(Pattern::None),
-            // Any other identifier is a user-enum variant: `V`, `V(x)`, `V(x, y)`.
-            _ => {
-                let _ = line;
-                let mut binds = Vec::new();
-                if *self.peek() == Tok::LParen {
+        // Every identifier is a variant name: `V`, `V(x)`, `V(x, y)`, and since
+        // RFC-0126 §8 that includes `Some`, `None`, `Ok` and `Err`. The parser
+        // has no scrutinee to ask what the name means, and it never needed one.
+        let _ = line;
+        let mut binds = Vec::new();
+        if *self.peek() == Tok::LParen {
+            self.advance();
+            while *self.peek() != Tok::RParen {
+                binds.push(self.expect_ident()?);
+                if *self.peek() == Tok::Comma {
                     self.advance();
-                    while *self.peek() != Tok::RParen {
-                        binds.push(self.expect_ident()?);
-                        if *self.peek() == Tok::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.eat(&Tok::RParen)?;
+                } else {
+                    break;
                 }
-                Ok(Pattern::Variant(name, binds))
             }
+            self.eat(&Tok::RParen)?;
         }
+        Ok(Pattern::Variant(name, binds))
     }
 }
 

@@ -1,0 +1,15 @@
+// RFC-0089 rule 2 through a wrapper: a whole `read` parameter put into the
+// value the function hands back. Neither side may release it.
+fn wrap(s: String) -> Option<String> {
+    return Some(s)
+}
+
+fn main() -> Int64 {
+    let s = "a".copy()
+    let o = wrap(s)
+    if let Some(v) = o {
+        print(v.byteLength)
+    }
+    print(s.byteLength)
+    return 0
+}

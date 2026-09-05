@@ -1,0 +1,11 @@
+/// Row `file-nul` — RFC-0014. `readFile` answers a `String`, which is
+/// NUL-terminated, so a file holding a NUL byte is an `Err` and not a
+/// truncated read.
+
+fn main() -> Int64 {
+    print(match readFile("data/embeddednul.bin") {
+        Ok(_) => "ok",
+        Err(e) => "err: \{e}",
+    })
+    return 0
+}

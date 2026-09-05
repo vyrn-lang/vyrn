@@ -28,7 +28,32 @@
 //! table, which is the derivation `peek` and `static_ty` are — written once
 //! below both backends instead of twice inside them.
 
+pub mod core;
+pub mod effects;
+pub mod kernel;
 mod render;
+pub mod typed;
+
+/// Install the placer (RFC-0125 M3) into `own::analyze`, so every consumer
+/// of the ownership plan — the interpreter, both backends, `vyrn why` — sees
+/// the release rows the kernel found missing. Idempotent; the CLI calls it
+/// at start-up the way it installs the generator engine.
+pub fn install() {
+    vyrn_frontend::own::install_placer(core::augment);
+    // RFC-0125 §3 M3, the deletion slice: the interpreter reads round forty's
+    // answer off the core through this slot, because `vyrn-frontend` sits
+    // below this crate and cannot call into it.
+    vyrn_frontend::own::install_arm_rows(core::arm_rows);
+    // RFC-0125 §3 M3, the accumulation slice: the kernel's own refusals into
+    // the one list a file's refusals come out in, so a rule that has left
+    // `movecheck.rs` is stated wherever that list is read — `vyrn check`, the
+    // editor, `vyrn fix`.
+    vyrn_frontend::own::install_refusals(core::refusal_diagnostics);
+    // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
+    // so a capability row is answered by the judgment and not by a second scan.
+    vyrn_frontend::floor::install_judge(effects::reaches);
+}
+pub use core::{refuses as kernel_refuses, take_refusals};
 pub use render::render;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -301,6 +326,47 @@ pub struct Lowered<'a> {
     /// set stays so the next engine that walks a lambda body can say which blocks
     /// those are without a second AST walk.
     pub lambda_bodies: std::collections::HashSet<usize>,
+    /// The `test` (RFC-0015) and `bench` (RFC-0055) bodies, in declaration
+    /// order, each body's rows under the synthetic `test@<i>` / `bench@<i>`
+    /// name the checker and `own` key it by.
+    ///
+    /// Outside every instantiation, like [`Lowered::globals`], and NOT
+    /// followed into the worklist, like [`Lowered::predicates`]: a test body
+    /// is no part of an artifact, so a generic it alone calls is an
+    /// instantiation no backend emits. The rows are here because a body the
+    /// judgment cannot see is a lambda with no frame, which is the half of
+    /// RFC-0125 §3 M6's finding 14 the third slice could not close.
+    pub bodies: Vec<OutsideBody<'a>>,
+    /// Every `impl` projection's body (RFC-0091 M2, RFC-0120), with its rows.
+    ///
+    /// A projection is never flattened into `Program::functions`, so no
+    /// instance covers it and no worklist reaches it — and the core still
+    /// lowers an access site as a CALL by the projection's own name. That is
+    /// why the effect judgment had twenty calls it could not attribute
+    /// (RFC-0125 §3 M6, finding 14). Outside every instantiation, like
+    /// [`Lowered::predicates`], and for the same reason: a projection is
+    /// inlined at its site, so following its calls would add instantiations
+    /// no backend's worklist has.
+    pub places: Vec<PlaceRows<'a>>,
+}
+
+/// One `impl` projection's body and its rows.
+#[derive(Debug, Clone)]
+pub struct PlaceRows<'a> {
+    pub func: &'a Function,
+    pub rows: Vec<Row<'a>>,
+}
+
+/// One body that is no function of the program: a `test` or a `bench`.
+#[derive(Debug, Clone)]
+pub struct OutsideBody<'a> {
+    /// `test@<i>` or `bench@<i>` — the name the checker checked it under and
+    /// the key `own`'s release plan uses.
+    pub name: String,
+    pub block: &'a vyrn_frontend::ast::Block,
+    pub module: Option<String>,
+    pub line: usize,
+    pub rows: Vec<Row<'a>>,
 }
 
 impl<'a> Lowered<'a> {
@@ -324,18 +390,50 @@ impl<'a> Lowered<'a> {
 /// JSON codecs are ordinary Vyrn functions and are lowered like any other, which
 /// is only true if they are in the program when the checker runs over it here.
 pub fn lower(program: &Program) -> Lowered<'_> {
-    let recorded = checker::record(program);
+    let _p = vyrn_frontend::prof::phase("lower");
     // The same analysis all three engines already share, asked once here so the
     // placement below is the only new thing in the form (RFC-0101 §1.4).
+    let own_span = vyrn_frontend::prof::phase("lower: own::analyze");
     let ownership = vyrn_frontend::own::analyze(program);
-    let mut lowered = build(program, &recorded, &ownership);
+    drop(own_span);
+    lower_with(program, &ownership)
+}
+
+/// The lowered form against an ownership analysis already made — what the
+/// placer (RFC-0125 M3) needs, since it runs INSIDE `own::analyze`.
+pub fn lower_with<'a>(
+    program: &'a Program,
+    ownership: &vyrn_frontend::own::Ownership,
+) -> Lowered<'a> {
+    let rec_span = vyrn_frontend::prof::phase("lower: checker::record");
+    let recorded = checker::record(program);
+    drop(rec_span);
+    // RFC-0125 §3 M5: the emitters read a join's type here instead of
+    // reconciling one from the arms.
+    core::set_joins(&recorded.joins);
+    let build_span = vyrn_frontend::prof::phase("lower: build");
+    let mut lowered = build(program, &recorded, ownership);
+    drop(build_span);
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });
+    // The lint re-derives the types with a fresh check, and a COMPTIME program
+    // is not the program that check admitted: a generator is re-loaded as its
+    // own root and keeps helpers that use `lex`, `render` and `Token`, which an
+    // ordinary check refuses as "only available during generation" and records
+    // as `<type error>`. Whether the lint sees one at all depends on which
+    // functions the instantiation reaches — the same generator reaches 448
+    // through `vyrn check` and 458 through the editor, which is what made this
+    // assertion fire in one host and not the other. It stays armed for every
+    // program a tool holds (RFC-0125 §3 M3, the accumulation slice).
     debug_assert!(
-        lint(&lowered).is_empty(),
-        "the lowered form failed its own lint:\n  {}",
-        lint(&lowered).join("\n  ")
+        vyrn_frontend::movecheck::in_comptime() || lint(&lowered).is_empty(),
+        "the lowered form failed its own lint:
+  {}",
+        lint(&lowered).join(
+            "
+  "
+        )
     );
     lowered
 }
@@ -398,11 +496,17 @@ fn build<'a>(
 
     // The roots are every non-generic function: that is what both backends emit
     // before either worklist turns, and a generic body is reachable only from
-    // one of them.
+    // one of them. A `std/mem` primitive is a declaration whose lowering is one
+    // instruction at each call (PLAN-0125-runtime §2.1, §3.2); like an
+    // `extern`, it has no body of its own to build.
     let mut queue: VecDeque<(&Function, Vec<Type>)> = program
         .functions
         .iter()
-        .filter(|f| f.type_params.is_empty() && !f.is_extern)
+        .filter(|f| {
+            f.type_params.is_empty()
+                && !f.is_extern
+                && !f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
+        })
         .map(|f| (f, Vec::new()))
         .collect();
     let mut seen: Vec<(String, String)> = queue
@@ -437,6 +541,45 @@ fn build<'a>(
         }
     }
     let predicates = pw.rows;
+    // The fourth root, and the second with no worklist attached: a `test` or
+    // `bench` body — see [`Lowered::bodies`].
+    let mut outside: Vec<OutsideBody<'a>> = Vec::new();
+    for (i, t) in program.tests.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&t.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("test@{i}"),
+            block: &t.body,
+            module: t.module.clone(),
+            line: t.line,
+            rows: w.rows,
+        });
+    }
+    for (i, b) in program.benches.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&b.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("bench@{i}"),
+            block: &b.body,
+            module: b.module.clone(),
+            line: b.line,
+            rows: w.rows,
+        });
+    }
+    // The fifth root, and the third with no worklist attached: an `impl`
+    // projection's body — see [`Lowered::places`].
+    let mut places: Vec<PlaceRows<'a>> = Vec::new();
+    for (_, f) in vyrn_frontend::project::all(program) {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&f.body, 0, &mut chain, &mut w);
+        places.push(PlaceRows {
+            func: f,
+            rows: w.rows,
+        });
+    }
     follow(
         "<module state>",
         std::mem::take(&mut gw.calls),
@@ -543,6 +686,8 @@ fn build<'a>(
         predicates,
         unresolved,
         lambda_bodies,
+        bodies: outside,
+        places,
     }
 }
 
@@ -1007,11 +1152,11 @@ fn has_of(e: &Expr, kids: &[usize], w: &Walk<'_, '_>) -> Option<Type> {
             }),
         ),
         // A sum constructor names one side, and the other is unconstrained.
-        Expr::Var { name, .. } if name == "None" => Type::Option(Box::new(UNCONSTRAINED)),
+        Expr::Var { name, .. } if name == "None" => Type::option(UNCONSTRAINED),
         Expr::Call { name, args, .. } if args.len() == 1 => match name.as_str() {
-            "Some" => Type::Option(Box::new(kid(0)?)),
-            "Ok" => Type::Result(Box::new(kid(0)?), Box::new(UNCONSTRAINED)),
-            "Err" => Type::Result(Box::new(UNCONSTRAINED), Box::new(kid(0)?)),
+            "Some" => Type::option(kid(0)?),
+            "Ok" => Type::result(kid(0)?, UNCONSTRAINED),
+            "Err" => Type::result(UNCONSTRAINED, kid(0)?),
             _ => return None,
         },
         _ => return None,

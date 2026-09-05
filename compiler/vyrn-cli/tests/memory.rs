@@ -2402,3 +2402,52 @@ fn a_map_entry_the_map_gives_up_goes_back_natively() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `a ?? b` is a `match` the parser spells, so the reporter had no recorded
+/// type for its result and called a String "unknown … owns no heap"
+/// (RFC-0126 §8.8). The declared reading answers it as it answers `?`.
+#[test]
+fn why_memory_types_a_nullish_result_as_its_payload() {
+    let dir = std::env::temp_dir().join(format!("vyrn-why-nullish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("n.vyrn");
+    std::fs::write(
+        &file,
+        r#"fn pick(o: Option<Int64>) -> Int64 {
+    let v = o ?? 0
+    return v
+}
+
+fn main() -> Int64 {
+    let s: Option<String> = Some("x")
+    let t = s.copy() ?? "y"
+    print("{t}
+")
+    return pick(Some(3))
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["why", "--memory"])
+        .arg(&file)
+        .output()
+        .expect("vyrn why --memory");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        !text.contains("unknown"),
+        "a `??` result has a type:
+{text}"
+    );
+    assert!(
+        text.contains("v                NOT reclaimed — the type Int64 owns no heap"),
+        "{text}"
+    );
+    assert!(
+        text.contains("t                reclaimed at block exit — freeing the String buffer"),
+        "{text}"
+    );
+}

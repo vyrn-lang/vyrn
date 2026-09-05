@@ -99,7 +99,7 @@ result, and every cell in it was produced by an execution recorded under
 |---|---|---|---|---|
 | `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `std/storage`'s `writeAtomic` | yes | yes | **no** — the canonical `Err` payloads (`` cannot read `p` ``, `` cannot write `p` ``), exit 0 |
 | `fs` durability | `fsyncFile` | yes | yes | **no** — the canonical `Err` (`` cannot write `p` ``), exit 0, exactly as the `fs` row above |
-| `fs` listing | `listDir` | **no — the build is refused** (interpreter / generation only) | **no** — same refusal | **no** — same refusal |
+| `fs` listing | `listDir`, `listDirKinds` | **no — the build is refused** (`NATIVE_UNSUPPORTED`) | yes — `fd_readdir` since RFC-0125 M5 | **no** — the canonical `Err` (`BADF`), exit 0 [2026-09-02: the row was "no" three times at M0; the direct backend lowered it, and the floor gained the row in RFC-0125 M6's second slice] |
 | `fs` through a declaration | `logging { sink: file("…") }` | yes | yes | **no, and silently**: the line is dropped, nothing is printed, exit 0 |
 | `stdin` | `readLine` | yes | yes | **no** — EOF, so `None` |
 | `args` | `args` | yes | yes | **no** — empty `Array<String>` |
@@ -419,10 +419,10 @@ Four capabilities, and nothing else is tracked:
 
 | capability | carried by |
 |---|---|
-| `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `fsyncFile`, and the `logging { sink: file("…") }` DECLARATION |
+| `fs` | `readFile`, `readFileBytes`, `writeFile`, `renameFile`, `fsyncFile`, `listDir`, `listDirKinds` (since RFC-0125 M6, second slice), and the `logging { sink: file("…") }` DECLARATION |
 | `stdin` | `readLine` |
 | `args` | `args` |
-| `extern` | an `extern fn` IMPORT declaration (not the call, not `export extern fn`) |
+| `extern` | a CALL to an `extern fn` IMPORT (not the declaration, not `export extern fn`) — see the addendum below |
 
 M0's table has more rows than this, and the ones it has that this does not are
 absent for two opposite reasons. `stdout` / `stderr`, the clock, entropy and
@@ -433,6 +433,16 @@ floor and keep the refusals they already have — a missing lowering for `listDi
 a runtime trap for `serveStream`. A capability set indexed by three targets
 cannot say "every artifact lacks this", and inventing a fourth answer to say it
 buys one diagnostic that two mechanisms already give.
+
+*[2026-09-02, RFC-0125 M6's second slice: the premise moved for `listDir`.
+RFC-0125 M5 lowered `listDir` and `listDirKinds` over `fd_readdir`, so a WASI
+host lists and a page answers `BADF` — the canonical `Err`, exit 0, which is
+the silent degradation the floor exists to refuse. Both are in the `fs` row
+now (`floor::CALLS`); native keeps its `NATIVE_UNSUPPORTED` refusal, as
+`fsyncFile` does. `examples/listing` is the prediction program: a browser
+artifact whose entry lists a directory, refused by `vyrn check` with the
+floor's wording and recorded in `EXPECTED_PROJECT_CHECK_FAILURE`.
+`serveStream` stays outside, unchanged.]*
 
 The target sets are Rust constants in `vyrn_frontend::floor::capabilities`.
 Nothing in `vyrn.json` reads them, writes them, or can argue with them — that is
@@ -455,7 +465,10 @@ import namespace an `extern` needs.
   of the whole check, not just of its `extern` row. A module carries a capability
   because the carrier is WRITTEN in it, never because a branch reaches it, and
   `extern` is carried by the DECLARATION for exactly the reason the census found:
-  a program that never calls the import still cannot start.
+  a program that never calls the import still cannot start. *[Superseded
+  2026-09-03 — see the addendum below. The premise stopped being true when the
+  direct backend began to sweep an import nothing reaches, so the row is a call
+  now.]*
 - **Finding 4 — one `fs` reach fails silently.** `logging { sink: file(..) }` is
   a carrier, quoted in the diagnostic as the declaration it is
   (`` `logging { sink: file("app.log") }` needs `fs` ``) with line 0, because the
@@ -463,6 +476,50 @@ import namespace an `extern` needs.
   something other than a call, and §2's "the union of the capabilities its calls
   carry" is corrected here rather than left to be re-derived.
 - **Finding 5 — two capabilities no compiled target has.** Second option, above.
+
+#### Addendum, 2026-09-03 — the `extern` row is a call
+
+Finding 3 above made `extern` a capability of the DECLARATION, and it gave one
+reason: an unanswered import stops instantiation, so a program that never
+calls the import still cannot start. That reason no longer holds on any target
+this row refuses, and the row follows the reason.
+
+**What the artifact does.** The direct backend (RFC-0077) emits an
+`(import "vyrn" ..)` for a host function the call graph reaches, and for no
+other. A declaration nothing calls produces no import, so the module
+instantiates and runs. Read off the emitted module:
+
+| program | `vyrn` import emitted | what the artifact does |
+|---|---|---|
+| declares `jsAdd`, calls nothing | none | `wasi`: instantiates, prints, exits 0. `native`: links, prints, exits 0 |
+| declares `jsAdd`, calls it from `main` | `(import "vyrn" "jsAdd" ..)` | `wasi`: a host without the namespace cannot instantiate. `native`: the call traps, `` extern `jsAdd` is not available on this target `` |
+| declares `jsAdd`, calls it from a function `main` never reaches | none | as the first row |
+
+The third row is the backend sweeping harder than the floor: it drops a call
+`_start` cannot reach, where the floor keeps every non-generic instance. The
+floor stays the wider of the two, so it never accepts a program whose artifact
+does hold the import.
+
+**The decision.** An `extern fn` declaration is not a capability. A CALL to one
+is. The vocabulary table above carries the row; the refusal, its wording and
+its chain are unchanged, and the target sets are unchanged. The prediction
+programs are `vyrn-cli` `floor::an_unreached_host_import_is_no_capability`:
+an import nothing calls is accepted, an import a live or a dead function calls
+is refused in the same words as before.
+
+**What it costs.** Nothing in the corpus. The three client artifacts whose
+`std/rpc` and `std/connect` stubs declare `vyrnRpcCall` are `browser`, and a
+page HAS `extern`; the stubs call their own import in the same module, so the
+one refusal the tree relies on — the same client retargeted to `native` — is
+unchanged. `examples/externdemo.vyrn` is no artifact's entry and was never
+touched by the floor.
+
+**What it buys.** One rule. RFC-0125 §2.2's effect lattice can state a call and
+cannot state a declaration, so with the row on the call the floor's four
+capabilities are the lattice's rows read through one match
+(`floor::Capability::of`) and the floor keeps no list of its own. The floor's
+scan finds the carriers and writes the refusals; the judgment says which
+module reaches them.
 
 #### `fsyncFile` is `fs`, not a fifth row
 

@@ -1,0 +1,14 @@
+// Row 25 of the refusals census, over a take of a PROJECTION.
+//
+// Both passes refuse it and they do not say the same thing: the checker names
+// the loop, the kernel names the back edge. That is why row 25's rule stayed
+// in `movecheck.rs` (RFC-0125 §3 M3, the containment slice).
+type Entry = { node: String, rest: Int64 }
+
+fn main() -> Int64 {
+    let er = Entry { node: "n", rest: 0 }
+    for i in [1, 2] {
+        consume er.node
+    }
+    return 0
+}

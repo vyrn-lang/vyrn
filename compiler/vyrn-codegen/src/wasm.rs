@@ -26,8 +26,8 @@
 //! trap.
 //!
 //! The stack's SIZE is not a free choice either, and no longer clang's default:
-//! it holds [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] frames of
-//! [`vyrn_frontend::interp::FRAME_LIMIT`], so that the call counter always trips
+//! it holds [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] frames of
+//! [`vyrn_frontend::trap::FRAME_LIMIT`], so that the call counter always trips
 //! before the stack pointer does and a deep recursion stops with the same
 //! diagnostic here as under the interpreter and the native binary.
 //!
@@ -42,12 +42,12 @@ pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 use wasm_encoder::{
     CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind, ExportSection,
     Function, FunctionSection, GlobalSection, GlobalType, ImportSection, MemorySection, MemoryType,
-    TypeSection,
+    NameMap, NameSection, TypeSection,
 };
 
 /// How much shadow stack a generated module has: enough for
-/// [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] frames of
-/// [`vyrn_frontend::interp::FRAME_LIMIT`] bytes.
+/// [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] frames of
+/// [`vyrn_frontend::trap::FRAME_LIMIT`] bytes.
 ///
 /// It is a PRODUCT rather than a chosen size, and that is the whole recursion
 /// contract in one line: no accepted frame is bigger than `FRAME_LIMIT`, so at
@@ -67,7 +67,7 @@ use wasm_encoder::{
 /// 8,257,536 bytes is exactly 126 wasm pages. A module reserves them and touches
 /// only as many as it recurses into, so the cost is address space, not memory.
 pub const STACK_BYTES: u32 =
-    vyrn_frontend::interp::FRAME_LIMIT * vyrn_frontend::interp::CALL_DEPTH_LIMIT + 65_536;
+    vyrn_frontend::trap::FRAME_LIMIT * vyrn_frontend::trap::CALL_DEPTH_LIMIT + 65_536;
 /// Top of the generated module's shadow stack; it grows down from here to 0.
 pub const STACK_TOP: u32 = STACK_BYTES;
 /// First byte of the generated module's data segments. Statics grow up from
@@ -89,6 +89,27 @@ pub const SHIM_BASE: u32 = 32 * 1024 * 1024;
 /// reaching our data. `compile_split` checks the same number on the linked bytes
 /// today; a direct emitter knows it before it writes it.
 pub const STATICS_LIMIT: u32 = SHIM_BASE / 2;
+
+/// What `std/runtime` occupies at `heapBase()` before its first allocated block:
+/// the free-list heads, the buffered standard output and input, the scratch the
+/// host imports write their out-parameters into, and the digit buffer. The map
+/// is in `std/runtime.vyrn` above `drain`, and `malloc` starts its bump region at
+/// exactly this offset.
+///
+/// The emitted memory has to COVER it. `minimum` used to be
+/// `round_up(data_end, 65536)`, whose comment said "one page past the top of
+/// everything we occupy" — but `round_up` adds nothing when `data_end` is already
+/// near a page boundary, and the header is above `data_end`. A module whose
+/// statics end within these 8,768 bytes of a page therefore declared a memory
+/// that stops inside its own runtime header, and the first host call to use the
+/// scratch at `heapBase() + 8696` wrote past the end of memory: the `wasmtime`
+/// CLI refuses that with `In func wasi_snapshot_preview1::fd_prestat_get at write
+/// prestat: Pointer out of bounds`, and this repo's own host answers `BADF` and
+/// runs on with a broken filesystem. `examples/bin/server.vyrn` is such a module.
+///
+/// Nothing else changes: for a module whose statics are not near a boundary the
+/// two round-ups agree, so its memory section is the byte it was.
+pub const HEAP_HEADER_BYTES: u32 = 8_768;
 
 /// wasm has no sub-32-bit values on the operand stack, and the stack pointer
 /// itself is 4-byte-aligned by convention; clang keeps frames 16-aligned on
@@ -235,10 +256,21 @@ pub struct Module {
     /// identical contents, which is what makes it a string pool.
     pool: Vec<u8>,
     pool_at: HashMap<Vec<u8>, u32>,
+    /// Every [`Module::data`] entry as `(address, length)`, in the order the
+    /// addresses were handed out — which is increasing, because each entry is
+    /// appended. [`Module::sweep_pool`] needs the extents: an address alone does
+    /// not say how many bytes belong to it. A [`Module::reserve`] is not here:
+    /// its bytes are zeros that no segment carries anyway.
+    spans: Vec<(u32, u32)>,
     /// Custom sections, emitted last and in the order they were added. A custom
     /// section is data for the host, not for the engine: nothing here changes
     /// what the module does.
     custom: Vec<(String, Vec<u8>)>,
+    /// Function names for a `name` section, by index as handed out. Empty
+    /// unless the lowering asked for one (`VYRN_WASM_NAMES`): a trap's
+    /// backtrace then names the function, which is worth the bytes only while
+    /// someone is reading one.
+    names: Vec<(u32, String)>,
 }
 
 impl Default for Module {
@@ -259,7 +291,9 @@ impl Module {
             sweep: false,
             pool: Vec::new(),
             pool_at: HashMap::new(),
+            spans: Vec::new(),
             custom: Vec::new(),
+            names: Vec::new(),
         }
     }
 
@@ -339,6 +373,7 @@ impl Module {
         self.pool.resize((at - DATA_BASE) as usize, 0);
         self.pool.extend_from_slice(bytes);
         self.pool_at.insert(bytes.to_vec(), at);
+        self.spans.push((at, bytes.len() as u32));
         at
     }
 
@@ -503,6 +538,13 @@ impl Module {
         keep
     }
 
+    /// Record the name of the function at `index`, for the `name` section
+    /// [`Module::finish`] writes when any name was recorded. `prune` renumbers
+    /// the names with the calls.
+    pub fn name(&mut self, index: u32, name: &str) {
+        self.names.push((index, name.to_string()));
+    }
+
     /// Drop what no export reaches and renumber every `call` that survives.
     ///
     /// Imports go first in the index space, so the new numbering is: surviving
@@ -544,13 +586,99 @@ impl Module {
         for (_, i) in &mut self.exports {
             *i = map[*i as usize];
         }
+        self.names.retain_mut(|(i, _)| {
+            *i = map[*i as usize];
+            *i != u32::MAX
+        });
+        self.sweep_pool();
+    }
+
+    /// Zero every pool entry no surviving body can reach (RFC-0125 §3 M4).
+    ///
+    /// The functions were already swept; the data they interned on the way past
+    /// was not, and [`crate::direct`]'s runtime interned ITS data before any body
+    /// was walked. So a program that reads no file still carried the UTF-8 DFA
+    /// table and all six I/O wordings, and a program that formats no integer
+    /// still carried `intStr`'s proof sentence. This is the sweep's question
+    /// asked of the bytes.
+    ///
+    /// An entry is live when a surviving body pushes an address INSIDE it, or
+    /// when a live entry holds one: the trap table is eight pairs of addresses
+    /// and nothing but its own bytes names the rows (RFC-0125 §2.3), so the scan
+    /// has to follow data into data.
+    ///
+    /// **Conservative in the one safe direction.** A constant that is not a
+    /// pointer but lands inside an entry KEEPS that entry. That costs bytes and
+    /// cannot change what the module does; the opposite mistake would hand a
+    /// program zeros where its literal was. `intern` hands out `at + SHDR`
+    /// rather than `at`, and a folded offset into a literal is inside it too,
+    /// which is why the test is containment and not equality.
+    ///
+    /// Addresses do not move and [`Module::data_end`] does not shift — a dead
+    /// entry becomes zeros, and [`Module::finish`] already writes no segment for
+    /// a run of them.
+    fn sweep_pool(&mut self) {
+        // `spans` is in increasing address order (each entry is appended), so
+        // the entry an address falls in is one binary search.
+        let spans = &self.spans;
+        let find = |x: u32| -> Option<usize> {
+            let i = spans.partition_point(|&(at, _)| at <= x).checked_sub(1)?;
+            let (at, len) = spans[i];
+            (x - at < len).then_some(i)
+        };
+        let mut live = vec![false; spans.len()];
+        let mut work: Vec<usize> = Vec::new();
+        let mark = |i: usize, live: &mut Vec<bool>, work: &mut Vec<usize>| {
+            if !live[i] {
+                live[i] = true;
+                work.push(i);
+            }
+        };
+        for d in &self.bodies {
+            for ins in &d.body.as_ref().expect("a surviving body").body {
+                // An address reaches a body as a constant it pushes. A `memarg`
+                // offset is a field offset off a pointer already on the stack
+                // (`at`, `word_at`), never a whole address, so there is nothing
+                // to read out of one.
+                let c = match ins {
+                    Instruction::I32Const(c) => *c as u32,
+                    Instruction::I64Const(c) => *c as u32,
+                    _ => continue,
+                };
+                if let Some(i) = find(c) {
+                    mark(i, &mut live, &mut work);
+                }
+            }
+        }
+        while let Some(i) = work.pop() {
+            let (at, len) = self.spans[i];
+            let lo = (at - DATA_BASE) as usize;
+            let bytes = &self.pool[lo..lo + len as usize];
+            // Unaligned, because an entry's own alignment says nothing about
+            // where a table inside it puts its words. Four bytes of an ordinary
+            // string almost never read as an address in this range, and one that
+            // does only keeps an entry alive.
+            for w in bytes.windows(4) {
+                let x = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                if let Some(j) = find(x) {
+                    mark(j, &mut live, &mut work);
+                }
+            }
+        }
+        for (i, &(at, len)) in self.spans.iter().enumerate() {
+            if !live[i] {
+                let lo = (at - DATA_BASE) as usize;
+                self.pool[lo..lo + len as usize].fill(0);
+            }
+        }
     }
 
     /// The finished bytes, or the one refusal a program can earn here.
     ///
     /// Sections go out in the order the format fixes: type, import, function,
-    /// memory, global, export, code, data. Nothing else in this file may emit a
-    /// section, so this list is the whole ordering constraint.
+    /// memory, global, export, code, data, then the `name` custom section when
+    /// one was asked for. Nothing else in this file may emit a section, so this
+    /// list is the whole ordering constraint.
     ///
     /// `Result` for [`STATICS_LIMIT`] alone. The other checks below are asserts
     /// because a reservation nobody filled is a bug in this file, which no source
@@ -632,9 +760,10 @@ impl Module {
         }
 
         let mem = MemoryType {
-            // One page past the top of everything we occupy; wasi-libc's
-            // `malloc` grows memory itself from there.
-            minimum: (round_up(self.data_end(), 65_536) / 65_536) as u64,
+            // Past the top of everything we occupy — the statics AND the runtime
+            // header above them ([`HEAP_HEADER_BYTES`]); `malloc` grows memory
+            // itself from there.
+            minimum: (round_up(self.data_end() + HEAP_HEADER_BYTES, 65_536) / 65_536) as u64,
             maximum: None,
             memory64: false,
             shared: false,
@@ -664,20 +793,10 @@ impl Module {
             },
             &ConstExpr::i32_const(STACK_TOP as i32),
         );
-        // The bump heap starts where the statics end, 16-aligned so a `malloc`
+        // The heap starts where the statics end, 16-aligned so a `malloc`
         // result is aligned for anything `layout` can put in it. This is the
         // number M0 said a direct emitter would know by construction instead of
-        // reading back out of linked bytes.
-        globals.global(
-            GlobalType {
-                val_type: ValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &ConstExpr::i32_const(round_up(self.data_end(), 16) as i32),
-        );
-        // The same address, immutable, because [`HEAP`] moves and a `free` has to
-        // ask where the heap STARTS (RFC-0077 M6). See [`HEAP_BASE`].
+        // reading back out of linked bytes. See [`HEAP_BASE`].
         globals.global(
             GlobalType {
                 val_type: ValType::I32,
@@ -690,8 +809,7 @@ impl Module {
         // Runs of zeros are not written. A wasm memory arrives zeroed, so a
         // segment of them is bytes in the file that change nothing, and what pays
         // for them is [`Module::reserve`] — every reservation is zero-filled
-        // scratch. RFC-0077 M6's 116 free-list heads are 464 of them, in the
-        // middle of the pool, in every module this backend emits including `fib`.
+        // scratch.
         //
         // A segment costs about nine bytes of its own, so a gap has to be wider
         // than that to be worth splitting on. `data_end` does not move: the
@@ -749,6 +867,16 @@ impl Module {
         if !data.is_empty() {
             m.section(&data);
         }
+        if !self.names.is_empty() {
+            let mut fns = NameMap::new();
+            self.names.sort_by_key(|(i, _)| *i);
+            for (i, n) in &self.names {
+                fns.append(*i, n);
+            }
+            let mut names = NameSection::new();
+            names.functions(&fns);
+            m.section(&names);
+        }
         for (name, payload) in &self.custom {
             m.section(&CustomSection {
                 name: name.as_str().into(),
@@ -768,14 +896,14 @@ fn encode(f: Frame, n_params: usize) -> Function {
     let mut decl = vec![ValType::I32]; // the frame base
     decl.extend(f.locals.iter().copied());
     let mut out = Function::new_with_locals_types(decl);
-    let frame = round_up(f.frame, FRAME_ALIGN);
+    let frame = f.bytes();
     // Claim the frame. Subtracting past 0 wraps to near `0xFFFFFFFF`, where
     // every access is out of bounds — the trap `--stack-first` buys, and the
     // reason the stack is at the BOTTOM of memory rather than above the data
     // it would otherwise overwrite.
     //
     // It is a safety net and not the limit any more: a lowered body is refused
-    // above [`vyrn_frontend::interp::FRAME_LIMIT`], and [`STACK_BYTES`] holds
+    // above [`vyrn_frontend::trap::FRAME_LIMIT`], and [`STACK_BYTES`] holds
     // `CALL_DEPTH_LIMIT` of those, so nothing this backend accepts can reach the
     // wrap. What still can is a hand-built `Frame` in a test, which is what
     // `tests/wasm_runs.rs` uses it for.
@@ -806,22 +934,18 @@ fn encode(f: Frame, n_params: usize) -> Function {
 /// state of its own that is not in memory.
 pub const SP: u32 = 0;
 
-/// The module's bump-allocation cursor, initialized past the statics by
-/// [`Module::finish`]. RFC-0076's shim owns `malloc` for the split build; a
-/// standalone module has no shim to ask, so the direct backend emits its own
-/// against this global.
-pub const HEAP: u32 = 1;
-
-/// The first byte of the heap — [`HEAP`]'s initial value, kept immutable so a
+/// The first byte of the heap, 16-aligned past the statics. Immutable, so a
 /// `free` can tell a heap pointer from one that never came out of `malloc`
-/// (RFC-0077 M6).
+/// (RFC-0077 M6). `std/runtime`'s allocator keeps its class heads and its bump
+/// offset in the heap's own first bytes (PLAN-0125-runtime §6 step 2), so the
+/// mutable `HEAP` cursor that used to sit beside this global is gone.
 ///
 /// It is not a refinement. `drop s` on a `String` bound to a literal hands `free`
 /// a data-segment address; the textual backend passes that to C's `free`, which
 /// reads a header that is not there. Here the address is BELOW this global and
 /// the release is a no-op — a leak of nothing, instead of a free list threaded
 /// through the string pool.
-pub const HEAP_BASE: u32 = 2;
+pub const HEAP_BASE: u32 = 1;
 
 /// A function body under construction, plus the frame it is accumulating.
 ///
@@ -833,6 +957,9 @@ pub struct Frame {
     locals: Vec<ValType>,
     next_local: u32,
     frame: u32,
+    /// The most `frame` has ever been: what the prologue claims. `frame`
+    /// itself comes back down at a statement's end ([`Frame::reset`]).
+    high: u32,
     /// Local holding the frame's base address, valid for the whole body.
     base: u32,
 }
@@ -848,6 +975,7 @@ impl Frame {
             locals: locals.to_vec(),
             next_local: base + 1 + locals.len() as u32,
             frame,
+            high: frame,
             base,
         }
     }
@@ -871,19 +999,40 @@ impl Frame {
     }
 
     /// Take `size` bytes of frame at `align`, giving the offset from the frame
-    /// base. Offsets are handed out for the whole function, never reused — a
-    /// slot inside a loop is one slot, written afresh each turn.
+    /// base. A slot inside a loop is one slot, written afresh each turn.
     /// Saturating, so a frame past 4 GB is a REFUSAL and not a panic: the caller
     /// compares [`Self::bytes`] against `FRAME_LIMIT` once the body is walked,
     /// and it cannot do that if the running total aborted the process first. A
     /// frame that saturates reports the clamp rather than its true size, which
     /// is a number nobody reads for anything but the comparison it loses by five
     /// orders of magnitude. Nothing under the limit moves at all.
+    ///
+    /// RFC-0125 M1: a slot is a statement's unless the statement bound a name.
+    /// The body walker takes [`Frame::mark`] before each statement and
+    /// [`Frame::reset`]s to it after one that left the scope as it found it, so
+    /// the temporaries of one statement — an argument's copy, a call's result,
+    /// a literal on its way to the heap — are the next statement's to reuse.
+    /// Before this, every temporary of a body was added up: a generated page
+    /// body of nine hundred statements needed 23 KB of frame for values no two
+    /// of which were ever live together.
     pub fn alloc(&mut self, size: u32, align: u32) -> u32 {
         debug_assert!(align.is_power_of_two());
         let at = round_up(self.frame, align.max(1));
         self.frame = at.saturating_add(size);
+        self.high = self.high.max(self.frame);
         at
+    }
+
+    /// Where the next [`Frame::alloc`] lands, to hand [`Frame::reset`] later.
+    pub fn mark(&self) -> u32 {
+        self.frame
+    }
+
+    /// Give back every slot taken since `mark`. Only the caller can know that
+    /// nothing still names one of them; the rule is on [`Frame::alloc`].
+    pub fn reset(&mut self, mark: u32) {
+        debug_assert!(mark <= self.frame);
+        self.frame = mark;
     }
 
     /// Push the address of the frame slot at `off`.
@@ -904,10 +1053,10 @@ impl Frame {
 
     /// How many bytes of shadow stack this body's prologue will claim — the same
     /// rounding [`encode`] applies, so a caller checking it against
-    /// [`vyrn_frontend::interp::FRAME_LIMIT`] is checking the number the prologue
+    /// [`vyrn_frontend::trap::FRAME_LIMIT`] is checking the number the prologue
     /// subtracts.
     pub fn bytes(&self) -> u32 {
-        round_up(self.frame, FRAME_ALIGN)
+        round_up(self.high, FRAME_ALIGN)
     }
 }
 
@@ -1162,6 +1311,38 @@ mod tests {
         assert!(!bytes.contains(&0x7c), "a type only a pruned function used");
     }
 
+    /// The same sweep over the bytes (RFC-0125 §3 M4): a literal no surviving
+    /// body names goes, one a surviving body names stays, and one that only a
+    /// live TABLE names stays with it — the trap table is addresses and nothing
+    /// else says its rows are live.
+    #[test]
+    fn the_sweep_takes_the_data_nothing_reaches() {
+        let mut m = Module::new();
+        let exit = m.import("wasi_snapshot_preview1", "proc_exit", &[ValType::I32], &[]);
+        let named = m.data(b"kept-by-a-body\0", 4);
+        let by_table = m.data(b"kept-by-a-table\0", 4);
+        m.data(b"reached-by-nothing\0", 4);
+        let table = m.data(&by_table.to_le_bytes(), 4);
+        let start = m.func(&[], &[], &[], 0, |b| {
+            b.ins(&Instruction::I32Const(named as i32))
+                .ins(&Instruction::Drop)
+                .ins(&Instruction::I32Const(table as i32))
+                .ins(&Instruction::Drop)
+                .ins(&Instruction::I32Const(0))
+                .ins(&Instruction::Call(exit));
+        });
+        m.export("_start", start);
+        m.sweep();
+        let bytes = m.finish().unwrap();
+        let has = |s: &[u8]| bytes.windows(s.len()).any(|w| w == s);
+        assert!(has(b"kept-by-a-body"), "a literal the body names stays");
+        assert!(
+            has(b"kept-by-a-table"),
+            "a literal a live table names stays"
+        );
+        assert!(!has(b"reached-by-nothing"), "the literal nobody names goes");
+    }
+
     #[test]
     #[should_panic(expected = "is reachable and was never filled")]
     fn a_reachable_body_that_was_never_filled_is_caught_by_the_sweep() {
@@ -1189,6 +1370,89 @@ mod tests {
         let mut m = Module::new();
         m.func(&[], &[], &[], 0, |_| {});
         m.import("env", "late", &[], &[]);
+    }
+
+    /// [`HEAP_HEADER_BYTES`] is `std/runtime`'s number, and this reads it there.
+    ///
+    /// The two cannot be one constant — one is Rust and the other is Vyrn — so
+    /// the map above `drain` in `std/runtime.vyrn` is the source and this is the
+    /// check. A drift here declares a memory that stops inside the header, which
+    /// is the defect this constant was added for.
+    #[test]
+    fn the_runtime_header_is_the_size_std_runtime_says_it_is() {
+        let map = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../std/runtime.vyrn")
+            .canonicalize()
+            .expect("std/runtime.vyrn is in the tree");
+        let src = std::fs::read_to_string(&map).expect("read std/runtime.vyrn");
+        let line = src
+            .lines()
+            .find(|l| l.contains("the allocator's first block"))
+            .expect("the heap map names the allocator's first block");
+        let at: u32 = line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|w| w.parse().ok())
+            .expect("the row starts with the offset");
+        assert_eq!(
+            at, HEAP_HEADER_BYTES,
+            "std/runtime.vyrn puts its first block at {at}, and the emitted memory \
+             reserves {HEAP_HEADER_BYTES} for the header in front of it"
+        );
+    }
+
+    /// The memory a module declares must cover the runtime header above its
+    /// statics, whatever the statics end on. The witness is the boundary case:
+    /// data ending EXACTLY on a page needs another page, and used to get none.
+    #[test]
+    fn the_declared_memory_covers_the_runtime_header() {
+        let mut m = Module::new();
+        m.data(&vec![7u8; (65_536 - DATA_BASE % 65_536) as usize], 1);
+        let f = m.func(&[], &[], &[], 0, |_| {});
+        m.export("_start", f);
+        let end = m.data_end();
+        assert_eq!(end % 65_536, 0, "the witness is data ending on a page");
+        let bytes = m.finish().expect("finish");
+        // The memory section's minimum, read back off the bytes: it has to cover
+        // `heapBase() + HEAP_HEADER_BYTES`, not just `data_end`.
+        let pages = read_memory_minimum(&bytes);
+        assert!(
+            pages * 65_536 >= end + HEAP_HEADER_BYTES,
+            "{pages} pages stop at {} and the header ends at {}",
+            pages * 65_536,
+            end + HEAP_HEADER_BYTES
+        );
+    }
+
+    /// The `minimum` of the module's one memory, off the finished bytes.
+    fn read_memory_minimum(bytes: &[u8]) -> u32 {
+        let mut i = 8;
+        while i < bytes.len() {
+            let id = bytes[i];
+            i += 1;
+            let (size, next) = uleb(bytes, i);
+            i = next;
+            if id == 5 {
+                let (_count, j) = uleb(bytes, i);
+                let (_flags, j) = (bytes[j], j + 1);
+                return uleb(bytes, j).0;
+            }
+            i += size as usize;
+        }
+        panic!("no memory section");
+    }
+
+    fn uleb(bytes: &[u8], mut i: usize) -> (u32, usize) {
+        let (mut out, mut shift) = (0u32, 0);
+        loop {
+            let b = bytes[i];
+            i += 1;
+            out |= ((b & 0x7f) as u32) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                return (out, i);
+            }
+        }
     }
 
     /// The one limit here a PROGRAM can reach, so the one that is a sentence.

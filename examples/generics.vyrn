@@ -7,7 +7,12 @@
 
 // ---- generic functions -----------------------------------------------------
 fn id<T>(x: T) -> T {
-    return x
+    // A `read` parameter returned whole hands the caller a value it already
+    // owns (RFC-0089 rule 2). The generic body hides that from the checker —
+    // `T` has no type until the instance — so the kernel is what says so
+    // (RFC-0125 §3 M3, the census). Natively the two owners freed one buffer:
+    // STATUS_HEAP_CORRUPTION.
+    return x.copy()
 }
 
 fn pick<T>(cond: Bool, a: T, b: T) -> T {

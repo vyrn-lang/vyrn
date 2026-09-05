@@ -52,6 +52,11 @@ impl<T> Scopes<T> {
         self.0.last_mut().unwrap().insert(name.to_string(), value);
     }
 
+    /// Every frame, outermost first, for a walk over all bindings.
+    pub fn frames(&self) -> &[HashMap<String, T>] {
+        &self.0
+    }
+
     /// The innermost binding of `name`, or `None` if nothing binds it.
     pub fn get(&self, name: &str) -> Option<&T> {
         self.0.iter().rev().find_map(|frame| frame.get(name))
@@ -179,7 +184,7 @@ impl Declared {
                 .map(|n| (n.to_string(), None))
                 .collect();
         for d in decls.values() {
-            if let Type::Enum(vs) = &d.base {
+            if let Some(vs) = crate::types::declared_variants(&d.base) {
                 for v in vs {
                     // A generic enum's bare name is an incomplete type, and a
                     // variant two enums share names neither — both answer
@@ -423,7 +428,7 @@ impl Declared {
                     }
                     args.first()
                         .and_then(|a| self.type_of(vars, a))
-                        .map(|t| Type::Option(Box::new(t)))
+                        .map(|t| Type::option(t))
                 })
                 .or_else(|| {
                     self.variants
@@ -504,27 +509,24 @@ impl Declared {
             } => self
                 .type_of(vars, then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|e| self.type_of(vars, e))),
-            // `e?` yields the success payload of what `e` is. A Fallible
-            // operand (RFC-0080 M3) yields what ITS `success` returns — the
-            // parser substituted the associated `Output` into the flattened
-            // impl method, so the mangled row already spells it concretely.
-            // Without this a `let body = fetch(code)?` typed as unknown and
-            // the copied-out payload carried no release row (exit-residue
-            // round forty-one).
-            Expr::Try { expr, .. } => {
-                let ot = self.type_of(vars, expr)?;
-                match crate::types::resolve(&ot, &self.decls) {
-                    Type::Option(t) | Type::Result(t, _) => Some(*t),
-                    _ => crate::types::type_key(&ot).and_then(|k| {
-                        self.rets
-                            .get(&crate::types::impl_method_name(
-                                crate::types::FALLIBLE,
-                                &k,
-                                "success",
-                            ))
-                            .cloned()
-                    }),
-                }
+            // `e?` yields the success payload of what `e` is.
+            Expr::Try { expr, .. } => self.success_payload(vars, expr),
+            // `a ?? b` is the `match` the parser spells for it
+            // (`Parser::nullish`): a `Success(@v) => @v` arm and a `Failure`
+            // arm. Its value is the scrutinee's success payload, exactly as
+            // `e?`'s is, so the one rule answers both. Without this a
+            // `let t = s ?? "y"` typed as unknown, and `vyrn why --memory`
+            // called a String "no heap" (RFC-0126 §8.8).
+            Expr::Match {
+                scrutinee, arms, ..
+            } if arms.len() == 2
+                && matches!(&arms[1].pattern, Pattern::Failure(_))
+                && matches!(
+                    (&arms[0].pattern, &arms[0].body),
+                    (Pattern::Success(v), ArmBody::Expr(Expr::Var { name, .. })) if v == name
+                ) =>
+            {
+                self.success_payload(vars, scrutinee)
             }
             // A fallible construction (RFC-0009) answers an OPTION of its own
             // type — `Age?(n)` is `Option<Age>`, which is what every other
@@ -536,15 +538,39 @@ impl Declared {
             // `if let` scrutinee, and the release then read the sum's TAG word as
             // a String pointer and freed it — an access violation on the first
             // line of the program.
-            Expr::TryConstruct { name, .. } => {
-                Some(Type::Option(Box::new(Type::Named(name.clone()))))
-            }
+            Expr::TryConstruct { name, .. } => Some(Type::option(Type::Named(name.clone()))),
             Expr::Spawn { name, .. } => self
                 .rets
                 .get(name)
                 .cloned()
                 .map(|t| Type::Task(Box::new(t))),
             _ => None,
+        }
+    }
+
+    /// The success payload of a `?` or `??` operand. An `Option<T>` or a
+    /// `Result<T, _>` yields `T`. A Fallible operand (RFC-0080 M3) yields
+    /// what ITS `success` returns — the parser substituted the associated
+    /// `Output` into the flattened impl method, so the mangled row already
+    /// spells it concretely. Without this a `let body = fetch(code)?` typed
+    /// as unknown and the copied-out payload carried no release row
+    /// (exit-residue round forty-one).
+    fn success_payload(&self, vars: &Scopes<Option<Type>>, operand: &Expr) -> Option<Type> {
+        let ot = self.type_of(vars, operand)?;
+        let r = crate::types::resolve(&ot, &self.decls);
+        match crate::types::option_payload(&r)
+            .or_else(|| crate::types::result_payloads(&r).map(|(t, _)| t))
+        {
+            Some(t) => Some(t.clone()),
+            None => crate::types::type_key(&ot).and_then(|k| {
+                self.rets
+                    .get(&crate::types::impl_method_name(
+                        crate::types::FALLIBLE,
+                        &k,
+                        "success",
+                    ))
+                    .cloned()
+            }),
         }
     }
 }

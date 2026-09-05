@@ -131,6 +131,7 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // ---- Memory: the allocator and the containers standing on it ------------
     ("@push", Memory, "Array: append, reallocating"),
     ("@reserve", Memory, "Array (RFC-0115): capacity for n more, one realloc"),
+    ("@clear", Memory, "Array (RFC-0115 addendum): forget the elements, keep the buffer"),
     ("@append", Memory, "Array (RFC-0115): bulk copy of a heapless source, one growth"),
     ("@copyFrom", Memory, "Array (RFC-0115): overwrite in place, reusing the buffer"),
     ("@tally", Memory, "Map (RFC-0116): insert-or-add in one probe"),
@@ -587,7 +588,13 @@ fn the_census_is_the_code() {
     // entry's kind from `listDir` — the listing's error is one string for
     // every failure, and the project refuses to parse OS wording — so a
     // walker paid a second full listing per subdirectory to find out.
-    assert_eq!(found.len(), 97, "the primitive core changed size");
+    // 97 -> 98 for RFC-0115's addendum `@clear`: a length that goes to zero
+    // while the buffer stays is not spellable — `xs = []` is a fresh empty
+    // triple, and `pop` in a loop frees nothing but also keeps nothing that a
+    // later `push` could reuse without asking the allocator again. It is the
+    // "per-line assembly tax" RFC-0125 §1.4 read off reverse-complement:
+    // eight allocator calls per sixty-byte line, five million over the input.
+    assert_eq!(found.len(), 98, "the primitive core changed size");
 }
 
 /// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).
@@ -595,8 +602,9 @@ fn the_census_is_the_code() {
 /// [`the_census_is_the_code`] pins the INTERPRETER against the census.
 /// `direct.rs` is the only wasm backend since RFC-0077 M5, and it had no such
 /// pin at all — so the census had to find its gaps by reading, and found five.
-/// One (`alen`) went with the verb forms and one (`fsyncFile`) was lowered; the
-/// other three are below with the reason each is allowed to be missing. A fourth
+/// One (`alen`) went with the verb forms, one (`fsyncFile`) was lowered, and
+/// the three test-only builtins were lowered when `vyrn test --engine wasm`
+/// stopped rewriting them (RFC-0125 §3 M5). The set below is empty; a name
 /// appearing here is a program that runs on three engines and refuses on the
 /// fourth.
 ///
@@ -611,15 +619,10 @@ fn the_direct_backend_carries_the_census_too() {
     // `no lowering for the call` message, so a program that reaches one is
     // stopped rather than miscompiled.
     const ABSENT: &[(&str, &str)] = &[
-        (
-            "assert",
-            "RFC-0015: `vyrn test` runs test bodies on the interpreter",
-        ),
-        ("assertEq", "as `assert`"),
-        (
-            "blackBox",
-            "RFC-0055: `vyrn bench` times through the interpreter",
-        ),
+        // `assert`, `assertEq` and `blackBox` stood here while `vyrn test` and
+        // `vyrn bench` ran their bodies on the interpreter alone; the direct
+        // backend lowers all three now (RFC-0125 §3 M5), beside `panic`.
+        //
         // `fsyncFile` stood here, the one row not explained by a test path: it
         // had ZERO callers in `std/` and `examples/`, so no parity program ever
         // asked the wasm column for it and the absence stayed invisible. It is

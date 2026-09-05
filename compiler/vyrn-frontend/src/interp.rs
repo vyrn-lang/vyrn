@@ -10,100 +10,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// The most Vyrn calls that may be in flight at once, in EVERY engine (audit
-/// A5.3, RFC-0016 addendum).
-///
-/// A recursion limit is the language's, not the interpreter's. Without one the
-/// three engines disagreed about the same program: at depth 30,000 the native
-/// binary printed the answer while the reference semantics aborted with a Rust
-/// runtime message, exit 127, no `file:line`. Counting the calls — here, and in
-/// each backend's function prologue — is what makes the outcome the same
-/// everywhere, and makes it a Vyrn diagnostic rather than a death.
-///
-/// 1,000 is what every engine reaches in every BUILD PROFILE, which is the part
-/// the first number (10,000) got wrong. The interpreter spends ~8.5 KB of Rust
-/// stack per Vyrn call in a release build and ~190 KB in a debug build — the
-/// unoptimized `expr`/`stmt` frames keep every local of a large match alive — so
-/// 10,000 fitted in release and died in debug, where CI runs the tests. A limit
-/// only one profile honors is not a limit.
-///
-/// Measured on the debug build against [`INTERP_STACK_BYTES`], with this counter
-/// lifted: depth 2,600 runs and 2,800 overflows, so 1,000 keeps 2.6x margin in
-/// the profile that has the least. The native binary and `wasmtime` run past
-/// 20,000 frames of an ordinary function in either profile. 1,000 is also where
-/// CPython settles, and it is past what a recursive descent over real data
-/// reaches: `.vyx` markup, a GraphQL selection set and a JSON document all nest
-/// in the tens. Data nested deeper than that is data no engine should try — it
-/// stops with the same diagnostic everywhere, which is the whole contract.
-///
-/// An `extern` is NOT counted: it is the host's frame, and no backend gives it a
-/// Vyrn prologue. Neither is a lambda body, which has no name to call itself by
-/// (RFC-0037) and so cannot recurse without passing through a named function.
-pub const CALL_DEPTH_LIMIT: u32 = 1_000;
-
-/// The most bytes one call frame may claim on the wasm backend's shadow stack.
-///
-/// A backend's stack is finite, and until this number existed nothing compared a
-/// frame against it. The wasm backend's whole stack was one 64 KB page, so a
-/// function with a 256-byte frame ran out of stack at depth 256 while
-/// [`CALL_DEPTH_LIMIT`] said 1,000 and the other two engines reached it — the
-/// program died there with `out of bounds memory access` at a wild address, and
-/// stopped with the shared diagnostic everywhere else.
-///
-/// Bounding the frame is what makes the depth one number again.
-/// `vyrn_codegen::wasm::STACK_BYTES` holds [`CALL_DEPTH_LIMIT`] of these, so at
-/// every depth the counter admits the stack pointer is still above 0: the
-/// counter is what stops the program, on every engine, with the same words. A
-/// frame past this is refused when it is built, naming the function and its
-/// line, because the backend that lays a frame out is the one that knows its
-/// size.
-///
-/// 8 KB is 1.5x the largest frame the corpus builds (5,552 bytes, `createForm`
-/// in `examples/shelf/boot.vyrn`), and the stack it implies costs 8,257,536
-/// bytes of linear memory — 126 wasm pages a module reserves and touches only as
-/// deep as it recurses.
-pub const FRAME_LIMIT: u32 = 8 * 1024;
-
-/// The most elements one array literal may have.
-///
-/// Half of [`FRAME_LIMIT`], over the eight bytes of an `Int64`: a literal is
-/// built in a frame slot, and the widest element type an ordinary literal has is
-/// what turns one bound into the other. HALF, because the slot is not all a
-/// literal costs — the array it becomes needs its own slot in the same frame, so
-/// a bound of a whole frame would let the checker admit a literal the backend
-/// then refuses. Wider elements — a literal of records — are caught by the frame
-/// bound itself, which knows the real stride.
-///
-/// The checker holds this rather than either backend, because the other half of
-/// the defect is one no frame can express: the textual backend lowers a literal
-/// to one `insertvalue` per element over an aggregate of the full width, so
-/// 100,000 elements ran clang for 2 m 53 s and died `LLVM ERROR: out of memory`,
-/// after `vyrn check` had said `ok` in 0.1 s. Refusing in the checker is what
-/// makes `check` predict the build, and makes all three engines refuse the same
-/// literal.
-///
-/// The corpus's largest literal has 24 elements, so this is 21x anything written
-/// so far. A table longer than it belongs in a data segment rather than in
-/// instructions, which is a lowering neither backend has yet.
-pub const ARRAY_LIT_LIMIT: usize = FRAME_LIMIT as usize / 16;
-
-/// How many `region` scopes may be open at once, in EVERY engine.
-///
-/// The two backends each keep a fixed stack of region records, so the number is
-/// the length of an array in one and a reserved block in the other, and it is in
-/// the trap's wording as well. It was written eight times across three engines
-/// before this constant, three of those inside string literals; the backends'
-/// comparisons had already drifted apart in signedness. One number, read by
-/// everything that has an opinion about it.
-pub const REGION_MAX: u32 = 64;
-
-/// The Rust stack every thread that runs the interpreter reserves.
-///
-/// Reserving is cheap — the pages are virtual until a frame touches them — and
-/// what is touched is [`CALL_DEPTH_LIMIT`] frames deep at worst: ~8.5 MB in a
-/// release build, ~190 MB in a debug one. Both sit well inside this, which is
-/// what gives the limit above room to be the same number in either profile.
-pub const INTERP_STACK_BYTES: usize = 512 * 1024 * 1024;
+// The language's limits and the `extern` refusal, declared in `trap.rs` since
+// RFC-0125 §3 M5's tenth slice. Imported unqualified because this file reads
+// them the way it always did.
+use crate::trap::{extern_unavailable, CALL_DEPTH_LIMIT, INTERP_STACK_BYTES, REGION_MAX};
 
 /// A fast, non-cryptographic hasher for the interpreter's own maps.
 ///
@@ -1018,15 +928,6 @@ fn val_kind(v: &Val) -> &'static str {
     }
 }
 
-/// The trap for calling an `extern` (RFC-0012) on a target that provides no
-/// host for it. Parity compares these bytes byte-for-byte
-/// (`vyrn-cli/tests/parity.rs`), so there is one definition: the interpreter
-/// raises it, and the native trap stub `vyrn_codegen::toolchain` writes prints
-/// it. Neither backend spells it a second time.
-pub fn extern_unavailable(name: &str) -> String {
-    format!("extern `{name}` is not available on this target")
-}
-
 /// Escape a `String` value into a Vyrn source string literal, quotes included —
 /// the mechanism by which a spliced String is data, never code (RFC-0054). Uses
 /// the same escapes the lexer decodes (`\n \t \r \" \\` and `\{` so an emitted
@@ -1278,22 +1179,6 @@ fn scalar_to_string(v: &Val) -> String {
     }
 }
 
-/// Wrap `v` into a `bits`-wide two's-complement integer, matching the native
-/// backend's `iN` arithmetic. Signed values are sign-extended back into `i64`;
-/// unsigned are zero-extended. `bits >= 64` is the identity.
-fn wrap_intn(v: i64, bits: u8, signed: bool) -> i64 {
-    if bits >= 64 {
-        return v;
-    }
-    let mask = (1i64 << bits) - 1;
-    let m = v & mask;
-    if signed && (m & (1i64 << (bits - 1))) != 0 {
-        m | !mask // set the high bits (sign extension)
-    } else {
-        m
-    }
-}
-
 /// IEEE-754-2019 `minimum` — NaN in either operand propagates, and `-0.0` orders
 /// strictly below `+0.0` (RFC-0083 M2).
 ///
@@ -1403,7 +1288,7 @@ fn vec_oob(i: i64, span: i64) -> String {
 }
 
 /// Convert a numeric value to `target` (Int / sized IntN / Float / Float32),
-/// matching the native casts (sext/trunc via `wrap_intn`, si/uitofp, fpto si/ui,
+/// matching the native casts (sext/trunc via `validate::wrap`, si/uitofp, fpto si/ui,
 /// fp trunc/ext). Float→int truncates toward zero; out-of-range float→int is
 /// unspecified (as in C/LLVM).
 fn convert_val(v: Val, target: &Type) -> Val {
@@ -1415,19 +1300,18 @@ fn convert_val(v: Val, target: &Type) -> Val {
             other => other,
         },
         Type::IntN { bits, signed } => {
+            // The float rows go through `validate::from_float`, which is the
+            // `float-to-int` row's one statement (RFC-0125 §3 M6): truncate
+            // toward zero, then re-read at the target's width.
             let n = match v {
-                Val::Int(n) => n,
-                Val::IntN { v, .. } => v,
-                // Truncate toward zero; an unsigned target reads the float as
-                // `u64` (native `fptoui`), signed as `i64` (`fptosi`).
-                Val::Float(f) if !*signed => f as u64 as i64,
-                Val::Float(f) => f as i64,
-                Val::Float32(f) if !*signed => f as u64 as i64,
-                Val::Float32(f) => f as i64,
+                Val::Int(n) => crate::validate::wrap(n, *bits, *signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, *bits, *signed),
+                Val::Float(f) => crate::validate::from_float(f, *bits, *signed),
+                Val::Float32(f) => crate::validate::from_float(f64::from(f), *bits, *signed),
                 other => return other,
             };
             Val::IntN {
-                v: wrap_intn(n, *bits, *signed),
+                v: n,
                 bits: *bits,
                 signed: *signed,
             }
@@ -2898,7 +2782,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut variant_lead = [false; 256];
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             for v in vs {
                 variants.insert(v.name.as_str());
                 if let Some(b) = v.name.as_bytes().first() {
@@ -2952,9 +2836,9 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         variant_enum: program
             .type_decls
             .iter()
-            .filter_map(|d| match &d.base {
-                Type::Enum(vs) => Some(vs.iter().map(|v| (v.name.clone(), d.name.clone()))),
-                _ => None,
+            .filter_map(|d| {
+                crate::types::declared_variants(&d.base)
+                    .map(|vs| vs.iter().map(|v| (v.name.clone(), d.name.clone())))
             })
             .flatten()
             .collect(),
@@ -3618,9 +3502,7 @@ impl<'a> Interp<'a> {
     /// `v` and fail if it does not hold. The runtime representation of a
     /// validated value is just its base value (zero overhead).
     fn construct(&self, decl: &TypeDecl, v: Val) -> Result<Val, Ctrl> {
-        if !self.validates(decl, &v)? {
-            return Err(crate::trap::validation(&decl.name, false).into());
-        }
+        self.enforce(decl, &v)?;
         Ok(v)
     }
 
@@ -5142,8 +5024,9 @@ impl<'a> Interp<'a> {
                 } = e
                 {
                     let sv = self.expr(scrutinee, scope)?;
-                    let r = self.eval_match_stmt(sv.clone(), arms, scope);
-                    return self.release_temp(e as *const Expr as usize, &sv, r.is_err(), r);
+                    let key = e as *const Expr as usize;
+                    let r = self.eval_match_stmt(key, sv.clone(), arms, scope);
+                    return self.release_temp(key, &sv, r.is_err(), r);
                 }
                 self.expr(e, scope)?;
                 Ok(Flow::Normal)
@@ -5340,11 +5223,13 @@ impl<'a> Interp<'a> {
                     self.stmt(s, scope)?;
                 }
                 let v = self.expr(&p.place, scope)?;
-                if let Pattern::Some(b) = pattern {
-                    scope
-                        .last_mut()
-                        .unwrap()
-                        .insert(b.clone(), Slot::untyped(v));
+                if let Pattern::Variant(_, binds) = pattern {
+                    if let Some(b) = binds.first() {
+                        scope
+                            .last_mut()
+                            .unwrap()
+                            .insert(b.clone(), Slot::untyped(v));
+                    }
                 }
                 self.block(then_block, scope)
             }
@@ -5412,7 +5297,7 @@ impl<'a> Interp<'a> {
                     // keeps it MIN, exactly as native `sub i64 0, %n` does.
                     (UnOp::Neg, Val::Int(n)) => Ok(Val::Int(n.wrapping_neg())),
                     (UnOp::Neg, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
-                        v: wrap_intn(v.wrapping_neg(), bits, signed),
+                        v: crate::validate::wrap(v.wrapping_neg(), bits, signed),
                         bits,
                         signed,
                     }),
@@ -5444,7 +5329,7 @@ impl<'a> Interp<'a> {
                     // width (re-wrapped so an unsigned complement stays in range).
                     (UnOp::BitNot, Val::Int(n)) => Ok(Val::Int(!n)),
                     (UnOp::BitNot, Val::IntN { v, bits, signed }) => Ok(Val::IntN {
-                        v: wrap_intn(!v, bits, signed),
+                        v: crate::validate::wrap(!v, bits, signed),
                         bits,
                         signed,
                     }),
@@ -6729,26 +6614,47 @@ impl<'a> Interp<'a> {
                                     }
                                 }
                             }
-                            // Same NUL-then-UTF-8 ordering as `readFile`.
-                            if bytes.contains(&0) {
+                            // RFC-0125 §3 M6 (the third judgment's fifth slice):
+                            // the CHECK is `std/text`'s `stringFault`, the one
+                            // statement all three engines run, and this arm keeps
+                            // only the BUILD. The order is the check's, not this
+                            // engine's: 1 is a NUL, which RFC-0014 refuses before
+                            // it looks at the encoding, and 2 is bad UTF-8.
+                            let f = crate::loader::STRING_FAULT;
+                            if !self.funcs.contains_key(f) {
+                                return Err(format!(
+                                    "`stringFromBytes` is checked in Vyrn (`{f}`) and its module \
+                                     is not in the link — a std root is needed to call it"
+                                )
+                                .into());
+                            }
+                            let fault = match self.call(f, &vals[0..1])? {
+                                Val::Int(n) => n,
+                                Val::IntN { v, .. } => v,
+                                other => {
+                                    return Err(format!("`{f}` answered {other:?}").into());
+                                }
+                            };
+                            let msg = match fault {
+                                1 => Some("bnul"),
+                                2 => Some("butf8"),
+                                _ => None,
+                            };
+                            if let Some(m) = msg {
                                 return Ok(Val::Result(
                                     false,
                                     Box::new(Val::Str(std::rc::Rc::new(
-                                        crate::trap::io("bnul").to_string(),
+                                        crate::trap::io(m).to_string(),
                                     ))),
                                 ));
                             }
-                            match String::from_utf8(bytes) {
-                                Ok(s) => {
-                                    Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s)))))
-                                }
-                                Err(_) => Ok(Val::Result(
-                                    false,
-                                    Box::new(Val::Str(std::rc::Rc::new(
-                                        crate::trap::io("butf8").to_string(),
-                                    ))),
-                                )),
-                            }
+                            // Not a second verdict: `stringFault` has already
+                            // answered, so this cannot fail. Rust's `String` needs
+                            // UTF-8 to EXIST, which is the build's requirement and
+                            // not the language's rule.
+                            let s = String::from_utf8(bytes)
+                                .expect("`stringFault` answered 0 for these bytes");
+                            Ok(Val::Result(true, Box::new(Val::Str(std::rc::Rc::new(s)))))
                         }
                         other => Err(format!("stringFromBytes of non-Array {other:?}").into()),
                     },
@@ -6869,6 +6775,16 @@ impl<'a> Interp<'a> {
                     "@reserve" => match &vals[0] {
                         Val::Array(_) => Ok(vals[0].clone()),
                         other => Err(format!("reserve of non-Array {other:?}").into()),
+                    },
+                    // `xs.clear()` (RFC-0115 addendum): an empty array; that the
+                    // buffer is kept is the compiled backends' fact.
+                    "@clear" => match &vals[0] {
+                        Val::Array(a) => {
+                            let mut next = a.clone();
+                            std::rc::Rc::make_mut(&mut next).clear();
+                            Ok(Val::Array(next))
+                        }
+                        other => Err(format!("clear of non-Array {other:?}").into()),
                     },
                     // `m.tally(k, n)` (RFC-0116): insert-or-add. Two probes in
                     // THIS engine — semantics only; the one-probe fact is the
@@ -7250,8 +7166,9 @@ impl<'a> Interp<'a> {
                 scrutinee, arms, ..
             } => {
                 let sv = self.expr(scrutinee, scope)?;
-                let r = self.eval_match(sv.clone(), arms, scope);
-                self.release_temp(expr as *const Expr as usize, &sv, r.is_err(), r)
+                let key = expr as *const Expr as usize;
+                let r = self.eval_match(key, sv.clone(), arms, scope);
+                self.release_temp(key, &sv, r.is_err(), r)
             }
             // `if` as an expression (RFC-0030): evaluate the condition, then ONLY
             // the taken branch (laziness identical to statement-`if`/match). The
@@ -7329,30 +7246,19 @@ impl<'a> Interp<'a> {
                         }
                     }
                 }
-                // Enforce a cross-field `where` invariant, if the record declares
-                // one (e.g. `{ start, end } where start < end`). The predicate
-                // runs under the runtime evaluator with every field bound, so
-                // Float/sized-int fields compare with exact runtime semantics.
-                if let Some(decl) = self.types.get(name.as_str()) {
-                    if let Some(pred) = &decl.predicate {
-                        let mut env = vec![map
-                            .iter()
-                            .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                            .collect::<Frame>()];
-                        match self.expr(pred, &mut env)? {
-                            Val::Bool(true) => {}
-                            Val::Bool(false) => {
-                                return Err(crate::trap::validation(name, true).into())
-                            }
-                            other => {
-                                return Err(format!(
-                                    "cross-field predicate for `{name}` did not evaluate \
-                                     to Bool (got {other:?})"
-                                )
-                                .into())
-                            }
-                        }
-                    }
+                // Enforce a cross-field `where` invariant, if the record
+                // declares one (e.g. `{ start, end } where start < end`) —
+                // through [`Interp::enforce`], the one place this interpreter
+                // runs a predicate (RFC-0125 section 3 M6). A literal is a
+                // boundary like any other, and it used to be a boundary that
+                // spelled the rule for itself.
+                if let Some(decl) = crate::validate::of(self.types.get(name.as_str()).copied()) {
+                    let probe = Val::Record(std::rc::Rc::new(map), None);
+                    self.enforce(decl, &probe)?;
+                    let Val::Record(back, _) = probe else {
+                        unreachable!("built one line above")
+                    };
+                    map = std::rc::Rc::try_unwrap(back).unwrap_or_else(|rc| (*rc).clone());
                 }
                 // A literal names its own type, and the checker types it as
                 // exactly that name — so `User { .. }` is born stamped `User`
@@ -7505,23 +7411,35 @@ impl<'a> Interp<'a> {
         }
     }
 
-    /// Whether `v` satisfies `decl`'s refinement predicate (always true if none).
+    /// Whether `v` satisfies `decl`'s refinement predicate (always true if
+    /// none) — by CALLING the program's own predicate function.
     ///
-    /// The predicate is evaluated by the *runtime* evaluator with `value` bound
-    /// — not by consteval — so every value kind the interpreter has (Float,
-    /// sized ints, strings, indexing, `=~`) validates with exactly its runtime
-    /// semantics, and a predicate that traps (division by zero) traps the same
-    /// way an ordinary expression does.
+    /// RFC-0125 §3 M6, the third judgment's fourth slice: the predicate is
+    /// generated Vyrn ([`crate::ctor`]), so this interpreter runs the same body
+    /// the two emitters compile instead of building a scope and evaluating the
+    /// clause itself. What `value` means, and whether the fields are bound
+    /// instead, is the generated function's signature — one answer, not one per
+    /// engine.
     fn validates(&self, decl: &TypeDecl, v: &Val) -> Result<bool, Ctrl> {
-        let pred = match &decl.predicate {
-            None => return Ok(true),
-            Some(p) => p,
+        if decl.predicate.is_none() {
+            return Ok(true);
+        }
+        // A record base binds every field, so the call spreads them in
+        // `predicate_binds` order; every other base binds `value` and passes it
+        // through. Not a record value under a cross-field predicate is nothing
+        // to read, as it was before this became a call.
+        let args: Vec<Val> = if crate::validate::is_cross_field(decl) {
+            let Val::Record(map, _) = v else {
+                return Ok(true);
+            };
+            crate::types::predicate_binds(decl)
+                .into_iter()
+                .map(|(n, _, _)| map.get(&n).cloned().unwrap_or(Val::Unit))
+                .collect()
+        } else {
+            vec![v.clone()]
         };
-        let mut scope = vec![Frame::from_iter([(
-            "value".to_string(),
-            Slot::untyped(v.clone()),
-        )])];
-        match self.expr(pred, &mut scope)? {
+        match self.call(&crate::ctor::pred_name(&decl.name), &args)? {
             Val::Bool(b) => Ok(b),
             other => Err(format!(
                 "refinement for `{}` did not evaluate to Bool (got {other:?})",
@@ -7531,9 +7449,30 @@ impl<'a> Interp<'a> {
         }
     }
 
+    /// The one place this interpreter refuses a value for its type's `where` —
+    /// RFC-0125 §3 M6, the census rows `where-scalar` and `where-record`.
+    ///
+    /// It was three places, then one, and now it is none: the refusal itself is
+    /// the generated constructor's ([`crate::ctor`]), which every engine calls,
+    /// so the sentence on stderr is written by one `panic` in one Vyrn body
+    /// rather than by three engines that agreed to spell it alike.
+    fn enforce(&self, decl: &TypeDecl, v: &Val) -> Result<(), Ctrl> {
+        if decl.predicate.is_none() {
+            return Ok(());
+        }
+        self.call(&crate::ctor::ctor_name(&decl.name), &[v.clone()])?;
+        Ok(())
+    }
+
     /// Evaluate a `match` over an Option or Result, binding the payload.
-    fn eval_match(&self, sv: Val, arms: &[MatchArm], scope: &mut Vec<Frame>) -> Result<Val, Ctrl> {
-        for arm in arms {
+    fn eval_match(
+        &self,
+        key: usize,
+        sv: Val,
+        arms: &[MatchArm],
+        scope: &mut Vec<Frame>,
+    ) -> Result<Val, Ctrl> {
+        for (ix, arm) in arms.iter().enumerate() {
             let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
             };
@@ -7547,10 +7486,43 @@ impl<'a> Interp<'a> {
                 // which routes through `eval_match_stmt` below.
                 ArmBody::Block(_) => Err("a block arm in expression position (RFC-0118)".into()),
             };
+            let result = result.and_then(|v| self.release_arm_binders(key, ix, scope).map(|_| v));
             scope.pop();
             return result;
         }
         Err("non-exhaustive match (should have been caught)".into())
+    }
+
+    /// Round forty at an arm's end: call the declared `release` of every
+    /// payload binder the plan's arm row names, in the order the row lists
+    /// them. The compiled backends free the buffers too; here they are `Rc`s,
+    /// so only a declared release and what a `Deep` walk reaches can be seen.
+    fn release_arm_binders(&self, key: usize, arm: usize, scope: &[Frame]) -> Result<(), Ctrl> {
+        // RFC-0125 §3 M3, the derivation slice: the core's answer, and no
+        // other. The kernel judges every arm the core lowers — a `match`, an
+        // `if let` and a `?` alike — so a site it states nothing for is a
+        // body no core was built for, and there is no second table to ask.
+        let Some(rows) = crate::own::core_arm_rows(key, arm as u32) else {
+            return Ok(());
+        };
+        if self.region_depth.get() != 0 {
+            return Ok(());
+        }
+        // The row's holes are not read: a buffer here is an `Rc`, and what
+        // a take handed out keeps its own count.
+        for (name, kind, _) in &rows {
+            let Some(v) = scope.last().and_then(|f| f.get(name)).map(|s| s.v.clone()) else {
+                continue;
+            };
+            match kind {
+                crate::own::DropKind::Release(f, _) => {
+                    self.call(f, std::slice::from_ref(&v))?;
+                }
+                crate::own::DropKind::Deep(_) if self.has_owned => self.release_nested(&v)?,
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// A `match` in STATEMENT position (RFC-0118): the same pattern walk, but
@@ -7559,11 +7531,12 @@ impl<'a> Interp<'a> {
     /// answers with.
     fn eval_match_stmt(
         &self,
+        key: usize,
         sv: Val,
         arms: &[MatchArm],
         scope: &mut Vec<Frame>,
     ) -> Result<Flow, Ctrl> {
-        for arm in arms {
+        for (ix, arm) in arms.iter().enumerate() {
             let Some(bindings) = Self::match_pattern(&arm.pattern, &sv) else {
                 continue;
             };
@@ -7575,6 +7548,14 @@ impl<'a> Interp<'a> {
                 ArmBody::Expr(e) => self.expr(e, scope).map(|_| Flow::Normal),
                 ArmBody::Block(b) => self.block(b, scope),
             };
+            // The compiled backends skip the arm free when the arm left by a
+            // signal; a `Flow` that is not `Normal` is that signal here.
+            let result = result.and_then(|f| match f {
+                Flow::Normal => self
+                    .release_arm_binders(key, ix, scope)
+                    .map(|_| Flow::Normal),
+                other => Ok(other),
+            });
             scope.pop();
             return result;
         }
@@ -7586,10 +7567,19 @@ impl<'a> Interp<'a> {
     /// `if let`, and the `while let` desugar so all three bind identically.
     fn match_pattern(pattern: &Pattern, sv: &Val) -> Option<Vec<(String, Val)>> {
         match (pattern, sv) {
-            (Pattern::Some(b), Val::Option(Some(v))) => Some(vec![(b.clone(), (**v).clone())]),
-            (Pattern::None, Val::Option(None)) => Some(vec![]),
-            (Pattern::Ok(b), Val::Result(true, v)) => Some(vec![(b.clone(), (**v).clone())]),
-            (Pattern::Err(b), Val::Result(false, v)) => Some(vec![(b.clone(), (**v).clone())]),
+            // Since RFC-0126 §8 the four built-in arms are variant patterns, and
+            // the VALUE is what says a name is a tag — the same question this
+            // function already asked of a declared enum's variant.
+            (Pattern::Variant(n, binds), Val::Option(Some(v))) if n == "Some" => {
+                Some(vec![(binds[0].clone(), (**v).clone())])
+            }
+            (Pattern::Variant(n, _), Val::Option(None)) if n == "None" => Some(vec![]),
+            (Pattern::Variant(n, binds), Val::Result(true, v)) if n == "Ok" => {
+                Some(vec![(binds[0].clone(), (**v).clone())])
+            }
+            (Pattern::Variant(n, binds), Val::Result(false, v)) if n == "Err" => {
+                Some(vec![(binds[0].clone(), (**v).clone())])
+            }
             // The `??` desugar's type-agnostic pair (RFC-0079): tag first, sum
             // second, which is the whole point of having them.
             (Pattern::Success(b), Val::Option(Some(v)) | Val::Result(true, v)) => {
@@ -7854,17 +7844,17 @@ impl<'a> Interp<'a> {
             // native backend's iN registers truncate it — comparing or dividing
             // by the raw i64 would give a different answer.
             let x = match l {
-                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
-                Val::Int(n) => wrap_intn(n, bits, signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, bits, signed),
+                Val::Int(n) => crate::validate::wrap(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let y = match r {
-                Val::IntN { v, .. } => wrap_intn(v, bits, signed),
-                Val::Int(n) => wrap_intn(n, bits, signed),
+                Val::IntN { v, .. } => crate::validate::wrap(v, bits, signed),
+                Val::Int(n) => crate::validate::wrap(n, bits, signed),
                 _ => return Err("type error in sized-int binop".into()),
             };
             let mk = |v: i64| Val::IntN {
-                v: wrap_intn(v, bits, signed),
+                v: crate::validate::wrap(v, bits, signed),
                 bits,
                 signed,
             };
@@ -8114,12 +8104,12 @@ impl<'a> Interp<'a> {
         }
         match (ty, v) {
             (Type::IntN { bits, signed }, Val::Int(n)) => Ok(Val::IntN {
-                v: wrap_intn(n, *bits, *signed),
+                v: crate::validate::wrap(n, *bits, *signed),
                 bits: *bits,
                 signed: *signed,
             }),
             (Type::IntN { bits, signed }, Val::IntN { v, .. }) => Ok(Val::IntN {
-                v: wrap_intn(v, *bits, *signed),
+                v: crate::validate::wrap(v, *bits, *signed),
                 bits: *bits,
                 signed: *signed,
             }),
@@ -8133,37 +8123,7 @@ impl<'a> Interp<'a> {
                 // Coerce toward the base first (a record base coerces fields;
                 // a scalar base wraps), then run the predicate on the result.
                 let v = self.coerce(v, &decl.base)?;
-                if let Some(pred) = &decl.predicate {
-                    // A record base has a cross-field predicate (field names in
-                    // scope); a scalar base binds `value`.
-                    let holds = if matches!(decl.base, Type::Record(_)) {
-                        match &v {
-                            Val::Record(map, _) => {
-                                let mut env = vec![map
-                                    .iter()
-                                    .map(|(k, v)| (k.clone(), Slot::untyped(v.clone())))
-                                    .collect::<Frame>()];
-                                match self.expr(pred, &mut env)? {
-                                    Val::Bool(b) => b,
-                                    other => {
-                                        return Err(format!(
-                                            "cross-field predicate for `{n}` did not \
-                                             evaluate to Bool (got {other:?})"
-                                        )
-                                        .into())
-                                    }
-                                }
-                            }
-                            _ => true, // not a record value — nothing to check
-                        }
-                    } else {
-                        self.validates(decl, &v)?
-                    };
-                    if !holds {
-                        let msg = crate::trap::validation_of(decl);
-                        return Err(msg.into());
-                    }
-                }
+                self.enforce(decl, &v)?;
                 // The typed boundary is where a record learns its name
                 // (RFC-0084 M1). `n` is the STATIC type of the slot the value is
                 // entering, which is the same thing `type_key` hands the two
@@ -8188,10 +8148,16 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Val::Record(map, name))
             }
-            (Type::Option(inner), Val::Option(Some(p))) => {
+            // The two built-in sums are a variant list in the AST since
+            // RFC-0126 §8.15's M5, and two runtime values of their own; the
+            // VALUE is what says which, and the payload readers say what it
+            // carries.
+            (ty, Val::Option(Some(p))) if crate::types::option_payload(ty).is_some() => {
+                let inner = crate::types::option_payload(ty).expect("an Option payload");
                 Ok(Val::Option(Some(Box::new(self.coerce(*p, inner)?))))
             }
-            (Type::Result(tok, terr), Val::Result(is_ok, p)) => {
+            (ty, Val::Result(is_ok, p)) if crate::types::result_payloads(ty).is_some() => {
+                let (tok, terr) = crate::types::result_payloads(ty).expect("Result payloads");
                 let inner = if is_ok { tok } else { terr };
                 Ok(Val::Result(is_ok, Box::new(self.coerce(*p, inner)?)))
             }
@@ -8354,7 +8320,18 @@ impl<'a> Interp<'a> {
                     bits: b,
                     signed: s,
                 },
-            ) => bits == b && signed == s && wrap_intn(*v, *bits, *signed) == *v,
+            ) => {
+                // "Already at this width and signedness" is `validate::narrows`
+                // read the other way round — the same question the emitters ask
+                // of a crossing (RFC-0125 §3 M6).
+                !crate::validate::narrows(
+                    &Type::IntN {
+                        bits: *b,
+                        signed: *s,
+                    },
+                    ty,
+                ) && crate::validate::wrap(*v, *bits, *signed) == *v
+            }
             (
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _),
                 Val::Array(items),
@@ -8413,8 +8390,14 @@ impl<'a> Interp<'a> {
                     ok
                 })
             }
-            (Type::Option(inner), Val::Option(Some(p))) => self.coercion_is_noop(inner, p, d),
-            (Type::Result(ok, err), Val::Result(is_ok, p)) => {
+            (ty, Val::Option(Some(p))) if crate::types::option_payload(ty).is_some() => self
+                .coercion_is_noop(
+                    crate::types::option_payload(ty).expect("an Option payload"),
+                    p,
+                    d,
+                ),
+            (ty, Val::Result(is_ok, p)) if crate::types::result_payloads(ty).is_some() => {
+                let (ok, err) = crate::types::result_payloads(ty).expect("Result payloads");
                 self.coercion_is_noop(if *is_ok { ok } else { err }, p, d)
             }
             (Type::Map(_, val), Val::Map(pairs)) => {
@@ -8487,14 +8470,18 @@ impl<'a> Interp<'a> {
                         && self.coercion_is_identity(&decl.base, d)
                 }
             },
-            Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
+            Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
                 self.coercion_is_identity(i, d)
-            }
-            Type::Result(ok, err) => {
-                self.coercion_is_identity(ok, d) && self.coercion_is_identity(err, d)
             }
             Type::Map(_, val) => self.coercion_is_identity(val, d),
             Type::Record(fields) => fields.iter().all(|f| self.coercion_is_identity(&f.ty, d)),
+            // Every sum, whichever way it is spelled (RFC-0126 §8.15). The two
+            // built-in ones are `Val::Option` and `Val::Result` and the walk
+            // above coerces their payload; a declared enum's value the walk does
+            // not touch at all, so its payloads answer for it too.
+            Type::Enum(vs) => vs
+                .iter()
+                .all(|v| v.payload.iter().all(|p| self.coercion_is_identity(p, d))),
             // `IntN` wraps, `Float32` rounds, `Fn` adopts a signature.
             _ => false,
         }
@@ -8546,7 +8533,7 @@ impl<'a> Interp<'a> {
             }
             Expr::Call { name, args, .. } => {
                 if name == "Some" {
-                    return Some(Type::Option(Box::new(self.type_of(args.first()?, scope)?)));
+                    return Some(Type::option(self.type_of(args.first()?, scope)?));
                 }
                 if name == crate::project::AT && args.len() == 2 {
                     let at = self.type_of(&args[0], scope)?;
@@ -8562,15 +8549,15 @@ impl<'a> Interp<'a> {
                 // encode needs; the other parameter is a placeholder (RFC-0024,
                 // mirroring codegen's `Ok`/`Err` typing).
                 if name == "Ok" {
-                    return Some(Type::Result(
-                        Box::new(self.type_of(args.first()?, scope)?),
-                        Box::new(Type::Unit),
+                    return Some(Type::result(
+                        self.type_of(args.first()?, scope)?,
+                        Type::Unit,
                     ));
                 }
                 if name == "Err" {
-                    return Some(Type::Result(
-                        Box::new(Type::Unit),
-                        Box::new(self.type_of(args.first()?, scope)?),
+                    return Some(Type::result(
+                        Type::Unit,
+                        self.type_of(args.first()?, scope)?,
                     ));
                 }
                 // An enum variant constructor (`Circle(2)`) resolves to its enum.
@@ -8579,9 +8566,7 @@ impl<'a> Interp<'a> {
                 }
                 self.funcs.get(name.as_str()).map(|f| f.ret.clone())
             }
-            Expr::TryConstruct { name, .. } => {
-                Some(Type::Option(Box::new(Type::Named(name.clone()))))
-            }
+            Expr::TryConstruct { name, .. } => Some(Type::option(Type::Named(name.clone()))),
             _ => None,
         }
     }
@@ -8590,7 +8575,7 @@ impl<'a> Interp<'a> {
     /// any — used by `toJson` to recover an enum constructor's static type.
     fn enum_of_variant(&self, variant: &str) -> Option<String> {
         for (name, decl) in self.type_map.iter() {
-            if let Type::Enum(vs) = &decl.base {
+            if let Some(vs) = crate::types::declared_variants(&decl.base) {
                 if vs.iter().any(|v| v.name == variant) {
                     return Some(name.clone());
                 }
@@ -8718,7 +8703,15 @@ mod tests {
     use super::{
         code_splice, lex_tokens, render_code, reserve_str, reserve_vec, CodePiece, Ctrl, Val,
     };
-    use crate::run;
+
+    /// Parse, check, then run `main` — the two lines `vyrn_frontend::run` was
+    /// until RFC-0125 §3 M5's tenth slice deleted it. These tests are the only
+    /// caller it had left, and a two-line convenience for one module's tests
+    /// belongs in that module's tests.
+    fn run(source: &str) -> Result<i64, String> {
+        let program = crate::check(source)?;
+        super::run(&program)
+    }
 
     /// RFC-0124's hypothesis, screened rather than assumed: the memo set
     /// holds exactly the nullary functions whose transitive effects are
@@ -9221,39 +9214,23 @@ mod tests {
         let _ = std::fs::remove_file(&nul);
     }
 
+    /// RFC-0125 §3 M6 (the third judgment's fifth slice): `stringFromBytes` is
+    /// checked by `std/text`'s `stringFault`, so a program built with no std root
+    /// cannot make a `String` from bytes and says which module is missing.
+    ///
+    /// This replaced three tests that ran the builtin here — the RFC-0014 M2
+    /// roundtrip law and the two refusals. They needed the module the interpreter
+    /// now calls, so their answers are pinned where a std root exists:
+    /// `tests/boundaries/string-nul.vyrn` and `string-utf8.vyrn` for the two
+    /// wordings under all three engines, and `tests/text.rs` for the roundtrip
+    /// over the whole codepoint corpus.
     #[test]
-    fn string_bytes_roundtrip_is_pinned() {
-        // RFC-0014 M2's pinned law: stringFromBytes(s.bytes()) == Ok(s).
-        let src = "fn main() -> Int64 { \
-                       let s = \"héllo ☕ wörld\" \
-                       let back = match stringFromBytes(bytes(s)) { \
-                           Ok(t) => t, \
-                           Err(e) => e, \
-                       } \
-                       if back == s { return 1 } \
-                       return 0 }";
-        assert_eq!(run(src).unwrap(), 1);
-    }
-
-    #[test]
-    fn string_from_bytes_rejects_invalid_utf8() {
-        // 0xFF is never valid UTF-8. Build it via an Array<UInt8> literal.
-        let src = "fn main() -> Int64 { \
-                       let b: Array<UInt8> = [104, 255] \
-                       let msg = match stringFromBytes(b) { Ok(s) => s, Err(e) => e } \
-                       if msg == \"bytes are not valid UTF-8\" { return 1 } \
-                       return 0 }";
-        assert_eq!(run(src).unwrap(), 1);
-    }
-
-    #[test]
-    fn string_from_bytes_rejects_nul() {
-        let src = "fn main() -> Int64 { \
-                       let b: Array<UInt8> = [104, 0, 105] \
-                       let msg = match stringFromBytes(b) { Ok(s) => s, Err(e) => e } \
-                       if msg == \"bytes contain a NUL byte\" { return 1 } \
-                       return 0 }";
-        assert_eq!(run(src).unwrap(), 1);
+    fn string_from_bytes_names_the_module_its_check_lives_in() {
+        let src = "fn main() -> Int64 { let b: Array<UInt8> = [104, 105] \
+                   return match stringFromBytes(b) { Ok(s) => 1, Err(e) => 0 } }";
+        let e = run(src).unwrap_err();
+        assert!(e.contains(crate::loader::STRING_FAULT), "{e}");
+        assert!(e.contains("a std root is needed"), "{e}");
     }
 
     #[test]
@@ -9505,13 +9482,10 @@ mod tests {
         assert_eq!(run(src).unwrap(), 604);
     }
 
-    #[test]
-    fn drop_then_use_is_a_compile_error() {
-        // `drop` consumes: using the value afterward must be rejected.
-        let src = "fn main() -> Int64 { let mut a: Array<Int64> = []; a.push(1); \
-                   drop a; return a.length; }";
-        assert!(run(src).is_err());
-    }
+    // `drop` consumes, and a use after it is refused — by the kernel now
+    // rather than by this crate's own check (RFC-0125 §3 M3, row 06). The
+    // assertion moved to `vyrn-cli`'s `refusals` suite, which runs the whole
+    // compiler; `crate::run` is the frontend alone and no longer states it.
 
     #[test]
     fn drop_of_non_heap_is_rejected() {
@@ -11442,7 +11416,7 @@ mod tests {
                      let mut seen = 0 \
                      for v in fromStep(0, 1, tick) { seen = seen + v if v == 7 { break } } \
                      return steps }";
-        assert_eq!(crate::run(src), Ok(8));
+        assert_eq!(run(src), Ok(8));
     }
 
     /// RFC-0075 M2c's `map`, spelled the way `std/stream` spells it: no
@@ -11480,7 +11454,7 @@ mod tests {
                  if v == 6 {{ break }} }} \
                return steps }}"
         );
-        assert_eq!(crate::run(&src), Ok(4));
+        assert_eq!(run(&src), Ok(4));
     }
 
     #[test]
@@ -11505,7 +11479,7 @@ mod tests {
                  close(s) i = i + 1 }} \
                return closed }}"
         );
-        assert_eq!(crate::run(&src), Ok(10000));
+        assert_eq!(run(&src), Ok(10000));
     }
 
     #[test]
@@ -11514,7 +11488,7 @@ mod tests {
         // stops a program from calling it on a number. The wording is the one the
         // compiled backends print.
         let src = "fn main() -> Int64 { let x: Option<Int64> = pullAt(24) return 0 }";
-        match crate::run(src) {
+        match run(src) {
             Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
             other => panic!("expected a trap, got {other:?}"),
         }
@@ -11524,7 +11498,7 @@ mod tests {
                    fn main() -> Int64 { let a = boxStream(fromStep(0, 1, tick)) \
                      let s: Stream<Int64> = unboxStream(a) close(s) \
                      let t: Stream<Int64> = unboxStream(a) close(t) return 0 }";
-        match crate::run(src) {
+        match run(src) {
             Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
             other => panic!("expected a trap, got {other:?}"),
         }
@@ -11542,7 +11516,7 @@ mod tests {
                    fn main() -> Int64 { let mut i = 0 \
                      while i < 100000 { let s = fromStep(i, 1, tick) close(s) i = i + 1 } \
                      return closed }";
-        assert_eq!(crate::run(src), Ok(100000));
+        assert_eq!(run(src), Ok(100000));
     }
 
     #[test]

@@ -1,0 +1,17 @@
+/// RFC-0125 §3 M5: `placeorder.vyrn`'s alias shape.
+///
+/// `let before = t.xs` binds a field of a record this frame owns. The element
+/// store then writes through `t.xs` while `before` still names the same
+/// buffer. The interpreter copies on write and prints 1; the compiled routes
+/// write through one buffer and print 99.
+
+type T = { xs: Array<Int64> }
+
+fn main() -> Int64 {
+    let mut t: T = T { xs: [1, 2, 3] }
+    let before = t.xs
+    t.xs[0] = 99
+    print(t.xs[0])
+    print(before[0])
+    return 0
+}

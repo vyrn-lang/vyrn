@@ -1,0 +1,16 @@
+// Rule 2, RFC-0089: a field of a `read` parameter is a borrow, and a store
+// outlives the call.
+type Head = { meta: Array<String> }
+
+fn keep(h: Head, out: modify Array<String>) -> Int64 {
+    out.push(h.meta[0])
+    return 0
+}
+
+fn main() -> Int64 {
+    let h = Head { meta: ["a"] }
+    let mut out: Array<String> = []
+    let n = keep(h, out)
+    print(n + out.length)
+    return 0
+}

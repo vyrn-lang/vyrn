@@ -423,6 +423,14 @@ fn analyze_inner(
             _ => Some(program.clone()),
         }
     };
+    // RFC-0125 §3 M3, the accumulation slice: the ownership memo the CLI opens
+    // around a command, opened around a keystroke. THREE readers want the
+    // analysis of this one program — the kernel's refusals, the floor's effect
+    // judgment and `memory_notes` — and each unmemoized call lowers the whole
+    // program and builds a core body per instance. It must outlive all of them,
+    // which is why it is here and not inside the block that asks first: `Memo`
+    // clears the slot when it drops.
+    let _own = checked.as_ref().map(crate::own::Memo::open);
     // `check_accum_with_let_types` returns the diagnostics AND a table of the
     // inferred/declared type of each clean `let` and `for`-var — used below to
     // give unannotated lets a real type on hover (`let x: Int`).
@@ -440,7 +448,16 @@ fn analyze_inner(
                 checker::check_accum_reusing(prog, &hashes)
             };
             let mut checked_diags = check_diags;
-            checked_diags.extend(movecheck::check_accum(prog));
+            // RFC-0125 §3 M3, the accumulation slice: the editor asks the same
+            // driver `vyrn check` asks, so a rule that has left `movecheck.rs`
+            // is shown here too. The kernel is asked only of a program the core
+            // can lower, which is one the type check accepted — the gate
+            // `check_and_synthesize` states for the command line.
+            if checked_diags.is_empty() {
+                checked_diags.extend(movecheck::refusals(prog));
+            } else {
+                checked_diags.extend(movecheck::check_accum(prog));
+            }
             // RFC-0033: a diagnostic at an origin-governed line in a synthesized
             // module is relocated to its input file (`.vyx`, …) and set aside so
             // the LSP can publish it against that file's URI; everything else
@@ -606,14 +623,19 @@ fn analyze_inner(
     // not compile is an answer about a body nobody will run. This is also what
     // keeps it off the hot path — an editor spends most of a keystroke burst on
     // a document that does not parse.
+    //
+    // `remapped` counts, and it did not. A type error at an origin-governed
+    // line is published against its `.vyx` and leaves `diags` EMPTY (RFC-0033),
+    // so this guard read a program the checker refused as a clean one and asked
+    // the ownership stage about it. That was harmless while nothing was
+    // installed under `own::analyze`; with the placer in the editor (RFC-0125
+    // §3 M3, the accumulation slice) it lowers a body whose nodes are typed
+    // `<type error>`, and the lowering's own lint refuses that.
+    let errored =
+        |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
+    let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
     let memory = match &checked {
-        Some(prog)
-            if !diags
-                .iter()
-                .any(|d| d.severity == crate::diagnostics::Severity::Error) =>
-        {
-            memory_notes(prog)
-        }
+        Some(prog) if clean => memory_notes(prog),
         _ => Vec::new(),
     };
 
@@ -1763,7 +1785,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             doc: t.doc.clone(),
             file: None,
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             // Variants carry no AST line; find the name token between this decl's
             // line and the next top-level declaration (or EOF).
             let until = lines
@@ -1930,7 +1952,7 @@ fn index_imported_symbols(
                     doc: t.doc.clone(),
                     file: Some(file.clone()),
                 });
-                if let Type::Enum(variants) = &t.base {
+                if let Some(variants) = crate::types::declared_variants(&t.base) {
                     for v in variants {
                         out.push(Symbol {
                             name: v.name.clone(),
@@ -2102,7 +2124,7 @@ fn namespace_members(
             doc: t.doc.clone(),
             file: file(target),
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             for v in variants {
                 out.push(Symbol {
                     name: v.name.clone(),
@@ -2474,14 +2496,10 @@ fn collect_lets_expr(
                 // desugar's `@`-prefixed binder is unspellable and never
                 // surfaces.
                 let (head, payloads): (Option<&str>, &[String]) = match &arm.pattern {
-                    ast::Pattern::Some(b) => (Some("Some"), std::slice::from_ref(b)),
-                    ast::Pattern::Ok(b) => (Some("Ok"), std::slice::from_ref(b)),
-                    ast::Pattern::Err(b) => (Some("Err"), std::slice::from_ref(b)),
                     ast::Pattern::Variant(head, payloads) => (Some(head.as_str()), payloads),
-                    ast::Pattern::None
-                    | ast::Pattern::Other
-                    | ast::Pattern::Success(_)
-                    | ast::Pattern::Failure(_) => (None, &[]),
+                    ast::Pattern::Other | ast::Pattern::Success(_) | ast::Pattern::Failure(_) => {
+                        (None, &[])
+                    }
                 };
                 for (k, b) in payloads.iter().enumerate() {
                     let prefix: Vec<&str> = match head {
@@ -2896,7 +2914,10 @@ fn field_detail(f: &ast::Field, all: &[TypeDecl]) -> String {
 
 fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
     match &t.base {
-        Type::Enum(vs) => {
+        // A DECLARED variant list. An alias of a built-in sum spells itself
+        // `Option<T>` / `Result<T, E>` (RFC-0126 §8.15), which is what the
+        // module wrote.
+        Type::Enum(vs) if !crate::types::is_sum_alias(&t.base) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("type {} = {}", t.name, arms)
         }
@@ -2961,7 +2982,7 @@ pub fn type_to_string(ty: &Type) -> String {
     // One source of truth: the AST's `Display` impl (the user-facing type
     // spelling). Enums keep the richer per-variant arm rendering for hovers.
     match ty {
-        Type::Enum(vs) => {
+        Type::Enum(vs) if !crate::types::is_sum_alias(ty) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("{{ {} }}", arms)
         }
@@ -3777,6 +3798,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "push", detail: "array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver" },
     BuiltinMethod { name: "reserve", detail: "array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation (RFC-0115)" },
     BuiltinMethod { name: "append", detail: "array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap (RFC-0115)" },
+    BuiltinMethod { name: "clear", detail: "array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap (RFC-0115 addendum)" },
     BuiltinMethod { name: "copyFrom", detail: "array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap (RFC-0115)" },
     BuiltinMethod { name: "tally", detail: "map.tally(key, n) -> Map<String, Int64> — insert-or-add on a count map, one probe (RFC-0116)" },
     BuiltinMethod { name: "tallyBytes", detail: "map.tallyBytes(bytes, n) -> Map<String, Int64> — tally keyed by raw bytes; the String is built and validated only on a miss (RFC-0116)" },
@@ -3839,8 +3861,7 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
             | Type::SmallArray(..)
             | Type::Map(..)
             | Type::Record(_)
-            | Type::Option(_)
-            | Type::Result(..)
+            | Type::Enum(_)
     ) {
         out.extend(by_name("copy"));
     }
@@ -3858,6 +3879,7 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
             by_name("pop"),
             by_name("swapRemove"),
             by_name("reserve"),
+            by_name("clear"),
             by_name("append"),
             by_name("copyFrom"),
         ]

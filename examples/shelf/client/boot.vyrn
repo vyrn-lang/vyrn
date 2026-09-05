@@ -167,7 +167,7 @@ fn tagViews() -> Array<TagCount> {
         }
         let label = match transKey("tag." + name) {
             Some(k) => t(k),
-            None => name,
+            None => name.copy(),
         }
         let cls = if filter == name { "tag active" } else { "tag" }
         out.push(TagCount { name: name, label: label, count: count, cls: cls })
@@ -341,7 +341,9 @@ export extern fn setDraftTags(arg: String) {
 /// trapping, unlike constructing `AddBookReq` directly). Valid => fire the typed
 /// stub (a real server round trip); Invalid => surface the Issues in the UI.
 export extern fn submitAdd(arg: String) {
-    let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, ",") }
+    // A record literal takes what it is given, and nothing takes module state
+    // (RFC-0013, RFC-0125 §3 M3).
+    let raw = RawAdd { title: draftTitle.copy(), url: draftUrl.copy(), tags: splitTrim(draftTags, ",") }
     match fromJson(api.AddBookReq, toJson(raw)) {
         Valid(req) => api.booksAdd(req, onAddBook),
         Invalid(iss) => setIssues(renderIssues(api.rpcIssuesFrom(iss))),

@@ -1,5 +1,5 @@
 /// A generic function that calls itself with a BIGGER type is refused, and
-/// `vyrn check` is the one that refuses it.
+/// `vyrn check`, `vyrn run` and `vyrn build` refuse it with one sentence.
 ///
 /// Monomorphization gives one function one body per distinct instantiation.
 /// `f<T>` calling `f<P<T>>` asks for `f<P<Int64>>`, then `f<P<P<Int64>>>`, and
@@ -17,7 +17,9 @@
 type P<T> = { a: T, b: T }
 
 fn mk<T>(x: T) -> P<T> {
-    return P { a: x, b: x }
+    // Two fields out of one `read` parameter: two owners for one value
+    // (RFC-0089 rule 2), which the generic body hides from the checker.
+    return P { a: x.copy(), b: x.copy() }
 }
 
 fn f<T>(x: T, n: Int64) -> Int64 {
