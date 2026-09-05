@@ -4450,6 +4450,75 @@ is the same carriage one step further on — and it is not what `arg_drops`
 needs, whose three whole-program closures are still a post-pass over every
 body and must be hoisted before the core builds one.
 
+**Where `store_owned` stops, read at the source (2026-09-05).**
+
+The fourth of the five was built, measured and taken out again. What follows
+is what the attempt found, so the next slice starts from it rather than from
+the sentence above.
+
+**It is two folds under one name.** `own::analyze` fills `store_owned` twice.
+`fold_store_owned` reads `movecheck`'s store events — one row per
+`Stmt::Assign`, plus `Facts::global_stores` for module state — and carries the
+three per-binding repairs the record above names. The fold beside it reads
+`Facts::place_stores` — one row per FIELD and ELEMENT store — and screens each
+against `is_global`, `is_modify_param` and a take-clearance over the binding.
+The kernel answers the first. It has no opinion about the second: its
+"a store into a place that owns heap releases nothing" refusal fires only
+where the CORE hands it `Old::Unreleased`, and `old_for` never did.
+
+**Both halves have a rule, and both rules are statable.** Module state needs
+no judgment at all — a global owns what it holds for the whole module and
+nothing may `consume` it, so every store into one releases what it replaces,
+and the core states that where it lowers the store. For a place store the
+kernel's rule is: the store owes the release where the place is rooted in
+module state, or in a `modify` parameter, or in a name this frame owns and
+still holds. That is `is_global`, `is_modify_param` and
+`takes_clear || droppable`, one for one, with the per-path `Own::Held` doing
+the third. The hand-back guard is the CORE's and not the kernel's: `s.dense
+= s.dense.push(i)` — which is what `s.dense.push(i)` becomes — gives the
+buffer back, so a field store whose value mentions its base stands the release
+down exactly as a store to a name does. The fold had that guard folded into
+its rows; the core has to say it.
+
+Written that way, the derived answer agrees with the analysis at every site
+the corpus reaches: `coretables` finds no store where the core releases and
+the plan does not, and the twelve rows the `place at` rewrite leaves to the
+plan stay twelve.
+
+**And the residue ratchet refuses it.** Three programs gain residue —
+`placeorder` one block, `rest` 65, `regexredux` 130,044 — while no store
+answer moved. The loss is not in the row. It is in what the FIRST build
+states.
+
+**The blocker is not a missing `MissingKind`.** That is ten lines. A store
+answer is an INPUT to the judgment as well as an output of it: the first
+build must state something at every store, the kernel's per-path state
+depends on what it states, and every other row the placer writes — the exits,
+the arms, the edges — moves with it. The same run counted one more arm binder
+freed, 499 to 500, and two more taken scrutinees, in a corpus where not one
+store answer changed.
+
+The two tables derived before this one do not have that property. A `Drop`
+the first build omits at an arm's end or on a join's edge is one the kernel
+reports and then treats as released, so the state after it is the state the
+second build has, and the judgment the second build gets is the judgment the
+first one gave. A store the first build says nothing about changes the state
+at every statement after it, and the placement is then a placement of a
+program that is not the one the emitters will run.
+
+So the next slice needs a first build whose store answers do not move the
+judgment. Two shapes fit: a store word that means "released, and the row is
+still to be written", so the kernel's state is the second build's state while
+the answer is open; or a placement that reaches a fixpoint over its own
+output, which is the same arrangement `St::Loop` already has for a widened
+entry. Neither is large. Both are the slice, and neither was in the reading
+above.
+
+`arg_drops` is untouched, and stops where the record above puts it. It does
+not have this property either, for the reason it is not a judgment: the rule
+is over DECLARATIONS, and a first build that states no argument drop asks the
+kernel nothing.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
