@@ -7,10 +7,11 @@
 //! transcript nobody would notice going stale.
 //!
 //! These are meaningful only when the binary is built with `--features
-//! wasm-gen` (and with a wasi sysroot present); without it both runs are the
-//! interpreter and the tests pass by agreeing with themselves. That is
-//! deliberate — the engine is optional, and a test that failed without it would
-//! make the default build red.
+//! wasm-gen`; without it both runs are the interpreter and the tests pass by
+//! agreeing with themselves. That is deliberate — the engine is optional, and a
+//! test that failed without it would make the default build red. They need no
+//! clang and no wasi sysroot since RFC-0076 M7, which emits the generator's
+//! module directly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -694,7 +695,7 @@ fn editing_a_generator_recompiles_its_artifact() {
 /// the guest is compiled by cranelift and a debug cranelift is the whole
 /// difference. Run it in release.
 #[test]
-#[ignore = "needs clang + wasi sysroot: cargo test -p vyrn-cli --release --features wasm-gen --test genwasm -- --ignored"]
+#[ignore = "compiles every generator in the corpus twice: cargo test -p vyrn-cli --features wasm-gen --test genwasm -- --ignored"]
 fn every_generator_example_emits_the_same_source_under_both_engines() {
     // Without the feature both columns are the interpreter and the whole thing
     // agrees with itself. Loudly, because a silent skip is exactly the failure

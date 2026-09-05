@@ -4659,17 +4659,17 @@ deleted here, and `--engine interp` is still the default.
 |---|---|---|---|
 | `run-default` | every user; 34 of `vyrn-cli`'s test suites, at 150 `vyrn run` call sites; the fixture recorder | yes — 204 examples run under both engines, all byte-identical since the fourth slice below (203 of 204 when this row was written), the same 58 exit non-zero | flipping one default. the corpus costs 89.1 s under the interpreter and 39.4 s under the compiled route, compile included |
 | `test-bodies` | 25 corpus files; `tests/testing.rs` | yes — all 25 byte-identical, `placeorder.vyrn` among them | 4.6 s against 5.3 s over the 25. The compiled route is SLOWER here: the bodies are small and the compile is the whole cost |
-| `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
+| `test-state` | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`; nothing else in the corpus | yes, since the ninth slice below — one resident instance per FILE, the shape `serve` has. Each body is an `export extern fn` door, `_start` runs the module's initializers and a `main` that does nothing else, and body `k+1` reads what body `k` wrote | RFC-0029 locks one instance per process and state that lives for the process, and `vyrn test` is one process, so this is a rule of the language and not the interpreter's accident. The probe is `2 passed, 0 failed` under both engines, and a file pays one instantiation rather than one per body |
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
 | `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | yes, since the sixth slice below — `vyrn serve --engine wasm` compiles the served file with the direct backend and answers every request through doors in ONE resident instance, `main` having run once behind them. `vyrn dev` still takes no engine | the fifth slice measured the resident half — `proc_exit` unwinds the call and not the store, module state keeps what `main` wrote, and an answer costs 11 ns against 839 µs for a fresh instance — and named three pieces that remained: no door for `handle`, no marshalling for `Request` and `Response`, and `serveStream` trapping in both compiling backends. The sixth slice below closes all three in appended Vyrn rather than in an emitter, and moves no emitted byte for a program nobody serves. `tests/serve.rs` is 27 of 27 and `rpc.rs` 12 of 12 under `VYRN_SERVE_ENGINE=wasm`; `universal_pages.rs` waits on a miscompile of `examples/bin/server.vyrn` that has nothing to do with serving |
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | yes, by replacement since the fifth slice below — the rows are phases rather than functions, and the count is wasmtime's fuel. A per-function table is not portable and the slice says why | `vyrn_frontend::prof` counts interpreter steps and keeps counting them for `--engine interp` and for `check --profile`, which measures generation. What the compiled route reports instead is five phases and one repeatable count: 85,759,742,333 operations for the site export, the same number twice |
-| `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, but the feature `wasm-gen` is OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s, it needs clang and a wasi sysroot, and it declines to the interpreter for a module reaching `writeFile`, `writeAtomic`, `renameFile` or `fsyncFile` | the largest row. `generate_interpreted` is both the reference and the fallback; deleting it makes clang a hard requirement of `vyrn check` |
-| `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | no — the interpreter IS the oracle the compiled route is compared against | after the deletion `VYRN_FIXTURES=write` records from the route under test, and the fixture gate is a self-comparison. The oracle becomes a reviewed diff plus `wasmhash`'s cross-platform bytes |
+| `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, and the ninth slice below removed three of the four reasons the feature was off: it needs no clang and no wasi sysroot since RFC-0076 M7, it serves an `Int64` argument, and the wrapper type-checks. `wasm-gen` is still OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s | the largest row, and ONE defect holds it: a generator that refuses through `std/diag`'s `reportHere` and returns the report beside a `vyrn"…"` code quote comes back with the report spliced into the quoted string and repeated. The reproduction is `tests/exports.rs`'s `graphql_sdl_answers_the_awkward_contract..`; the interpreter answers it correctly and the defect is older than this slice — it reproduces at this branch's base, so `vyrn-lsp` has it today. `generate_interpreted` is both the reference and the fallback until the splice is fixed |
+| `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | yes, since the ninth slice below — `VYRN_FIXTURES=write` records from the compiled route and the gate compares the compiled route, so the recorded file is the expectation and not a transcript of a second engine. `VYRN_FIXTURES=interp` is the interpreter as a second column, for as long as there is one | re-recording all 205 from the route moved ZERO bytes, so the change of oracle costs nothing that is in the tree. What it costs is a kind of proof: the gate proves the route has not moved since a human read the diff, and it cannot prove the answer is right. `wasmhash` says the same bytes on four platforms, and the review of the recorded diff is what says the bytes are the right ones |
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
-| `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | no — the compiled route lives in `vyrn-cli`, not in the frontend | those tests move to the CLI's harness, or the frontend takes a dependency on a backend |
+| `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | yes, since the ninth slice below — the tests that RUN a program are integration tests now (`vyrn-frontend/tests/loader_run.rs` and `jsondec_run.rs`, 108 of them), and they compile with the direct backend and run in the driver's WASI host, which `vyrn-cli` exposes as a library target | neither of the two options in this column, because the second one cannot be built: a unit test INSIDE `vyrn-frontend` that dev-depends on a backend compiles a SECOND copy of `vyrn-frontend`, and the two `Program` types are different types. So the tests left the lib target rather than the crate — what reads the loader's insides stays a unit test, what runs a program is behaviour and is stated from outside. The crate's test count is the same 1,246, and the shipped crate still depends on nothing |
 | `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | yes, since the fourth slice below — both engines print ``error: extern `jsNow` is not available on this target`` on standard error and exit 1. The third slice read `worse` here: the compiled route trapped with `error: error while executing at wasm backtrace:`, the one output difference in 204 programs | the embedded host answers the `vyrn` namespace with `interp::extern_unavailable`'s sentence, as native's C stub already did. No emitted byte changes |
 | `site-export` | CI's Site job | yes, and this is new — the frame-limit refusal M5's second slice recorded is gone, and the compiled route writes the same 241 files | 187.30 s against 13.89 s, medians of three interleaved runs, and the 241 files are byte-identical |
 
@@ -5666,6 +5666,271 @@ with a fresh `VYRN_GEN_CACHE_DIR`, 12; `testsweep` with `--ignored`, 28 s; `vyrn
 doc --std -o ../docs/api --verify`, 41 files up to date; the site — `vyrn run
 site/export.vyrn out` writes its 82 routes and 14 assets in 232 s, and `vyrn
 test` is green over `export.vyrn` and `site/app`, 189 blocks.
+
+#### The ninth slice (2026-09-05): the four rows that were left
+
+The census had eleven `yes`, one `partial` and three `no`. This slice closes all
+four, in the order the table lists them. Each is a decision before it is a diff,
+and each decision is below with what it cost.
+
+**`test-state` is a rule, and the compiled route now keeps it.**
+
+RFC-0029's locked semantics say two things about a module's state: **one
+instance per process, per module**, and a lifetime "unchanged from RFC-0013 —
+state lives for the process". `vyrn test` is one process. A body that reads what
+an earlier body wrote is therefore reading the one instance the rule allows, and
+the compiled route's fresh instance per body was a SECOND instance in the same
+process. RFC-0015 says the same thing from the other side: it locks the bodies'
+declaration order, and an order is only observable when the bodies share a
+world. So the interpreter was right and the compiled route was wrong, and the
+census's earlier reading — semantics M5 retires rather than reproduces — is
+withdrawn.
+
+The compiled route takes the shape `serve` took in the sixth slice. Each
+selected body is lifted into an RFC-0012 `export extern fn __vyrn_body_<k>`
+rather than an ordinary function; `_start` runs the module's initializers and a
+`main` that does nothing else; `wasmrun::start` leaves the store open; and the
+host knocks on one door per body. Nothing in an emitter moved: an export was
+already a sweep root and already the only name a host may call.
+
+| | before | after |
+|---|---|---|
+| instances per file | one per body | one |
+| the body's name | a line the host wrote to standard input, which `main` read and dispatched on | an export |
+| `main` | a `readLine` and a chain of `if`s | `return 0` |
+| the probe | 2 passed under the interpreter, `1 != 2` under wasm | `2 passed, 0 failed` under both |
+
+**A trap still ends one body and not the run.** RFC-0015 requires the run to
+continue after a failing assert, and a resident instance keeps that: a trap
+unwinds the CALL and not the store, exactly as `proc_exit` does for `serve`. A
+four-body probe — a failed `assertEq`, a body that reads the state the failed
+one wrote, a `panic`, and a body after the `panic` — prints the same four lines
+and the same `2 passed, 2 failed` on both engines.
+
+`Resident::call_body` is what the harness knocks with. `tell` keeps only a
+refusal's first line, which is all a serving loop logs; a test body's own
+standard-error output has to pass through whether the body passed or failed, so
+`call_body` hands back both halves of the drain — everything before the last
+`error: ..` line, and that line as the message. It is the split the fresh-instance
+harness already made over `Outcome::stderr`, moved to where the store
+stays open.
+
+**What was re-run.** All 25 corpus files with `test` blocks, and all 17 with
+`bench` blocks, under both engines: every one byte-identical on stdout, stderr
+and the exit code, which is what the `test-bodies` and `bench-check` rows
+claimed and still claim.
+
+**`gen-fn`: three of the four reasons are gone, and the fourth is a defect.**
+
+RFC-0076's engine runs a `gen fn` as compiled wasm. `vyrn-lsp` turns it on by
+default; `vyrn-cli` does not. Four things kept it off, and this slice removes
+three of them.
+
+**One: it needed a C toolchain.** The engine reached wasm through clang and a
+wasi sysroot, and `vyrn check` may not require one. RFC-0076 M7 removed that: the
+engine emits the generator's module directly. What the feature costs the default
+build now is one path crate whose own dependencies — `vyrn-frontend`,
+`vyrn-codegen`, `wasmtime` — this binary already resolves.
+
+**Two: an `Int64` argument declined.** Arguments travel as argv, which is what
+lets one compiled artifact serve every call. Only `String` was written, so a
+generator with an `Int64` parameter was declined and the interpreter ran it. The
+element generators take `line` and `col` as `Int64`, so EVERY element of every
+`.vyx` page took the interpreted path: 66 declines over this repo's corpus,
+measured, and the only declines there were. An `Int64` is decimal in argv now and
+`parse` reads it back inside the guest at the parameter's declared type. The
+corpus declines are 0.
+
+**Three: the host's bodies read as ordinary code.** The compiled program is the
+generator's module with `is_gen` cleared, because a `gen fn` has no runtime
+lowering. The checker reads the same flag, so it also concluded the bodies were
+not generation: `lex`, `moduleInterface`, `contractOf` and the `Code` and `Token`
+types were refused with "only available during generation", and every node under
+a refusal recorded `<type error>`. The emitter has its own lowering for all of
+them and emitted a module regardless. What the errors cost was the RECORD — the
+join types the emitters read (the eighth slice above) among them — and, in a
+debug build, `vyrn_lower`'s own lint, which failed the run. The context is a
+property of the PROGRAM and not of one function, so it is stated once:
+`checker::set_gen_host`, a thread flag, set by `vyrn_codegen::set_gen_host`,
+which the two gen-host emitters already bracket their whole compile with. It
+only ever enables a generation-only name; nothing reads it to refuse. The three
+atom-stream primitives — `__vyrnGenReflect`, `__vyrnGenNextInt`,
+`__vyrnGenNextStr` — had a signature in the emitter and none in the checker, and
+they are declared beside that flag now and re-exported from `vyrn-codegen`. One
+name, one signature, one place.
+
+**Four, and it stands: a code quote beside a refusal comes back corrupted.**
+With the flag turned on, one test in the whole tree failed —
+`tests/exports.rs`'s `graphql_sdl_answers_the_awkward_contract_instead_of_emitting_an_invalid_document`.
+`std/graphql`'s `sdl` builds a document, collects `std/diag` reports beside it,
+and returns `diags + render(vyrn"…\{doc}…")`. The interpreter answers one report
+and a clean document. The compiled engine answers FOUR copies of the report, and
+the document itself carries the report's text spliced into the middle of a
+string: `getSecret: __Secret` comes back as `getSecret: __Secretr - the GraphQL
+document would ..`.
+
+| | interpreted | compiled |
+|---|---|---|
+| `//@diag` lines | 1 | 4 |
+| the document's last field | `getSecret: __Secret` | `getSecret: __Secretr - the GraphQL document would ..` |
+
+**Whose defect it is.** Not this slice's. Checking out this branch's BASE for
+`vyrn-genwasm`, `vyrn-codegen` and the checker, and building with `--features
+wasm-gen`, reproduces it exactly. `vyrn-lsp` turns the feature on, so the editor
+has this today. It is not the direct backend in general: the cross-engine
+generator suite is 12 of 12 and all 24 corpus generators emit identical source
+under both engines, `vyrn run --engine wasm` is byte-identical over 205 examples,
+and a hand-written program of the same SHAPE — two strings grown alternately, a
+helper returning the report, a code quote splicing one of them — agrees under
+both engines. What is left is the narrow path: a `Code` is an `i64` HANDLE under
+`gen_host`, and the splice reads a String out of the guest to rebuild it, which
+is where a stale read would live.
+
+**So the flag stays off and the row stays `partial`.** Turning it on would make
+one program print four wrong diagnostics and a corrupted document, and a census
+row is not worth a wrong answer. The three fixes above ship: they are the
+engine's, so `vyrn-lsp` gets all three now, and the day the splice is fixed the
+flag is one line.
+
+
+**`fixture-oracle`: the recorded file is the expectation.**
+
+`tests/fixtures.rs` compared the compiled route with `examples/expected/*`, and
+`VYRN_FIXTURES=write` recorded those files by running the INTERPRETER. So the
+gate read as a comparison of two engines with one of them written down, and the
+row read `no`: delete the interpreter and the recorder has nothing to record
+with.
+
+The change is one line of test: the recorder runs `--engine wasm` as well.
+`VYRN_FIXTURES=interp` is added for the second column, which compares the
+interpreter with the same files. The corpus is 205 examples. Re-recorded from
+the route, ZERO of the recorded bytes moved — which is what the gate had been
+proving green for six slices, now stated where it can be seen.
+
+**What the route-only gate proves.** That the route's answer has not moved.
+Every pass, the runtime, the host and the example itself are in that answer, and
+a divergence names the file and the first line. `wasmhash` adds that the module's
+bytes are identical on four platforms, so "has not moved" holds everywhere and
+not only on the machine that recorded.
+
+**What it does not prove.** That the answer is RIGHT. No self-comparison can.
+The oracle is the review of the diff in the commit that changes a recorded file:
+a recorded file is a reviewed file, and that is the whole of its authority. The
+interpreter never was a specification either — it was one implementation whose
+output was written down once, and a fault in both engines would have been
+recorded then as it would be recorded now. What is lost is narrower than "an
+oracle": it is a SECOND, independently written implementation, which catches the
+class of fault that one implementation makes and the other does not. `--engine
+interp` keeps that column while the interpreter exists, at 82 s against the
+route's 17 s over the 205, and the day it goes the column goes with it.
+
+**`library-run`: a unit test cannot reach a backend, so the tests moved out of
+the lib.**
+
+`src/loader.rs` and `src/jsondec.rs` state their claims by RUNNING: a link is
+right when the program it produced answers 42. There were 108 such tests, and
+each called `crate::interp::run`, because the interpreter is the one engine
+inside that crate.
+
+The census offered two ways out — move the tests to the CLI's harness, or let
+the frontend depend on a backend. The second one was tried first and it does not
+compile. `vyrn-codegen` and `vyrn-cli` both depend on `vyrn-frontend`, so a
+dev-dependency back on either builds a SECOND copy of `vyrn-frontend` for the
+lib's test target, and `rustc` says it plainly: "expected
+`vyrn_frontend::ast::Program`, found `ast::Program` — there are multiple
+different versions of crate `vyrn_frontend` in the dependency graph". Cargo
+permits the cycle; it does not unify the types. **No unit test in this crate can
+ever run compiled code.**
+
+An integration test can, because it links the real crate. So the tests left the
+LIB TARGET rather than the crate, and the line where they split is a rule worth
+having: a test that reads the loader's insides — the cache entry's format, the
+nesting counter, the two generator budgets — stays a unit test, and a test that
+runs a program is stating behaviour and states it from outside.
+
+| | before | after |
+|---|---|---|
+| where the running tests live | `src/loader.rs`, `src/jsondec.rs` | `tests/loader_run.rs`, `tests/jsondec_run.rs` |
+| what runs them | `interp::run` | `vyrn_codegen::direct::compile` + `vyrn_cli::wasmrun::run` |
+| `src/loader.rs` unit tests | 114 | 6, and all six read this module's insides |
+| the crate's tests | 1,246 | 1,246 |
+| the crate's dependencies | none | none — the two are DEV-dependencies |
+
+The host is `vyrn-cli`'s, not a second copy: `wasmrun.rs` names nothing in
+`main.rs`, so the driver gained a `[lib]` target that exposes that one module,
+and `main.rs` reads it from there. One host, one copy.
+
+**Two things the route needs that the interpreter did not.** A builtin the
+tree-walker answered in Rust is a CALL on this route, so every resolver in those
+tests injects `std/runtime` and `std/mem` as well. And `main`'s answer is a
+process exit code, so a program returning `-1` reads as 255 — which is what
+`vyrn run` reports under BOTH engines, since the driver masks the interpreter's
+answer to a byte too. One test said `-1` and says 255 now. Nothing else in the
+108 moved.
+
+`tests/contracts_api.rs` was already an integration test and had the last
+`interp::run` outside the interpreter's own tests. It takes the same runner, in
+one line.
+
+**The census reads fourteen `yes` and one `partial`.** Every capability the
+interpreter alone provided is on the compiled route except `gen-fn`, which is one
+splice defect away and not one line of design away. What follows is a RECORD of
+where the retirement starts, and no line of `interp.rs` is deleted here.
+
+**Every `interp::` caller, by file.** 97 references over 24 files, and they are
+three different things:
+
+| what it reaches for | files | refs |
+|---|---|---|
+| LIMITS and canonical wordings — `CALL_DEPTH_LIMIT`, `FRAME_LIMIT`, `REGION_MAX`, `ARRAY_LIT_LIMIT`, `INTERP_STACK_BYTES`, `extern_unavailable`, `on_deep_stack`, `coerce` | `vyrn-codegen/src/{lib,direct,wasm,toolchain}.rs`; `vyrn-frontend/src/{trap,checker,own,prof,codec}.rs`; `vyrn-cli/src/wasmrun.rs`; `vyrn-cli/tests/{limits,parity,kernel,coretables,typed,effects}.rs` | 43 |
+| the GENERATION bridge — `Val`, `gen_code_splice`, `gen_lex_tokens_lit`, `gen_module_interface_lit`, `generate`, `GenInputs` | `vyrn-genwasm/src/lib.rs`; `vyrn-frontend/src/{loader,prelude}.rs` | 13 |
+| RUNNING — `run`, `run_with_args`, `run_tests`, `run_benches`, `serve`, `serve_pool`, the four `Serve*` types, `mounted_routes` | `vyrn-cli/src/main.rs` (37); `vyrn-play/src/lib.rs`; `vyrn-cli/tests/lowered.rs`; `vyrn-frontend/src/lib.rs` | 40 |
+| the module's own tests | `vyrn-frontend/src/interp.rs` | 1 |
+
+Only the third row is the tree-walker. The first row is a number and a sentence
+that happen to be declared in `interp.rs`, and the second is RFC-0076's
+reflection, which the compiled generator engine reads from the interpreter's
+`Val` because that is where the type is written down.
+
+**The first deletable slice**, in that order:
+
+1. `vyrn_frontend::run` (`src/lib.rs`, four lines). It has NO caller as of this
+   slice — the loader's and decoder's tests were the last, and they run compiled
+   now. It goes first because nothing has to move for it to go.
+2. The limits and the wordings, MOVED rather than deleted: `trap.rs` already
+   holds the canonical trap text and already reads two of these constants. Move
+   the eight names there, and 43 references over 12 files stop naming the
+   interpreter — with no behaviour changed and no test rewritten, since a
+   constant is the same constant wherever it is declared.
+
+After those two, `interp::` is named by the generation bridge, by `main.rs`, and
+by the two remaining engine hosts. That is where the deletion becomes a question
+about the default engine rather than about tidying — and the first question is
+`gen-fn`'s splice, because `generate_interpreted` cannot be deleted while it is
+the only engine that answers a refusing generator correctly. It is M5's next
+slice rather than this one's.
+
+**Gates.** In §1.4's order, one at a time, in the foreground: `cargo fmt --all
+--check`, clean; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`
+with no filter, 548 passed and 74 ignored; the `kernel`, `coretables`, `typed`
+and `effects` suites with `--ignored` (1, 1, 1 and 2, at 33 s, 27 s, 59 s and
+66 s); `fixtures` with `--ignored`, 205 compared in 25 s; `vyrn-frontend`, 1,246
+— the same count as before the tests moved out of the lib; the workspace less
+`vyrn-cli` with `--skip _natively`, 1,422; `memory` with `--test-threads=1`, 10;
+parity in release with `--ignored`, 41 of 41 in 427 s; the residue ratchet,
+194 s; `VYRN_WASM_MANIFEST=check` on `wasmhash`, green on all 173 with no byte
+moved; the cross-engine generator test with a fresh `VYRN_GEN_CACHE_DIR` and
+`--features wasm-gen`, 12, and its corpus test with `--ignored`, all 24
+generators identical under both engines; `testsweep` with `--ignored`, 34 s;
+`vyrn doc --std -o ../docs/api --verify`, 41 files up to date; the site — `vyrn
+run site/export.vyrn out` writes its 82 routes and 14 assets in 225 s, and `vyrn
+test` is green over `export.vyrn` and `site/app`, 189 blocks; and
+`VYRN_SERVE_ENGINE=wasm` over `serve` (27), `rpc` (12) and `universal_pages`
+(9 still ignored, as the sixth slice left them).
+
+`fixtures` was also run in its two other modes: `VYRN_FIXTURES=write` re-recorded
+all 205 from the compiled route and moved zero bytes, and `VYRN_FIXTURES=interp`
+compared all 205 against the same files in 82 s.
 
 ### M6 — the other two judgments
 

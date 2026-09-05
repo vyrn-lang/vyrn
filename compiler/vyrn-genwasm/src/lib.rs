@@ -152,30 +152,31 @@ fn run(
     args: &[ConstVal],
     inputs: &GenInputs<'_>,
 ) -> Result<GenOutput, EngineError> {
-    // String-only, because the arguments travel as argv rather than being baked
-    // into the module — which is what lets ONE compiled artifact serve every
-    // call. Every generator in this repo takes constant paths and names.
+    // Eagerly, because the key no longer names the target: an artifact compiled
+    // for a sibling generator would be a cache HIT here, and dispatching to a
+    // name the wrapper never emitted is a trap rather than a decline.
+    let target = match program.functions.iter().find(|f| f.name == fn_name) {
+        Some(f) if dispatchable(f) && f.params.len() == args.len() => f,
+        _ => return Err(decline("the generator is not one this path serves")),
+    };
+
+    // The arguments travel as argv rather than being baked into the module —
+    // which is what lets ONE compiled artifact serve every call, whatever the
+    // constants are. So each one is WRITTEN here and read back in the wrapper
+    // at the parameter's declared type ([`wrapper_program`]).
     //
     // argv[0] is the generator's NAME, which `main` dispatches on: the artifact
     // is one per MODULE, not one per generator, so it has to be told which of
     // the module's generators this call wants.
     let mut argv: Vec<String> = vec![fn_name.to_string()];
-    argv.extend(
-        args.iter()
-            .map(|a| match a {
-                ConstVal::Str(s) => Some(s.clone()),
-                _ => None,
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| decline("a non-String constant argument"))?,
-    );
-
-    // Eagerly, because the key no longer names the target: an artifact compiled
-    // for a sibling generator would be a cache HIT here, and dispatching to a
-    // name the wrapper never emitted is a trap rather than a decline.
-    match program.functions.iter().find(|f| f.name == fn_name) {
-        Some(f) if dispatchable(f) && f.params.len() == args.len() => {}
-        _ => return Err(decline("the generator is not one this path serves")),
+    for (a, p) in args.iter().zip(&target.params) {
+        argv.push(match (a, &p.ty) {
+            (ConstVal::Str(s), Type::Str) => s.clone(),
+            // Decimal, which is what `parse` reads (RFC-0046) and what the
+            // interpreter would have passed as the value itself.
+            (ConstVal::Int(n), Type::Int) => n.to_string(),
+            _ => return Err(decline("a constant argument this path cannot write")),
+        });
     }
 
     let t = std::time::Instant::now();
@@ -298,8 +299,20 @@ fn serve(
 /// nothing in this repo does it, and a wrong answer is worse than a slow one.
 /// `exported` because the loader only ever resolves a generator import to an
 /// exported `gen fn`, so anything else could not be asked for.
+///
+/// A parameter is served when its type can be WRITTEN into argv and read back
+/// at that type inside the guest: `String` is itself, and `Int64` is decimal
+/// through the `parse` builtin. Every other type declines. The element
+/// generators (`<div>`, `Icon`) take `line` and `col` as `Int64`, so before
+/// `Int64` was served every element on a `.vyx` page ran under the interpreter
+/// — 66 declines over this repo's corpus, and the only ones there were.
 fn dispatchable(f: &Function) -> bool {
-    f.is_gen && f.exported && f.ret == Type::Str && f.params.iter().all(|par| par.ty == Type::Str)
+    f.is_gen
+        && f.exported
+        && f.ret == Type::Str
+        && f.params
+            .iter()
+            .all(|par| matches!(par.ty, Type::Str | Type::Int))
 }
 
 /// The program actually compiled: the generator's module with `is_gen` cleared,
@@ -352,7 +365,11 @@ fn wrapper_program(program: &Program) -> Option<Program> {
                         "print",
                         vec![call(
                             &f.name,
-                            (0..f.params.len()).map(|i| argv(i + 1)).collect(),
+                            f.params
+                                .iter()
+                                .enumerate()
+                                .map(|(i, par)| at_type(argv(i + 1), &par.ty))
+                                .collect(),
                         )],
                     )),
                     Stmt::Expr(call("print", vec![Expr::Str(RESULT_END.into())])),
@@ -471,6 +488,33 @@ fn func(name: &str, params: Vec<Param>, ret: Type, stmts: Vec<Stmt>) -> Function
         is_export_extern: false,
         is_gen: false,
         is_mut: false,
+    }
+}
+
+/// One `args()[i]` — a String — read back at the parameter's declared type.
+///
+/// `String` is itself. `Int64` is `match parse(s) { Some(v) => v, None => 0 }`:
+/// [`dispatchable`] and `run` agree on what argv can carry, so the `None` arm
+/// is unreachable and `0` is there to give the `match` a type rather than to be
+/// read. Anything else would have declined before the wrapper is built.
+fn at_type(e: Expr, ty: &Type) -> Expr {
+    use vyrn_frontend::ast::{ArmBody, MatchArm, Pattern};
+    if *ty == Type::Str {
+        return e;
+    }
+    Expr::Match {
+        scrutinee: Box::new(call("parse", vec![e])),
+        arms: vec![
+            MatchArm {
+                pattern: Pattern::Variant("Some".into(), vec!["v".into()]),
+                body: ArmBody::Expr(var("v")),
+            },
+            MatchArm {
+                pattern: Pattern::Variant("None".into(), Vec::new()),
+                body: ArmBody::Expr(Expr::Int(0)),
+            },
+        ],
+        line: 0,
     }
 }
 

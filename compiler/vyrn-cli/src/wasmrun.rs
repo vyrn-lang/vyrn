@@ -450,6 +450,39 @@ impl Resident {
         out.map_err(|e| self.trapped(door, e))
     }
 
+    /// Call a nullary door for its effect and hand back BOTH what the guest
+    /// wrote to standard error and, if it refused, the line it refused with.
+    ///
+    /// [`Resident::tell`] keeps only the refusal's first line, which is all a
+    /// serving loop logs. A test body's own output has to pass through whether
+    /// the body passed or failed, so this splits the drain the way the harness
+    /// needs it: everything before the last `error: ..` line, and that line.
+    pub fn call_body(&mut self, door: &str) -> (String, Option<String>) {
+        let outcome: Result<(), String> =
+            match self.inst.get_typed_func::<(), ()>(&mut self.store, door) {
+                Err(e) => Err(format!("{door}: {e}")),
+                Ok(f) => match f.call(&mut self.store, ()) {
+                    Ok(()) => Ok(()),
+                    Err(e) => match e.downcast_ref::<Exit>() {
+                        Some(Exit(0)) => Ok(()),
+                        Some(Exit(code)) => Err(format!("exit {code}")),
+                        None => Err(first_line(&format!("{e:?}")).to_string()),
+                    },
+                },
+            };
+        let said = self.drain_err();
+        let Err(host) = outcome else {
+            return (said, None);
+        };
+        match said.rfind("error: ") {
+            Some(at) if at == 0 || said.as_bytes()[at - 1] == b'\n' => (
+                said[..at].to_string(),
+                Some(said[at + 7..].trim_end_matches('\n').to_string()),
+            ),
+            _ => (said, Some(host)),
+        }
+    }
+
     /// A door that answers a `Bool`.
     pub fn ask_bool(&mut self, door: &str) -> Result<bool, String> {
         let f = self
@@ -1037,13 +1070,54 @@ fn main() -> Int64 {
 }
 "#;
 
+    // The probe imports nothing of its own, but a compiled program calls
+    // `std/runtime` for what the tree-walker answered in Rust, and the loader
+    // injects that from the std root. So the load is a load, over the two files
+    // it needs — this module is the library target and has no driver in it to
+    // find them on disk (see ../lib.rs).
     fn probe_bytes() -> Vec<u8> {
-        let dir = std::env::temp_dir().join("vyrn-resident");
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("probe.vyrn");
-        std::fs::write(&file, PROBE).unwrap();
-        let key = file.to_string_lossy().replace('\\', "/");
-        let program = crate::load_program(&key, PROBE).expect("the probe loads");
+        let files = vyrn_frontend::loader::MapResolver(
+            [
+                (
+                    "std/runtime.vyrn".to_string(),
+                    include_str!("../../../std/runtime.vyrn").to_string(),
+                ),
+                (
+                    "std/mem.vyrn".to_string(),
+                    include_str!("../../../std/mem.vyrn").to_string(),
+                ),
+                (
+                    "std/text.vyrn".to_string(),
+                    include_str!("../../../std/text.vyrn").to_string(),
+                ),
+                (
+                    "std/strpred.vyrn".to_string(),
+                    include_str!("../../../std/strpred.vyrn").to_string(),
+                ),
+                (
+                    "std/num.vyrn".to_string(),
+                    include_str!("../../../std/num.vyrn").to_string(),
+                ),
+                (
+                    "std/codecs.vyrn".to_string(),
+                    include_str!("../../../std/codecs.vyrn").to_string(),
+                ),
+                (
+                    "std/hash.vyrn".to_string(),
+                    include_str!("../../../std/hash.vyrn").to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let opts = vyrn_frontend::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        let mut program =
+            vyrn_frontend::load(PROBE, "probe.vyrn", &opts, &files).expect("the probe loads");
+        let diags = vyrn_frontend::check_and_synthesize(&mut program);
+        assert!(diags.is_empty(), "the probe checks: {diags:?}");
         vyrn_codegen::direct::compile(&program).expect("the probe compiles")
     }
 

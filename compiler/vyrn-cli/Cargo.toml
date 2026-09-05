@@ -32,7 +32,24 @@ wasmtime = { version = "47", default-features = false, features = [
 [features]
 # `cargo build --features wasm-gen` opts into running generators as compiled
 # wasm instead of interpreting them.
+#
+# STILL OFF by default, and no longer for the reason it was: RFC-0076 M7 emits
+# the generator's module directly, so the engine needs no clang and no wasi
+# sysroot, and its dependencies are ones this binary already resolves. What
+# keeps it off is a DEFECT (RFC-0125 §3 M5, the ninth slice): a generator that
+# refuses through `std/diag`'s `reportHere` and returns its report beside a
+# `vyrn"…"` code quote comes back corrupted — `tests/exports.rs`'s
+# `graphql_sdl_answers_the_awkward_contract..` is the reproduction. The
+# interpreter answers it correctly, so it stays the default until the splice is
+# fixed. `vyrn-lsp` turns the feature on and has this defect today.
 wasm-gen = ["dep:vyrn-genwasm"]
+
+# The host the compiled route runs in, and nothing else (see src/lib.rs).
+# `vyrn-frontend` dev-depends on it so its tests run a program the way the
+# driver does (RFC-0125 §3 M5, the `library-run` row).
+[lib]
+name = "vyrn_cli"
+path = "src/lib.rs"
 
 [[bin]]
 name = "vyrn"

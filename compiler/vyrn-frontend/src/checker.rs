@@ -115,6 +115,62 @@ thread_local! {
     /// disguised as memory hygiene.
     static CHECK_MEMO: std::cell::RefCell<(u64, HashMap<(String, String, String), Vec<Diagnostic>>)> =
         std::cell::RefCell::new((0, HashMap::new()));
+
+    /// Whether this thread is checking a GENERATOR HOST — the program RFC-0076's
+    /// engine compiles so it can run a `gen fn` as wasm (RFC-0125 §3 M5, the
+    /// ninth slice).
+    ///
+    /// That program is the generator's module with `is_gen` cleared, because a
+    /// `gen fn` has no runtime lowering. Clearing it also told this checker the
+    /// bodies were ordinary code, so `lex`, `moduleInterface`, `contractOf` and
+    /// the `Code` and `Token` types were refused as "only available during
+    /// generation" and every node under them recorded `<type error>`. The
+    /// emitter has its own lowering for all of them and emitted a correct
+    /// module anyway; what the errors cost was the RECORD — the join types the
+    /// emitters read (RFC-0125 M5, the eighth slice) among them — and, in a
+    /// debug build, `vyrn_lower`'s own lint, which failed the run.
+    ///
+    /// So the context is stated once, here, for the whole program: this is
+    /// generation, whatever an individual `is_gen` says. It only ever ENABLES a
+    /// generation-only name; nothing reads it to refuse.
+    static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark this thread as checking a generator host, or stop. Set by
+/// `vyrn_codegen::set_gen_host`, which the two gen-host emitters bracket their
+/// whole compile with — so the checker's answer and the emitter's lowering come
+/// from one flag rather than two.
+pub fn set_gen_host(on: bool) {
+    GEN_HOST.with(|g| g.set(on));
+}
+
+/// Whether a body is checked as generation code: its own `gen fn` marker, or a
+/// whole-program generator host.
+fn in_gen_of(f: &Function) -> bool {
+    f.is_gen || GEN_HOST.with(|g| g.get())
+}
+
+/// The atom-stream primitives a generator host's synthesized decoders are
+/// written against (RFC-0076 M3b): one call that starts a reflected answer, and
+/// two that take the next atom off it. `vyrn-codegen` re-exports these names and
+/// lowers the calls in place; they are declared HERE so the checker and the
+/// emitter read one signature rather than two (RFC-0125 §3 M5, the ninth
+/// slice). They exist only under [`set_gen_host`], so no program can name them.
+pub const GEN_REFLECT: &str = "__vyrnGenReflect";
+pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
+pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+
+/// What one of those three answers, at that arity.
+fn gen_host_primitive(name: &str, argc: usize) -> Option<Type> {
+    if !GEN_HOST.with(|g| g.get()) {
+        return None;
+    }
+    match (name, argc) {
+        (GEN_REFLECT, 2) => Some(Type::Unit),
+        (GEN_NEXT_INT, 0) => Some(Type::Int),
+        (GEN_NEXT_STR, 0) => Some(Type::Str),
+        _ => None,
+    }
 }
 
 /// A cheap hash over everything a function body may refer to by name: every
@@ -1209,7 +1265,7 @@ fn check_accum_inner(
 
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
-        *checker.in_gen.borrow_mut() = f.is_gen;
+        *checker.in_gen.borrow_mut() = in_gen_of(f);
         *checker.here.borrow_mut() = f.module.clone();
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
@@ -3682,7 +3738,7 @@ impl<'a> Checker<'a> {
     fn function_body(&self, f: &Function, body: &Block) -> Result<(), Diagnostic> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
-        *self.in_gen.borrow_mut() = f.is_gen;
+        *self.in_gen.borrow_mut() = in_gen_of(f);
         self.errors.borrow_mut().clear();
         // Module state (RFC-0013) sits BELOW every frame: a local (param/let/for)
         // with the same name shadows a global, since `lookup` walks frames from
@@ -8910,6 +8966,12 @@ impl<'a> Checker<'a> {
                      so call `.{name}(..)` on a concrete type"
                 ));
             }
+        }
+        if let Some(t) = gen_host_primitive(name, args.len()) {
+            for a in args {
+                self.expr(a, scope, None, fn_ret)?;
+            }
+            return Ok(t);
         }
         let (params, ret) = self
             .sigs
