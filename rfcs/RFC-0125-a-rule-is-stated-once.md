@@ -4351,6 +4351,105 @@ kernel's refusal wording plus, for the names it accepts, the placement the
 placer wrote. Nothing reads that yet, and the report reads `own::analyze`'s
 notes until it does.
 
+**The scrutinee slice (2026-09-05): the core counts its own reads, and round
+twenty-seven's table is gone.**
+
+The third of the five. `own::analyze` folded `movecheck`'s consuming-match
+candidates into `consuming_matches`, and the core asked the table twice —
+once to mint the temporary that takes a named scrutinee, once to decide the
+binding owns what the construct takes. Both emitters asked it too. The core
+derives the answer now, and `own.rs` states none.
+
+**What the derivation is.** The question has two halves, and the core states
+each of them where it can see it. The first half is "did THIS construct give
+the value away", and the note answers it: `Leak::Aliased` carries the line
+the alias was written at, and an arm's alias is written at the construct's
+own line, so the comparison is a line against the construct's arms. An arm
+that hands its payload to a call spells the same fact as `Fate::Moved` at the
+CALL's line, which is a line of one of those arms. The second half is
+"is the construct the last owner", and that is a count over the core: the
+first build records the candidate and takes nothing, `core::last_owner` reads
+the body it made, and the second build takes every scrutinee nothing reads
+after the construct. A body with no candidate is still built once.
+
+**The core says it better than the fold did.** The fold's three screens were
+an order window over `movecheck`'s event stream, and each of them is a
+plainer thing here. Its window is the order of a read. Its loop test is the
+nesting depth of a `St::Loop`. Its "no read of the scrutinee's own NAME
+inside the arm window" — the screen that had to tell a binder's read from the
+scrutinee's, because both resolve to one row — is the difference between two
+names: a payload binder is a name of its own in the core, so an arm reading
+the payload is not a read of the scrutinee and no window is needed to say so.
+A release the plan placed is a `Drop`, and it reads the name like anything
+else.
+
+**What a first reading got wrong, and what caught it.** A rule made of the
+note alone says yes at two sites the table refuses, and both are the counting
+half. `std/vyx:vyxProcessElem` matches a `consume` parameter whose six other
+arms answer `VyxOne { node: n }` — the arms read the scrutinee itself, so the
+construct is not its last owner. `examples/refutablelet.vyrn`'s `let
+Tagged(tag, n) = local` becomes ONE match per binder (RFC-0121), so the first
+of the two is not the last reader of `local` either. Reading the note without
+the count would take a value the next statement still wants. The corpus test
+is what said so, at both sites, before anything was deleted.
+
+**Nothing moved.** Over the corpus the core's answer is the answer it gave
+before, site for site: no site where the analysis took the scrutinee and the
+core does not, and 1,602 sites where the core takes one the table never named
+— the same 1,602 the slice above counted. `VYRN_WASM_MANIFEST=check` is green
+on all 173 modules: not one emitted byte.
+
+**What that let go.** `ReleasePlan::consuming_matches` and `match_consumes`;
+the fold in `own::analyze` and its three screens; `movecheck::MentionEv`,
+`Facts::mentions` and its sink, `ConsumeCand`, `Facts::consume_cands` and the
+two halves of the candidate the `match` walk pushed, and `quiet_mentions` —
+the flag that kept `gave_up_returned`'s bookkeeping out of the arm window,
+which was a repair on a window that no longer exists. A read still advances
+the event order, because every other fold compares orders. The textual
+backend read the table directly and reads the core now
+(`Gen::match_consumes`); the direct backend's core-first read lost its
+fallback, because there is nothing to fall back to.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/own.rs` | 4,987 | 4,922 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 9,573 | 9,480 |
+| `compiler/vyrn-codegen/src/lib.rs` | 19,139 | 19,154 |
+| `compiler/vyrn-codegen/src/direct.rs` | 16,737 | 16,735 |
+| `compiler/vyrn-lower/src/core.rs` | 4,032 | 4,290 |
+
+The structural census over `movecheck.rs` moves with it: placement rows
+2,295 → 2,250, shared machinery 3,474 → 3,426.
+
+**The cost is one more build, and only where there is a question.** `build`
+and `build_outside` build twice where the body holds a candidate, and once
+everywhere else. The site export is the longest reader of the core in the
+repo, and it exports its 82 routes in 364 s.
+
+**Gates.** As the slice above, and all green: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`, 548 and 74
+ignored; `kernel`, `coretables`, `typed`, `effects` with `--ignored` (1, 1, 1,
+2 at 111 s, 87 s, 214 s, 195 s); `fixtures` with `--ignored`, 48 s;
+`vyrn-frontend`, 1,249; the workspace less `vyrn-cli` with `--skip
+_natively`, 1,425; `vyrn-lsp`, 99, and `vyrn-genwasm`, 3; `memory` with
+`--test-threads=1`, 10; parity in release with `--ignored`, 41 of 41 in
+293 s; the residue ratchet, 188 s; `VYRN_WASM_MANIFEST=check`, 173 hashed and
+no byte moved; the generator test with a fresh `VYRN_GEN_CACHE_DIR` and
+`--features wasm-gen`, 12 and the cross-engine one; `testsweep` with
+`--ignored`, 30 s; `vyrn doc --std --verify`, 41 files; and the site — 82
+routes and 14 assets, and `vyrn test` green over `export.vyrn` and
+`site/app`.
+
+**Where the last two stop, after this one.** `arg_drops` and `store_owned`
+stand where the record above put them, and this slice moves neither. What it
+adds to that record is a shape: a rule the kernel cannot state can still be
+DERIVED, if the core can state it over its own body and the two-build
+arrangement can carry the answer from the first build to the second. That is
+what `store_owned` needs — its blocker is a `MissingKind` for a store, which
+is the same carriage one step further on — and it is not what `arg_drops`
+needs, whose three whole-program closures are still a post-pass over every
+body and must be hoisted before the core builds one.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

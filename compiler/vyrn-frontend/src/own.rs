@@ -1270,12 +1270,6 @@ pub struct ReleasePlan {
     /// nothing binds, lenders screened — the backends free the discarded
     /// value right after the call.
     pub discarded_results: std::collections::HashSet<usize>,
-    /// Round twenty-seven: `Expr::Match` nodes over a WHOLE named local whose
-    /// binding nothing reads after the match — the extraction may free the
-    /// payload BOX. The binding's row goes `Aliased` (never released), the
-    /// alias owns the payload, and the box was nobody's. See the fold in
-    /// `analyze`.
-    pub consuming_matches: std::collections::HashSet<usize>,
     /// RFC-0114 R1′: the `Expr::Field` nodes whose unnamed receiver this
     /// frame owns — freed right after the read (the header for a projection,
     /// the whole record deep after a scalar field).
@@ -1410,11 +1404,6 @@ impl ReleasePlan {
     pub fn discarded_result(&self, at: usize) -> bool {
         let at = self.resolve(at);
         self.discarded_results.contains(&at)
-    }
-
-    pub fn match_consumes(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        self.consuming_matches.contains(&at)
     }
 
     /// RFC-0114 M2: does this store release the value it replaces?
@@ -1934,59 +1923,6 @@ fn analyze_now(program: &Program) -> Ownership {
         }
         early
     };
-    // Round twenty-seven: the consuming-match upgrade. A `match o` over a
-    // whole named local whose arm hands the payload out marks `o` Aliased —
-    // o releases nothing, the alias owns the payload, and the payload's BOX
-    // was nobody's (one 8-16 byte block per extraction; matchown's table,
-    // htmltree's and regexredux's box columns). Where nothing reads `o`
-    // after the match — no mention with a later order, no read of the
-    // scrutinee NAME inside the arm window (binder reads resolve to the same
-    // row but keep their own name), and the binding's initializing write in
-    // the same loop context as the match (per-iteration freshness) — the
-    // match may free the boxes its arms extract, exactly as it does for a
-    // temporary scrutinee.
-    //
-    // An arm hands the payload out two ways, and the row spells them
-    // differently. `JObj(fs) => fs` is an ALIAS — `note_arm_value` reads the
-    // arm's place path and writes `Gone::Aliased`. `JObj(fs) => f(fs)` is a
-    // MOVE — the call takes the binder, and the take lands on the scrutinee's
-    // own row, because a binder read resolves there. Both give the payload
-    // away, so both are this upgrade's case: reading only the first left the
-    // second a match whose binder is a BORROW and whose scrutinee is still
-    // held, and the placer then added a deep release of a value the arm had
-    // already given to the callee (RFC-0125 §3 M5, the seventh slice's
-    // `$schema` double free). The three screens below are what makes the
-    // second sound, and they are the same three: nothing reads the row after
-    // the match, no read of the scrutinee's own NAME inside the window — so a
-    // move of `o` ITSELF rather than of a binder is refused here — and one
-    // loop context.
-    let consuming_matches: std::collections::HashSet<usize> = {
-        use crate::movecheck::EvKind;
-        let mut init_loops: HashMap<usize, &Vec<u32>> = HashMap::new();
-        for ev in &facts.store_events {
-            if let EvKind::Write { .. } = ev.kind {
-                init_loops.entry(ev.key).or_insert(&ev.loops);
-            }
-        }
-        facts
-            .consume_cands
-            .iter()
-            .filter(|c| {
-                matches!(
-                    lets.get(&c.key).and_then(|r| r.gone.as_ref()),
-                    Some(
-                        crate::movecheck::Gone::Aliased { .. }
-                            | crate::movecheck::Gone::Moved { .. }
-                    )
-                ) && init_loops.get(&c.key).is_some_and(|l| **l == c.loops)
-                    && !facts.mentions.iter().any(|m| {
-                        m.key == c.key
-                            && (m.order > c.end || (m.order > c.start && m.name == c.scrut_name))
-                    })
-            })
-            .map(|c| c.match_id)
-            .collect()
-    };
     // Round twenty-eight: the discarded set, lenders already screened by
     // `facts()`.
     let discarded_results: std::collections::HashSet<usize> =
@@ -2180,7 +2116,6 @@ fn analyze_now(program: &Program) -> Ownership {
         store_owned,
         store_fresh,
         malloc_scrutinees,
-        consuming_matches,
         discarded_results,
         receiver_frees,
         receiver_malloc,

@@ -1367,22 +1367,20 @@ impl<'a> Cx<'a> {
     /// deletion slice): did the construct at `node` TAKE its scrutinee, so
     /// the boxes its binders came out of are its own to give back?
     ///
-    /// The previous slice measured this row and left it alone: the core's
-    /// answer rested on the scrutinee binding's ownership, and round
-    /// twenty-seven's table is what made that binding `Aliased`. The core
-    /// states the ownership apart from the decision now
-    /// (`core::Builder::own_the_scrutinee`), and the six sites that
-    /// disagreed agree — `compiler/vyrn-cli/tests/coretables.rs` counts
-    /// them, and the count is zero. A site the core states nothing for
-    /// keeps the plan's answer.
+    /// Since RFC-0125 §3 M3's third derivation slice the answer is the
+    /// core's own and `own.rs` states none: the first build records which
+    /// constructs give a named scrutinee away, `core::last_owner` decides
+    /// which of them the frame reads no more, and the second build states
+    /// the take. A site the core has no answer for is a construct that took
+    /// nothing.
     fn match_consumes(&self, node: usize) -> bool {
         let Some(f) = &self.facts else {
-            return self.plan.match_consumes(node);
+            return false;
         };
-        match f.consuming.get(&self.plan.key_of(node)) {
-            Some(took) => *took,
-            None => self.plan.match_consumes(node),
-        }
+        f.consuming
+            .get(&self.plan.key_of(node))
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Round forty's table read off the core (RFC-0125 §3 M3, the

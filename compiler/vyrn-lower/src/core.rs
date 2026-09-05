@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
-    ArmBody, Block, Capability, Expr, Function, LambdaBody, Pattern, Program, Stmt, Type,
+    ArmBody, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program, Stmt, Type,
 };
 use vyrn_frontend::own::{DropKind, Exit, Fate, Leak, Owned, Ownership, Release};
 use vyrn_frontend::prelude;
@@ -474,6 +474,11 @@ pub struct Body {
     /// borrowed inputs, its own bindings are ordinary, and the plan keys its
     /// rows by its own nodes under the enclosing function's name.
     pub lambdas: Vec<Body>,
+    /// RFC-0125 §3 M3, the third derivation slice: the `(construct, name)`
+    /// pairs whose note says the construct gave the binding away. Whether it
+    /// may TAKE it is decided over this body by [`last_owner`], and the
+    /// second build acts on what that decided.
+    pub(crate) cands: Vec<(usize, Name)>,
 }
 
 impl Body {
@@ -719,6 +724,159 @@ fn borrow_root(sv: &Val, consuming: bool) -> Option<Name> {
     }
 }
 
+/// Which candidate constructs are their scrutinee's LAST owner — RFC-0125
+/// §3 M3, the third derivation slice, and the rule `own.rs`'s
+/// `consuming_matches` used to state off `movecheck`'s event stream.
+///
+/// The question is an order over the core the first build made. A construct
+/// takes its named scrutinee where nothing reads that name after it — a
+/// payload binder is a name of its own, so an arm reading the payload is not
+/// a read of the scrutinee, and a release the plan placed is a `Drop` and
+/// reads it — and where the binding and the construct stand under the same
+/// loops, so one value is not taken twice.
+///
+/// Every screen the fold applied is here in the core's own terms: its order
+/// window is an order, its loop test is a nesting depth, and its "no read of
+/// the scrutinee's own NAME" is the difference between two names.
+fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
+    let mut out = std::collections::HashSet::new();
+    for f in top.frames() {
+        if f.cands.is_empty() {
+            continue;
+        }
+        let mut w = Reads {
+            last: vec![0; f.names.len()],
+            bound: vec![usize::MAX; f.names.len()],
+            switches: Vec::new(),
+            order: 0,
+        };
+        w.stmts(&f.stmts, 0);
+        for p in &f.params {
+            w.bound[*p as usize] = 0;
+        }
+        for (site, n) in &f.cands {
+            let at = w.switches.iter().find(|(s, m, _, _)| s == site && m == n);
+            if let Some((_, _, depth, order)) = at {
+                if w.last[*n as usize] == *order && w.bound[*n as usize] == *depth {
+                    out.insert(*site);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One frame's last read of each name, the loop depth each name was bound
+/// at, and every switch over a bare name with its depth and the order of its
+/// own read. See [`last_owner`].
+struct Reads {
+    last: Vec<usize>,
+    bound: Vec<usize>,
+    switches: Vec<(usize, Name, usize, usize)>,
+    order: usize,
+}
+
+impl Reads {
+    fn val(&mut self, v: &Val) {
+        self.order += 1;
+        if let Val::Name(n) = v {
+            self.last[*n as usize] = self.order;
+        }
+    }
+
+    fn place(&mut self, p: &Place) {
+        match p {
+            Place::Name(n) => {
+                self.order += 1;
+                self.last[*n as usize] = self.order;
+            }
+            Place::Global(_) => {}
+            Place::Field(b, _) => self.place(b),
+            Place::Elem(b, v) | Place::Key(b, v) => {
+                self.place(b);
+                self.val(v);
+            }
+        }
+    }
+
+    fn rhs(&mut self, r: &Rhs) {
+        match r {
+            Rhs::Val(v) => self.val(v),
+            Rhs::Read(p) | Rhs::Take(p) => self.place(p),
+            Rhs::Call { args, .. } => {
+                for (v, _) in args {
+                    self.val(v);
+                }
+            }
+            Rhs::Prim(vs, _) | Rhs::Make(vs) => {
+                for v in vs {
+                    self.val(v);
+                }
+            }
+        }
+    }
+
+    fn name(&mut self, n: Name) {
+        self.order += 1;
+        self.last[n as usize] = self.order;
+    }
+
+    fn stmts(&mut self, stmts: &[St], depth: usize) {
+        for st in stmts {
+            match st {
+                St::Let(n, r) => {
+                    self.rhs(r);
+                    self.bound[*n as usize] = depth;
+                }
+                St::Store { place, value, .. } => {
+                    self.place(place);
+                    self.val(value);
+                }
+                St::Drop(n, _, _) => self.name(*n),
+                St::Row { name, .. } => self.name(*name),
+                St::If {
+                    cond, then, els, ..
+                } => {
+                    self.val(cond);
+                    self.stmts(then, depth);
+                    self.stmts(els, depth);
+                }
+                St::Loop(b) => self.stmts(b, depth + 1),
+                St::Block { body, .. } => self.stmts(body, depth),
+                St::Return { value: Some(v), .. } => self.val(v),
+                St::Switch { on, arms, .. } => {
+                    self.val(on);
+                    if let (Val::Name(n), Some(a)) = (on, arms.first()) {
+                        self.switches.push((a.site, *n, depth, self.order));
+                    }
+                    for a in arms {
+                        for b in &a.binds {
+                            self.bound[*b as usize] = depth;
+                        }
+                        self.stmts(&a.body, depth);
+                    }
+                }
+                St::Do(r, _) => self.rhs(r),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A `match`'s own source lines: its head, and the last line an arm's value
+/// starts on. Read by [`Builder::takes_scrutinee`], which asks whether the
+/// note on a named scrutinee was written inside this construct.
+///
+/// A BLOCK arm (RFC-0118) yields nothing, so it hands no payload out as a
+/// value and adds no line here.
+fn arms_span(line: usize, arms: &[MatchArm]) -> (usize, usize) {
+    let last = arms.iter().fold(line, |m, a| match &a.body {
+        ArmBody::Expr(e) => m.max(e.line()),
+        ArmBody::Block(_) => m,
+    });
+    (line, last)
+}
+
 /// The kind of an expression, for a gap's detail.
 fn expr_kind(e: &Expr) -> &'static str {
     match e {
@@ -779,7 +937,28 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
 }
 
 /// Build the core of one instance.
+///
+/// Twice where the body has a `match` over a NAMED scrutinee whose note says
+/// this construct gave the value away: the first build records the candidate
+/// and takes nothing, [`last_owner`] reads the core it made, and the second
+/// build takes the scrutinees it named. A body with no candidate is built
+/// once (RFC-0125 §3 M3, the third derivation slice).
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
+    let none = std::collections::HashSet::new();
+    let first = build_seeded(program, inst, own, &none)?;
+    let seed = last_owner(&first);
+    if seed.is_empty() {
+        return Ok(first);
+    }
+    build_seeded(program, inst, own, &seed)
+}
+
+fn build_seeded(
+    program: &Program,
+    inst: &Instance<'_>,
+    own: &Ownership,
+    seed: &std::collections::HashSet<usize>,
+) -> Result<Body, Gap> {
     let mut types: HashMap<usize, Type> = HashMap::new();
     let mut produced: HashMap<usize, Type> = HashMap::new();
     for r in &inst.rows {
@@ -813,6 +992,7 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
             params: Vec::new(),
             stmts: Vec::new(),
             lambdas: Vec::new(),
+            cands: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -823,6 +1003,7 @@ pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        seed,
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -881,6 +1062,8 @@ pub fn build_module_state<'a>(
     own: &'a Ownership,
     rows: &[crate::Row<'a>],
 ) -> Result<Body, Gap> {
+    let seed = std::collections::HashSet::new();
+    let seed = &seed;
     let mut types: HashMap<usize, Type> = HashMap::new();
     let mut produced: HashMap<usize, Type> = HashMap::new();
     for r in rows {
@@ -909,6 +1092,7 @@ pub fn build_module_state<'a>(
             params: Vec::new(),
             stmts: Vec::new(),
             lambdas: Vec::new(),
+            cands: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -919,6 +1103,7 @@ pub fn build_module_state<'a>(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        seed,
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -952,6 +1137,25 @@ pub fn build_outside<'a>(
     file: Option<String>,
     block: &Block,
     rows: &[crate::Row<'a>],
+) -> Result<Body, Gap> {
+    let none = std::collections::HashSet::new();
+    let first = build_outside_seeded(program, own, name, file.clone(), block, rows, &none)?;
+    let seed = last_owner(&first);
+    if seed.is_empty() {
+        return Ok(first);
+    }
+    build_outside_seeded(program, own, name, file, block, rows, &seed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_outside_seeded<'a>(
+    program: &'a Program,
+    own: &'a Ownership,
+    name: &str,
+    file: Option<String>,
+    block: &Block,
+    rows: &[crate::Row<'a>],
+    seed: &std::collections::HashSet<usize>,
 ) -> Result<Body, Gap> {
     let mut types: HashMap<usize, Type> = HashMap::new();
     let mut produced: HashMap<usize, Type> = HashMap::new();
@@ -988,6 +1192,7 @@ pub fn build_outside<'a>(
             params: Vec::new(),
             stmts: Vec::new(),
             lambdas: Vec::new(),
+            cands: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -998,6 +1203,7 @@ pub fn build_outside<'a>(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        seed,
     };
     let mut out = Vec::new();
     b.block(block, &mut out)?;
@@ -1040,6 +1246,10 @@ struct Builder<'a> {
     /// or a `?` inside such a loop closes every one of them on its way out
     /// (the direct backend's cursor stack), and the loop's end closes its own.
     stream_loops: Vec<Name>,
+    /// The constructs this build may take their named scrutinee at — what
+    /// [`last_owner`] decided over the build before it. Empty on the first
+    /// build, which is where the candidates come from.
+    seed: &'a std::collections::HashSet<usize>,
 }
 
 impl<'a> Builder<'a> {
@@ -1554,7 +1764,7 @@ impl<'a> Builder<'a> {
                 line,
             } => {
                 let sty = self.ty_of(scrutinee)?;
-                let (sv, consuming) = self.scrutinee(scrutinee, sid, out)?;
+                let (sv, consuming) = self.scrutinee(scrutinee, sid, None, out)?;
                 let mut t = Vec::new();
                 let mark = self.scope.len();
                 let from = borrow_root(&sv, consuming);
@@ -2009,11 +2219,16 @@ impl<'a> Builder<'a> {
     }
 
     /// The scrutinee of a `match`, `if let` or `?`: the value it switches on,
-    /// and whether the construct consumed it.
+    /// and whether the construct consumed it. `lines` is the construct's own
+    /// first and last source line, which is how a give written inside it is
+    /// told from a move after it ([`Builder::takes_scrutinee`]). `None` where
+    /// the construct has no arm that can hand a payload out of a NAMED
+    /// scrutinee — an `if let`, a `?` — and a named local is read there.
     fn scrutinee(
         &mut self,
         e: &'a Expr,
         construct: usize,
+        lines: Option<(usize, usize)>,
         out: &mut Vec<St>,
     ) -> Result<(Val, bool), Gap> {
         if !matches!(e, Expr::Var { .. }) && is_place_read(e) {
@@ -2025,18 +2240,25 @@ impl<'a> Builder<'a> {
         match e {
             Expr::Var { name, .. } if self.lookup(name).is_some() => {
                 let n = self.lookup(name).unwrap();
-                self.own_the_scrutinee(n, construct);
+                if !self.takes_scrutinee(n, lines) {
+                    return Ok((Val::Name(n), false));
+                }
+                // The note says this construct gave the value away. Whether
+                // it may TAKE it is the second question, and the first build
+                // answers it over the core it just made ([`last_owner`]): the
+                // candidate is recorded here, and only a seeded site acts.
+                self.body.cands.push((construct, n));
+                if !self.seed.contains(&construct) {
+                    return Ok((Val::Name(n), false));
+                }
+                self.own_the_scrutinee(n);
                 if !self.body.names[n as usize].releases {
                     return Ok((Val::Name(n), false));
                 }
-                if self.own.plan.match_consumes(construct) {
-                    let t = self.temp(self.body.names[n as usize].ty.clone(), e.line());
-                    out.push(St::Let(t, Rhs::Val(Val::Name(n))));
-                    self.by_binding.insert(construct, t);
-                    Ok((Val::Name(t), true))
-                } else {
-                    Ok((Val::Name(n), false))
-                }
+                let t = self.temp(self.body.names[n as usize].ty.clone(), e.line());
+                out.push(St::Let(t, Rhs::Val(Val::Name(n))));
+                self.by_binding.insert(construct, t);
+                Ok((Val::Name(t), true))
             }
             Expr::Consume { place, line } => match &**place {
                 Expr::Var { name, .. } => {
@@ -2088,23 +2310,57 @@ impl<'a> Builder<'a> {
     /// and the take is here; so where a construct the plan calls consuming
     /// names the binding, the value is this frame's and the take is stated.
     ///
-    /// Stated at the take and nowhere else. A binding aliased by anything
-    /// but a consuming construct — `let t = s`, an arm handing the loop's
+    /// Stated at the take and nowhere else. A binding given away by anything
+    /// but this construct — `let t = s`, an arm handing the loop's
     /// accumulator back — keeps the note's answer, because nothing in this
     /// core takes it and an owned name nothing takes is a release the
     /// placer would add where the plan places none.
-    fn own_the_scrutinee(&mut self, n: Name, construct: usize) {
+    fn own_the_scrutinee(&mut self, n: Name) {
         let info = &self.body.names[n as usize];
         if info.releases || !info.heap || info.borrow {
             return;
         }
-        let aliased = matches!(
-            self.fate_of(&info.source, info.line),
-            Some(Fate::Leaked(Leak::Aliased { .. }))
-        );
-        if aliased && self.own.plan.match_consumes(construct) {
-            self.body.names[n as usize].releases = true;
+        self.body.names[n as usize].releases = true;
+    }
+
+    /// Whether the construct spanning `lines` is the one this binding gave
+    /// its value to — RFC-0125 §3 M3, the third derivation slice.
+    ///
+    /// An arm hands the payload out two ways, and the note spells them
+    /// differently. `Some(v) => v` is an ALIAS, written at the construct's
+    /// own line (`movecheck::note_arm_value`). `Words(ws) => takeWords(ws)`
+    /// is a MOVE: the call takes the binder, a binder read resolves to the
+    /// scrutinee's row, and the note is written at the CALL's line — which is
+    /// a line of one of these arms. So "did THIS construct take it" is the
+    /// note's line against the construct's own, and the core states it with
+    /// no table.
+    ///
+    /// The upper bound is what tells a give inside the construct from a move
+    /// after it: `match o { .. }` and then `takeString(o)` is a binding this
+    /// construct did not take, and reading the note without the bound would
+    /// take a value the next statement still wants. An answer too WIDE is a
+    /// refusal and never a double free — the take is stated in the core, so
+    /// the kernel refuses the later read rather than freeing behind it.
+    ///
+    /// A `consume` PARAMETER carries no note, because a note is a `let`'s
+    /// (`own::Walk::stmt`). It needs none: the frame owns it outright and no
+    /// other binding names it, so a construct that reads it is a candidate
+    /// and the count below decides.
+    fn takes_scrutinee(&self, n: Name, lines: Option<(usize, usize)>) -> bool {
+        let Some((first, last)) = lines else {
+            return false;
+        };
+        let info = &self.body.names[n as usize];
+        if !info.heap || info.borrow {
+            return false;
         }
+        let at = match self.fate_of(&info.source, info.line) {
+            Some(Fate::Leaked(Leak::Aliased { line })) => *line,
+            Some(Fate::Moved { line, .. }) => *line,
+            Some(_) => return false,
+            None => return self.body.params.contains(&n),
+        };
+        first <= at && at <= last
     }
 
     /// Whether the construct took the temporary `t` it owns: the payloads
@@ -2454,6 +2710,7 @@ impl<'a> Builder<'a> {
                 params: Vec::new(),
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
+                cands: Vec::new(),
             },
         );
         self.body.name = format!("{}@lambda:{line}", outer.name);
@@ -2771,7 +3028,8 @@ impl<'a> Builder<'a> {
                 let sty = self.ty_of(scrutinee)?;
                 let mid = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
-                let (sv, consuming) = self.scrutinee(scrutinee, mid, out)?;
+                let (sv, consuming) =
+                    self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
                     let mut body = Vec::new();
@@ -2829,7 +3087,7 @@ impl<'a> Builder<'a> {
                 let ity = self.ty_of(expr)?;
                 let tid = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
-                let (sv, consuming) = self.scrutinee(expr, tid, out)?;
+                let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
                 let decls = vyrn_frontend::types::decl_map(self.program);
                 // A DECLARED `Fallible` enum (RFC-0080 M3) asks its impl; the two
                 // built-in sums have tags, and since RFC-0126 §8.11's M4b they
