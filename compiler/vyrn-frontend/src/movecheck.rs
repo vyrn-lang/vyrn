@@ -954,6 +954,7 @@ fn run(program: &Program, want: Want) -> Run {
         carrying_locals: RefCell::new(HashSet::new()),
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mentions: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
+        quiet_mentions: std::cell::Cell::new(false),
         consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         arm_payloads: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
@@ -1335,6 +1336,11 @@ struct MoveCheck<'a> {
     carrying_locals: RefCell<HashSet<String>>,
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
     mentions: Option<RefCell<Vec<MentionEv>>>,
+    /// Whether the walk is inside `gave_up_returned`'s bookkeeping over a
+    /// returned JOIN's scrutinee. A mention is a READ, and that walk reads
+    /// nothing. The order still advances, so every other fold sees the numbers
+    /// it saw before; only the sink is skipped.
+    quiet_mentions: std::cell::Cell<bool>,
     consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
     arm_payloads: Option<RefCell<Vec<ArmPayloadEv>>>,
     discarded: Option<RefCell<Vec<(usize, String)>>>,
@@ -1888,6 +1894,9 @@ impl MoveCheck<'_> {
         }
         let o = self.ev_order.get();
         self.ev_order.set(o + 1);
+        if self.quiet_mentions.get() {
+            return;
+        }
         sink.borrow_mut().push(MentionEv {
             key,
             name: name.to_string(),
@@ -2228,7 +2237,17 @@ impl MoveCheck<'_> {
             Expr::Match {
                 scrutinee, arms, ..
             } => {
+                // The scrutinee's row is marked, and NOT as a read: every arm
+                // has already written its own verdict there. Minting a read
+                // put a mention of the scrutinee's NAME inside the arm window,
+                // which is what `own`'s consuming-match screen refuses, so
+                // every `return match o { .. }` fell out of the upgrade — its
+                // binder stayed a borrow, `o` stayed held, and the placer then
+                // released a payload the arm had given away (RFC-0125 §3 M5,
+                // the seventh slice).
+                let was = self.quiet_mentions.replace(true);
                 self.gave_up_returned(scrutinee, gone);
+                self.quiet_mentions.set(was);
                 for arm in arms {
                     if let crate::ast::ArmBody::Expr(b) = &arm.body {
                         self.gave_up_returned(b, gone);

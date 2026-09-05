@@ -2026,6 +2026,21 @@ fn analyze_now(program: &Program) -> Ownership {
     // the same loop context as the match (per-iteration freshness) — the
     // match may free the boxes its arms extract, exactly as it does for a
     // temporary scrutinee.
+    //
+    // An arm hands the payload out two ways, and the row spells them
+    // differently. `JObj(fs) => fs` is an ALIAS — `note_arm_value` reads the
+    // arm's place path and writes `Gone::Aliased`. `JObj(fs) => f(fs)` is a
+    // MOVE — the call takes the binder, and the take lands on the scrutinee's
+    // own row, because a binder read resolves there. Both give the payload
+    // away, so both are this upgrade's case: reading only the first left the
+    // second a match whose binder is a BORROW and whose scrutinee is still
+    // held, and the placer then added a deep release of a value the arm had
+    // already given to the callee (RFC-0125 §3 M5, the seventh slice's
+    // `$schema` double free). The three screens below are what makes the
+    // second sound, and they are the same three: nothing reads the row after
+    // the match, no read of the scrutinee's own NAME inside the window — so a
+    // move of `o` ITSELF rather than of a binder is refused here — and one
+    // loop context.
     let consuming_matches: std::collections::HashSet<usize> = {
         use crate::movecheck::EvKind;
         let mut init_loops: HashMap<usize, &Vec<u32>> = HashMap::new();
@@ -2040,7 +2055,10 @@ fn analyze_now(program: &Program) -> Ownership {
             .filter(|c| {
                 matches!(
                     lets.get(&c.key).and_then(|r| r.gone.as_ref()),
-                    Some(crate::movecheck::Gone::Aliased { .. })
+                    Some(
+                        crate::movecheck::Gone::Aliased { .. }
+                            | crate::movecheck::Gone::Moved { .. }
+                    )
                 ) && init_loops.get(&c.key).is_some_and(|l| **l == c.loops)
                     && !facts.mentions.iter().any(|m| {
                         m.key == c.key

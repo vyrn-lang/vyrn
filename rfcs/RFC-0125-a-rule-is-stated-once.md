@@ -2257,13 +2257,18 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 
 | kind | lines | share |
 |---|---|---|
-| a rule the kernel now gives | 1,045 | 10 per cent |
+| a rule the kernel now gives | 1,009 | 10 per cent |
 | a rule only the checker gives | 723 | 7 per cent |
 | placement rows for the engines | 2,362 | 23 per cent |
 | a fix menu | 81 | 1 per cent |
 | shared machinery | 3,657 | 36 per cent |
 | tests | 2,187 | 22 per cent |
 | **the file** | **10,055** | |
+| placement rows for the engines | 2,373 | 24 per cent |
+| a fix menu | 81 | 1 per cent |
+| shared machinery | 3,657 | 37 per cent |
+| tests | 2,172 | 22 per cent |
+| **the file** | **10,015** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
@@ -2278,7 +2283,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 27 | shared machinery | the entry points a caller uses |
 | `fn run(program: &Program, want: Want) -> Run` | 348 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
 | `pub fn check(program: &Program) -> Result<(), String>` | 10 | shared machinery | the historical string shim |
-| `struct MoveCheck<'a>` | 153 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
+| `struct MoveCheck<'a>` | 158 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
 | `enum Borrow` | 48 | a rule the kernel now gives | what a borrow is, in words — `core::BorrowKind::what` is this sentence |
 | `fn fixes(&self, root: &str, path: &str) -> Vec<String>` | 24 | a fix menu | the named ways out of a borrow error |
 | `enum TakeForm` | 18 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
@@ -2289,7 +2294,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn enter(&self)` | 35 | shared machinery | the three scope stacks, read as one environment |
 | `fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed)` | 37 | a rule the kernel now gives | a write to a place ends every alias that reads out of it (row 05) |
 | `fn place_key(&self, e: &Expr) -> usize` | 20 | placement rows for the engines | the key a row is written under |
-| `fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize` | 479 | placement rows for the engines | the recording: temporaries, store events, branches, reads, exits, takes, holes, place stores, hand-overs at a `return` |
+| `fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize` | 492 | placement rows for the engines | the recording: temporaries, store events, branches, reads, exits, takes, holes, place stores, hand-overs at a `return` |
 | `fn is_bound_name(&self, e: &Expr) -> bool` | 18 | placement rows for the engines | whether a `let` names storage somebody else owns, for reclamation |
 | `fn names_a_place(&self, value: &Expr) -> Option<&'static str>` | 76 | a rule the kernel now gives | whether a value reads a place that owns it — the kernel's alias table |
 | `fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String>` | 36 | a fix menu | the ways out that exist in THIS function |
@@ -5122,6 +5127,189 @@ generator test with a fresh `VYRN_GEN_CACHE_DIR`; `testsweep` with `--ignored`,
 site — `vyrn run site/export.vyrn out` writes its 82 routes and 14 assets, and
 `vyrn test` is green over `export.vyrn` and `site/app`, 189 blocks. Then the new
 column: `VYRN_SERVE_ENGINE=wasm` over `serve` and `rpc`, green.
+
+#### The seventh slice (2026-09-05): the arm that gives its payload to a call
+
+The sixth slice left one row red and named it: `examples/bin/server.vyrn` faults
+in its own `main` at `/openapi.json`, under `vyrn run --engine wasm` and under
+the `wasmtime` CLI alike, with `memory fault at wasm address 0x68637324` — the
+four bytes `$sch`, the start of a literal, read as a pointer. It is fixed, and
+`universal_pages` is green on both engines.
+
+**The program.** Twenty-six lines, no imports, and the bytes are the fault
+address:
+
+```vyrn
+type Json =
+    | JNull
+    | JObj(Array<String>)
+
+fn takeAll(fs: consume Array<String>) -> Array<String> {
+    return fs
+}
+
+fn main() -> Int64 {
+    let j = JObj(["$schema"])
+    let k = match j {
+        JObj(fs) => takeAll(fs),
+        JNull => [],
+    }
+    for f in k {
+        print(f)
+    }
+    return 0
+}
+```
+
+Write `JObj(fs) => fs` instead of `JObj(fs) => takeAll(fs)` and all three
+engines agree. The difference is not what the arm hands out. It is HOW.
+
+**One act, two spellings, and the fold read one of them.** An arm gives its
+payload away two ways. `JObj(fs) => fs` NAMES a place, and `note_arm_value`
+writes `Gone::Aliased` on the scrutinee's row. `JObj(fs) => takeAll(fs)` gives
+the binder to a call that consumes it, and the take lands on that same row as
+`Gone::Moved`, because a binder read resolves to the scrutinee's row. The two
+rows say the same thing about the same buffer.
+
+`own::analyze`'s consuming-match upgrade read only the first. So this match was
+not a consuming match: the core built `switch j!` with a BORROW binder, `j` was
+still held at the return, and M3's placer — the pass that adds the releases the
+plan owes — added `release j : Deep<enum { JNull | JObj }>` there. `takeAll` had
+already given the array to `k`, which releases it. One buffer, two owners.
+`VYRN_KERNEL_TRACE=1` prints the added row, and it is the whole diagnosis:
+
+```
+placer: main `j` (line 9) Exit at Return site .. kind Some(Deep(Enum([..])))
+```
+
+The fold now reads both rows. Its three screens are what make the second sound,
+and they are the screens it already had: nothing reads the row after the match,
+no read of the scrutinee's own NAME inside the arm window — so a move of `o`
+ITSELF rather than of a binder is still refused — and one loop context.
+
+**The served file needed the other half.** `std/openapi` generates `oaWithId`,
+and its match is in RETURN position:
+
+```vyrn
+fn oaWithId(id: String, j: consume Json) -> Json {
+    return match j {
+        JObj(fs) => oaObjWithId(id, fs),
+        ...
+    }
+}
+```
+
+`gave_up_returned` is rule 3's conservative walk — what a returned expression
+may carry out of the function — and it recurses into a returned join's
+SCRUTINEE. It marks the row by calling `took`, and `took` mints a MENTION. The
+screen above refuses a read of the scrutinee's NAME inside the arm window, and
+that mention is one. So every `return match o { .. }` fell out of the upgrade,
+which is the spelling `std/json`, `std/openapi` and every decoder in `std/` ends
+on.
+
+That walk reads nothing. The returned expression is the match's VALUE, and every
+arm has already written its own verdict on the row: this was a THIRD statement
+of one fact, and the two that were right were already there. The walk marks the
+row quietly now — the event order still advances, so every other fold sees the
+numbers it saw before, and only the mention sink is skipped.
+
+**Which route was wrong.** Both compiling routes, from the one plan.
+
+| route | the program above, before | after |
+|---|---|---|
+| the interpreter | `$schema` | `$schema` |
+| `vyrn run --engine wasm` | `memory fault at wasm address 0x68637324` | `$schema` |
+| `vyrn build`, text IR through clang | heap corruption at exit, `0xC0000374` | `$schema` |
+
+The interpreter reference-counts and was right about every line, which is why
+the fixture oracle could not see this. The direct backend's free list met the
+second free first and read a String's bytes as the next block's pointer; the
+native route's allocator noticed at exit. The same wrong plan broke both.
+
+**Why a miscompile fix moves one emitted byte.** `VYRN_WASM_MANIFEST=check`
+answers green on 172 of 173 examples with the fix in, and the row that moves is
+`matchown.vyrn` — which moves because the EXAMPLE changed, not because the
+emitter did. No other example of the corpus has an arm that gives its payload to
+a consuming call: `matchown.vyrn` is the example for this rule and it held the
+other two arrangements, and every other match in the corpus is over a temporary.
+`examples/bin/server.vyrn` has the shape, and the corpus walk reads
+`examples/*.vyrn` and not `examples/bin/`. So the third arrangement is in
+`matchown.vyrn` now, twice: once out of a named local, once out of a `consume`
+parameter in return position, with a type that declares `impl Owned` because the
+program that found it had one.
+
+**A second miscompile, native only, recorded and not fixed.** It was found
+reducing the first. Nine lines:
+
+```vyrn
+type Json =
+    | JNull
+    | JObj(Array<String>)
+
+fn main() -> Int64 {
+    let j = JObj(["$schema"])
+    let k = match j {
+        JObj(fs) => fs,
+        JNull => ["z"],
+    }
+    for f in k {
+        print(f)
+    }
+    return 0
+}
+```
+
+`vyrn build` refuses to link it: `'%t20' defined with type '{ ptr, i64, i64 }'
+but expected '[1 x ptr]'`. Write `[]` for the second arm and it links and prints
+a POINTER where the String belongs. The interpreter and the direct backend are
+both right. The cause is in `vyrn-codegen`'s match-expression emitter, which
+reconciles the join's type from the ARMS — the last arm that answers wins —
+rather than reading the type the checker gave the match node. It is an emitter's
+second copy of a rule the core states, which is the class M5 exists to delete,
+and the native route has no node-type map to read instead. So it waits for the
+route rather than for a patch. No example reaches it: an array LITERAL beside an
+array VALUE in one join is a shape `std/` does not write, and `matchown.vyrn`'s
+own `emptyStrs()` is the spelling that avoids it.
+
+**Two gates were already red, for reasons of their own.** Both are repaired
+here, because a gate that fails for an old reason hides the new one.
+
+- `fixtures.rs`'s `CENSUS` still read `serve no` while M5's own table read
+  `yes`. The sixth slice moved the table and not the constant, and the test
+  between them is the one that says "one table, not two".
+- `toolchain_pin.rs` asserted that no `tools/` sits above a temp directory. The
+  test scratch moved under `compiler/target` so that two worktrees can gate at
+  once, and this checkout's `tools/` is above it. The row asserts what it is
+  about now — no pin is no refusal and no pinned path, so the resolver falls
+  through to the walk — and not where the machine keeps its directories.
+
+`movecheck.rs` grew by nineteen lines, so M3's structural census moved with it.
+The table there had also drifted from what the test asserts; it reads the
+asserted numbers now.
+
+**Gates.** In §1.4's order, one at a time, in the foreground: `cargo fmt --all
+--check`, clean; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`
+with no filter, 546 passed and 74 ignored; the `kernel`, `coretables`, `typed`
+and `effects` suites with `--ignored` (1, 1, 1 and 2, at 83 s, 69 s, 168 s and
+164 s); `fixtures` with `--ignored`, the whole corpus against its recorded
+output, 52 s; `vyrn-frontend`, 1,255; the workspace less `vyrn-cli` with `--skip
+_natively`, 1,431; `memory` with `--test-threads=1`, 10; parity in release with
+`--ignored`, 41 of 41 in 236 s; the residue ratchet, 203 s;
+`VYRN_WASM_MANIFEST=check` on `wasmhash`, green on all 173 after the one row
+above was rewritten; the cross-engine generator test with a fresh
+`VYRN_GEN_CACHE_DIR`, 12; `testsweep` with `--ignored`, 80 s; `vyrn doc --std -o
+../docs/api --verify`, 41 files up to date; the site — `vyrn run
+site/export.vyrn out` writes its 82 routes and 14 assets, and `vyrn test` is
+green over `export.vyrn` and `site/app`, 189 blocks. Then both engines over the
+three serving suites:
+
+| suite | interpreter | compiled route |
+|---|---|---|
+| `serve`, 27 tests | 7.21 s | 3.19 s |
+| `rpc`, 12 tests | 17.28 s | 8.99 s |
+| `universal_pages`, 9 tests, `--ignored` | 17.97 s | 18.66 s |
+
+The third row is the one the sixth slice could not write.
 
 ### M6 — the other two judgments
 
