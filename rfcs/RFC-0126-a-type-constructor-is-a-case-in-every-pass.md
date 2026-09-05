@@ -1015,3 +1015,74 @@ remembers the same convention. `genwasm` is green on 25 of 25, byte-identical
 across engines. **The lesson is the census's own**: §3 counts seven files, and
 this arm was in none of them, so nothing in the collapse's own measurement could
 have predicted it. An excluded crate needs its gate named in the step, not in CI.
+
+### 8.14 M5, not taken: a declaration is what does not survive the deletion
+
+M5 was tried on this branch and reverted. Unlike M4b it is compiler-CHECKED —
+deleting `Type::Option` and `Type::Result` from `ast::Type` is an error at every
+remaining site, not a silently-taken wrong arm — so what stopped it is not risk.
+It is that one of the sites is not a site at all.
+
+**The mechanical half, measured.** 268 mentions of the two constructors across
+21 files (270 before §8.13's late defect took two dead arms out of
+`vyrn-genwasm`). **115 of them are `Type::<Sum>(Box::new(..))` constructions**, and a
+paren-matching rewrite turns every one into `Type::option(t)` / `Type::result(ok,
+err)` — two associated functions on `Type` that build §8.1's variant lists. That
+is §8.5's warning arriving exactly as written: the census stops counting a
+construction the moment it hides behind a helper, and nothing simplifies. The
+honest reading of M5's number is the same as §8.5's — about 150 arms, not 205,
+and not 270.
+
+**What is left after the rewrite: 100 compile errors.** Most are a dead arm to
+delete, because the `Type::Enum` arm beside it already says the same thing —
+`collect_params`, `contains_stream`, `contains_fn`, `ensure_type_exists`,
+`region_dangles`. Three are a RULE to rewrite rather than remove:
+
+- **`assignable`'s covariance.** Two rules — an `Option` in its payload, a
+  `Result` in both — become one rule over a variant list, and a declared enum
+  gains a covariance it did not have. That is the collapse and it is a surface
+  change, so it needs its own line in a release note.
+- **`check_try`.** `?` matches the operand's spelling on an UNRESOLVED type, so
+  it takes the readers rather than the enum arm; and `Fallible` sits under the
+  same `match`, which is the arm the readers have to run in front of.
+- **`check_match`'s alias branch has to move above the enum branch.** They test
+  the same `Type::Enum` now, and the alias is the one that declares no names.
+
+**And one that is not a site.** `type Maybe = Option<Int64>` and
+`type Maybe = | None | Some(Int64)` become the SAME `TypeDecl.base`. **Twenty
+places read a declaration's base as `Type::Enum`** — the checker's declaration
+check and its two scrutinee resolvers, five collections in `loader`, three in
+`symbols`, `interp` twice, `codec`, `declared`, `own`, `vyrn-lower`'s constructor
+lookup, and the module-wide `variants` maps in both emitters. Every one of them
+would read an ALIAS as a variant declaration and register `None`, `Some`, `Ok`
+and `Err` as variants of it.
+
+That is not hypothetical. The corpus holds **seven such aliases** —
+`examples/aliascontext.vyrn`'s `MaybeAge`, `examples/enumcodec.vyrn`'s `Lookup`,
+and five `*Result` aliases in the shared wire modules of four separate projects,
+two of them both named `DeleteResult`. `vyrn-codegen`'s `variants` map is keyed
+by variant NAME across the whole module, so `Ok` and `Err` would each resolve to
+whichever alias was collected last.
+
+**So §8.6's third guard is not one guard.** It says "the parser keeps
+`Some`/`Ok`/`Err` as declaration-free constructor names", which is true and is
+already how the parser works. What M5 actually needs is the same guard on the
+other side: **a declaration whose base is one of the two built-in variant lists
+is not a variant declaration**, stated once and asked at each of the twenty
+readers — the shape §8.13 already used for `codec::wire` and `Display`, at
+twenty sites instead of two.
+
+**What M5 needs, in order.** One reader — `is_sum_alias(decl) -> bool`, or the
+readers asked of `d.base` — and twenty call sites; then the 115 constructions;
+then the 100 errors, of which three are the rules above. It is zero bytes if the
+guard is right and a name collision across four corpus projects if it is not,
+which is why it is a step and not a rename.
+
+**And the argument FOR taking it, from this branch's own defect.** §8.13 records
+a dead arm that survived every gate the workspace runs, at both ends of
+`vyrn-genwasm`'s reflection channel, and it cost 12 of 25 generator examples
+their engine without one red test. M5 is the step that makes that class of miss
+impossible: with the constructors gone, an arm that can no longer be taken does
+not compile. The excluded crate is the sharpest case, because it is the one the
+workspace cannot type-check at all — so the deletion reaches it where a reader
+convention did not.

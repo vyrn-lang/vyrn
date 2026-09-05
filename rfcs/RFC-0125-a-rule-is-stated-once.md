@@ -7089,11 +7089,20 @@ its record.
   both ends of its reflection channel matched a resolved sum's spelling, so 12 of
   25 generator examples silently fell back to the interpreter. Both read
   `option_payload` now. RFC-0126 §8.13.
-- **M5 — the last step, and the only one left.** §8.11 measured M4 and M5 as one
-  step that is not zero bytes, and split it: M4a moved the bytes, M4b answered
-  `Enum` for none. What is left is deleting `Type::Option` and `Type::Result`,
-  with §8.6's third guard — the parser accepting `Some`/`Ok`/`Err` with no
-  declaration — the only one not already standing. RFC-0126 §8.11 and §8.13.
+- **M5 — not taken (2026-09-05), and it is not the guard §8.6 named.** Deleting
+  the two constructors is compiler-checked, so the risk is not the 270 mentions:
+  115 are constructions a rewrite hides behind `Type::option` / `Type::result`,
+  and most of the 100 remaining errors are a dead arm the `Type::Enum` arm beside
+  it already covers. What blocks it is that `type Maybe = Option<Int64>` and
+  `type Maybe = | None | Some(Int64)` become one `TypeDecl.base`, so the TWENTY
+  places that read a declaration's base as an enum would register `None`, `Some`,
+  `Ok` and `Err` as that alias's variants — and the corpus holds seven such
+  aliases across four projects, two of them sharing a name. §8.6's third guard is
+  one guard in the parser; the measurement says the step needs the same rule
+  asked at twenty readers of a declaration. What argues FOR taking it is §8.13's
+  late defect: with the constructors gone, an arm that can no longer be taken
+  does not compile, including in the crate the workspace cannot type-check.
+  RFC-0126 §8.14.
 
 ### What each milestone is worth on its own
 
