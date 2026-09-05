@@ -1,41 +1,39 @@
 //! The fixture comparison (RFC-0125 §2.6, M5): every example, run as compiled
 //! wasm in the embedded engine, against its recorded output.
 //!
-//! Parity compares three engines with each other. This compares ONE engine
-//! with a recorded file — `examples/expected/<name>.stdout`, `.stderr` and
-//! `.exit` — so it needs no clang, no external `wasmtime` and no second engine,
-//! and a divergence names the line. Together with `wasmhash.rs` (the same bytes
-//! on every platform) it is what the parity job becomes once the interpreter is
-//! gone.
+//! Parity compares the two compiling routes with each other. This compares ONE
+//! of them with a recorded file — `examples/expected/<name>.stdout`, `.stderr`
+//! and `.exit` — so it needs no clang, no external `wasmtime` and no second
+//! engine, and a divergence names the line. Together with `wasmhash.rs` (the
+//! same bytes on every platform) it is what the parity job became once the
+//! interpreter went.
 //!
 //! The recorded file is the expectation, and the ROUTE records it (RFC-0125 §3
 //! M5, the ninth slice). What that proves is that the route's answer has not
 //! moved since a human read it in a diff; what it does not prove is that the
-//! answer is right, which no self-comparison can. The interpreter is an
-//! optional second column for as long as there is an interpreter, and it is a
-//! second opinion rather than the oracle.
+//! answer is right, which no self-comparison can. The second column was the
+//! interpreter, and RFC-0125 §3 M5 deleted it; what stands in for a second
+//! opinion now is the NATIVE route, which `parity` compares against this one.
 //!
-//! Three modes, read from `VYRN_FIXTURES`:
+//! Two modes, read from `VYRN_FIXTURES`:
 //!
-//!   - unset: run each example with `vyrn run --engine wasm` and compare.
+//!   - unset: run each example with `vyrn run` and compare.
 //!   - `write`: run each the same way and replace the recorded files. Do this
 //!     when an example's OUTPUT is meant to change, and commit the result
 //!     beside the change — where it is reviewed, which is what makes it an
 //!     expectation.
-//!   - `interp`: compare `vyrn run` with the same recorded files. The second
-//!     column.
 //!
 //! Every example runs under the corpus's conventions (tests/common): cwd is
 //! `examples/`, stdin is `<name>.stdin` or closed, argv is `<name>.args`, and
 //! the clock and seed are fixed. The file is named by its bare name, as
 //! `wasmhash.rs` names it, so a diagnostic that quotes the path is the same in
 //! every checkout. A refusal (`EXPECTED_CHECK_FAILURE`) is compared like any
-//! other program: its output is the diagnostic, and both engines share the
-//! load that prints it — `polyrecursion.vyrn` among them, since `vyrn run`
-//! refuses what `vyrn check` refuses under either engine. Nothing is skipped:
-//! the host-only program (`WASM_ONLY`) is compared like the rest, because the
-//! embedded host answers an RFC-0012 `extern` with the same refusal the
-//! interpreter recorded (RFC-0125 §3 M5, the `extern-unavailable` row).
+//! other program: its output is the diagnostic, and it comes out of the same
+//! load — `polyrecursion.vyrn` among them, since `vyrn run` refuses what `vyrn
+//! check` refuses. Nothing is skipped: the host-only program (`WASM_ONLY`) is
+//! compared like the rest, because the embedded host answers an RFC-0012
+//! `extern` with the recorded refusal (RFC-0125 §3 M5, the
+//! `extern-unavailable` row).
 
 mod common;
 use common::*;
@@ -128,11 +126,10 @@ const CENSUS: &[Census] = &[
 #[ignore = "compiles and runs the whole corpus; the `fixtures` job runs it: cargo test -p vyrn-cli --test fixtures -- --ignored"]
 fn every_example_prints_what_was_recorded() {
     let dir = examples_dir();
-    let (write, engine) = match std::env::var("VYRN_FIXTURES").as_deref() {
-        Ok("write") => (true, "wasm"),
-        Ok("interp") => (false, "interp"),
-        Ok(other) => panic!("VYRN_FIXTURES must be unset, `write` or `interp`, got `{other}`"),
-        Err(_) => (false, "wasm"),
+    let write = match std::env::var("VYRN_FIXTURES").as_deref() {
+        Ok("write") => true,
+        Ok(other) => panic!("VYRN_FIXTURES must be unset or `write`, got `{other}`"),
+        Err(_) => false,
     };
     let expected = expected_dir();
     if write {
@@ -153,7 +150,7 @@ fn every_example_prints_what_was_recorded() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         let mut cmd = vyrn();
-        cmd.arg("run").arg("--engine").arg(engine).arg(&name);
+        cmd.arg("run").arg(&name);
         cmd.args(read_args(&path.with_extension("args")));
         let out = run_io(cmd, &dir, &path.with_extension("stdin"));
         let (stdout, stderr) = (norm(&out.stdout), norm(&out.stderr));
@@ -184,9 +181,9 @@ fn every_example_prints_what_was_recorded() {
         let w_code = want(&f_exit).trim().to_string();
         if stdout != w_out || stderr != w_err || code != w_code {
             failures.push(format!(
-                "{name}: DIVERGED from the recorded output\n  exit: recorded {w_code} vs {engine} {code}\n{}{}",
-                first_diff("stdout", "recorded", &w_out, engine, &stdout).unwrap_or_default(),
-                first_diff("stderr", "recorded", &w_err, engine, &stderr).unwrap_or_default(),
+                "{name}: DIVERGED from the recorded output\n  exit: recorded {w_code} vs run {code}\n{}{}",
+                first_diff("stdout", "recorded", &w_out, "run", &stdout).unwrap_or_default(),
+                first_diff("stderr", "recorded", &w_err, "run", &stderr).unwrap_or_default(),
             ));
             continue;
         }
@@ -253,35 +250,26 @@ fn the_rfc_census_lists_exactly_these_capabilities() {
 /// `test-state` row.
 ///
 /// RFC-0029 locks one module instance per PROCESS, and `vyrn test` is one
-/// process, so a body reads what an earlier body wrote. Both engines answer
-/// that now — the compiled route on one resident instance with a door per body
-/// (RFC-0125 §3 M5, the ninth slice), where it used to run one fresh instance
-/// per body and disagree. The probe under `rfcs/probes-0125/` is twelve lines
-/// and is the whole claim.
+/// process, so a body reads what an earlier body wrote. The compiled route
+/// answers that on one resident instance with a door per body (RFC-0125 §3 M5,
+/// the ninth slice), where it used to run one fresh instance per body and
+/// disagree with the tree-walker. The tree-walker is gone and the claim is the
+/// route's own; the probe under `rfcs/probes-0125/` is twelve lines and is the
+/// whole of it.
 #[test]
-fn module_state_is_shared_across_test_bodies_on_both_engines() {
+fn module_state_is_shared_across_test_bodies() {
     let probe = repo_root()
         .join("rfcs")
         .join("probes-0125")
         .join("module-state-across-test-bodies.vyrn");
-    let one = |engine: Option<&str>| {
-        let mut cmd = vyrn();
-        cmd.arg("test");
-        if let Some(e) = engine {
-            cmd.arg("--engine").arg(e);
-        }
-        let out = cmd.arg(&probe).output().expect("run vyrn test");
-        (out.status.code(), norm(&out.stdout))
-    };
-    let (interp_code, interp_out) = one(None);
-    assert_eq!(interp_code, Some(0), "the interpreter's run:\n{interp_out}");
-    let (wasm_code, wasm_out) = one(Some("wasm"));
-    assert_eq!(wasm_code, Some(0), "the compiled run:\n{wasm_out}");
-    assert_eq!(interp_out, wasm_out, "the two engines disagree");
-    assert!(
-        interp_out.contains("2 passed, 0 failed"),
-        "both runs:\n{interp_out}"
-    );
+    let out = vyrn()
+        .arg("test")
+        .arg(&probe)
+        .output()
+        .expect("run vyrn test");
+    let text = norm(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "the run:\n{text}");
+    assert!(text.contains("2 passed, 0 failed"), "the run:\n{text}");
 }
 
 /// The repository root, for the RFC and the probe the two tests above read.

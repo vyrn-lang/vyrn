@@ -1,4 +1,4 @@
-//! `vyrn run --engine wasm` (RFC-0125 §2.5, M5): the program's own wasm, run in
+//! `vyrn run` (RFC-0125 §2.5, M5): the program's own wasm, run in
 //! this process by the embedded wasmtime.
 //!
 //! The module is what `vyrn build --target wasm` writes, byte for byte. This
@@ -54,7 +54,7 @@ pub struct Run {
     /// writing it through — the test harness reads a trap's message out of it.
     pub capture_stderr: bool,
     /// Time the phases and count the guest's operations, into
-    /// [`Outcome::meter`] — `vyrn run --profile --engine wasm` (RFC-0125 §3 M5,
+    /// [`Outcome::meter`] — `vyrn run --profile` (RFC-0125 §3 M5,
     /// the `run-profile` row). It costs the run a fuel counter, so it is off
     /// unless it was asked for.
     pub meter: bool,
@@ -165,8 +165,7 @@ impl vyrn_genwasm::GenHost for Host {
 ///
 /// The METERED engine is a second one, and it exists for the same reason it is
 /// second: fuel is a counter the guest decrements in every block, so a run that
-/// nobody asked to count must not pay for it. `vyrn run --profile --engine
-/// wasm` asks (RFC-0125 §3 M5).
+/// nobody asked to count must not pay for it. `vyrn run --profile` asks (RFC-0125 §3 M5).
 fn engine(metered: bool) -> &'static Engine {
     static PLAIN: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
     static METERED: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
@@ -352,7 +351,7 @@ pub fn compile(bytes: &[u8], meter: bool) -> Result<Compiled, String> {
     })
 }
 
-/// One instance that outlives `_start` — what `vyrn serve --engine wasm` answers
+/// One instance that outlives `_start` — what `vyrn serve` answers
 /// requests on (RFC-0125 §3 M6).
 ///
 /// `proc_exit` unwinds the call and not the store, so `main` runs to its exit

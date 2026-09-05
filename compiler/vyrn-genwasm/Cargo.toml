@@ -8,9 +8,10 @@ description = "RFC-0076: runs `gen fn` generators as compiled wasm in an embedde
 
 # NOT a member of the default workspace (see ../Cargo.toml `exclude`): nothing
 # needs its test suite to build or test the language. It IS in the default
-# resolve, because both consumers turn `wasm-gen` on by default — `vyrn-lsp`
-# always did, and `vyrn-cli` since RFC-0125 §3 M5's tenth slice, so every command
-# runs a `gen fn` the way a keystroke in the editor already did.
+# resolve, and in both consumers unconditionally — `vyrn-cli` since RFC-0125 §3
+# M5's tenth slice and `vyrn-lsp` since its sixteenth, when the tree-walker that
+# could have answered instead was deleted. There is one generation engine and it
+# is this one.
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-codegen = { path = "../vyrn-codegen" }

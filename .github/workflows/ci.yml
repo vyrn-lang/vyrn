@@ -65,20 +65,16 @@
 #      (bench, LSP, genwasm, node, docs, install), which run at the same time.
 #      Two jobs and not three — a third was measured on paper and does not move
 #      the pole, which is now the workspace suite.
-#   2. `checks` builds vyrn `--release`. `bench --check` runs every bench body
-#      under the INTERPRETER, so the interpreter's own speed IS that step, and a
-#      debug interpreter is 4-7x slower per bench. Over the corpus on one
-#      machine: 323 s serial / 148 s at -P 4 debug, against 62 s serial / 29 s at
-#      -P 4 release. Release+SERIAL beats debug+parallel by 2.4x. One bench
-#      dominates the corpus — spectralnorm is 95 s of the 323 s debug total, and
-#      16 s of the 62 s release one — so no amount of -P could have cut below it
-#      and the optimization level was always the larger lever.
+#   2. `checks` builds vyrn `--release`. `bench --check` compiles and runs every
+#      bench body, so the compiler's own speed IS that step, and a debug build
+#      is several times slower per bench. Over the corpus on one machine, when
+#      the body ran under the tree-walker: 323 s serial / 148 s at -P 4 debug,
+#      against 62 s serial / 29 s at -P 4 release. Release+SERIAL beat
+#      debug+parallel by 2.4x, and the optimization level was always the larger
+#      lever.
 #
-# The gate loses nothing by not being debug: `--check` runs no codegen, and the
-# four first-party `debug_assert!`s in this workspace are in vyrn-codegen (2),
-# vyrn-lower (1) and vyrn-genwasm (1) — NONE in the interpreter. The 1753-test
-# workspace suite still runs in debug, so every assertion still has a job that
-# trips it. Same corpus, same one-run-per-body, same verdict.
+# The workspace suite still runs in debug, so every `debug_assert!` still has a
+# job that trips it. Same corpus, same one-run-per-body, same verdict.
 #
 # WHERE IT LANDED, from run 32408641317 (warm; 32407284624 is the cold one):
 #
@@ -717,7 +713,7 @@ jobs:
   fixtures:
     name: compiled run prints the recorded output — ${{ matrix.os }}
     # RFC-0125 §2.6, M5: `tests/fixtures.rs` runs every example with
-    # `vyrn run --engine wasm` — the direct backend's module, in the wasmtime
+    # `vyrn run` — the direct backend's module, in the wasmtime
     # the CLI embeds — and compares stdout, stderr and the exit code byte for
     # byte against `examples/expected/`, which the same route records
     # (`VYRN_FIXTURES=write`) and a human reviews in the diff. With `wasmhash`
@@ -750,7 +746,7 @@ jobs:
         run: cargo test --quiet -p vyrn-cli --test fixtures -- --ignored --nocapture
 
   gen-engine:
-    name: cross-engine generation (interp == wasm)
+    name: generation is deterministic over the corpus
     # Its own job rather than a step in `test`: it is the only thing in CI that
     # builds wasmtime + cranelift, which is minutes of compile the other jobs
     # must not wait on or share a cache with. Parallel to `parity`, and for the
@@ -775,12 +771,13 @@ jobs:
       # no sysroot, and its wasmtime is a crate rather than a spawned binary. The
       # only readers of those two variables left in the repo are the codegen
       # integration tests, which run in the parity job where the fetch now lives.
-      - name: Every generator agrees under both engines (RFC-0076)
-        # The RFC's acceptance criteria, both halves in one run: the wasm column
-        # must match the interpreter column byte for byte over every
-        # generator-using example, and the interpreter column IS the
-        # `VYRN_NO_WASM_GEN=1` configuration, so "the interpreter still works with
-        # the wasm path disabled" is exercised by the same corpus.
+      - name: Every generator emits the same source twice (RFC-0076)
+        # The RFC's acceptance criterion over the corpus. It compared two engines
+        # until RFC-0125 §3 M5 deleted the second one; the second column is the
+        # SAME engine on a second cold run now, which still catches a generator
+        # whose answer depends on anything but its declared inputs. What the
+        # emitted source MEANS is the `fixtures` job's, which runs every one of
+        # these examples against its recorded output.
         #
         # `--release` because cranelift compiles the guest: measured over this
         # corpus with an empty artifact cache, 20 s release against 98 s debug.

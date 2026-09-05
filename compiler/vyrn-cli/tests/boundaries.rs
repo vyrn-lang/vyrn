@@ -15,22 +15,25 @@
 //!
 //! | carrier | where |
 //! |---|---|
-//! | `interp` | `vyrn-frontend/src/interp.rs` |
 //! | `native` | `vyrn-codegen/src/lib.rs`'s IR, and the C shim in `toolchain.rs` |
 //! | `wasm` | `vyrn-codegen/src/direct.rs` |
 //! | `vyrn` | a Vyrn module — `std/runtime.vyrn`, or a library that states it |
 //!
+//! There was a fourth, `interp`, on thirteen of these rows, and RFC-0125 §3 M5
+//! deleted the file it named. Every copy it held went with it: the count below
+//! fell from 45 to 32 in one commit, which is what a census is for.
+//!
 //! An engine that CALLS another carrier's statement is not a carrier. The wasm
 //! emitter is not a carrier of `string-utf8` because it calls `std/runtime`'s
-//! `strFromBytes`; the interpreter is, because it calls Rust's `from_utf8`.
+//! `strFromBytes`.
 //!
 //! # The two tests
 //!
 //! 1. [`every_boundary_row_says_the_same_thing_in_every_engine`] runs each row's
-//!    program under the interpreter, the compiled wasm and the native binary and
-//!    asserts byte-identical stdout, stderr and exit code. That is what makes
-//!    the census's last column a fact rather than a claim: the copies agree
-//!    TODAY, and a deletion slice has to keep them agreeing.
+//!    program under the compiled wasm and the native binary and asserts
+//!    byte-identical stdout, stderr and exit code. That is what makes the
+//!    census's last column a fact rather than a claim: the copies agree TODAY,
+//!    and a deletion slice has to keep them agreeing.
 //! 2. [`the_rfc_table_lists_exactly_these_rows`] reads the census table out of
 //!    `rfcs/RFC-0125-a-rule-is-stated-once.md` and refuses when it and [`ROWS`]
 //!    differ. `tests/effects.rs` holds its lattice this way for the same reason:
@@ -48,7 +51,6 @@ use std::path::{Path, PathBuf};
 /// One engine's own statement of a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Carrier {
-    Interp,
     Native,
     Wasm,
     Vyrn,
@@ -57,7 +59,6 @@ pub enum Carrier {
 impl Carrier {
     fn key(self) -> &'static str {
         match self {
-            Carrier::Interp => "interp",
             Carrier::Native => "native",
             Carrier::Wasm => "wasm",
             Carrier::Vyrn => "vyrn",
@@ -84,44 +85,44 @@ pub const ROWS: &[Row] = &[
     Row {
         rule: "array-index",
         rfc: "RFC-0011",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     Row {
         rule: "string-index",
         rfc: "RFC-0022",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     // ---- the arithmetic boundaries -------------------------------------
     Row {
         rule: "int-div-zero",
         rfc: "RFC-0002",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     Row {
         rule: "int-rem-zero",
         rfc: "RFC-0002",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     Row {
         rule: "int-div-overflow",
         rfc: "RFC-0002",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     Row {
         rule: "shift-range",
         rfc: "RFC-0045",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     // ---- the coercions: a rule that answers rather than refusing --------
     Row {
         rule: "int-narrowing",
         rfc: "RFC-0002",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     Row {
         rule: "float-to-int",
         rfc: "RFC-0002",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     // ---- the user's own predicate --------------------------------------
     // One carrier each since RFC-0125 §3 M6's fourth slice: the predicate and
@@ -160,28 +161,28 @@ pub const ROWS: &[Row] = &[
     Row {
         rule: "file-nul",
         rfc: "RFC-0014",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Vyrn],
+        carriers: &[Carrier::Native, Carrier::Vyrn],
     },
     Row {
         rule: "file-utf8",
         rfc: "RFC-0014",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Vyrn],
+        carriers: &[Carrier::Native, Carrier::Vyrn],
     },
     Row {
         rule: "io-status",
         rfc: "RFC-0014",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Vyrn],
+        carriers: &[Carrier::Native, Carrier::Vyrn],
     },
     // ---- the budgets ----------------------------------------------------
     Row {
         rule: "call-depth",
         rfc: "RFC-0004",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     Row {
         rule: "region-depth",
         rfc: "RFC-0004",
-        carriers: &[Carrier::Interp, Carrier::Native, Carrier::Wasm],
+        carriers: &[Carrier::Native, Carrier::Wasm],
     },
     // ---- the two rules that are already stated once ---------------------
     Row {
@@ -253,7 +254,7 @@ fn every_boundary_row_says_the_same_thing_in_every_engine() {
     let native = vyrn_codegen::toolchain::find_clang();
     let native = require_tools("clang", "VYRN_CLANG", native).is_some();
     if !native {
-        eprintln!("SKIP the native column (no clang); interp and wasm still compared");
+        eprintln!("SKIP the native column (no clang); the wasm column still runs");
     }
     let scratch = scratch("boundaries");
 
@@ -266,24 +267,14 @@ fn every_boundary_row_says_the_same_thing_in_every_engine() {
             row.rule,
             dir.join(&file).display()
         );
-        let run = |extra: &[&str]| -> Answer {
+        let wasm = {
             let mut cmd = vyrn();
             cmd.arg("run");
-            cmd.args(extra);
             cmd.arg(&file);
             answer(run_io(cmd, &dir, &dir.join("nostdin")))
         };
-        let interp = run(&[]);
-        let wasm = run(&["--engine", "wasm"]);
-        if interp != wasm {
-            failures.push(format!(
-                "{}: interp and wasm differ\n  interp {interp}\n  wasm   {wasm}",
-                row.rule
-            ));
-            continue;
-        }
         if !native {
-            eprintln!("ok    {:<16} interp == wasm", row.rule);
+            eprintln!("ok    {:<16} wasm answered {wasm}", row.rule);
             continue;
         }
         let exe = scratch.join(format!("{}.exe", row.rule));
@@ -309,14 +300,14 @@ fn every_boundary_row_says_the_same_thing_in_every_engine() {
             &dir,
             &dir.join("nostdin"),
         ));
-        if interp != got {
+        if wasm != got {
             failures.push(format!(
-                "{}: interp and native differ\n  interp {interp}\n  native {got}",
+                "{}: wasm and native differ\n  wasm   {wasm}\n  native {got}",
                 row.rule
             ));
             continue;
         }
-        eprintln!("ok    {:<16} interp == wasm == native", row.rule);
+        eprintln!("ok    {:<16} wasm == native", row.rule);
     }
 
     let copies: usize = ROWS.iter().map(|r| r.carriers.len()).sum();

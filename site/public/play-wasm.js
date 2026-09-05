@@ -7,8 +7,9 @@
 //     `check` shortly after. Both must be synchronous: a colour layer that
 //     arrives a message later than the character shows the reader an editor that
 //     lags. Neither can loop forever, because neither runs the program.
-//   - `play-worker.js` asks for `run`, which CAN loop forever. That is the whole
-//     reason a worker exists: the page stays alive and can terminate it.
+//   - `play-worker.js` asks for `compile`, and then runs the module it gets back
+//     with `wasi-min.js`. THAT can loop forever, which is the whole reason a
+//     worker exists: the page stays alive and can terminate it.
 //
 // No bindgen and no dependencies. The module owns one input buffer and one output
 // buffer; `memory.buffer` is detached by a growth, so every access below re-reads
@@ -52,6 +53,12 @@ function api(instance) {
     return JSON.parse(decoder.decode(new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), len)));
   }
 
+  /// The last call's result as BYTES, copied out. A copy because
+  /// `memory.buffer` is detached by the next call's growth.
+  function takeBytes(len) {
+    return new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), len).slice();
+  }
+
   return {
     /// `{ spans: [[start, length, class], …] }` in UTF-16 code units, or
     /// `{ error }` when the source cannot be lexed at all — which happens on the
@@ -65,12 +72,15 @@ function api(instance) {
       const [n] = put([src]);
       return take(wasm.play_check(n));
     },
-    /// `{ stdout, stderr, exitCode, diagnostics }`, or `{ diagnostics }` alone
-    /// when the program did not compile. `now` is the wall clock the program
-    /// reads; it is sampled once, because a wasm module has no clock of its own.
-    run(src, stdin, now) {
-      const [n, m] = put([src, stdin || ""]);
-      return take(wasm.play_run(n, m, now));
+    /// `{ module }` — the program as a wasm module, the same bytes
+    /// `vyrn build --target wasm` writes — or `{ diagnostics }` when it did not
+    /// compile. The two are told apart by the first byte, because a module
+    /// begins with the wasm magic and JSON begins with `{`.
+    compile(src) {
+      const [n] = put([src]);
+      const len = wasm.play_compile(n);
+      const first = new Uint8Array(wasm.memory.buffer, wasm.result_ptr(), 1)[0];
+      return first === 0x00 ? { module: takeBytes(len) } : take(len);
     },
   };
 }

@@ -6,15 +6,21 @@
 //!     colours code with the compiler's own lexer and not a second one written in
 //!     JavaScript.
 //!   - [`play_check`] — every diagnostic, structured, from the real loader.
-//!   - [`play_run`] — the tree-walking interpreter, which is the reference
-//!     semantics: what the page prints is what `vyrn run` prints.
+//!   - [`play_compile`] — the program as a wasm module, from the direct backend:
+//!     the same bytes `vyrn build --target wasm` writes, so what the page runs is
+//!     what `vyrn run` runs.
+//!
+//! THE PAGE RUNS THE PROGRAM, NOT THIS MODULE. This crate cannot instantiate a
+//! wasm module, because it IS one. So it answers the bytes and
+//! `site/public/play-worker.js` hands them to `web/wasi-min.js`, which is the
+//! runtime the `web/` demos have always used for a `vyrn build --target wasm`
+//! module and which already answers `{ exitCode, stdout, stderr }`. Stdout,
+//! stdin and the clock are the PAGE's now — a browser tab has all three, and
+//! only a module that runs a program inside itself needed them faked.
 //!
 //! WHAT THIS CRATE ADDS is a calling convention and a JSON writer. Not one
-//! language decision is made here. `vyrn-frontend` compiles for
-//! `wasm32-unknown-unknown` unchanged; the only edits it needed were three
-//! `cfg` switches at the host boundary (output, input, the clock — see
-//! `vyrn_frontend::playhost`), because a browser tab has no stdout, no stdin and
-//! no clock a module may call.
+//! language decision is made here. `vyrn-frontend` and `vyrn-codegen` compile
+//! for `wasm32-unknown-unknown` unchanged.
 //!
 //! ONE FILE, PLUS `std/`. The standard library is embedded by `build.rs` — the
 //! whole directory, walked rather than listed — because the guide book's run
@@ -26,8 +32,11 @@
 //! output buffer, both owned by the module:
 //!
 //!   1. `input_ptr(n)` reserves `n` bytes and returns where to write them.
-//!   2. an entry point is called with the lengths; it returns the result length.
-//!   3. `result_ptr()` says where the result is. It is UTF-8 JSON.
+//!   2. an entry point is called with the length; it returns the result length.
+//!   3. `result_ptr()` says where the result is. It is UTF-8 JSON — except for
+//!      [`play_compile`], which answers a wasm module when the program compiled.
+//!      The caller tells the two apart by the first byte: a module begins with
+//!      the four-byte wasm magic (a NUL, then `asm`) and JSON begins with `{`.
 //!
 //! `memory.buffer` is detached by a growth, so the page re-reads both pointers
 //! after every call. `site/public/play-worker.js` and `site/public/play.js` are
@@ -69,39 +78,20 @@ pub extern "C" fn result_ptr() -> *const u8 {
 /// Token spans for `input[..src_len]`. See [`tokens_json`].
 #[no_mangle]
 pub extern "C" fn play_tokens(src_len: usize) -> usize {
-    with_input(src_len, |src| tokens_json(src))
+    with_input(src_len, |src| tokens_json(src).into_bytes())
 }
 
 /// Every diagnostic for `input[..src_len]`. See [`check_json`].
 #[no_mangle]
 pub extern "C" fn play_check(src_len: usize) -> usize {
-    with_input(src_len, |src| check_json(src))
+    with_input(src_len, |src| check_json(src).into_bytes())
 }
 
-/// Run `input[..src_len]`, with `input[src_len..src_len + stdin_len]` as stdin
-/// and `now_ms` as the wall clock. See [`run_json`].
-///
-/// The lengths are the host's word, and a slice past the reserved buffer
-/// would panic — which on this target aborts the instance silently. Out-of-
-/// range lengths therefore answer with a diagnostic instead, the same shape
-/// the page already knows how to render.
+/// Compile `input[..src_len]` and answer the module's bytes, or the JSON
+/// diagnostics of a program that did not compile. See [`compile_result`].
 #[no_mangle]
-pub extern "C" fn play_run(src_len: usize, stdin_len: usize, now_ms: f64) -> usize {
-    let out_of_range = INPUT.with(|i| {
-        let b = i.borrow();
-        src_len.checked_add(stdin_len).is_none_or(|end| end > b.len())
-    });
-    if out_of_range {
-        let d = Diagnostic::error(
-            0,
-            0,
-            "host",
-            format!("play_run lengths {src_len} + {stdin_len} exceed the input buffer"),
-        );
-        return publish_json(format!("{{\"diagnostics\":[{}]}}", diag_json(&d)));
-    }
-    let stdin = INPUT.with(|i| i.borrow()[src_len..src_len + stdin_len].to_vec());
-    with_input(src_len, |src| run_json(src, &stdin, now_ms as i64))
+pub extern "C" fn play_compile(src_len: usize) -> usize {
+    with_input(src_len, |src| compile_result(src))
 }
 
 /// Decode the input as UTF-8, hand it to `f`, and publish what comes back.
@@ -111,7 +101,7 @@ pub extern "C" fn play_run(src_len: usize, stdin_len: usize, now_ms: f64) -> usi
 /// panic on this target aborts the instance and says nothing. A `src_len`
 /// past the reserved buffer gets the same treatment — the length is the
 /// host's word, and slicing would panic.
-fn with_input(src_len: usize, f: impl FnOnce(&str) -> String) -> usize {
+fn with_input(src_len: usize, f: impl FnOnce(&str) -> Vec<u8>) -> usize {
     let too_long = INPUT.with(|i| src_len > i.borrow().len());
     if too_long {
         let d = Diagnostic::error(
@@ -123,24 +113,28 @@ fn with_input(src_len: usize, f: impl FnOnce(&str) -> String) -> usize {
         return publish_json(format!("{{\"diagnostics\":[{}]}}", diag_json(&d)));
     }
     let bytes = INPUT.with(|i| i.borrow()[..src_len].to_vec());
-    let json = match std::str::from_utf8(&bytes) {
+    let result = match std::str::from_utf8(&bytes) {
         Ok(src) => f(src),
         Err(_) => {
             let d = Diagnostic::error(0, 0, "lex", "the source is not valid UTF-8".to_string());
-            format!("{{\"diagnostics\":[{}]}}", diag_json(&d))
+            format!("{{\"diagnostics\":[{}]}}", diag_json(&d)).into_bytes()
         }
     };
-    publish_json(json)
+    publish(result)
 }
 
-/// Store the JSON result and return its length — the calling convention's
-/// return value, shared by every entry point.
-fn publish_json(json: String) -> usize {
+/// Store the result and return its length — the calling convention's return
+/// value, shared by every entry point.
+fn publish(bytes: Vec<u8>) -> usize {
     RESULT.with(|r| {
         let mut b = r.borrow_mut();
-        *b = json.into_bytes();
+        *b = bytes;
         b.len()
     })
+}
+
+fn publish_json(json: String) -> usize {
+    publish(json.into_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -287,54 +281,28 @@ fn check_json(src: &str) -> String {
     format!("{{\"diagnostics\":{}}}", diags_json(&all))
 }
 
-fn run_json(src: &str, stdin: &[u8], now_ms: i64) -> String {
-    let (result, warnings) = load(src);
+/// The program as a wasm module, or the diagnostics of one that did not compile.
+///
+/// The module is the direct backend's (RFC-0077), which is what `vyrn build
+/// --target wasm` writes — no clang, no sysroot, and therefore the one backend
+/// that compiles for this target. A warning is not answered here: the page's own
+/// `check` reports warnings continuously, and a run does not change what the
+/// checker said.
+fn compile_result(src: &str) -> Vec<u8> {
+    let (result, _warnings) = load(src);
     let program = match result {
         Ok(p) => p,
-        Err(diags) => return format!("{{\"diagnostics\":{}}}", diags_json(&diags)),
+        Err(diags) => return format!("{{\"diagnostics\":{}}}", diags_json(&diags)).into_bytes(),
     };
-    arm_host(stdin, now_ms);
-    let outcome = vyrn_frontend::interp::run_with_args(&program, &[]);
-    let (stdout, mut stderr) = drain_host();
-    // `vyrn run`'s own shape: a trap is `error: <message>` on stderr and a
-    // failing exit code; `main`'s return value is the exit code otherwise, low
-    // byte only, as a process exit code is.
-    let exit = match outcome {
-        Ok(code) => code & 0xff,
+    match vyrn_codegen::direct::compile(&program) {
+        Ok(bytes) => bytes,
+        // A backend refusal is a diagnostic with no position — the same channel
+        // the page already renders, rather than a silent abort.
         Err(e) => {
-            stderr.push_str(&format!("error: {e}\n"));
-            1
+            let d = Diagnostic::error(0, 0, "codegen", e);
+            format!("{{\"diagnostics\":[{}]}}", diag_json(&d)).into_bytes()
         }
-    };
-    format!(
-        "{{\"stdout\":{},\"stderr\":{},\"exitCode\":{},\"diagnostics\":{}}}",
-        json_str(&stdout),
-        json_str(&stderr),
-        exit,
-        diags_json(&warnings)
-    )
-}
-
-/// Point the interpreter's host boundary at the page's stdin and clock.
-///
-/// A no-op off `wasm32-unknown-unknown`: there the interpreter reads the real
-/// stdin and the real clock, which is what the host-side tests below exercise.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn arm_host(stdin: &[u8], now_ms: i64) {
-    vyrn_frontend::playhost::arm(stdin, now_ms);
-}
-
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn arm_host(_stdin: &[u8], _now_ms: i64) {}
-
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-fn drain_host() -> (String, String) {
-    vyrn_frontend::playhost::drain()
-}
-
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-fn drain_host() -> (String, String) {
-    (String::new(), String::new())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -503,35 +471,45 @@ mod tests {
         assert!(local.contains("module not found"), "{local}");
     }
 
+    /// The wasm magic, which is how the page tells a module from the JSON of a
+    /// program that did not compile.
+    const MAGIC: &[u8] = b"\0asm";
+
     #[test]
-    fn a_program_that_calls_the_standard_library_runs() {
-        let json = run_json(
+    fn a_program_that_calls_the_standard_library_compiles_to_a_module() {
+        let bytes = compile_result(
             "import { joinWith } from \"std/strings\"\n\
              fn main() -> Int64 {\n    print(joinWith([\"a\", \"b\"], \"-\"))\n    return 0\n}\n",
-            b"",
-            0,
         );
-        assert!(json.contains("\"exitCode\":0"), "{json}");
+        assert_eq!(
+            &bytes[..4],
+            MAGIC,
+            "not a module: {:?}",
+            &bytes[..8.min(bytes.len())]
+        );
     }
 
-    /// The lengths are the host's word; a slice past the reserved buffer used
-    /// to panic, and a panic on wasm aborts the instance silently. Out-of-
-    /// range lengths must answer through the normal JSON channel instead.
+    /// The one thing this crate decides: which of the two answers comes back.
+    /// WHAT the module then does is the compiled route's rule, and `vyrn-cli`'s
+    /// parity suite is where it is stated.
     #[test]
-    fn play_run_lengths_past_the_buffer_answer_instead_of_aborting() {
+    fn a_program_that_does_not_compile_answers_diagnostics_and_not_a_module() {
+        let bytes = compile_result("fn main() -> Int64 {\n    return nope\n}\n");
+        let json = String::from_utf8(bytes).expect("diagnostics are UTF-8 JSON");
+        assert!(json.starts_with("{\"diagnostics\":["), "{json}");
+        assert!(json.contains("\"line\":2"), "{json}");
+    }
+
+    /// The length is the host's word; a slice past the reserved buffer used to
+    /// panic, and a panic on wasm aborts the instance silently. An out-of-range
+    /// length must answer through the normal JSON channel instead.
+    #[test]
+    fn play_compile_length_past_the_buffer_answers_instead_of_aborting() {
         input_ptr(8); // reserve 8 zero bytes
-        let read = |len: usize| {
-            String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), len) })
-                .into_owned()
-        };
-        let n = play_run(100, 0, 0.0);
-        assert!(read(n).contains("exceed the input buffer"), "{}", read(n));
-        // stdin alone past the end is the same refusal.
-        let n = play_run(4, 100, 0.0);
-        assert!(read(n).contains("exceed the input buffer"), "{}", read(n));
-        // A length addition that overflows usize must not wrap into range.
-        let n = play_run(usize::MAX, usize::MAX, 0.0);
-        assert!(read(n).contains("exceed the input buffer"), "{}", read(n));
+        let n = play_compile(usize::MAX);
+        let json = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), n) })
+            .into_owned();
+        assert!(json.contains("exceeds the input buffer"), "{json}");
     }
 
     #[test]
@@ -541,32 +519,6 @@ mod tests {
         let json = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(result_ptr(), n) })
             .into_owned();
         assert!(json.contains("exceeds the input buffer"), "{json}");
-    }
-
-    #[test]
-    fn a_run_reports_the_exit_code_main_returned() {
-        // Output goes to the real stdout on the host, so this asserts the shape
-        // and the code. The browser check is what proves the buffers.
-        let json = run_json("fn main() -> Int64 {\n    return 7\n}\n", b"", 0);
-        assert!(json.contains("\"exitCode\":7"), "{json}");
-    }
-
-    #[test]
-    fn a_trap_becomes_error_on_stderr_and_a_failing_code() {
-        let json = run_json(
-            "fn main() -> Int64 {\n    panic(\"nope\")\n    return 0\n}\n",
-            b"",
-            0,
-        );
-        assert!(json.contains("\"exitCode\":1"), "{json}");
-        assert!(json.contains("error: nope"), "{json}");
-    }
-
-    #[test]
-    fn a_program_too_deep_stops_with_the_limit_every_engine_shares() {
-        let src = "fn down(n: Int64) -> Int64 {\n    if n <= 0 { return 0 }\n    return down(n - 1)\n}\nfn main() -> Int64 {\n    return down(5000)\n}\n";
-        let json = run_json(src, b"", 0);
-        assert!(json.contains(&vyrn_frontend::trap::call_depth()), "{json}");
     }
 
     #[test]

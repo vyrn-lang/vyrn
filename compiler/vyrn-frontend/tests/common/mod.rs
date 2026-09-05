@@ -1,7 +1,7 @@
 //! Running a linked program from an integration test, on the compiled route
 //! (RFC-0125 §3 M5, the `library-run` row).
 
-/// Compile `program` and run its `main`, as `vyrn run --engine wasm` does.
+/// Compile `program` and run its `main`, as `vyrn run` does.
 ///
 /// The answer is `main`'s return value, which the guest hands to `proc_exit` and
 /// the host reports as the exit code — a byte, like any process's. A trap writes

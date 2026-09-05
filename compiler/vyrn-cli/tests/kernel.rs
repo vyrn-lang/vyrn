@@ -192,7 +192,7 @@ fn the_kernel_over_the_corpus() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
         .spawn(run_corpus)
         .unwrap()
         .join()
@@ -200,6 +200,11 @@ fn the_kernel_over_the_corpus() {
 }
 
 fn run_corpus() {
+    // A corpus example may import through a generator, and generation is the
+    // DRIVER's engine rather than the frontend's (RFC-0125 §3 M5). Without this
+    // those examples fail to link and the gate silently measures a smaller
+    // corpus. Installing is idempotent.
+    vyrn_genwasm::install();
     // The placer (RFC-0125 M3) is installed unless the run is asked to judge
     // the analysis alone, which is how the first slice's numbers were taken.
     if std::env::var("VYRN_NO_PLACER").is_err() {

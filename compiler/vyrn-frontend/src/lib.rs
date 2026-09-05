@@ -26,7 +26,6 @@ pub mod floor;
 pub mod fmt;
 pub mod gen;
 pub mod hash;
-pub mod interp;
 pub mod jsondec;
 pub mod jsonenc;
 pub mod lexer;
@@ -36,11 +35,6 @@ pub mod movecheck;
 pub mod origin;
 pub mod own;
 pub mod parser;
-/// The playground's host boundary — output, input and the clock — on the one
-/// target that has no operating system to supply them (`wasm32-unknown-unknown`,
-/// which `compiler/vyrn-play` builds). Absent everywhere else.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub mod playhost;
 pub mod prelude;
 pub mod prof;
 pub mod project;

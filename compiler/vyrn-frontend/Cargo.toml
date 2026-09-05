@@ -16,6 +16,11 @@ description = "Vyrn front end: lexer, parser, AST, type checker, and a tree-walk
 [dev-dependencies]
 vyrn-codegen = { path = "../vyrn-codegen" }
 vyrn-cli = { path = "../vyrn-cli", default-features = false }
+# RFC-0125 §3 M5: generation is not this crate's. `gen::generate` asks the
+# INSTALLED engine and refuses when there is none — there used to be a
+# tree-walker behind it, and a test that runs a `gen fn` had one for free. The
+# tests that run one now supply the engine, which is what every driver does.
+vyrn-genwasm = { path = "../vyrn-genwasm" }
 
 [lib]
 name = "vyrn_frontend"

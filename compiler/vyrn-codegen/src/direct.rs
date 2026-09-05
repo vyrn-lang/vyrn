@@ -7671,8 +7671,7 @@ impl<'p> Fn_<'_, 'p> {
         // emitter calls: the generator host's resolver under a generation,
         // told the host's list mode, and WASI's `fd_readdir` on an ordinary
         // build (RFC-0125 §3 M5), told whether names carry kinds, so `vyrn
-        // run --engine wasm` lists the real filesystem the way the interpreter
-        // does.
+        // run` lists the real filesystem.
         if matches!(name, "listDir" | "listDirKinds") && args.len() == 1 {
             let ty = gen_list_dir_ty();
             let l = self.layout_of(&ty, line)?;

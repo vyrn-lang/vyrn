@@ -7625,6 +7625,288 @@ Another track carries it. `site/app/apidoc.vyrn` runs under `--engine interp`,
 which is the `gen-fn-at-run-time` row the slice above named and not a change
 here.
 
+#### The sixteenth slice (2026-09-05): the playground compiles
+
+The fifteenth slice named one row that stopped the deletion, and it was a
+browser tab. This slice closes it. `play_run` is gone; `play_compile` answers the
+program's own wasm module — the bytes `vyrn build --target wasm` writes — and
+`site/public/play-worker.js` runs those with `web/wasi-min.js`. The page shows
+the same `{ exitCode, stdout, stderr }` it always showed.
+
+**The port is the shape the fifteenth slice named, and the three obstacles cost
+less than it read.**
+
+- **A module cannot instantiate a module.** `vyrn-play` IS one, so the running
+  moves OUT of it rather than in. The crate gains one dependency,
+  `vyrn-codegen`, and one call: `direct::compile(&program)`. `vyrn-lower` comes
+  with it and is not named.
+- **The clock was not a problem at all.** `wasi-min.js` backs `clock_time_get`
+  with `Date.now()`, so a browser tab already has the clock the tree-walker had
+  to be handed. `arm_host(stdin, now_ms)` had one caller and no successor.
+- **Stdin was eleven lines.** `fd_read` answered immediate EOF because a page
+  had no descriptor to read; `runVyrn(bytes, { stdin })` now takes a string or a
+  `Uint8Array` and serves it in order. The playground's standard-input box is
+  the first caller, and `web/README.md` says so where it used to say a page has
+  no stdin.
+
+**The two answers, told apart by one byte.** The calling convention hands back
+one buffer, and `play_compile` puts either a module or the JSON of a program that
+did not compile in it. A module begins with the wasm magic and JSON begins with
+`{`, so the page reads the first byte and needs no second entry point, no length
+pair and no framing. Nothing else in the convention moved.
+
+**A run stopped deciding what the checker says.** `run_json` used to answer the
+warnings with the output, because it had loaded the program anyway. The page
+already asks the checker after every edit, so the success path calls `recheck()`
+and the diagnostics pane has one source again.
+
+#### What the browser measured
+
+Run in Chrome against `out/` served by `scripts/devserve.py`, which sends
+`Cache-Control: no-store`, so every number below includes a fresh fetch.
+
+| | before | after |
+|---|---|---|
+| `play.wasm` | 3,120,388 bytes | 3,728,684 bytes |
+| the whole worker round trip, `hello` | 15 ms | 370 to 680 ms |
+| fetch and instantiate `play.wasm` | — | 220 ms |
+| `play_compile`, `hello` | — | 24 ms cold, 18 ms warm |
+| the program's own module | — | 1,660 bytes |
+| `runVyrn` on it | — | 1 ms |
+
+The module is up 608,296 bytes, 19.5%, for a backend — `opt-level = "z"` and LTO
+keep what `direct::compile` reaches and drop the rest. The round trip is up
+because it now fetches 3.6 MB with no cache and compiles a program; the RUN is
+1 ms against the tree-walker's whole 15. The next slice gives 236,075 of the
+size back by deleting the tree-walker, which is in this module too — 3,120,388
+bytes before the port and 3,492,609 after both slices, up 11.9% for a compiler
+where there was an interpreter.
+
+#### The ceiling that stopped being the browser's
+
+`play-worker.js` used to explain, in a paragraph, that a reader's program had hit
+V8's native stack at a MEASURED 466 nested calls rather than the language's
+1,000, because an interpreter frame cost ~8.5 KB of it. A compiled Vyrn call is
+one wasm frame. Measured here, `down(5000)` answers
+
+    error: call depth exceeds 1000
+
+on standard error with exit 1 — the language's own limit, the same wording
+`vyrn run` gives it. The browser's ceiling is no longer reachable by recursion,
+and the sentence about it is gone from the worker and from the page's tooltip.
+
+What is left of that story is the COMPILER's own recursion, which a deeply
+nested program still reaches: `return ((((…1…))))` compiles at 200 levels and
+throws a `RangeError` at 1,000, where `vyrn run` compiles it. The worker still
+catches that and still says whose ceiling it was, in one sentence about the
+compiler rather than about the program.
+
+`site/test/playlimits.test.mjs` follows. It read `CALL_DEPTH_LIMIT` out of
+`interp.rs`, which has not declared it since the eleventh slice's neighbourhood,
+and it compared two prose copies of a measurement no source held. It reads
+`trap.rs` now, and the recursion test is a real pair: the tooltip says
+"recursion stops at 1,000 calls" and the constant says `1_000`. The third test,
+the one that compared the tooltip's 466 to the worker's 466, is deleted with the
+number.
+
+#### What was verified in a browser
+
+The page, not a harness: the trap template through the Run button
+(`before` on stdout, `error: this is a trap (play.vyrn:5)` on stderr, `exit 1`);
+the input template with three lines typed into the standard-input box
+(`0: one` … `3 line(s)`, exit 0); a program that does not compile ("This program
+did not compile.", two diagnostics, status `Did not compile`); and the index's
+hero editor, which mounts the same `mountPlay` on a smaller root and printed
+`admitted at 30`. The site's node tests are green: 56, including the two
+`playlimits` checks that survive.
+
+#### Gates
+
+`cargo fmt --all --check` clean; `cargo build --release -p vyrn-cli` ok;
+`cargo test -p vyrn-cli` 551 passed, 74 ignored — the counts the fifteenth
+slice's table records; `vyrn-frontend` 1,246; `vyrn-play`'s own tests 12; the
+site export 82 routes, 14 assets; the site's node tests 56. The full table is the
+next slice's, because the next slice is the deletion.
+
+`compiler/**/*.rs` less `target` is 204,318 lines to 204,106 — down 212.
+`playhost.rs` is all 105 of its lines; `interp.rs` is down 54, which is the six
+`cfg` pairs at its host boundary collapsing to the one host that is left;
+`vyrn-play/src/lib.rs` is down 48; `vyrn-frontend/src/lib.rs` is down 5.
+
+#### The seventeenth slice (2026-09-06): the interpreter is deleted
+
+`interp.rs` is gone. 11,051 lines, of which 2,859 were its own tests, and it was
+the third statement of nearly every rule this RFC counts.
+
+**What went with it, in one commit.**
+
+| what | where |
+|---|---|
+| the file | `vyrn-frontend/src/interp.rs`, and `pub mod interp` |
+| `--engine`, whole | the flag had one legal value left, which is a rule stated twice |
+| `Engine::Interp`, `Engine`, and the four commands that took one | `vyrn-cli/src/main.rs` |
+| `gen::generate`'s fall-through, and `VYRN_NO_WASM_GEN` | `vyrn-frontend/src/gen.rs`, `main.rs` |
+| `vyrn-lsp`'s `wasm-gen` feature | `vyrn-lsp/Cargo.toml`, `main.rs` |
+| the per-function half of `prof` | `vyrn-frontend/src/prof.rs`, 251 lines |
+| `own::trace` | `vyrn-frontend/src/own.rs`, 155 lines |
+| `VYRN_FIXTURES=interp`, `VYRN_SERVE_ENGINE=interp` | `fixtures.rs`, `serve.rs`, `rpc.rs`, `universal_pages.rs` |
+| the differential half of `genwasm.rs` | it compared two engines; there is one |
+| thirteen `Carrier::Interp` rows, and the carrier | `boundaries.rs`, and the census table above |
+| four `interp.rs` rows in the coercion census | `lowered.rs`, and §3 M6's table |
+| the `interp` column of the surface census | `surface.rs`, and RFC-0126's cost table |
+
+**Four things MOVED rather than went.**
+
+- **The serving protocol.** `ServeRequest`, `ServeResponse`, `ServeCall` and
+  `ServeAnswer` are the driver's — the accept loop, the request parser and the
+  response writer speak them, and none of those is an engine. They are declared
+  in `main.rs` now.
+- **`INTERP_STACK_BYTES` is `DEEP_STACK_BYTES`.** The 512 MB was sized for a
+  tree-walker's frames; what needs it now is the COMPILER, which recurses over
+  the syntax of a file. Same number, honest name.
+- **`--profile` on `check` and `test` reports the PHASES.** The per-function
+  table was charged at the tree-walker's one call funnel, and the compiled route
+  has no such hook. `run --profile` already reported phases plus the guest's
+  operation count; the other two arm `VYRN_BUILD_PROFILE` and print the same
+  phase table `main` prints on the way out.
+- **The interpreter's own tests.** 210 of them, and this is the part worth
+  counting.
+
+#### The 210 tests, and where each one went
+
+| | count |
+|---|---|
+| ported to the compiled route, unchanged in what they assert | **193** |
+| ported and ignored, because they found a DEFECT | **1** |
+| dropped, because they were about the tree-walker's own machinery | **16** |
+
+The 194 that came over are `vyrn-frontend/tests/semantics.rs`, an integration
+test for the reason `loader_run.rs` states: running anything needs
+`vyrn-codegen` and the driver's host, and a unit test inside `vyrn-frontend`
+that reaches for them compiles a second copy of `vyrn-frontend`. Not one
+assertion moved. Three things about the HARNESS did:
+
+- **`main`'s answer comes back through stdout.** A process answers a byte, so
+  `Ok(702)` came back as `Ok(190)` and `Ok(-1)` as `Ok(255)`. The program is
+  wrapped — the test's own `main` is renamed and a new one prints its answer —
+  and a trap still traps before the print, so a trapping program is still an
+  `Err` carrying the trap's wording.
+- **The whole standard library stands behind every program.** A builtin the
+  tree-walker answered in Rust is a CALL on this route, and `std/runtime` is
+  where the body is.
+- **The scratch directory is the working directory.** WASI gives a module one
+  preopened directory and it is the host's cwd, so the file rows name their
+  files relatively where they used to name an absolute temp path.
+
+The 16 that were dropped reach into a `Val`, a `Frame` or an `Interp`, and there
+is nothing left for them to be about: the effect screen's set, the freshness
+witness over `Rc` identity, `run_tests`'s own reporting, the seven splice and
+`render` rows that called `code_splice`/`render_code` directly, the two `lex`
+rows, an allocation refusal, and a stream release counted through interpreter
+state. Every rule those rows are ABOUT is stated elsewhere — the splice rules by
+`genwasm.rs`, `lex` by the lexer's own tests, the stream releases by the two
+that came over.
+
+#### The defect the port found
+
+`m.tallyBytes(w, n)` (RFC-0116) makes the direct backend emit a module wasmtime
+refuses:
+
+    Invalid input WebAssembly code at offset 2972:
+    type mismatch: expected i32 but nothing on stack
+
+Six lines reproduce it, in statement position and in expression position alike,
+and `vyrn build` compiles and runs the same program — so it is the wasm emitter
+alone (`Fn_::map_tally_bytes`). Nothing in `std/` or `examples/` calls
+`tallyBytes`, which is why parity never reached it, and the tree-walker was the
+only engine that ever ran it. The compiled route has been the default since the
+eleventh slice, so this builtin has been broken on the default engine and hidden
+by the engine being deleted. The test is
+`method_tally_bytes_writes_back_in_place`, ignored with the reproducer in its
+reason; the fix is its own change.
+
+**This is the census's argument, arriving as an event.** A rule stated twice can
+be wrong in one place and right in the other, and what you see is agreement. The
+output-cap wording is the smaller twin: the tree-walker said `over the 5 byte
+cap` and the engine says `exceeds the 5 byte cap`, the loader's unit test only
+ever ran the tree-walker, and nothing compared them.
+
+#### What still names the interpreter
+
+Nothing that RUNS. `grep -ri interpreter compiler --include=*.rs` finds prose:
+comments that explain why a lowering is shaped as it is by saying what the
+tree-walker did. Those are records of a decision and are left as records —
+rewriting four hundred of them would be a bigger diff than the deletion, and
+would delete the reasoning. What was rewritten is every doc comment that
+described CURRENT behaviour: `bench --check` no longer "runs under the
+interpreter", `benchgame.rs` no longer needs "no wasmtime", the census in
+`primitives.rs` no longer scans a file that is not there.
+
+`primitives.rs` is the one place with a real hole, and it is named rather than
+papered over. RFC-0078's census was scanned out of `interp.rs` both ways: every
+Rust builtin had to have a row, and every row had to name a builtin. The half
+that survives is `the_direct_backend_carries_the_census_too`, which proves every
+censused name is lowered by the one backend there is, with an empty list of
+permitted absences. The half that is gone is the ANTI-ROT one — a builtin added
+to `direct.rs` with no census row. The anchor a future slice would scan is that
+file's own `match name {` in the call-emission path, with the guards above it:
+the same two-region shape, one engine over. It belongs to RFC-0078.
+
+#### Gates (2026-09-06)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 550 passed, 74 ignored — one down from 551, which is `bench_check` |
+| `kernel` `--ignored` | 1, 69 s |
+| `coretables` `--ignored` | 1, 73 s |
+| `typed` `--ignored` | 1, 137 s |
+| `effects` `--ignored` | 2, 155 s |
+| `fixtures` `--ignored` | 205 compared, 55 s |
+| `vyrn-frontend` | 1,225 and 8 ignored — 1,246 before, and the difference is the 210 that were `interp.rs`'s against the 194 that are `semantics.rs`'s |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,401 |
+| `vyrn-lsp`'s own tests | 99 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `vyrn-play` for `wasm32-unknown-unknown` | builds; 3,728,684 bytes to 3,492,609, down 236,075 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 343 s — 171 checked, 34 skipped, 0 failed |
+| the residue ratchet | 243 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, no byte moved |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 65 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154 |
+| the site's node tests | 56 |
+| `serve` / `rpc` / `universal_pages` | 27, 12, 9 ignored |
+
+**Five corpus gates needed one line each.** `lowered`, `kernel`, `coretables`,
+`typed` and `effects` load the examples IN PROCESS, and a corpus example may
+import through a generator. The tree-walker answered those for free; the engine
+is the driver's to install, so each gate installs it. Without that they linked
+fewer examples and measured a smaller corpus — `coretables` said so by name
+(`receiver_malloc: core only` fell from 14 to 10), which is the floor assertion
+those gates carry for exactly this.
+
+The same line is why `vyrn-frontend` has `vyrn-genwasm` as a DEV-dependency now,
+and why two of its unit tests are integration tests: a unit test inside
+`vyrn-frontend` that installs an engine installs it into a second copy of
+`vyrn-frontend`, and the `OnceLock` the loader reads is the other one.
+
+The second columns are gone from that table because the second engine is:
+`VYRN_FIXTURES=interp`, `VYRN_SERVE_ENGINE=interp` and `VYRN_NO_WASM_GEN=1` were
+the three, and each was one engine asking itself for a second opinion.
+
+`compiler/**/*.rs`, excluding `target`, is 204,106 lines to 194,452 — **down
+9,654**. `interp.rs` is 11,051 of that; `semantics.rs` gives 2,569 back.
+`vyrn-cli/main.rs` is down 207, `lowered.rs` 252, `primitives.rs` 227,
+`prof.rs` 234, `genwasm.rs` 50, `own.rs` 155. The workspace was 204,318 at the
+start of this milestone's last two slices and is 194,452 at the end of them.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
@@ -8383,28 +8665,28 @@ recorded what that costs.
 
 | rule | what it refuses | RFC | copies | carriers |
 |---|---|---|---|---|
-| `array-index` | an index outside `0..len` of an array | RFC-0011 | 3 | `interp` `native` `wasm` |
-| `string-index` | an index outside `0..byteLength` of a String | RFC-0022 | 3 | `interp` `native` `wasm` |
-| `int-div-zero` | an integer divided by zero | RFC-0002 | 3 | `interp` `native` `wasm` |
-| `int-rem-zero` | an integer remainder by zero | RFC-0002 | 3 | `interp` `native` `wasm` |
-| `int-div-overflow` | `Int64.MIN / -1`, whose quotient is not an `Int64` | RFC-0002 | 3 | `interp` `native` `wasm` |
-| `shift-range` | a shift count outside `0..bits` | RFC-0045 | 3 | `interp` `native` `wasm` |
-| `int-narrowing` | nothing — it answers, with the low bits and the sign re-read | RFC-0002 | 3 | `interp` `native` `wasm` |
-| `float-to-int` | nothing — it answers, truncated toward zero | RFC-0002 | 3 | `interp` `native` `wasm` |
+| `array-index` | an index outside `0..len` of an array | RFC-0011 | 2 | `native` `wasm` |
+| `string-index` | an index outside `0..byteLength` of a String | RFC-0022 | 2 | `native` `wasm` |
+| `int-div-zero` | an integer divided by zero | RFC-0002 | 2 | `native` `wasm` |
+| `int-rem-zero` | an integer remainder by zero | RFC-0002 | 2 | `native` `wasm` |
+| `int-div-overflow` | `Int64.MIN / -1`, whose quotient is not an `Int64` | RFC-0002 | 2 | `native` `wasm` |
+| `shift-range` | a shift count outside `0..bits` | RFC-0045 | 2 | `native` `wasm` |
+| `int-narrowing` | nothing — it answers, with the low bits and the sign re-read | RFC-0002 | 2 | `native` `wasm` |
+| `float-to-int` | nothing — it answers, truncated toward zero | RFC-0002 | 2 | `native` `wasm` |
 | `where-scalar` | a scalar failing its named type's `where` predicate | RFC-0003 | 1 | `vyrn` |
 | `where-record` | a record failing its cross-field `where` predicate | RFC-0003 | 1 | `vyrn` |
 | `string-nul` | bytes holding a NUL, made into a String | RFC-0014 | 1 | `vyrn` |
 | `string-utf8` | bytes that are not UTF-8, made into a String | RFC-0014 | 1 | `vyrn` |
-| `file-nul` | a file holding a NUL, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
-| `file-utf8` | a file that is not UTF-8, read as a String | RFC-0014 | 3 | `interp` `native` `vyrn` |
-| `io-status` | nothing — it turns a host status into canonical Vyrn wording | RFC-0014 | 3 | `interp` `native` `vyrn` |
-| `call-depth` | recursion past `CALL_DEPTH_LIMIT` frames | RFC-0004 | 3 | `interp` `native` `wasm` |
-| `region-depth` | arena nesting past `REGION_MAX` frames | RFC-0004 | 3 | `interp` `native` `wasm` |
+| `file-nul` | a file holding a NUL, read as a String | RFC-0014 | 2 | `native` `vyrn` |
+| `file-utf8` | a file that is not UTF-8, read as a String | RFC-0014 | 2 | `native` `vyrn` |
+| `io-status` | nothing — it turns a host status into canonical Vyrn wording | RFC-0014 | 2 | `native` `vyrn` |
+| `call-depth` | recursion past `CALL_DEPTH_LIMIT` frames | RFC-0004 | 2 | `native` `wasm` |
+| `region-depth` | arena nesting past `REGION_MAX` frames | RFC-0004 | 2 | `native` `wasm` |
 | `json-decode` | nothing — it accumulates `Issue`s, shape and `where` alike | RFC-0018 | 1 | `vyrn` |
 | `char-boundary` | a byte offset inside a multi-byte character | RFC-0046 | 1 | `vyrn` |
 
-**19 rows and 45 copies**, and it was 53 when this census was written. Thirteen
-rows are stated three times. Six are stated once, and they are the rows that
+**19 rows and 32 copies**, and it was 53 when this census was written. Thirteen
+rows are stated twice. Six are stated once, and they are the rows that
 went where §2.3 sends the rest: `json-decode` is `std/jsondec` plus the decoders
 `jsondec.rs` synthesizes per target type (RFC-0078 M3), `char-boundary` is nine
 lines of `std/strings`, `where-scalar` and `where-record` are the generated
@@ -9477,19 +9759,22 @@ by one edit. The two rows that did not move are in the census above.
 | `vyrn-frontend/src/interp.rs` `coercion_is_noop` | yes | interp | whether the walk would change the value | 92 |
 | `vyrn-frontend/src/interp.rs` `coercion_is_identity` | yes | interp | whether a target type can change any value at all | 35 |
 
-**Four statements of one rule became two**, and
-`the_coercion_census_is_what_the_rfc_records` asserts the number: it was the
-native ladder, the wasm ladder, the interpreter's walk and a plan nobody
-asked; it is the plan and the interpreter's walk. The interpreter is the
-remaining one and it is M5's, not this slice's, for the same reason every
-other row of §3 M6 gives — deleting it is deleting the third picture of
-memory.
+**Four statements of one rule became two, and then one.**
+`the_coercion_census_is_what_the_rfc_records` asserts the number. It was the
+native ladder, the wasm ladder, the interpreter's walk and a plan nobody asked;
+this slice made it the plan and the interpreter's walk; M5's sixteenth slice
+deleted `interp.rs`, and with it the four rows above — 252 code lines of the
+second statement — so it is the plan alone. Deleting it was deleting the third
+picture of memory, which is what M5 is.
 
 **The line counts, and what they do and do not show.** The rung ladder was 533
 code lines and is 532. (RFC-0126 §8.9 took it to 562: one rung more, stated
 once in the plan and written by each emitter. §8.15 took it to 570: the
 interpreter's walk reads the two built-in sums through their payloads where it
 matched a constructor.) The native emitter grew by 7 and the direct one shrank
+once in the plan and written by each emitter. RFC-0125 §3 M5's sixteenth slice
+took it to **310**, by deleting `interp.rs` and the 252 lines of the four rows
+above.) The native emitter grew by 7 and the direct one shrank
 by 8. That is the same measurement the `where-scalar` row already carried and
 the same warning: the column that counts CARRIERS moves when a rule moves, and
 the column that counts LINES moves when a shape moves. What each emitter lost

@@ -173,7 +173,7 @@ fn step_ty(
 #[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test typed -- --ignored"]
 fn the_typed_judgment_over_the_corpus() {
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
         .spawn(run_corpus)
         .unwrap()
         .join()
@@ -181,6 +181,11 @@ fn the_typed_judgment_over_the_corpus() {
 }
 
 fn run_corpus() {
+    // A corpus example may import through a generator, and generation is the
+    // DRIVER's engine rather than the frontend's (RFC-0125 §3 M5). Without this
+    // those examples fail to link and the gate silently measures a smaller
+    // corpus. Installing is idempotent.
+    vyrn_genwasm::install();
     vyrn_lower::install();
     let dump = std::env::var("VYRN_TYPED_DUMP").ok();
     // The LAST colon: a Windows path carries one after its drive letter.
