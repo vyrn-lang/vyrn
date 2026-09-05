@@ -4665,7 +4665,7 @@ deleted here, and `--engine interp` is still the default.
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | yes, by replacement since the fifth slice below — the rows are phases rather than functions, and the count is wasmtime's fuel. A per-function table is not portable and the slice says why | `vyrn_frontend::prof` counts interpreter steps and keeps counting them for `--engine interp` and for `check --profile`, which measures generation. What the compiled route reports instead is five phases and one repeatable count: 85,759,742,333 operations for the site export, the same number twice |
 | `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | yes, since the ninth slice below — `wasm-gen` is ON in `vyrn-cli`'s default build, so every command runs a generator as compiled wasm the way `vyrn-lsp` already did. No clang and no wasi sysroot: RFC-0076 M7 emits the generator's module directly | the largest row, and three defects were under it — an `Int64` argument declined (66 calls over this corpus, every element of every `.vyx` page), the wrapper's generation-only names read as ordinary code so the checker recorded `<type error>` under them, and the atom-stream primitives had a signature in the emitter and none in the checker. `generate_interpreted` stays as a decline path that no program in this repo takes, and `VYRN_NO_WASM_GEN=1` still picks it |
-| `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | no — the interpreter IS the oracle the compiled route is compared against | after the deletion `VYRN_FIXTURES=write` records from the route under test, and the fixture gate is a self-comparison. The oracle becomes a reviewed diff plus `wasmhash`'s cross-platform bytes |
+| `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | yes, since the ninth slice below — `VYRN_FIXTURES=write` records from the compiled route and the gate compares the compiled route, so the recorded file is the expectation and not a transcript of a second engine. `VYRN_FIXTURES=interp` is the interpreter as a second column, for as long as there is one | re-recording all 205 from the route moved ZERO bytes, so the change of oracle costs nothing that is in the tree. What it costs is a kind of proof: the gate proves the route has not moved since a human read the diff, and it cannot prove the answer is right. `wasmhash` says the same bytes on four platforms, and the review of the recorded diff is what says the bytes are the right ones |
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
 | `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | no — the compiled route lives in `vyrn-cli`, not in the frontend | those tests move to the CLI's harness, or the frontend takes a dependency on a backend |
@@ -5778,6 +5778,37 @@ program in this repo now takes, and `VYRN_NO_WASM_GEN=1` and
 `--no-default-features` still pick it. The cross-engine `genwasm` suite is 12 of
 12 with a fresh `VYRN_GEN_CACHE_DIR`, and it compares two engines now rather
 than the interpreter with itself.
+
+**`fixture-oracle`: the recorded file is the expectation.**
+
+`tests/fixtures.rs` compared the compiled route with `examples/expected/*`, and
+`VYRN_FIXTURES=write` recorded those files by running the INTERPRETER. So the
+gate read as a comparison of two engines with one of them written down, and the
+row read `no`: delete the interpreter and the recorder has nothing to record
+with.
+
+The change is one line of test: the recorder runs `--engine wasm` as well.
+`VYRN_FIXTURES=interp` is added for the second column, which compares the
+interpreter with the same files. The corpus is 205 examples. Re-recorded from
+the route, ZERO of the recorded bytes moved — which is what the gate had been
+proving green for six slices, now stated where it can be seen.
+
+**What the route-only gate proves.** That the route's answer has not moved.
+Every pass, the runtime, the host and the example itself are in that answer, and
+a divergence names the file and the first line. `wasmhash` adds that the module's
+bytes are identical on four platforms, so "has not moved" holds everywhere and
+not only on the machine that recorded.
+
+**What it does not prove.** That the answer is RIGHT. No self-comparison can.
+The oracle is the review of the diff in the commit that changes a recorded file:
+a recorded file is a reviewed file, and that is the whole of its authority. The
+interpreter never was a specification either — it was one implementation whose
+output was written down once, and a fault in both engines would have been
+recorded then as it would be recorded now. What is lost is narrower than "an
+oracle": it is a SECOND, independently written implementation, which catches the
+class of fault that one implementation makes and the other does not. `--engine
+interp` keeps that column while the interpreter exists, at 82 s against the
+route's 17 s over the 205, and the day it goes the column goes with it.
 
 ### M6 — the other two judgments
 

@@ -719,8 +719,9 @@ jobs:
     # RFC-0125 §2.6, M5: `tests/fixtures.rs` runs every example with
     # `vyrn run --engine wasm` — the direct backend's module, in the wasmtime
     # the CLI embeds — and compares stdout, stderr and the exit code byte for
-    # byte against `examples/expected/`, which was recorded once from the
-    # interpreter. With `wasmhash` (the same bytes everywhere) it is what the
+    # byte against `examples/expected/`, which the same route records
+    # (`VYRN_FIXTURES=write`) and a human reviews in the diff. With `wasmhash`
+    # (the same bytes everywhere) it is what the
     # parity job becomes once the interpreter is gone; until then it is not a
     # required check, and a red leg names the example and the first line that
     # differs.

@@ -2,18 +2,28 @@
 //! wasm in the embedded engine, against its recorded output.
 //!
 //! Parity compares three engines with each other. This compares ONE engine
-//! with what was recorded once from the interpreter — `examples/expected/
-//! <name>.stdout`, `.stderr` and `.exit` — so it needs no clang, no external
-//! `wasmtime` and no second engine, and a divergence names the line. Together
-//! with `wasmhash.rs` (the same bytes on every platform) it is what the parity
-//! job becomes once the interpreter is gone.
+//! with a recorded file — `examples/expected/<name>.stdout`, `.stderr` and
+//! `.exit` — so it needs no clang, no external `wasmtime` and no second engine,
+//! and a divergence names the line. Together with `wasmhash.rs` (the same bytes
+//! on every platform) it is what the parity job becomes once the interpreter is
+//! gone.
 //!
-//! Two modes, read from `VYRN_FIXTURES`:
+//! The recorded file is the expectation, and the ROUTE records it (RFC-0125 §3
+//! M5, the ninth slice). What that proves is that the route's answer has not
+//! moved since a human read it in a diff; what it does not prove is that the
+//! answer is right, which no self-comparison can. The interpreter is an
+//! optional second column for as long as there is an interpreter, and it is a
+//! second opinion rather than the oracle.
+//!
+//! Three modes, read from `VYRN_FIXTURES`:
 //!
 //!   - unset: run each example with `vyrn run --engine wasm` and compare.
-//!   - `write`: run each with `vyrn run` (the interpreter) and replace the
-//!     recorded files. Do this when an example's OUTPUT is meant to change, and
-//!     commit the result beside the change.
+//!   - `write`: run each the same way and replace the recorded files. Do this
+//!     when an example's OUTPUT is meant to change, and commit the result
+//!     beside the change — where it is reviewed, which is what makes it an
+//!     expectation.
+//!   - `interp`: compare `vyrn run` with the same recorded files. The second
+//!     column.
 //!
 //! Every example runs under the corpus's conventions (tests/common): cwd is
 //! `examples/`, stdin is `<name>.stdin` or closed, argv is `<name>.args`, and
@@ -86,7 +96,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "fixture-oracle",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "parity-column",
@@ -114,10 +124,11 @@ const CENSUS: &[Census] = &[
 #[ignore = "compiles and runs the whole corpus; the `fixtures` job runs it: cargo test -p vyrn-cli --test fixtures -- --ignored"]
 fn every_example_prints_what_was_recorded() {
     let dir = examples_dir();
-    let write = match std::env::var("VYRN_FIXTURES").as_deref() {
-        Ok("write") => true,
-        Ok(other) => panic!("VYRN_FIXTURES must be unset or `write`, got `{other}`"),
-        Err(_) => false,
+    let (write, engine) = match std::env::var("VYRN_FIXTURES").as_deref() {
+        Ok("write") => (true, "wasm"),
+        Ok("interp") => (false, "interp"),
+        Ok(other) => panic!("VYRN_FIXTURES must be unset, `write` or `interp`, got `{other}`"),
+        Err(_) => (false, "wasm"),
     };
     let expected = expected_dir();
     if write {
@@ -138,11 +149,7 @@ fn every_example_prints_what_was_recorded() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
         let mut cmd = vyrn();
-        cmd.arg("run");
-        if !write {
-            cmd.arg("--engine").arg("wasm");
-        }
-        cmd.arg(&name);
+        cmd.arg("run").arg("--engine").arg(engine).arg(&name);
         cmd.args(read_args(&path.with_extension("args")));
         let out = run_io(cmd, &dir, &path.with_extension("stdin"));
         let (stdout, stderr) = (norm(&out.stdout), norm(&out.stderr));
@@ -173,9 +180,9 @@ fn every_example_prints_what_was_recorded() {
         let w_code = want(&f_exit).trim().to_string();
         if stdout != w_out || stderr != w_err || code != w_code {
             failures.push(format!(
-                "{name}: DIVERGED from the recorded output\n  exit: recorded {w_code} vs wasm {code}\n{}{}",
-                first_diff("stdout", "recorded", &w_out, "wasm", &stdout).unwrap_or_default(),
-                first_diff("stderr", "recorded", &w_err, "wasm", &stderr).unwrap_or_default(),
+                "{name}: DIVERGED from the recorded output\n  exit: recorded {w_code} vs {engine} {code}\n{}{}",
+                first_diff("stdout", "recorded", &w_out, engine, &stdout).unwrap_or_default(),
+                first_diff("stderr", "recorded", &w_err, engine, &stderr).unwrap_or_default(),
             ));
             continue;
         }
