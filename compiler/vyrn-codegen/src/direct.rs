@@ -49,6 +49,7 @@ use vyrn_frontend::types::INT32;
 use crate::layout::{self, Layout};
 use crate::llt_of;
 use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE};
+use crate::{ArmRef, BodyRef};
 
 /// What the direct backend cannot lower yet: the construct, and where.
 ///
@@ -4395,74 +4396,24 @@ impl<'p> Fn_<'_, 'p> {
                 if self.optional_if_let(m, b, pattern, scrutinee, then_block, else_block, *line)? {
                     return Ok(());
                 }
-                let st = self.expr(m, b, scrutinee)?;
-                let sum = self
-                    .sum_of(&st)
-                    .ok_or_else(|| gap(&format!("an `if let` on `{st}`"), *line))?;
-                let Repr::Agg(sl) = self.cx.repr(&st, *line)? else {
-                    return unsupported("an `if let` on a non-aggregate", *line);
-                };
-                // A local of its own rather than shared scratch: the address has to
-                // survive the test AND the binds, and an `if let` nests — an inner
-                // one's scrutinee would take the same scratch slot back.
-                let addr = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(addr));
-                // Census §14, Phase 10a: a scrutinee that is a TEMPORARY owns
-                // what it holds and has no name, so `own` gives the STATEMENT
-                // the reclamation row. A release frame of its own is what makes
-                // the release survive a `return` out of the arm — an early exit
-                // walks the frames, and this one is on the stack for the whole
-                // statement.
+                // The two-arm switch the core lowers this to (RFC-0125 §3 M5):
+                // the pattern's arm, and the `else` under the default arm a
+                // user cannot spell. `match_expr` reads that shape and writes
+                // the `if`/`else` this arm used to write itself.
+                let empty = Block { stmts: Vec::new() };
+                let other = Pattern::Other;
+                let arms = [
+                    ArmRef {
+                        pattern,
+                        body: BodyRef::Block(then_block),
+                    },
+                    ArmRef {
+                        pattern: &other,
+                        body: BodyRef::Block(else_block.as_ref().unwrap_or(&empty)),
+                    },
+                ];
                 let key = s as *const Stmt as usize;
-                if self.drops.contains_key(&key) {
-                    if let Some(r) = self.rel_for(&st, *line)? {
-                        // A slot of its own, and it has to be one. `expr` left the
-                        // aggregate wherever it built it, and the arm can build
-                        // over that — the release then read a slot the then-block
-                        // had reused and freed a pointer nobody allocated. It cost
-                        // `examples/vyxdemo.vyrn` a wrong `None` out of `slice`,
-                        // and only on the direct backend, because the textual one
-                        // copies into an `alloca` at the same point.
-                        //
-                        // The copy is by value, so the copy holds the same buffer
-                        // pointers the binders read and releasing it releases
-                        // exactly those.
-                        let own = b.alloc(sl.size, sl.align);
-                        b.slot(own);
-                        b.ins(&Instruction::LocalGet(addr));
-                        b.ins(&Instruction::I32Const(sl.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                        self.register_rel(key, Place::Slot(own), r);
-                    }
-                }
-                let free_box = self.frees_boxes(scrutinee, key);
-                self.tag_test(b, addr, &sum, pattern, *line)?;
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                let mark = self.scope.len();
-                let binds = self.pattern_binds(&sum, pattern, *line)?;
-                let ptys: Vec<Type> = binds.iter().map(|(_, t)| t.clone()).collect();
-                for (i, (n, t)) in binds.into_iter().enumerate() {
-                    let place = self.bind_payload(b, addr, &sl, &ptys, i, &t, *line, free_box)?;
-                    self.scope.push((n, place, t));
-                }
-                self.block(m, b, then_block)?;
-                // The binders are the then-arm's only: an `else` that could see
-                // them would be reading a payload the tag says is not there.
-                self.scope.truncate(mark);
-                if let Some(e) = else_block {
-                    b.ins(&Instruction::Else);
-                    self.block(m, b, e)?;
-                }
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                // The fall-through release, after both arms have rejoined. An arm
-                // that returned already ran it and branched, so this copy lands in
-                // code wasm has marked unreachable — the same rule `block` follows.
-                self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
+                self.match_expr(m, b, key, scrutinee, &arms, "`if let`", *line)?;
             }
             Stmt::While { cond, body, line } => {
                 // RFC-0125 M1: the headers this loop reads and never moves,
@@ -5868,7 +5819,15 @@ impl<'p> Fn_<'_, 'p> {
                 scrutinee,
                 arms,
                 line,
-            } => self.match_expr(m, b, e as *const Expr as usize, scrutinee, arms, *line)?,
+            } => self.match_expr(
+                m,
+                b,
+                e as *const Expr as usize,
+                scrutinee,
+                &ArmRef::of(arms),
+                "`match`",
+                *line,
+            )?,
             Expr::Try {
                 expr: operand,
                 line,
@@ -6021,11 +5980,11 @@ impl<'p> Fn_<'_, 'p> {
     /// A later arm `peek` cannot see forfeits the upgrade and nothing else: its own
     /// `expr_as` refuses it later if it truly cannot be lowered. So the scan never
     /// narrows what this backend reaches.
-    fn match_ty(&mut self, sum: &Sum, arms: &[MatchArm], line: usize) -> Result<Type, String> {
+    fn match_ty(&mut self, sum: &Sum, arms: &[ArmRef], line: usize) -> Result<Type, String> {
         // Any block arm (RFC-0118) makes this a statement match: the arms
         // yield nothing, whatever the expression arms compute is discarded,
         // and the join carries no value.
-        if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
+        if arms.iter().any(ArmRef::is_block) {
             return Ok(Type::Unit);
         }
         let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
@@ -6052,15 +6011,15 @@ impl<'p> Fn_<'_, 'p> {
 
     /// One arm's type, with its bindings in scope. The place is a dummy: `peek`
     /// reads types and never emits, so a scope frame it cannot mutate is enough.
-    fn peek_arm(&mut self, arm: &MatchArm, sum: &Sum, line: usize) -> Result<Type, String> {
+    fn peek_arm(&mut self, arm: &ArmRef, sum: &Sum, line: usize) -> Result<Type, String> {
         let mark = self.scope.len();
-        for (n, t) in self.pattern_binds(sum, &arm.pattern, line)? {
+        for (n, t) in self.pattern_binds(sum, arm.pattern, line)? {
             self.scope.push((n, Place::Local(u32::MAX), t));
         }
         let got = match &arm.body {
-            ArmBody::Expr(e) => self.peek(e, line),
+            BodyRef::Expr(e) => self.peek(e, line),
             // A block arm (RFC-0118) yields nothing.
-            ArmBody::Block(_) => Ok(Type::Unit),
+            BodyRef::Block(_) => Ok(Type::Unit),
         };
         self.scope.truncate(mark);
         got
@@ -6321,7 +6280,7 @@ impl<'p> Fn_<'_, 'p> {
                 let sum = self
                     .sum_of(&st)
                     .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
-                self.match_ty(&sum, arms, line)?
+                self.match_ty(&sum, &ArmRef::of(arms), line)?
             }
             Expr::Unary { expr, .. } => self.peek(expr, line)?,
             Expr::Binary { op, lhs, .. } => match op {
@@ -12318,6 +12277,24 @@ impl<'p> Fn_<'_, 'p> {
 /// output against a build that uses the other one.
 type Sum = Vec<EnumVariant>;
 
+/// The tag an arm tests, or `None` for the arm that tests nothing — RFC-0121's
+/// `Pattern::Other`, which a user cannot spell and which the switch's shape is
+/// read off ([`crate::two_way`]).
+fn tag_of(sum: &Sum, pat: &Pattern, line: usize) -> Result<Option<usize>, String> {
+    Ok(match pat {
+        Pattern::Other => None,
+        Pattern::Variant(name, _) => Some(
+            sum.iter()
+                .position(|v| v.name == *name)
+                .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
+        ),
+        // `??`'s pair (RFC-0079) names a TAG and not a variant: the desugar
+        // runs in the parser, where there is no type to name one. Tag 1 is the
+        // success side of every built-in sum (RFC-0126 §8.1).
+        _ => Some(usize::from(matches!(pat, Pattern::Success(_)))),
+    })
+}
+
 /// How one payload travels inside a sum's `i64` word.
 #[derive(PartialEq)]
 enum Word {
@@ -13183,23 +13160,40 @@ impl<'p> Fn_<'_, 'p> {
     /// copied into a slot allocated BEFORE the first test. Nothing here counts
     /// arms, which is the property that makes 46 four-to-seven-way joins cost
     /// exactly what 103 diamonds cost.
+    #[allow(clippy::too_many_arguments)]
     fn match_expr(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         key: usize,
         scrutinee: &Expr,
-        arms: &[MatchArm],
+        arms: &[ArmRef],
+        form: &str,
         line: usize,
     ) -> Result<Type, String> {
         let st = self.expr(m, b, scrutinee)?;
         let sum = self
             .sum_of(&st)
-            .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
+            .ok_or_else(|| gap(&format!("a {form} on `{st}`"), line))?;
+        // The shape, asked once, before anything is emitted: two arms, one
+        // tag and a default is a two-way branch, and every other shape is the
+        // chain (RFC-0125 §3 M5, and [`crate::two_way`]).
+        let tags: Vec<Option<usize>> = arms
+            .iter()
+            .map(|a| tag_of(&sum, a.pattern, line))
+            .collect::<Result<_, _>>()?;
+        let two = crate::two_way(&tags);
+        // One scratch slot for every switch. `if let` took a local of its
+        // own, on the argument that "an inner one's scrutinee would take the
+        // same scratch slot back" — which the emitted order says is not so:
+        // nothing reads the address after the arm's binds, and an inner
+        // construct is inside an arm. So the two forms share the slot, and a
+        // function that writes both now declares one local where it declared
+        // two.
         let addr = self.scratch(b, ValType::I32, 3);
         b.ins(&Instruction::LocalSet(addr));
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
-            return unsupported("a `match` on a non-aggregate", line);
+            return unsupported(&format!("a {form} on a non-aggregate"), line);
         };
         // The scrutinee's release, where `own` says this match is its last owner
         // — the `if let` release above, at the construct that also carries a
@@ -13231,7 +13225,7 @@ impl<'p> Fn_<'_, 'p> {
         // carries nothing, whatever the expression arms beside it compute is
         // dropped, and the checker's answer for the node is about a value the
         // construct does not hand out.
-        let want = if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
+        let want = if arms.iter().any(ArmRef::is_block) {
             want
         } else {
             self.join_ty(key, want)
@@ -13242,23 +13236,54 @@ impl<'p> Fn_<'_, 'p> {
             Repr::Agg(l) => Some((b.alloc(l.size, l.align), l.size)),
             _ => None,
         };
-        let out = self.depth;
-        b.ins(&Instruction::Block(match &r {
+        // A two-way branch is an `if`/`else` and joins where it ends, so it
+        // needs no block to leave and no `br` to leave it by. Every other
+        // shape is a chain of `if`s inside one block, and each arm branches
+        // out of it.
+        let bt = match &r {
             Repr::Scalar(v) => BlockType::Result(*v),
             _ => BlockType::Empty,
-        }));
-        self.depth += 1;
+        };
+        let out = self.depth;
+        if two.is_none() {
+            b.ins(&Instruction::Block(bt));
+            self.depth += 1;
+        }
 
         // RFC-0114 Rule N at a match join, keyed by this expression's address.
         let ers = self.cx.edge_rows(key);
         let free_box = self.frees_boxes(scrutinee, key);
-        for (arm_ix, arm) in arms.iter().enumerate() {
-            self.tag_test(b, addr, &sum, &arm.pattern, line)?;
-            b.ins(&Instruction::If(BlockType::Empty));
-            self.depth += 1;
+        // The tagged arm goes first in a two-way branch, whichever side the
+        // source wrote it on: the `if` tests a tag and the `else` is what is
+        // left.
+        let order: Vec<usize> = match two {
+            Some((at, _)) => vec![at, 1 - at],
+            None => (0..arms.len()).collect(),
+        };
+        // Where the `else` went, so an arm that writes nothing can take it
+        // back — `if let` with no `else` is the whole of that case.
+        let mut els = None;
+        for (slot, arm_ix) in order.into_iter().enumerate() {
+            let arm = &arms[arm_ix];
+            match two {
+                Some(_) if slot == 1 => {
+                    els = Some(b.here());
+                    b.ins(&Instruction::Else);
+                }
+                Some(_) => {
+                    self.tag_test(b, addr, &sum, arm.pattern, line)?;
+                    b.ins(&Instruction::If(bt));
+                    self.depth += 1;
+                }
+                None => {
+                    self.tag_test(b, addr, &sum, arm.pattern, line)?;
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                }
+            }
 
             let mark = self.scope.len();
-            let binds = self.pattern_binds(&sum, &arm.pattern, line)?;
+            let binds = self.pattern_binds(&sum, arm.pattern, line)?;
             let ptys: Vec<Type> = binds.iter().map(|(_, t)| t.clone()).collect();
             let mut bound: Vec<(String, Place, Type)> = Vec::new();
             for (i, (n, t)) in binds.into_iter().enumerate() {
@@ -13267,7 +13292,7 @@ impl<'p> Fn_<'_, 'p> {
                 self.scope.push((n, place, t));
             }
             match (&arm.body, dest) {
-                (ArmBody::Expr(body), Some((off, size))) => {
+                (BodyRef::Expr(body), Some((off, size))) => {
                     b.slot(off);
                     self.expr_as(m, b, body, &want)?;
                     b.ins(&Instruction::I32Const(size as i32));
@@ -13280,14 +13305,14 @@ impl<'p> Fn_<'_, 'p> {
                 // an expression arm beside one computes and drops — `want` is
                 // Unit whenever any arm is a block, so a dest never exists on
                 // this path.
-                (ArmBody::Expr(body), None) if matches!(want, Type::Unit) => {
+                (BodyRef::Expr(body), None) if matches!(want, Type::Unit) => {
                     let got = self.expr(m, b, body)?;
                     if !matches!(self.cx.repr(&got, line)?, Repr::Unit) {
                         b.ins(&Instruction::Drop);
                     }
                 }
-                (ArmBody::Expr(body), None) => self.expr_as(m, b, body, &want)?,
-                (ArmBody::Block(blk), _) => self.block(m, b, blk)?,
+                (BodyRef::Expr(body), None) => self.expr_as(m, b, body, &want)?,
+                (BodyRef::Block(blk), _) => self.block(m, b, blk)?,
             }
             // Round forty: the unmoved payload binders the row names — the
             // textual backend's `gen_arm_body` twin.
@@ -13309,17 +13334,35 @@ impl<'p> Fn_<'_, 'p> {
             }
             self.scope.truncate(mark);
             self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;
-            let d = self.br_to(out);
-            b.ins(&Instruction::Br(d));
-
+            match two {
+                Some(_) if slot == 0 => {}
+                Some(_) => {
+                    // An `else` that wrote nothing is no `else` at all. A
+                    // branch that carries a value always writes one, so only
+                    // an empty-result `if` can lose it.
+                    if let Some(at) =
+                        els.filter(|at| b.here() == at + 1 && matches!(bt, BlockType::Empty))
+                    {
+                        b.rewind(at);
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                None => {
+                    let d = self.br_to(out);
+                    b.ins(&Instruction::Br(d));
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+            }
+        }
+        if two.is_none() {
+            // The checker proves the arms exhaustive; the validator cannot see
+            // the proof, so it is told instead.
+            b.ins(&Instruction::Unreachable);
             self.depth -= 1;
             b.ins(&Instruction::End);
         }
-        // The checker proves the arms exhaustive; the validator cannot see the
-        // proof, so it is told instead.
-        b.ins(&Instruction::Unreachable);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
         // The fall-through release, after the arms have rejoined and before the
         // aggregate result's address is pushed. A scalar result is already on
         // the stack here and the release is stack-neutral, so it sits under it.
@@ -13703,22 +13746,15 @@ impl<'p> Fn_<'_, 'p> {
         // The refutable-`let` desugar's default arm (RFC-0121): the probe is
         // constant truth — the address read above is discarded, and the one
         // `i32` every caller expects is pushed in its place.
-        if matches!(pat, Pattern::Other) {
+        let Some(tag) = tag_of(sum, pat, line)? else {
             b.ins(&Instruction::Drop);
             b.ins(&Instruction::I32Const(1));
             return Ok(());
-        }
+        };
         // One tag read for every sum since RFC-0126 §8.11's M4b, where the two
         // built-in ones stopped having a variant list of their own. A second
         // spelling of this probe would be a second chance to read the tag at the
         // wrong width, which is silent rather than loud.
-        let tag = match pat {
-            Pattern::Variant(name, _) => sum
-                .iter()
-                .position(|v| v.name == *name)
-                .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
-            _ => usize::from(matches!(pat, Pattern::Success(_))),
-        };
         b.ins(&Instruction::I64Load(word8()));
         b.ins(&Instruction::I64Const(tag as i64));
         b.ins(&Instruction::I64Eq);

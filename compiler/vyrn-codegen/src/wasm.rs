@@ -991,6 +991,22 @@ impl Frame {
         self
     }
 
+    /// How many instructions the body holds, to hand [`Frame::rewind`] later.
+    pub fn here(&self) -> usize {
+        self.body.len()
+    }
+
+    /// Give back every instruction appended since `here`.
+    ///
+    /// One caller, and one rule: an `else` whose arm writes nothing is the
+    /// same branch without the `else` (RFC-0125 §3 M5). Asking the emitted
+    /// body is the only test of "writes nothing" that cannot drift from what
+    /// the arm's four writers do.
+    pub fn rewind(&mut self, at: usize) {
+        debug_assert!(at <= self.body.len());
+        self.body.truncate(at);
+    }
+
     /// Take another local of type `t`, giving its index.
     pub fn local(&mut self, t: ValType) -> u32 {
         self.locals.push(t);

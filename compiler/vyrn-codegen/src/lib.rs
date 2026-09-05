@@ -674,6 +674,60 @@ ok:
 
 ";
 
+/// One arm of a switch, borrowed (RFC-0125 §3 M5, the one-emission slice).
+///
+/// Both emitters lower ONE switch, and an `if let` reaches it as the two-arm
+/// switch the core says it is ([`vyrn_lower::core::St::Switch`]) — its pattern
+/// arm, and its `else` under [`Pattern::Other`], the arm a user cannot spell.
+/// The halves are borrowed rather than cloned because an expression's ADDRESS
+/// is the key every side table this backend reads is written under, and a
+/// clone has a different one.
+pub(crate) struct ArmRef<'a> {
+    pub pattern: &'a Pattern,
+    pub body: BodyRef<'a>,
+}
+
+/// [`ArmBody`], borrowed.
+pub(crate) enum BodyRef<'a> {
+    Expr(&'a Expr),
+    Block(&'a Block),
+}
+
+impl<'a> ArmRef<'a> {
+    /// The arms a `match` wrote, as the switch reads them.
+    pub(crate) fn of(arms: &'a [MatchArm]) -> Vec<ArmRef<'a>> {
+        arms.iter()
+            .map(|a| ArmRef {
+                pattern: &a.pattern,
+                body: match &a.body {
+                    ArmBody::Expr(e) => BodyRef::Expr(e),
+                    ArmBody::Block(b) => BodyRef::Block(b),
+                },
+            })
+            .collect()
+    }
+
+    /// A block arm yields nothing, which is what makes a switch a statement.
+    pub(crate) fn is_block(&self) -> bool {
+        matches!(self.body, BodyRef::Block(_))
+    }
+}
+
+/// The `if let` shape, keyed on the switch and not on the source form: two
+/// arms, one of which names a tag and the other of which is the default.
+///
+/// A switch of that shape is a two-way branch on a compare — the `br i1` on an
+/// `icmp` this backend used to write a second time for `Stmt::IfLet`, and the
+/// `if`/`else` the direct backend used to. Every other shape takes the switch.
+/// `tags` is one entry per arm: the tag it tests, or `None` for the default.
+pub(crate) fn two_way(tags: &[Option<usize>]) -> Option<(usize, usize)> {
+    match tags {
+        [Some(t), None] => Some((0, *t)),
+        [None, Some(t)] => Some((1, *t)),
+        _ => None,
+    }
+}
+
 /// The private LLVM symbol for an `extern` import (RFC-0012). Prefixed so it
 /// cannot collide with a real C symbol on the native target: the generated C
 /// trap stub defines exactly this name, and the wasm import name is carried
@@ -6185,82 +6239,23 @@ impl<'a> Gen<'a> {
                 if self.optional_if_let(pattern, scrutinee, then_block, else_block)? {
                     return Ok(());
                 }
-                // Evaluate the scrutinee once, test the pattern, and branch to the
-                // then-arm (payload bound into fresh locals) or the else-arm
-                // (RFC-0060). No `phi` — the arms carry no value (statement form).
-                let (sv, sty) = self.gen_expr(scrutinee)?;
-                let sr = self.resolve(&sty);
-                // Census §14, Phase 10a: a scrutinee that is a TEMPORARY owns
-                // what it holds and has no name, so `own` gives the STATEMENT
-                // the reclamation row. The value goes into a slot and the slot
-                // onto a drop frame of its own, which is what makes the release
-                // survive a `return` out of the arm — `emit_all_drops` walks the
-                // frames, and this one is on the stack for the whole statement.
-                let key = stmt as *const Stmt as usize;
-                let scrut_drop = self.droppable.get(&key).cloned();
-                if let Some(kind) = scrut_drop {
-                    let slot = self.fresh_alloca(&self.llt(&sr).clone());
-                    self.emit(format!("store {} {sv}, ptr {slot}", self.llt(&sr)));
-                    self.register_drop(key, slot, kind);
-                }
-                let then_l = self.fresh_label("il.then");
-                let end_l = self.fresh_label("il.end");
-                let else_l = if else_block.is_some() {
-                    self.fresh_label("il.else")
-                } else {
-                    end_l.clone()
-                };
-                let cond = self.gen_pattern_test(&sv, &sr, pattern)?;
-                self.emit_term(format!("br i1 {cond}, label %{then_l}, label %{else_l}"));
-
-                self.emit_label(&then_l);
-                // A scope frame holds the pattern binders (payload borrows, never
-                // drop-tracked — like a `match` arm's), wrapping the then-block.
-                self.scope.push(Vec::new());
-                self.gen_pattern_binds(&sv, &sr, pattern)?;
-                self.gen_block(then_block)?;
-                self.scope.pop();
-                if !self.terminated {
-                    self.emit_term(format!("br label %{end_l}"));
-                }
-
-                if let Some(eb) = else_block {
-                    self.emit_label(&else_l);
-                    self.gen_block(eb)?;
-                    if !self.terminated {
-                        self.emit_term(format!("br label %{end_l}"));
-                    }
-                }
-
-                self.emit_label(&end_l);
-                // The fall-through release. An arm that returned already ran it
-                // through `emit_all_drops` and left `terminated` set, so nothing
-                // is freed twice — the same rule `gen_block` follows.
-                if !self.terminated {
-                    self.emit_releases(ExitKind::Scrutinee, key);
-                    // A MAP lookup's `Option` box is a fresh allocation even
-                    // though `m[k]` spells a place — the `match` path's rule
-                    // (round forty-two), on the `if let` spelling mapdemo
-                    // uses. The payload shares the map's storage, so only the
-                    // box goes back; `None` carries a zero word and `free`
-                    // refuses null.
-                    let map_lookup = matches!(scrutinee, Expr::Call { name, args, .. }
-                        if name == "@at"
-                            && args.first().and_then(|a| self.static_ty(a)).is_some_and(
-                                |t| matches!(self.resolve(&t), Type::Map(..))));
-                    if map_lookup && self.droppable.get(&key).is_none() && self.region_depth == 0 {
-                        if let Some(inner) = vyrn_frontend::types::option_payload(&sr).cloned() {
-                            if self.payload_boxed(&inner) {
-                                let sll = self.llt(&sr);
-                                let w0 = self.fresh_tmp();
-                                let q = self.fresh_tmp();
-                                self.emit(format!("{w0} = extractvalue {sll} {sv}, 1"));
-                                self.emit(format!("{q} = inttoptr i64 {w0} to ptr"));
-                                self.emit(format!("call void @__vyrn_free(ptr {q})"));
-                            }
-                        }
-                    }
-                }
+                // The two-arm switch the core lowers this to (RFC-0125 §3 M5):
+                // the pattern's arm, and the `else` under the default arm a
+                // user cannot spell. `gen_match_sum` recognises the shape and
+                // writes the two-way branch this arm used to write itself.
+                let empty = Block { stmts: Vec::new() };
+                let other = Pattern::Other;
+                let arms = [
+                    ArmRef {
+                        pattern,
+                        body: BodyRef::Block(then_block),
+                    },
+                    ArmRef {
+                        pattern: &other,
+                        body: BodyRef::Block(else_block.as_ref().unwrap_or(&empty)),
+                    },
+                ];
+                self.gen_match(stmt as *const Stmt as usize, scrutinee, &arms)?;
                 Ok(())
             }
             Stmt::While { cond, body, .. } => {
@@ -6744,7 +6739,7 @@ impl<'a> Gen<'a> {
             Expr::Call { name, args, .. } => self.gen_call(name, args),
             Expr::Match {
                 scrutinee, arms, ..
-            } => self.gen_match(expr as *const Expr as usize, scrutinee, arms),
+            } => self.gen_match(expr as *const Expr as usize, scrutinee, &ArmRef::of(arms)),
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -7233,7 +7228,7 @@ impl<'a> Gen<'a> {
         &mut self,
         key: usize,
         scrutinee: &Expr,
-        arms: &[MatchArm],
+        arms: &[ArmRef],
     ) -> Result<(String, Type), String> {
         let (sv, sty) = self.gen_expr(scrutinee)?;
         let scrut_drop = self.droppable.get(&key).cloned();
@@ -7370,11 +7365,18 @@ impl<'a> Gen<'a> {
     /// to take a two-way `br` on `icmp eq i64 %tag, 1`, with the tag-1 arm first
     /// whatever order the source wrote; it takes the switch now, in source order,
     /// like the declared enum it is (§8.1).
+    ///
+    /// **And one emission for every switch** (RFC-0125 §3 M5). `if let` wrote
+    /// the two-way branch a second time, on the same `icmp`, because a switch
+    /// with a default was more instructions than it needed. That is an
+    /// optimization and it is stated here, once, keyed on the SHAPE the core
+    /// gives ([`two_way`]): two arms, one tag, and a default. The source form
+    /// that built the arms is not asked.
     fn gen_match_sum(
         &mut self,
         sv: &str,
         evs: &[EnumVariant],
-        arms: &[MatchArm],
+        arms: &[ArmRef],
         ers: &[(String, u32)],
         free_boxes: bool,
         key: usize,
@@ -7417,9 +7419,20 @@ impl<'a> Gen<'a> {
             .find(|(idx, _)| idx.is_none())
             .map(|(_, lbl)| lbl.clone())
             .unwrap_or_else(|| default_l.clone());
-        self.emit_term(format!(
-            "switch i64 {tag}, label %{switch_default} [ {cases} ]"
-        ));
+        let tags: Vec<Option<usize>> = arm_labels.iter().map(|(i, _)| *i).collect();
+        match two_way(&tags) {
+            Some((at, t)) => {
+                let m = self.fresh_tmp();
+                self.emit(format!("{m} = icmp eq i64 {tag}, {t}"));
+                self.emit_term(format!(
+                    "br i1 {m}, label %{}, label %{switch_default}",
+                    arm_labels[at].1
+                ));
+            }
+            None => self.emit_term(format!(
+                "switch i64 {tag}, label %{switch_default} [ {cases} ]"
+            )),
+        }
 
         let mut incoming: Vec<(String, String)> = Vec::new();
         // Seeded `Never`, not `Unit`: a match whose EVERY arm diverges is itself
@@ -7468,11 +7481,11 @@ impl<'a> Gen<'a> {
                 }
             }
             let (v, t) = match &arm.body {
-                ArmBody::Expr(e) => self.gen_join_arm(e, want.as_ref())?,
+                BodyRef::Expr(e) => self.gen_join_arm(e, want.as_ref())?,
                 // A block arm (RFC-0118) is its statements and yields nothing;
                 // `has_block` below forces the void merge, so the empty value
                 // never reaches a `phi`.
-                ArmBody::Block(b) => {
+                BodyRef::Block(b) => {
                     self.gen_block(b)?;
                     (String::new(), Type::Unit)
                 }
@@ -7525,7 +7538,7 @@ impl<'a> Gen<'a> {
         // expression arms beside it computed is discarded, the type is Unit,
         // and the void path below skips the phi a valueless edge could not
         // feed.
-        if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
+        if arms.iter().any(ArmRef::is_block) {
             ty = Type::Unit;
         } else if let Some(w) = want {
             ty = w;
@@ -7988,70 +8001,6 @@ impl<'a> Gen<'a> {
         self.emit_label(&end_l);
         self.scope.pop();
         Ok(true)
-    }
-
-    fn gen_pattern_test(
-        &mut self,
-        sv: &str,
-        sr: &Type,
-        pattern: &Pattern,
-    ) -> Result<String, String> {
-        match sr {
-            Type::Enum(evs) => {
-                let ell = enum_ll(self.enum_slots(evs));
-                let vname = match pattern {
-                    Pattern::Variant(n, _) => n,
-                    _ => return Err("non-variant pattern on an enum scrutinee".into()),
-                };
-                let idx = evs
-                    .iter()
-                    .position(|v| &v.name == vname)
-                    .ok_or_else(|| format!("unknown variant `{vname}`"))?;
-                let tag = self.fresh_tmp();
-                self.emit(format!("{tag} = extractvalue {ell} {sv}, 0"));
-                let m = self.fresh_tmp();
-                self.emit(format!("{m} = icmp eq i64 {tag}, {idx}"));
-                Ok(m)
-            }
-            other => Err(format!(
-                "if-let scrutinee is not an Option/Result/enum: {other:?}"
-            )),
-        }
-    }
-
-    /// After a successful `gen_pattern_test`, declare the pattern's binders in the
-    /// current scope, decoding each payload from `sv` (RFC-0060).
-    fn gen_pattern_binds(&mut self, sv: &str, sr: &Type, pattern: &Pattern) -> Result<(), String> {
-        match sr {
-            Type::Enum(evs) => {
-                if let Pattern::Variant(vname, binds) = pattern {
-                    let ell = enum_ll(self.enum_slots(evs));
-                    let idx = evs
-                        .iter()
-                        .position(|v| &v.name == vname)
-                        .ok_or_else(|| format!("unknown variant `{vname}`"))?;
-                    let payload_tys = evs[idx].payload.clone();
-                    for (i, bind) in binds.iter().enumerate() {
-                        let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
-                        let at = self.payload_slot(&payload_tys, i);
-                        let nw = self.payload_words(&pty);
-                        let words: Vec<String> = (0..nw)
-                            .map(|k| {
-                                let w = self.fresh_tmp();
-                                self.emit(format!("{w} = extractvalue {ell} {sv}, {}", at + k));
-                                w
-                            })
-                            .collect();
-                        let v = self.decode_payload(&words, &pty);
-                        let ll = self.llt(&pty);
-                        let slot = self.declare(bind, &pty);
-                        self.emit(format!("store {ll} {v}, ptr {slot}"));
-                    }
-                }
-                Ok(())
-            }
-            _ => Ok(()),
-        }
     }
 
     /// Lower `expr?`: on `None`/`Err` (tag 0) return the aggregate as the
