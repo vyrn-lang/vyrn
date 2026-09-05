@@ -844,8 +844,26 @@ fn projection_call(name: &str) -> bool {
 /// the first error wins — this is sound because every statement does its
 /// sub-expression checking *before* mutating `consumed`/`scope`, so after an
 /// error the flow state is consistent for the next statement.
+/// **The order a file's refusals come out in is the source's** (RFC-0125 §3
+/// M3, the corpus slice). This pass walks top-level functions before `impl`
+/// methods and the placer walks bodies in the lowering's order, so the same
+/// two sentences came out swapped and the whole standard error moved even
+/// where every sentence was identical. Neither walk order is a rule anybody
+/// wrote down; the source's is, and it is the only one a reader can predict.
+/// So both passes sort by line before they print, and the other statement of
+/// the same rule is `vyrn-cli`'s `kernel_refuses`. Files keep the order they
+/// were first named in — a module's refusals stay together — and two on one
+/// line keep the walk's order, which is why the sort is stable.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    run(program, Want::Check).diags
+    let mut diags = run(program, Want::Check).diags;
+    let mut files: Vec<Option<String>> = Vec::new();
+    for d in &diags {
+        if !files.contains(&d.file) {
+            files.push(d.file.clone());
+        }
+    }
+    diags.sort_by_key(|d| (files.iter().position(|f| *f == d.file).unwrap_or(0), d.line));
+    diags
 }
 
 /// Every place rule 2 refuses a **store** of a borrow, out of `program`.
@@ -7755,15 +7773,29 @@ mod tests {
     fn run(src: &str) -> Result<(), String> {
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
         let r = super::check(&program);
-        if let Ok(dir) = std::env::var("VYRN_DUMP_MOVECHECK") {
-            let _ = std::fs::create_dir_all(&dir);
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(src, &mut h);
-            let n = std::hash::Hasher::finish(&h);
-            let tag = if r.is_ok() { "ok" } else { "no" };
-            let _ = std::fs::write(format!("{dir}/{tag}_{n:016x}.vyrn"), src);
-        }
+        record(src, r.is_ok());
         r
+    }
+
+    /// One program of the corpus, written out.
+    ///
+    /// A test that parses for itself — because it asks [`super::ownership`] of
+    /// the same program — calls this beside its own `check`. Five did not, and
+    /// the corpus was blind to exactly those five: row 19 read `licensed` over
+    /// 134 programs, and the program its OWN unit test writes (a loop variable
+    /// put into `Some(..)`) is worded differently by the two passes (RFC-0125
+    /// §3 M3, the corpus slice). A licence is only ever as wide as what it was
+    /// read from.
+    fn record(src: &str, ok: bool) {
+        let Ok(dir) = std::env::var("VYRN_DUMP_MOVECHECK") else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(src, &mut h);
+        let n = std::hash::Hasher::finish(&h);
+        let tag = if ok { "ok" } else { "no" };
+        let _ = std::fs::write(format!("{dir}/{tag}_{n:016x}.vyrn"), src);
     }
 
     /// What `views` and `sinks` answer, now that both read a signature.
@@ -7824,7 +7856,9 @@ mod tests {
                        return xs.length\n\
                    }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(super::check(&program).is_ok());
+        let r = super::check(&program);
+        record(src, r.is_ok());
+        assert!(r.is_ok());
         let rows = super::ownership(&program);
         let payload = rows
             .values()
@@ -8060,6 +8094,7 @@ mod tests {
                    if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
         let err = super::check(&program).unwrap_err();
+        record(src, false);
         assert!(
             err.contains("may not be put into `Some(..)`"),
             "the borrow is refused at the constructor position: {err}"
@@ -8068,7 +8103,9 @@ mod tests {
         // survives that would stop the caller reclaiming it.
         let src2 = src.replace("Some(m)", "Some(m.copy())");
         let program2 = crate::parser::parse(crate::lexer::lex(&src2).unwrap()).unwrap();
-        assert!(super::check(&program2).is_ok());
+        let r2 = super::check(&program2);
+        record(&src2, r2.is_ok());
+        assert!(r2.is_ok());
     }
 
     /// Phase 10a keyed the scrutinee row on `place_key == 0`, and 0 means two
@@ -8082,7 +8119,9 @@ mod tests {
                    if let Some(s) = v { return s.byteLength } return 0 } \
                    fn main() -> Int64 { return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(super::check(&program).is_ok());
+        let r = super::check(&program);
+        record(src, r.is_ok());
+        assert!(r.is_ok());
         assert!(
             super::ownership(&program)
                 .values()
@@ -8684,7 +8723,9 @@ mod tests {
                    let r = g(arr) let s2 = h(arr) \
                    return r.name.byteLength + s2[0].byteLength }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(super::check(&program).is_ok());
+        let r = super::check(&program);
+        record(src, r.is_ok());
+        assert!(r.is_ok());
         assert!(
             super::ownership(&program).values().all(|r| {
                 let fc = r.from_call.as_deref();

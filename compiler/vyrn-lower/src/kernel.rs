@@ -251,10 +251,34 @@ struct Kernel<'b> {
     /// the checker's words — recorded against every name it consumes.
     here: usize,
     by: String,
+    /// How that taker takes ([`Taker`]).
+    takes: Taker,
     /// The loop being walked: the state at its entry, the states at its
     /// `break`s, and the names bound inside it (which its back edge must find
     /// consumed).
     loops: Vec<LoopCtx>,
+}
+
+/// Which taker a right-hand side is.
+fn taker_of(rhs: &Rhs) -> Taker {
+    match rhs {
+        Rhs::Call { declared: true, .. } => Taker::Declared,
+        Rhs::Call { ctor: true, .. } => Taker::Constructs,
+        _ => Taker::Stores,
+    }
+}
+
+/// How the taker of the statement being judged takes what it is handed, which
+/// is three sentences for one rule — `movecheck` words each differently
+/// (RFC-0125 §3 M3, rows 07, 19 and 34).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Taker {
+    /// A parameter the author declared `consume`: it is PASSED to it.
+    Declared,
+    /// A builtin's sink, a store, a literal: the value is STORED into it.
+    Stores,
+    /// A variant constructor: the value is PUT INTO what it makes.
+    Constructs,
 }
 
 struct LoopCtx {
@@ -288,6 +312,7 @@ fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
         loops: Vec::new(),
         here: 0,
         by: String::new(),
+        takes: Taker::Stores,
     };
     let mut st = State {
         own: vec![Own::Gone; body.names.len()],
@@ -373,8 +398,14 @@ impl<'b> Kernel<'b> {
         st.own[n as usize] == Own::Gone && (self.releases(n) || st.taker[n as usize].is_some())
     }
 
+    /// The name a refusal quotes: the path the reader wrote where this name is
+    /// a temporary the lowering minted for a read of a place
+    /// ([`crate::core::NameInfo::path`]), and the source spelling otherwise.
+    /// `@borrow` is a name no program contains, and a reader who is told about
+    /// it is told about the compiler rather than about the program.
     fn src(&self, n: Name) -> &str {
-        &self.body.names[n as usize].source
+        let i = &self.body.names[n as usize];
+        i.path.as_deref().unwrap_or(&i.source)
     }
 
     fn info(&self, n: Name) -> String {
@@ -563,10 +594,24 @@ impl<'b> Kernel<'b> {
                     .unwrap_err();
             }
         }
-        let what = format!("it is read out of `{src}`, a place that owns it");
+        // The name a refusal quotes is the reader's path where the lowering
+        // minted this name for a read of a place, and the place is then the
+        // subject rather than a second quotation of it: `b.xs` may not be
+        // taken because it is read out of a place that owns it, which is how
+        // the checker words the same refusal (RFC-0125 §3 M3, the corpus
+        // slice). A name the READER bound is quoted with the place it reads,
+        // because the two are different words.
+        let minted = self.body.names[n as usize].path.is_some();
+        let what = if minted {
+            "it is read out of a place that owns it".to_string()
+        } else {
+            format!("it is read out of `{src}`, a place that owns it")
+        };
         // A named binding a call takes: at the binding, as the checker words
-        // it, so the `.copy()` on the menu lands where the read is.
-        if by.ends_with("(..)`") && !s.starts_with('@') {
+        // it, so the `.copy()` on the menu lands where the read is. A minted
+        // name has no binding a reader can look at, so this form has nowhere
+        // to stand.
+        if by.ends_with("(..)`") && !minted {
             let (here, at) = (self.here, self.body.names[n as usize].line);
             return self
                 .refuse_at::<()>(
@@ -616,16 +661,88 @@ impl<'b> Kernel<'b> {
                 )
                 .unwrap_err();
         }
-        let msg = if by.ends_with("(..)`") {
-            format!("`{s}` may not be passed to a `consume` parameter via {by} — {what}")
-        } else if by == "a `return`" {
+        let msg = if by == "a `return`" {
             format!("`{s}` may not be returned — {what}")
-        } else if by == "a literal" {
-            format!("`{s}` may not be stored into the literal — {what}")
         } else {
-            format!("`{s}` may not be stored into {by} — {what}")
+            format!("{} — {what}", self.may_not(s))
         };
-        self.refuse_at::<()>(self.here, msg).unwrap_err()
+        self.refuse_at::<()>(self.here, menu(msg, self.place_fixes(st, n)))
+            .unwrap_err()
+    }
+
+    /// The ways out of a take of a place read, in `movecheck::Borrow::fixes`'s
+    /// words: the take where the root is one this frame owns, and the copy
+    /// always. RFC-0093 puts the take first because it is the answer that
+    /// allocates nothing — a field of a root nobody borrowed may be moved out,
+    /// and the field is dead afterwards. A borrowed root and module state are
+    /// `.copy()` alone, which is exactly where the take would be refused in
+    /// turn. Empty for a name the reader bound, whose refusal quotes the place
+    /// rather than being it.
+    fn place_fixes(&self, st: &State, n: Name) -> Vec<String> {
+        let Some(path) = &self.body.names[n as usize].path else {
+            return Vec::new();
+        };
+        // An ELEMENT has no take — `check_take` refuses one — so where a
+        // declared `consume` parameter is the taker the menu names the two
+        // spellings that exist for it instead of a prefix take
+        // (`movecheck::refuse_projected_arg`). A path that reaches an element
+        // is the one `place_path` cannot spell, and it is the one this pass
+        // spelled with brackets.
+        let root = match &st.alias[n as usize] {
+            Some(Alias {
+                root: Root::N(m), ..
+            }) => self.src(*m),
+            _ => path.as_str(),
+        };
+        if self.takes == Taker::Declared && path.contains('[') {
+            return vec![
+                format!("`{path}.copy()` — the callee owns its copy"),
+                format!(
+                    "`{root}.swapRemove(..)` returns the element and leaves the container \
+                     one shorter"
+                ),
+            ];
+        }
+        let takeable = root != path && self.root_owns(st, n);
+        let mut fixes = Vec::new();
+        if takeable {
+            fixes.push(format!(
+                "`consume {path}` if `{root}` should give it up — the field is dead afterwards"
+            ));
+        }
+        fixes.push(format!("`{path}.copy()` if both sides need a value"));
+        fixes
+    }
+
+    /// Whether the place this name reads out of has a root THIS frame owns, so
+    /// a prefix take of the path is an answer rather than a second refusal.
+    fn root_owns(&self, st: &State, n: Name) -> bool {
+        matches!(
+            &st.alias[n as usize],
+            Some(Alias { root: Root::N(m), .. })
+                if self.body.names[*m as usize].borrow_kind.is_none()
+        )
+    }
+
+    /// `<name> may not be <verb> <taker>`, stated once for every refusal that
+    /// names one. The verb is the taker's ([`Taker`]) and the words are
+    /// `movecheck`'s: a declared `consume` parameter is passed to, a builtin's
+    /// sink and a store are stored into, a variant constructor is put into.
+    fn may_not(&self, s: &str) -> String {
+        let by = &self.by;
+        if by == "a literal" {
+            return format!("`{s}` may not be stored into the literal");
+        }
+        if !by.ends_with("(..)`") {
+            return format!("`{s}` may not be stored into {by}");
+        }
+        match self.takes {
+            Taker::Declared => {
+                format!("`{s}` may not be passed to a `consume` parameter via {by}")
+            }
+            Taker::Constructs => format!("`{s}` may not be put into {by}"),
+            Taker::Stores => format!("`{s}` may not be stored into {by}"),
+        }
     }
 
     /// A refusal at the statement being judged.
@@ -870,19 +987,20 @@ impl<'b> Kernel<'b> {
             )
         } else if by == "a `return`" {
             format!("`{s}` may not be returned — it is {what}, and a return is owned")
-        } else if by.ends_with("(..)`") {
-            format!("`{s}` may not be passed to a `consume` parameter via {by} — it is {what}")
-        } else if by == "a literal" {
-            format!("`{s}` may not be stored into the literal — it is {what}")
         } else {
-            format!("`{s}` may not be stored into {by} — it is {what}")
+            format!("{} — it is {what}", self.may_not(s))
         };
         // The ways out, as `movecheck::Borrow::fixes` and
         // `movecheck::MoveCheck::fixes_here` name them. An `export extern fn`
         // has one: its JS caller releases the String the call returns, so the
         // signature refuses `consume` and only a copy is left (RFC-0089 M3b).
         let capture = matches!(b, BorrowKind::Capture);
-        let fixes = if by == "a `return`" && capture {
+        // A constructor names one way out: the value it makes owns what it is
+        // given, so the copy is the answer and a `consume` on the parameter is
+        // not (RFC-0125 §3 M3, row 19).
+        let fixes = if self.takes == Taker::Constructs && !capture {
+            vec![format!("`{s}.copy()` if the value should own it")]
+        } else if by == "a `return`" && capture {
             vec![format!("`{s}.copy()` if the caller needs its own value")]
         } else if capture {
             Vec::new()
@@ -923,8 +1041,12 @@ impl<'b> Kernel<'b> {
     ) -> Result<(), Refusal> {
         if let Val::Name(n) = v {
             if !write_back {
-                if let Some(b) = &self.body.names[*n as usize].borrow_kind {
-                    if self.borrowed(*n) {
+                let i = &self.body.names[*n as usize];
+                if let Some(b) = &i.borrow_kind {
+                    // RFC-0075 M1: a must-use parameter is the callee's to
+                    // hand on, whatever its capability says, so this take is
+                    // not the caller's value leaving ([`NameInfo::must_use_param`]).
+                    if self.borrowed(*n) && !i.must_use_param {
                         return Err(self.param_take(*n, b));
                     }
                 }
@@ -1163,9 +1285,11 @@ impl<'b> Kernel<'b> {
             St::Let(n, rhs) => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = self.by_of(rhs, Some(*n));
+                self.takes = taker_of(rhs);
             }
             St::Store { place, line, .. } => {
                 self.here = *line;
+                self.takes = Taker::Stores;
                 self.by = match place {
                     Place::Name(n) if !self.src(*n).starts_with('@') => {
                         format!("the binding `{}`", self.src(*n))
@@ -1177,9 +1301,11 @@ impl<'b> Kernel<'b> {
             St::Return { line, .. } => {
                 self.here = *line;
                 self.by = "a `return`".to_string();
+                self.takes = Taker::Stores;
             }
             St::Do(rhs, line) => {
                 self.here = *line;
+                self.takes = taker_of(rhs);
                 self.by = self.by_of(rhs, None);
             }
             St::Switch { line, .. } => {
