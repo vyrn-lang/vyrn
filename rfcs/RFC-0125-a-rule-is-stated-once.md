@@ -7084,7 +7084,11 @@ its record.
   into a sum's payloads. Two of §8.6's three M5 guards arrive here, because a
   resolved sum reaches a user: `codec::wire` keeps `null` and `Ok`-first, and
   `Display` keeps printing `Option<T>`. Zero bytes: the manifest is unchanged on
-  all 173, parity 41 of 41, residue green. RFC-0126 §8.13.
+  all 173, parity 41 of 41, residue green. One consumer was missed and no
+  workspace gate could say so: `vyrn-genwasm` is EXCLUDED from the workspace, and
+  both ends of its reflection channel matched a resolved sum's spelling, so 12 of
+  25 generator examples silently fell back to the interpreter. Both read
+  `option_payload` now. RFC-0126 §8.13.
 - **M5 — the last step, and the only one left.** §8.11 measured M4 and M5 as one
   step that is not zero bytes, and split it: M4a moved the bytes, M4b answered
   `Enum` for none. What is left is deleting `Type::Option` and `Type::Result`,
