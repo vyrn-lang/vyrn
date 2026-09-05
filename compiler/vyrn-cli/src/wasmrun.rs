@@ -1070,13 +1070,11 @@ fn main() -> Int64 {
 }
 "#;
 
+    // The probe imports nothing, so the single-source check is the whole load
+    // the driver would do — and this module is the library target, which has no
+    // driver in it (see ../lib.rs).
     fn probe_bytes() -> Vec<u8> {
-        let dir = std::env::temp_dir().join("vyrn-resident");
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("probe.vyrn");
-        std::fs::write(&file, PROBE).unwrap();
-        let key = file.to_string_lossy().replace('\\', "/");
-        let program = crate::load_program(&key, PROBE).expect("the probe loads");
+        let program = vyrn_frontend::check(PROBE).expect("the probe checks");
         vyrn_codegen::direct::compile(&program).expect("the probe compiles")
     }
 

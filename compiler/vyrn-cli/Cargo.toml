@@ -40,6 +40,13 @@ wasmtime = { version = "47", default-features = false, features = [
 default = ["wasm-gen"]
 wasm-gen = ["dep:vyrn-genwasm"]
 
+# The host the compiled route runs in, and nothing else (see src/lib.rs).
+# `vyrn-frontend` dev-depends on it so its tests run a program the way the
+# driver does (RFC-0125 §3 M5, the `library-run` row).
+[lib]
+name = "vyrn_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "vyrn"
 path = "src/main.rs"

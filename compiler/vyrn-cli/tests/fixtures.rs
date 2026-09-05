@@ -108,7 +108,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "library-run",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "extern-unavailable",

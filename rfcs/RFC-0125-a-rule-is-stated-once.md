@@ -4668,7 +4668,7 @@ deleted here, and `--engine interp` is still the default.
 | `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | yes, since the ninth slice below — `VYRN_FIXTURES=write` records from the compiled route and the gate compares the compiled route, so the recorded file is the expectation and not a transcript of a second engine. `VYRN_FIXTURES=interp` is the interpreter as a second column, for as long as there is one | re-recording all 205 from the route moved ZERO bytes, so the change of oracle costs nothing that is in the tree. What it costs is a kind of proof: the gate proves the route has not moved since a human read the diff, and it cannot prove the answer is right. `wasmhash` says the same bytes on four platforms, and the review of the recorded diff is what says the bytes are the right ones |
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
-| `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | no — the compiled route lives in `vyrn-cli`, not in the frontend | those tests move to the CLI's harness, or the frontend takes a dependency on a backend |
+| `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | yes, since the ninth slice below — the tests that RUN a program are integration tests now (`vyrn-frontend/tests/loader_run.rs` and `jsondec_run.rs`, 108 of them), and they compile with the direct backend and run in the driver's WASI host, which `vyrn-cli` exposes as a library target | neither of the two options in this column, because the second one cannot be built: a unit test INSIDE `vyrn-frontend` that dev-depends on a backend compiles a SECOND copy of `vyrn-frontend`, and the two `Program` types are different types. So the tests left the lib target rather than the crate — what reads the loader's insides stays a unit test, what runs a program is behaviour and is stated from outside. The crate's test count is the same 1,246, and the shipped crate still depends on nothing |
 | `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | yes, since the fourth slice below — both engines print ``error: extern `jsNow` is not available on this target`` on standard error and exit 1. The third slice read `worse` here: the compiled route trapped with `error: error while executing at wasm backtrace:`, the one output difference in 204 programs | the embedded host answers the `vyrn` namespace with `interp::extern_unavailable`'s sentence, as native's C stub already did. No emitted byte changes |
 | `site-export` | CI's Site job | yes, and this is new — the frame-limit refusal M5's second slice recorded is gone, and the compiled route writes the same 241 files | 187.30 s against 13.89 s, medians of three interleaved runs, and the 241 files are byte-identical |
 
@@ -5809,6 +5809,54 @@ oracle": it is a SECOND, independently written implementation, which catches the
 class of fault that one implementation makes and the other does not. `--engine
 interp` keeps that column while the interpreter exists, at 82 s against the
 route's 17 s over the 205, and the day it goes the column goes with it.
+
+**`library-run`: a unit test cannot reach a backend, so the tests moved out of
+the lib.**
+
+`src/loader.rs` and `src/jsondec.rs` state their claims by RUNNING: a link is
+right when the program it produced answers 42. There were 108 such tests, and
+each called `crate::interp::run`, because the interpreter is the one engine
+inside that crate.
+
+The census offered two ways out — move the tests to the CLI's harness, or let
+the frontend depend on a backend. The second one was tried first and it does not
+compile. `vyrn-codegen` and `vyrn-cli` both depend on `vyrn-frontend`, so a
+dev-dependency back on either builds a SECOND copy of `vyrn-frontend` for the
+lib's test target, and `rustc` says it plainly: "expected
+`vyrn_frontend::ast::Program`, found `ast::Program` — there are multiple
+different versions of crate `vyrn_frontend` in the dependency graph". Cargo
+permits the cycle; it does not unify the types. **No unit test in this crate can
+ever run compiled code.**
+
+An integration test can, because it links the real crate. So the tests left the
+LIB TARGET rather than the crate, and the line where they split is a rule worth
+having: a test that reads the loader's insides — the cache entry's format, the
+nesting counter, the two generator budgets — stays a unit test, and a test that
+runs a program is stating behaviour and states it from outside.
+
+| | before | after |
+|---|---|---|
+| where the running tests live | `src/loader.rs`, `src/jsondec.rs` | `tests/loader_run.rs`, `tests/jsondec_run.rs` |
+| what runs them | `interp::run` | `vyrn_codegen::direct::compile` + `vyrn_cli::wasmrun::run` |
+| `src/loader.rs` unit tests | 114 | 6, and all six read this module's insides |
+| the crate's tests | 1,246 | 1,246 |
+| the crate's dependencies | none | none — the two are DEV-dependencies |
+
+The host is `vyrn-cli`'s, not a second copy: `wasmrun.rs` names nothing in
+`main.rs`, so the driver gained a `[lib]` target that exposes that one module,
+and `main.rs` reads it from there. One host, one copy.
+
+**Two things the route needs that the interpreter did not.** A builtin the
+tree-walker answered in Rust is a CALL on this route, so every resolver in those
+tests injects `std/runtime` and `std/mem` as well. And `main`'s answer is a
+process exit code, so a program returning `-1` reads as 255 — which is what
+`vyrn run` reports under BOTH engines, since the driver masks the interpreter's
+answer to a byte too. One test said `-1` and says 255 now. Nothing else in the
+108 moved.
+
+`tests/contracts_api.rs` was already an integration test and had the last
+`interp::run` outside the interpreter's own tests. It takes the same runner, in
+one line.
 
 ### M6 — the other two judgments
 

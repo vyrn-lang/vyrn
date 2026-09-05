@@ -67,8 +67,10 @@ use std::process::{Command, ExitCode};
 use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
 
 mod remote;
-/// RFC-0125 M5: the WASI host `--engine wasm` runs a program's wasm under.
-mod wasmrun;
+// RFC-0125 M5: the WASI host `--engine wasm` runs a program's wasm under. It
+// lives in this crate's LIBRARY target, because `vyrn-frontend`'s tests run
+// their programs through it as well (RFC-0125 §3 M5, the `library-run` row).
+use vyrn_cli::wasmrun;
 
 /// What executes a program under `run`, `test` and `bench --check` (RFC-0125
 /// §2.5). The interpreter is the default in M5's first slice; `wasm` compiles
