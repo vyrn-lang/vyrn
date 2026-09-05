@@ -149,7 +149,7 @@ struct State {
     /// What consumed each name, for the wording of a refusal (RFC-0125 M3,
     /// third slice): the line and the taker in the checker's words — "the
     /// binding `t`", "`take(..)`", "a `return`". Not part of the judgment.
-    taker: Vec<Option<(usize, String)>>,
+    taker: Vec<Option<(usize, String, Taker)>>,
     /// Where each hole was taken: `(name, path, line)`. Append-only, and not
     /// part of the judgment either.
     taken_at: Vec<(Name, String, usize)>,
@@ -251,6 +251,11 @@ struct Kernel<'b> {
     /// the checker's words — recorded against every name it consumes.
     here: usize,
     by: String,
+    /// Where each part of the record literal being judged goes, if it is one
+    /// ([`crate::core::NameInfo::fields`]), and which part is being judged —
+    /// its index plus one, or zero for "not one of them".
+    made: Vec<String>,
+    part: std::cell::Cell<usize>,
     /// How that taker takes ([`Taker`]).
     takes: Taker,
     /// The loop being walked: the state at its entry, the states at its
@@ -271,7 +276,7 @@ fn taker_of(rhs: &Rhs) -> Taker {
 /// How the taker of the statement being judged takes what it is handed, which
 /// is three sentences for one rule — `movecheck` words each differently
 /// (RFC-0125 §3 M3, rows 07, 19 and 34).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Taker {
     /// A parameter the author declared `consume`: it is PASSED to it.
     Declared,
@@ -312,6 +317,8 @@ fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
         loops: Vec::new(),
         here: 0,
         by: String::new(),
+        made: Vec::new(),
+        part: std::cell::Cell::new(0),
         takes: Taker::Stores,
     };
     let mut st = State {
@@ -378,7 +385,22 @@ impl<'b> Kernel<'b> {
     fn gone(&self, st: &mut State, n: Name) {
         st.own[n as usize] = Own::Gone;
         st.holes.retain(|(h, _)| *h != n);
-        st.taker[n as usize] = Some((self.here, self.by.clone()));
+        let by = match self
+            .part
+            .get()
+            .checked_sub(1)
+            .and_then(|i| self.made.get(i))
+        {
+            Some(field) => field.clone(),
+            None => self.by.clone(),
+        };
+        // A part of a literal is STORED into the field, whatever the statement
+        // around it does.
+        let takes = match self.part.get() {
+            0 => self.takes,
+            _ => Taker::Stores,
+        };
+        st.taker[n as usize] = Some((self.here, by, takes));
     }
 
     /// The name is out of scope: like [`Kernel::gone`], but nothing took it.
@@ -594,6 +616,13 @@ impl<'b> Kernel<'b> {
                     .unwrap_err();
             }
         }
+        // A loop variable is what the READER wrote, and the checker says so
+        // rather than naming the place the element sits in — the alias table
+        // has already decided the take is refused, and this is only the words
+        // (RFC-0125 §3 M3, row 19).
+        if let Some(of) = &self.body.names[n as usize].loop_var {
+            return self.param_take(n, &BorrowKind::LoopVar { of: of.clone() });
+        }
         // The name a refusal quotes is the reader's path where the lowering
         // minted this name for a read of a place, and the place is then the
         // subject rather than a second quotation of it: `b.xs` may not be
@@ -785,13 +814,31 @@ impl<'b> Kernel<'b> {
             "\n  (a `consume` parameter takes ownership; the value can't be used afterward)"
         };
         let r = match &st.taker[n as usize] {
-            Some((l, by)) if by.ends_with("(..)`") || by == "`drop`" => self.refuse_at::<()>(
-                here,
-                format!(
-                    "`{read}` is {what} here but was already consumed by {by} on line {l}{note}"
-                ),
-            ),
-            Some((l, by)) if !by.is_empty() => self.refuse_at::<()>(
+            // The sentence turns on HOW the taker took, which the checker asks
+            // as "does this consumption carry a `.copy()` menu?" — a parameter
+            // the author declared `consume`, and a `drop`, carry none, and
+            // everything else does (RFC-0125 §3 M3, rows 06 and 07). The test
+            // used to be the SHAPE of the taker's words, which reads a
+            // builtin's sink (`push(..)`, `fromArray(..)`) as a declared
+            // parameter and gave four programs of the corpus rule 1's sentence
+            // where the checker gives the move's two lines. A LINEAR value is
+            // the exception the other way: `close(s)` is a builtin and the
+            // must-use walk owns it, so the checker words a use after it as a
+            // `consume` parameter's — which is the one builtin `sinks` answers
+            // `false` for ([`crate::core::NameInfo::linear`]).
+            Some((l, by, t))
+                if *t == Taker::Declared
+                    || by == "`drop`"
+                    || self.body.names[n as usize].linear =>
+            {
+                self.refuse_at::<()>(
+                    here,
+                    format!(
+                        "`{read}` is {what} here but was already consumed by {by} on line {l}{note}"
+                    ),
+                )
+            }
+            Some((l, by, _)) if !by.is_empty() => self.refuse_at::<()>(
                 *l,
                 menu(
                     format!(
@@ -1104,11 +1151,26 @@ impl<'b> Kernel<'b> {
             {
                 let s = self.src(n);
                 let (here, l) = (self.here, self.hole_line(st, n, h));
+                // Both lines name the STORAGE that moved, not the longer path
+                // that reads it — the rule `used_after_at` states and the one
+                // `movecheck::check_use` states. A read of `d.a.byteLength`
+                // after `consume d.a` was the one refusal in the tree that
+                // broke it, and it dropped the menu with it: the reader wanted
+                // a value on both sides (RFC-0125 §3 M3, row 07).
+                // Both lines name the STORAGE that moved, not the longer path
+                // that reads it — the rule `used_after_at` states and the one
+                // `movecheck::check_use` states. A read of `d.a.byteLength`
+                // after `consume d.a` was the one refusal in the tree that broke
+                // it, and it dropped the menu with it: the reader wanted a value
+                // on both sides (RFC-0125 §3 M3, row 07).
                 return self.refuse_at(
                     l,
-                    format!(
-                        "`{s}{h}` was moved here into `consume`\nline {here}: ... and `{s}{path}` \
-                         is used again here"
+                    menu(
+                        format!(
+                            "`{s}{h}` was moved here into `consume`\n\
+                             line {here}: ... and `{s}{h}` is used again here"
+                        ),
+                        vec![format!("`{s}{h}.copy()` if both sides need a value")],
                     ),
                 );
             }
@@ -1224,8 +1286,17 @@ impl<'b> Kernel<'b> {
                 Ok(())
             }
             Rhs::Make(vs) => {
-                for v in vs {
-                    self.take(st, v)?;
+                // A record literal takes each part into a FIELD, and the
+                // refusal names it — "a literal" is where the value went for a
+                // reader who did not write one (RFC-0125 §3 M3, row 07). The
+                // words are the bound name's, because the core keeps no
+                // statement kinds; empty for an array, a map and a variant,
+                // whose parts the checker does not name either.
+                for (i, v) in vs.iter().enumerate() {
+                    self.part.set(i + 1);
+                    let r = self.take(st, v);
+                    self.part.set(0);
+                    r?;
                 }
                 Ok(())
             }
@@ -1262,6 +1333,12 @@ impl<'b> Kernel<'b> {
                 Some(n) if !self.src(n).starts_with('@') => {
                     format!("the binding `{}`", self.src(n))
                 }
+                // A `for x in consume xs` takes the container into a temporary
+                // of its own, and the reader wrote the loop, not the temporary
+                // (RFC-0125 §3 M3, row 07).
+                Some(n) if self.body.names[n as usize].for_consume => {
+                    "the `for .. in consume` loop".to_string()
+                }
                 _ => "a value".to_string(),
             },
             // RFC-0125 §3 M3, the containment slice: a spawned call is named
@@ -1286,6 +1363,7 @@ impl<'b> Kernel<'b> {
                 self.here = self.body.names[*n as usize].line;
                 self.by = self.by_of(rhs, Some(*n));
                 self.takes = taker_of(rhs);
+                self.made = self.body.names[*n as usize].fields.clone();
             }
             St::Store { place, line, .. } => {
                 self.here = *line;
@@ -1816,7 +1894,7 @@ impl<'b> Kernel<'b> {
                 if at.own[n as usize] == Own::Gone && entry.own[n as usize] != Own::Gone {
                     let s = self.src(n);
                     return match &at.taker[n as usize] {
-                        Some((l, by)) if !by.is_empty() => self.refuse_at(
+                        Some((l, by, _)) if !by.is_empty() => self.refuse_at(
                             *l,
                             format!(
                                 "`{s}` is consumed by {by} inside a loop, so it would be used \
@@ -1833,7 +1911,7 @@ impl<'b> Kernel<'b> {
                 if at.own[n as usize] == Own::Gone {
                     let s = self.src(n);
                     return match &at.taker[n as usize] {
-                        Some((l, by)) if !by.is_empty() => self.refuse_at(
+                        Some((l, by, _)) if !by.is_empty() => self.refuse_at(
                             *l,
                             format!(
                                 "`{s}` is consumed by {by} inside a loop, so it would be used \
@@ -1931,7 +2009,7 @@ impl<'b> Kernel<'b> {
                     let gone = if a == Own::Gone { first } else { other };
                     let s = self.src(n);
                     return match &gone.taker[n as usize] {
-                        Some((l, by)) if !by.is_empty() => self.refuse_at(
+                        Some((l, by, _)) if !by.is_empty() => self.refuse_at(
                             *l,
                             format!(
                                 "`{s}` was moved here into {by} on one path and not on the \
