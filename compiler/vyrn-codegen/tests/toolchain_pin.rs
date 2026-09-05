@@ -156,9 +156,17 @@ fn the_pin_resolves_offline_and_the_order_is_env_then_pin_then_walk() {
     let unpinned = tmp("unpinned");
     std::fs::write(unpinned.join("vyrn.json"), r#"{"main":"src/main.vyrn"}"#).unwrap();
     let found = wasmtime_from(&unpinned).expect("no pin is not an error");
+    // What this row proves is that no pin is no refusal and no pinned path: the
+    // resolver falls through to the walk. What the WALK then answers is a fact
+    // about the machine, not about the resolver — the test scratch moved under
+    // `compiler/target` so that two worktrees can gate at once, and this
+    // checkout's own `tools/` is above it, where a system temp directory had
+    // none.
     assert!(
-        found.is_none(),
-        "no `tools/` above a temp directory, so nothing is found: {found:?}"
+        found
+            .as_ref()
+            .map_or(true, |(_, why)| *why == "discovered: tools/"),
+        "no pin must fall through to the `tools/` walk: {found:?}"
     );
 
     // --- step 1: the environment override beats the pin ----------------------
