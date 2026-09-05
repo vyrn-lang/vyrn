@@ -309,7 +309,12 @@ fn main() {
     // editor read a different compiler from the build: seven ownership rules
     // have left `movecheck.rs` and are stated by the kernel alone, so a program
     // `vyrn check` refuses analyzed clean here.
-    vyrn_lower::install();
+    // `VYRN_NO_PLACER=1` stands it aside, spelled exactly as `vyrn` spells it:
+    // the editor before the kernel, which is the column a measurement of what
+    // the kernel costs a keystroke is read against.
+    if std::env::var("VYRN_NO_PLACER").is_err() {
+        vyrn_lower::install();
+    }
 
     // `Connection::stdio` sets up the stdin/stdout channels. The server is
     // single-threaded and blocking — no tokio, no I/O threads.
@@ -330,6 +335,20 @@ fn main() {
         .name("vyrn-lsp".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
+            // RFC-0125 §3 M3, the memo slice. This server reads the kernel's
+            // REFUSALS and lowers nothing — the analysis feeds `memory_notes`,
+            // which reads the walk's own notes, and the effect judgment, which
+            // walks the lowering — so a body whose text and declarations have
+            // not moved keeps the verdict it earned last keystroke instead of
+            // being built and judged again. `vyrn` does not arm it: it emits,
+            // and an emitter reads the core's facts, which a served body does
+            // not contribute.
+            //
+            // HERE and not beside `vyrn_lower::install`: the memo is a
+            // thread-local, like every other table a keystroke reuses (the
+            // parse cache, the checker's, the loader's module hashes), and
+            // this thread is the one that analyses.
+            vyrn_frontend::movecheck::reuse_judgments();
             let mut server = Server {
                 docs: HashMap::new(),
                 analyses: HashMap::new(),

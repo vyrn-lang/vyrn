@@ -871,7 +871,13 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
     // Runs the placer, which builds and judges a core body for every instance.
     // The answer is not handed on: see `own::Memo::open` for why a plan made
     // here does not fit the lowering a tool runs next.
+    //
+    // THIS analysis is the one a judgment may be reused for, and no other: a
+    // generator load's and an engine's both run outside this call, and neither
+    // reads the refusals ([`reuse_judgments`]).
+    JUDGING.with(|j| j.set(true));
     let _ = crate::own::analyze(program);
+    JUDGING.with(|j| j.set(false));
     let mut said: HashSet<(Option<String>, String)> = HashSet::new();
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
@@ -911,6 +917,215 @@ pub fn comptime<T>(f: impl FnOnce() -> T) -> T {
 /// Whether the program being worked on is a generator's own — see [`comptime`].
 pub fn in_comptime() -> bool {
     COMPTIME.with(|c| c.get())
+}
+
+/// The kernel's verdict on one body as the cache holds it: every field of the
+/// kernel's own refusal — file, line, message, body — and nothing an address
+/// could reach. A body that earns none caches an empty list.
+pub type Verdict = Vec<(Option<String>, usize, String, String)>;
+
+/// The cache's key: the module a body is declared in, that module's content
+/// hash, and the instance's spelling.
+pub type JudgmentKey = (String, String, String);
+
+thread_local! {
+    /// Whether this host reuses the kernel's judgment — see [`reuse_judgments`].
+    static REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether the analysis running now is the one [`refusals`] asked for.
+    static JUDGING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The declaration fingerprint the entries answer under, and the entries.
+    /// Keyed by fingerprint at the top rather than inside the entry key, for
+    /// `checker::CHECK_MEMO`'s reason: a fingerprint change invalidates every
+    /// entry anyway, so the whole map is dropped and nothing needs eviction.
+    static JUDGED: RefCell<(u64, HashMap<JudgmentKey, Verdict>)> =
+        RefCell::new((0, HashMap::new()));
+    /// `(judged, reused)` since [`reset_judgment_tally`] — the instrument the
+    /// pin below counts bodies with.
+    static TALLY: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Reuse the kernel's per-body judgment across calls — RFC-0125 §3 M3, the
+/// memo slice. Armed once by the host, and only by a host that reads the
+/// REFUSALS and lowers nothing: the editor.
+///
+/// A body whose key is unchanged is not built and not judged, so the release
+/// rows the placer would have added for it are not added either, and its
+/// frames are not folded into the core's facts. Both are empty for a body the
+/// placer records as inert — which is the only kind of body an entry is
+/// written for — but the FACTS a body contributes are not, and an engine that
+/// emits reads them. So a host that lowers or emits must never arm this.
+pub fn reuse_judgments() {
+    REUSE.with(|r| r.set(true));
+}
+
+/// Whether the analysis running now may reuse a judgment: the host armed it,
+/// and this is the analysis [`refusals`] asked for rather than one a generator
+/// load or an engine asked for.
+pub fn reusing_judgments() -> bool {
+    REUSE.with(|r| r.get()) && JUDGING.with(|j| j.get())
+}
+
+/// The cache, open for one analysis, or `None` where nothing is armed.
+///
+/// Opening it computes the declaration fingerprint and drops every entry if it
+/// moved. It also takes the loader's module hashes once: a key reads them, and
+/// asking the loader per body would clone the map 882 times.
+pub struct Judgments {
+    hashes: HashMap<String, String>,
+}
+
+impl Judgments {
+    /// Open the cache for `program`, or `None` where nothing is armed.
+    pub fn open(program: &Program) -> Option<Judgments> {
+        if !reusing_judgments() {
+            return None;
+        }
+        let fp = declaration_fingerprint(program);
+        JUDGED.with(|j| {
+            let mut j = j.borrow_mut();
+            if j.0 != fp {
+                j.0 = fp;
+                j.1.clear();
+            }
+        });
+        Some(Judgments {
+            hashes: crate::loader::last_module_hashes(),
+        })
+    }
+
+    /// This body's key, or `None` where it has none: the ROOT module, which is
+    /// the one a keystroke edits, and a module the loader recorded no hash for.
+    pub fn key(&self, module: Option<&str>, spelling: &str) -> Option<JudgmentKey> {
+        let m = module?;
+        let h = self.hashes.get(m)?;
+        Some((m.to_string(), h.clone(), spelling.to_string()))
+    }
+
+    /// The verdict recorded for `key`, and a tally of the reuse.
+    pub fn get(&self, key: &JudgmentKey) -> Option<Verdict> {
+        let hit = JUDGED.with(|j| j.borrow().1.get(key).cloned());
+        TALLY.with(|t| {
+            let (judged, reused) = t.get();
+            match hit {
+                Some(_) => t.set((judged, reused + 1)),
+                None => t.set((judged + 1, reused)),
+            }
+        });
+        hit
+    }
+
+    /// Record what a body earned. Only its caller knows whether the body was
+    /// inert, which is the condition an entry is written under.
+    pub fn put(&self, key: JudgmentKey, verdict: Verdict) {
+        JUDGED.with(|j| j.borrow_mut().1.insert(key, verdict));
+    }
+}
+
+/// `(judged, reused)` since [`reset_judgment_tally`].
+pub fn judgment_tally() -> (u64, u64) {
+    TALLY.with(|t| t.get())
+}
+
+/// Start counting bodies again.
+pub fn reset_judgment_tally() {
+    TALLY.with(|t| t.set((0, 0)));
+}
+
+/// A cheap hash over every declaration the kernel's judgment of a body can
+/// read across a module boundary — RFC-0125 §3 M3, the memo slice.
+///
+/// The key above says WHICH body and WHICH text; this says what else that text
+/// was judged against. Function BODIES are excluded, which is the whole point:
+/// an edit inside one body must not re-judge every other. Three things a
+/// reader would not guess are in:
+///
+///   * every parameter's CAPABILITY, which the checker's own fingerprint has
+///     no use for and this one cannot do without — `read x` to `consume x`
+///     changes what every caller's body owes and moves no type;
+///   * a projection's whole BODY (`impl`'s `places`), because a projection is
+///     inlined into its caller's block rather than judged as a body of its
+///     own, so its text is its callers' text;
+///   * a validated type's predicate and a module-state binding's initializer,
+///     for the same reason the checker's fingerprint has them.
+///
+/// Every part is sorted before it is folded, because two of the sources are
+/// hash maps and one run's iteration order is not the next run's.
+fn declaration_fingerprint(program: &Program) -> u64 {
+    let sig = |f: &Function| {
+        let mut bounds: Vec<String> = f
+            .type_bounds
+            .iter()
+            .map(|(k, v)| format!("{k}:{v:?}"))
+            .collect();
+        bounds.sort_unstable();
+        format!(
+            "f{:?}/{}<{:?}{:?}>({:?})->{:?}|{}{}{}{}",
+            f.module,
+            f.name,
+            f.type_params,
+            bounds,
+            f.params,
+            f.ret,
+            f.exported as u8,
+            f.is_extern as u8,
+            f.is_export_extern as u8,
+            f.is_gen as u8,
+        )
+    };
+    let mut parts: Vec<String> =
+        Vec::with_capacity(program.functions.len() + program.type_decls.len());
+    parts.extend(program.functions.iter().map(&sig));
+    for t in &program.type_decls {
+        parts.push(format!(
+            "t{:?}/{}<{:?}>={:?}|{:?}",
+            t.module, t.name, t.type_params, t.base, t.predicate
+        ));
+    }
+    for g in &program.globals {
+        parts.push(format!(
+            "g{:?}/{}:{:?}|{}|{:?}",
+            g.module, g.name, g.ty, g.mutable as u8, g.init
+        ));
+    }
+    for p in &program.protocols {
+        parts.push(format!(
+            "p{:?}/{}<{:?}>={:?}",
+            p.module, p.name, p.assoc, p.methods
+        ));
+    }
+    for i in &program.impls {
+        let mut bounds: Vec<String> = i
+            .type_bounds
+            .iter()
+            .map(|(k, v)| format!("{k}:{v:?}"))
+            .collect();
+        bounds.sort_unstable();
+        parts.push(format!(
+            "i{}/{:?}<{:?}{:?}>{:?}",
+            i.protocol, i.ty, i.type_params, bounds, i.assoc
+        ));
+        parts.extend(i.methods.iter().map(&sig));
+        // A projection is never a body of its own: every access site inlines
+        // it, so its body belongs to its callers' text.
+        parts.extend(i.places.iter().map(|p| format!("j{p:?}")));
+    }
+    parts.extend(
+        program
+            .surface_shadows
+            .iter()
+            .map(|(m, n)| format!("s{m:?}/{n}")),
+    );
+    parts.sort_unstable();
+    let mut h: u64 = 0xcbf29ce484222325;
+    for p in &parts {
+        for b in p.as_bytes() {
+            h ^= *b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 /// The binding a refusal is about: the root of the first path its message

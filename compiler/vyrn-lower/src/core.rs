@@ -3801,12 +3801,31 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // one added, and it added none there.
     let mut built: Vec<Option<Body>> = Vec::with_capacity(lowered.instances.len());
     let mut touched: std::collections::HashSet<String> = Default::default();
+    // The judgment memo, when the host armed one — RFC-0125 §3 M3, the memo
+    // slice. A body whose key is unchanged is served its own refusals and is
+    // neither built nor judged. The key and the cache are the driver's
+    // (`movecheck::Judgments`); what this loop knows and the driver does not
+    // is whether a body was INERT, which is the condition an entry is written
+    // under: a body the placer wrote no row for leaves nothing behind but its
+    // refusals, so serving those is serving the whole answer.
+    let js = vyrn_frontend::prof::phase("placer: judgments");
+    let memo = vyrn_frontend::movecheck::Judgments::open(program);
+    drop(js);
     for inst in &lowered.instances {
+        let key = memo
+            .as_ref()
+            .and_then(|m| m.key(inst.func.module.as_deref(), &inst.spelling()));
+        if serve(memo.as_ref(), key.as_ref()) {
+            built.push(None);
+            continue;
+        }
+        let refused_before = REFUSALS.with(|v| v.borrow().len());
+        let added_before = added.len();
         let bs = vyrn_frontend::prof::phase("placer: core::build");
         let made = build(program, inst, own);
         drop(bs);
         let top = match made {
-            Ok(b) => b,
+            Ok(b) => Some(b),
             Err(g) => {
                 // A rule the core states, rather than a construct it cannot
                 // lower: reported like the kernel's own refusals (RFC-0125
@@ -3820,10 +3839,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                             body: inst.func.name.clone(),
                         })
                     });
-                    built.push(None);
-                    continue;
-                }
-                if trace {
+                } else if trace {
                     eprintln!(
                         "placer: {} not lowered: {} {}",
                         inst.spelling(),
@@ -3831,19 +3847,26 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                         g.detail
                     );
                 }
-                built.push(None);
-                continue;
+                None
             }
         };
-        // `VYRN_KERNEL_TRACE=<fn>` prints that body's core, lambdas included.
-        if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && top.name.contains(&v)) {
-            eprintln!("{}", top.render());
+        if let Some(top) = &top {
+            // `VYRN_KERNEL_TRACE=<fn>` prints that body's core, lambdas included.
+            if std::env::var("VYRN_KERNEL_TRACE").is_ok_and(|v| v != "1" && top.name.contains(&v)) {
+                eprintln!("{}", top.render());
+            }
+            // The body and every lambda frame under it: a lambda's rows are
+            // keyed by its own nodes under the enclosing function's name, so a
+            // row placed here lands where the emitters read (RFC-0125 M3,
+            // third slice).
+            place_frames(top, &inst.func.name, own, &mut added, &mut touched, trace);
         }
-        // The body and every lambda frame under it: a lambda's rows are keyed
-        // by its own nodes under the enclosing function's name, so a row
-        // placed here lands where the emitters read (RFC-0125 M3, third slice).
-        place_frames(&top, &inst.func.name, own, &mut added, &mut touched, trace);
-        built.push(Some(top));
+        // Inert: no row placed, by this instance or by an earlier one of the
+        // same generic body — every table `place_frames` writes marks its
+        // owner `touched`, and the rows it defers are the tail of `added`.
+        let inert = added.len() == added_before && !touched.contains(&inst.func.name);
+        remember(memo.as_ref(), key, refused_before, inert);
+        built.push(top);
     }
     // A `test` (RFC-0015) or `bench` (RFC-0055) body is a body, and the
     // kernel judges it like any other (RFC-0125 §3 M3, the reach slice). The
@@ -3851,7 +3874,21 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // did not reach: the judgment said nothing about them, and one program
     // of `movecheck`'s own suite was accepted for that reason alone.
     let mut outside: Vec<Option<Body>> = Vec::with_capacity(lowered.bodies.len());
+    let os = vyrn_frontend::prof::phase("placer: build_outside");
     for ob in &lowered.bodies {
+        // The same key, spelled with the LINE beside the synthetic name: a
+        // `test@<i>` index is global, and a test added to an earlier module
+        // renumbers every later one, so the name alone would name a different
+        // body of the same unchanged module.
+        let key = memo
+            .as_ref()
+            .and_then(|m| m.key(ob.module.as_deref(), &format!("{}@{}", ob.name, ob.line)));
+        if serve(memo.as_ref(), key.as_ref()) {
+            outside.push(None);
+            continue;
+        }
+        let refused_before = REFUSALS.with(|v| v.borrow().len());
+        let added_before = added.len();
         match build_outside(
             program,
             own,
@@ -3885,7 +3922,10 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 outside.push(None);
             }
         }
+        let inert = added.len() == added_before && !touched.contains(&ob.name);
+        remember(memo.as_ref(), key, refused_before, inert);
     }
+    drop(os);
     for (f, row, kind) in added {
         touched.insert(f.clone());
         own.droppable
@@ -3900,8 +3940,12 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // before this pass filled it (RFC-0125 §3 M3, the deletion-preparation
     // slice). The lowering is reused, so this costs the naming pass alone.
     // `VYRN_PLAN_ROWS=1` puts every emitter back on the plan, and then the
-    // second build has no reader and is not run.
-    if std::env::var("VYRN_PLAN_ROWS").is_ok() {
+    // second build has no reader and is not run. An armed memo has none
+    // either: a served body contributes no frame, so these facts would be a
+    // partial answer, and the readers of the facts are the two compiled
+    // backends and the interpreter's arm rows — none of which a host that
+    // armed the memo runs (RFC-0125 §3 M3, the memo slice).
+    if memo.is_some() || std::env::var("VYRN_PLAN_ROWS").is_ok() {
         return;
     }
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
@@ -3952,6 +3996,63 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         }
     }
     FACTS.with(|f| *f.borrow_mut() = Some(facts));
+}
+
+/// Serve one body's refusals out of the judgment memo — RFC-0125 §3 M3, the
+/// memo slice. `true` when it did, and then the body is neither built nor
+/// judged.
+fn serve(
+    memo: Option<&vyrn_frontend::movecheck::Judgments>,
+    key: Option<&vyrn_frontend::movecheck::JudgmentKey>,
+) -> bool {
+    let (Some(memo), Some(key)) = (memo, key) else {
+        return false;
+    };
+    let Some(hit) = memo.get(key) else {
+        return false;
+    };
+    REFUSALS.with(|v| {
+        v.borrow_mut()
+            .extend(
+                hit.into_iter()
+                    .map(|(file, line, message, body)| crate::kernel::Refusal {
+                        message,
+                        line,
+                        file,
+                        body,
+                    }),
+            )
+    });
+    true
+}
+
+/// Record what one body earned: every refusal from `from` to the end of the
+/// list.
+///
+/// Only an INERT body — one the placer wrote no row for — is recorded, because
+/// serving a body skips its placement as well as its judgment, and a body that
+/// owed a row would have that row silently dropped the next time round.
+fn remember(
+    memo: Option<&vyrn_frontend::movecheck::Judgments>,
+    key: Option<vyrn_frontend::movecheck::JudgmentKey>,
+    from: usize,
+    inert: bool,
+) {
+    let (Some(memo), Some(key)) = (memo, key) else {
+        return;
+    };
+    if !inert {
+        return;
+    }
+    memo.put(
+        key,
+        REFUSALS.with(|v| {
+            v.borrow()[from..]
+                .iter()
+                .map(|r| (r.file.clone(), r.line, r.message.clone(), r.body.clone()))
+                .collect()
+        }),
+    );
 }
 
 /// Place what one built body owes, frame by frame (RFC-0125 §3 M3).
