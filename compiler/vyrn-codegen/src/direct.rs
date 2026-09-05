@@ -6083,7 +6083,7 @@ impl<'p> Fn_<'_, 'p> {
             Type::Never => self.peek(else_e, line)?,
             t => t,
         };
-        let want = self.join_ty(want);
+        let want = self.join_ty(key, want);
         let r = self.cx.repr(&want, line)?;
         // RFC-0114 Rule N at an `if`-expression join. The releases are
         // stack-neutral, so in the scalar case they sit under the branch value
@@ -6162,7 +6162,16 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// The type a join carries, which is not always the one its first arm names.
+    /// The type a join carries — the checker's, where the core carries it.
+    ///
+    /// RFC-0125 §3 M5: a merge holds ONE value and the checker states which
+    /// type it has, at the node, once. What [`Fn_::peek`] and
+    /// [`Fn_::match_ty`] answer is the type an ARM produced, which is the same
+    /// type in whichever shape that arm happened to build it — and the
+    /// textual backend fed its `phi` the other shape for exactly that reason.
+    /// `guess` is still asked, because it is what answers where no lowering
+    /// ran (`VYRN_NO_PLACER=1`), and because `peek` refusing is this
+    /// backend's gap report.
     ///
     /// A REFINED type decays to its base here, and only here, because a join is
     /// not a value boundary. The checker unifies `Some(a) => a` (an `Age`) with
@@ -6170,14 +6179,22 @@ impl<'p> Fn_<'_, 'p> {
     /// arm; a lowering that made `Age` the arms' target instead would send that
     /// arm through M2d's seam and validate it against a refinement the language
     /// never required, which is `error: validation failed for `Age`` here and
-    /// `-1` on the other two engines.
+    /// `-1` on the other two engines. The checker's own answer is already the
+    /// base, so the decay is the guess's — kept because the guess is.
     ///
     /// Found by `validate.vyrn` becoming compilable in M2k, but the hole is
     /// M2b's: a plain `match` on an `Option<Age>` had it all along, and no
     /// example held one. The boundary the value really crosses — the `let`, the
     /// `return`, the field — still validates, because that coercion is a
     /// separate one outside the join.
-    fn join_ty(&self, t: Type) -> Type {
+    fn join_ty(&self, key: usize, guess: Type) -> Type {
+        let t = match vyrn_lower::core::join_ty(key) {
+            // A `Never` recorded for a join every arm diverges out of is the
+            // answer; a guess that says `Never` where the record does not is
+            // the arm that answered nothing, and the record is right there too.
+            Some(t) => self.cx.sub(&t),
+            None => guess,
+        };
         match &t {
             Type::Named(n) if self.cx.types.get(n).is_some_and(|d| d.predicate.is_some()) => {
                 self.cx.resolve(&t)
@@ -13198,7 +13215,15 @@ impl<'p> Fn_<'_, 'p> {
         // `match` in a branch. `expr_as` re-checks every arm against it, so a wrong
         // guess here is a compile error rather than a miscompile.
         let want = self.match_ty(&sum, arms, line)?;
-        let want = self.join_ty(want);
+        // A block arm (RFC-0118) makes this a STATEMENT match: the merge
+        // carries nothing, whatever the expression arms beside it compute is
+        // dropped, and the checker's answer for the node is about a value the
+        // construct does not hand out.
+        let want = if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
+            want
+        } else {
+            self.join_ty(key, want)
+        };
         let r = self.cx.repr(&want, line)?;
 
         let dest = match &r {

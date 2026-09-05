@@ -3342,6 +3342,38 @@ thread_local! {
     static REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
+    /// [`checker::Recorded::joins`] for the program last lowered on this
+    /// thread — see [`join_ty`].
+    static JOINS: std::cell::RefCell<std::collections::HashMap<usize, Type>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Hand the emitters the checker's type for every join — RFC-0125 §3 M5.
+///
+/// Called by [`crate::lower_with`] with what the checker just recorded, so
+/// the map is the program's and not an instance's: the types are the ones
+/// the checker WROTE, with a generic body's parameters still spelled as
+/// parameters. A reader inside a monomorphized body substitutes its own
+/// instantiation in, exactly as it does for every other type it is handed.
+pub fn set_joins(joins: &std::collections::HashMap<usize, Type>) {
+    JOINS.with(|j| j.borrow_mut().clone_from(joins));
+}
+
+/// The checker's type for the `match` or `if` expression at `node`.
+///
+/// The two compiled backends used to derive a join's type from its ARMS —
+/// the last arm that answered, or the first — which is a second statement
+/// of a rule the checker states. It is the rule that decides which value a
+/// merge holds, and an arm can only report the type it happens to have
+/// produced: `Array<String>` in one arm and `["z"]` in the other are the
+/// same type in two shapes, and an emitter that reads one of them feeds its
+/// merge the other.
+///
+/// `None` when no lowering has run on this thread — `VYRN_NO_PLACER=1`, or
+/// a host that never linked this crate — and a reader falls back to what it
+/// did before, as every other reader of the core does.
+pub fn join_ty(node: usize) -> Option<Type> {
+    JOINS.with(|j| j.borrow().get(&node).cloned())
 }
 
 /// RFC-0125 §3 M3, the deletion-preparation slice: what an emitter reads off

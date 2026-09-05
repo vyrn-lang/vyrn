@@ -1812,6 +1812,17 @@ thread_local! {
 pub struct Recorded {
     /// The static type of every expression the checker typed.
     pub node_types: HashMap<usize, Type>,
+    /// The static type of every JOIN — a `match` or an `if` used as an
+    /// expression — as the checker gave it, before any instantiation
+    /// substitutes for it.
+    ///
+    /// It is a subset of [`Recorded::node_types`] and it is named apart
+    /// because of who reads it: an EMITTER, which has no key but the node's
+    /// address and used to reconcile a join's type from its arms instead
+    /// (RFC-0125 §3 M5). The whole map is too large to hand an emitter and
+    /// an address alone cannot say which nodes are joins, so the recording
+    /// wrapper — which holds the `&Expr` — separates them here.
+    pub joins: HashMap<usize, Type>,
     /// Every place the checker SOLVES a type parameter: a generic call and a
     /// generic record literal. The name is the callee or the record, and the
     /// arguments are in its own type-parameter order where they are solved.
@@ -4526,6 +4537,9 @@ impl<'a> Checker<'a> {
         RECORD.with(|r| {
             let mut r = r.borrow_mut();
             r.node_types.insert(key, t.clone());
+            if matches!(expr, Expr::Match { .. } | Expr::IfExpr { .. }) {
+                r.joins.insert(key, t.clone());
+            }
             if let Some(call) = pending {
                 r.node_substs.insert(key, call);
             }
