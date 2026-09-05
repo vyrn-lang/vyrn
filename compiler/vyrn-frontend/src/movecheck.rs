@@ -7754,15 +7754,29 @@ mod tests {
     fn run(src: &str) -> Result<(), String> {
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
         let r = super::check(&program);
-        if let Ok(dir) = std::env::var("VYRN_DUMP_MOVECHECK") {
-            let _ = std::fs::create_dir_all(&dir);
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            std::hash::Hash::hash(src, &mut h);
-            let n = std::hash::Hasher::finish(&h);
-            let tag = if r.is_ok() { "ok" } else { "no" };
-            let _ = std::fs::write(format!("{dir}/{tag}_{n:016x}.vyrn"), src);
-        }
+        record(src, r.is_ok());
         r
+    }
+
+    /// One program of the corpus, written out.
+    ///
+    /// A test that parses for itself — because it asks [`super::ownership`] of
+    /// the same program — calls this beside its own `check`. Five did not, and
+    /// the corpus was blind to exactly those five: row 19 read `licensed` over
+    /// 134 programs, and the program its OWN unit test writes (a loop variable
+    /// put into `Some(..)`) is worded differently by the two passes (RFC-0125
+    /// §3 M3, the corpus slice). A licence is only ever as wide as what it was
+    /// read from.
+    fn record(src: &str, ok: bool) {
+        let Ok(dir) = std::env::var("VYRN_DUMP_MOVECHECK") else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(src, &mut h);
+        let n = std::hash::Hasher::finish(&h);
+        let tag = if ok { "ok" } else { "no" };
+        let _ = std::fs::write(format!("{dir}/{tag}_{n:016x}.vyrn"), src);
     }
 
     /// What `views` and `sinks` answer, now that both read a signature.
@@ -7823,7 +7837,9 @@ mod tests {
                        return xs.length\n\
                    }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(super::check(&program).is_ok());
+        let r = super::check(&program);
+        record(src, r.is_ok());
+        assert!(r.is_ok());
         let rows = super::ownership(&program);
         let payload = rows
             .values()
@@ -8059,6 +8075,7 @@ mod tests {
                    if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
         let err = super::check(&program).unwrap_err();
+        record(src, false);
         assert!(
             err.contains("may not be put into `Some(..)`"),
             "the borrow is refused at the constructor position: {err}"
@@ -8067,7 +8084,9 @@ mod tests {
         // survives that would stop the caller reclaiming it.
         let src2 = src.replace("Some(m)", "Some(m.copy())");
         let program2 = crate::parser::parse(crate::lexer::lex(&src2).unwrap()).unwrap();
-        assert!(super::check(&program2).is_ok());
+        let r2 = super::check(&program2);
+        record(&src2, r2.is_ok());
+        assert!(r2.is_ok());
     }
 
     /// Phase 10a keyed the scrutinee row on `place_key == 0`, and 0 means two
@@ -8081,7 +8100,9 @@ mod tests {
                    if let Some(s) = v { return s.byteLength } return 0 } \
                    fn main() -> Int64 { return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(super::check(&program).is_ok());
+        let r = super::check(&program);
+        record(src, r.is_ok());
+        assert!(r.is_ok());
         assert!(
             super::ownership(&program)
                 .values()
@@ -8683,7 +8704,9 @@ mod tests {
                    let r = g(arr) let s2 = h(arr) \
                    return r.name.byteLength + s2[0].byteLength }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(super::check(&program).is_ok());
+        let r = super::check(&program);
+        record(src, r.is_ok());
+        assert!(r.is_ok());
         assert!(
             super::ownership(&program).values().all(|r| {
                 let fc = r.from_call.as_deref();

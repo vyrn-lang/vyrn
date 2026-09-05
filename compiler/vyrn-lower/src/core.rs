@@ -114,6 +114,23 @@ pub struct NameInfo {
     /// the ownership half: it excepts the take, and [`NameInfo::borrow_kind`]
     /// keeps the words.
     pub must_use_param: bool,
+    /// The path the READER wrote, for a temporary this pass minted to hold a
+    /// read of a place: `p.name`, `xs[i]`, `d.title`. A refusal about the
+    /// temporary is a refusal about that read, and `@borrow` is a name no
+    /// program contains — the checker quotes the path and the kernel quoted
+    /// the compiler's own spelling, which is 23 of the corpus's differing
+    /// refusals (RFC-0125 §3 M3, the corpus slice). `None` for every name a
+    /// program does spell, whose `source` is already the reader's.
+    pub path: Option<String>,
+}
+
+/// The path a reader wrote for a place read, spelled as the checker quotes it
+/// (`movecheck::place_path`, `movecheck::element_path`): `p.name`, `xs[i]`,
+/// `d.title`. `None` where the expression names no place.
+fn reader_path(e: &Expr) -> Option<String> {
+    vyrn_frontend::movecheck::place_path(e)
+        .or_else(|| vyrn_frontend::movecheck::element_path(e))
+        .map(|(_, p)| p)
 }
 
 /// The borrow a parameter's capability makes, or `None` for one that owns
@@ -282,6 +299,13 @@ pub enum Rhs {
         /// and asks nothing at a declared parameter). RFC-0125 §3 M3, the
         /// two-questions slice.
         declared: bool,
+        /// Whether the callee is a CONSTRUCTOR — a variant of an enum,
+        /// `Some`, `Ok`, `Err`. [`Rhs::Call::declared`] is false for a builtin
+        /// and for a variant alike, and the two are different sentences: a
+        /// builtin STORES its argument and a constructor PUTS it into the
+        /// value it makes, which is how `movecheck` words the refusal
+        /// (RFC-0125 §3 M3, row 19).
+        ctor: bool,
         /// The producer type: what the callee answers at this site, with the
         /// call's own type arguments already substituted. `None` for a call
         /// the checker did not type.
@@ -1040,8 +1064,17 @@ impl<'a> Builder<'a> {
             holes: Vec::new(),
             receiver_malloc: false,
             must_use_param: false,
+            path: None,
         });
         (self.body.names.len() - 1) as Name
+    }
+
+    /// The `@borrow` a read of a place binds, carrying the path the reader
+    /// wrote ([`NameInfo::path`]).
+    fn borrow_name(&mut self, e: &'a Expr, ty: Type, line: usize) -> Name {
+        let n = self.name("@borrow", ty, false, line);
+        self.body.names[n as usize].path = reader_path(e);
+        n
     }
 
     /// Record the plan's key for a name, and the name for the key.
@@ -1608,7 +1641,7 @@ impl<'a> Builder<'a> {
                         // consumer a drain encloses: it stays held, and the
                         // judgment says so.
                         self.pending_receiver = None;
-                        let t = self.name("@borrow", ity.clone(), false, *line);
+                        let t = self.borrow_name(iter, ity.clone(), *line);
                         out.push(St::Let(t, Rhs::Read(place)));
                         t
                     }
@@ -2173,14 +2206,14 @@ impl<'a> Builder<'a> {
         match e {
             Expr::Field { .. } if owns => {
                 let place = self.place(e, out)?;
-                let t = self.name("@borrow", ty.unwrap(), false, e.line());
+                let t = self.borrow_name(e, ty.unwrap(), e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
                 self.release_receiver(e, out, true);
                 Ok(Val::Name(t))
             }
             Expr::Call { name, args, .. } if owns && name == "@at" && args.len() == 2 => {
                 let place = self.place(e, out)?;
-                let t = self.name("@borrow", ty.unwrap(), false, e.line());
+                let t = self.borrow_name(e, ty.unwrap(), e.line());
                 out.push(St::Let(t, Rhs::Read(place)));
                 self.release_receiver(e, out, true);
                 Ok(Val::Name(t))
@@ -2307,7 +2340,7 @@ impl<'a> Builder<'a> {
                     // that would own it — a `return`, a literal part, a
                     // `consume` argument — is refused there without a `.copy()`.
                     let place = self.place(e, out)?;
-                    let t = self.name("@borrow", ty, false, e.line());
+                    let t = self.borrow_name(e, ty, e.line());
                     out.push(St::Let(t, Rhs::Read(place)));
                     self.release_receiver(e, out, true);
                     return Ok(Val::Name(t));
@@ -2317,7 +2350,7 @@ impl<'a> Builder<'a> {
                 // yields a borrow (`movecheck::names_a_place`).
                 let borrows = matches!(&rhs, Rhs::Val(v) if self.borrows(v));
                 let t = if self.lends(e) || borrows {
-                    self.name("@borrow", ty, false, e.line())
+                    self.borrow_name(e, ty, e.line())
                 } else {
                     self.temp(ty, e.line())
                 };
@@ -2495,7 +2528,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let t = if self.owns(&ty) {
-            self.name("@borrow", ty, false, line)
+            self.borrow_name(e, ty, line)
         } else {
             self.temp(ty, line)
         };
@@ -2898,8 +2931,9 @@ impl<'a> Builder<'a> {
                 args: vec![(sv.clone(), Capability::Consume)],
                 spawn: false,
                 write_back: false,
-                // A variant constructor: it stores the payload.
+                // A variant constructor: it puts the payload into the value.
                 declared: false,
+                ctor: true,
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
@@ -3037,6 +3071,10 @@ impl<'a> Builder<'a> {
         // Whether the capabilities below are the author's word or this
         // pass's: the three branches that read a declaration set it.
         let mut declared = false;
+        // And whether it is a constructor, which is a third answer to the same
+        // question: a declared parameter TAKES, a builtin STORES, a variant
+        // PUTS the value into what it makes (RFC-0125 §3 M3, row 19).
+        let mut ctor = false;
         let caps: Vec<Capability> =
             if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
                 declared = true;
@@ -3056,6 +3094,7 @@ impl<'a> Builder<'a> {
                 declared = true;
                 p.params.iter().map(|p| p.capability).collect()
             } else if matches!(name, "Some" | "Ok" | "Err") || self.is_variant(name) {
+                ctor = true;
                 vec![Capability::Consume; args.len()]
             } else if vyrn_frontend::checker::RESERVED.contains(&name)
                 || vyrn_frontend::ast::is_log_level(name)
@@ -3157,6 +3196,7 @@ impl<'a> Builder<'a> {
             spawn: false,
             write_back,
             declared,
+            ctor,
             ret,
         })
     }

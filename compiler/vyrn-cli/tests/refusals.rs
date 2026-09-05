@@ -99,21 +99,23 @@ fn census() -> Vec<Row> {
             "rule 2: an element read may not be stored",
             "RFC-0092",
             "`b.xs[0]` may not be stored into `push(..)` — it is read out of a place that owns it",
-            Kernel::Other("read out of `b.xs[..]`, a place that owns it"),
+            Kernel::Same,
         ),
         row(
             "r02_store_read_parameter_field.vyrn",
             "rule 2: a field of a `read` parameter may not be stored",
             "RFC-0089",
             "`h.meta[0]` may not be stored into `push(..)` — it is a `read` parameter",
-            Kernel::Other("read out of `h.meta[..]`, a place that owns it"),
+            Kernel::Other(
+                "`h.meta[0]` may not be stored into `push(..)` — it is read out of a place",
+            ),
         ),
         row(
             "r03_store_projection.vyrn",
             "rule 2: a projection is a borrow of its root, whatever the root is",
             "RFC-0092",
             "`d.title` may not be stored into `push(..)` — it is read out of a place that owns it",
-            Kernel::Other("read out of `d.title`, a place that owns it"),
+            Kernel::Same,
         ),
         row(
             "r04_whole_after_a_hole.vyrn",
@@ -199,7 +201,7 @@ fn census() -> Vec<Row> {
             "RFC-0092",
             "`d.title` may not be passed to a `consume` parameter via `take(..)` — it is read \
              out of a place that owns it",
-            Kernel::Other("read out of `d.title`, a place that owns it"),
+            Kernel::Same,
         ),
         row(
             "r15_return_module_state.vyrn",
@@ -214,7 +216,7 @@ fn census() -> Vec<Row> {
             "rule 2 at the return: a field of a `read` parameter",
             "RFC-0089",
             "`d.title` may not be returned — it is a `read` parameter, and a return is owned",
-            Kernel::Other("read out of `d.title`, a place that owns it"),
+            Kernel::Other("`d.title` may not be returned — it is read out of a place that owns it"),
         ),
         row(
             "r17_export_returns_a_borrow.vyrn",
@@ -236,7 +238,7 @@ fn census() -> Vec<Row> {
             "rule 2 through a wrapper: a `read` parameter put into the result",
             "RFC-0089",
             "`s` may not be put into `Some(..)` — it is a `read` parameter",
-            Kernel::Other("via `Some(..)` — it is a `read` parameter"),
+            Kernel::Same,
         ),
         row(
             "r20_drop_after_consume.vyrn",
@@ -297,7 +299,7 @@ fn census() -> Vec<Row> {
             "rule 2: a `read` parameter to a builtin that declares `consume`",
             "RFC-0089",
             "`xs` may not be stored into `fromArray(..)` — it is a `read` parameter",
-            Kernel::Other("via `fromArray(..)` — it is a `read` parameter"),
+            Kernel::Same,
         ),
         row(
             "r28_return_a_capture_from_a_closure.vyrn",
@@ -352,7 +354,7 @@ fn census() -> Vec<Row> {
             "rule 2: a `read` parameter into a builtin's `consume` argument",
             "RFC-0089",
             "`s` may not be stored into `push(..)` — it is a `read` parameter",
-            Kernel::Other("via `push(..)` — it is a `read` parameter"),
+            Kernel::Same,
         ),
     ]
 }
@@ -1443,7 +1445,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("placement rows for the engines", 2362),
         ("a fix menu", 73),
         ("shared machinery", 3665),
-        ("tests", 2069),
+        ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
