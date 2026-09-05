@@ -422,10 +422,13 @@ const STR_HDR: i64 = 16;
 ///
 /// All-ones rather than a flag bit because the free is an equality test: a heap
 /// block would have to answer `cap == 2^64-1` to be mistaken for a literal. The
-/// reserve arithmetic in [`Gen::emit_str_append`] compares capacities UNSIGNED,
-/// where all-ones reads as room for everything — it never sees a literal (step 1
-/// copies a buffer this path does not own before step 2 reads its capacity), and
-/// an equality test keeps that a separate question rather than a shared one.
+/// reserve arithmetic in [`Gen::emit_str_append_owned`] compares capacities
+/// UNSIGNED, where all-ones reads as room for everything — so step 1 tests this
+/// sentinel as well as the ownership flag, and a literal never reaches step 2.
+/// It used to test the flag alone, on the reading that step 1 already screened
+/// every borrowed buffer; the flag is set from the accumulator's DECLARATION,
+/// and `let mut acc = empty()` — a call that returns `""` — carried a literal
+/// past it and grew it in place over the next literal in the pool.
 const STR_STATIC: i64 = -1;
 
 /// `bytes(s)`: an `Array<UInt8>` ({ptr,len,cap}, i8 stride — RFC-0014 M2) of a
@@ -3687,12 +3690,29 @@ impl<'a> Gen<'a> {
         let vlen = self.str_len(val);
 
         // Step 1: the flag is 0 — copy the borrowed buffer into one we own.
+        //
+        // OR the header says static. The flag is set from the accumulator's
+        // DECLARATION, and a call that transfers a `String` may still hand back
+        // a data-segment literal (`fn empty() -> String { return "" }`), so
+        // [`STR_STATIC`] decides over it: without this the append grew a literal
+        // in place and wrote over the next literal in the pool. Same rule, same
+        // words, in `std/runtime.vyrn`'s `strAppend`.
         let own_l = self.fresh_label("app.own");
         let have_l = self.fresh_label("app.have");
         let f0 = self.fresh_tmp();
         let owned = self.fresh_tmp();
+        let flagged = self.fresh_tmp();
+        let cur0 = self.fresh_tmp();
+        let capp0 = self.fresh_tmp();
+        let cap0 = self.fresh_tmp();
+        let dynamic = self.fresh_tmp();
         self.emit(format!("{f0} = load i64, ptr {flag}"));
-        self.emit(format!("{owned} = icmp ne i64 {f0}, 0"));
+        self.emit(format!("{flagged} = icmp ne i64 {f0}, 0"));
+        self.emit(format!("{cur0} = load ptr, ptr {slot}"));
+        self.emit(format!("{capp0} = getelementptr i8, ptr {cur0}, i64 -8"));
+        self.emit(format!("{cap0} = load i64, ptr {capp0}"));
+        self.emit(format!("{dynamic} = icmp ne i64 {cap0}, {STR_STATIC}"));
+        self.emit(format!("{owned} = and i1 {flagged}, {dynamic}"));
         self.emit_term(format!("br i1 {owned}, label %{have_l}, label %{own_l}"));
         self.emit_label(&own_l);
         let ob = self.fresh_tmp();

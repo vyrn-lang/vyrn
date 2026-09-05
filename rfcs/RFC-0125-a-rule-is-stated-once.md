@@ -4664,7 +4664,7 @@ deleted here, and `--engine interp` is still the default.
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
 | `from-json` | `vyrn fmt --from-json` (RFC-0097 M1) | yes, since the fifth slice below — the converter compiles through the direct backend and runs in the embedded engine. `fmt` still has no engine flag, because the converter is the CLI's program and not the user's: there is one route and nothing to choose | 145 ms against 260 ms on `examples/shelf/vyrn.json`, medians of three. The compiled route is SLOWER, for the reason `test-bodies` is: 40 lines of program against a compile of every module they reach |
 | `run-profile` | `vyrn run --profile`, `vyrn check --profile` | yes, by replacement since the fifth slice below — the rows are phases rather than functions, and the count is wasmtime's fuel. A per-function table is not portable and the slice says why | `vyrn_frontend::prof` counts interpreter steps and keeps counting them for `--engine interp` and for `check --profile`, which measures generation. What the compiled route reports instead is five phases and one repeatable count: 85,759,742,333 operations for the site export, the same number twice |
-| `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | partial — RFC-0076's `vyrn-genwasm` runs a generator as compiled wasm, and the ninth slice below removed three of the four reasons the feature was off: it needs no clang and no wasi sysroot since RFC-0076 M7, it serves an `Int64` argument, and the wrapper type-checks. `wasm-gen` is still OFF in `vyrn-cli`'s default build and ON in `vyrn-lsp`'s | the largest row, and ONE defect holds it: a generator that refuses through `std/diag`'s `reportHere` and returns the report beside a `vyrn"…"` code quote comes back with the report spliced into the quoted string and repeated. The reproduction is `tests/exports.rs`'s `graphql_sdl_answers_the_awkward_contract..`; the interpreter answers it correctly and the defect is older than this slice — it reproduces at this branch's base, so `vyrn-lsp` has it today. `generate_interpreted` is both the reference and the fallback until the splice is fixed |
+| `gen-fn` | every `gen fn` (RFC-0021), on every command that loads a module: `run`, `check`, `test`, `bench`, `build`, `doc`, `why`, `routes`, `fmt`, `emit-*`, and the LSP | yes, since the tenth slice below — `wasm-gen` is ON in `vyrn-cli`'s default build, so every command runs a generator as compiled wasm the way `vyrn-lsp` already did. No clang and no wasi sysroot: RFC-0076 M7 emits the generator's module directly | the largest row, and four defects were under it. Three are the ninth slice's — an `Int64` argument declined (66 calls over this corpus), the wrapper's generation-only names read as ordinary code, and the atom-stream primitives had a signature in the emitter and none in the checker. The fourth turned out not to be the splice at all: `strAppend` grew a data-segment literal in place, which is a defect of the RUNTIME and reaches the native target too. `generate_interpreted` stays as a decline path that no program in this repo takes, and `VYRN_NO_WASM_GEN=1` still picks it |
 | `fixture-oracle` | `examples/expected/*.stdout`, `.stderr`, `.exit` | yes, since the ninth slice below — `VYRN_FIXTURES=write` records from the compiled route and the gate compares the compiled route, so the recorded file is the expectation and not a transcript of a second engine. `VYRN_FIXTURES=interp` is the interpreter as a second column, for as long as there is one | re-recording all 205 from the route moved ZERO bytes, so the change of oracle costs nothing that is in the tree. What it costs is a kind of proof: the gate proves the route has not moved since a human read the diff, and it cannot prove the answer is right. `wasmhash` says the same bytes on four platforms, and the review of the recorded diff is what says the bytes are the right ones |
 | `parity-column` | CI's parity job, 41 programs three engines | yes, by replacement — `fixtures` plus `wasmhash` state the invariant §2.6 names | parity is 971 s on one platform; `fixtures` is 123 to 213 s and `wasmhash` 97 to 146 s, each on four |
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
@@ -5930,6 +5930,89 @@ test` is green over `export.vyrn` and `site/app`, 189 blocks; and
 `fixtures` was also run in its two other modes: `VYRN_FIXTURES=write` re-recorded
 all 205 from the compiled route and moved zero bytes, and `VYRN_FIXTURES=interp`
 compared all 205 against the same files in 82 s.
+
+**The tenth slice: the splice was innocent, and `strAppend` grew a literal.**
+
+The ninth slice left one defect and named the `Code`-as-handle splice as the
+suspect. It was not the splice, and it was not generation. The reduction is a
+program with no generator in it at all:
+
+```vyrn
+fn empty() -> String {
+    return ""
+}
+
+fn main() -> Int64 {
+    let mut doc = "# head\n"
+    let mut diags = empty()
+    doc = doc + "type a\n"
+    diags = diags + "REPORT\n"
+    diags = diags + empty()
+    print(diags + doc)
+    return 0
+}
+```
+
+The interpreter prints `REPORT`, then the document. `vyrn run --engine wasm`
+prints `REPORT` twice. A native build prints the document and no report at all.
+Three engines, three answers, and the interpreter is the only one that is right.
+
+**The rule that was wrong.** A `String` accumulator carries one word beside it —
+the append shadow — which answers "did THIS path allocate the buffer the
+variable holds?". `0` means no, so the next append copies before it grows; `1`
+means the buffer is ours and an append may grow it in place. Both backends set
+that word at the DECLARATION, from the `let`'s shape:
+`compiler/vyrn-codegen/src/direct.rs:4052` and
+`compiler/vyrn-codegen/src/lib.rs:5808`, each spelling the same test —
+the plan says this `let` owns its initializer, AND the initializer is not a
+string literal.
+
+A call is not a string literal, and `own` says a function that returns a
+`String` transfers it (RFC-0089 rule 3). So `let mut diags = empty()` starts the
+shadow at `1`. But `empty()` returns `""`, which is a data-segment address: the
+value transfers and the storage is static. The first append then took the
+in-place branch, read the literal's capacity — all ones, RFC-0089 M1a's word for
+static — decided it had room for everything, and wrote the operand's bytes over
+the next literal in the string pool. `"# head\n"`'s length header was the four
+bytes it landed on, so `doc` was a `String` claiming 677,458 bytes; the next
+concatenation copied that many out of the data segment. In `std/graphql`'s
+`sdl`, written in exactly this shape, the claim was large enough to grow the
+guest to two gigabytes, and what came back was the report repeated four times
+and spliced into the middle of the document.
+
+**Where the rule is stated now.** In the value, which already knew. The all-ones
+capacity is the runtime's word for "this buffer is nobody's", and the free path
+has consulted it since RFC-0089 M1a. The append did not. It does now:
+`std/runtime.vyrn`'s `strAppend` takes the copy branch when the flag is `0` OR
+the capacity is all ones, and the textual backend's inline copy
+(`Gen::emit_str_append_owned`) makes the same test before its branch. The flag
+is advisory; the header decides. Two places, because the append is written twice
+until step 3 of PLAN-0125-runtime moves the native route onto `std/runtime` —
+and the comment on `STR_STATIC` that said a literal never reaches the reserve
+arithmetic is the sentence this slice deleted.
+
+| | before | after |
+|---|---|---|
+| `let mut acc = f()` where `f` returns `""` | the shadow starts at 1 | unchanged — the shadow is still declaration-shaped |
+| the first append on that buffer | grows the literal in place | copies it out first |
+| what decides | the caller's flag | the flag AND the capacity |
+| engines that agree on the reduction | 1 of 3 | 3 of 3 |
+
+The pin is `tests/genwasm.rs`'s
+`an_accumulator_seeded_by_a_call_does_not_grow_a_literal_in_place`: the same
+shape as a generator, both engines, and it fails on this branch's parent. The
+corpus pin is `wasmhash` — 38 of the 173 examples emit different bytes, which is
+every example that appends to a `String`, and the manifest is re-recorded here.
+
+**So `wasm-gen` is ON again.** The ninth slice took the default off for this one
+defect and kept its three fixes; the tenth puts it back. Every command runs a
+`gen fn` as compiled wasm. `cargo test -p vyrn-cli` is green with the default
+on, `tests/exports.rs`'s `graphql_sdl_answers_the_awkward_contract..` passes,
+and the site export writes the same 82 routes and 14 assets under both
+generator engines — 241 files, byte-identical, diffed tree against tree.
+
+**The census reads fifteen `yes`.** Nothing the interpreter alone provides is
+left.
 
 ### M6 — the other two judgments
 
