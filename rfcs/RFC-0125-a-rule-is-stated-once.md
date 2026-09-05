@@ -7768,6 +7768,47 @@ Another track carries it. `site/app/apidoc.vyrn` runs under `--engine interp`,
 which is the `gen-fn-at-run-time` row the slice above named and not a change
 here.
 
+#### The store slice's gates (2026-09-06)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 564 passed, 75 ignored, and the one failure this slice did not cause |
+| `kernel` `--ignored` | 1, 32 s |
+| `coretables` `--ignored` | 1, 33 s |
+| `typed` `--ignored` | 1, 90 s |
+| `effects` `--ignored` | 2, 85 s |
+| `fixtures` `--ignored` | 1, 30 s |
+| `vyrn-frontend` | 1,245, four fewer for the four rules that moved to `tests/stores.rs` |
+| the workspace less `vyrn-cli` | 1,421 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 234 s |
+| the residue ratchet | 211 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, against the manifest this arc rewrote |
+| `genwasm`, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 62 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
+
+Lines per file. `own.rs` 4,958 to 4,545 and `movecheck.rs` 9,794 to 9,683 —
+the two folds, the accessor, the field, `PlaceStore`, `note_place_store` and
+the two sinks. `core.rs` is up 123 and `kernel.rs` 84, which is the word, the
+rule and the two stand-downs. `project.rs` is up 20 for `store_node`;
+`direct.rs` down 3 and `lib.rs` up 3, where each backend lost its own copy of
+`fresh_str` and gained the alias pair. `coretables.rs` is down 22 and
+`tests/stores.rs` is 220 new lines for the four rules that moved.
+
+Over the corpus the core states an answer at 55,874 stores: 2,724 release,
+53,137 stand down at the statement, and thirteen are neither — the twelve the
+`place at` rewrite now reaches through the alias pair, and `root = kw`.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
