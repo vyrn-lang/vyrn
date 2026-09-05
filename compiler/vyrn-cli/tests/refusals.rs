@@ -34,7 +34,7 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28 and 06, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
+//! 28, 06, 20 and 21, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
 //! two must still agree. The row is what stops the sentence moving after the
 //! deletion, so it stays in the census.
 //!
@@ -964,8 +964,16 @@ fn heads(dir: PathBuf, file: &str) -> Vec<String> {
 /// `movecheck.rs` too, so the load used to fail before the kernel was ever
 /// asked: rows 20 and 21 were licensed by the corpus and could not leave,
 /// because leaving would have REMOVED their two sentences from this file
-/// instead of moving them. Six diagnostics, and the two the rules give are
-/// named.
+/// instead of moving them.
+///
+/// Both rules have left, and the file keeps FIVE of its six diagnostics. Row
+/// 21's sentence about `ops` is the kernel's now, in the same words at the same
+/// line, which is what this file was the obstacle to. Row 20's sentence about
+/// `b` is gone, and it is gone to the rule that keeps the merge from adding
+/// rather than to the deletion: the must-use walk already refuses `b` — a `Txn`
+/// disposed twice, on line 59 — so the kernel's second sentence about `b` at
+/// line 61 is the same mistake said twice, and is dropped exactly as `r31`'s is
+/// (see below). One binding, one sentence, whichever pass states it.
 #[test]
 fn a_file_with_a_must_use_error_still_gets_its_ownership_refusals() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -973,16 +981,16 @@ fn a_file_with_a_must_use_error_still_gets_its_ownership_refusals() {
         .canonicalize()
         .unwrap();
     let got = heads(dir, "mustuse_abandoned.vyrn");
-    assert_eq!(got.len(), 6, "{got:#?}");
+    assert_eq!(got.len(), 5, "{got:#?}");
     assert!(
         got.iter().any(|d| d
             == "`ops` may not be dropped — it is a second name for the `read` parameter `self`"),
         "{got:#?}"
     );
     assert!(
-        got.iter()
+        !got.iter()
             .any(|d| d == "`b` is dropped here but was already consumed by `finish(..)` on line 60"),
-        "{got:#?}"
+        "one binding, one sentence: {got:#?}"
     );
 }
 
@@ -1515,7 +1523,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2375),
         ("a fix menu", 73),
-        ("shared machinery", 3793),
+        ("shared machinery", 3762),
         ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");

@@ -5492,49 +5492,18 @@ impl MoveCheck<'_> {
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
             Stmt::Drop { name, line } => {
-                // All three of this statement's refusals stay, and two of them
-                // were measured out of the deletion rather than argued out
-                // (RFC-0125 §3 M3, rows 20 and 21). The kernel words both now
-                // — the core carries the `drop`'s own line — and
-                // `examples/mustuse_abandoned.vyrn` is the program that keeps
-                // them here: the two passes disagree about what an undeclared
-                // `self` IS, so the second sentence moves, and the two
-                // refusals come out in the other order because the placer
-                // walks bodies in the lowering's order and this pass walks
-                // them in the source's.
-                if let Some(c) = consumed.get(name) {
-                    let (cline, consumer) = (c.line, &c.by);
-                    return Err(menu(
-                        *line,
-                        format!(
-                            "`{name}` is dropped here but was already consumed by \
-                             {consumer} on line {cline}"
-                        ),
-                        c.fixes.clone(),
-                    ));
-                }
-                // Rule 2 at the drop. `drop x` reclaims storage, and a borrow
-                // names storage somebody else owns — so `let owned = box.items ;
-                // drop owned` hands back a buffer the record still holds.
-                if let Some(b) = self.borrow_of(name) {
-                    return Err(menu(
-                        *line,
-                        format!("`{name}` may not be dropped — it is {}", b.what(name)),
-                        vec![
-                            format!(
-                                "`consume` the place where `{name}` is bound, so `{name}` takes \
-                                 the value rather than naming it"
-                            ),
-                            format!(
-                                "delete the `drop` — the place that owns it releases it \
-                                 (RFC-0089 rule 4)"
-                            ),
-                        ],
-                    ));
-                }
+                // Two of this statement's three refusals have LEFT (RFC-0125
+                // §3 M3, rows 20 and 21): a `drop` of what a take already took,
+                // and a `drop` of a borrow. The kernel states both, in these
+                // words and at this line, and the accumulation driver puts them
+                // beside whatever else the file earns — which is what the two
+                // rows waited on, because the one program of the corpus that
+                // breaks either of them, `examples/mustuse_abandoned.vyrn`,
+                // breaks a must-use obligation as well.
+                //
                 // A PARTIAL take left a hole in the binding (RFC-0093), and the
-                // kernel accepts that program. The
-                // taken place belongs to whoever received it, and `drop`
+                // kernel accepts that program. The taken place belongs to
+                // whoever received it, and `drop`
                 // reclaims storage BY TYPE — it cannot be told to skip the
                 // places a take handed away. Dropping here would free what
                 // the receiver still holds, so the spelling is refused.
