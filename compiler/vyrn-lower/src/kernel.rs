@@ -161,6 +161,20 @@ struct State {
     alias: Vec<Option<Alias>>,
 }
 
+/// One refusal with its menu of ways out (RFC-0087 U2), in the shape
+/// `movecheck::menu` prints: the sentence, then one `fix:` line per way out.
+///
+/// A refusal is a head, a sentence and a menu, and a reader who loses a menu
+/// loses part of the refusal. So the kernel names the same ways out in the
+/// same words as the checker, which is what lets a rule leave the checker
+/// without the diagnostic moving (RFC-0125 §3 M3, the menu slice).
+fn menu(mut message: String, fixes: Vec<String>) -> String {
+    for f in fixes {
+        message.push_str(&format!("\n  fix: {f}"));
+    }
+    message
+}
+
 /// Whether two paths under one name overlap: equal, or one under the other.
 /// The empty path is the whole name.
 fn overlaps(a: &str, b: &str) -> bool {
@@ -487,11 +501,20 @@ impl<'b> Kernel<'b> {
             return Ok(());
         };
         let (s, here) = (self.src(n), self.here);
+        // The way out is a value of its own, read where the alias was bound —
+        // the place the alias reads, not the place the write named.
+        let src = self.src_text(st, n);
+        let at = self.body.names[n as usize].line;
         self.refuse_at(
             *l,
-            format!(
-                "`{place}` is written here while `{s}` still reads out of it\nline {here}: ... \
-                 and `{s}` is {what} again here"
+            menu(
+                format!(
+                    "`{place}` is written here while `{s}` still reads out of it\nline {here}: \
+                     ... and `{s}` is {what} again here"
+                ),
+                vec![format!(
+                    "`{src}.copy()` on line {at}, so `{s}` is a value of its own"
+                )],
             ),
         )
     }
@@ -526,7 +549,18 @@ impl<'b> Kernel<'b> {
                 } else {
                     format!("module state `{g}` may not be consumed by {by} — {never}")
                 };
-                return self.refuse_at::<()>(self.here, msg).unwrap_err();
+                // A return is the one of the three with a way out: the caller
+                // releases what it is handed, so it is handed a copy.
+                let fixes = if by == "a `return`" {
+                    vec![format!(
+                        "`{g}.copy()` — the caller releases what it is handed"
+                    )]
+                } else {
+                    Vec::new()
+                };
+                return self
+                    .refuse_at::<()>(self.here, menu(msg, fixes))
+                    .unwrap_err();
             }
         }
         let what = format!("it is read out of `{src}`, a place that owns it");
@@ -544,12 +578,48 @@ impl<'b> Kernel<'b> {
                 )
                 .unwrap_err();
         }
+        // A `drop` is the one exit whose sentence names no place, because its
+        // ways out are both about the BINDING: take the value there, or let
+        // the place that owns it release it (RFC-0089 rule 4, RFC-0125 §3 M3,
+        // row 21).
+        if by == "a `drop`" {
+            // What the borrow IS, in `movecheck::Borrow::what`'s words: a
+            // second name for a parameter where the alias reads one, and the
+            // place otherwise. `examples/mustuse_abandoned.vyrn` is the
+            // program that needed the first — `let ops = self.ops` inside a
+            // `read self` method.
+            let kind = match &st.alias[n as usize] {
+                Some(Alias {
+                    root: Root::N(m), ..
+                }) => self.body.names[*m as usize]
+                    .borrow_kind
+                    .as_ref()
+                    .map(|b| b.what(s)),
+                _ => None,
+            }
+            .unwrap_or_else(|| "read out of a place that owns it".to_string());
+            return self
+                .refuse_at::<()>(
+                    self.here,
+                    menu(
+                        format!("`{s}` may not be dropped — it is {kind}"),
+                        vec![
+                            format!(
+                                "`consume` the place where `{s}` is bound, so `{s}` takes the \
+                                 value rather than naming it"
+                            ),
+                            "delete the `drop` — the place that owns it releases it (RFC-0089 \
+                             rule 4)"
+                                .to_string(),
+                        ],
+                    ),
+                )
+                .unwrap_err();
+        }
         let msg = if by.ends_with("(..)`") {
             format!("`{s}` may not be passed to a `consume` parameter via {by} — {what}")
         } else if by == "a `return`" {
             format!("`{s}` may not be returned — {what}")
-        } else if by == "a `drop`" {
-            format!("`{s}` may not be dropped — {what}")
         } else if by == "a literal" {
             format!("`{s}` may not be stored into the literal — {what}")
         } else {
@@ -588,17 +658,31 @@ impl<'b> Kernel<'b> {
         let s = self.src(n);
         let read = format!("{s}{}", path.replace(".[]", "[..]"));
         let here = self.here;
+        // A `drop` a reader wrote takes the value as a `consume` parameter
+        // does, and the checker says so in the same sentence (row 06). The
+        // note under it is about a READ, so a second `drop` does not print
+        // it (row 20).
+        let note = if what == "dropped" {
+            ""
+        } else {
+            "\n  (a `consume` parameter takes ownership; the value can't be used afterward)"
+        };
         let r = match &st.taker[n as usize] {
-            Some((l, by)) if by.ends_with("(..)`") => self.refuse_at::<()>(
+            Some((l, by)) if by.ends_with("(..)`") || by == "`drop`" => self.refuse_at::<()>(
                 here,
                 format!(
-                    "`{read}` is {what} here but was already consumed by {by} on line {l}\n  \
-                     (a `consume` parameter takes ownership; the value can't be used afterward)"
+                    "`{read}` is {what} here but was already consumed by {by} on line {l}{note}"
                 ),
             ),
             Some((l, by)) if !by.is_empty() => self.refuse_at::<()>(
                 *l,
-                format!("`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} again here"),
+                menu(
+                    format!(
+                        "`{s}` was moved here into {by}\nline {here}: ... and `{s}` is {what} \
+                         again here"
+                    ),
+                    vec![format!("`{s}.copy()` if both sides need a value")],
+                ),
             ),
             _ => self.refuse_at::<()>(here, format!("`{s}` is {what} here after it was released")),
         };
@@ -703,7 +787,14 @@ impl<'b> Kernel<'b> {
             return Ok(());
         }
         if st.own[n as usize] == Own::Gone {
-            return Err(self.used_after(st, n, "released"));
+            // A `drop` a reader wrote is worded as the reader wrote it; a
+            // release this pass placed is worded as a release (row 20).
+            let what = if self.by == "`drop`" {
+                "dropped"
+            } else {
+                "released"
+            };
+            return Err(self.used_after(st, n, what));
         }
         if st.own[n as usize] == Own::Held {
             let state = self.holes_owned(st, n);
@@ -786,7 +877,29 @@ impl<'b> Kernel<'b> {
         } else {
             format!("`{s}` may not be stored into {by} — it is {what}")
         };
-        self.refuse_at::<()>(self.here, msg).unwrap_err()
+        // The ways out, as `movecheck::Borrow::fixes` and
+        // `movecheck::MoveCheck::fixes_here` name them. An `export extern fn`
+        // has one: its JS caller releases the String the call returns, so the
+        // signature refuses `consume` and only a copy is left (RFC-0089 M3b).
+        let capture = matches!(b, BorrowKind::Capture);
+        let fixes = if by == "a `return`" && capture {
+            vec![format!("`{s}.copy()` if the caller needs its own value")]
+        } else if capture {
+            Vec::new()
+        } else if self.body.export && by == "a `return`" {
+            vec![format!(
+                "`{s}.copy()` — an `export extern fn` owns its result"
+            )]
+        } else if self.body.export {
+            vec![format!(
+                "`{s}.copy()` — an `export extern fn` may not take ownership of a String its \
+                 JS caller releases"
+            )]
+        } else {
+            b.fixes(s)
+        };
+        self.refuse_at::<()>(self.here, menu(msg, fixes))
+            .unwrap_err()
     }
 
     /// A take of a name: it must be held, and it is gone afterwards. An
@@ -832,9 +945,17 @@ impl<'b> Kernel<'b> {
                     let (here, l) = (self.here, self.hole_line(st, *n, path));
                     return self.refuse_at(
                         l,
-                        format!(
-                            "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and `{s}` \
-                             is used as a whole here, with the hole still in it"
+                        menu(
+                            format!(
+                                "`{s}{path}` was taken out of `{s}` here\nline {here}: ... and \
+                                 `{s}` is used as a whole here, with the hole still in it"
+                            ),
+                            vec![
+                                format!(
+                                    "`{s}{path}.copy()` on line {l} if `{s}` is still needed whole"
+                                ),
+                                format!("write `{s}{path}` back before this line"),
+                            ],
                         ),
                     );
                 }
@@ -1065,7 +1186,15 @@ impl<'b> Kernel<'b> {
                 self.here = *line;
                 self.by = "a `match`".to_string();
             }
-            St::Drop(n, _) | St::Row { name: n, .. } => {
+            // A `drop` a reader WROTE is a statement with a line, and the
+            // taker it records is the word the reader used. A release this
+            // pass placed has neither: it stands at the binding, and nothing
+            // took the value (RFC-0125 §3 M3, rows 06, 20 and 21).
+            St::Drop(n, _, line) if *line > 0 => {
+                self.here = *line;
+                self.by = "`drop`".to_string();
+            }
+            St::Drop(n, ..) | St::Row { name: n, .. } => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = String::new();
             }
@@ -1215,7 +1344,7 @@ impl<'b> Kernel<'b> {
                     }
                 }
             }
-            St::Drop(n, _) => {
+            St::Drop(n, ..) => {
                 let holes = self.body.names[*n as usize].holes.clone();
                 self.drop(st, *n, &holes, None)?;
                 self.wrote(st, &Place::Name(*n), self.src(*n));

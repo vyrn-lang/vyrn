@@ -33,10 +33,12 @@
 //!     survives `VYRN_NO_MOVECHECK=1` because another pass gives it. Nothing
 //!     is owed here, and the close-out's attribution is corrected.
 //!
-//! A row whose site has already LEFT `movecheck.rs` — row 12, RFC-0125 §3 M3,
-//! the containment slice — is refused by the kernel in both runs, and the two
-//! must still agree. The row is what stops the sentence moving after the
-//! deletion, so it stays in the census.
+//! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
+//! 28 and 06, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
+//! two must still agree. The row is what stops the sentence moving after the
+//! deletion, so it stays in the census. Rows 20 and 21 read `Kernel::Same`
+//! and their sites STAYED: `examples/mustuse_abandoned.vyrn` is a program the
+//! two passes word differently, and it is not in this file's corpus.
 
 use std::path::{Path, PathBuf};
 
@@ -236,18 +238,14 @@ fn census() -> Vec<Row> {
             "rule 1 at the drop: what a `consume` parameter took is gone",
             "RFC-0089",
             "`a` is dropped here but was already consumed by `take(..)` on line 6",
-            Kernel::Other("was already consumed by `take(..)` on line 6"),
+            Kernel::Same,
         ),
         row(
             "r21_drop_a_borrow.vyrn",
             "rule 4 at the drop: the place that owns a value releases it",
             "RFC-0089",
             "`owned` may not be dropped — it is read out of a place that owns it",
-            // The sentence is the checker's; the line is the binding's, because
-            // a `Drop` in the core carries none.
-            Kernel::Other(
-                "`owned` may not be dropped — it is read out of `b.items`, a place that owns it",
-            ),
+            Kernel::Same,
         ),
         row(
             "r22_drop_with_a_hole.vyrn",
@@ -729,6 +727,165 @@ fn the_licence_is_per_program_and_these_are_the_counterexamples() {
     assert!(bad.is_empty(), "the licence has moved: {}", bad.join("; "));
 }
 
+/// The shapes rule 1's own unit tests pinned, still refused after the rule
+/// left `movecheck.rs` (RFC-0125 §3 M3, row 06).
+///
+/// They lived in `movecheck.rs`'s test module and asked `vyrn_frontend::check`
+/// alone, which no longer states this rule. Each names something OTHER than
+/// the rule — a region's shadowing `let`, a lambda block's, a `break` path, a
+/// `spawn`, a method's `consume` parameter, a `test` body, a `drop` — and each
+/// used the refusal to see it, so the deletion would have taken seven readings
+/// of the walk with it. They are asked of the whole compiler here instead.
+#[test]
+fn the_shapes_rule_ones_unit_tests_pinned_are_still_refused() {
+    const T: &str = "type T = { id: Int64 } \
+                     fn take(t: consume T) -> Int64 { return t.id } ";
+    let cases: &[(&str, String)] = &[
+        (
+            "a second call",
+            format!(
+                "{T} fn main() -> Int64 {{ let x = T {{ id: 1 }} let a = take(x) return take(x) }}"
+            ),
+        ),
+        (
+            "a test body",
+            format!(
+                "{T} test \"consumes twice\" {{ let x = T {{ id: 1 }} \
+                 let a = take(x) let b = take(x) assert(a == b) }} \
+                 fn main() -> Int64 {{ return 0 }}"
+            ),
+        ),
+        (
+            "a lambda blocks shadowing let",
+            format!(
+                "{T} fn main() -> Int64 {{ let s = T {{ id: 1 }} let n = take(s) \
+                 let g: fn(Int64) -> Int64 = x -> {{ let s = 0 return x + s }} \
+                 return g(n) + take(s) }}"
+            ),
+        ),
+        (
+            "a regions shadowing let",
+            "fn sink(t: consume String) -> Int64 { drop t return 0 } \
+             fn main() -> Int64 { let x = \"a\" + \"b\" let n = sink(x) \
+             region { let x = 9 } return x.byteLength + n }"
+                .to_string(),
+        ),
+        (
+            "a break path",
+            format!(
+                "{T} fn main() -> Int64 {{ let x = T {{ id: 1 }} \
+                 for i in [0, 1] {{ let a = take(x) break }} return take(x) }}"
+            ),
+        ),
+        (
+            "a spawn",
+            format!(
+                "{T} fn main() -> Int64 {{ let x = T {{ id: 1 }} \
+                 let t = spawn take(x) let z = take(x) return t.join() + z }}"
+            ),
+        ),
+        (
+            "a methods consume parameter",
+            "type T = { n: Int64 } \
+             protocol Taking { fn take(modify self, s: consume String) -> Unit } \
+             impl Taking for T { fn take(modify self, s: consume String) -> Unit \
+             { self.n = self.n + s.byteLength } } \
+             fn main() -> Int64 { let mut t = T { n: 1 } let s = \"a\" \
+             t.take(s) return s.byteLength }"
+                .to_string(),
+        ),
+        (
+            "a drop",
+            "fn main() -> Int64 { let mut xs: SmallArray<Int64, 4> = [] xs.push(1) \
+             drop xs return xs.length }"
+                .to_string(),
+        ),
+    ];
+    let dir = common::scratch("rule-one-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains("already consumed") {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "rule 1 no longer refuses:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// A nullary constructor is a value with no owner, not a name (RFC-0126 §8.8).
+///
+/// `take(None)` twice hands the callee two values. The checker keyed rule 1 on
+/// the bare name a nullary variant parses as, so it reported the second as a
+/// use of the first — of `None`, of a user enum's `Nothing`, at a call, across
+/// a branch, around a loop. Every engine runs these programs; the kernel never
+/// had the defect, because a constructor lowers to a value and not to a name.
+///
+/// Asked of both passes, because the checker is the one that was wrong and the
+/// answer has to stay right when the next rule leaves it.
+#[test]
+fn a_nullary_constructor_is_a_value_and_not_a_name() {
+    const M: &str = "type Maybe = | Nothing | Just(String) \
+                     fn takeM(m: consume Maybe) -> Int64 { return 0 } ";
+    const O: &str = "fn takeO(o: consume Option<String>) -> Int64 { return 0 } ";
+    let cases: &[(&str, String)] = &[
+        (
+            "a builtin variant twice",
+            format!("{O} fn main() -> Int64 {{ let a = takeO(None) let b = takeO(None) return a + b }}"),
+        ),
+        (
+            "a declared variant twice",
+            format!("{M} fn main() -> Int64 {{ let a = takeM(Nothing) let b = takeM(Nothing) return a + b }}"),
+        ),
+        (
+            "one on each branch and one after",
+            format!(
+                "{O} fn main() -> Int64 {{ let mut t = 0 \
+                 if t > 0 {{ t = t + takeO(None) }} else {{ t = t + takeO(None) }} \
+                 return t + takeO(None) }}"
+            ),
+        ),
+        (
+            "one every turn of a loop and one after",
+            format!(
+                "{M} fn main() -> Int64 {{ let mut t = 0 let mut i = 0 \
+                 while i < 2 {{ t = t + takeM(Nothing) i = i + 1 }} \
+                 return t + takeM(Nothing) }}"
+            ),
+        ),
+    ];
+    let dir = common::scratch("nullary-constructors");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        for kernel_only in [false, true] {
+            let (ok, text) = refusal_in(dir.to_path_buf(), &name, kernel_only);
+            if !ok {
+                let by = if kernel_only {
+                    "the kernel"
+                } else {
+                    "the compiler"
+                };
+                bad.push(format!(
+                    "{what}, {by}:\n    {}",
+                    text.replace('\n', "\n    ")
+                ));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a nullary constructor is read as a name:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// Every program under `tests/unlicensed/` is a counterexample, and every
 /// counterexample is a program.
 #[test]
@@ -921,16 +1078,6 @@ fn sections() -> Vec<Section> {
             "which form wrote the `consume`, and how a refusal names it",
         ),
         sec(
-            "    fn nothing_to_take(self) -> String {",
-            Kernel,
-            "`consume` with nothing to take (row 09)",
-        ),
-        sec(
-            "    fn drop_it(self) -> String {",
-            Menu,
-            "the `drop` a take's menu offers",
-        ),
-        sec(
             "fn root_of(path: &str) -> &str {",
             Shared,
             "the path algebra and the consumed table: overlap, reach, revival",
@@ -944,11 +1091,6 @@ fn sections() -> Vec<Section> {
             "    fn enter(&self) {",
             Shared,
             "the three scope stacks, read as one environment",
-        ),
-        sec(
-            "    fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed) {",
-            Kernel,
-            "a write to a place ends every alias that reads out of it (row 05)",
         ),
         sec(
             "    fn place_key(&self, e: &Expr) -> usize {",
@@ -1291,12 +1433,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 1009),
+        ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 723),
         ("placement rows for the engines", 2360),
-        ("a fix menu", 81),
-        ("shared machinery", 3651),
-        ("tests", 2172),
+        ("a fix menu", 73),
+        ("shared machinery", 3646),
+        ("tests", 2069),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

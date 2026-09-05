@@ -3704,6 +3704,203 @@ the slice before recorded. It is the same licence, measured against what a
 reader sees.
 
 
+**The menu slice (2026-09-05): the menu is written once, and six rules
+leave.** The slice before measured the licence over the whole diagnostic and
+spent it on one rule. It ended by naming three things between the licence and
+the lines: the menu, seven wordings, and one arm with two rules in it. This
+slice pays all three. Six rules leave `movecheck.rs`, two more were licensed
+by every program of the corpus and stayed anyway, and the reason they stayed
+is the finding that matters most here.
+
+**The menu, and it was a day's work rather than a pass.** The close-out
+priced the `fix:` menus at 81 lines and the slice before called them "the
+largest to BE OWED", because eleven `the same` rows lose one or more `fix:`
+lines the day their rule goes. What was needed was not a pass that restores
+them: it was the same eleven sentences, written where the rule now is.
+`kernel::menu` is `movecheck::menu`'s shape and `core::BorrowKind::fixes` is
+`movecheck::Borrow::fixes`'s words. Six sites carry one:
+
+| the refusal | where | the ways out it names |
+|---|---|---|
+| a take of a `read` or `modify` parameter | `kernel::param_take` | the `consume` on the parameter, the `.copy()`; the export's one answer; a capture returned from a closure |
+| a return of module state | `kernel::alias_take` | the `.copy()` the caller releases |
+| a use after a move | `kernel::used_after_at` | the `.copy()` both sides need |
+| a whole read after a hole | `kernel::take_arg` | the `.copy()` on the take's line, the write-back |
+| a read of an alias whose place was written | `kernel::alias_read` | the `.copy()` at the binding |
+| a `consume` that names no place, and a `consume` of a borrow | `core::take_names_a_place`, `core::consume_names_a_borrow` | `swapRemove`, dropping the `consume`, the parameter and the path |
+
+All 27 menu-only programs became identical: 24 / 27 / 60 / 23 before, 51 / 0 /
+60 / 23 after, over the same 134.
+
+**Three wordings, and all three were one field in the core.** A `Drop` in the
+core carried no line, so a refusal at a `drop` a reader WROTE stood at the
+binding and called nothing the taker. `St::Drop` carries that line now, and 0
+for every release the lowering places — the same field says which kind of
+release it is. With it the kernel gives all three of the `drop`'s sentences:
+a use after a `drop` names the `drop` as the taker (row 06); a second release
+is "dropped here", at the reader's line, without the note about a `consume`
+parameter, which is about a READ (row 20); a `drop` of a borrow names its two
+ways out and no place (row 21).
+
+Four wordings are NOT closed, and each names what it waits on:
+
+- **row 25**, a hole at a loop's back edge, is the previous slice's obstacle
+  unchanged: the hole would have to carry the line and the taker that made
+  it, which is a `State` field every join and widen must merge. It belongs to
+  a slice that is judging.
+- **row 26**, a rebuilding receiver, needs a SECOND diagnostic. The checker
+  prints two — the read, then rule 2 at the store that follows — and a
+  `Refusal` is one message. The second is rule 2 at a store, which is not
+  licensed anyway, so closing the first buys nothing.
+- **row 16**, a return read out of a `read` parameter's field, and **row 19**,
+  a borrow put into a constructor, are both about a name: the kernel says
+  `@borrow`, the compiler's own temporary, where the checker says the path
+  the reader wrote. Neither rule is licensed by its own wording — row 16's
+  site (`refuse_return`) has six other programs in the text column, and row
+  19's is one program whose sentence needs the kernel to know a callee is a
+  CONSTRUCTOR, which the core does not record (`declared: false` covers a
+  builtin and a variant alike).
+
+**`check_use` held four rules, and three of them left.** The arm was named as
+"one arm with two rules in it". It was four: a whole read after a hole (row
+04), a read of an alias whose place was written (row 05), a use after a
+`consume` capability (row 06), and a move into a binding (row 07). The split
+is a filter and not a second function — `check_use` selects the earliest
+overlapping consumption, and the two it must not select are named by what
+they carry. A hole is a flag on the record; a capability carries no menu,
+because the capability IS the fix. Row 07 stays.
+
+**What left, and what each was worth.**
+
+| the rule | census row | where it was | programs | why it could go |
+|---|---|---|---|---|
+| a whole read after a hole | 04 | `check_use` | 3 | the menu |
+| a write ends every alias | 05 | `check_use`, `wrote_place` | 1 | the menu |
+| rule 1: a use after a take | 06 | `check_use` | 9 | the `drop` taker |
+| `consume` of an element | 08 | `check_take` | 2 | the menu |
+| `consume` with nothing to take | 09 | `check_take` | 3 | the menu |
+| a closure's result is its caller's | 28 | `expr` | 1 | the menu |
+
+`MoveCheck::wrote_place`, `touches` and `Consumption::write` had no caller
+left and went with row 05; `TakeForm::nothing_to_take` and
+`TakeForm::drop_it` went with rows 08 and 09. Nothing else was orphaned.
+
+**The two that stayed, and why the corpus is not the checkout.** Rows 20 and
+21 were licensed: every program of the 134 gets the identical whole
+diagnostic from the kernel, and both were deleted. The `fixtures` gate then
+refused `examples/mustuse_abandoned.vyrn`, and the deletion is reverted. Two
+things are wrong with that program and neither is in the corpus:
+
+1. **The two passes disagree about what an undeclared `self` IS.** `impl
+   Owned for Txn { fn release(self) { let ops = self.ops  drop ops } }`. The
+   checker calls `ops` "a second name for the `read` parameter `self`"; the
+   core gives `self` no `borrow_kind`, so the kernel calls `ops` "read out of
+   a place that owns it". Row 21's licence was read off one program whose
+   root was an owned local, and this is a second program with a borrowed one
+   — the same shape of error the containment slice fixed by measuring every
+   program, one level down.
+2. **The two passes order a file's refusals differently.** The checker walks
+   top-level functions before `impl` methods; the placer walks bodies in the
+   lowering's order. The same two sentences come out swapped, which is a
+   change to the whole standard error even when every sentence is identical.
+
+So the corpus a licence is read from is 134 refusal programs AND the 203
+examples the fixture oracle records. The kernel keeps all three `drop`
+wordings — they are better answers and cost nothing while the checker
+refuses first — and the rules stay until the disagreement about `self` is
+settled and the order is one order.
+
+**What every deletion costs, stated three times because three readers were
+wrong.**
+
+1. `VYRN_NO_PLACER=1` and `VYRN_NO_KERNEL=1` accept every program the six
+   refused. That is the previous slice's note, unchanged and now six times
+   larger: a knob turns off the only pass that states these rules.
+2. `vyrn fix` read `load_warned` alone. A use after a `consume` parameter
+   became `0 fix(es) applied, 0 left` — the tool told a reader that a broken
+   program was clean. It asks the kernel now, as `check` does, and since the
+   kernel prints the same menu it can apply the same edits.
+3. The by-default sweep (`testsweep`) reads `VYRN_NO_KERNEL=1` as "what the
+   compiler said before the kernel". That reading held only while every rule
+   was stated twice. Its exemption is per RULE — seven sentences, each with
+   the census row that licensed it — and every other disagreement is still
+   the finding the file exists for.
+
+**And two costs are not paid.**
+
+- **The editor.** `vyrn-lsp` depends on `vyrn-frontend` and nothing else; the
+  kernel is in `vyrn-lower`. So a rule that leaves this file leaves the
+  editor: no squiggle, no message, no `fix:` menu for a use after a take. The
+  CLI is right and the editor is silent. That is the largest single thing the
+  deletion track owes, it grows with every rule, and it is a dependency and
+  not a wording.
+- **Accumulation.** The kernel is asked only of a program the checker
+  ACCEPTED, so a rule that left is invisible in a file that also has a
+  must-use error. No program of either corpus is caught by this today, which
+  is why nothing is changed for it here, and merging the two lists is not the
+  repair it looks like: the kernel says things this pass deliberately does
+  not — `r31`'s second `close(s)` is a use after a take AND a must-use
+  disposed twice — so a merge adds diagnostics rather than restoring them.
+  Both halves want the same thing, which is one pass stating each rule.
+
+**The rule's tests, moved rather than dropped.** Nine of this pass's own unit
+tests asked rule 1, and eight named something OTHER than the rule: a region's
+shadowing `let`, a lambda block's, a `break` path, a `spawn`, a method's
+`consume` parameter, a `test` body, a `drop`. They asked
+`vyrn_frontend::check`, which no longer states it. They are asked of the
+whole compiler now
+(`refusals::the_shapes_rule_ones_unit_tests_pinned_are_still_refused`). Three
+tests of the diagnostics and symbol APIs asked this rule for a subject that
+was never the rule — bounded accumulation, and the identifier a diagnostic is
+pinned to — and ask rule 2 instead.
+
+**A defect in the same file, repaired.** RFC-0126 §8.8: `movecheck` read a
+NULLARY constructor as a binding, so `take(None)` twice, or `take(Nothing)`
+for a user enum's nullary variant, reported "`None` is used here but was
+already consumed". A variant with no payload parses as a bare name, and a
+bare name is what every ownership rule keys on. The reading is one predicate
+now, `MoveCheck::names_a_constructor`, and the three sites that read a bare
+name as a binding ask it — the alias record at a `let`, which already carried
+an inline copy of the list, and the two consumption records at a `consume`
+argument, which carried none. The kernel never had the defect: a constructor
+lowers to a value and not to a name. The pin
+(`refusals::a_nullary_constructor_is_a_value_and_not_a_name`) asks both
+passes, over four shapes, so the answer stays right when the next rule leaves.
+
+**The licence, after.** 54 identical / 0 menu / 57 text / 23 accepted over the
+same 134 programs, against 24 / 27 / 60 / 23 at the start of this branch.
+Every rule that has left is in the identical column by construction — both
+runs give the kernel — and the census rows for 04, 05, 06, 08, 09, 12 and 28
+are what hold their sentences still. Rows 20 and 21 read `the same` and their
+sites stayed. Of the 57 that differ, the two largest families are one
+obstacle each: the kernel names a temporary (`@borrow`) where the checker
+names the path a reader wrote, which is 19 of them; and the kernel does not
+know whether the taker DECLARED `consume` or merely STORED, which is the
+difference between rule 1's two sentences.
+
+**The structural census, re-measured.** 916 / 723 / 2,360 / 73 / 3,646 /
+2,069 over 9,787 lines, against 1,009 / 723 / 2,360 / 81 / 3,651 / 2,172 over
+9,996. The rules the kernel gives lost 93 lines, the menus 8, the tests 103;
+shared machinery lost 5, which is the `drop` arm's spans absorbing what
+`wrote_place` and `touches` left, less the nullary predicate this slice added.
+The placement rows did not move, because nothing this slice deleted was one.
+
+**What is left between the licence and the lines.** The walk is unchanged
+(1,929 lines of `stmt` and `expr`). Above it now stand three things, and none
+of them is a menu:
+
+1. **the name a refusal gives**, which 19 of the 57 wait on: the kernel's
+   binding is a temporary the lowering made, and the reader's is a path;
+2. **whether a taker declared `consume`**, which rule 1's remaining half (row
+   07) and the linear rows wait on: `Rhs::Call::declared` says it and the
+   `State`'s taker does not carry it;
+3. **the order of a file's refusals, and one disagreement about `self`**,
+   which rows 20 and 21 wait on, and which no wording closes.
+
+The licence was one rule spent last slice. It is six this slice, and two more
+were spent and given back — by a gate, over a program no corpus held, which
+is the only reason to have gates that read a different corpus.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

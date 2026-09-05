@@ -171,6 +171,29 @@ fn looks_like_a_program(s: &str) -> bool {
         && s.len() > 40
 }
 
+/// The rules that have LEFT `movecheck.rs`, one needle each (RFC-0125 §3 M3).
+///
+/// The pair of runs below reads `VYRN_NO_KERNEL=1` as "what the compiler said
+/// before the kernel". That reading held while every rule was stated twice.
+/// It stops holding the day a rule is stated once: with the kernel off, the
+/// checker no longer refuses what it used to, so a program a test wrote to BE
+/// refused reaches the report — which is the opposite of a finding.
+///
+/// So the exemption is per RULE and not per program: a refusal whose sentence
+/// is one of these is a rule the deletion track moved, and the two runs are
+/// SUPPOSED to disagree about it. Every other disagreement is still the
+/// finding this file exists for. An entry here is added only with the census
+/// row that licensed it, and the row is what proves the sentence did not move.
+const LEFT_THE_CHECKER: &[(&str, &str)] = &[
+    ("was taken out of", "row 04, a whole read after a hole"),
+    ("still reads out of it", "row 05, a write ends an alias"),
+    ("is used here but was already consumed by", "row 06, rule 1"),
+    ("an element is not a place a take reaches", "row 08"),
+    ("has nothing to take", "row 09"),
+    ("may not be passed to a `consume` parameter via", "row 12"),
+    ("may not be returned from a closure", "row 28"),
+];
+
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {
     let mut c = Command::new(env!("CARGO_BIN_EXE_vyrn"));
     c.arg("check").arg(path);
@@ -230,7 +253,7 @@ fn no_program_a_test_writes_is_accepted_without_the_kernel_and_refused_with_it()
             }
             programs += 1;
             let (with, msg) = check(&path, false);
-            if !with {
+            if !with && !LEFT_THE_CHECKER.iter().any(|(n, _)| msg.contains(n)) {
                 refused.push(format!("{stem} literal #{i}:\n{msg}\n--- source ---\n{s}"));
             }
         }

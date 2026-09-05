@@ -80,45 +80,53 @@ fn check_shim_matches_first_rendered() {
     );
 }
 
-/// A move-check error (use-after-consume) is reported with the right stage and
-/// accumulates with a type error in another function.
+/// A move-check error (rule 2 at a `consume` parameter) is reported with the
+/// right stage and accumulates with a type error in another function.
+///
+/// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
+/// row 06). The subject is the accumulation, so it asks a rule that stays.
 #[test]
 fn movecheck_accumulates_with_check() {
-    let src = "type T = { id: Int64 };\n\
-               fn take(t: consume T) -> Int64 { return t.id; }\n\
+    let src = "type T = { s: String };\n\
+               fn take(t: consume T) -> Int64 { return t.s.byteLength; }\n\
                fn bad() -> Int64 { return true; }\n\
-               fn main() -> Int64 { let x = T { id: 1 }; let a = take(x); return take(x); }";
+               fn borrow(x: read T) -> Int64 { return take(x); }\n\
+               fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
-    // One check error (bad returns Bool) and one movecheck error (x used twice).
+    // One check error (bad returns Bool) and one movecheck error (a `read`
+    // parameter handed to a `consume` one).
     let check_errs = diags.iter().filter(|d| d.stage == "check").count();
     let move_errs = diags.iter().filter(|d| d.stage == "movecheck").count();
     assert_eq!(check_errs, 1, "{:?}", diags);
     assert_eq!(move_errs, 1, "{:?}", diags);
     assert!(
-        diags
-            .iter()
-            .any(|d| d.stage == "movecheck" && d.message.contains("already consumed")),
+        diags.iter().any(|d| d.stage == "movecheck"
+            && d.message
+                .contains("may not be passed to a `consume` parameter")),
         "{diags:?}"
     );
 }
 
-/// Inside-body accumulation for movecheck (RFC-0006): two *independent*
-/// use-after-consume bugs in ONE function body are both reported — `block`
-/// push-and-continues at each statement, so the `y` bug is still found after the
-/// `x` bug. Each is `movecheck`-stage; lines follow the source (the second
-/// `take(x)` on line 5, the second `take(y)` on line 6).
+/// Inside-body accumulation for movecheck (RFC-0006): two *independent* rule-2
+/// bugs in ONE function body are both reported — `block` push-and-continues at
+/// each statement, so the `y` bug is still found after the `x` bug. Each is
+/// `movecheck`-stage; lines follow the source.
+///
+/// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
+/// row 06). The subject is the accumulation, so it asks a rule that stays.
 #[test]
 fn movecheck_accumulates_within_function_body() {
-    let src = "type T = { id: Int64 };\n\
-               fn take(t: consume T) -> Int64 { return t.id; }\n\
-               fn main() -> Int64 {\n  let x = T { id: 1 }; let a = take(x); let b = take(x);\n  let y = T { id: 2 }; let c = take(y); let d = take(y);\n  return a + c;\n}";
+    let src = "type T = { s: String };\n\
+               fn take(t: consume T) -> Int64 { return t.s.byteLength; }\n\
+               fn borrow(x: read T, y: read T) -> Int64 {\n  let a = take(x);\n  let b = take(y);\n  return a + b;\n}\n\
+               fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
     let move_errs: Vec<_> = diags.iter().filter(|d| d.stage == "movecheck").collect();
     assert_eq!(move_errs.len(), 2, "{:?}", diags);
     assert!(
-        move_errs
-            .iter()
-            .all(|d| d.message.contains("already consumed")),
+        move_errs.iter().all(|d| d
+            .message
+            .contains("may not be passed to a `consume` parameter")),
         "{:?}",
         move_errs
     );
