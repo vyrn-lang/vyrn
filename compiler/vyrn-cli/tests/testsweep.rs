@@ -192,6 +192,8 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     ("has nothing to take", "row 09"),
     ("may not be passed to a `consume` parameter via", "row 12"),
     ("may not be returned from a closure", "row 28"),
+    ("is dropped here but was already consumed by", "row 20"),
+    ("may not be dropped — it is", "row 21"),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {

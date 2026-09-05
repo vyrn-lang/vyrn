@@ -122,6 +122,39 @@ pub struct NameInfo {
     /// refusals (RFC-0125 §3 M3, the corpus slice). `None` for every name a
     /// program does spell, whose `source` is already the reader's.
     pub path: Option<String>,
+    /// The temporary a `for x in consume xs` loop binds its container to.
+    ///
+    /// The core lowers that loop's take to `let @tN = xs`, which is the shape
+    /// a move into any other binding has, so a refusal about `xs` named "a
+    /// value" where the checker names the loop the reader wrote (RFC-0125 §3
+    /// M3, row 07). The form is a fact about the statement and the core keeps
+    /// no statement kinds, so it is a fact about the name the statement binds.
+    pub for_consume: bool,
+    /// For a name a RECORD literal binds: where each part of the literal goes,
+    /// in the checker's words — "the field `R.s`", one per field in order.
+    ///
+    /// A literal takes its parts, and the checker names the field each part
+    /// went into (`movecheck`'s `Expr::StructLit` arm). `Rhs::Make` is a list
+    /// of values with no names on it, so the kernel could only say "a literal"
+    /// (RFC-0125 §3 M3, row 07). Empty for an array, a map and a variant,
+    /// whose parts the checker does not name either.
+    pub fields: Vec<String>,
+    /// For the variable of a `for` over a container the loop does NOT own: the
+    /// container's root, which the way out names (RFC-0125 §3 M3, row 19).
+    ///
+    /// It is not a [`NameInfo::borrow_kind`], and the difference is the whole
+    /// point. A kind refuses every take of the name; this one only says what
+    /// the name IS when a take is refused for a reason the alias table already
+    /// found. Making it a kind refused `std/vyx.vyrn`'s `for s in kids` and
+    /// twenty-two programs of the corpus with it.
+    pub loop_var: Option<String>,
+    /// Whether the type is LINEAR — a `Stream`, a `Task`, a type that declares
+    /// `impl MustUse` (RFC-0075). Such a value is disposed, not stored, and the
+    /// builtin that disposes it (`close`, `@join`, `boxStream`) is the one
+    /// builtin `movecheck::sinks` answers `false` for: the must-use walk owns
+    /// it, and it words a use after it as a `consume` parameter's, not as a
+    /// move into a sink. RFC-0125 §3 M3, row 07.
+    pub linear: bool,
 }
 
 /// The path a reader wrote for a place read, spelled as the checker quotes it
@@ -157,6 +190,11 @@ pub enum BorrowKind {
     /// A name of the enclosing frame that a lambda frame reads (RFC-0037).
     /// The closure observes it; the frame that made it still owns it.
     Capture,
+    /// The variable of a `for` over a container the loop does not own: the
+    /// container still owns the element, and the loop only names it. `of` is
+    /// the container's ROOT, which is what the way out names
+    /// (`movecheck::Borrow::Element`). RFC-0125 §3 M3, row 19.
+    LoopVar { of: String },
 }
 
 impl BorrowKind {
@@ -170,6 +208,7 @@ impl BorrowKind {
                 format!("a second name for the `{cap}` parameter `{of}`")
             }
             BorrowKind::Capture => "a captured binding".to_string(),
+            BorrowKind::LoopVar { .. } => "a loop variable".to_string(),
         }
     }
 
@@ -188,6 +227,14 @@ impl BorrowKind {
                 format!("`{path}.copy()` if both sides need a value"),
             ],
             BorrowKind::Capture => Vec::new(),
+            // A loop variable has a second way out, and it comes first: let the
+            // loop take the elements. It only works when the WHOLE element is
+            // handed on, which is the only shape this reaches — a field of one
+            // is read into a name of its own.
+            BorrowKind::LoopVar { of } => vec![
+                format!("`for {path} in consume {of}` if the loop should take the elements"),
+                format!("`{path}.copy()` if both sides need a value"),
+            ],
         }
     }
 }
@@ -1049,6 +1096,7 @@ impl<'a> Builder<'a> {
 
     fn name(&mut self, source: &str, ty: Type, releases: bool, line: usize) -> Name {
         let heap = self.proto.owns_heap(&ty);
+        let linear = self.proto.linear_kind(&ty).is_some();
         self.body.names.push(NameInfo {
             source: source.to_string(),
             ty,
@@ -1065,6 +1113,10 @@ impl<'a> Builder<'a> {
             receiver_malloc: false,
             must_use_param: false,
             path: None,
+            for_consume: false,
+            fields: Vec::new(),
+            loop_var: None,
+            linear,
         });
         (self.body.names.len() - 1) as Name
     }
@@ -1351,6 +1403,17 @@ impl<'a> Builder<'a> {
                         ));
                 let n = self.name(name, ty, owned, *line);
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
+                // Where each part of a record literal goes, for a refusal
+                // about a part (RFC-0125 §3 M3, row 07).
+                if let Expr::StructLit {
+                    name: t, fields, ..
+                } = value
+                {
+                    self.body.names[n as usize].fields = fields
+                        .iter()
+                        .map(|(f, _)| format!("the field `{t}.{f}`"))
+                        .collect();
+                }
                 // `let t = s` on a `read` parameter: `t` is a second name for
                 // it, and the checker says so in the refusal it gives at `t`.
                 if let Rhs::Val(Val::Name(m)) = &rhs {
@@ -1626,6 +1689,9 @@ impl<'a> Builder<'a> {
                         let n = self.lookup(name).unwrap();
                         if *consuming {
                             let t = self.temp(ity.clone(), *line);
+                            // The loop is what took it, and the refusal says so
+                            // (RFC-0125 §3 M3, row 07).
+                            self.body.names[t as usize].for_consume = true;
                             out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                             self.keyed(t, sid);
                             t
@@ -1693,6 +1759,17 @@ impl<'a> Builder<'a> {
                 });
                 let owned = handed_over && self.owns(&ety);
                 let x = self.name(var, ety, owned, *line);
+                // What the variable IS, for a refusal about it: the container
+                // outlives the loop, so the loop only names the element. The
+                // kernel read that off the alias table and said the element was
+                // read out of a place; the checker says what the reader wrote
+                // (RFC-0125 §3 M3, row 19).
+                if !*consuming && self.body.names[x as usize].borrow {
+                    let of = vyrn_frontend::movecheck::place_path(iter)
+                        .map(|(r, _)| r)
+                        .unwrap_or_default();
+                    self.body.names[x as usize].loop_var = Some(of);
+                }
                 // The variable has no `let` node; the plan keys it by its
                 // spelling's buffer, which is one address per loop.
                 self.keyed(x, vyrn_frontend::own::for_var_key(var));
@@ -3605,6 +3682,34 @@ pub fn refuses() -> bool {
 /// collected here, and only refusals fail a command.
 pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
     REFUSALS.with(|v| std::mem::take(&mut *v.borrow_mut()))
+}
+
+/// The same refusals as `movecheck`-stage diagnostics, deduplicated, for the
+/// one list a file's refusals come out in
+/// (`vyrn_frontend::movecheck::refusals`, RFC-0125 §3 M3, the accumulation
+/// slice). Installed into `own::analyze`'s slot by [`crate::install`].
+///
+/// A refusal reaches the same rule through more than one instance of the same
+/// generic body, and a reader is owed one sentence per program mistake, so the
+/// file, the line and the message are the identity. `file` is `None` for the
+/// root module, which is what tells `vyrn fix` an edit is its to make. Ordering
+/// is the caller's: it orders the two passes' lists together.
+pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+    if !refuses() {
+        let _ = take_refusals();
+        return Vec::new();
+    }
+    let mut seen = std::collections::HashSet::new();
+    take_refusals()
+        .into_iter()
+        .filter(|r| seen.insert((r.file.clone(), r.line, r.message.clone())))
+        .map(|r| {
+            let mut d =
+                vyrn_frontend::diagnostics::Diagnostic::error(r.line, 0, "movecheck", r.message);
+            d.file = r.file;
+            d
+        })
+        .collect()
 }
 
 /// RFC-0125 M3, first slice: the releases the plan did not place, placed.

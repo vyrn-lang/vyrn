@@ -12,6 +12,11 @@ publish = false
 #   cargo build --manifest-path compiler/vyrn-lsp/Cargo.toml
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
+# RFC-0125 §3 M3, the accumulation slice: the kernel. Seven ownership rules are
+# stated by it and by nothing else, so a server that cannot call it accepts a
+# program the build refuses. It is the crate directly above `vyrn-frontend` and
+# depends on nothing else, so this adds no external dependency and no toolchain.
+vyrn-lower = { path = "../vyrn-lower" }
 # RFC-0076 M4: the wasm generation engine. ON by default here — the LSP is the
 # long-lived process the engine pays off in — but still a feature, so a build
 # without a wasm toolchain can drop it entirely.

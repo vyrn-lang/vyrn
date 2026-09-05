@@ -1612,6 +1612,17 @@ thread_local! {
 
 impl<'a> Memo<'a> {
     /// Hold one analysis of `program` until the guard is dropped.
+    ///
+    /// The load makes an analysis of its own — the ownership stage judges every
+    /// program it checks (RFC-0125 §3 M3, the accumulation slice) — and this
+    /// guard does NOT adopt it. It cannot: a projection is inlined into its
+    /// caller's block with a per-inline tag (`project.rs`), so the analysis the
+    /// load made names bindings `@p26.h` and the lowering a tool runs next
+    /// names them `@p31.h`. A plan whose rows are keyed by those names then
+    /// places nothing, and `examples/genref.vyrn` leaked a block that the
+    /// residue ratchet had recorded clean. Adoption is worth about a third of
+    /// `vyrn check site/export.vyrn` and it needs the inline to be memoized
+    /// across the load and the command, which the project memo is not.
     pub fn open(program: &'a Program) -> Memo<'a> {
         MEMO_FOR.with(|p| p.set(program as *const Program as usize));
         MEMO.with(|m| *m.borrow_mut() = None);
@@ -2335,6 +2346,31 @@ pub fn install_arm_rows(f: ArmRows) {
 /// the core states no answer.
 pub fn core_arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
     ARM_ROWS.get().and_then(|f| f(key, arm))
+}
+
+/// The hard refusals the kernel made about the program the placer just judged,
+/// drained, as diagnostics — RFC-0125 §3 M3, the accumulation slice.
+///
+/// The third slot of the same shape as [`Placer`] and [`ArmRows`], and for the
+/// same reason: the kernel lives in `vyrn-lower`, this crate sits below it, and
+/// a refusal has to reach the one list a file's refusals come out in
+/// ([`crate::movecheck::refusals`]). Draining is the point — the loader runs a
+/// generator by loading a whole program of its own, and each such load takes
+/// its own refusals with it, so what is left is this program's.
+pub type Refusals = fn() -> Vec<crate::diagnostics::Diagnostic>;
+
+static REFUSALS: std::sync::OnceLock<Refusals> = std::sync::OnceLock::new();
+
+/// Install the kernel's refusal drain. The first installation wins.
+pub fn install_refusals(f: Refusals) {
+    let _ = REFUSALS.set(f);
+}
+
+/// What the kernel refuses about the program just analysed. Empty where
+/// nothing is installed — a host that never linked the lowering, or
+/// `VYRN_NO_KERNEL=1`, which the drain itself answers for.
+pub fn kernel_refusals() -> Vec<crate::diagnostics::Diagnostic> {
+    REFUSALS.get().map(|f| f()).unwrap_or_default()
 }
 
 /// RFC-0114 untake: the bindings whose value was taken and then provably

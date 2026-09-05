@@ -44,6 +44,11 @@ pub fn install() {
     // answer off the core through this slot, because `vyrn-frontend` sits
     // below this crate and cannot call into it.
     vyrn_frontend::own::install_arm_rows(core::arm_rows);
+    // RFC-0125 §3 M3, the accumulation slice: the kernel's own refusals into
+    // the one list a file's refusals come out in, so a rule that has left
+    // `movecheck.rs` is stated wherever that list is read — `vyrn check`, the
+    // editor, `vyrn fix`.
+    vyrn_frontend::own::install_refusals(core::refusal_diagnostics);
     // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);
@@ -412,10 +417,23 @@ pub fn lower_with<'a>(
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });
+    // The lint re-derives the types with a fresh check, and a COMPTIME program
+    // is not the program that check admitted: a generator is re-loaded as its
+    // own root and keeps helpers that use `lex`, `render` and `Token`, which an
+    // ordinary check refuses as "only available during generation" and records
+    // as `<type error>`. Whether the lint sees one at all depends on which
+    // functions the instantiation reaches — the same generator reaches 448
+    // through `vyrn check` and 458 through the editor, which is what made this
+    // assertion fire in one host and not the other. It stays armed for every
+    // program a tool holds (RFC-0125 §3 M3, the accumulation slice).
     debug_assert!(
-        lint(&lowered).is_empty(),
-        "the lowered form failed its own lint:\n  {}",
-        lint(&lowered).join("\n  ")
+        vyrn_frontend::movecheck::in_comptime() || lint(&lowered).is_empty(),
+        "the lowered form failed its own lint:
+  {}",
+        lint(&lowered).join(
+            "
+  "
+        )
     );
     lowered
 }

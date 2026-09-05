@@ -423,6 +423,14 @@ fn analyze_inner(
             _ => Some(program.clone()),
         }
     };
+    // RFC-0125 §3 M3, the accumulation slice: the ownership memo the CLI opens
+    // around a command, opened around a keystroke. THREE readers want the
+    // analysis of this one program — the kernel's refusals, the floor's effect
+    // judgment and `memory_notes` — and each unmemoized call lowers the whole
+    // program and builds a core body per instance. It must outlive all of them,
+    // which is why it is here and not inside the block that asks first: `Memo`
+    // clears the slot when it drops.
+    let _own = checked.as_ref().map(crate::own::Memo::open);
     // `check_accum_with_let_types` returns the diagnostics AND a table of the
     // inferred/declared type of each clean `let` and `for`-var — used below to
     // give unannotated lets a real type on hover (`let x: Int`).
@@ -440,7 +448,16 @@ fn analyze_inner(
                 checker::check_accum_reusing(prog, &hashes)
             };
             let mut checked_diags = check_diags;
-            checked_diags.extend(movecheck::check_accum(prog));
+            // RFC-0125 §3 M3, the accumulation slice: the editor asks the same
+            // driver `vyrn check` asks, so a rule that has left `movecheck.rs`
+            // is shown here too. The kernel is asked only of a program the core
+            // can lower, which is one the type check accepted — the gate
+            // `check_and_synthesize` states for the command line.
+            if checked_diags.is_empty() {
+                checked_diags.extend(movecheck::refusals(prog));
+            } else {
+                checked_diags.extend(movecheck::check_accum(prog));
+            }
             // RFC-0033: a diagnostic at an origin-governed line in a synthesized
             // module is relocated to its input file (`.vyx`, …) and set aside so
             // the LSP can publish it against that file's URI; everything else
@@ -606,14 +623,19 @@ fn analyze_inner(
     // not compile is an answer about a body nobody will run. This is also what
     // keeps it off the hot path — an editor spends most of a keystroke burst on
     // a document that does not parse.
+    //
+    // `remapped` counts, and it did not. A type error at an origin-governed
+    // line is published against its `.vyx` and leaves `diags` EMPTY (RFC-0033),
+    // so this guard read a program the checker refused as a clean one and asked
+    // the ownership stage about it. That was harmless while nothing was
+    // installed under `own::analyze`; with the placer in the editor (RFC-0125
+    // §3 M3, the accumulation slice) it lowers a body whose nodes are typed
+    // `<type error>`, and the lowering's own lint refuses that.
+    let errored =
+        |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
+    let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
     let memory = match &checked {
-        Some(prog)
-            if !diags
-                .iter()
-                .any(|d| d.severity == crate::diagnostics::Severity::Error) =>
-        {
-            memory_notes(prog)
-        }
+        Some(prog) if clean => memory_notes(prog),
         _ => Vec::new(),
     };
 

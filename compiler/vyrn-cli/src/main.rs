@@ -547,9 +547,6 @@ fn real_main() -> ExitCode {
         "check" => profile_now(match load_program(path, &source) {
             Ok(program) => {
                 let _memo = shared_desugars(&program);
-                if let Err(code) = kernel_refuses(&program, path) {
-                    return code;
-                }
                 match vyrn_codegen::check_instantiations(&program) {
                     Ok(()) => {
                         println!("ok");
@@ -595,11 +592,6 @@ fn real_main() -> ExitCode {
             // And what `check` refuses, `run` refuses: one program has one
             // answer, whichever engine runs it (RFC-0125 §3 M3, the default
             // slice). `run_wasm` asks again on its own route.
-            if engine != Engine::Wasm {
-                if let Err(code) = kernel_refuses(&program, path) {
-                    return code;
-                }
-            }
             if engine == Engine::Wasm {
                 return run_wasm(path, &program, &prog_args, want_profile.then_some(load));
             }
@@ -2541,9 +2533,6 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
     // choice, so there is no engine flag — this IS the engine. Standard output
     // passes through; standard error is captured because the wording below
     // rewrites it.
-    if let Err(code) = kernel_refuses(&program, &key) {
-        return code;
-    }
     let bytes = match vyrn_codegen::direct::compile(&program) {
         Ok(b) => b,
         Err(e) => {
@@ -3236,49 +3225,19 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
 }
 
 /// Load `text` as `root_key` and return every diagnostic, printing nothing.
+///
+/// The load states every ownership refusal a program earns, the checker's and
+/// the kernel's, as one list (`vyrn_frontend::movecheck::refusals`, RFC-0125 §3
+/// M3, the accumulation slice), so a rule that has left `movecheck.rs` reaches
+/// `vyrn fix` with its menu — including in a file that breaks another rule as
+/// well, which is what the second list used to be blind to.
 fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
     let opts = load_options(root_key);
     let resolver = make_resolver(root_key);
     match vyrn_frontend::load_warned(text, root_key, &opts, &resolver).0 {
-        // A program the checker accepts may still be refused by the kernel,
-        // and every rule the deletion track moves is refused there and
-        // nowhere else (RFC-0125 §3 M3). Without this the tool answered `0
-        // fix(es) applied` for a program it used to name — and the kernel
-        // prints the same `fix:` menu, so the ways out are readable here too.
-        Ok(program) => kernel_diagnostics(&program),
-        // A program the CHECKER refused is not asked of the kernel here. It
-        // should be — a rule that left is invisible in a file that also has a
-        // must-use error — and the reason it is not yet is that the kernel
-        // says things this pass deliberately does not (`r31`: a second
-        // `close(s)` is a use after a take AND a must-use disposed twice), so
-        // merging the two lists adds diagnostics rather than restoring them
-        // (RFC-0125 §3 M3, the menu slice).
+        Ok(_) => Vec::new(),
         Err(d) => d,
     }
-}
-
-/// The kernel's refusals for `program`, as `movecheck`-stage diagnostics.
-///
-/// The same reading [`kernel_refuses`] prints, in the shape every other
-/// consumer of a diagnostic already takes. `file` is `None` for the root
-/// module, which is what tells `vyrn fix` an edit is its to make.
-fn kernel_diagnostics(
-    program: &vyrn_frontend::ast::Program,
-) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
-    if !vyrn_lower::kernel_refuses() {
-        return Vec::new();
-    }
-    let _ = vyrn_frontend::own::analyze(program);
-    let refusals = kernel_refusals();
-    refusals
-        .into_iter()
-        .map(|r| {
-            let mut d =
-                vyrn_frontend::diagnostics::Diagnostic::error(r.line, 0, "movecheck", r.message);
-            d.file = r.file;
-            d
-        })
-        .collect()
 }
 
 /// The path a `.copy()` fix names, out of a diagnostic's menu.
@@ -3359,67 +3318,6 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
     }
 }
 
-/// Every refusal this program's kernel made, deduplicated and **in the order
-/// the source states them** (RFC-0125 §3 M3, the corpus slice).
-///
-/// The order a file's refusals come out in is a rule, and it is stated the same
-/// way in the other pass (`vyrn_frontend::movecheck::check_accum`): by line.
-/// The checker walked top-level functions before `impl` methods and this pass
-/// walks bodies in the lowering's order, so `examples/mustuse_abandoned.vyrn`
-/// gave the same two sentences swapped, and the whole standard error moved
-/// even where every sentence was identical. Neither walk order is a rule
-/// anybody wrote down; the source's is, and it is the only one a reader can
-/// predict. Files keep the order they were first named in, and two refusals on
-/// one line keep the walk's order, which is why the sort is stable.
-fn kernel_refusals() -> Vec<vyrn_lower::kernel::Refusal> {
-    let mut refusals = vyrn_lower::take_refusals();
-    let mut seen = std::collections::HashSet::new();
-    refusals.retain(|r| seen.insert((r.file.clone(), r.line, r.message.clone())));
-    let mut files: Vec<Option<String>> = Vec::new();
-    for r in &refusals {
-        if !files.contains(&r.file) {
-            files.push(r.file.clone());
-        }
-    }
-    refusals.sort_by_key(|r| (files.iter().position(|f| *f == r.file).unwrap_or(0), r.line));
-    refusals
-}
-
-/// A hard refusal by the kernel — a double free, a use after release, a join
-/// whose edges disagree, a rule the core states; not a missing release, which
-/// the placer repairs, and not a gap, which is a construct the core cannot
-/// lower and no opinion about the program — fails the command with the
-/// kernel's message as a diagnostic, printed as the checker's are:
-/// `file:line:col: message` (RFC-0125 §3 M3).
-///
-/// It fails by default (RFC-0125 §3 M3, the default slice), which is what
-/// lets a rule leave `movecheck.rs`: while the refusal was behind a flag, a
-/// deleted rule shipped a program that should be refused. `VYRN_NO_KERNEL=1`
-/// turns it off for a bisect.
-///
-/// The refusals are this program's because [`RefusalScope`] cleared the
-/// thread-local when the program was linked — the load runs `gen fn` bodies as
-/// whole programs of their own, and each fills the same one. The analysis is
-/// asked for here rather than re-run: under the ownership memo it is the one
-/// this build already made, and where no memo is armed it is a second run that
-/// says the same thing twice, which the dedup below drops.
-fn kernel_refuses(program: &vyrn_frontend::ast::Program, path: &str) -> Result<(), ExitCode> {
-    if !vyrn_lower::kernel_refuses() {
-        return Ok(());
-    }
-    let _ = vyrn_frontend::own::analyze(program);
-    let refusals = kernel_refusals();
-    if refusals.is_empty() {
-        return Ok(());
-    }
-    let root = path.trim_start_matches(r"\\?\").replace('\\', "/");
-    for r in &refusals {
-        let file = r.file.as_deref().unwrap_or(&root);
-        eprintln!("{}:{}:0: {}", file, r.line, r.message);
-    }
-    Err(ExitCode::FAILURE)
-}
-
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
@@ -3471,32 +3369,11 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
 /// linked to the point it has been lowered and emitted.
 fn shared_desugars(
     program: &vyrn_frontend::ast::Program,
-) -> (
-    vyrn_frontend::project::Memo,
-    vyrn_frontend::own::Memo<'_>,
-    RefusalScope,
-) {
+) -> (vyrn_frontend::project::Memo, vyrn_frontend::own::Memo<'_>) {
     (
         vyrn_frontend::project::Memo::open(),
         vyrn_frontend::own::Memo::open(program),
-        RefusalScope::open(),
     )
-}
-
-/// Everything the kernel refuses from here on belongs to THIS program.
-///
-/// The loader runs generators by loading and judging whole programs of their
-/// own (RFC-0021), and each fills the same thread-local. Clearing here, once,
-/// at the point the command's program is linked, is what `kernel_refuses` used
-/// to do by re-analysing — which under the ownership memo (RFC-0125 §3 M3, the
-/// repetition slice) would re-analyse nothing and print nothing.
-struct RefusalScope;
-
-impl RefusalScope {
-    fn open() -> RefusalScope {
-        let _ = vyrn_lower::take_refusals();
-        RefusalScope
-    }
 }
 
 /// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
@@ -6414,9 +6291,6 @@ fn run_wasm(
     prog_args: &[String],
     profile: Option<std::time::Duration>,
 ) -> ExitCode {
-    if let Err(code) = kernel_refuses(program, path) {
-        return code;
-    }
     let clock = std::time::Instant::now();
     let bytes = match vyrn_codegen::direct::compile(program) {
         Ok(b) => b,
@@ -6696,9 +6570,6 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     let _memo = shared_desugars(&program);
-    if let Err(code) = kernel_refuses(&program, path) {
-        return code;
-    }
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)
     let stem = Path::new(path)
         .file_stem()
