@@ -1547,18 +1547,12 @@ fn mount_calls_block<'a>(b: &'a Block, out: &mut Vec<&'a [Expr]>) {
                 }
             }
             Stmt::If {
-                cond,
+                cond: scrutinee,
                 then_block,
                 else_block,
                 ..
-            } => {
-                mount_calls_expr(cond, out);
-                mount_calls_block(then_block, out);
-                if let Some(e) = else_block {
-                    mount_calls_block(e, out);
-                }
             }
-            Stmt::IfLet {
+            | Stmt::IfLet {
                 scrutinee,
                 then_block,
                 else_block,

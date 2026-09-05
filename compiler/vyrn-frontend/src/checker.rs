@@ -10498,22 +10498,18 @@ fn contains_spawn(b: &Block) -> bool {
                 expr_contains_spawn(index) || expr_contains_spawn(value)
             }
             Stmt::If {
-                cond,
+                cond: e,
                 then_block,
                 else_block,
                 ..
-            } => {
-                expr_contains_spawn(cond)
-                    || contains_spawn(then_block)
-                    || else_block.as_ref().is_some_and(contains_spawn)
             }
-            Stmt::IfLet {
-                scrutinee,
+            | Stmt::IfLet {
+                scrutinee: e,
                 then_block,
                 else_block,
                 ..
             } => {
-                expr_contains_spawn(scrutinee)
+                expr_contains_spawn(e)
                     || contains_spawn(then_block)
                     || else_block.as_ref().is_some_and(contains_spawn)
             }
@@ -11425,24 +11421,18 @@ fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
             }
         }
         Stmt::If {
-            cond,
+            cond: e,
             then_block,
             else_block,
             ..
-        } => {
-            calls_expr(cond, out);
-            calls_block(then_block, out);
-            if let Some(eb) = else_block {
-                calls_block(eb, out);
-            }
         }
-        Stmt::IfLet {
-            scrutinee,
+        | Stmt::IfLet {
+            scrutinee: e,
             then_block,
             else_block,
             ..
         } => {
-            calls_expr(scrutinee, out);
+            calls_expr(e, out);
             calls_block(then_block, out);
             if let Some(eb) = else_block {
                 calls_block(eb, out);

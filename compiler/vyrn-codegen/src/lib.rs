@@ -7215,15 +7215,15 @@ impl<'a> Gen<'a> {
         Ok((cur, result_ty))
     }
 
-    /// Lower a `match`, releasing the scrutinee where `own` says the match is its
-    /// last owner.
+    /// Lower a switch — a `match` or an `if let` — releasing the scrutinee where
+    /// `own` says the switch is its last owner.
     ///
-    /// The release is the `if let` release one construct over (`Stmt::IfLet`
-    /// above): the scrutinee goes into a slot and the slot onto a drop frame of
-    /// its own, so an arm that returns reclaims it through `emit_all_drops` and
-    /// the fall-through reclaims it here. A row exists only where nothing took
-    /// the scrutinee — an arm that hands its payload out marks the row, and then
-    /// the binding the payload flowed into is the one owner there is.
+    /// The scrutinee goes into a slot and the slot onto a drop frame of its own,
+    /// so an arm that returns reclaims it through `emit_all_drops` and the
+    /// fall-through reclaims it here. A row exists only where nothing took the
+    /// scrutinee — an arm that hands its payload out marks the row, and then the
+    /// binding the payload flowed into is the one owner there is. `if let` said
+    /// all of this a second time until RFC-0125 §3 M5's slice.
     fn gen_match(
         &mut self,
         key: usize,
