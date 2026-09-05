@@ -1176,7 +1176,9 @@ pub struct Block {
     pub stmts: Vec<Stmt>,
 }
 
-/// A statement. In v0, `if`/`while` are statements (not expressions).
+/// A statement. `while`, `for` and `region` are statements and nothing else;
+/// `if` is both (RFC-0030 gave the expression form its own node, [`Expr::IfExpr`])
+/// and `match` is one node the checker reads by position (RFC-0118).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `let [mut] name [: Type] = value;`
@@ -1353,7 +1355,9 @@ pub enum Expr {
         line: usize,
     },
     /// `match scrutinee { Some(x) => e, None => e }` — an expression yielding a
-    /// value (RFC-0005). Arms are single expressions in v0.1.
+    /// value (RFC-0005). An arm is a single expression here; in STATEMENT
+    /// position an arm may be a block instead (RFC-0118), which is what
+    /// [`ArmBody`] carries and what the checker's position flag decides.
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
@@ -1420,11 +1424,15 @@ pub enum Expr {
         args: Vec<Expr>,
         line: usize,
     },
-    /// A lambda literal (RFC-0023): `|x| expr` or `|x, y| { block }`. The
-    /// parameters are untyped in the literal — their types flow from the expected
-    /// `fn(..) -> R` type of the parameter position it is passed to. Legal ONLY as
-    /// a call argument in a function-typed parameter position (enforced by the
-    /// checker). Captures outer locals by read; monomorphized away in codegen.
+    /// A lambda literal: `x -> expr`, `(x, y) -> expr` or `x -> { block }`
+    /// (RFC-0110; the `|x| expr` spelling is retired and the parser reports it).
+    /// The parameters are untyped in the literal — their types flow from the
+    /// expected `fn(..) -> R` type of the position it appears in. Two positions
+    /// take one: a call argument in a `fn`-typed parameter position (RFC-0023),
+    /// which is monomorphized away in codegen, and anywhere a STORED `fn` value
+    /// is expected (RFC-0037), which is defunctionalized — a `let` with a
+    /// declared `fn` type takes one, and `std/stream.vyrn` writes three.
+    /// Captures outer locals by read.
     Lambda {
         params: Vec<String>,
         body: LambdaBody,
@@ -1484,7 +1492,9 @@ pub struct MatchArm {
     pub body: ArmBody,
 }
 
-/// A pattern in a `match` arm. v0.1 supports the `Option` and `Result` variants.
+/// A pattern in a `match` arm. One spellable form since RFC-0126 §8.10 folded
+/// `Some`/`None`/`Ok`/`Err` into [`Pattern::Variant`]; the other three are built
+/// by a desugar and cannot be written.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     /// A variant pattern: `Circle(r)`, `Rect(w, h)`, `Empty` — and, since
