@@ -4315,6 +4315,127 @@ renumber because the load runs one analysis more than it did. The whole-stderr
 snapshot over the 1,023 moved ONE line across the four commits, and it is the
 one this record names.
 
+**The memo slice (2026-09-05): a keystroke judges the bodies whose text moved.**
+The accumulation slice ended with a number and a place. The kernel adds 434 ms
+to a keystroke, and it spends them building and judging 882 core bodies. A
+keystroke moves ONE body. So the editor keeps each body's verdict and judges
+the bodies whose key changed.
+
+**One cache, one key.** `movecheck::Judgments` holds it, beside the driver that
+asks for the judgment. A body's key is the module it is declared in, that
+module's content hash, and the instance's spelling — under a fingerprint of
+every declaration in the program with the function bodies left out. That is the
+checker's own memo, one crate down: `CHECK_MEMO` keys a function's diagnostics
+by `(module key, module hash, name)` under a signature fingerprint, and drops
+the whole map when the fingerprint moves. Three conditions make it sound, and
+each is a thing the checker's memo does not need.
+
+1. **The fingerprint is the judgment's, not the checker's.** A body may refer
+   by NAME to a type or a signature, which is what `signature_fingerprint`
+   folds. A body's JUDGMENT reads two things beside those. Every parameter's
+   CAPABILITY is one: `read x` to `consume x` changes what every caller owes
+   and moves no type. A projection's whole BODY is the other: a projection is
+   inlined into its caller's block rather than judged as a body of its own, so
+   its text is its callers' text.
+2. **A served body is not built, so only an INERT body is recorded.** Serving
+   a body skips its placement as well as its judgment, and a body that owed a
+   release row would have that row silently dropped the next time round. So the
+   placer records a body only where it wrote no row for it — where `added` did
+   not grow and the body's owner is not `touched`, which is every table
+   `place_frames` writes. Measured on `site/app/chart.vyrn`, 954 of the 995
+   keyed bodies are inert.
+3. **The host arms it, and only a host that reads the refusals and lowers
+   nothing.** A served body contributes no frame to the core's FACTS, and the
+   two compiled backends and the interpreter's arm rows read those. `vyrn` does
+   not arm it. The editor does, and the arming is scoped twice more: to the
+   analysis `refusals` itself asks for, so a generator load's analysis and an
+   engine's are untouched, and to the thread that analyses.
+
+A `test` or a `bench` body is keyed with its LINE beside its synthetic name. A
+`test@<i>` index is global, so a test added to an earlier module renumbers every
+later one, and the name alone would name a different body of the same unchanged
+module.
+
+**What a keystroke costs.** One `didChange` to `publishDiagnostics`, median of
+three alternating runs of one test binary against two servers
+(`keystroke_cost_on_the_sites_own_modules`), with a third column from
+`VYRN_NO_PLACER=1`, which stands the kernel aside in the editor exactly as it
+does on the command line:
+
+| file | before the kernel | with the kernel | with the memo |
+|---|---|---|---|
+| site/app/chart.vyrn | 128 ms | 990 ms | 305 ms |
+| site/app/docs.vyrn | 323 ms | 1,045 ms | 476 ms |
+| site/app/guide.vyrn | 96 ms | 285 ms | 158 ms |
+| site/app/bench.vyrn | 27 ms | 97 ms | 57 ms |
+
+All three columns are one sitting on one machine, because the machine matters:
+the first column reproduces the accumulation slice's (136, 318, 127 and 24 ms)
+while the second reads about twice that record's. The kernel cost a keystroke
+7.7x on `chart.vyrn` and costs it 2.4x.
+
+**The target was the first column, and none of the four reaches it.**
+`bench.vyrn` stands 30 ms above the editor before the kernel, `guide.vyrn`
+62 ms, `docs.vyrn` 153 ms and `chart.vyrn` 178 ms. What is left is not the
+judgment of the program in the editor, and the paragraph after next says what
+it is.
+
+**The defect, and it was the whole measurement.** The first cut armed the memo
+beside `vyrn_lower::install()`, at the top of `main`. The server runs its whole
+session on ONE worker thread with a 64 MB stack, and the memo is a thread-local
+— like every other table a keystroke reuses, the parse cache and the checker's
+and the loader's module hashes. So the flag was set on a thread that analyses
+nothing, the memo was never armed, and the measurement read a tenth of what it
+now reads. A flag that arms a thread-local belongs on the thread that reads
+it.
+
+**What is left, and where.** One `chart.vyrn` keystroke measured in the same
+process, without a server: 431 ms, of which the placer is 218 ms. The ROOT
+program's share of that is small — 41 bodies judged and 954 served — and the
+rest is the two generator programs the load runs on the way to it. Those are
+not a memo away: a generator is EXECUTED, and the interpreter that runs it
+reads the plan and the core's facts the placer fills, which is exactly what
+condition 3 says a served body does not have. The load's own
+read-parse-resolve is 167 ms over those three loads. So the next slice that
+wants this cheaper should ask why a keystroke re-runs two generators, not what
+a judgment costs.
+
+Two other items went with the same slice, and each was larger than it looked.
+`build_outside` — the `test` and `bench` bodies, which the accumulation slice's
+table did not name — was 214 ms of the placer's 611 and is 29 ms. The facts
+rebuild was 112 ms and is 1.4 ms: an armed memo skips it outright, because a
+served body makes it a partial answer and nothing an editor runs reads it.
+
+**The pin.** `one_edit_re_judges_one_body` (`vyrn-cli`'s `kernel` suite) loads a
+program whose two imported modules hold one function each, three times. The
+second load edits nothing and is served every body it can key. The third edits
+`a`'s body — the same signature, the same line — and judges exactly ONE body
+more than the second did. That "one more" is the claim: it is `a`'s, and `b`'s
+is still served.
+
+**Gates.** In §1.4's order, one at a time, with `TMP` set outside the checkout:
+`cargo fmt --all --check` and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s
+manifests, clean; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`
+with no filter, 551 passed and 74 ignored — one more than the accumulation
+slice, and it is the pin above; the `kernel`, `coretables`, `typed` and
+`effects` suites with `--ignored` (1, 1, 1 and 2, at 125 s, 113 s, 235 s and
+256 s); `fixtures` with `--ignored`, 69 s; `vyrn-frontend`, 1,246; the workspace
+less `vyrn-cli` with `--skip _natively`, 1,422; `vyrn-lsp`'s own manifest, 100
+and 5 ignored, which is where `lsp_e2e` runs and where the editor is pinned
+against what `vyrn check` prints; `vyrn-genwasm`, 3; `memory` with
+`--test-threads=1`, 10; parity in release with `--ignored`, 41 of 41 in 318 s;
+the residue ratchet, 161 s; `VYRN_WASM_MANIFEST=check` on `wasmhash`, green, so
+no emitted byte moved; the cross-engine generator test with a fresh
+`VYRN_GEN_CACHE_DIR` and `--features wasm-gen`, 12 and then the ignored one;
+`testsweep` with `--ignored`, 118 s; `vyrn doc --std -o ../docs/api --verify`,
+41 files up to date; and the site — `vyrn run site/export.vyrn out` writes its
+82 routes and 14 assets, and `vyrn test` is green over `export.vyrn` (35
+blocks) and `site/app` (154).
+
+No blessed snapshot moved, and the structural census moves by one row: shared
+machinery 3,768 to 3,983, which is the cache and its fingerprint inside
+`movecheck.rs`.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
