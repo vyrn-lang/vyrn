@@ -2259,9 +2259,9 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 |---|---|---|
 | a rule the kernel now gives | 1,009 | 10 per cent |
 | a rule only the checker gives | 723 | 7 per cent |
-| placement rows for the engines | 2,362 | 23 per cent |
+| placement rows for the engines | 2,365 | 23 per cent |
 | a fix menu | 81 | 1 per cent |
-| shared machinery | 3,657 | 36 per cent |
+| shared machinery | 3,668 | 36 per cent |
 | tests | 2,187 | 22 per cent |
 | **the file** | **10,055** | |
 | placement rows for the engines | 2,373 | 24 per cent |
@@ -2269,6 +2269,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | shared machinery | 3,657 | 37 per cent |
 | tests | 2,172 | 22 per cent |
 | **the file** | **10,015** | |
+| **the file** | **10,069** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
@@ -7609,12 +7610,43 @@ its record.
   `Err` become `Pattern::Variant`, and the SCRUTINEE says what the name means, as
   it always did for a declared enum. Four constructors, 89 mentions to 0, 19 code
   lines, zero bytes. RFC-0126 §8.10.
-- **M4 and M5 — not taken (2026-09-05).** They are one step, and it is not zero
-  bytes. `resolve` answering `Enum` turns 97 of `vyrn-frontend`'s 1,186 unit
-  tests red on its own line, and `own::release_kind` records a drop with the
-  RESOLVED type — so a sum's release routes to the enum's, and the two emit
-  different labels and a different arm order. One EMISSION per engine has to come
-  first. RFC-0126 §8.11 measures it and writes the order that works.
+- **M4a — one emission per engine (2026-09-05).** §8.9 made the encoding one;
+  this makes the WALK one. `sum_variants_of` answers any sum's variants in tag
+  order, and a release, a copy and a `match` ask it instead of matching the
+  spelling. Four functions and four arms, 224 code lines out of the two crates;
+  25 of 173 wasm hashes moved, and the manifest is regenerated in that commit and
+  no other; parity 41 of 41. It also closed the drift §8.11 recorded: the sum
+  payload's width rule and boxing rule are one statement each, in
+  `vyrn_frontend::types`, where `own` used to keep a hand-written word list.
+  RFC-0126 §8.12.
+- **M4b — `resolve` answers `Enum` (2026-09-05).** The two built-in sums resolve
+  to `| None | Some(T)` and `| Err(E) | Ok(T)`, and `option_payload` /
+  `result_payloads` are the one reading. 101 red frontend tests to 0; four
+  consumers were a MERGE rather than a reader — `check_match` is
+  `check_match_enum`, the direct backend's `Sum` is a variant list, `?` stopped
+  mistaking every sum for a `Fallible`, and `normalize_fn_sig` has to descend
+  into a sum's payloads. Two of §8.6's three M5 guards arrive here, because a
+  resolved sum reaches a user: `codec::wire` keeps `null` and `Ok`-first, and
+  `Display` keeps printing `Option<T>`. Zero bytes: the manifest is unchanged on
+  all 173, parity 41 of 41, residue green. One consumer was missed and no
+  workspace gate could say so: `vyrn-genwasm` is EXCLUDED from the workspace, and
+  both ends of its reflection channel matched a resolved sum's spelling, so 12 of
+  25 generator examples silently fell back to the interpreter. Both read
+  `option_payload` now. RFC-0126 §8.13.
+- **M5 — not taken (2026-09-05), and it is not the guard §8.6 named.** Deleting
+  the two constructors is compiler-checked, so the risk is not the 270 mentions:
+  115 are constructions a rewrite hides behind `Type::option` / `Type::result`,
+  and most of the 100 remaining errors are a dead arm the `Type::Enum` arm beside
+  it already covers. What blocks it is that `type Maybe = Option<Int64>` and
+  `type Maybe = | None | Some(Int64)` become one `TypeDecl.base`, so the TWENTY
+  places that read a declaration's base as an enum would register `None`, `Some`,
+  `Ok` and `Err` as that alias's variants — and the corpus holds seven such
+  aliases across four projects, two of them sharing a name. §8.6's third guard is
+  one guard in the parser; the measurement says the step needs the same rule
+  asked at twenty readers of a declaration. What argues FOR taking it is §8.13's
+  late defect: with the constructors gone, an arm that can no longer be taken
+  does not compile, including in the crate the workspace cannot type-check.
+  RFC-0126 §8.14.
 
 ### What each milestone is worth on its own
 

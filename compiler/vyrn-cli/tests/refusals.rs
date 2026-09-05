@@ -1442,9 +1442,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 723),
-        ("placement rows for the engines", 2375),
+        ("placement rows for the engines", 2378),
         ("a fix menu", 73),
-        ("shared machinery", 3671),
+        ("shared machinery", 3682),
         ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");

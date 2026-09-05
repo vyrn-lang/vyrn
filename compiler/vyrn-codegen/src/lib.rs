@@ -3066,18 +3066,40 @@ impl<'a> Gen<'a> {
         )
     }
 
+    /// The variants of the sum `ty`, in TAG order — RFC-0126 §8.1's list, under
+    /// this emitter's substitution.
+    ///
+    /// The two built-in sums spell the declaration they would have had, so one
+    /// release, one copy and one match serve every sum and a built-in sum emits
+    /// what a declared enum of the same shape emits (§8.11's M4a). The order is
+    /// the tag order and it is fixed by what exists: `None` and `Err` are tag 0,
+    /// because `??`'s parser desugar names them that way without a type.
+    fn sum_vs(&self, ty: &Type) -> Option<Vec<EnumVariant>> {
+        sum_variants_of(
+            &vyrn_frontend::types::substitute(ty, self.subst),
+            self.types,
+        )
+    }
+
+    /// The two payloads of a TWO-VARIANT sum — `(variant 0's, variant 1's)`, each
+    /// `None` when that variant is nullary — or `None` for anything else.
+    ///
+    /// What the built-in sums' own arms used to ask, in the one spelling that
+    /// still works after RFC-0126 §8.11's M4b, where `resolve` answers `Enum` for
+    /// them. A declared two-variant enum answers too, which is the collapse.
+    fn two_variant_sum(&self, ty: &Type) -> Option<(Option<Type>, Option<Type>)> {
+        let vs = self.sum_vs(ty)?;
+        match vs.as_slice() {
+            [zero, one] => Some((zero.payload.first().cloned(), one.payload.first().cloned())),
+            _ => None,
+        }
+    }
+
     /// The payload slot count of the sum `ty` — the shape's members less the tag.
     fn sum_slots(&self, ty: &Type) -> usize {
-        match self.resolve(ty) {
-            Type::Option(t) => self.payload_words(&t),
-            Type::Result(a, b) => self.payload_words(&a).max(self.payload_words(&b)),
-            Type::Enum(vs) => vs
-                .iter()
-                .map(|v| self.variant_slots(&v.payload))
-                .max()
-                .unwrap_or(0),
-            _ => 0,
-        }
+        self.sum_vs(ty)
+            .map(|vs| self.enum_slots(&vs))
+            .unwrap_or_default()
     }
 
     /// The slots one variant's payloads occupy, laid out consecutively.
@@ -3134,9 +3156,13 @@ impl<'a> Gen<'a> {
         // A payload the instance has not fixed has no shape at all — taking the
         // position's spelling then would declare a binder at `void`.
         let solved = |g: &Self, t: &Type| !matches!(g.resolve(t), Type::Param(_));
-        let take = match (self.resolve(&want), &fallback) {
-            (Type::Option(i), Type::Option(_)) => solved(self, &i),
-            (Type::Result(a, b), Type::Result(..)) => solved(self, &a) && solved(self, &b),
+        let r = self.resolve(&want);
+        let take = match &fallback {
+            Type::Option(_) => {
+                vyrn_frontend::types::option_payload(&r).is_some_and(|i| solved(self, i))
+            }
+            Type::Result(..) => vyrn_frontend::types::result_payloads(&r)
+                .is_some_and(|(a, b)| solved(self, a) && solved(self, b)),
             _ => false,
         };
         if take {
@@ -4265,9 +4291,12 @@ impl<'a> Gen<'a> {
                 }
                 Ok(cur)
             }
-            Type::Option(inner) => self.copy_sum(ty, v, &[("1", *inner)]),
-            Type::Result(ok, err) => self.copy_sum(ty, v, &[("1", *ok), ("0", *err)]),
-            Type::Enum(vs) => self.copy_enum(v, &vs),
+            // Every sum, one walk: §8.1's variant list is what a built-in sum
+            // and a declared enum both answer (RFC-0126 §8.11, M4a).
+            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+                let vs = self.sum_vs(ty).unwrap_or_default();
+                self.copy_sum(v, &vs)
+            }
             // A handle names something; copying it names the same thing. A
             // `Task<T>`/`lazy T` is a promise, which is the same shape.
             Type::Task(_) | Type::Lazy(_) => Ok(v.to_string()),
@@ -4472,9 +4501,11 @@ impl<'a> Gen<'a> {
                 }
                 Ok(())
             }
-            Type::Option(inner) => self.release_sum(ty, v, &[("1", *inner)]),
-            Type::Result(ok, err) => self.release_sum(ty, v, &[("1", *ok), ("0", *err)]),
-            Type::Enum(vs) => self.release_enum(v, &vs, true),
+            // Every sum, one walk — the mirror of `deep_copy`'s own arm.
+            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+                let vs = self.sum_vs(ty).unwrap_or_default();
+                self.release_sum(v, &vs, true)
+            }
             // A stored function value is `{ i64 tag, i64 captures }` (RFC-0037).
             // The captures are one heap block, read by value at the construction
             // site, and 0 when there are none — which `free` refuses. Census §16.
@@ -4513,41 +4544,6 @@ impl<'a> Gen<'a> {
         self.payload_words(ty) == 1 && self.llt(ty) != "i64"
     }
 
-    /// The release of an `Option`/`Result`: one payload, selected by the tag.
-    fn release_sum(&mut self, sty: &Type, v: &str, arms: &[(&str, Type)]) -> Result<(), String> {
-        let tag = self.sum_tag(sty, v);
-        let end_l = self.fresh_label("rel.sum.end");
-        for (want, pty) in arms {
-            // Round twenty-nine: a payload that owns no heap can still TRAVEL
-            // in a box, and the box is the sum's to free.
-            if !self.owns_heap(pty) && !self.payload_boxed(pty) {
-                continue;
-            }
-            let hit_l = self.fresh_label("rel.sum.hit");
-            let miss_l = self.fresh_label("rel.sum.miss");
-            let is = self.fresh_tmp();
-            self.emit(format!("{is} = icmp eq i64 {tag}, {want}"));
-            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
-            self.emit_label(&hit_l);
-            let n = self.payload_words(pty);
-            let words = self.sum_words(sty, v, 1, n);
-            let pv = self.decode_payload(&words, pty);
-            self.deep_release(&pv, pty)?;
-            // A payload wider than its slots is a pointer to a block the sum
-            // owns, exactly as `encode_payload` allocated it.
-            if self.payload_boxed(pty) {
-                let q = self.fresh_tmp();
-                self.emit(format!("{q} = inttoptr i64 {} to ptr", words[0]));
-                self.emit(format!("call void @__vyrn_free(ptr {q})"));
-            }
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&miss_l);
-        }
-        self.emit_term(format!("br label %{end_l}"));
-        self.emit_label(&end_l);
-        Ok(())
-    }
-
     /// Free the payload BOXES of an enum whose release the type declared, and
     /// nothing else — RFC-0096.
     ///
@@ -4566,23 +4562,32 @@ impl<'a> Gen<'a> {
         let Type::Enum(vs) = self.resolve(ty) else {
             return Ok(());
         };
-        self.release_enum(v, &vs, false)
+        self.release_sum(v, &vs, false)
     }
 
-    /// The release of a user enum: the payload slots of the live variant, and
-    /// only the ones whose declared type owns something. A wide payload is BOXED
-    /// here where an `Option`'s is not, so the block behind it is freed too —
-    /// `unbox_payload` is what says which.
+    /// The release of ANY sum: the payload slots of the live variant, and only
+    /// the ones whose declared type owns something or travels boxed.
+    ///
+    /// **One emission for every sum** (RFC-0126 §8.11, M4a). §8.9 made the
+    /// ENCODING one; this is the walk over it, and until M4a there were two —
+    /// this one for a declared enum and a second for `Option`/`Result` that
+    /// tested the tag with a two-way `br` in the CALLER's arm order. A sum whose
+    /// variants are the same is now the same instructions, whichever way it was
+    /// spelled, which is what lets M4b answer `Enum` from `resolve` for no bytes.
+    ///
+    /// The tag is the variant's POSITION in `vs`. That is what the layout means
+    /// and it is the one reading that also serves a built-in sum, whose variants
+    /// are in no declaration and so in no name-keyed table.
     ///
     /// `payloads` is false for an enum that DECLARED its release: the payload
     /// values are that function's to give back, and only the boxes they
     /// travelled in are left for this walk (RFC-0096).
-    fn release_enum(&mut self, v: &str, vs: &[EnumVariant], payloads: bool) -> Result<(), String> {
+    fn release_sum(&mut self, v: &str, vs: &[EnumVariant], payloads: bool) -> Result<(), String> {
         let ell = enum_ll(self.enum_slots(vs));
         let tag = self.fresh_tmp();
         self.emit(format!("{tag} = extractvalue {ell} {v}, 0"));
-        let end_l = self.fresh_label("rel.enum.end");
-        for var in vs {
+        let end_l = self.fresh_label("rel.sum.end");
+        for (n, var) in vs.iter().enumerate() {
             // A slot is releasable when its VALUE owns heap — or when the
             // slot itself is BOXED, which `payload_boxed` decides (since M2 the
             // same rule for every sum). The two are different questions: a
@@ -4597,11 +4602,8 @@ impl<'a> Gen<'a> {
             {
                 continue;
             }
-            let Some((n, _)) = self.variants.get(&var.name).cloned() else {
-                continue;
-            };
-            let hit_l = self.fresh_label("rel.enum.hit");
-            let miss_l = self.fresh_label("rel.enum.miss");
+            let hit_l = self.fresh_label("rel.sum.hit");
+            let miss_l = self.fresh_label("rel.sum.miss");
             let is = self.fresh_tmp();
             self.emit(format!("{is} = icmp eq i64 {tag}, {n}"));
             self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
@@ -4639,65 +4641,24 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    /// The copy of an `Option`/`Result`: one payload, selected by the tag.
-    /// `arms` pairs the tag value to test against with the payload type it
-    /// carries (one, for both built-in sums).
-    fn copy_sum(&mut self, sty: &Type, v: &str, arms: &[(&str, Type)]) -> Result<String, String> {
-        let sll = self.llt(sty);
-        let slot = self.fresh_alloca(&sll);
-        self.emit(format!("store {sll} {v}, ptr {slot}"));
-        let tag = self.sum_tag(sty, v);
-        let end_l = self.fresh_label("cp.sum.end");
-        for (want, pty) in arms {
-            if !self.owns_heap(pty) {
-                continue;
-            }
-            let hit_l = self.fresh_label("cp.sum.hit");
-            let miss_l = self.fresh_label("cp.sum.miss");
-            let is = self.fresh_tmp();
-            self.emit(format!("{is} = icmp eq i64 {tag}, {want}"));
-            self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
-            self.emit_label(&hit_l);
-            let n = self.payload_words(pty);
-            let words = self.sum_words(sty, v, 1, n);
-            let pv = self.decode_payload(&words, pty);
-            let cv = self.deep_copy(&pv, pty)?;
-            let nw = self.encode_payload(&cv, pty);
-            let mut cur = v.to_string();
-            for (i, w) in nw.iter().enumerate() {
-                let t = self.fresh_tmp();
-                self.emit(format!("{t} = insertvalue {sll} {cur}, i64 {w}, {}", i + 1));
-                cur = t;
-            }
-            self.emit(format!("store {sll} {cur}, ptr {slot}"));
-            self.emit_term(format!("br label %{end_l}"));
-            self.emit_label(&miss_l);
-        }
-        self.emit_term(format!("br label %{end_l}"));
-        self.emit_label(&end_l);
-        let out = self.fresh_tmp();
-        self.emit(format!("{out} = load {sll}, ptr {slot}"));
-        Ok(out)
-    }
-
-    /// The copy of a user enum: the payload slots of the live variant, and only
-    /// the ones whose declared type owns something.
-    fn copy_enum(&mut self, v: &str, vs: &[EnumVariant]) -> Result<String, String> {
+    /// The copy of ANY sum: the payload slots of the live variant, and only the
+    /// ones whose declared type owns something.
+    ///
+    /// The mirror of [`release_sum`](Self::release_sum), and one emission for
+    /// every sum for the same reason (RFC-0126 §8.11, M4a).
+    fn copy_sum(&mut self, v: &str, vs: &[EnumVariant]) -> Result<String, String> {
         let ell = enum_ll(self.enum_slots(vs));
         let slot = self.fresh_alloca(&ell);
         self.emit(format!("store {ell} {v}, ptr {slot}"));
         let tag = self.fresh_tmp();
         self.emit(format!("{tag} = extractvalue {ell} {v}, 0"));
-        let end_l = self.fresh_label("cp.enum.end");
-        for var in vs {
+        let end_l = self.fresh_label("cp.sum.end");
+        for (n, var) in vs.iter().enumerate() {
             if !var.payload.iter().any(|p| self.owns_heap(p)) {
                 continue;
             }
-            let Some((n, _)) = self.variants.get(&var.name).cloned() else {
-                continue;
-            };
-            let hit_l = self.fresh_label("cp.enum.hit");
-            let miss_l = self.fresh_label("cp.enum.miss");
+            let hit_l = self.fresh_label("cp.sum.hit");
+            let miss_l = self.fresh_label("cp.sum.miss");
             let is = self.fresh_tmp();
             self.emit(format!("{is} = icmp eq i64 {tag}, {n}"));
             self.emit_term(format!("br i1 {is}, label %{hit_l}, label %{miss_l}"));
@@ -5632,14 +5593,12 @@ impl<'a> Gen<'a> {
             // selects). The payload VALUE keeps the shallow rule: what it
             // owns leaks rather than risk reading through a value the store
             // is replacing.
-            Some(DropKind::Deep(t))
-                if matches!(self.resolve(&t), Type::Option(_) | Type::Result(..)) =>
-            {
-                let (box_some, box_zero) = match self.resolve(&t) {
-                    Type::Option(p) => (self.payload_boxed(&p), false),
-                    Type::Result(a, b) => (self.payload_boxed(&a), self.payload_boxed(&b)),
-                    _ => unreachable!(),
-                };
+            Some(DropKind::Deep(t)) if self.two_variant_sum(&t).is_some() => {
+                let (zero, one) = self.two_variant_sum(&t).expect("the guard just asked");
+                let (box_some, box_zero) = (
+                    one.map(|p| self.payload_boxed(&p)).unwrap_or(false),
+                    zero.map(|p| self.payload_boxed(&p)).unwrap_or(false),
+                );
                 if box_some || box_zero {
                     let sll = self.llt(&t);
                     let tag = self.fresh_tmp();
@@ -6284,8 +6243,8 @@ impl<'a> Gen<'a> {
                             && args.first().and_then(|a| self.static_ty(a)).is_some_and(
                                 |t| matches!(self.resolve(&t), Type::Map(..))));
                     if map_lookup && self.droppable.get(&key).is_none() && self.region_depth == 0 {
-                        if let Type::Option(inner) = &sr {
-                            if self.payload_boxed(inner) {
+                        if let Some(inner) = vyrn_frontend::types::option_payload(&sr).cloned() {
+                            if self.payload_boxed(&inner) {
                                 let sll = self.llt(&sr);
                                 let w0 = self.fresh_tmp();
                                 let q = self.fresh_tmp();
@@ -7326,106 +7285,14 @@ impl<'a> Gen<'a> {
         // RFC-0114 Rule N at a match join: the arms that still own what
         // another arm consumed, keyed by this match expression's address.
         let ers = self.edge_rows(key);
-        let r = self.gen_match_body_boxed(&sv, &sty, arms, &ers, free_boxes, key);
+        let vs = self
+            .sum_vs(&sty)
+            .ok_or_else(|| format!("a `match` on `{sty}` is not lowered"))?;
+        let r = self.gen_match_sum(&sv, &vs, arms, &ers, free_boxes, key);
         if !self.terminated {
             self.emit_releases(ExitKind::Scrutinee, key);
         }
         r
-    }
-
-    /// Lower a `match` over an Option/Result to a tag test + `phi`. Payloads are
-    /// i64 (native restriction), so bindings are i64 locals. The `Some`/`Ok` arm
-    /// has tag 1; the `None`/`Err` arm has tag 0.
-    fn gen_match_body_boxed(
-        &mut self,
-        sv: &str,
-        sty: &Type,
-        arms: &[MatchArm],
-        ers: &[(String, u32)],
-        free_boxes: bool,
-        key: usize,
-    ) -> Result<(String, Type), String> {
-        let sv = sv.to_string();
-        let sty = sty.clone();
-        // A user enum dispatches to the switch-based path.
-        if let Type::Enum(evs) = self.resolve(&sty) {
-            return self.gen_match_enum(&sv, &evs, arms, ers, free_boxes, key);
-        }
-        // The payload type carried by each arm: for Option<T> the one-arm binds
-        // `T`; for Result<T, E> the one-arm binds `T` and the zero-arm binds `E`.
-        let want = self.join_ty(key);
-        let (one_ty, zero_ty) = match self.resolve(&sty) {
-            Type::Option(inner) => (*inner, Type::Int),
-            Type::Result(ok, err) => (*ok, *err),
-            _ => (Type::Int, Type::Int),
-        };
-        let tag = self.sum_tag(&sty, &sv);
-        let one_l = self.fresh_label("m.one");
-        let zero_l = self.fresh_label("m.zero");
-        let end_l = self.fresh_label("m.end");
-        let is_one = self.fresh_tmp();
-        self.emit(format!("{is_one} = icmp eq i64 {tag}, 1"));
-        self.emit_term(format!("br i1 {is_one}, label %{one_l}, label %{zero_l}"));
-
-        // tag == 1 arm (Some / Ok)
-        self.emit_label(&one_l);
-        let one_ix = arms
-            .iter()
-            .position(|a| pattern_is_one(&a.pattern))
-            .unwrap();
-        let one_pf = self.arm_row(key, one_ix as u32);
-        let (one_val, one_t) =
-            self.gen_arm_body(&sv, &sty, &arms[one_ix], &one_ty, free_boxes, one_pf, &want)?;
-        if !self.terminated {
-            self.emit_edge_releases(ers, one_ix as u32);
-        }
-        let one_end = self.cur_block.clone();
-        self.emit_term(format!("br label %{end_l}"));
-
-        // tag == 0 arm (None / Err)
-        self.emit_label(&zero_l);
-        let zero_ix = arms
-            .iter()
-            .position(|a| !pattern_is_one(&a.pattern))
-            .unwrap();
-        let zero_pf = self.arm_row(key, zero_ix as u32);
-        let (zero_val, zero_t) = self.gen_arm_body(
-            &sv,
-            &sty,
-            &arms[zero_ix],
-            &zero_ty,
-            free_boxes,
-            zero_pf,
-            &want,
-        )?;
-        if !self.terminated {
-            self.emit_edge_releases(ers, zero_ix as u32);
-        }
-        // Any block arm (RFC-0118) makes this a statement match — Unit, so
-        // the void path below skips the phi a valueless edge could not feed.
-        let ty = if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
-            Type::Unit
-        } else {
-            match want {
-                Some(w) => w,
-                None => join_never(one_t, zero_t),
-            }
-        };
-        let zero_end = self.cur_block.clone();
-        self.emit_term(format!("br label %{end_l}"));
-
-        // merge — a statement-position match with Unit arms (side effects only)
-        // has no value to merge, and `phi void` is invalid IR.
-        self.emit_label(&end_l);
-        let ll = self.llt(&ty);
-        if ll == "void" {
-            return Ok((void_merge_value(&ty), ty));
-        }
-        let res = self.fresh_tmp();
-        self.emit(format!(
-            "{res} = phi {ll} [ {one_val}, %{one_end} ], [ {zero_val}, %{zero_end} ]"
-        ));
-        Ok((res, ty))
     }
 
     /// Lower an `if` used as an expression (RFC-0030) to the same branch+`phi`
@@ -7491,9 +7358,13 @@ impl<'a> Gen<'a> {
         Ok((res, ty))
     }
 
-    /// Lower a `match` over a user enum to a `switch` on the tag + `phi`. Payloads
-    /// are i64; a binding arm loads the payload as an i64 local.
-    fn gen_match_enum(
+    /// Lower a `match` over ANY sum to a `switch` on the tag + `phi`.
+    ///
+    /// **One emission for every sum** (RFC-0126 §8.11, M4a). A built-in sum used
+    /// to take a two-way `br` on `icmp eq i64 %tag, 1`, with the tag-1 arm first
+    /// whatever order the source wrote; it takes the switch now, in source order,
+    /// like the declared enum it is (§8.1).
+    fn gen_match_sum(
         &mut self,
         sv: &str,
         evs: &[EnumVariant],
@@ -7521,8 +7392,12 @@ impl<'a> Gen<'a> {
                         .position(|v| &v.name == n)
                         .ok_or_else(|| format!("unknown variant `{n}`"))?,
                 ),
+                // `??`'s pair (RFC-0079) names a TAG and not a variant: the
+                // desugar runs in the parser, where there is no type to name one.
+                // Tag 1 is the success side of every built-in sum (§8.1).
+                Pattern::Success(_) => Some(1),
+                Pattern::Failure(_) => Some(0),
                 Pattern::Other => None,
-                _ => return Err("non-variant pattern in enum match".into()),
             };
             arm_labels.push((idx, self.fresh_label("me.arm")));
         }
@@ -7550,7 +7425,16 @@ impl<'a> Gen<'a> {
             self.emit_label(lbl);
             self.scope.push(Vec::new());
             let mut bind_slots: Vec<(String, String, Type)> = Vec::new();
-            if let (Pattern::Variant(_, binds), Some(idx)) = (&arm.pattern, idx) {
+            // What the arm binds. `Success`/`Failure` bind one name each; a
+            // `Failure` over an `Option` binds it to the nullary `None`'s absent
+            // payload, which is a dead word nothing reads — cheaper than teaching
+            // the desugar about types, and what the built-in path already did.
+            let binds: &[String] = match &arm.pattern {
+                Pattern::Variant(_, b) => b,
+                Pattern::Success(n) | Pattern::Failure(n) => std::slice::from_ref(n),
+                Pattern::Other => &[],
+            };
+            if let Some(idx) = idx {
                 let payload_tys = &evs[*idx].payload;
                 for (i, bind) in binds.iter().enumerate() {
                     let pty = payload_tys.get(i).cloned().unwrap_or(Type::Int);
@@ -7601,14 +7485,14 @@ impl<'a> Gen<'a> {
                 ty = t;
             }
             // Round forty: the unmoved payload binders the row names — see
-            // `gen_arm_body`.
+            // the payload binder's row, below.
             if let Some(rows) = self.arm_row(key, arm_ix as u32) {
                 for (bind, slot, pty) in &bind_slots {
                     let Some((_, holes)) = rows.iter().find(|(n, _)| n == bind) else {
                         continue;
                     };
-                    // The kind is the binder's TYPE's, as `gen_arm_body`
-                    // states: the core names the binder, not the shape.
+                    // The kind is the binder's TYPE's: the core names the
+                    // binder, not the shape.
                     let Some(kind) = self.rel_kind(pty) else {
                         continue;
                     };
@@ -8024,74 +7908,6 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// Emit an arm body, binding the payload (decoded to `payload_ty`) if the
-    /// pattern binds a name.
-    #[allow(clippy::too_many_arguments)]
-    fn gen_arm_body(
-        &mut self,
-        sv: &str,
-        sty: &Type,
-        arm: &MatchArm,
-        payload_ty: &Type,
-        free_boxes: bool,
-        payload_free: Option<Vec<(String, Vec<String>)>>,
-        want: &Option<Type>,
-    ) -> Result<(String, Type), String> {
-        self.scope.push(Vec::new());
-        let mut bind_slot: Option<(String, String)> = None;
-        if let Some(bind) = pattern_binding(&arm.pattern) {
-            let nw = self.payload_words(payload_ty);
-            let words = self.sum_words(sty, sv, 1, nw);
-            let v = self.decode_payload(&words, payload_ty);
-            let ll = self.llt(payload_ty);
-            let slot = self.declare(bind, payload_ty);
-            self.emit(format!("store {ll} {v}, ptr {slot}"));
-            bind_slot = Some((bind.to_string(), slot.clone()));
-            // A TEMPORARY scrutinee with no drop row: the boxed payload's
-            // block is this match's to give back once the value is out —
-            // `readDoc`'s `match parseJson(src)` left one 16-byte Result box
-            // per `fromJson` (exit-residue round thirteen; the enum path's
-            // twin landed in round eight).
-            if free_boxes && self.payload_boxed(payload_ty) {
-                let q = self.fresh_tmp();
-                self.emit(format!("{q} = inttoptr i64 {} to ptr", words[0]));
-                self.emit(format!("call void @__vyrn_free(ptr {q})"));
-            }
-        }
-        let out = match &arm.body {
-            ArmBody::Expr(e) => self.gen_join_arm(e, want.as_ref())?,
-            // A block arm (RFC-0118): the statements, and no value — the
-            // caller forces the void merge whenever one exists.
-            ArmBody::Block(b) => {
-                self.gen_block(b)?;
-                (String::new(), Type::Unit)
-            }
-        };
-        // Round forty: an unmoved payload binder in a match whose sibling
-        // arm moved — the row went Moved for the mover's sake, the whole
-        // release stood down, and this payload is the arm's to give back
-        // once its body is done with it.
-        if let (Some(rows), Some((bind, slot))) = (&payload_free, &bind_slot) {
-            if let Some((_, holes)) = rows.iter().find(|(n, _)| n == bind) {
-                // RFC-0125 §3 M3, the deletion slice: the row names the
-                // binder and its holes; the release KIND is the payload
-                // TYPE's, which is where the placer took the plan's kinds
-                // from (`Owned::release_kind`).
-                if let Some(kind) = self.rel_kind(payload_ty) {
-                    if !self.terminated && self.region_depth == 0 {
-                        let (slot, holes) = (slot.clone(), holes.clone());
-                        self.emit_drop_holed(&slot, &kind, holes);
-                    }
-                }
-            }
-        }
-        self.scope.pop();
-        Ok(out)
-    }
-
-    /// Emit the `i1` "does `sv` (of resolved type `sr`) match `pattern`" test for
-    /// an `if let`/`while let` (RFC-0060). Shares the tag-extraction shape with
-    /// `gen_match`/`gen_match_enum`.
     /// `if let Some(x) = s.tryAt(h)` (RFC-0122): lower an OPTIONAL projection
     /// where it is tested. Answers `false` when the scrutinee is not one, and
     /// the caller keeps the ordinary path.
@@ -8276,17 +8092,16 @@ impl<'a> Gen<'a> {
     /// function's result; otherwise continue with the unwrapped i64 payload.
     fn gen_try(&mut self, expr: &Expr, at: usize) -> Result<(String, Type), String> {
         let (agg, aty) = self.gen_expr(expr)?;
-        if !matches!(self.resolve(&aty), Type::Option(_) | Type::Result(..)) {
+        if self.two_variant_sum(&aty).is_none() {
             let place = vyrn_frontend::movecheck::place_path(expr).is_some()
                 || vyrn_frontend::movecheck::element_path(expr).is_some();
             return self.gen_try_fallible(&agg, &aty, at, place);
         }
         // The type unwrapped on the success path.
-        let ok_ty = match self.resolve(&aty) {
-            Type::Option(inner) => *inner,
-            Type::Result(ok, _) => *ok,
-            _ => Type::Int,
-        };
+        let ok_ty = self
+            .two_variant_sum(&aty)
+            .and_then(|(_, one)| one)
+            .unwrap_or(Type::Int);
         // The propagated value is the WHOLE sum, byte for byte, which is only
         // sound if the two are the same shape. Since M2 a sum's slot count
         // follows its widest payload (RFC-0126 §8.4), so the two can differ and
@@ -9404,9 +9219,19 @@ pub(crate) fn normalize_fn_sig(t: &Type, types: &HashMap<String, TypeDecl>) -> T
         Type::Fn(ps, r) => Type::Fn(ps.iter().map(norm).collect(), Box::new(norm(&r))),
         Type::Array(i) => Type::Array(Box::new(norm(&i))),
         Type::ArrayN(i, n) => Type::ArrayN(Box::new(norm(&i)), n),
-        Type::Option(i) => Type::Option(Box::new(norm(&i))),
-        Type::Result(a, b) => Type::Result(Box::new(norm(&a)), Box::new(norm(&b))),
         Type::Map(k, v) => Type::Map(Box::new(norm(&k)), Box::new(norm(&v))),
+        // Every sum, one arm — since RFC-0126 §8.11's M4b the two built-in
+        // spellings resolve to variant lists, and a normalization that stopped
+        // at the list registered `Option<T>` under an UNnormalized payload while
+        // the dispatcher looked one up under a normalized one.
+        Type::Enum(vs) => Type::Enum(
+            vs.iter()
+                .map(|v| EnumVariant {
+                    name: v.name.clone(),
+                    payload: v.payload.iter().map(norm).collect(),
+                })
+                .collect(),
+        ),
         Type::Record(fs) => Type::Record(
             fs.iter()
                 .map(|f| Field {
@@ -12985,9 +12810,9 @@ impl<'a> Gen<'a> {
             let (fv, fty) = self.gen_expr(&args[2])?;
             let sig = self.normalize_sig(&fty);
             let elem = match &sig {
-                Type::Fn(_, r) => match self.resolve(r) {
-                    Type::Option(i) => *i,
-                    other => return Err(format!("fromStep step returns {other:?}")),
+                Type::Fn(_, r) => match vyrn_frontend::types::option_payload(&self.resolve(r)) {
+                    Some(i) => i.clone(),
+                    None => return Err(format!("fromStep step returns {:?}", self.resolve(r))),
                 },
                 other => return Err(format!("fromStep of non-fn {other:?}")),
             };
@@ -13054,11 +12879,12 @@ impl<'a> Gen<'a> {
         // an `Int64` whatever it addresses, so the call carries nothing to infer
         // from (the checker says the same thing in its own words).
         if name == "pullAt" {
-            let elem = match self.expect.last().map(|t| self.resolve(t)) {
-                Some(Type::Option(i)) => *i,
-                other => {
+            let want = self.expect.last().map(|t| self.resolve(t));
+            let elem = match want.as_ref().and_then(vyrn_frontend::types::option_payload) {
+                Some(i) => i.clone(),
+                None => {
                     return Err(format!(
-                        "`pullAt` needs an `Option<T>` context, found {other:?}"
+                        "`pullAt` needs an `Option<T>` context, found {want:?}"
                     ))
                 }
             };
@@ -13630,11 +13456,10 @@ impl<'a> Gen<'a> {
         if name == "Some" {
             // RFC-0037: an enclosing `Option<T>` expectation types the payload
             // (a lambda literal payload needs its fn signature).
-            let payload_expect: Option<Type> =
-                self.expect.last().and_then(|t| match self.resolve(t) {
-                    Type::Option(i) => Some(*i),
-                    _ => None,
-                });
+            let payload_expect: Option<Type> = self
+                .expect
+                .last()
+                .and_then(|t| vyrn_frontend::types::option_payload(&self.resolve(t)).cloned());
             let pushed = payload_expect.is_some();
             if let Some(t) = &payload_expect {
                 self.expect.push(t.clone());
@@ -13662,11 +13487,15 @@ impl<'a> Gen<'a> {
             _ => None,
         } {
             // RFC-0037: an enclosing `Result<T, E>` expectation types the arm.
-            let payload_expect: Option<Type> =
-                self.expect.last().and_then(|t| match self.resolve(t) {
-                    Type::Result(ok, err) => Some(if name == "Ok" { *ok } else { *err }),
-                    _ => None,
-                });
+            let payload_expect: Option<Type> = self.expect.last().and_then(|t| {
+                vyrn_frontend::types::result_payloads(&self.resolve(t)).map(|(ok, err)| {
+                    if name == "Ok" {
+                        ok.clone()
+                    } else {
+                        err.clone()
+                    }
+                })
+            });
             let pushed = payload_expect.is_some();
             if let Some(t) = &payload_expect {
                 self.expect.push(t.clone());
@@ -14282,7 +14111,7 @@ impl<'a> Gen<'a> {
 }
 
 /// Whether a pattern matches the tag-1 variant (`Some`/`Ok`). Only used on the
-/// Option/Result path; user-enum variants go through `gen_match_enum`.
+/// Option/Result `if let` path; every `match` goes through `gen_match_sum`.
 fn pattern_is_one(p: &Pattern) -> bool {
     matches!(p, Pattern::Success(_))
         || matches!(p, Pattern::Variant(v, _) if v == "Some" || v == "Ok")
@@ -15590,6 +15419,31 @@ pub(crate) fn sum_variants(ty: &Type) -> Option<Vec<String>> {
     }
 }
 
+/// The VARIANTS of a sum, in tag order — RFC-0126 §8.1, and the one reading of
+/// a sum's shape that both compiled engines have.
+///
+/// `Option<T>` is `| None | Some(T)` and `Result<T, E>` is `| Err(E) | Ok(T)`,
+/// which is the declaration each would carry if it had one. Everything that
+/// walks a sum — a release, a copy, a match — asks here instead of matching the
+/// spelling, so a built-in sum and a declared enum of the same shape emit the
+/// same instructions (§8.11's M4a). It is what makes M4b's `resolve` answering
+/// `Enum` cost no bytes: the two spellings already meet here.
+pub(crate) fn sum_variants_of(
+    ty: &Type,
+    types: &HashMap<String, TypeDecl>,
+) -> Option<Vec<EnumVariant>> {
+    let var = |name: &str, payload: Vec<Type>| EnumVariant {
+        name: name.to_string(),
+        payload,
+    };
+    match vyrn_frontend::types::resolve(ty, types) {
+        Type::Option(t) => Some(vec![var("None", Vec::new()), var("Some", vec![*t])]),
+        Type::Result(ok, err) => Some(vec![var("Err", vec![*err]), var("Ok", vec![*ok])]),
+        Type::Enum(vs) => Some(vs),
+        _ => None,
+    }
+}
+
 /// An arm of an engine's `coerce` could not destructure the pair the plan sent
 /// it. Unreachable unless [`coerce_plan`] and that arm have come apart, which is
 /// the one class of disagreement a single statement of a rule can still have —
@@ -15831,36 +15685,10 @@ fn enum_ll(slots: usize) -> String {
     s
 }
 
-/// RFC-0126 §8.4's `words(t)`: how many `i64` slots a payload of type `t` rides
-/// in. Two for the shapes that ARE `{ i64, i64 }` — a stored `fn`, a `lazy`, a
-/// record of exactly two words — and one for everything else, where a value
-/// wider than its slots is boxed and the slot holds the pointer.
-///
-/// It is a STRUCTURAL test rather than `llt_of(t) == "{ i64, i64 }"`, which is
-/// how §8.4 writes it, and the difference is TERMINATION. `llt_of` of a sum asks
-/// this question about the sum's payloads, so asking `llt_of` back from here
-/// loops the moment a type reaches itself — `type R = { a: Int64, b: Option<R> }`
-/// is legal, and it overflowed the stack.
-///
-/// The two readings differ in one place, and it is the place §8.7 already
-/// measured: a payload that is itself a ONE-SLOT SUM prints `{ i64, i64 }` and
-/// rides in one slot, boxed, which is what both conventions did for a nested sum
-/// before. Nothing else prints that shape.
-pub(crate) fn payload_words_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> usize {
-    // A member that prints `i64`. Structural, so it cannot descend anywhere.
-    let word = |t: &Type| {
-        matches!(
-            vyrn_frontend::types::resolve(t, types),
-            Type::Int | Type::IntN { bits: 64, .. }
-        )
-    };
-    match vyrn_frontend::types::resolve(ty, types) {
-        // A stored `fn` value (RFC-0037), and the deferral that lowers to one.
-        Type::Fn(..) | Type::Lazy(_) => 2,
-        Type::Record(fs) if fs.len() == 2 && fs.iter().all(|f| word(&f.ty)) => 2,
-        _ => 1,
-    }
-}
+/// RFC-0126 §8.4's `words(t)` and §8.11's boxing rule, both stated in
+/// [`vyrn_frontend::types`] because `own` asks the same two questions of the
+/// same types and used to answer them from a hand-written word list of its own.
+pub(crate) use vyrn_frontend::types::payload_words as payload_words_of;
 
 /// The slots one variant's payloads occupy, laid out consecutively.
 fn variant_slots_of(payload: &[Type], types: &HashMap<String, TypeDecl>) -> usize {

@@ -630,7 +630,13 @@ impl Decoders {
         if !self.made.insert(name.clone()) {
             return Some(name);
         }
-        let body = match vyrn_frontend::types::resolve(ty, &self.types) {
+        let resolved = vyrn_frontend::types::resolve(ty, &self.types);
+        // RFC-0126 §8.13: a resolved `Option<T>` is a variant list and no longer
+        // its own constructor, so the payload comes from the reader rather than
+        // from the spelling. A DECLARED enum of other variants reads `None` here
+        // and still declines, which is what this path served before.
+        let opt = vyrn_frontend::types::option_payload(&resolved).cloned();
+        let body = match resolved {
             // The length, then that many elements.
             Type::Array(inner) => {
                 let elem = self.decode(&inner)?;
@@ -697,8 +703,8 @@ impl Decoders {
                 ]
             }
             // One tag atom, then the payload only when it is there.
-            Type::Option(inner) => {
-                let some = self.decode(&inner)?;
+            _ if opt.is_some() => {
+                let some = self.decode(&opt.clone()?)?;
                 vec![
                     Stmt::If {
                         cond: Expr::Binary {
@@ -910,7 +916,12 @@ fn encode(
     out: &mut Vec<Atom>,
 ) -> Result<(), String> {
     let wrong = || format!("cannot encode {lit:?} as {ty}");
-    match vyrn_frontend::types::resolve(ty, types) {
+    let resolved = vyrn_frontend::types::resolve(ty, types);
+    // RFC-0126 §8.13, as in `Decoders::materialize`: a resolved `Option<T>` is a
+    // variant list, so the payload comes from the reader. Both sides read it the
+    // same way, which is what keeps the atom stream one walk of one type.
+    let opt = vyrn_frontend::types::option_payload(&resolved).cloned();
+    match resolved {
         Type::Str => match lit {
             Expr::Str(s) => out.push(Atom::Str(s.clone().into_bytes())),
             _ => return Err(wrong()),
@@ -924,10 +935,10 @@ fn encode(
             _ => return Err(wrong()),
         },
         // `Some(x)` / `None` — one presence atom, then the payload if there is one.
-        Type::Option(inner) => match lit {
+        _ if opt.is_some() => match lit {
             Expr::Call { name, args, .. } if name == "Some" && args.len() == 1 => {
                 out.push(Atom::Int(1));
-                encode(&inner, &args[0], types, out)?;
+                encode(&opt.clone().ok_or_else(wrong)?, &args[0], types, out)?;
             }
             Expr::Var { name, .. } if name == "None" => out.push(Atom::Int(0)),
             _ => return Err(wrong()),

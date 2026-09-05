@@ -480,7 +480,9 @@ impl Walk<'_> {
         for (i, f) in fields.iter().enumerate() {
             let name = &f.name;
             out.push_str(&format!("    let p{i} = {fpath}(path, \"{name}\")\n"));
-            if let Type::Option(inner) = crate::types::resolve(&f.ty, self.types) {
+            if let Some(inner) =
+                crate::types::option_payload(&crate::types::resolve(&f.ty, self.types)).cloned()
+            {
                 let d = self.decoder(&inner)?;
                 let ispell = spell(&inner);
                 out.push_str(&format!(

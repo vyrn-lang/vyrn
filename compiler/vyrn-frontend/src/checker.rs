@@ -2410,14 +2410,12 @@ impl<'a> Checker<'a> {
         }
         let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
         match self.base(ty) {
-            Type::Option(t)
-            | Type::ArrayN(t, _)
+            Type::ArrayN(t, _)
             | Type::Array(t)
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
             | Type::Task(t)
             | Type::Stream(t) => deeper(&t),
-            Type::Result(a, b) => deeper(&a).or_else(|| deeper(&b)),
             Type::Map(k, v) => deeper(&k).or_else(|| deeper(&v)),
             Type::Record(fs) => fs.iter().find_map(|f| deeper(&f.ty)),
             Type::Enum(vs) => vs
@@ -4664,7 +4662,9 @@ impl<'a> Checker<'a> {
                     // The type RETURNED is the one written, so the binding keeps
                     // its name.
                     return match expected.map(|t| self.base(t)) {
-                        Some(Type::Option(_)) => Ok(expected.unwrap().clone()),
+                        Some(b) if crate::types::option_payload(&b).is_some() => {
+                            Ok(expected.unwrap().clone())
+                        }
                         _ => Err(cerr!(
                             line,
                             "cannot infer the type of `None`; \
@@ -5548,99 +5548,19 @@ impl<'a> Checker<'a> {
             },
             _ => raw_sty.clone(),
         };
-        // A user enum dispatches to its own (N-variant) checker.
-        if let Type::Enum(evs) = self.base(&sty) {
-            return self
-                .check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos);
-        }
-        // The two patterns an Option/Result scrutinee requires.
-        let want: [&str; 2] = match &sty {
-            Type::Option(_) => ["Some", "None"],
-            Type::Result(_, _) => ["Ok", "Err"],
-            other => {
-                return Err(cerr!(
-                    line,
-                    "`match` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
-            }
-        };
-        let mut seen: Vec<&str> = Vec::new();
-        let mut result: Option<Type> = expected.cloned();
-        for arm in arms {
-            let (tag, bind): (&str, Option<&str>) = match &arm.pattern {
-                // Since RFC-0126 §8 the four built-in arms are variant patterns
-                // like any other, and the SCRUTINEE is what says a name is a tag.
-                Pattern::Variant(v, binds) => (v.as_str(), binds.first().map(|b| b.as_str())),
-                // The `??` desugar's two patterns (RFC-0079): they take whichever
-                // tag the scrutinee's own shape names, which is the one thing the
-                // parser could not do. `Failure` binds only on the `Result` path
-                // — an `Option`'s tag-0 has no payload — which is exactly what
-                // this per-arm `Option<&str>` seam is for.
-                Pattern::Success(b) => (want[0], Some(b)),
-                Pattern::Failure(b) => (
-                    want[1],
-                    matches!(sty, Type::Result(..)).then_some(b.as_str()),
-                ),
-                // The refutable-`let` desugar's default arm (RFC-0121) belongs
-                // to an enum `match`; an Option/Result scrutinee spells both
-                // tags, so nothing produces it here.
-                Pattern::Other => {
-                    return Err(cerr!(line, "the default arm belongs to an enum `match`"))
-                }
-            };
-            if !want.contains(&tag) {
-                return Err(cerr!(
-                    line,
-                    "pattern `{tag}` does not match scrutinee of type {sty}"
-                ));
-            }
-            if let Pattern::Variant(v, binds) = &arm.pattern {
-                sum_arm_arity(v, binds.len(), line)?;
-            }
-            if seen.contains(&tag) {
-                return Err(cerr!(line, "duplicate `{tag}` arm"));
-            }
-            seen.push(tag);
-
-            let mut inner_scope = scope.clone();
-            if let Some(name) = bind {
-                let bty = self.binding_type(&sty, tag);
-                inner_scope.push(HashMap::new());
-                inner_scope.last_mut().unwrap().insert(
-                    name.to_string(),
-                    Binding {
-                        ty: bty,
-                        mutable: false,
-                    },
-                );
-            }
-            match &arm.body {
-                ArmBody::Expr(e) => {
-                    let bty = self.expr(e, &inner_scope, result.as_ref(), fn_ret)?;
-                    self.unify_arm(&mut result, bty, line)?;
-                }
-                // A block arm (RFC-0118): statement position only, checked as
-                // the block it is, contributing no type — the expression arms
-                // beside it still unify among themselves.
-                ArmBody::Block(b) => {
-                    self.arm_block(b, stmt_pos, line, &mut inner_scope, fn_ret)?;
-                }
-            }
-        }
-        if !want.iter().all(|w| seen.contains(w)) {
+        // EVERY sum goes to the N-variant checker. Since RFC-0126 §8.11's M4b
+        // `base` answers `Enum` for an `Option` and a `Result` too, so the
+        // two-tag path that stood here — its own `want` table, its own
+        // exhaustiveness message and its own arm loop, sixty lines of it — is
+        // the enum's path, and a built-in sum gets the wording a declared enum
+        // already had.
+        let Type::Enum(evs) = self.base(&sty) else {
             return Err(cerr!(
                 line,
-                "`match` must cover both `{}` and `{}`",
-                want[0],
-                want[1]
+                "`match` scrutinee must be an Option, Result, or enum, found {sty}"
             ));
-        }
-        // A statement match whose arms are all blocks yields nothing, which is
-        // exactly what its position consumes.
-        if stmt_pos && result.is_none() {
-            return Ok(Type::Unit);
-        }
-        result.ok_or_else(|| cerr!(line, "empty `match`"))
+        };
+        self.check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos)
     }
 
     /// Check one block arm (RFC-0118): legal only in statement position, and
@@ -5714,6 +5634,28 @@ impl<'a> Checker<'a> {
                 // pattern-matches at all; `??` does, so it stops here, and it says
                 // so in the source's own words rather than naming a pattern nobody
                 // wrote.
+                // A two-variant sum is what `??` was written for, and since
+                // RFC-0126 §8.11's M4b that includes the two built-in ones,
+                // which reach here as `| None | Some(T)` and `| Err(E) | Ok(T)`.
+                // The pair names a TAG: variant 1 succeeds, variant 0 fails.
+                // Anything wider has no success side as a PATTERN — that would
+                // be a wildcard over N-1 variants, and `Pattern` has none — so
+                // it says so in the source's own words.
+                Pattern::Success(b) | Pattern::Failure(b)
+                    if crate::types::option_payload(&Type::Enum(evs.to_vec())).is_some()
+                        || crate::types::result_payloads(&Type::Enum(evs.to_vec())).is_some() =>
+                {
+                    let at = usize::from(matches!(arm.pattern, Pattern::Success(_)));
+                    let v = &evs[at];
+                    (
+                        v.name.clone(),
+                        if v.payload.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![b.clone()]
+                        },
+                    )
+                }
                 Pattern::Success(_) | Pattern::Failure(_) => {
                     return Err(cerr!(
                         line,
@@ -8016,10 +7958,10 @@ impl<'a> Checker<'a> {
             {
                 return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
             }
-            let Type::Option(inner) = self.base(&ret) else {
+            let Some(inner) = crate::types::option_payload(&self.base(&ret)).cloned() else {
                 return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
             };
-            return Ok(Type::Stream(inner));
+            return Ok(Type::Stream(Box::new(inner)));
         }
         // RFC-0075 M2c, re-hosted by RFC-0090 M3. `boxStream(s)` moves a
         // stream into one heap box and hands back its address, `unboxStream(a)` takes
@@ -8078,7 +8020,7 @@ impl<'a> Checker<'a> {
             };
             let ok = match name {
                 "unboxStream" => matches!(self.base(exp), Type::Stream(_)),
-                _ => matches!(self.base(exp), Type::Option(_)),
+                _ => crate::types::option_payload(&self.base(exp)).is_some(),
             };
             if !ok {
                 return Err(cerr!(line, "`{name}` answers a `{want}`, not {exp}"));
@@ -8553,10 +8495,9 @@ impl<'a> Checker<'a> {
             }
             // Resolved, as `Ok`/`Err` below do: `type MaybeAge = Option<Age>` is
             // a named Option, and the payload's refinement rides on `Age`.
-            let inner_expected = match expected.map(|t| self.base(t)) {
-                Some(Type::Option(t)) => Some((*t).clone()),
-                _ => None,
-            };
+            let inner_expected = expected
+                .map(|t| self.base(t))
+                .and_then(|b| crate::types::option_payload(&b).cloned());
             let aty = self.expr(&args[0], scope, inner_expected.as_ref(), fn_ret)?;
             // The expectation still names the payload's SHAPE when its element
             // type is an unsolved parameter, so it is handed to the payload
@@ -8584,17 +8525,16 @@ impl<'a> Checker<'a> {
             // Resolve a named alias (`type DeleteResult = Result<..>`) so the
             // expected `Result<T, E>` is visible for payload inference (RFC-0024).
             let expected_res = expected.map(|e| crate::types::resolve(e, self.types));
-            let want = match &expected_res {
-                Some(Type::Result(t, e)) => Some(
-                    (name == "Ok")
-                        .then(|| (**t).clone())
-                        .unwrap_or_else(|| (**e).clone()),
-                ),
-                _ => None,
-            };
+            let res_pair = expected_res
+                .as_ref()
+                .and_then(crate::types::result_payloads)
+                .map(|(t, e)| (t.clone(), e.clone()));
+            let want = res_pair
+                .as_ref()
+                .map(|(t, e)| if name == "Ok" { t.clone() } else { e.clone() });
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
-            let (mut t, mut e) = match &expected_res {
-                Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
+            let (mut t, mut e) = match res_pair {
+                Some(pair) => pair,
                 _ => {
                     return Err(cerr!(
                         line,
@@ -12328,7 +12268,9 @@ mod tests {
              fn main() -> Int64 { if let Ok(v) = f() { return v } return 0 }",
         )
         .unwrap_err();
-        assert!(bad.contains("does not match scrutinee"), "{bad}");
+        // The enum path's wording, since RFC-0126 §8.11's M4b took every sum
+        // to it: a name that is not one of the scrutinee's variants.
+        assert!(bad.contains("is not a variant of"), "{bad}");
     }
 
     #[test]
@@ -13815,7 +13757,7 @@ mod tests {
         let src = "fn main() -> Int64 { let o: Option<Int64> = Some(1); \
                    return match o { Some(x) => x }; }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("cover both"), "{e}");
+        assert!(e.contains("missing variant `None`"), "{e}");
     }
 
     #[test]
@@ -13855,7 +13797,7 @@ mod tests {
         let src = "fn main() -> Int64 { let o: Option<Int64> = Some(1); \
                    return match o { Ok(x) => x, None => 0 }; }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("does not match"), "{e}");
+        assert!(e.contains("is not a variant of"), "{e}");
     }
 
     // ---- generic functions ---------------------------------------------

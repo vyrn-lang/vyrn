@@ -1477,6 +1477,14 @@ impl<'a> Cx<'a> {
         1 + payload[..i].iter().map(|p| self.words(p)).sum::<usize>()
     }
 
+    /// The variants of the sum `ty`, in TAG order — [`crate::sum_variants_of`],
+    /// under this emitter's substitution. `Gen`'s own answer, for [`Cx::ll`]'s
+    /// reason, and what makes a release and a copy one walk per sum rather than
+    /// one per SPELLING of a sum (RFC-0126 §8.11, M4a).
+    fn sum_vs(&self, ty: &Type) -> Option<Vec<EnumVariant>> {
+        crate::sum_variants_of(&self.sub(ty), &self.types)
+    }
+
     /// The PROGRAM's own body for a lambda literal at this address, or `None`
     /// for a literal the program does not hold — see [`Cx::lambdas`].
     fn lambda(&self, at: &Expr) -> Option<&'a LambdaBody> {
@@ -1624,10 +1632,16 @@ impl<'a> Cx<'a> {
         }
         match self.resolve(ty) {
             Type::Record(fs) => fs.iter().find_map(|f| self.ty_gap(&f.ty, depth + 1)),
-            Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) => self.ty_gap(&i, depth + 1),
-            Type::Result(a, b) | Type::Map(a, b) => self
+            Type::Array(i) | Type::ArrayN(i, _) => self.ty_gap(&i, depth + 1),
+            Type::Map(a, b) => self
                 .ty_gap(&a, depth + 1)
                 .or_else(|| self.ty_gap(&b, depth + 1)),
+            // Every sum, one arm — the two built-in ones resolve to their
+            // variant lists since RFC-0126 §8.11's M4b.
+            Type::Enum(vs) => vs
+                .iter()
+                .flat_map(|v| v.payload.iter())
+                .find_map(|p| self.ty_gap(p, depth + 1)),
             _ => None,
         }
     }
@@ -3513,31 +3527,13 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.rel_each(m, b, a, count, stride, &inner, line)
             }
-            Type::Option(inner) => {
-                let l = self.layout_of(ty, line)?;
-                let w = self.word2(&inner)?;
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.rel_word(m, b, a, l.fields[1], &inner, w, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Result(ok, err) => {
-                let l = self.layout_of(ty, line)?;
-                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.rel_word(m, b, a, l.fields[1], &ok, wo, line)?;
-                b.ins(&Instruction::Else);
-                self.rel_word(m, b, a, l.fields[1], &err, we, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Enum(vs) => {
+            // ANY sum: the payload slots of the live variant, and only the ones
+            // whose declared type owns something. One walk since RFC-0126 §8.11's
+            // M4a — the built-in two used to have arms of their own here, testing
+            // only tag 1 and writing a `Result` as one `if`/`else` where the enum
+            // writes one `if` per variant in tag order.
+            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+                let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
                     if !var.payload.iter().any(|p| self.owns_heap(p)) {
@@ -6479,12 +6475,15 @@ impl<'p> Fn_<'_, 'p> {
                 // is always two `Int64`s (RFC-0075 M2b).
                 "fromStep" if args.len() == 3 => {
                     match self.cx.resolve(&self.peek(&args[2], line)?) {
-                        Type::Fn(_, r) => match self.cx.resolve(&r) {
-                            Type::Option(i) => Type::Stream(i),
-                            other => {
-                                return unsupported(&format!("a step returning `{other}`"), line)
+                        Type::Fn(_, r) => {
+                            let rr = self.cx.resolve(&r);
+                            match ftypes::option_payload(&rr) {
+                                Some(i) => Type::Stream(Box::new(i.clone())),
+                                None => {
+                                    return unsupported(&format!("a step returning `{rr}`"), line)
+                                }
                             }
-                        },
+                        }
                         other => return unsupported(&format!("`fromStep` of `{other}`"), line),
                     }
                 }
@@ -6499,11 +6498,14 @@ impl<'p> Fn_<'_, 'p> {
                     Some(t @ Type::Stream(_)) => t,
                     _ => return unsupported("an `unboxStream` with no expected Stream type", line),
                 },
-                "pullAt" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t))
-                {
-                    Some(t @ Type::Option(_)) => t,
-                    _ => return unsupported("a `pullAt` with no expected Option type", line),
-                },
+                "pullAt" if args.len() == 1 => {
+                    match self.expect.last().map(|t| self.cx.resolve(t)) {
+                        Some(ref t) if ftypes::option_payload(t).is_some() => {
+                            self.expect.last().cloned().unwrap_or(Type::Unit)
+                        }
+                        _ => return unsupported("a `pullAt` with no expected Option type", line),
+                    }
+                }
                 "close" => Type::Unit,
                 "@has" | "@remove" => Type::Bool,
                 "@keys" => Type::Array(Box::new(Type::Str)),
@@ -6732,8 +6734,8 @@ impl<'p> Fn_<'_, 'p> {
             // reading it needs the impl the emitting path resolves.
             Expr::Try { expr, line } => {
                 let st = self.peek(expr, *line)?;
-                match self.sum_of(&st) {
-                    Some(Sum::Opt(t)) | Some(Sum::Res(t, _)) => t,
+                match self.sum_of(&st).as_deref() {
+                    Some([_, one]) if one.payload.len() == 1 => one.payload[0].clone(),
                     _ => return unsupported(&format!("a branch yielding `?` on `{st}`"), *line),
                 }
             }
@@ -10799,16 +10801,21 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(fv));
         let sig = self.cx.resolve(&fty);
         let elem = match &sig {
-            Type::Fn(_, r) => match self.cx.resolve(r) {
-                Type::Option(i) => *i,
-                other => return unsupported(&format!("a step returning `{other}`"), line),
-            },
+            Type::Fn(_, r) => {
+                let rr = self.cx.resolve(r);
+                match ftypes::option_payload(&rr) {
+                    Some(i) => i.clone(),
+                    None => return unsupported(&format!("a step returning `{rr}`"), line),
+                }
+            }
             other => return unsupported(&format!("`fromStep` of `{other}`"), line),
         };
         // The loop reconstructs this signature from the element type alone, so a
         // step registered under any other spelling would dispatch through a
         // table it is not in. Refuse rather than miscompile.
-        if sig != stream_step_sig(&elem) {
+        if crate::normalize_fn_sig(&sig, &self.cx.types)
+            != crate::normalize_fn_sig(&stream_step_sig(&elem), &self.cx.types)
+        {
             return unsupported(&format!("a step of type `{sig}`"), line);
         }
         let Repr::Agg(fl) = self.cx.repr(&sig, line)? else {
@@ -10966,9 +10973,10 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
-            Some(Type::Option(i)) => *i,
-            _ => return unsupported("a `pullAt` with no expected Option type", line),
+        let want = self.expect.last().map(|t| self.cx.resolve(t));
+        let elem = match want.as_ref().and_then(ftypes::option_payload) {
+            Some(i) => i.clone(),
+            None => return unsupported("a `pullAt` with no expected Option type", line),
         };
         let opt = Type::Option(Box::new(elem.clone()));
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
@@ -11126,7 +11134,12 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        let dsig = self.dispatcher(m, &stream_step_sig(elem), line)?;
+        // Normalized, as every other dispatcher key is: a step's tag is
+        // registered under `normalize_fn_sig`, and since RFC-0126 §8.11's M4b
+        // that turns the `Option<T>` return into its variant list. A raw key
+        // looked the tag up in a table it was not in.
+        let step = crate::normalize_fn_sig(&stream_step_sig(elem), &self.cx.types);
+        let dsig = self.dispatcher(m, &step, line)?;
         let ooff = b.alloc(ol.size, ol.align);
         b.slot(ooff);
         b.ins(&Instruction::LocalGet(a));
@@ -11244,7 +11257,12 @@ impl<'p> Fn_<'_, 'p> {
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        let dsig = self.dispatcher(m, &stream_step_sig(elem), line)?;
+        // Normalized, as every other dispatcher key is: a step's tag is
+        // registered under `normalize_fn_sig`, and since RFC-0126 §8.11's M4b
+        // that turns the `Option<T>` return into its variant list. A raw key
+        // looked the tag up in a table it was not in.
+        let step = crate::normalize_fn_sig(&stream_step_sig(elem), &self.cx.types);
+        let dsig = self.dispatcher(m, &step, line)?;
         let ooff = b.alloc(ol.size, ol.align);
         b.slot(ooff);
         b.ins(&Instruction::LocalGet(s));
@@ -11259,7 +11277,7 @@ impl<'p> Fn_<'_, 'p> {
         let oaddr = b.local(ValType::I32);
         b.slot(ooff);
         b.ins(&Instruction::LocalSet(oaddr));
-        let sum = Sum::Opt(elem.clone());
+        let sum = crate::sum_variants_of(&opt, &self.cx.types).unwrap_or_default();
         let some = Pattern::Variant("Some".into(), vec![String::new()]);
         self.tag_test(b, oaddr, &sum, &some, line)?;
         b.ins(&Instruction::If(BlockType::Empty));
@@ -12281,11 +12299,7 @@ impl<'p> Fn_<'_, 'p> {
 /// `{ i64 tag, i64 p0, .. }` with one word per payload slot of its widest
 /// variant. Inheriting them is not politeness — parity compares this backend's
 /// output against a build that uses the other one.
-enum Sum {
-    Opt(Type),
-    Res(Type, Type),
-    Enum(Vec<EnumVariant>),
-}
+type Sum = Vec<EnumVariant>;
 
 /// How one payload travels inside a sum's `i64` word.
 #[derive(PartialEq)]
@@ -12706,34 +12720,12 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.copy_each(b, a, count, stride, &inner, line)
             }
-            Type::Option(inner) => {
-                let l = self.layout_of(ty, line)?;
-                let w = self.word2(&inner)?;
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.copy_word(b, a, l.fields[1], &inner, w, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Result(ok, err) => {
-                let l = self.layout_of(ty, line)?;
-                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.copy_word(b, a, l.fields[1], &ok, wo, line)?;
-                b.ins(&Instruction::Else);
-                self.copy_word(b, a, l.fields[1], &err, we, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            // A user enum: the payload slots of the live variant, and only the
-            // ones whose declared type owns something. The tag is the variant's
-            // position, exactly as `match` reads it.
-            Type::Enum(vs) => {
+            // ANY sum: the payload slots of the live variant, and only the ones
+            // whose declared type owns something. The tag is the variant's
+            // position, exactly as `match` reads it. The mirror of `rel_at`'s own
+            // arm, and one walk for the same reason (RFC-0126 §8.11, M4a).
+            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+                let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
                     if !var.payload.iter().any(|p| self.owns_heap(p)) {
@@ -12824,12 +12816,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     fn sum_of(&self, ty: &Type) -> Option<Sum> {
-        match self.cx.resolve(ty) {
-            Type::Option(t) => Some(Sum::Opt(*t)),
-            Type::Result(a, b) => Some(Sum::Res(*a, *b)),
-            Type::Enum(vs) => Some(Sum::Enum(vs)),
-            _ => None,
-        }
+        self.cx.sum_vs(ty)
     }
 
     /// How an `Option`/`Result` payload of type `t` fills its two words.
@@ -13015,9 +13002,17 @@ impl<'p> Fn_<'_, 'p> {
             .as_ref()
             .and_then(|t| self.sum_of(t).map(|s| (t.clone(), s)));
         let (ty, payload) = match picked {
-            Some((t, Sum::Opt(p))) if name == "Some" => (t, p),
-            Some((t, Sum::Res(ok, er))) if name != "Some" => {
-                (t, if name == "Ok" { ok } else { er })
+            // The position's sum names the payload the constructor carries: the
+            // variant with that name, in the variant list `sum_of` answers for
+            // every sum since RFC-0126 §8.11's M4b.
+            Some((t, vs)) if vs.iter().any(|v| v.name == name && v.payload.len() == 1) => {
+                let p = vs
+                    .iter()
+                    .find(|v| v.name == name)
+                    .expect("the guard just found it")
+                    .payload[0]
+                    .clone();
+                (t, p)
             }
             // An unexpected `Some` still types itself from its payload;
             // `Ok`/`Err` cannot, because the other half is unknowable.
@@ -13123,45 +13118,45 @@ impl<'p> Fn_<'_, 'p> {
         pat: &Pattern,
         line: usize,
     ) -> Result<Vec<(String, Type)>, String> {
-        Ok(match (sum, pat) {
-            // Since RFC-0126 §8 the built-in arms are variant patterns; the
-            // SCRUTINEE, here the `Sum`, is what says a name is a tag.
-            (Sum::Opt(t), Pattern::Variant(v, ns)) if v == "Some" => {
-                vec![(ns[0].clone(), t.clone())]
-            }
-            (Sum::Opt(_) | Sum::Res(..), Pattern::Variant(v, _)) if v == "None" => vec![],
-            (Sum::Res(t, _), Pattern::Variant(v, ns)) if v == "Ok" => {
-                vec![(ns[0].clone(), t.clone())]
-            }
-            (Sum::Res(_, e), Pattern::Variant(v, ns)) if v == "Err" => {
-                vec![(ns[0].clone(), e.clone())]
-            }
-            // `??`'s type-agnostic pair (RFC-0079) — the sum decides which side
-            // each names, which is the same thing `try_` does one screen down.
-            (Sum::Opt(t), Pattern::Success(n)) | (Sum::Res(t, _), Pattern::Success(n)) => {
-                vec![(n.clone(), t.clone())]
-            }
-            (Sum::Opt(_), Pattern::Failure(_)) => vec![],
-            (Sum::Res(_, e), Pattern::Failure(n)) => vec![(n.clone(), e.clone())],
+        // The variant the pattern names, in the list `sum_of` answers for every
+        // sum since RFC-0126 §8.11's M4b. `??`'s pair (RFC-0079) names a TAG
+        // rather than a variant — variant 1 succeeds, variant 0 fails — which is
+        // the one thing the parser could not do; a sum wider than two has no
+        // success side as a pattern.
+        let (at, binds): (usize, &[String]) = match pat {
             // The refutable-`let` desugar's default arm (RFC-0121): any
             // variant, nothing bound.
-            (_, Pattern::Other) => vec![],
-            (Sum::Enum(vs), Pattern::Variant(name, binds)) => {
-                let v = vs
-                    .iter()
-                    .find(|v| v.name == *name)
-                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
-                if v.payload.len() != binds.len() {
-                    return unsupported(&format!("the variant `{name}` at this arity"), line);
-                }
-                binds
-                    .iter()
-                    .cloned()
-                    .zip(v.payload.iter().cloned())
-                    .collect()
-            }
+            Pattern::Other => return Ok(Vec::new()),
+            Pattern::Variant(name, binds) => (
+                sum.iter()
+                    .position(|v| v.name == *name)
+                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
+                binds,
+            ),
+            Pattern::Success(n) | Pattern::Failure(n) if sum.len() == 2 => (
+                usize::from(matches!(pat, Pattern::Success(_))),
+                std::slice::from_ref(n),
+            ),
             _ => return unsupported("a pattern of the wrong shape for its scrutinee", line),
-        })
+        };
+        let v = &sum[at];
+        // A `Failure` over a nullary variant binds nothing — an `Option`'s tag 0
+        // has no payload, and that is exactly what this per-arm seam is for.
+        if matches!(pat, Pattern::Success(_) | Pattern::Failure(_)) {
+            return Ok(v
+                .payload
+                .first()
+                .map(|t| vec![(binds[0].clone(), t.clone())])
+                .unwrap_or_default());
+        }
+        if v.payload.len() != binds.len() {
+            return unsupported(&format!("the variant `{}` at this arity", v.name), line);
+        }
+        Ok(binds
+            .iter()
+            .cloned()
+            .zip(v.payload.iter().cloned())
+            .collect())
     }
 
     /// `match` — the n-way join M0 warned about, lowered destination-first.
@@ -13349,18 +13344,14 @@ impl<'p> Fn_<'_, 'p> {
         // The success pattern's binder name is unread — `tag_test` and
         // `bind_payload` both take the type from `sum`, not from the pattern — so
         // it is spelled empty rather than invented.
+        // Tag 1 is the success side of every two-variant sum (§8.1); anything
+        // else asks `Fallible` (RFC-0080 M3) instead of the tag.
         let (sum, ok_ty, ok_pat) = match self.sum_of(&st) {
-            Some(Sum::Opt(t)) => (
-                Sum::Opt(t.clone()),
-                t,
-                Pattern::Variant("Some".into(), vec![String::new()]),
-            ),
-            Some(Sum::Res(t, err)) => (
-                Sum::Res(t.clone(), err),
-                t,
-                Pattern::Variant("Ok".into(), vec![String::new()]),
-            ),
-            // Anything else asks `Fallible` (RFC-0080 M3) instead of the tag.
+            Some(vs) if vs.len() == 2 && vs[1].payload.len() == 1 => {
+                let ok_ty = vs[1].payload[0].clone();
+                let pat = Pattern::Variant(vs[1].name.clone(), vec![String::new()]);
+                (vs, ok_ty, pat)
+            }
             _ => return self.try_fallible(m, b, &st, line, at),
         };
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
@@ -13692,31 +13683,28 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         b.ins(&Instruction::LocalGet(addr));
-        match (sum, pat) {
-            (Sum::Enum(vs), Pattern::Variant(name, _)) => {
-                let tag = vs
-                    .iter()
-                    .position(|v| v.name == *name)
-                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
-                b.ins(&Instruction::I64Load(word8()));
-                b.ins(&Instruction::I64Const(tag as i64));
-                b.ins(&Instruction::I64Eq);
-            }
-            // The refutable-`let` desugar's default arm (RFC-0121): the probe
-            // is constant truth — the address read above is discarded, and the
-            // one `i32` every caller expects is pushed in its place.
-            (_, Pattern::Other) => {
-                b.ins(&Instruction::Drop);
-                b.ins(&Instruction::I32Const(1));
-            }
-            (_, p) => {
-                let one = matches!(p, Pattern::Success(_))
-                    || matches!(p, Pattern::Variant(v, _) if v == "Some" || v == "Ok");
-                b.ins(&Instruction::I64Load(word8()));
-                b.ins(&Instruction::I64Const(i64::from(one)));
-                b.ins(&Instruction::I64Eq);
-            }
+        // The refutable-`let` desugar's default arm (RFC-0121): the probe is
+        // constant truth — the address read above is discarded, and the one
+        // `i32` every caller expects is pushed in its place.
+        if matches!(pat, Pattern::Other) {
+            b.ins(&Instruction::Drop);
+            b.ins(&Instruction::I32Const(1));
+            return Ok(());
         }
+        // One tag read for every sum since RFC-0126 §8.11's M4b, where the two
+        // built-in ones stopped having a variant list of their own. A second
+        // spelling of this probe would be a second chance to read the tag at the
+        // wrong width, which is silent rather than loud.
+        let tag = match pat {
+            Pattern::Variant(name, _) => sum
+                .iter()
+                .position(|v| v.name == *name)
+                .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
+            _ => usize::from(matches!(pat, Pattern::Success(_))),
+        };
+        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Const(tag as i64));
+        b.ins(&Instruction::I64Eq);
         Ok(())
     }
 

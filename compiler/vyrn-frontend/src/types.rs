@@ -1496,6 +1496,70 @@ pub fn resolve(ty: &Type, types: &HashMap<String, TypeDecl>) -> Type {
     resolve_d(ty, types, 0)
 }
 
+/// RFC-0126 §8.4's `words(t)`: how many `i64` slots a payload of type `t` rides
+/// in inside a sum. Two for the shapes that ARE `{ i64, i64 }` — a stored `fn`,
+/// a `lazy`, a record of exactly two words — and one for everything else, where
+/// a value wider than its slots is boxed and the slot holds the pointer.
+///
+/// It is a STRUCTURAL test rather than `llt_of(t) == "{ i64, i64 }"`, which is
+/// how §8.4 writes it, and the difference is TERMINATION. `llt_of` of a sum asks
+/// this question about the sum's payloads, so asking `llt_of` back from here
+/// loops the moment a type reaches itself — `type R = { a: Int64, b: Option<R> }`
+/// is legal, and it overflowed the stack.
+///
+/// The two readings differ in one place, and it is the place §8.7 already
+/// measured: a payload that is itself a ONE-SLOT SUM prints `{ i64, i64 }` and
+/// rides in one slot, boxed, which is what both conventions did for a nested sum
+/// before. Nothing else prints that shape.
+///
+/// It lives here, and not in the emitter that reads it back as a shape, because
+/// [`payload_boxed`] below is the same fact and `own` asks that one.
+pub fn payload_words(ty: &Type, types: &HashMap<String, TypeDecl>) -> usize {
+    // A member that prints `i64`. Structural, so it cannot descend anywhere.
+    let word = |t: &Type| matches!(resolve(t, types), Type::Int | Type::IntN { bits: 64, .. });
+    match resolve(ty, types) {
+        // A stored `fn` value (RFC-0037), and the deferral that lowers to one.
+        Type::Fn(..) | Type::Lazy(_) => 2,
+        Type::Record(fs) if fs.len() == 2 && fs.iter().all(|f| word(&f.ty)) => 2,
+        _ => 1,
+    }
+}
+
+/// Whether a sum payload of type `t` travels BOXED — a pointer in the slot
+/// rather than the value in it — so the sum owns one heap block per live payload
+/// whatever the payload itself holds.
+///
+/// **One statement of the rule** (RFC-0126 §8.11, M4a). It was three, all in
+/// `own::owns_heap`: one for `Option`, two for `Result` and one for `Enum`, each
+/// naming the word class by hand as `Int`, `Bool`, `Str`, `Fn`. That list ran
+/// two rules together — a payload two words WIDE rides in its slots, and a
+/// one-word payload rides in the word when the word is what it is — and §8.9
+/// moved the first of them. `Fn` was in the list for the width and `Int` for the
+/// word; a `lazy` and a record of two `Int64`s are two words and were in
+/// neither, so `owns_heap` called a payload the emitter puts inline heap-owning.
+///
+/// `Gen::payload_boxed` and `Fn_::word2` are the same rule asked of the LLVM
+/// shape, which is theirs to know. The two answers differ at one type the
+/// emitter names and the language cannot — `Code` on the generator-host path,
+/// which lowers to `i64` and rides in the word. This answers "boxed" there,
+/// which is the conservative half: it registers a release row that frees
+/// nothing.
+pub fn payload_boxed(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    if payload_words(ty, types) == 2 {
+        return false;
+    }
+    !matches!(
+        resolve(ty, types),
+        Type::Int
+            | Type::IntN { bits: 64, .. }
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Never
+            | Type::Param(_)
+    )
+}
+
 /// The fields of `ty` if it (resolves to) a record; otherwise `None`.
 pub fn record_fields(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<Vec<Field>> {
     match resolve(ty, types) {
@@ -1588,7 +1652,66 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
         // the three places that must see it: the field READ (which forces), the
         // codec (which forces too) and reflection.
         Type::Lazy(inner) => Type::Fn(Vec::new(), Box::new(resolve_d(inner, types, depth + 1))),
+        // RFC-0126 §8.11 M4b: the two built-in sums ARE enums, and this is where
+        // they say so. §8.1's variant lists, in tag order — `None` and `Err` are
+        // variant 0, because `??`'s parser desugar names them that way without a
+        // type. Every consumer that resolves a type reads the sum through
+        // [`option_payload`] and [`result_payloads`], which answer for the
+        // surface spelling and for this one alike.
+        Type::Option(t) => Type::Enum(vec![
+            EnumVariant {
+                name: "None".to_string(),
+                payload: Vec::new(),
+            },
+            EnumVariant {
+                name: "Some".to_string(),
+                payload: vec![resolve_arg(t, types, depth)],
+            },
+        ]),
+        Type::Result(ok, err) => Type::Enum(vec![
+            EnumVariant {
+                name: "Err".to_string(),
+                payload: vec![resolve_arg(err, types, depth)],
+            },
+            EnumVariant {
+                name: "Ok".to_string(),
+                payload: vec![resolve_arg(ok, types, depth)],
+            },
+        ]),
         other => other.clone(),
+    }
+}
+
+/// What an `Option<T>` carries, whichever way the sum is spelled — RFC-0126
+/// §8.11's M4b. `Type::Option(T)` is the surface spelling; `| None | Some(T)` is
+/// what [`resolve`] answers for it, and what a user who writes those two variants
+/// out gets. One reader, so a consumer never has to know which it was handed.
+pub fn option_payload(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Option(t) => Some(t),
+        Type::Enum(vs) => match vs.as_slice() {
+            [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
+                s.payload.first()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What a `Result<T, E>` carries — `(T, E)`, ok first — whichever way the sum is
+/// spelled. [`option_payload`]'s twin, and the tag order is §8.1's: `Err` is
+/// variant 0.
+pub fn result_payloads(ty: &Type) -> Option<(&Type, &Type)> {
+    match ty {
+        Type::Result(ok, err) => Some((ok, err)),
+        Type::Enum(vs) => match vs.as_slice() {
+            [e, o] if e.name == "Err" && o.name == "Ok" => {
+                Some((o.payload.first()?, e.payload.first()?))
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1607,6 +1730,15 @@ pub fn deferred(ty: &Type) -> Option<&Type> {
 /// itself. What a read of the field yields, and what the codec encodes.
 pub fn forced(ty: &Type) -> Type {
     deferred(ty).cloned().unwrap_or_else(|| ty.clone())
+}
+
+/// A payload as the enum form carries it. NOT resolved: a variant's payload is a
+/// declared type in the declared case, so the built-in sums' payloads stay the
+/// spelling they were given, and a consumer that wants the shape resolves it the
+/// way it resolves a declared enum's. `depth` is carried only so a runaway
+/// declaration still bottoms out.
+fn resolve_arg(ty: &Type, _types: &HashMap<String, TypeDecl>, _depth: usize) -> Type {
+    ty.clone()
 }
 
 fn fields_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Option<Vec<Field>> {

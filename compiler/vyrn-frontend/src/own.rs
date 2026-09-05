@@ -508,11 +508,18 @@ impl Owned {
             // container working: `resolve` leaves a `Param` alone and leaves an
             // undeclared `Named` as `Unit`, so `Array<T>` in `map`, `filter`,
             // `fold` and `std/slots` carries no obligation.
-            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Option(e) => {
-                self.linear_kind(&e)
+            Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) => self.linear_kind(&e),
+            Type::Map(a, b) => self.linear_kind(&a).or_else(|| self.linear_kind(&b)),
+            // The two built-in sums, read through their variant lists since
+            // RFC-0126 §8.11's M4b. A DECLARED enum is left alone for the reason
+            // the record field is: `impl MustUse for Order` is how an author says
+            // one holding a `Txn` must be discharged.
+            ref r if crate::types::option_payload(r).is_some() => {
+                self.linear_kind(crate::types::option_payload(r).unwrap())
             }
-            Type::Map(a, b) | Type::Result(a, b) => {
-                self.linear_kind(&a).or_else(|| self.linear_kind(&b))
+            ref r if crate::types::result_payloads(r).is_some() => {
+                let (a, b) = crate::types::result_payloads(r).unwrap();
+                self.linear_kind(a).or_else(|| self.linear_kind(b))
             }
             _ => None,
         }
@@ -730,13 +737,10 @@ impl Owned {
             // stored at all. So an aggregate holds what it holds, and rule 4
             // says releasing it releases those places.
             //
-            // Two rows, and only two. Census §14 is the whole reason: `Option`
-            // and `Result` are how this language is told to write a fallible
-            // function, so a String built inside one had no owner in the
-            // RECOMMENDED style.
-            t @ (Type::Option(_) | Type::Result(..)) => {
-                owns_heap(&t, &self.types).then(|| DropKind::Deep(t))
-            }
+            // Census §14's two rows are the enum's row now: since RFC-0126
+            // §8.11's M4b a built-in sum RESOLVES to `| None | Some(T)` and
+            // `| Err(E) | Ok(T)`, so it takes the arm below, with the guard a
+            // declared enum already had.
             // A stored function value (RFC-0037) is `{ tag, captures }` and the
             // capture block IS heap — one `malloc` per evaluation of the lambda,
             // which is census §16. Phase 10b releases it: the block is one
@@ -788,6 +792,12 @@ impl Owned {
                     .then(|| DropKind::Deep(t))
             }
             Type::Lazy(_) => None,
+            // The surface spellings of the two built-in sums, which `resolve`
+            // no longer answers (RFC-0126 §8.11 M4b) but which a caller can still
+            // hand over unresolved. They take the enum's row, because they are it.
+            t @ (Type::Option(_) | Type::Result(..)) => (self.unbounded(ty).is_none()
+                && owns_heap(&t, &self.types))
+            .then(|| DropKind::Deep(t)),
             // ---- shapes that are not a runtime value ------------------------
             // A type operator survives only until `resolve` reaches its base, a
             // `Param` is erased by monomorphization, and an unresolved `Named`
@@ -931,62 +941,24 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             | Type::Map(..)
             | Type::Stream(_)
             | Type::Task(_) => true,
-            // A SUM whose payload is wider than one word travels BOXED in the
-            // boxing representation, and that box is heap whatever else the
-            // payload holds — `Option<Handle>` is three words behind one
-            // pointer (round twenty-nine, the same argument the recursive-name
-            // rule above already made: the representation's box IS heap). The
-            // word-class four (`Int`, `Bool`, `Str`, `Fn`) mirror the
-            // emitter's `payload_boxed`.
-            Type::Option(t) => {
-                !matches!(
-                    crate::types::resolve(&t, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || deeper(&t)
-            }
             Type::ArrayN(t, _) | Type::Lazy(t) => deeper(&t),
-            Type::Result(a, b) => {
-                !matches!(
-                    crate::types::resolve(&a, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || !matches!(
-                    crate::types::resolve(&b, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || deeper(&a)
-                    || deeper(&b)
-            }
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
+            // A SUM whose payload travels BOXED owns that box whatever else the
+            // payload holds — `Option<Handle>` is three words behind one pointer
+            // (round twenty-nine, the same argument the recursive-name rule above
+            // already made: the representation's box IS heap).
+            //
+            // One question, asked once, of every sum — `types::payload_boxed`,
+            // which is the emitter's own rule. It was written out here four
+            // times, as a hand-kept word list, and RFC-0126 §8.9 moved the rule
+            // out from under it: a payload two words wide rides in its slots now
+            // and the list still called it boxed (§8.11 recorded the drift).
+            // Since §8.11's M4b there is one arm as well as one rule: the two
+            // built-in sums resolve to their variant lists.
             Type::Enum(vs) => vs.iter().any(|v| {
-                v.payload.iter().any(|t| {
-                    !matches!(
-                        crate::types::resolve(t, types),
-                        Type::Int
-                            | Type::Bool
-                            | Type::Str
-                            | Type::Fn(..)
-                            | Type::Unit
-                            | Type::Never
-                            | Type::Param(_)
-                    ) || deeper(t)
-                })
+                v.payload
+                    .iter()
+                    .any(|t| crate::types::payload_boxed(t, types) || deeper(t))
             }),
             // A stored function value (RFC-0037) is `{ tag, captures }` and the
             // capture block IS heap — one `malloc` per evaluation of the lambda,
@@ -4228,6 +4200,21 @@ pub(crate) mod tests {
 
     // ---- census §14 at a `match`: the scrutinee and its payload ----------
 
+    /// `Option<T>`'s row as `release_kind` records it since RFC-0126 §8.11's M4b:
+    /// the RESOLVED type, which is the variant list `resolve` answers.
+    fn opt_row(t: Type) -> DropKind {
+        DropKind::Deep(Type::Enum(vec![
+            EnumVariant {
+                name: "None".to_string(),
+                payload: Vec::new(),
+            },
+            EnumVariant {
+                name: "Some".to_string(),
+                payload: vec![t],
+            },
+        ]))
+    }
+
     /// Census §14 at the third construct that walks a temporary. No arm keeps
     /// the scrutinee — both hand back a number — so the match is its last owner
     /// and releases it. `Stmt::IfLet` has had this row since Phase 10a and
@@ -4238,10 +4225,7 @@ pub(crate) mod tests {
         let src = "fn maybe(n: Int64) -> Option<String> { return Some(\"x\") } \
                    fn main() -> Int64 { let d = match maybe(1) { \
                    Some(s) => s.byteLength, None => 0, } return Int64(d) }";
-        assert_eq!(
-            drop_kinds(src, "main"),
-            vec![DropKind::Deep(Type::Option(Box::new(Type::Str)))]
-        );
+        assert_eq!(drop_kinds(src, "main"), vec![opt_row(Type::Str)]);
     }
 
     /// The other half of one rule. An arm that hands its payload out gives the
@@ -4854,7 +4838,7 @@ pub(crate) mod tests {
                    fn main() -> Int64 { let a = \"x\"; let b = \"y\"; \
                        let o = pick(a, b); return 0; }";
         let (o, _) = analyze_src(src);
-        let want = DropKind::Deep(Type::Option(Box::new(Type::Str)));
+        let want = opt_row(Type::Str);
         assert_eq!(o.owned_fns.get("pick"), Some(&want));
         assert_eq!(drop_kinds(src, "main"), vec![want]);
     }

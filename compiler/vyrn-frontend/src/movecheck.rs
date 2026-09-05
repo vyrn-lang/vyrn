@@ -2782,16 +2782,27 @@ impl MoveCheck<'_> {
                 .map(|t| crate::types::resolve(t, self.decl.decls())),
             p,
         ) {
-            (Some(Type::Option(t)), Pattern::Variant(v, _)) if v == "Some" => vec![Some(*t)],
-            (Some(Type::Result(t, _)), Pattern::Variant(v, _)) if v == "Ok" => vec![Some(*t)],
-            (Some(Type::Result(_, e)), Pattern::Variant(v, _)) if v == "Err" => vec![Some(*e)],
-            (Some(Type::Result(t, _)), Pattern::Success(_)) => vec![Some(*t)],
-            (Some(Type::Result(_, e)), Pattern::Failure(_)) => vec![Some(*e)],
+            // One variant list for every sum since RFC-0126 §8.11's M4b, and
+            // `??`'s pair names a TAG in it: variant 1 succeeds, variant 0 fails.
             (Some(Type::Enum(vs)), Pattern::Variant(name, _)) => vs
                 .iter()
                 .find(|v| &v.name == name)
                 .map(|v| v.payload.iter().cloned().map(Some).collect())
                 .unwrap_or_else(|| vec![None; n]),
+            // `??`'s pair (RFC-0079) names a TAG. It types the binder on a
+            // `Result` and not on an `Option`, which is where it stood before
+            // RFC-0126 §8.11's M4b and is a defect of its own — §8.13 records it
+            // rather than fixing it here, because fixing it moves bytes and this
+            // step promised none.
+            (Some(ref r), Pattern::Success(_) | Pattern::Failure(_))
+                if crate::types::result_payloads(r).is_some() =>
+            {
+                let (ok, err) = crate::types::result_payloads(r).expect("the guard just asked");
+                match p {
+                    Pattern::Success(_) => vec![Some(ok.clone())],
+                    _ => vec![Some(err.clone())],
+                }
+            }
             _ => vec![None; n],
         };
         // A place, and since RFC-0092 M3 an ELEMENT of one. `m[k]` reaches this
@@ -3564,11 +3575,14 @@ impl MoveCheck<'_> {
                 let Some(sty) = self.type_of(scrutinee) else {
                     return;
                 };
-                let sides = match crate::types::resolve(&sty, self.decl.decls()) {
-                    Type::Result(ok, err) if both_sides => vec![*ok, *err],
-                    Type::Result(ok, _) => vec![*ok],
-                    Type::Option(t) => vec![*t],
-                    _ => return,
+                let r = crate::types::resolve(&sty, self.decl.decls());
+                let sides = match crate::types::result_payloads(&r) {
+                    Some((ok, err)) if both_sides => vec![ok.clone(), err.clone()],
+                    Some((ok, _)) => vec![ok.clone()],
+                    None => match crate::types::option_payload(&r) {
+                        Some(t) => vec![t.clone()],
+                        None => return,
+                    },
                 };
                 // `String` payloads only: the one shape the corpus leaks,
                 // and the one whose free is a single pointer on every

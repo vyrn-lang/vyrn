@@ -2110,27 +2110,21 @@ impl<'a> Builder<'a> {
         let rt = vyrn_frontend::types::resolve(sty, &decls);
         let payloads: Vec<(String, Type)> = match p {
             Pattern::Other => Vec::new(),
-            Pattern::Success(n) => match &rt {
-                Type::Option(t) => vec![(n.clone(), (**t).clone())],
-                Type::Result(t, _) => vec![(n.clone(), (**t).clone())],
-                _ => return gap("a `Some` pattern on a non-option", line),
-            },
-            Pattern::Failure(n) => match &rt {
-                Type::Result(_, e) => vec![(n.clone(), (**e).clone())],
-                Type::Option(_) => Vec::new(),
-                _ => return gap("an `Err` pattern on a non-result", line),
-            },
-            // Since RFC-0126 §8 the built-in sums' arms are variant patterns
-            // too, and the SCRUTINEE says which half of the sum a name names.
-            Pattern::Variant(v, names) if matches!(rt, Type::Option(_) | Type::Result(..)) => {
-                match (&rt, v.as_str()) {
-                    (_, "None") => Vec::new(),
-                    (Type::Option(t), "Some") => vec![(names[0].clone(), (**t).clone())],
-                    (Type::Result(t, _), "Ok") => vec![(names[0].clone(), (**t).clone())],
-                    (Type::Result(_, e), "Err") => vec![(names[0].clone(), (**e).clone())],
-                    _ => return gap("a variant pattern on a built-in sum", line),
+            // `??`'s pair (RFC-0079) names a TAG rather than a variant, and the
+            // SCRUTINEE says which one: variant 1 succeeds, variant 0 fails. Since
+            // RFC-0126 §8.11's M4b that is one list for every sum, so the two
+            // built-in spellings have no arm of their own here.
+            Pattern::Success(n) | Pattern::Failure(n) => match &rt {
+                Type::Enum(vs) if vs.len() == 2 => {
+                    let at = usize::from(matches!(p, Pattern::Success(_)));
+                    vs[at]
+                        .payload
+                        .first()
+                        .map(|t| vec![(n.clone(), t.clone())])
+                        .unwrap_or_default()
                 }
-            }
+                _ => return gap("a `??` pattern on a scrutinee with no two tags", line),
+            },
             Pattern::Variant(v, names) => match &rt {
                 Type::Enum(variants) => {
                     let Some(var) = variants.iter().find(|x| x.name == *v) else {
@@ -2822,7 +2816,15 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, out)?;
                 let decls = vyrn_frontend::types::decl_map(self.program);
-                if let Type::Enum(_) = vyrn_frontend::types::resolve(&ity, &decls) {
+                // A DECLARED `Fallible` enum (RFC-0080 M3) asks its impl; the two
+                // built-in sums have tags, and since RFC-0126 §8.11's M4b they
+                // resolve to variant lists too — so the test is which list it is,
+                // not whether there is one.
+                let r = vyrn_frontend::types::resolve(&ity, &decls);
+                if matches!(r, Type::Enum(_))
+                    && vyrn_frontend::types::option_payload(&r).is_none()
+                    && vyrn_frontend::types::result_payloads(&r).is_none()
+                {
                     return self.fallible_try(ity, sv, res, tid, out);
                 }
                 // Failure: the exit's drops, then the propagated value leaves.

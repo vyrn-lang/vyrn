@@ -515,6 +515,21 @@ fn deep(t: &Type, decls: &HashMap<String, TypeDecl>, depth: usize) -> Type {
         Type::SmallArray(a, n) => Type::SmallArray(d(a), *n),
         Type::Result(a, b) => Type::Result(d(a), d(b)),
         Type::Map(a, b) => Type::Map(d(a), d(b)),
+        // Since RFC-0126 §8.11's M4b `resolve` answers `Enum` for the two
+        // built-in sums, so an alias whose payload is a name comes back with the
+        // name still in it unless the walk descends here.
+        Type::Enum(vs) => Type::Enum(
+            vs.iter()
+                .map(|v| vyrn_frontend::ast::EnumVariant {
+                    name: v.name.clone(),
+                    payload: v
+                        .payload
+                        .iter()
+                        .map(|p| deep(p, decls, depth + 1))
+                        .collect(),
+                })
+                .collect(),
+        ),
         Type::Fn(ps, r) => Type::Fn(ps.iter().map(|p| deep(p, decls, depth + 1)).collect(), d(r)),
         Type::App(n, args) => Type::App(
             n.clone(),
@@ -575,6 +590,16 @@ fn defaulted(a: &Type, b: &Type) -> bool {
             | (Type::SmallArray(x, _), Type::SmallArray(y, _)) => walk(x, y),
             (Type::Result(x1, x2), Type::Result(y1, y2))
             | (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),
+            // The resolved form of every sum since RFC-0126 §8.11's M4b — an
+            // `Option` and a `Result` reach here as variant lists, and the
+            // defaulted half is a payload rather than a type argument.
+            (Type::Enum(v1), Type::Enum(v2)) if v1.len() == v2.len() => {
+                v1.iter().zip(v2).all(|(x, y)| {
+                    x.name == y.name
+                        && x.payload.len() == y.payload.len()
+                        && x.payload.iter().zip(&y.payload).all(|(p, q)| walk(p, q))
+                })
+            }
             (Type::App(n1, a1), Type::App(n2, a2)) if n1 == n2 && a1.len() == a2.len() => {
                 a1.iter().zip(a2).all(|(x, y)| walk(x, y))
             }
