@@ -193,6 +193,10 @@ mod tests {
     }
 
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
+        // Every process that runs a `gen fn` installs the engine itself: under
+        // nextest a test is its own process, and the sibling that used to
+        // install it is not there.
+        vyrn_genwasm::install();
         let files: Vec<(&str, &str)> = files
             .iter()
             .copied()
@@ -218,6 +222,7 @@ mod tests {
     }
 
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
+        vyrn_genwasm::install();
         match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds
@@ -1240,6 +1245,7 @@ mod remote_tests {
     use super::*;
 
     fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
+        vyrn_genwasm::install();
         match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds
