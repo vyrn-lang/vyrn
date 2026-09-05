@@ -6439,6 +6439,47 @@ deletion removes rather than moves, and five sentences.
 
 `interp.rs` is 11,549 lines to 11,105.
 
+#### Why the deletion did not follow (2026-09-05)
+
+The four steps above were the deletion's whole preparation, and the fifth was
+`interp.rs`, `Val`, the eighteen `Carrier::Interp` rows, `--engine interp`,
+`vyrn-play`'s use and every doc-comment mention. It is not taken. What blocks
+it is one row of the census and nothing else, and the row is named here so the
+next slice starts from a location rather than from a search.
+
+**The blocker: `gen-fn-at-run-time`.** Seven `std` modules and one site module
+call a `gen fn` from a `test` block. No compiling route lowers such a call —
+the direct backend refuses it by name and the textual one would too — so
+`vyrn test` over those eight files runs on the tree-walker and nowhere else.
+
+| where | what names the interpreter |
+|---|---|
+| `tests/std_suite.rs` `GEN_TESTED` | the seven std modules, in one list |
+| `tests/hints.rs`, `pages.rs`, `tw.rs`, `von.rs`, `vyx.rs` | one `--engine interp` each, on the same seven |
+| the site gate | `site/app/apidoc.vyrn`, whose `gen fn proseHtml` its own tests call |
+
+**Two more things name it, and neither is a blocker.** `--workers` is
+RFC-0025's pool, which is N interpreters and goes WITH the interpreter rather
+than before it — a decision, not an obstacle. `VYRN_FIXTURES=interp` is the
+second column the ninth slice added and said would go the day the interpreter
+does. Both are one deletion each, on the day the row above is closed.
+
+**What closing it costs, as far as this slice can price it.** The machinery
+exists: `vyrn-genwasm` compiles a generator's module by clearing `is_gen` and
+setting `checker::set_gen_host`, which is precisely "the generation-only names
+are ordinary code here". Pointing it at `vyrn test` compiles the whole test
+file that way, and a body reaching `moduleInterface` or `contractOf` then wants
+the three atom-stream imports (`__vyrnGenReflect`, `__vyrnGenNextInt`,
+`__vyrnGenNextStr`) that `vyrn-cli`'s embedded host does not define. So the
+work is a host, a decision about which files compile in gen-host mode, and a
+gate; it is not a line and it is not a search.
+
+**The tree is not half-deleted.** Every step above stands on its own: the
+default is the compiled route, the suites say which of them needs the other one
+and why, parity compares the two compiling routes, and the generation bridge no
+longer names an interpreter type. `interp.rs` still compiles, still runs, and
+is still what `--engine interp` selects.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
