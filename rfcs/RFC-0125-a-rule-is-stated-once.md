@@ -4664,6 +4664,162 @@ blocks) and `site/app` (154).
 No blessed snapshot moved, and the structural census moves by one row: shared
 machinery 3,768 to 3,983, which is the cache and its fingerprint inside
 `movecheck.rs`.
+
+**The residue slice (2026-09-06): a keystroke paid for a generation it already
+had, and what is left after that is the placer.**
+The memo slice left four numbers above the editor before the kernel, and named
+what was left as the two generator programs a load runs on the way to the one
+the editor holds. It asked the next slice to find out why a keystroke re-runs
+two generators. The answer is that the MEASUREMENT re-ran them. The editor does
+not.
+
+**The instrument first, because the last two findings here were both about the
+instrument.** `VYRN_BUILD_PROFILE=1` armed `prof`'s phase table in every crate
+the editor calls, and nothing printed it: the printer runs at the end of a
+command, and an editor's session is one command. The server prints the table at
+the end of ONE analysis now, which is the unit a keystroke is, and the test
+lets the server's stderr through when the flag is set. `VYRN_NO_MEMO=1` joins
+`VYRN_NO_PLACER=1`, so the three columns of the table below are one build and
+one sitting rather than two commits.
+
+**Re-measured on the memo slice's own instrument.** The same test, the same
+four files, medians of three, all three columns in one sitting:
+
+| file | before the kernel | with the kernel | with the memo | what the memo slice read |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 151 ms | 1,106 ms | 359 ms | 128 / 990 / 305 |
+| site/app/docs.vyrn | 364 ms | 1,125 ms | 535 ms | 323 / 1,045 / 476 |
+| site/app/guide.vyrn | 115 ms | 353 ms | 182 ms | 96 / 285 / 158 |
+| site/app/bench.vyrn | 28 ms | 121 ms | 69 ms | 27 / 97 / 57 |
+
+The shape holds. This machine is a little slower and was shared with other
+gates, which is why the tables below say medians of five.
+
+**The first residue was the instrument, and it was the largest item in the
+measurement.** `docs.vyrn`'s load spent 261 ms over its three loads. Eight of
+those milliseconds read and parsed; the rest RAN `apiDocs` over the whole of
+`std`, once per keystroke. Every client in `lsp_e2e` spawns the server with
+`VYRN_NO_GEN_CACHE=1`, and for a correctness reason: the RFC-0033 fixtures are
+written and rewritten under the same paths, so a synthesized module another run
+left in the shared cache would answer for the one this run wrote. A measurement
+is the one client that must not. An editor's cache is ON — participating in it
+is why the server has `gen_cache_get` at all — so the keystroke measurement now
+has a cache of its OWN, in a directory under the system temp rather than the
+user's `~/.vyrn/cache/gen`.
+
+**What a cache hit decides is more than the generation.** `run_generator`
+defers the generator's re-read and its check to the MISS path, so on a hit the
+loader never loads the generator as a program. The `check`, `synthesize`,
+`movecheck` and `floor` rows a keystroke showed twice leave the phase table
+entirely. The kernel never judged those two programs in the first place:
+`refusals` returns a comptime program's diagnostics before it runs the placer,
+and has since the accumulation slice. A generator a tool holds is judged when
+it is compiled, not when its importer is edited.
+
+`docs.vyrn` falls from 535 ms to 363 and `guide.vyrn` from 182 to 151. The
+column each is read against falls with it, so this closes no gap. It stops the
+measurement reporting a cost that only the measurement pays.
+
+**What a keystroke costs now**, medians of five alternating runs, with the
+cache an editor has:
+
+| file | before the kernel | with the kernel | with the memo | above the first column |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 125 ms | 993 ms | 376 ms | 251 ms |
+| site/app/docs.vyrn | 126 ms | 767 ms | 363 ms | 237 ms |
+| site/app/guide.vyrn | 65 ms | 404 ms | 151 ms | 86 ms |
+| site/app/bench.vyrn | 27 ms | 148 ms | 75 ms | 48 ms |
+
+**Where the rest of it is, phase by phase.** One analysis — the last of the
+ten the test sends — under `VYRN_BUILD_PROFILE=1`. The keystroke column is
+higher than the table above because the server writes a table per analysis:
+
+| file | keystroke | load | `lower_with` | `core::build` | `build_outside` | the placer |
+|---|---|---|---|---|---|---|
+| chart.vyrn | 499 ms | 50 ms | 64 ms | 139 ms, 122 bodies | 35 ms | 253 ms |
+| docs.vyrn | 313 ms | 42 ms | 43 ms | 99 ms, 69 bodies | 14 ms | 169 ms |
+| guide.vyrn | 200 ms | 48 ms | 42 ms | 41 ms, 60 bodies | 15 ms | 107 ms |
+| bench.vyrn | 99 ms | 12 ms | 12 ms | 19 ms, 102 bodies | 13 ms | 47 ms |
+
+The residue is the placer, and inside it the core it builds. There is no memo
+of a pure function left to take: `lower_with` is `checker::record` and the
+lowering, and both answer about the program the keystroke just changed.
+
+**Which bodies the placer still builds, and this is the finding.** A body is
+built when the memo cannot key it or may not serve it. Timed one at a time and
+split by where the body is declared:
+
+| file | the root's bodies | their cost | an imported module's | theirs |
+|---|---|---|---|---|
+| bench.vyrn | 99 | 12.2 ms | 3 | 1.0 ms |
+| guide.vyrn | 39 | 7.4 ms | 21 | 15.8 ms |
+| chart.vyrn | 70 | 20.0 ms | 52 | 114.7 ms |
+| docs.vyrn | 18 | 4.5 ms | 51 | 91.8 ms |
+
+The ROOT's bodies have no key — the root module is the one a keystroke edits —
+and they are CHEAP: 20 ms of chart's 139 and 4.5 ms of docs's 99. Keying them
+by their own text would buy about a tenth of the gap.
+
+The expensive ones are the imported bodies condition 2 forbids: the placer
+wrote a row for them, so serving them would silently drop that row. On
+`chart.vyrn` that is 52 bodies and 115 ms, twenty-eight of them in
+`std/vyx.vyrn`.
+
+**And condition 2 cannot be lifted by recording the row.** A placement is
+addressed by NODE. `Node::id()` is the address of the `Expr` or the `Stmt`, and
+every table `place_frames` writes is keyed by one — `own.plan.arg_drops`, its
+`owners`, `receiver_frees`, `receiver_holes`, the `Placed` edge and arm rows,
+and the release rows themselves. A keystroke re-parses the root and clones
+every other module out of the parse cache, so last keystroke's addresses name
+nothing this keystroke owns. The memo records "every field of the kernel's own
+refusal and nothing an address could reach" for exactly that reason, and the
+same reason stops an entry growing to hold the rows. What would serve those
+bodies is not a bigger memo. It is a program whose nodes survive an edit, and
+that is a different thing to build.
+
+**So the target is not reached, and this is by how much and where.** The target
+was the editor before the kernel. `bench.vyrn` stands 48 ms above it,
+`guide.vyrn` 86 ms, `docs.vyrn` 237 ms and `chart.vyrn` 251 ms. Of `chart`'s
+253 ms of placer, 115 ms is the imported bodies above, 20 ms is the root's, 64
+ms is the lowering the placer needs before it can name an instance, and 35 ms
+is `build_outside`. A slice that wants the first column has to make a body
+cheaper to build or a node stable across an edit; it has no third door.
+
+**The two pins held.** `VYRN_WASM_MANIFEST=check` is green on `wasmhash`, so
+no emitted byte moved — this slice touches the editor and its measurement and
+nothing an engine reads. `a_rule_that_left_the_checker_is_still_shown_in_the_editor`
+passes, which is where the editor is pinned against what `vyrn check` prints.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` and
+`TEMP` pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 561 passed, 75 ignored |
+| `kernel` `--ignored` | 1, 99 s |
+| `coretables` `--ignored` | 1, 88 s |
+| `typed` `--ignored` | 1, 208 s |
+| `effects` `--ignored` | 2, 314 s |
+| `fixtures` `--ignored` | 1, 81 s |
+| `vyrn-frontend` | 1,249 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,425 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored — where `lsp_e2e` runs |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 20 s |
+| `parity` `--ignored`, release | 41 of 41, 302 s |
+| the residue ratchet | 1, 235 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 98 s, no byte moved |
+| `genwasm` release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 130 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files, 18 s |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 blocks and 154 over 25 files |
+
+No blessed snapshot moved and no census row moved: the change is 21 lines in
+`vyrn-lsp`, which is not shared machinery and is counted by nothing.
+
 **The scrutinee slice (2026-09-05): the core counts its own reads, and round
 twenty-seven's table is gone.**
 
