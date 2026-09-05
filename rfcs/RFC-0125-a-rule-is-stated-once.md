@@ -7396,6 +7396,172 @@ than the only opinion.
 One table for the fourteenth and fifteenth slices, run in §1.4's order, one at a
 time, in the foreground, with `TMP` and `TEMP` pointed at a shallow scratch
 directory outside the checkout.
+#### The switch slice (2026-09-06): `if let` is a shape, not a form
+
+The form census §5.4a measured a collapse and did not take it. That census
+is RFC 0127, on the track beside this one. This branch does not carry the
+file, so the number is written without its hyphen.
+
+`if let P = e { A } else { B }` and `match e { P => { A } _ => { B } }` are
+one rule written twice in each emitter, and the census counted 37 mentions of
+the form. The rewrite was refused because it moved bytes: an `if let` emitted
+a two-way `br i1` on an `icmp` and a `match` emitted a `switch`, so every
+module that wrote one would have grown.
+
+**The answer is RFC-0126 §8.12's, one level up.** State the rule once, and put
+the optimization in ONE place, keyed on the SHAPE the core gives rather than on
+the form the parser built. §8.12 did this for a built-in sum against a declared
+enum. This slice does it for a two-arm switch against a many-arm one.
+
+**Step one: one lowering.** The core already lowered `Stmt::IfLet` to the
+`St::Switch` a `match` lowers to. It did not state the same arm edges: the
+`match` arm calls `edge_drops` per arm and the `if let` arm called none. It
+calls them now, on both arms. **Nothing moved** — `VYRN_WASM_MANIFEST=check`
+green on all 173 — because RFC-0114 Rule N places no edge row at an `if let`
+join anywhere in the corpus. The rule is stated where it belongs rather than
+left true by accident.
+
+The kernel and the placer lost no `if let` case, because they had none to lose:
+both read `St::Switch` and neither had ever known which form built it. That is
+the milestone working, and it is why step two was possible at all.
+
+**Step two: one emission, and one optimization.** The shape is
+`codegen::two_way`, and it is four lines: two arms, one of which names a tag
+and the other of which is the default. That is exactly what an `if let` builds
+and exactly what a two-arm `match` over `_` builds, and it is NOT what a
+two-arm `match` over two variants builds — which is why the corpus's `Some` /
+`None` matches keep their `switch` and their bytes.
+
+Both emitters read it once now:
+
+- the textual one writes `icmp eq i64 %tag, T` and a `br i1` where the shape
+  says two-way, and the `switch` otherwise;
+- the direct one writes `if` / `else` where the shape says two-way, and the
+  chain of `if`s inside one block otherwise.
+
+Then each emitter's `if let` lowering was deleted. The textual one lost
+`gen_pattern_test` and `gen_pattern_binds` with it — both had one caller, and
+both re-spelled what the arm loop already did.
+
+**Two things had to be reconciled, and one of them was the finding.** The
+direct backend's `if let` took a local of its own for the scrutinee's address,
+on the argument that an inner one's scrutinee would take the same scratch slot
+back. The emitted order says otherwise: nothing reads the address after an
+arm's binds, and an inner construct is inside an arm. The two forms share the
+scratch slot now, and a function that writes both declares one local where it
+declared two. The other was an `else` with an empty body, which an `if let`
+with no `else` produced through the shared path — one byte, on every such site.
+`Frame::rewind` gives it back, and the test is the emitted body itself rather
+than a list of the four things an arm can write.
+
+**The probe, and the manifest.** The census's probe is the same function written
+both ways. No `.wat` tool is in the pinned toolchain, so this measures the
+`.wasm` the manifest hashes.
+
+| probe | before | after |
+|---|---|---|
+| the `if let` half | 5,398 | 5,398 |
+| the `match` half | 5,416 | 5,416 |
+
+Both byte for byte, which is the answer §5.4a wanted: the two forms cost what
+they cost, and neither pays for the other.
+
+Over the corpus, 18 of 173 modules moved and **no module grew**.
+
+| example | before | after | delta |
+|---|---|---|---|
+| `refutablelet.vyrn` | 6,366 | 6,306 | -60 |
+| `jchain.vyrn` | 8,126 | 8,066 | -60 |
+| `jsonplace.vyrn` | 10,536 | 10,476 | -60 |
+| `tryplace.vyrn` | 12,693 | 12,640 | -53 |
+| `clidemo.vyrn` | 20,651 | 20,639 | -12 |
+| `clifail.vyrn` | 20,510 | 20,498 | -12 |
+| `contractquery.vyrn` | 27,985 | 27,981 | -4 |
+| `controlflow.vyrn` | 7,191 | 7,187 | -4 |
+| `matchown.vyrn` | 13,850 | 13,846 | -4 |
+| `nestedsum.vyrn` | 12,198 | 12,195 | -3 |
+| eight more, listed below | | | 0 |
+
+The ten that shrink are the two-arm `match` over `_` the shape now recognises —
+the refutable-`let` desugar's own output (RFC-0121). The eight at zero are
+`copy.vyrn`, `knucleotide.vyrn`, `namedplace.vyrn`, `rest.vyrn`,
+`revcomp.vyrn`, `simdmem2.vyrn`, `validatestr.vyrn` and `vlog.vyrn`: the same
+size in different bytes, because they share a scratch local where they used to
+take two and every local index above it moved down one. The manifest was
+regenerated in that one commit, and it is the only thing that commit
+regenerated.
+
+**Step three: the readers.** The three passes that walk `Stmt::IfLet` were read
+one site at a time. Five sites asked the same question the `Stmt::If` arm above
+them already answered, in the same words, and are one arm now:
+`contains_spawn` and `calls_block` in `checker.rs`, `paths` and
+`stmt_mentions` in `movecheck.rs`, and `mount_calls_block` in `interp.rs`. The
+field name differs — `cond` against `scrutinee` — and an or-pattern binds both
+to one name, which is what the `calls_block` arm one file over had already
+done.
+
+Six sites stay, and each names what it carries.
+
+| where | why it stays |
+|---|---|
+| `checker::block` | RFC-0122's optional projection has ONE legal position, and it is this scrutinee; the refusal names the form |
+| `checker::captures_block` | the pattern's binders are in scope in the then-block and nowhere else |
+| `checker::global_ref_block` | the same, for the binders that shadow module state |
+| `movecheck::stmt` | the scrutinee is consumed eagerly and the binders are the then-arm's |
+| `movecheck::declared_in` | the pattern's binders are names the block declares |
+| `interp::stmt` | RFC-0122's prologue, then the pattern test |
+
+**The mention count did not fall, and that is the honest number.**
+
+| file | before | after |
+|---|---|---|
+| `vyrn-frontend/src/checker.rs` | 7 | 7 |
+| `vyrn-frontend/src/movecheck.rs` | 7 | 7 |
+| `vyrn-frontend/src/interp.rs` | 3 | 3 |
+| `vyrn-codegen/src/lib.rs` | 7 | 7 |
+| `vyrn-codegen/src/direct.rs` | 3 | 3 |
+| `vyrn-lower/src/core.rs` | 2 | 2 |
+
+An or-pattern still names the form, so a merge deletes a rule and no mention.
+RFC-0126 §8.5 said this about a field and it is the same rule about an arm: the
+metric counts a NAME. What fell is what the names cost.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-codegen/src/lib.rs` | 19,194 | 19,151 |
+| `compiler/vyrn-codegen/src/direct.rs` | 16,784 | 16,820 |
+| `compiler/vyrn-codegen/src/wasm.rs` | 1,518 | 1,534 |
+| `compiler/vyrn-frontend/src/checker.rs` | 16,147 | 16,137 |
+| `compiler/vyrn-frontend/src/interp.rs` | 11,107 | 11,101 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 9,885 | 9,887 |
+| `compiler/vyrn-lower/src/core.rs` | 4,238 | 4,239 |
+
+`direct.rs` grew by 36 lines, and that is the price stated plainly: its two-way
+emission is general where the `if let` arm was particular, and a wrapper that
+serves both shapes is longer than one that serves one. `movecheck.rs` grew by
+two, because rustfmt spends a line on a three-way or-pattern that two arms fit
+on two lines. Both are one rule where there were two.
+
+**Two censuses moved with the slice.** RFC-0126's surface census: `Type::Int`,
+`Type::Enum` and `Type::Map` in the native column by 1, 2 and 1, and the total
+2,300 to 2,296 — the deleted `gen_pattern_test`, `gen_pattern_binds` and the
+`if let` map-lookup tail named all four. M3's structural census over
+`movecheck.rs`: 916 / 725 / 2,295 / 73 / 3,786 / 2,092 over 9,887, the second
+column up two for the reason above. One test pin moved: a codegen unit test
+asked for the label `il.then`, which no longer exists; it asks for the two-way
+branch itself now, which is the rule and not its spelling.
+
+**What this leaves.** §5.4a's own next step was one emission for a
+two-arm `match` and an `if let`, priced against the manifest. It is priced and
+it is taken. Whether `if let` then becomes a parser rewrite is still §5.4a's
+question, and it is a cheaper one now: the two forms emit the same branch, so
+the rewrite would move no byte on the branch. What it would still move is the
+six diagnostics above, and that is the argument the row waits on.
+
+#### The switch slice's gates (2026-09-06)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
 
 | gate | result |
 |---|---|
@@ -7431,6 +7597,33 @@ The workspace's `compiler/**/*.rs`, excluding `target`, is 204,164 lines to
 of those moved: `prepare` and `link` are the two halves that were private to one
 function. `vyrn-cli`'s `main.rs` is up 106 and `wasmrun.rs` up 66, which is the
 pool and the translated module. The seven test files are down 65 between them.
+| `cargo test -p vyrn-cli`, no filter | 553 passed, 74 ignored, and one failure this slice did not cause |
+| `kernel` `--ignored` | 1, 31 s |
+| `coretables` `--ignored` | 1, 31 s |
+| `typed` `--ignored` | 1, 74 s |
+| `effects` `--ignored` | 2, 76 s |
+| `fixtures` `--ignored` | 1, 25 s |
+| `vyrn-frontend` | 1,249 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,425 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 234 s |
+| the residue ratchet | 188 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, against the manifest this slice rewrote |
+| `genwasm` `--release --features wasm-gen`, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 41 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files, 11.5 s |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
+
+The one failure is `fallible.rs`'s `a_generic_impl_serves_every_payload_type`,
+which was red at this branch's point and is red for a reason of its own: "no
+lowering for a string operator with a non-string operand", a generic
+`Fallible` impl whose monomorphization the direct backend does not solve.
+Another track carries it. `site/app/apidoc.vyrn` runs under `--engine interp`,
+which is the `gen-fn-at-run-time` row the slice above named and not a change
+here.
 
 ### M6 — the other two judgments
 

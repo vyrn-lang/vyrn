@@ -7050,8 +7050,9 @@ mod linear {
                     let (i, v) = (paths(index, name), paths(value, name));
                     (i.0 || v.0, i.1 || v.1)
                 }
-                Stmt::If { cond, .. } | Stmt::While { cond, .. } => paths(cond, name),
-                Stmt::IfLet { scrutinee, .. } => paths(scrutinee, name),
+                Stmt::If { cond: e, .. }
+                | Stmt::While { cond: e, .. }
+                | Stmt::IfLet { scrutinee: e, .. } => paths(e, name),
                 Stmt::ForIn { iter, .. } => paths(iter, name),
                 Stmt::Drop { name: n, .. } => (n == name, n == name),
                 Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => none,
@@ -7245,8 +7246,9 @@ mod linear {
             | Stmt::SetField { value, .. }
             | Stmt::Expr(value) => mentions(value, name),
             Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
-            Stmt::If { cond, .. } | Stmt::While { cond, .. } => mentions(cond, name),
-            Stmt::IfLet { scrutinee, .. } => mentions(scrutinee, name),
+            Stmt::If { cond: e, .. }
+            | Stmt::While { cond: e, .. }
+            | Stmt::IfLet { scrutinee: e, .. } => mentions(e, name),
             Stmt::ForIn { iter, .. } => mentions(iter, name),
             Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| mentions(e, name)),
             Stmt::Drop { name: n, .. } => n == name,
