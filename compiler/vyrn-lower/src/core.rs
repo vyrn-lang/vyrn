@@ -1560,6 +1560,7 @@ impl<'a> Builder<'a> {
                 let from = borrow_root(&sv, consuming);
                 let binds = self.bind_pattern(pattern, &sty, consuming, *line, from, &mut t)?;
                 self.block(then_block, &mut t)?;
+                let frees = self.arm_frees(sid, 0, &binds, &mut t);
                 self.scope.truncate(mark);
                 let mut e = Vec::new();
                 if let Some(blk) = else_block {
@@ -1569,14 +1570,14 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: vec![
                         Arm {
-                            frees: None,
+                            frees: Some(frees),
                             binds,
                             body: t,
                             site: sid,
                             index: 0,
                         },
                         Arm {
-                            frees: None,
+                            frees: Some(Vec::new()),
                             binds: Vec::new(),
                             body: e,
                             site: sid,
@@ -1827,6 +1828,31 @@ impl<'a> Builder<'a> {
         } else {
             Old::Nothing
         }
+    }
+
+    /// Round forty's releases, derived: the payload binders the kernel found
+    /// still held where this arm ends, released there.
+    ///
+    /// RFC-0125 §3 M3, the derivation slice. The FIRST build states none, so
+    /// [`crate::kernel::placement`] reports every binder an arm still holds —
+    /// which is the whole of the rule — and the second build reads the rows
+    /// back out of [`Placed`]. Nothing here asks `own.rs`, and the answer is
+    /// the same one the kernel refuses a leak by.
+    fn arm_frees(&mut self, site: usize, arm: u32, binds: &[Name], out: &mut Vec<St>) -> Vec<Name> {
+        let mut frees: Vec<Name> = Vec::new();
+        let Some(rows) = placed_arm(site, arm) else {
+            return frees;
+        };
+        for b in binds {
+            let src = self.body.names[*b as usize].source.clone();
+            if let Some((_, holes)) = rows.iter().find(|(n, _)| *n == src) {
+                self.body.names[*b as usize].holes =
+                    holes.iter().map(|h| format!(".{h}")).collect();
+                out.push(St::Drop(*b, Site::None, 0));
+                frees.push(*b);
+            }
+        }
+        frees
     }
 
     /// The streams every enclosing `for` walks, closed on the way out of the
@@ -2778,18 +2804,7 @@ impl<'a> Builder<'a> {
                         }
                         ArmBody::Block(blk) => self.block(blk, &mut body)?,
                     }
-                    let mut frees: Vec<Name> = Vec::new();
-                    if let Some(rows) = self.own.plan.arm_payload_free(mid, i as u32) {
-                        for b in &binds {
-                            let src = &self.body.names[*b as usize].source;
-                            if let Some((_, _, holes)) = rows.iter().find(|(n, _, _)| n == src) {
-                                self.body.names[*b as usize].holes =
-                                    holes.iter().map(|h| format!(".{h}")).collect();
-                                body.push(St::Drop(*b, Site::None, 0));
-                                frees.push(*b);
-                            }
-                        }
-                    }
+                    let frees = self.arm_frees(mid, i as u32, &binds, &mut body);
                     self.edge_drops(mid, i as u32, &mut body)?;
                     self.scope.truncate(mark);
                     core_arms.push(Arm {
@@ -2865,19 +2880,21 @@ impl<'a> Builder<'a> {
                     site: Site::None,
                     releases: false,
                 });
+                let ok_frees = self.arm_frees(tid, 1, &ob, &mut ok);
+                let fail_frees = self.arm_frees(tid, 0, &fb, &mut fail);
                 self.scope.truncate(mark);
                 out.push(St::Switch {
                     on: sv,
                     arms: vec![
                         Arm {
-                            frees: None,
+                            frees: Some(fail_frees),
                             binds: fb,
                             body: fail,
                             site: tid,
                             index: 0,
                         },
                         Arm {
-                            frees: None,
+                            frees: Some(ok_frees),
                             binds: ob,
                             body: ok,
                             site: tid,
@@ -2953,14 +2970,14 @@ impl<'a> Builder<'a> {
             on: sv,
             arms: vec![
                 Arm {
-                    frees: None,
+                    frees: Some(Vec::new()),
                     binds: Vec::new(),
                     body: fail,
                     site: tid,
                     index: 0,
                 },
                 Arm {
-                    frees: None,
+                    frees: Some(Vec::new()),
                     binds: Vec::new(),
                     body: ok,
                     site: tid,
@@ -3345,6 +3362,7 @@ thread_local! {
     static REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
+    static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
     /// [`checker::Recorded::joins`] for the program last lowered on this
     /// thread — see [`join_ty`].
     static JOINS: std::cell::RefCell<std::collections::HashMap<usize, Type>> =
@@ -3436,6 +3454,27 @@ pub struct Facts {
     /// are its own to give back ([`St::Switch`]'s `consuming`). A site
     /// absent from the map is one this pass states no answer for.
     pub consuming: std::collections::HashMap<usize, bool>,
+}
+
+/// What the kernel decided over the core's own first build, keyed the way the
+/// emitters key it — RFC-0125 §3 M3, the derivation slice.
+///
+/// The first build states no release the kernel has not judged owed, so the
+/// judgment reports every one of them ([`crate::kernel::placement`]), and the
+/// second build writes them down. A table in `own.rs` computed the same rows
+/// a second time from `movecheck`'s facts; this is the one statement of the
+/// rule, and the corpus test diffs it against what that table said.
+#[derive(Default, Clone, Debug)]
+pub(crate) struct Placed {
+    /// Round forty's table, derived: `(switch site, arm) -> [(binder, holes)]`,
+    /// the payload binders the kernel found still held where their arm ends.
+    arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+}
+
+/// The binders the kernel found held at the end of one arm, or `None` where
+/// it found none — read by the second build, empty on the first.
+fn placed_arm(site: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
+    PLACED.with(|p| p.borrow().arms.get(&(site, arm)).cloned())
 }
 
 /// The core's answers for the program last analysed on this thread. `None`
@@ -3630,6 +3669,9 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
 /// after release), is left exactly as the plan had it.
 pub fn augment(program: &Program, own: &mut Ownership) {
     let _p = vyrn_frontend::prof::phase("placer");
+    // A node is an address, and the allocator hands the same one out again:
+    // a row this pass placed for the LAST program must not fire on this one.
+    PLACED.with(|p| *p.borrow_mut() = Placed::default());
     let lw = vyrn_frontend::prof::phase("placer: lower_with");
     let lowered = crate::lower_with(program, own);
     drop(lw);
@@ -3903,11 +3945,14 @@ fn place_frames(
                 // entry per binder so an emitter frees exactly those, each
                 // with the holes its arm left in it.
                 MissingKind::ArmBinder { arm } => {
-                    let rows = own.plan.arm_frees.entry((m.site, arm)).or_default();
-                    if !rows.iter().any(|(n, _, _)| *n == info.source) {
-                        rows.push((info.source.clone(), kind.clone(), holes));
-                        touched.insert(owner.to_string());
-                    }
+                    PLACED.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let rows = p.arms.entry((m.site, arm)).or_default();
+                        if !rows.iter().any(|(n, _)| *n == info.source) {
+                            rows.push((info.source.clone(), holes));
+                            touched.insert(owner.to_string());
+                        }
+                    });
                     own.plan.owners.insert(m.site, owner.to_string());
                     continue;
                 }

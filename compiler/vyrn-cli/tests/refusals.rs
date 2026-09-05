@@ -1022,7 +1022,7 @@ fn sections() -> Vec<Section> {
         sec(
             "pub struct ExitEv {",
             Rows,
-            "the event records: exits, reads, consuming matches, arm payloads, \
+            "the event records: exits, reads, consuming matches, \
              stores, Rule N edges, place stores",
         ),
         sec(
@@ -1442,9 +1442,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 723),
-        ("placement rows for the engines", 2378),
+        ("placement rows for the engines", 2335),
         ("a fix menu", 73),
-        ("shared machinery", 3682),
+        ("shared machinery", 3619),
         ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");

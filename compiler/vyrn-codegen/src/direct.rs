@@ -1404,27 +1404,13 @@ impl<'a> Cx<'a> {
     /// `(key, arm)` releases at its end, each with the holes the arm left in
     /// it. The core states them as the trailing run of `St::Drop` in
     /// `Arm::body`, with `NameInfo::holes` on each binder;
-    /// `compiler/vyrn-cli/tests/coretables.rs` proves it equal to the plan's
-    /// rows at every site in the corpus. The plan is acknowledged for §26's
-    /// finish check, as [`Cx::receiver_row`] acknowledges R1′'s.
+    /// Since RFC-0125 §3 M3's derivation slice the rows are the kernel's own
+    /// answer over the core, and `own.rs` states none: the core answers at
+    /// every switch it lowers — a `match`, an `if let` and a `?` alike — and
+    /// a site with no answer is a body no core was built for.
     fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
-        let Some(f) = &self.facts else {
-            return self.plan.arm_payload_free(key, arm).map(|rows| {
-                rows.iter()
-                    .map(|(n, _, h)| (n.clone(), h.clone()))
-                    .collect()
-            });
-        };
-        // A site this pass of the core does not state (an `if let`, a `?`)
-        // keeps reading the plan; `match` is the reader this slice flips.
-        let Some(rows) = f.arms.get(&(self.plan.key_of(key), arm)) else {
-            return self.plan.arm_payload_free(key, arm).map(|rows| {
-                rows.iter()
-                    .map(|(n, _, h)| (n.clone(), h.clone()))
-                    .collect()
-            });
-        };
-        self.plan.acknowledge(key);
+        let f = self.facts.as_ref()?;
+        let rows = f.arms.get(&(self.plan.key_of(key), arm))?;
         // The kind the core carries beside each binder is the interpreter's
         // reader; this backend reads the release off the type itself.
         (!rows.is_empty()).then(|| {

@@ -2976,23 +2976,13 @@ impl<'a> Gen<'a> {
     /// no release KIND, because a kind is a property of the type and not of
     /// the site: the caller asks [`vyrn_frontend::own::Owned::release_kind`]
     /// for it, which is the one table the placer itself derived the plan's
-    /// kinds from. An `if let` or a `?` builds arms of its own and consults
-    /// no table, so the core states `None` there and this reader keeps the
-    /// plan.
+    /// kinds from. Since the derivation slice the core states an answer at
+    /// every switch it lowers — a `match`, an `if let` and a `?` alike — and
+    /// there is no second table: a site with no core answer is a body no core
+    /// was built for, and it owes nothing here.
     fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
-        let plan_rows = || {
-            self.plan.arm_payload_free(key, arm).map(|rows| {
-                rows.iter()
-                    .map(|(n, _, h)| (n.clone(), h.clone()))
-                    .collect::<Vec<_>>()
-            })
-        };
-        let Some(f) = self.facts else {
-            return plan_rows();
-        };
-        let Some(rows) = f.arms.get(&(self.plan.key_of(key), arm)) else {
-            return plan_rows();
-        };
+        let f = self.facts?;
+        let rows = f.arms.get(&(self.plan.key_of(key), arm))?;
         self.plan.acknowledge(key);
         // The core's row carries a kind since the interpreter's slice; this
         // reader does not want it — the native emitter asks

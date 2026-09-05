@@ -327,29 +327,6 @@ pub struct ConsumeCand {
     pub loops: Vec<u32>,
 }
 
-/// Round forty: an arm of a match over a TEMPORARY scrutinee that binds a
-/// payload and never moves it, in a match where some OTHER arm does move its
-/// own — the row goes Moved for the mover's sake, the whole-release stands
-/// down, and this arm's payload was nobody's (`readDoc`'s `Err(e) =>
-/// pushParse(iss, e)` beside `Ok(j) => out.push(j)`, before pushParse
-/// consumed). The backends release the binder's slot at the arm's end.
-pub struct ArmPayloadEv {
-    pub match_id: usize,
-    pub arm_ix: u32,
-    /// The binder the arm frees. One per event; the plan groups the events of
-    /// an arm into one row, so a multi-binder arm placed by RFC-0125 M3's
-    /// placer names each unmoved binder and the emitters free exactly those.
-    pub binder: String,
-    pub kind: crate::own::DropKind,
-    pub owner: String,
-    /// Round fifty-seven: the callee positions through which the arm's value
-    /// mentions the binder — `Some(Response { body: toJson(create(input)) })`
-    /// reads `input` only as a read argument. `facts()` screens them against
-    /// the lending/retention/escaper closures, exactly as `fresh_stores`
-    /// screens a mention store; an empty list needed no screen.
-    pub mentions: Vec<(String, usize)>,
-}
-
 pub struct Facts {
     /// What every `let` owns at the end of its block — see [`ownership`].
     pub lets: HashMap<usize, LetOwnership>,
@@ -385,9 +362,6 @@ pub struct Facts {
     pub mentions: Vec<MentionEv>,
     /// Round twenty-seven: the consuming-match candidates.
     pub consume_cands: Vec<ConsumeCand>,
-    /// Round forty: unmoved payload binders of temp-scrutinee matches whose
-    /// sibling arm moved — see [`ArmPayloadEv`].
-    pub arm_payloads: Vec<ArmPayloadEv>,
     /// Round twenty-eight: statement-position calls whose OWNED heap result
     /// nothing binds — `remove(s, h)` for the return value's side effect —
     /// with the callee name for the lender screen. The backends free the
@@ -606,23 +580,6 @@ pub fn facts(program: &Program) -> Facts {
         exit_sites: r.exit_sites,
         mentions: r.mentions,
         consume_cands: r.consume_cands,
-        // Round fifty-seven: a row whose arm value mentions the binder
-        // through call positions survives only when every callee neither
-        // lends, retains that position, nor forwards a parameter's storage —
-        // the same trio `fresh_stores` screens with, for the same reason: a
-        // callee that can hand the binder's storage onward makes the arm-end
-        // free a use-after-free, not a leak.
-        arm_payloads: r
-            .arm_payloads
-            .into_iter()
-            .filter(|a| {
-                a.mentions.iter().all(|(c, i)| {
-                    !r.lending.contains(c)
-                        && !r.retains.contains(&(c.clone(), *i))
-                        && !r.param_escapers.contains(c)
-                })
-            })
-            .collect(),
         // Round twenty-eight: a wrapped lender's result names storage inside
         // its argument — freeing a discarded one is a use-after-free, so the
         // closed lending set screens here.
@@ -684,7 +641,6 @@ struct Run {
     exit_sites: Vec<ExitEv>,
     mentions: Vec<MentionEv>,
     consume_cands: Vec<ConsumeCand>,
-    arm_payloads: Vec<ArmPayloadEv>,
     discarded: Vec<(usize, String)>,
 }
 
@@ -974,7 +930,6 @@ fn run(program: &Program, want: Want) -> Run {
         mentions: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         quiet_mentions: std::cell::Cell::new(false),
         consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        arm_payloads: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         fnval_sigs: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
@@ -1223,7 +1178,6 @@ fn run(program: &Program, want: Want) -> Run {
             .consume_cands
             .map(RefCell::into_inner)
             .unwrap_or_default(),
-        arm_payloads: mc.arm_payloads.map(RefCell::into_inner).unwrap_or_default(),
         discarded: mc.discarded.map(RefCell::into_inner).unwrap_or_default(),
     }
 }
@@ -1360,7 +1314,6 @@ struct MoveCheck<'a> {
     /// it saw before; only the sink is skipped.
     quiet_mentions: std::cell::Cell<bool>,
     consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
-    arm_payloads: Option<RefCell<Vec<ArmPayloadEv>>>,
     discarded: Option<RefCell<Vec<(usize, String)>>>,
     /// Round forty-six: for an argument of a call THROUGH A FN VALUE (a
     /// `fn`-typed parameter, field or binding), the callee's declared
@@ -5943,8 +5896,6 @@ impl MoveCheck<'_> {
                 } else {
                     None
                 };
-                let mut arm_frees: Vec<Option<(crate::own::DropKind, Vec<(String, usize)>)>> =
-                    Vec::new();
                 let mut any_moved = false;
                 let mut moved_gone: Option<Gone> = None;
                 // Round twenty-seven: a match over a WHOLE named local is a
@@ -6030,14 +5981,13 @@ impl MoveCheck<'_> {
                     };
                     self.leave_branch();
                     self.arm_binders.borrow_mut().pop();
-                    // Round forty, still inside the binder scope: an arm that
-                    // never moved its ONE heap-owning payload binder — in a
-                    // match where a sibling arm moves — leaves that payload
-                    // nobody's, and the backends may release the binder's
-                    // slot at the arm's end. Screens: the payload's release
-                    // is silent (the four buffer kinds, or a Deep walk that
-                    // cannot reach a declared release), and an expression
-                    // arm's value cannot alias the binder.
+                    // Round forty's other half: which arm MOVED the temp
+                    // scrutinee, which is what the row below writes back.
+                    // Which binders an arm still holds at its end is the
+                    // kernel's answer since RFC-0125 §3 M3's derivation
+                    // slice, and the screens this walk kept for it — one
+                    // binder, a silent release, an arm value that cannot
+                    // alias — went with the table they fed.
                     if minted_temp {
                         let now = self
                             .lets
@@ -6049,46 +5999,6 @@ impl MoveCheck<'_> {
                             if moved_gone.is_none() {
                                 moved_gone = now;
                             }
-                            arm_frees.push(None);
-                        } else {
-                            let free = (binders.len() == 1)
-                                .then(|| tys.first().cloned().flatten())
-                                .flatten()
-                                .filter(|t| self.decl.owns_heap(t))
-                                .and_then(|t| {
-                                    let k = self.decl.release_kind(&t)?;
-                                    let silent = matches!(
-                                        k,
-                                        DropKind::FreeStr
-                                            | DropKind::FreeArr
-                                            | DropKind::FreeSmallArr
-                                            | DropKind::FreeMap
-                                    ) || matches!(&k, DropKind::Deep(dt)
-                                        if !self.decl.reaches_declared(dt));
-                                    silent.then_some(k)
-                                })
-                                .and_then(|k| match &arm.body {
-                                    // Round fifty-seven: an arm value that
-                                    // mentions the binder only as a READ
-                                    // argument of declared functions is a
-                                    // candidate too — the callees ride with
-                                    // the row and `facts()` screens them
-                                    // against the closed lending/retention/
-                                    // escaper sets. The structural
-                                    // cannot-alias answer keeps its
-                                    // screen-free fast path.
-                                    ArmBody::Expr(b) => {
-                                        if self.value_cannot_alias(b, &binders[0]) {
-                                            Some((k, Vec::new()))
-                                        } else {
-                                            let mut ms = Vec::new();
-                                            self.read_only_mentions(b, &binders[0], &mut ms)
-                                                .then_some((k, ms))
-                                        }
-                                    }
-                                    ArmBody::Block(_) => Some((k, Vec::new())),
-                                });
-                            arm_frees.push(free);
                         }
                     }
                     self.exit();
@@ -6104,22 +6014,6 @@ impl MoveCheck<'_> {
                             } else {
                                 pre_gone.clone()
                             };
-                        }
-                    }
-                    if any_moved {
-                        if let Some(sink) = &self.arm_payloads {
-                            for (ix, f) in arm_frees.iter().enumerate() {
-                                if let Some((kind, mentions)) = f {
-                                    sink.borrow_mut().push(ArmPayloadEv {
-                                        match_id: e as *const Expr as usize,
-                                        arm_ix: ix as u32,
-                                        binder: pattern_bindings(&arms[ix].pattern)[0].to_string(),
-                                        kind: kind.clone(),
-                                        owner: self.cur_fn.borrow().clone(),
-                                        mentions: mentions.clone(),
-                                    });
-                                }
-                            }
                         }
                     }
                 }
