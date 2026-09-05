@@ -24,10 +24,10 @@ import { fileURLToPath } from "node:url";
 const root = new URL("../../", import.meta.url);
 const read = (p) => readFile(fileURLToPath(new URL(p, root)), "utf8");
 
-const [playJs, worker, interp, page] = await Promise.all([
+const [playJs, worker, trap, page] = await Promise.all([
   read("site/public/play.js"),
   read("site/public/play-worker.js"),
-  read("compiler/vyrn-frontend/src/interp.rs"),
+  read("compiler/vyrn-frontend/src/trap.rs"),
   read("out/play.html").catch(() => ""),
 ]);
 
@@ -44,7 +44,7 @@ function only(src, re, what) {
 
 const runLimitMs = Number(only(playJs, /const RUN_LIMIT_MS = (\d+);/g, "RUN_LIMIT_MS"));
 const depthLimit = Number(
-  only(interp, /pub const CALL_DEPTH_LIMIT: u32 = ([\d_]+);/g, "CALL_DEPTH_LIMIT").replace(/_/g, ""),
+  only(trap, /pub const CALL_DEPTH_LIMIT: u32 = ([\d_]+);/g, "CALL_DEPTH_LIMIT").replace(/_/g, ""),
 );
 
 // Whole seconds spelled the way the tooltip spells them. The limit has been
