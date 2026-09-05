@@ -6439,6 +6439,46 @@ deletion removes rather than moves, and five sentences.
 
 `interp.rs` is 11,549 lines to 11,105.
 
+#### The three slices' gates (2026-09-05)
+
+One table for the eleventh, twelfth and thirteenth slices, run in §1.4's order,
+one at a time, in the foreground, with `TMP` and `TEMP` pointed at a shallow
+scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 551 passed, 74 ignored (549 before; the two new are this arc's pins) |
+| `kernel` `--ignored` | 1, 80 s |
+| `coretables` `--ignored` | 1, 62 s |
+| `typed` `--ignored` | 1, 183 s |
+| `effects` `--ignored` | 2, 211 s |
+| `fixtures` `--ignored` | 205 compared, 47 s |
+| `fixtures` `--ignored`, `VYRN_FIXTURES=interp` | 205 compared, 235 s |
+| `vyrn-frontend` | 1,246 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,422 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 186 s (370 s for the three-column run the tenth slice recorded) |
+| the residue ratchet | 175 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, no byte moved |
+| `genwasm` `--release --features wasm-gen`, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 86 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files, 17.7 s |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 26 files |
+| `serve` / `rpc` / `universal_pages` | 27, 12, 9 ignored — and 27 and 12 again under `VYRN_SERVE_ENGINE=interp` |
+
+Two surface censuses moved and were re-recorded in RFC-0126: `Type::Unit` in
+the wasm column by 2 (the two `peek` rows), and `Type::IntN`, `Type::Array`,
+`Type::ArrayN` and `Type::SmallArray` in the native column by 1, 2, 3 and 1
+(the `stringFromBytes` coercion).
+
+The workspace's `compiler/**/*.rs`, excluding `target`, is 203,812 lines to
+204,164 — up 352. The interpreter is 444 lines smaller and every one of them
+moved rather than went.
+
 #### Why the deletion did not follow (2026-09-05)
 
 The four steps above were the deletion's whole preparation, and the fifth was
