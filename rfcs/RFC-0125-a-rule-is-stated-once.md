@@ -5858,6 +5858,41 @@ answer to a byte too. One test said `-1` and says 255 now. Nothing else in the
 `interp::run` outside the interpreter's own tests. It takes the same runner, in
 one line.
 
+**The census reads fifteen `yes`.** Nothing the interpreter alone provides is
+left. What follows is a RECORD of where the retirement starts, and no line of
+`interp.rs` is deleted here.
+
+**Every `interp::` caller, by file.** 97 references over 24 files, and they are
+three different things:
+
+| what it reaches for | files | refs |
+|---|---|---|
+| LIMITS and canonical wordings — `CALL_DEPTH_LIMIT`, `FRAME_LIMIT`, `REGION_MAX`, `ARRAY_LIT_LIMIT`, `INTERP_STACK_BYTES`, `extern_unavailable`, `on_deep_stack`, `coerce` | `vyrn-codegen/src/{lib,direct,wasm,toolchain}.rs`; `vyrn-frontend/src/{trap,checker,own,prof,codec}.rs`; `vyrn-cli/src/wasmrun.rs`; `vyrn-cli/tests/{limits,parity,kernel,coretables,typed,effects}.rs` | 43 |
+| the GENERATION bridge — `Val`, `gen_code_splice`, `gen_lex_tokens_lit`, `gen_module_interface_lit`, `generate`, `GenInputs` | `vyrn-genwasm/src/lib.rs`; `vyrn-frontend/src/{loader,prelude}.rs` | 13 |
+| RUNNING — `run`, `run_with_args`, `run_tests`, `run_benches`, `serve`, `serve_pool`, the four `Serve*` types, `mounted_routes` | `vyrn-cli/src/main.rs` (37); `vyrn-play/src/lib.rs`; `vyrn-cli/tests/lowered.rs`; `vyrn-frontend/src/lib.rs` | 40 |
+| the module's own tests | `vyrn-frontend/src/interp.rs` | 1 |
+
+Only the third row is the tree-walker. The first row is a number and a sentence
+that happen to be declared in `interp.rs`, and the second is RFC-0076's
+reflection, which the compiled generator engine reads from the interpreter's
+`Val` because that is where the type is written down.
+
+**The first deletable slice**, in that order:
+
+1. `vyrn_frontend::run` (`src/lib.rs`, four lines). It has NO caller as of this
+   slice — the loader's and decoder's tests were the last, and they run compiled
+   now. It goes first because nothing has to move for it to go.
+2. The limits and the wordings, MOVED rather than deleted: `trap.rs` already
+   holds the canonical trap text and already reads two of these constants. Move
+   the eight names there, and 43 references over 12 files stop naming the
+   interpreter — with no behaviour changed and no test rewritten, since a
+   constant is the same constant wherever it is declared.
+
+After those two, `interp::` is named by the generation bridge, by `main.rs`, and
+by the two remaining engine hosts. That is where the deletion becomes a question
+about the default engine rather than about tidying, and it is M5's next slice
+rather than this one's.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
