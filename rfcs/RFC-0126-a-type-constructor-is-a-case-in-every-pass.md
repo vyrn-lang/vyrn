@@ -562,12 +562,17 @@ constructors, 89 mentions to 0, 19 code lines, zero bytes.** Done, 2026-09-05.
 generic `Option<T>` reaching it as an enum would solve nothing and
 `applied_type` would fill the parameter with `Unit`. That gap is this step's
 whole risk and it is one arm.
+**Not taken, and both sentences above are wrong.** §8.11 measured it:
+`solve_param` HAS that arm, the risk is elsewhere, and the step is neither one
+arm nor zero bytes. Read §8.11 before this paragraph.
 
 **M5 — delete the constructors.** The 205. `Display` recognises the two variant
 lists and keeps printing `Option<T>` and `Result<T, E>`; `codec::wire`
 recognises them and keeps `Wire::Option`; the parser keeps `Some`/`Ok`/`Err` as
 declaration-free constructor names. Three guards where there were two
-constructors.
+constructors. **Not taken: §8.11 shows this step and M4 are one step, and that a
+third — one EMISSION per engine — belongs in front of both.** The three guards
+above are unaffected and still stand.
 
 ### 8.7 M1, taken: the nested refusal was conservatism
 
@@ -727,3 +732,93 @@ the four across the compiler, down to 0.** 19 code lines, one parser function
 deleted and two small ones added — the arity rule and the free-name guard, each
 one place where there had been none. Zero bytes:
 `VYRN_WASM_MANIFEST=check` is unchanged and parity is 41 of 41.
+
+### 8.11 M4 and M5, not taken: they are one step, and it is not zero bytes
+
+§8.6 splits the rest of the collapse in two: M4 makes `resolve` answer `Enum`
+with no byte moving, and M5 deletes the constructors. Both halves were tried on
+this branch and neither holds as written. The step is one step, it needs a third
+one in front of it, and the reason is not in the arms.
+
+**What was tried.** One arm in `types::resolve_d`, exactly the shape the `lazy`
+arm beside it has:
+
+```
+Type::Option(inner) => Type::Enum([ None(), Some(inner) ])
+Type::Result(ok, err) => Type::Enum([ Err(err), Ok(ok) ])
+```
+
+The compiler builds. **97 of `vyrn-frontend`'s 1,186 unit tests turn red on that
+line alone.** Two consumer fixes — `None`'s inference from its expected type, and
+the `match` scrutinee's dispatch, both in `checker.rs` — take it to 45, spread
+over `checker`, `interp`, `codec`, `jsondec`, `loader`, `own` and `schema`. The
+two codegen crates were not reached.
+
+**Why the `lazy` precedent does not transfer.** RFC-0085 M4a's own note says why
+that arm was free: it does not reach a record's fields, and three places read the
+marker. The two sums are read on RESOLVED values everywhere. Counted as
+match-arm positions on `Type::Option`/`Type::Result`:
+
+| file | arm positions |
+|---|---|
+| `vyrn-codegen/src/lib.rs` | 37 |
+| `vyrn-frontend/src/checker.rs` | 29 |
+| `vyrn-codegen/src/direct.rs` | 13 |
+| `vyrn-frontend/src/codec.rs` | 7 |
+| `vyrn-frontend/src/own.rs` | 5 |
+| `vyrn-lower/src/core.rs` | 4 |
+| `vyrn-frontend/src/interp.rs` | 3 |
+| `vyrn-frontend/src/movecheck.rs` | 3 |
+
+101 arms, before the `matches!` and `if let` spellings. Not all read a resolved
+type, and every one has to be read to find out which. That is M5's own 205, done
+at M4 — which is the first half of the finding: **the two steps are one.**
+
+**The zero-byte requirement fails, and not on the arms.** `own::release_kind`
+records a drop with the RESOLVED type. So an `Option<String>` binding's row stops
+being `Deep(Option(String))` and becomes
+`Deep(Enum([None, Some(String)]))` — measured, at `own.rs`'s own unit test for
+that row. Both emitters then route the row to their ENUM release, and the two
+paths are not the same bytes:
+
+| the sum's path | the enum's path |
+|---|---|
+| `Gen::release_sum`, labels `rel.sum.*`, arms in the caller's order | `Gen::release_enum`, labels `rel.enum.*`, variants in tag order |
+| `Gen::copy_sum`, labels `cp.sum.*` | `Gen::copy_enum`, labels `cp.enum.*` |
+| `Gen::gen_match_body_boxed`, a two-way `br` on `icmp eq i64 %tag, 1` | `Gen::gen_match_enum`, a `switch i64` |
+| `Fn_::rel_at`'s `Option`/`Result` arms, one `If` | its `Enum` arm, one `If` per variant |
+
+§8.9 made the ENCODING one. It did not make the EMISSION one, and §8.6 assumed
+it had.
+
+**The order that works**, and the correction to §8.6:
+
+- **M4a — one emission per engine.** Unify release, copy and match so a built-in
+  sum and a two-variant enum produce the same instructions. This MOVES bytes and
+  regenerates the manifest, which is why it cannot sit behind M4's zero-byte
+  promise.
+- **M4b — `resolve` answers `Enum`**, and every consumer reads a sum through one
+  pair of readers instead of matching a shape that depends on whether its
+  scrutinee was resolved. The probe wrote the readers and they are four lines
+  each: `option_payload(ty) -> Option<&Type>` and
+  `result_payloads(ty) -> Option<(&Type, &Type)>`, each answering for the surface
+  constructor and for the enum form. They are not in the tree — unused code is
+  debt — and this is where they are written down.
+- **M5 — delete the constructors**, with §8.6's three guards unchanged.
+
+**One thing §8.6 gets wrong about the risk.** It says `solve_param` "has no
+`Type::Enum` arm" and calls that the step's whole risk. It has one, and it
+matches variant by name then payload-wise, so the parameter a generic
+`Option<T>` carries is solved once the enum arrives. What it lacks is the CROSS
+arm `Lazy` already has — `Type::Option(p)` binding from an `aty` that arrives as
+the enum, and `Type::Enum(pv)` binding from an `aty` still spelled
+`Option`/`Result` — because after M4b the two spellings meet at a call boundary.
+
+**One drift §8.9 left, recorded and not fixed.** `own::owns_heap`'s `Option` and
+`Result` arms say they "mirror the emitter's `payload_boxed`" and name the word
+class by hand — `Int`, `Bool`, `Str`, `Fn`. Since §8.9 `payload_boxed` is
+`words(t) == 1 && llt(t) != "i64"`, so a two-word payload — a record of two
+`Int64`s — rides inline and `owns_heap` still calls it heap-owning. It costs
+nothing today: the row it registers walks a payload that owns nothing and frees
+no box, and parity, the residue ratchet and the memory suite are all green with
+it. It is one rule stated twice, and M4a is where it stops being.

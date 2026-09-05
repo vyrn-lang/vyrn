@@ -6203,6 +6203,12 @@ its record.
   `Err` become `Pattern::Variant`, and the SCRUTINEE says what the name means, as
   it always did for a declared enum. Four constructors, 89 mentions to 0, 19 code
   lines, zero bytes. RFC-0126 §8.10.
+- **M4 and M5 — not taken (2026-09-05).** They are one step, and it is not zero
+  bytes. `resolve` answering `Enum` turns 97 of `vyrn-frontend`'s 1,186 unit
+  tests red on its own line, and `own::release_kind` records a drop with the
+  RESOLVED type — so a sum's release routes to the enum's, and the two emit
+  different labels and a different arm order. One EMISSION per engine has to come
+  first. RFC-0126 §8.11 measures it and writes the order that works.
 
 ### What each milestone is worth on its own
 
