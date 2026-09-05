@@ -139,6 +139,13 @@ fn main() -> Int64 {{
 /// `s.copy()?` for the reason above, at both payload types: `Slot<String>` owns
 /// heap and `Slot<Int64>` does not, and rule 3 asks the question of the
 /// parameter rather than of the payload.
+///
+/// `Full(v) => v.copy()` for the same rule INSIDE the impl, which this program
+/// used to break: `success` takes `read self`, so handing its payload out is
+/// handing out a second name for the caller's value. Every other impl in the
+/// corpus writes the copy. This one did not and was accepted, because a generic
+/// impl reached from `?` alone was on no worklist and therefore reached no
+/// judgment — the gap RFC-0126 §8.16 closed beside the miscompile.
 #[test]
 fn a_generic_impl_serves_every_payload_type() {
     let src = "\
@@ -156,7 +163,7 @@ impl<T> Fallible for Slot<T> {
         return match self { Full(v) => true, Gone(m) => false }
     }
     fn success(self) -> Output {
-        return match self { Full(v) => v, Gone(m) => panic(\"unreachable\") }
+        return match self { Full(v) => v.copy(), Gone(m) => panic(\"unreachable\") }
     }
 }
 

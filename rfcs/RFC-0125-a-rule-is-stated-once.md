@@ -9628,6 +9628,18 @@ its record.
   `examples/graphql.vyrn`'s recorded hash drifted before this branch, and the
   modules this step brackets are byte-identical as files. Parity 41 of 41,
   residue green, `genwasm` 25 of 25. RFC-0126 §8.15.
+- **The defect the collapse left (2026-09-05).** `?` on a DECLARED two-variant
+  sum took the built-in propagation in both compiled emitters: M4a's spelling
+  test became an arity test, so `| Full(T) | Gone(String)` read `Gone`'s payload
+  as the success type and neither engine called the impl. The checker,
+  `vyrn-lower` and the interpreter always asked the variant NAMES;
+  `types::is_builtin_sum` is that question and the three emitter readers ask it.
+  The pin found three more holes of the same shape, each a reader answering for
+  a case nobody asked it about: `?` was not a call in the lowering's walk, so a
+  generic `Fallible` impl reached no worklist and therefore no judgment; a body
+  that reaches no judgment was accepted while it broke rule 3; and `own` read a
+  generic impl's `success` row as a type when it is a variable, so the
+  copied-out payload leaked. One example, one manifest row. RFC-0126 §8.16.
 
 ### What each milestone is worth on its own
 
