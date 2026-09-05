@@ -7003,6 +7003,121 @@ the three, and each was one engine asking itself for a second opinion.
 `prof.rs` 234, `genwasm.rs` 50, `own.rs` 155. The workspace was 204,318 at the
 start of this milestone's last two slices and is 194,452 at the end of them.
 
+#### The eighteenth slice (2026-09-06): the two the deletion left
+
+The seventeenth slice found two things and fixed neither. Both are this one.
+
+**`m.tallyBytes(w, n)` miscompiled because a call's argument list was stated
+twice.**
+
+`std/runtime`'s `strFromBytes` takes six operands: the destination, the data
+pointer, the count, the check's answer, and the two interned messages
+(PLAN-0125-runtime §6 step 4). M6's fifth slice replaced its DFA-table argument
+with the answer of `std/text`'s `stringFault`, and made that answer the CALLER's
+to push. `Fn_::str_from_bytes_tail` pushed the last two operands; whoever called
+it pushed the first four. The call has two callers, and the slice gave the new
+argument to ONE of them.
+
+| caller, at `64573847` | what it pushed |
+|---|---|
+| the `stringFromBytes` arm, `direct.rs:8252` | dest, data, len, fault — four |
+| `Fn_::map_tally_bytes`, `direct.rs:14074` | dest, data, len — three |
+
+So the miss path of `tallyBytes` emitted a `call` five operands deep into a
+six-operand signature. It sits inside an `if` block, whose operand stack starts
+empty, and wasmtime named the sixth:
+
+    type mismatch: expected i32 but nothing on stack
+
+**The fix is the whole call in one function.** `str_from_bytes_tail` is
+`Fn_::str_from_bytes` now. It takes the destination slot and the local holding
+the `Array<UInt8>` header, it calls `stringFault` itself, and it emits all six
+operands. Neither caller can be short of an argument it no longer spells. The
+instructions come out in the order they came out before, so `stringFromBytes`
+moves no bytes — the manifest agrees, and that is the check.
+
+**The hole under the defect is the corpus, not the emitter.** Nothing in `std/`
+or `examples/` called `tallyBytes`. Parity compared nothing, the fixtures
+recorded nothing, and the manifest held no row, so the only engine that ever ran
+the builtin was the one being deleted. `examples/tallybytes.vyrn` is the row.
+It counts a String key with `tally` — a miss, a miss, then a hit through the same
+slot — every two-byte window of `ababcab` with `tallyBytes` through ONE reused
+buffer, a key that is two bytes for one character, and the two builtins counting
+into the same slot. Then it hands `tallyBytes` the bytes `255 254`, which is the
+miss path's one failure: it traps, in RFC-0116's wording, which no fixture had
+ever read.
+
+One program, four gates. `fixtures` records its three streams, `parity` compares
+the native route against the wasm one, `wasmhash` pins the module, and the
+residue ratchet carries an `other` row for it, because a trap exits before the
+leak check speaks. `wasm-sha256.tsv` gained exactly one row and no other row
+moved: 173 to 174.
+
+**RFC-0078's census reads the emitters both ways again.**
+
+The seventeenth slice kept the direction that proves every censused name is
+lowered, and lost the ANTI-ROT one — a builtin added to `direct.rs` with no
+census row. `the_backends_dispatch_on_nothing_the_census_omits` is that
+direction. It reads four regions, each located by content, so an emitter that is
+reorganised fails the test rather than scanning nothing and passing.
+
+| region | what it holds |
+|---|---|
+| `direct.rs`, `fn call_inner` down to its `_ => {}` | the guards, and the table under them |
+| `direct.rs`, `fn gen_builtin` | the builtins that exist only while a generator runs |
+| `direct.rs`, `fn gen_entry` | the three whose lowering is a synthesized Vyrn entry |
+| `lib.rs`, `fn gen_call_inner` | the textual backend's own chain |
+
+A builtin IS a name an emitter branches on, and the two emitters spell that four
+ways: `name == "x"`, `matches!(name, "x" | "y")`, an arm of `match name`, and an
+arm of `match (name, args.len())`. `dispatched` reads those four and nothing
+else, which is why it carries no exemption list — 97 names, and every one of them
+is censused today. One name it cannot see, and the forward direction already
+aliases it: `@panicAt` is spelled `ast::PANIC_AT`.
+
+The restored scan is WIDER than the one that was lost. `interp.rs` was one
+engine. This is two, and the textual backend had never been censused in either
+direction.
+
+The two tests answer different questions, and the check is that each one fails
+alone. Delete `@tallyBytes`'s census row and
+`the_backends_dispatch_on_nothing_the_census_omits` names it while
+`the_direct_backend_carries_the_census_too` stays green.
+
+#### Gates (2026-09-06)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 550 passed, 74 ignored — the seventeenth slice's counts |
+| `kernel` `--ignored` | 1, 87 s |
+| `coretables` `--ignored` | 1, 63 s |
+| `typed` `--ignored` | 1, 120 s |
+| `effects` `--ignored` | 2, 135 s |
+| `fixtures` `--ignored` | 206 compared, 43 s — 205 before, and the one is the new example |
+| `vyrn-frontend` | 1,227 and 7 ignored — 1,225 and 8 before: the census's new test, and `tallyBytes` leaving the ignore list |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,403 |
+| `vyrn-lsp`'s own tests | 99 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `vyrn-play` for `wasm32-unknown-unknown` | builds; 3,491,229 bytes |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 227 s — 172 checked, 34 skipped, 0 failed; 171 were checked before |
+| the residue ratchet | 257 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 174 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 71 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154 |
+
+`compiler/**/*.rs`, excluding `target`, is 194,472 lines to 194,590 — up 118.
+`direct.rs` is up 15, and `primitives.rs` up 104, which is the census's scan and
+the paragraph saying why it reads an emitter rather than a list kept beside one.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
