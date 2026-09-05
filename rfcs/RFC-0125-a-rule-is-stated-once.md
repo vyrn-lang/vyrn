@@ -6596,6 +6596,37 @@ run time. CI's generator job drops `--features wasm-gen`.
 the default engine. The five topic suites (`hints`, `pages`, `tw`, `von`, `vyx`)
 lose one `--engine interp` each. Census row 16 reads `yes`.
 
+#### The fifteenth slice (2026-09-05): the pool is N stores
+
+RFC-0025's `--workers N` was N interpreters, and the eleventh slice recorded it
+as the tree-walker's on both `serve` and `dev`. It is N resident instances now,
+over ONE Cranelift compile: `wasmrun::Compiled` is a translated module and
+`start_on` instantiates it, so a pool costs an instantiation per worker rather
+than a translation.
+
+**The handler shape did not move.** `serve_pool_wasm` has
+`interp::serve_pool`'s signature, so the spmc channel, the accept loop,
+`serve_one` and `dev_serve_one` are the same code on both engines and the two
+call sites choose between the two pools in one `if`. What differs is the thing
+behind `call_handle`: `serve_call` on an `Interp`, `serve_wasm_call` on a
+`Resident`.
+
+**`main` runs once, and that is a rule the gate already proved.** The
+tree-walker runs module state and `main` on a setup interpreter, drops it, and
+gives each worker a fresh one that only initializes globals. The compiled route
+does the same with two programs: the setup instance runs the program as
+written, and the workers run a copy whose `main` returns 0 and does nothing
+else, so `_start` still initializes each instance's module state (RFC-0013) and
+no worker repeats `main`'s effects. What one instance holds and another does not
+is unreachable from a request, because `refuse_workers_if_stateful` has already
+refused a `handle` that reads or writes module state. That refusal is unchanged
+and its wording is unchanged; it is simply no longer an interpreter's.
+
+`tests/serve.rs`'s three pool tests run on the DEFAULT engine now —
+`engine_args` no longer forces `--engine interp` when it sees `--workers`, and
+the isolation-gate test asks for no engine at all. All three pass on both
+columns: 27 tests with the default, 27 under `VYRN_SERVE_ENGINE=interp`.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

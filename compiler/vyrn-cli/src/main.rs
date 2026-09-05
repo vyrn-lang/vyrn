@@ -5086,14 +5086,6 @@ fn serve_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
         }
     }
 
-    if workers.is_some() && engine == Engine::Wasm {
-        eprintln!(
-            "serve: `--workers` is the interpreter's (RFC-0025) — the compiled route serves \
-             from one resident instance"
-        );
-        return ExitCode::from(2);
-    }
-
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -5155,36 +5147,41 @@ fn serve_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
         }
         let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
         let rx = std::sync::Mutex::new(rx);
-        let result = vyrn_frontend::interp::serve_pool(
-            &program,
-            n,
-            |_i, call_handle| loop {
+        let pool_argv = vec![path.to_string()];
+        let each =
+            |_i: usize,
+             call_handle: &mut dyn FnMut(
+                vyrn_frontend::interp::ServeCall,
+            )
+                -> Result<vyrn_frontend::interp::ServeAnswer, String>| loop {
                 // spmc over std: each idle worker takes the next connection.
                 let stream = rx.lock().unwrap().recv();
                 match stream {
                     Ok(mut s) => serve_one(&mut s, call_handle),
                     Err(_) => break, // accept loop gone; drain out
                 }
-            },
-            move || {
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                eprintln!(
-                    "serving {file_label} on http://localhost:{actual_port} with {n} workers"
-                );
-                for stream in listener.incoming() {
-                    match stream {
-                        Ok(s) => {
-                            if tx.send(s).is_err() {
-                                break;
-                            }
+            };
+        let listen = move || {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            eprintln!("serving {file_label} on http://localhost:{actual_port} with {n} workers");
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        if tx.send(s).is_err() {
+                            break;
                         }
-                        Err(_) => continue,
                     }
+                    Err(_) => continue,
                 }
-                Ok(())
-            },
-        );
+            }
+            Ok(())
+        };
+        let result = if engine == Engine::Wasm {
+            serve_pool_wasm(&program, pool_argv, n, each, listen)
+        } else {
+            vyrn_frontend::interp::serve_pool(&program, n, each, listen)
+        };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -5266,6 +5263,102 @@ fn serve_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
     }
 }
 
+/// RFC-0025's pool on the compiled route: N resident instances, one per worker
+/// thread, over one Cranelift compile.
+///
+/// The signature is `interp::serve_pool`'s, because the accept loop, the request
+/// handler and the spmc channel above it are the same code on both engines —
+/// only the thing behind `call_handle` differs (RFC-0125 §3 M5).
+///
+/// `main` runs ONCE, on a setup instance that is then dropped, which is what the
+/// tree-walker's setup interpreter is. The workers run a program whose `main`
+/// returns 0 and does nothing else, so each instance still initializes its own
+/// module state (RFC-0013) and no worker repeats `main`'s effects. That is sound
+/// here and nowhere else: [`refuse_workers_if_stateful`] has already proved
+/// `handle` reads and writes no module state, so what `main` left in one is
+/// unreachable from a request.
+fn serve_pool_wasm<W, A>(
+    program: &vyrn_frontend::ast::Program,
+    argv: Vec<String>,
+    workers: usize,
+    worker: W,
+    accept: A,
+) -> Result<(), String>
+where
+    W: Fn(
+            usize,
+            &mut dyn FnMut(
+                vyrn_frontend::interp::ServeCall,
+            ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+        ) + Send
+        + Sync,
+    A: FnOnce() -> Result<(), String> + Send,
+{
+    use vyrn_frontend::ast::{Block, Expr, Stmt};
+    let run = wasmrun::Run {
+        argv,
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        capture_stderr: true,
+        meter: false,
+    };
+    // Setup: module state + `main`, once, before any worker exists.
+    let bytes = vyrn_codegen::direct::compile(program)?;
+    let (mut setup, code) = wasmrun::start(&bytes, &run, None)?;
+    eprint!("{}", setup.drain_err());
+    if code != 0 {
+        return Err(format!("main returned {code}, aborting serve"));
+    }
+    drop(setup);
+
+    let mut quiet = program.clone();
+    if let Some(main) = quiet
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "main" && f.module.is_none())
+    {
+        main.body = Block {
+            stmts: vec![Stmt::Return {
+                value: Some(Expr::Int(0)),
+                line: main.line,
+            }],
+        };
+    }
+    let module = wasmrun::compile(&vyrn_codegen::direct::compile(&quiet)?, false)?;
+
+    std::thread::scope(|s| {
+        let (worker, module, run) = (&worker, &module, &run);
+        for i in 0..workers {
+            std::thread::Builder::new()
+                // Cranelift-compiled code runs on this stack, and a served
+                // program may recurse as deeply as any other.
+                .stack_size(WORKER_STACK_BYTES)
+                .spawn_scoped(s, move || {
+                    let mut res = match wasmrun::start_on(module, run, None) {
+                        Ok((res, 0)) => res,
+                        Ok((_, code)) => {
+                            eprintln!("error: worker {i}: main returned {code}");
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("error: worker {i}: {e}");
+                            return;
+                        }
+                    };
+                    let mut handler = |call| serve_wasm_call(&mut res, call);
+                    worker(i, &mut handler);
+                })
+                .expect("failed to spawn a worker thread");
+        }
+        accept()
+    })
+}
+
+/// One worker thread's stack. The interpreter's pool sizes its threads for the
+/// tree-walker's frames; a compiled worker needs room for the guest's own
+/// recursion under Cranelift, which is the same order of magnitude.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
+
 /// The RFC-0025 worker gate: `--workers` requires a module-state-free `handle`
 /// (transitively — the existing isolation analysis answers the question).
 /// Prints the refusal naming the offending call path and returns the exit code
@@ -5328,13 +5421,6 @@ fn dev_cmd(rest: &[String], engine: Engine) -> ExitCode {
             eprintln!("dev: unexpected argument `{}`", rest[i]);
             return ExitCode::from(2);
         }
-    }
-
-    if workers.is_some() && engine == Engine::Wasm {
-        eprintln!(
-            "dev: `--workers` is the interpreter's (RFC-0025) — the compiled route serves              from one resident instance"
-        );
-        return ExitCode::from(2);
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -5465,32 +5551,38 @@ fn dev_cmd(rest: &[String], engine: Engine) -> ExitCode {
         let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
         let rx = std::sync::Mutex::new(rx);
         let assets = &assets;
-        let result = vyrn_frontend::interp::serve_pool(
-            &program,
-            n,
-            |_i, call_handle| loop {
+        let each =
+            |_i: usize,
+             call_handle: &mut dyn FnMut(
+                vyrn_frontend::interp::ServeCall,
+            )
+                -> Result<vyrn_frontend::interp::ServeAnswer, String>| loop {
                 let stream = rx.lock().unwrap().recv();
                 match stream {
                     Ok(mut s) => dev_serve_one(&mut s, assets, call_handle),
                     Err(_) => break,
                 }
-            },
-            move || {
-                banner(assets);
-                eprintln!("dev:   workers        -> {n}");
-                for stream in listener.incoming() {
-                    match stream {
-                        Ok(s) => {
-                            if tx.send(s).is_err() {
-                                break;
-                            }
+            };
+        let listen = move || {
+            banner(assets);
+            eprintln!("dev:   workers        -> {n}");
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        if tx.send(s).is_err() {
+                            break;
                         }
-                        Err(_) => continue,
                     }
+                    Err(_) => continue,
                 }
-                Ok(())
-            },
-        );
+            }
+            Ok(())
+        };
+        let result = if engine == Engine::Wasm {
+            serve_pool_wasm(&program, vec![server_path.clone()], n, each, listen)
+        } else {
+            vyrn_frontend::interp::serve_pool(&program, n, each, listen)
+        };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
