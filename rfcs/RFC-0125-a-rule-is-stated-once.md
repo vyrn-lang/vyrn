@@ -4670,6 +4670,7 @@ deleted here, and `--engine interp` is still the default.
 | `boundary-carrier` | `tests/boundaries.rs`, 18 of its 19 rules | yes — every row keeps a native, wasm or Vyrn carrier | 18 rows lose a carrier and the census's copy total falls by 18 |
 | `library-run` | `vyrn_frontend::run`, `interp::run`; `jsondec.rs` and `loader.rs` self-tests | yes, since the ninth slice below — the tests that RUN a program are integration tests now (`vyrn-frontend/tests/loader_run.rs` and `jsondec_run.rs`, 108 of them), and they compile with the direct backend and run in the driver's WASI host, which `vyrn-cli` exposes as a library target | neither of the two options in this column, because the second one cannot be built: a unit test INSIDE `vyrn-frontend` that dev-depends on a backend compiles a SECOND copy of `vyrn-frontend`, and the two `Program` types are different types. So the tests left the lib target rather than the crate — what reads the loader's insides stays a unit test, what runs a program is behaviour and is stated from outside. The crate's test count is the same 1,246, and the shipped crate still depends on nothing |
 | `extern-unavailable` | `examples/externdemo.vyrn`, the corpus's one host-only program | yes, since the fourth slice below — both engines print ``error: extern `jsNow` is not available on this target`` on standard error and exit 1. The third slice read `worse` here: the compiled route trapped with `error: error while executing at wasm backtrace:`, the one output difference in 204 programs | the embedded host answers the `vyrn` namespace with `interp::extern_unavailable`'s sentence, as native's C stub already did. No emitted byte changes |
+| `gen-fn-at-run-time` | seven `std` modules and `site/app/apidoc.vyrn`, whose own `test` blocks call the module's `gen fn`s | no — RFC-0021 runs a generator at generation time and no compiling route lowers a call to one, so the direct backend refuses the body by name ("no lowering for the call `roundTrip`") and a native build would too. Found by the eleventh slice below, by moving the default | the machinery exists — `vyrn-genwasm` compiles a generator module by clearing `is_gen` and setting `checker::set_gen_host` — but pointing it at `vyrn test` compiles every test file in gen-host mode, and a body reaching `moduleInterface` or `contractOf` then wants three atom-stream imports the embedded host does not define. A slice with a decision in it. Until it is taken this is what `--engine interp` is for, and `interp.rs` cannot go |
 | `site-export` | CI's Site job | yes, and this is new — the frame-limit refusal M5's second slice recorded is gone, and the compiled route writes the same 241 files | 187.30 s against 13.89 s, medians of three interleaved runs, and the 241 files are byte-identical |
 
 #### How the third column was proved
@@ -6012,7 +6013,9 @@ and the site export writes the same 82 routes and 14 assets under both
 generator engines — 241 files, byte-identical, diffed tree against tree.
 
 **The census reads fifteen `yes`.** Nothing the interpreter alone provides is
-left.
+left. (The eleventh slice below adds a sixteenth row, and it reads `no`: moving
+the default found one thing the tree-walker alone does, which no reading of the
+list would have found.)
 
 **The first deletable slice, taken.** The ninth slice named two steps and this
 one runs them.
@@ -6131,6 +6134,167 @@ result. It counts files now. `testsweep` reassembles programs into a fixed
 directory under the system temp dir and is only meaningful when that directory
 starts empty — it read 139 runnable programs against a floor of 150 over one
 another gate had left behind, and 171 over a clean one.
+
+#### The eleventh slice (2026-09-05): the compiled route is the default
+
+The tenth slice left the census at fifteen `yes` and the default at `interp`.
+This slice moves the default. `vyrn run`, `vyrn test`, `vyrn bench --check`,
+`vyrn serve` and `vyrn dev` compile the program and run its wasm; `--engine
+interp` selects the tree-walker, and every place that still names it is below.
+
+**`vyrn dev` had no compiled route, and has one.** It was the last of the six
+commands with none: the fifth slice ported `from-json`, `routes` and
+`--profile`, the sixth ported `serve`, and `dev` was left because it is `serve`
+with static assets in front of the same door. It is that here too — the same
+`SERVE_SHIM`, the same `serve_rewrite`, the same resident instance, the same
+`serve_wasm_call` per request, with `dev_serve_one` in place of `serve_one`.
+Nothing new is a rule.
+
+**`--workers` is the tree-walker's, on both commands.** RFC-0025's pool is N
+interpreters, one per thread; the compiled route serves from one resident
+instance. `serve` already refused the two together and `dev` refuses them now,
+in the same sentence.
+
+#### What the default found
+
+The suites were not edited one call site at a time. Moving the default moves
+all of them at once, and what fails is the answer to which of them needed the
+tree-walker — a list nobody could have written by reading. `cargo test -p
+vyrn-cli` went from 549 green to fourteen failures over nine suites, and they
+are five different things.
+
+**Two are defects in the direct backend, and both are fixed here.**
+
+*A test-only builtin in a branch has no type.* `Fn_::peek` answers the type of
+an arm's value, and `assert` and `assertEq` had no row — the same hole the
+third slice found under `blackBox`. `std/bench.vyrn`'s `match parseJson(out) {
+Ok(tree) => assertEq(..), Err(e) => assert(false) }` was refused with "no
+lowering for a branch yielding `assertEq`"; `std/regex.vyrn`'s seven `match
+compile(..) { Ok(r) => panic(..), Err(w) => assert(..) }` were worse — they
+COMPILED, because a peek further down guessed a type, and trapped at run time
+with a wasm backtrace. Both builtins hand `Type::Unit` back where they emit,
+so the row is the one `print` and the five log levels already have. The pin is
+`tests/testing.rs`'s `a_match_arm_may_assert`: both shapes, both engines.
+
+| | before | after |
+|---|---|---|
+| `assertEq` in an arm | refused at compile time | `Unit`, joined like `print` |
+| `assert` in an arm | compiled, trapped at run time | `Unit`, joined like `print` |
+
+*A function nothing can call refused the whole build.* RFC-0021 runs a `gen
+fn` at generation time and no compiled route lowers a call to one. The direct
+backend skipped the `gen fn` itself and lowered every ordinary function beside
+it, so `std/vyx-hints`'s `checkOf` — a two-line helper its own `test` blocks
+call, in a module every `vyxHints` program imports — failed the compile of
+every program that imported it. The three kinds of function the emitter
+already skips carry the rule: an unspecializable shell has no first-order
+definition, and failing the build over a function nothing calls is the wrong
+answer. So the closure of "calls a `gen fn`" is skipped too, computed by
+fixpoint over `checker::fn_calls`. An ENTRY POINT is never dropped — `main`, an
+export a host knocks on, a lifted test or serve door — so it stays and refuses
+at the call the closure was computed from, naming that call rather than
+reporting a program with no `main`. That second half is a pin too, because the
+first draft of this swept `main` up with the rest:
+`a_function_that_calls_a_generator_does_not_fail_the_build`.
+
+No emitted byte moves, and `VYRN_WASM_MANIFEST=check` says so over all 173. A
+program with such a function did not compile before this, so no example has
+one.
+
+**Seven are the interpreter's, and they say so.**
+
+| what | where | why the tree-walker |
+|---|---|---|
+| `--workers` | `tests/serve.rs`, three tests | RFC-0025's pool is N interpreters |
+| `vyrn run --profile`'s rows | `tests/cli.rs` | the per-function table was the tree-walker's; the compiled route's rows are phases (the fifth slice), so the assertion moved to the phases rather than the engine |
+| a `writeFileBytes` to an absolute path | `tests/bytesink.rs` | the host preopens the working directory and only that |
+| seven std modules' own `test` blocks | `tests/std_suite.rs`, `hints.rs`, `pages.rs`, `tw.rs`, `von.rs`, `vyx.rs` | the blocks call the module's `gen fn`s |
+
+Two of the four are the suite's own doing and were repaired rather than
+excepted. The profile test asserted `function`, `work` and `main`, which is
+the table the fifth slice replaced; it asserts `phase`, `compile` and `run`
+now, and pins what ships. The `writeFileBytes` test wrote to an absolute path
+inside its scratch directory; it runs IN that directory with a relative path
+now, and the write it is about is the same write.
+
+**The absolute path is a real divergence and it is written down.** A program
+that writes `C:/tmp/x` runs under the tree-walker and is refused by the
+compiled route, because the WASI host preopens the working directory and
+nothing else — the CLI's own capability rule, applied where the guest asks
+rather than where the CLI does. No example does it, which is why the fixture
+gate never saw it.
+
+    fn main() -> Int64 {
+        match writeFile("C:/wtbotmp/abs.txt", "hi") {
+            Ok(d) => print("wrote"),
+            Err(w) => print("err: " + w),
+        }
+        return 0
+    }
+
+| engine | stdout |
+|---|---|
+| `--engine interp` | `wrote` |
+| the compiled route | ``err: cannot write `C:/wtbotmp/abs.txt` `` |
+
+#### The seven modules, and what they block
+
+`std/i18n`, `std/icons`, `std/tw`, `std/ui`, `std/von`, `std/vyx-hints` and
+`std/vyx` unit-test their own generators by calling them from a `test` block:
+
+    test "scanArgs finds a plain string arg" {
+        let sc = scanArgs("Hello, {name}!")     // `gen fn scanArgs`
+        assert(sc.ok)
+    }
+
+No compiling route lowers that call, and after the fix above the refusal says
+so by name — `error: direct backend: no lowering for the call `scanArgs` at
+line 1544`. A native build would refuse it for the same reason. The
+tree-walker is the one engine that runs a generator as ordinary code, so these
+seven files name `--engine interp`, and the list is `GEN_TESTED` in
+`tests/std_suite.rs` so that it is one list rather than seven comments.
+
+**This is the deletion's remaining blocker, and it is not a tidying job.** It
+is the generation fence read from the other side: RFC-0021 puts a generator in
+a sandbox with its own builtins and its own cache key, and a `test` block that
+calls one is asking the sandbox to be ordinary code. The machinery to grant
+that exists — `vyrn-genwasm` compiles a generator module by clearing `is_gen`
+and setting `checker::set_gen_host`, which is exactly "the generation-only
+names are ordinary here" — but turning it on for `vyrn test` would compile
+every test file in gen-host mode, and a body reaching `moduleInterface` or
+`contractOf` then wants the three atom-stream imports the embedded host does
+not define. That is a slice of its own with a decision in it, not a line.
+Until it is taken, `--engine interp` cannot be deleted, and so neither can
+`interp.rs`.
+
+#### One more, outside `std`
+
+`site/app/apidoc.vyrn`'s `gen fn proseHtml` is tested the same way, so the
+site's own `vyrn test` gate names `--engine interp` for that one file and for
+no other. 189 blocks over 26 files, as before.
+
+#### Gates
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at this worktree's own scratch directory: `cargo fmt --all --check`,
+clean; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` with no
+filter, 549 passed and 74 ignored — the same counts as the tenth slice, with
+the compiled route under them; the `kernel`, `coretables`, `typed` and
+`effects` suites with `--ignored` (1, 1, 1 and 2, at 136 s, 119 s, 253 s and
+224 s); `fixtures` with `--ignored`, 205 compared in 59 s, and its interpreter
+column with `VYRN_FIXTURES=interp`, 205 in 200 s; `vyrn-frontend`, 1,246; the
+workspace less `vyrn-cli` with `--skip _natively`, 1,422; `vyrn-genwasm`'s own
+tests, 3; `memory` with `--test-threads=1`, 10; the residue ratchet, 191 s;
+`VYRN_WASM_MANIFEST=check` on `wasmhash`, green on all 173 with no byte moved,
+which is the claim the skip above makes; the cross-engine generator test with a
+fresh `VYRN_GEN_CACHE_DIR` and `--features wasm-gen`, 13, and its corpus test
+with `--ignored`; `testsweep` with `--ignored`, 81 s; `vyrn doc --std -o
+../docs/api --verify`, 41 files up to date; the site — `vyrn run
+site/export.vyrn out` writes its 82 routes and 14 assets in 7.8 s, against 313 s
+in the tenth slice, and `vyrn test` is green over `export.vyrn` and `site/app`,
+189 blocks over 26 files; and `serve` (27), `rpc` (12) and `universal_pages`
+(9 still ignored) on the default route, with `VYRN_SERVE_ENGINE=interp` now the
+switch that asks for the other one.
 
 ### M6 — the other two judgments
 

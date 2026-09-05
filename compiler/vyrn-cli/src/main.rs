@@ -81,7 +81,7 @@ enum Engine {
     Wasm,
 }
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out] [--route wasm2c]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Under the interpreter the rows are functions; under --engine wasm they are phases, with the operations the guest executed)\n       vyrn run|test|bench --check --engine interp|wasm [file.vyrn]   (RFC-0125 M5: `wasm` compiles the program with the direct backend and runs it in the embedded wasmtime; `interp` is the default. Counts only BEFORE the file, like --profile)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out] [--route wasm2c]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Rows are the phases of the compile and the run, with the operations the guest executed; under --engine interp they are functions)\n       vyrn run|test|bench --check|serve|dev --engine wasm|interp [file.vyrn]   (RFC-0125 M5: `wasm` compiles the program with the direct backend and runs it in the embedded wasmtime, and is the default; `interp` selects the tree-walker. Counts only BEFORE the file, like --profile)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once, compiled; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -390,7 +390,7 @@ fn real_main() -> ExitCode {
     let at = args
         .get(2.min(args.len())..head)
         .and_then(|h| h.iter().position(|a| a == "--engine"));
-    let mut engine = Engine::Interp;
+    let mut engine = Engine::Wasm;
     if let Some(i) = at {
         engine = match args.get(i + 3).map(String::as_str) {
             Some("interp") => Engine::Interp,
@@ -455,7 +455,7 @@ fn real_main() -> ExitCode {
         return doc_cmd(&args[2..]);
     }
     if cmd == "dev" {
-        return dev_cmd(&args[2..]);
+        return dev_cmd(&args[2..], engine);
     }
     if cmd == "routes" {
         let json = args[2..].iter().any(|a| a == "--json");
@@ -5302,7 +5302,7 @@ fn refuse_workers_if_stateful(program: &vyrn_frontend::ast::Program) -> Option<E
 /// static file (so all of `/rpc/*`) — goes to the server's `handle`. Static
 /// sources, in order: the built `/client.wasm`, the runtimes under
 /// `/vyrn-runtime/<name>`, then files under the public dir (`/` → `index.html`).
-fn dev_cmd(rest: &[String]) -> ExitCode {
+fn dev_cmd(rest: &[String], engine: Engine) -> ExitCode {
     let mut port: u16 = 8080;
     let mut workers: Option<usize> = None;
     let mut i = 0;
@@ -5329,6 +5329,13 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
             eprintln!("dev: unexpected argument `{}`", rest[i]);
             return ExitCode::from(2);
         }
+    }
+
+    if workers.is_some() && engine == Engine::Wasm {
+        eprintln!(
+            "dev: `--workers` is the interpreter's (RFC-0025) — the compiled route serves              from one resident instance"
+        );
+        return ExitCode::from(2);
     }
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -5393,10 +5400,21 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let program = match load_program(&server_path, &source) {
+    let source = match engine {
+        Engine::Interp => source,
+        Engine::Wasm => format!(
+            "{source}
+{SERVE_SHIM}"
+        ),
+    };
+    let mut program = match load_program(&server_path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
+    if engine == Engine::Wasm {
+        serve_rewrite(&mut program);
+    }
+    let program = program;
     let _memo = shared_desugars(&program);
     use vyrn_frontend::ast::Type;
     let has_handle = program.functions.iter().any(|f| {
@@ -5481,6 +5499,47 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+
+    // The compiled route (RFC-0125 §3 M5): the same resident instance `vyrn
+    // serve` runs, with the dev command's static assets in front of the doors.
+    if engine == Engine::Wasm {
+        let bytes = match vyrn_codegen::direct::compile(&program) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let run = wasmrun::Run {
+            argv: vec![server_path.clone()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: false,
+            capture_stderr: true,
+            meter: false,
+        };
+        let mut res = match wasmrun::start(&bytes, &run) {
+            Ok((res, 0)) => res,
+            Ok((mut res, code)) => {
+                eprint!("{}", res.drain_err());
+                eprintln!("error: main returned {code}, aborting dev");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        eprint!("{}", res.drain_err());
+        banner(&assets);
+        let mut call_handle = |call| serve_wasm_call(&mut res, call);
+        for stream in listener.incoming() {
+            match stream {
+                Ok(mut s) => dev_serve_one(&mut s, &assets, &mut call_handle),
+                Err(_) => continue,
+            }
+        }
+        return ExitCode::SUCCESS;
     }
 
     let result = vyrn_frontend::interp::serve(&program, move |call_handle| {

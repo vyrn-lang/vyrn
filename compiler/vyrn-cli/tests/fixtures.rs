@@ -115,6 +115,10 @@ const CENSUS: &[Census] = &[
         verdict: "yes",
     },
     Census {
+        capability: "gen-fn-at-run-time",
+        verdict: "no",
+    },
+    Census {
         capability: "site-export",
         verdict: "yes",
     },

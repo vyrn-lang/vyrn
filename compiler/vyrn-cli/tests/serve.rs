@@ -152,19 +152,20 @@ fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
     }
 }
 
-/// `--engine wasm` when the environment asks for it (RFC-0125 §3 M6). The whole
-/// suite then runs against the compiled route — one set of assertions rather
-/// than two, because a served program must answer the same on both engines.
+/// The compiled route is the default (RFC-0125 §3 M5, the eleventh slice), so
+/// this adds nothing unless `VYRN_SERVE_ENGINE=interp` asks for the tree-walker
+/// — one set of assertions either way, because a served program must answer the
+/// same on both engines.
 ///
-/// `--workers` is the interpreter's (RFC-0025: N interpreters, one per thread),
-/// so a spawn that asks for workers keeps the default engine whatever the
-/// environment says.
+/// `--workers` is the interpreter's (RFC-0025: N interpreters, one per thread)
+/// and the compiled route refuses it, so a spawn that asks for workers names
+/// `--engine interp` whatever the environment says.
 fn engine_args(extra: &[&str]) -> Vec<String> {
     if extra.contains(&"--workers") {
-        return Vec::new();
+        return vec!["--engine".to_string(), "interp".to_string()];
     }
     match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
-        Ok("wasm") => vec!["--engine".to_string(), "wasm".to_string()],
+        Ok("interp") => vec!["--engine".to_string(), "interp".to_string()],
         _ => Vec::new(),
     }
 }
@@ -432,6 +433,8 @@ fn handle(req: Request) -> Response {
 
     let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
+        // The pool is the tree-walker's, so the gate it is refused by is too.
+        .args(["--engine", "interp"])
         .arg(&file.path)
         .arg("--port")
         .arg("0")

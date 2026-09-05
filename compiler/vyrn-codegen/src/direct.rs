@@ -348,6 +348,36 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // Three kinds of function define nothing, and are skipped exactly as the
     // textual driver skips them (`lib.rs`, step 1). Lowering an unspecializable
     // shell would fail the whole build over a function nothing calls.
+    // RFC-0021: a `gen fn` runs at generation time and has no runtime lowering
+    // at all, so neither has an ordinary function that calls one — nor one that
+    // calls THAT. The closure is skipped for the reason the three kinds below
+    // are skipped: failing the whole build over a function nothing calls is the
+    // wrong answer. A call to a skipped name refuses at its own call site,
+    // naming it. `std/vyx-hints`'s `checkOf` is the shape: a helper its own
+    // test blocks call, in a module every `vyxHints` program imports.
+    let mut gen_reach: std::collections::HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_gen)
+        .map(|f| f.name.clone())
+        .collect();
+    loop {
+        let before = gen_reach.len();
+        for f in &program.functions {
+            if f.is_extern || gen_reach.contains(&f.name) {
+                continue;
+            }
+            if vyrn_frontend::checker::fn_calls(&f.body)
+                .iter()
+                .any(|c| gen_reach.contains(c))
+            {
+                gen_reach.insert(f.name.clone());
+            }
+        }
+        if gen_reach.len() == before {
+            break;
+        }
+    }
     let mut generics: HashMap<String, &Function> = HashMap::new();
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
@@ -356,6 +386,15 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // only in the compiler's own interpreter and may use builtins with no
         // lowering at all.
         if f.is_extern || f.is_gen {
+            continue;
+        }
+        // An ENTRY POINT is never dropped — `main`, an export a host knocks on,
+        // a lifted test or serve door. It stays, and lowering it refuses at the
+        // call the closure was computed from, naming that call rather than
+        // reporting a program with no `main`. Everything else in `gen_reach` is
+        // a function no run-time entry can reach.
+        let entry = f.name == "main" || f.exported || f.is_export_extern;
+        if gen_reach.contains(&f.name) && !entry {
             continue;
         }
         // PLAN-0125-runtime §3.2: a `std/mem` declaration has no body this
@@ -6421,6 +6460,14 @@ impl<'p> Fn_<'_, 'p> {
                 // told. Suppressed or not, a log call is `Unit` (RFC-0008), so the
                 // threshold cannot change a type.
                 "print" | "trace" | "debug" | "info" | "warn" | "error" => Type::Unit,
+                // RFC-0015's two test-only builtins, for the same reason. Both
+                // hand `Type::Unit` back where they emit, so an arm that only
+                // asserts carries nothing across the join. Found by RFC-0125 §3
+                // M5's eleventh slice: without these rows `std/bench.vyrn` is
+                // refused ("a branch yielding `assertEq`") and `std/regex.vyrn`
+                // traps at run time, where a peek further down had guessed.
+                "assert" if args.len() == 1 => Type::Unit,
+                "assertEq" if args.len() == 2 => Type::Unit,
                 "logger" => Type::Logger,
                 // RFC-0083: the vector builtins, whose result type is fixed.
                 "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
