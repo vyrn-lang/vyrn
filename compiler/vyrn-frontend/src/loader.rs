@@ -1985,7 +1985,7 @@ fn run_generator(
     // The same check+synthesize a root gets (`crate::check_and_synthesize`): a
     // generator is a runnable program, and RFC-0076 compiles it to wasm, so a
     // builtin whose implementation is synthesized has to be synthesized here too.
-    let gdiags = crate::check_and_synthesize(&mut gen_program);
+    let gdiags = crate::movecheck::comptime(|| crate::check_and_synthesize(&mut gen_program));
     if !gdiags.is_empty() {
         return Err(gdiags);
     }

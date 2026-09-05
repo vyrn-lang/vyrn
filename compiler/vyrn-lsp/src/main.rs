@@ -303,6 +303,14 @@ fn main() {
         vyrn_genwasm::install();
     }
 
+    // RFC-0125 §3 M3, the accumulation slice. The placer, the arm rows, the
+    // kernel's refusals and the effect judgment, into the slots `vyrn-frontend`
+    // holds for them — the same call `vyrn` makes at start-up. Without it the
+    // editor read a different compiler from the build: seven ownership rules
+    // have left `movecheck.rs` and are stated by the kernel alone, so a program
+    // `vyrn check` refuses analyzed clean here.
+    vyrn_lower::install();
+
     // `Connection::stdio` sets up the stdin/stdout channels. The server is
     // single-threaded and blocking — no tokio, no I/O threads.
     let (connection, io_threads) = Connection::stdio();

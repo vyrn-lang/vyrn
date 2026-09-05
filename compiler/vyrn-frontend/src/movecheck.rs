@@ -921,6 +921,17 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
     } else {
         run(program, Want::Check).diags
     };
+    // A comptime program is judged by the checker alone: its refusals were
+    // always discarded (`vyrn-cli`'s old `RefusalScope` cleared the
+    // thread-local at the point the command's own program was linked), and the
+    // placer it would run here is the one the interpreter runs to execute it.
+    // MEASURED, because it is the editor that pays twice: a keystroke in
+    // `site/app/docs.vyrn` re-runs two generators, and judging them cost 117 ms
+    // of the 870 ms the kernel adds.
+    if COMPTIME.with(|c| c.get()) {
+        in_source_order(&mut diags);
+        return diags;
+    }
     // Runs the placer, which builds and judges a core body for every instance
     // — under the ownership memo this is the analysis the build already made.
     crate::own::offer(program, crate::own::analyze(program));
@@ -938,6 +949,26 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
     }));
     in_source_order(&mut diags);
     diags
+}
+
+thread_local! {
+    /// Whether the program being checked is a `gen fn`'s own — see
+    /// [`comptime`].
+    static COMPTIME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Check a COMPTIME program inside `f` — a generator's own program, loaded and
+/// run during the load of the program a tool asked about (RFC-0021).
+///
+/// [`refusals`] states the kernel's sentences about the program a tool holds.
+/// A generator's program is not that program: it is machinery the load runs on
+/// the way there, its refusals were always dropped, and the placer this would
+/// run is the one the interpreter runs anyway to execute it.
+pub fn comptime<T>(f: impl FnOnce() -> T) -> T {
+    let was = COMPTIME.with(|c| c.replace(true));
+    let out = f();
+    COMPTIME.with(|c| c.set(was));
+    out
 }
 
 /// The binding a refusal is about: the root of the first path its message
