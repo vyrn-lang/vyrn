@@ -53,7 +53,9 @@
 //!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
 //!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
 //!     bound;
-//!   - `edge_releases`, from a `St::Drop` at a `Site::Edge`.
+//!   - `edge_releases`, from a `St::Drop` at a `Site::Edge` — DERIVED and no
+//!     longer diffed since the derivation slice, for the reason `arm_frees`
+//!     is not.
 //!
 //! The diff is structural in both directions: a plan row the core states
 //! nothing for is a site a flipped emitter would stop releasing at, and a
@@ -220,10 +222,6 @@ fn run() {
                 "arg_drops (plan)",
                 own.plan.arg_drops.iter().filter(|a| reached(a)).count(),
             ),
-            (
-                "edge_releases (plan)",
-                own.plan.edge_releases.keys().filter(|a| reached(a)).count(),
-            ),
         ] {
             *counted.entry(what).or_default() += n;
         }
@@ -283,29 +281,13 @@ fn run() {
             }
         }
 
-        for (join, core_rows) in &facts.edges {
+        // RFC-0125 §3 M3, the derivation slice: Rule N's rows are the
+        // kernel's `equalize` and nothing else, so there is no second answer
+        // to diff. Counted; a wrong one fails the ratchet and the memory
+        // suite.
+        for rows in facts.edges.values() {
             *counted.entry("edge_releases").or_default() += 1;
-            let mut core_rows = core_rows.clone();
-            core_rows.sort();
-            let mut plan_rows = own
-                .plan
-                .edge_releases
-                .get(join)
-                .cloned()
-                .unwrap_or_default();
-            plan_rows.sort();
-            if core_rows != plan_rows {
-                diffs.push(format!(
-                    "{file}: join {join}: edge_releases: core {core_rows:?},                      plan {plan_rows:?}"
-                ));
-            }
-        }
-        for (join, plan_rows) in own.plan.edge_releases.iter().filter(|(a, _)| reached(a)) {
-            if !facts.edges.contains_key(join) && !plan_rows.is_empty() {
-                diffs.push(format!(
-                    "{file}: join {join}: edge_releases: the plan owes                      {plan_rows:?} and the core states none"
-                ));
-            }
+            *counted.entry("edge rows").or_default() += rows.len();
         }
 
         for (node, core_holes) in &facts.receivers {

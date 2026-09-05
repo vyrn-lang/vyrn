@@ -4224,6 +4224,56 @@ date; and the site — `vyrn run site/export.vyrn out` writes its 82 routes and
 14 assets in 386 s, and `vyrn test` is green over `export.vyrn` and
 `site/app`, 189 blocks.
 
+**The edge slice (2026-09-05): Rule N is `equalize`, and the fold that agreed
+with it is gone.**
+
+The second of the five. `own::fold_edge_releases` folded `movecheck`'s
+`EdgeRel` events into a per-join table, the core read the table to place its
+`St::Drop`s at a `Site::Edge`, and the placer added to the same table what the
+kernel found the fold had missed. The kernel's `equalize` is the rule: where
+one live edge of a join has taken a name another still holds, the holding
+edges release it, and a hole one edge has and another lacks is released as a
+sub-place. The core reads the kernel's rows now, out of its own `Placed`
+table, and `own.rs` states none.
+
+**Nothing moved.** The corpus test had counted the two answers equal at 52
+joins in each direction for two slices, and `VYRN_WASM_MANIFEST=check` is
+green on all 173 modules: not one emitted byte. The derivation is a deletion
+and nothing else.
+
+**What that let go.** `ReleasePlan::edge_releases` and `edge_releases_at`;
+`fold_edge_releases` and its two vetoes; `movecheck::EdgeRel`,
+`Facts::edge_releases`, its sink and the three places that filled it — the
+`if` statement's, the `match`'s and the `if` EXPRESSION's, each with its own
+guard about which edge may release what. With the match sink went the
+per-arm `arm_heap` vector and the `all_binders` set it read, and with all
+three went `MoveCheck::value_cannot_alias`, Rule N's structural edge guard,
+whose last caller had been the arm table deleted in the slice above. Both
+compiled emitters' `edge_rows` lost their plan fallback.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/own.rs` | 5,074 | 4,987 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 9,758 | 9,573 |
+| `compiler/vyrn-codegen/src/lib.rs` | 19,151 | 19,139 |
+| `compiler/vyrn-codegen/src/direct.rs` | 16,751 | 16,737 |
+| `compiler/vyrn-lower/src/core.rs` | 4,017 | 4,032 |
+
+The structural census over `movecheck.rs` moves again: placement rows
+2,335 → 2,295, shared machinery 3,619 → 3,474.
+
+**Gates.** As the slice above, and all green: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`, 548 and 74
+ignored; `kernel`, `coretables`, `typed`, `effects` with `--ignored` (1, 1, 1,
+2 at 100 s, 83 s, 205 s, 194 s); `fixtures` with `--ignored`, 205 in 61 s; the
+workspace less `vyrn-cli` with `--skip _natively`, 1,425; `vyrn-genwasm`, 3;
+`memory` with `--test-threads=1`, 10; parity in release with `--ignored`, 41
+of 41 in 277 s; the residue ratchet, 219 s; `VYRN_WASM_MANIFEST=check`, green
+with no byte moved; the generator test with a fresh `VYRN_GEN_CACHE_DIR` and
+`--features wasm-gen`, 12; `testsweep` with `--ignored`, 79 s; `vyrn doc --std
+--verify`, 41 files; and the site — 82 routes and 14 assets, and `vyrn test`
+green over `export.vyrn` and `site/app`.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

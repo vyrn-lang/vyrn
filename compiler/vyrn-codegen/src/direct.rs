@@ -1347,34 +1347,20 @@ impl<'a> Cx<'a> {
         self.plan.arg_drop(node)
     }
 
-    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the
-    /// emitter-reads-the-core slice): the releases one edge of the join at
-    /// `node` owes because another edge took the name. The core states each
-    /// as a `St::Drop` at a `Site::Edge`, which is the join and the edge —
-    /// a position in a branch is not a key, and this is why the drop carries
-    /// one. A sub-place row (`d.line`) keeps its spelling, because the
-    /// temporary the core takes it into is spelled for the place it took.
+    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the derivation
+    /// slice): the releases one edge of the join at `node` owes because
+    /// another edge took the name. The core states each as a `St::Drop` at a
+    /// `Site::Edge`, which is the join and the edge — a position in a branch
+    /// is not a key, and this is why the drop carries one. The kernel's
+    /// `equalize` is the one statement of the rule, and `own.rs` states none.
     fn edge_rows(&self, node: usize) -> Vec<(String, u32)> {
-        let Some(f) = &self.facts else {
-            return self
-                .plan
-                .edge_releases_at(node)
-                .cloned()
-                .unwrap_or_default();
+        let Some(f) = self.facts.as_ref() else {
+            return Vec::new();
         };
-        match f.edges.get(&self.plan.key_of(node)) {
-            Some(rows) => {
-                self.plan.acknowledge(node);
-                rows.clone()
-            }
-            // A join this pass of the core states nothing for — a body it
-            // could not lower — keeps the plan's rows.
-            None => self
-                .plan
-                .edge_releases_at(node)
-                .cloned()
-                .unwrap_or_default(),
-        }
+        f.edges
+            .get(&self.plan.key_of(node))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Round twenty-seven's table read off the core (RFC-0125 §3 M3, the

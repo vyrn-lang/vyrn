@@ -340,8 +340,6 @@ pub struct Facts {
     /// holds for the whole module and nothing may `consume` it, so every store
     /// into one releases what it replaces (Phase 5's rule, now stated as data).
     pub global_stores: std::collections::HashSet<usize>,
-    /// RFC-0114 Rule N: the asymmetric-consumption joins (see [`EdgeRel`]).
-    pub edge_releases: Vec<EdgeRel>,
     /// RFC-0114 R1′: `.byteLength` reads whose receiver is an unnamed String
     /// temporary — `(Expr::Field address, producer)`, producer a function name
     /// or `@concat`/`@str`. Lenders are already filtered out; `own::analyze`
@@ -416,22 +414,6 @@ pub struct StoreEv {
     /// untake fold needs: a CONDITIONAL revive must not qualify.
     pub branch: Vec<u32>,
     pub kind: EvKind,
-    /// The enclosing function — see [`ArgTemp::owner`].
-    pub owner: String,
-}
-
-/// RFC-0114 Rule N: an `if` consumed a binding on exactly one branch, both
-/// branches continue to the join, and the other branch still holds the value —
-/// so a release belongs ON THE EDGE that did not consume. `edge` names the
-/// edge that releases: for an `if`, 0 is the then-edge and 1 the else-edge;
-/// for a `match`, the arm's source index. `own::analyze` folds these against
-/// the write events (every write must be owning) before either backend sees
-/// one.
-pub struct EdgeRel {
-    pub if_key: usize,
-    pub key: usize,
-    pub name: String,
-    pub edge: u32,
     /// The enclosing function — see [`ArgTemp::owner`].
     pub owner: String,
 }
@@ -564,7 +546,6 @@ pub fn facts(program: &Program) -> Facts {
         arg_temps,
         store_events: r.store_events,
         global_stores: r.global_stores,
-        edge_releases: r.edge_releases,
         // A lender's result names storage inside its argument; freeing it
         // would free the argument. Filtered here because the lender set is
         // only complete once every body has been read.
@@ -632,7 +613,6 @@ struct Run {
     projections: Vec<ProjectionSite>,
     store_events: Vec<StoreEv>,
     global_stores: HashSet<usize>,
-    edge_releases: Vec<EdgeRel>,
     receiver_temps: Vec<(usize, String, String)>,
     place_stores: Vec<PlaceStore>,
     exit_orders: Vec<u32>,
@@ -920,7 +900,6 @@ fn run(program: &Program, want: Want) -> Run {
         arg_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         global_stores: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
-        edge_releases: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         place_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mention_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
@@ -1154,10 +1133,6 @@ fn run(program: &Program, want: Want) -> Run {
             .global_stores
             .map(RefCell::into_inner)
             .unwrap_or_default(),
-        edge_releases: mc
-            .edge_releases
-            .map(RefCell::into_inner)
-            .unwrap_or_default(),
         receiver_temps: mc
             .receiver_temps
             .map(RefCell::into_inner)
@@ -1296,7 +1271,6 @@ struct MoveCheck<'a> {
     /// assigns to module state, which are owned unconditionally.
     store_events: Option<RefCell<Vec<StoreEv>>>,
     global_stores: Option<RefCell<HashSet<usize>>>,
-    edge_releases: Option<RefCell<Vec<EdgeRel>>>,
     receiver_temps: Option<RefCell<Vec<(usize, String, String)>>>,
     place_stores: Option<RefCell<Vec<PlaceStore>>>,
     mention_stores: Option<RefCell<Vec<(usize, Vec<(String, usize)>)>>>,
@@ -3942,27 +3916,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Whether `e`'s VALUE provably cannot alias `root`'s heap (RFC-0114
-    /// Rule N's edge guard), structurally: an operator result is a scalar or a
-    /// fresh allocation; a scalar projection carries nothing; a call cannot
-    /// return heap it was never handed, so its result is safe when every
-    /// argument is — a lending function can only lend what it was passed, and
-    /// a return of module state or a projection is refused elsewhere. A
-    /// closure capturing the binding is `Gone::Captured`, which the fold's
-    /// veto refuses before this is asked. Anything unproven answers false,
-    /// which is the leak direction.
-    fn value_cannot_alias(&self, e: &Expr, root: &str) -> bool {
-        if !mentions_place(e, root) {
-            return true;
-        }
-        match e {
-            Expr::Binary { .. } | Expr::Unary { .. } => true,
-            Expr::Field { .. } => !self.arm_carries_heap(e),
-            Expr::Call { args, .. } => args.iter().all(|a| self.value_cannot_alias(a, root)),
-            _ => false,
-        }
-    }
-
     /// Exit-residue round eighteen. For a store `x = <e>` whose value mentions
     /// `x`: can the stored value hand the OLD value back? Every mention of
     /// `root` must be the bare name in a plain (non-`consume`) argument
@@ -4956,38 +4909,6 @@ impl MoveCheck<'_> {
                 // Whole bindings only, taken clean (no hole), untouched before
                 // the `if` and untouched on the other branch — a projection
                 // take, or any prior activity in the binding's bucket, refuses.
-                if !then_div && !else_div {
-                    if let Some(sink) = &self.edge_releases {
-                        let if_key = s as *const Stmt as usize;
-                        for (taker, other, edge) in
-                            [(&then_c, &else_c, 1u32), (&else_c, &then_c, 0u32)]
-                        {
-                            for (root, bucket) in &taker.0 {
-                                if consumed.0.contains_key(root)
-                                    || other.0.contains_key(root)
-                                    || bucket.len() != 1
-                                {
-                                    continue;
-                                }
-                                let Some(c) = bucket.get(root) else { continue };
-                                if c.hole {
-                                    continue;
-                                }
-                                let key = self.nodes.borrow().get(root).copied().unwrap_or(0);
-                                if key == 0 {
-                                    continue;
-                                }
-                                sink.borrow_mut().push(EdgeRel {
-                                    if_key,
-                                    key,
-                                    name: root.clone(),
-                                    edge,
-                                    owner: self.cur_fn.borrow().clone(),
-                                });
-                            }
-                        }
-                    }
-                }
                 // may-consume, but a branch that DIVERGES (break/continue/return)
                 // carries its consumptions out the exit path, not to the code
                 // after the `if` — so a value moved only on a break-path is not
@@ -5915,8 +5836,6 @@ impl MoveCheck<'_> {
                 };
                 let base = consumed.clone();
                 let mut arm_cs: Vec<Consumed> = Vec::new();
-                let mut all_binders: HashSet<String> = HashSet::new();
-                let mut arm_heap: Vec<bool> = Vec::new();
                 for arm in arms {
                     let mut c = base.clone();
                     // Round forty: each arm is an ALTERNATIVE — a take through
@@ -5949,22 +5868,11 @@ impl MoveCheck<'_> {
                             self.nodes.borrow_mut().bind(b, key);
                         }
                     }
-                    all_binders.extend(binders.iter().cloned());
-                    match &arm.body {
-                        ArmBody::Expr(body) => {
-                            // Asked HERE, one scope in, because the question is
-                            // about the binders and this is where they are bound.
-                            self.note_arm_value(body, *line, &binders);
-                            // Asked here too, and kept per arm: the answer needs
-                            // the binder types, which leave with this scope.
-                            arm_heap.push(self.arm_carries_heap(body));
-                        }
-                        // A block arm (RFC-0118) yields nothing: there is no
-                        // arm value to note, and `false` is the TRUE answer to
-                        // "does the value carry heap", not the conservative one
-                        // — nothing exists to alias the binding Rule N would
-                        // release.
-                        ArmBody::Block(_) => arm_heap.push(false),
+                    // Asked HERE, one scope in, because the question is about
+                    // the binders and this is where they are bound. A block arm
+                    // (RFC-0118) yields nothing, so there is no arm value.
+                    if let ArmBody::Expr(body) = &arm.body {
+                        self.note_arm_value(body, *line, &binders);
                     }
                     self.arm_binders
                         .borrow_mut()
@@ -6043,63 +5951,6 @@ impl MoveCheck<'_> {
                 // the binding — its value must not alias what the edge frees. An
                 // arm yielding the binding whole is `Gone::Aliased`, which the
                 // fold's veto refuses.
-                if let Some(sink) = &self.edge_releases {
-                    let match_key = e as *const Expr as usize;
-                    let mut roots: Vec<&String> = Vec::new();
-                    for c in &arm_cs {
-                        roots.extend(c.0.keys());
-                    }
-                    roots.sort();
-                    roots.dedup();
-                    for root in roots {
-                        if base.0.contains_key(root)
-                            || all_binders.contains(root.as_str())
-                            || mentions_place(scrutinee, root)
-                        {
-                            continue;
-                        }
-                        let bkey = self.nodes.borrow().get(root).copied().unwrap_or(0);
-                        if bkey == 0 {
-                            continue;
-                        }
-                        let clean = |c: &Consumed| {
-                            c.0.get(root).is_some_and(|b| {
-                                b.len() == 1 && b.get(root).is_some_and(|t| !t.hole)
-                            })
-                        };
-                        let untouched = |c: &Consumed| !c.0.contains_key(root);
-                        if !arm_cs.iter().all(|c| clean(c) || untouched(c))
-                            || !arm_cs.iter().any(|c| clean(c))
-                            || arm_cs.iter().all(|c| clean(c))
-                        {
-                            continue;
-                        }
-                        for (i, (c, arm)) in arm_cs.iter().zip(arms).enumerate() {
-                            // `arm_heap` keeps the in-scope answer (binder
-                            // types are gone by now); the structural proof —
-                            // operator results are scalar or fresh, a call
-                            // returns only what it was handed — covers what
-                            // the type alone could not.
-                            // `arm_heap` is already `false` for a block arm
-                            // (no value exists to carry heap), so the alias
-                            // proof is only ever asked of an expression.
-                            let safe_value = !arm_heap[i]
-                                || arm
-                                    .body
-                                    .as_expr()
-                                    .is_some_and(|e| self.value_cannot_alias(e, root));
-                            if untouched(c) && safe_value {
-                                sink.borrow_mut().push(EdgeRel {
-                                    if_key: match_key,
-                                    key: bkey,
-                                    name: root.clone(),
-                                    edge: i as u32,
-                                    owner: self.cur_fn.borrow().clone(),
-                                });
-                            }
-                        }
-                    }
-                }
                 let mut merged: Option<Consumed> = None;
                 for c in arm_cs {
                     match &mut merged {
@@ -6146,42 +5997,6 @@ impl MoveCheck<'_> {
                 // Binary/Unary body, whose result is a scalar or fresh). No
                 // binders and no scrutinee here, so those guards do not apply;
                 // the condition is a Bool read completed before the branch.
-                if let Some(sink) = &self.edge_releases {
-                    if let Some(eb) = else_branch {
-                        let if_key = e as *const Expr as usize;
-                        let branches: [&Expr; 2] = [then_branch, eb];
-                        for (taker, edge) in [(&then_c, 1usize), (&else_c, 0usize)] {
-                            let other = if edge == 1 { &else_c } else { &then_c };
-                            let value: &Expr = branches[edge];
-                            for (root, bucket) in &taker.0 {
-                                if base.0.contains_key(root)
-                                    || other.0.contains_key(root)
-                                    || bucket.len() != 1
-                                {
-                                    continue;
-                                }
-                                let Some(c) = bucket.get(root) else { continue };
-                                if c.hole {
-                                    continue;
-                                }
-                                let key = self.nodes.borrow().get(root).copied().unwrap_or(0);
-                                if key == 0 {
-                                    continue;
-                                }
-                                if !self.value_cannot_alias(value, root) {
-                                    continue;
-                                }
-                                sink.borrow_mut().push(EdgeRel {
-                                    if_key,
-                                    key,
-                                    name: root.clone(),
-                                    edge: edge as u32,
-                                    owner: self.cur_fn.borrow().clone(),
-                                });
-                            }
-                        }
-                    }
-                }
                 for (k, v) in then_c.into_iter().chain(else_c) {
                     consumed.or_insert(k, v);
                 }

@@ -1276,11 +1276,6 @@ pub struct ReleasePlan {
     /// alias owns the payload, and the box was nobody's. See the fold in
     /// `analyze`.
     pub consuming_matches: std::collections::HashSet<usize>,
-    /// RFC-0114 Rule N: per join address (`Stmt::If` or `Expr::Match`), the
-    /// bindings to release on one edge because another edge consumed them —
-    /// `(name, edge)`, 0/1 for an `if`'s then/else, the arm's source index
-    /// for a `match`. See [`fold_edge_releases`].
-    pub edge_releases: HashMap<usize, Vec<(String, u32)>>,
     /// RFC-0114 R1′: the `Expr::Field` nodes whose unnamed receiver this
     /// frame owns — freed right after the read (the header for a projection,
     /// the whole record deep after a scalar field).
@@ -1432,16 +1427,6 @@ impl ReleasePlan {
         hit
     }
 
-    /// RFC-0114 Rule N: the releases one edge of this join owes.
-    pub fn edge_releases_at(&self, at: usize) -> Option<&Vec<(String, u32)>> {
-        let at = self.resolve(at);
-        let ers = self.edge_releases.get(&at);
-        if ers.is_some() {
-            self.taken.borrow_mut().insert(at);
-        }
-        ers
-    }
-
     /// RFC-0114 R1′: does this frame own (and free) the unnamed receiver?
     pub fn receiver_free(&self, at: usize) -> bool {
         let at = self.resolve(at);
@@ -1481,10 +1466,9 @@ impl ReleasePlan {
         emitted: &std::collections::HashSet<String>,
     ) -> Vec<(String, &'static str)> {
         let taken = self.taken.borrow();
-        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 4] = [
+        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 3] = [
             ("an argument drop", Box::new(self.arg_drops.iter())),
             ("a store release", Box::new(self.store_owned.iter())),
-            ("an edge release", Box::new(self.edge_releases.keys())),
             ("a receiver free", Box::new(self.receiver_frees.iter())),
         ];
         let mut out: Vec<(String, &'static str)> = Vec::new();
@@ -1623,7 +1607,6 @@ fn analyze_now(program: &Program) -> Ownership {
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let mut facts = crate::movecheck::facts(program);
     let mut store_owned = fold_store_owned(&facts);
-    let edge_releases = fold_edge_releases(&facts);
     let revived = fold_revived(&facts);
     let store_fresh = facts.fresh_stores;
     let exit_sites = std::mem::take(&mut facts.exit_sites);
@@ -2176,11 +2159,6 @@ fn analyze_now(program: &Program) -> Ownership {
             owners.insert(ps.id, ps.owner.clone());
         }
     }
-    for er in &facts.edge_releases {
-        if edge_releases.contains_key(&er.if_key) {
-            owners.insert(er.if_key, er.owner.clone());
-        }
-    }
     for (k, n, owner) in &facts.receiver_temps {
         if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
             eprintln!(
@@ -2204,7 +2182,6 @@ fn analyze_now(program: &Program) -> Ownership {
         malloc_scrutinees,
         consuming_matches,
         discarded_results,
-        edge_releases,
         receiver_frees,
         receiver_malloc,
         receiver_holes: HashMap::new(),
@@ -2372,70 +2349,6 @@ fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<us
             continue;
         }
         out.insert(*key);
-    }
-    out
-}
-
-/// RFC-0114 Rule N (edge normalization, R5). The walker hands over every `if`
-/// that consumed a binding on exactly one branch with both branches reaching
-/// the join; this fold keeps a candidate only when the value at the other edge
-/// is provably this frame's to release:
-///
-/// - every write into the binding, anywhere, is OWNING — a binding ever
-///   assigned a projection may hold a borrow at the edge, and no walk-order
-///   argument survives a loop's back edge, so one non-owning write refuses
-///   the binding outright;
-/// - the binding's final verdict is a plain take — borrowed, lent, captured,
-///   aliased or holed refuses, exactly as [`fold_store_owned`] refuses.
-///
-/// The loop cases need no rule of their own: a binding declared outside a
-/// loop and conditionally consumed inside it is already refused by the
-/// checker's next-iteration reuse rule, so a candidate inside a loop is
-/// re-initialized every iteration before the `if` is reached.
-///
-/// Refusal is the leak direction, which is today's behaviour.
-fn fold_edge_releases(facts: &crate::movecheck::Facts) -> HashMap<usize, Vec<(String, u32)>> {
-    use crate::movecheck::{EvKind, Gone};
-    let vetoed: std::collections::HashSet<usize> = facts
-        .lets
-        .iter()
-        .filter(|(_, r)| {
-            !matches!(
-                r.gone,
-                None | Some(Gone::Moved { .. })
-                    | Some(Gone::Dropped { .. })
-                    | Some(Gone::Returned { .. })
-            )
-        })
-        .map(|(k, _)| *k)
-        .collect();
-    let mut all_owning: HashMap<usize, bool> = HashMap::new();
-    for ev in &facts.store_events {
-        if let EvKind::Write { owning, .. } = ev.kind {
-            *all_owning.entry(ev.key).or_insert(true) &= owning;
-        }
-    }
-
-    let mut out: HashMap<usize, Vec<(String, u32)>> = HashMap::new();
-    for er in &facts.edge_releases {
-        // A row with NO write events is vacuously all-owning: it is an `if
-        // let` scrutinee temporary, whose payload binder can be taken on one
-        // branch like any binding — `if .. { header = l } else { .. }` inside
-        // a line loop leaked one payload per untaken line (round twenty).
-        // The row minting already refused borrows, parameters and module
-        // state (`names_a_place`), so a write-less row's value is this
-        // frame's own.
-        if vetoed.contains(&er.key) || !all_owning.get(&er.key).copied().unwrap_or(true) {
-            continue;
-        }
-        out.entry(er.if_key)
-            .or_default()
-            .push((er.name.clone(), er.edge));
-    }
-    // The walker's bucket iteration is hash-ordered; the emitted IR must not be.
-    for v in out.values_mut() {
-        v.sort();
-        v.dedup();
     }
     out
 }

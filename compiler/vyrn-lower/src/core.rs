@@ -1867,10 +1867,10 @@ impl<'a> Builder<'a> {
 
     /// RFC-0114 Rule N: the drops one edge of a join owes.
     fn edge_drops(&mut self, join: usize, edge: u32, out: &mut Vec<St>) -> Result<(), Gap> {
-        let Some(ers) = self.own.plan.edge_releases_at(join) else {
+        let Some(ers) = placed_edges(join) else {
             return Ok(());
         };
-        for (name, e) in ers {
+        for (name, e) in &ers {
             if *e != edge {
                 continue;
             }
@@ -3469,12 +3469,21 @@ pub(crate) struct Placed {
     /// Round forty's table, derived: `(switch site, arm) -> [(binder, holes)]`,
     /// the payload binders the kernel found still held where their arm ends.
     arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>)>>,
+    /// RFC-0114 Rule N, derived: per join node, the `(name, edge)` releases
+    /// one edge owes because another edge took the name. A sub-place row is
+    /// spelled `d.line`, which every reader resolves as a place.
+    edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
 }
 
 /// The binders the kernel found held at the end of one arm, or `None` where
 /// it found none — read by the second build, empty on the first.
 fn placed_arm(site: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
     PLACED.with(|p| p.borrow().arms.get(&(site, arm)).cloned())
+}
+
+/// Rule N's rows for one join, as the kernel equalized its edges.
+fn placed_edges(join: usize) -> Option<Vec<(String, u32)>> {
+    PLACED.with(|p| p.borrow().edges.get(&join).cloned())
 }
 
 /// The core's answers for the program last analysed on this thread. `None`
@@ -3920,12 +3929,15 @@ fn place_frames(
                 // Rule N's table: one edge of a join still holds what another
                 // took. Consumed by name, so a loop variable qualifies.
                 MissingKind::Edge { edge } => {
-                    let rows = own.plan.edge_releases.entry(m.site).or_default();
-                    if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
-                        rows.push((info.source.clone(), edge));
-                        own.plan.owners.insert(m.site, owner.to_string());
-                        touched.insert(owner.to_string());
-                    }
+                    PLACED.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let rows = p.edges.entry(m.site).or_default();
+                        if !rows.iter().any(|(n, e)| *n == info.source && *e == edge) {
+                            rows.push((info.source.clone(), edge));
+                            touched.insert(owner.to_string());
+                        }
+                    });
+                    own.plan.owners.insert(m.site, owner.to_string());
                     continue;
                 }
                 // The same table, one level down: the sub-place one edge took,
@@ -3933,12 +3945,15 @@ fn place_frames(
                 // every reader of the table resolves as a place.
                 MissingKind::EdgePlace { edge, path } => {
                     let name = format!("{}{}", info.source, path);
-                    let rows = own.plan.edge_releases.entry(m.site).or_default();
-                    if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
-                        rows.push((name, edge));
-                        own.plan.owners.insert(m.site, owner.to_string());
-                        touched.insert(owner.to_string());
-                    }
+                    PLACED.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let rows = p.edges.entry(m.site).or_default();
+                        if !rows.iter().any(|(n, e)| *n == name && *e == edge) {
+                            rows.push((name, edge));
+                            touched.insert(owner.to_string());
+                        }
+                    });
+                    own.plan.owners.insert(m.site, owner.to_string());
                     continue;
                 }
                 // Round forty's table: the arm's unmoved payload binders, one
