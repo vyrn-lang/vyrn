@@ -3901,6 +3901,221 @@ The licence was one rule spent last slice. It is six this slice, and two more
 were spent and given back — by a gate, over a program no corpus held, which
 is the only reason to have gates that read a different corpus.
 
+**The corpus slice (2026-09-05): a licence is as wide as the corpus it was
+read from, and this one was three times too narrow.** The slice before spent
+the licence on six rules and gave two back, because the `fixtures` gate refused
+a program no corpus held. It named that as an accident. It is not an accident:
+the licence was measured over 134 refusal programs while the compiler is asked
+about 1,023, and every program the measurement cannot see is a rule it cannot
+refuse. This slice widens the corpus, re-measures, and closes four of the
+wordings the wider corpus then names. No rule leaves. Two of the reasons are
+new and neither is a wording.
+
+**The corpus, widened three ways.** It was the checker suite's own refusals,
+the 34 census rows and the pinned counterexamples. It is now those and:
+
+- **every program under `examples/`** — 205 files, whose whole standard error
+  the fixture oracle already records, so the gate that caught rows 20 and 21
+  and the corpus a licence is read from are the same corpus at last;
+- **every program under `site/`** — 54 files, all of which compile;
+- **every program a test WRITES** — the 524 literals `testsweep` lifts out of
+  `tests/*.rs`, which is the other corpus RFC-0125's by-default sweep exists
+  for;
+- **five the dump could not see.** `VYRN_DUMP_MOVECHECK` lived in the test
+  module's `run`, so a unit test that parsed for itself and called `check`
+  directly wrote nothing. Those five tests call `record` now. One of them is
+  the reason this paragraph is here.
+
+That is 1,023 programs. 502 of them compile under both runs and say nothing
+about any rule; the table below is the other 521.
+
+**The measurement is the containment slice's, unchanged.** Run `vyrn check`
+and `VYRN_NO_MOVECHECK=1 vyrn check` over every program and compare the two
+standard error streams WHOLE: identical, menu, text, or accepted.
+
+| answer | before | after |
+|---|---|---|
+| identical | 427 | 437 |
+| menu | 0 | 0 |
+| text | 67 | 57 |
+| accepted | 27 | 27 |
+
+Ten programs moved from `text` to `identical` and none moved the other way.
+The five the dump was blind to are three that compile, one identical, and one
+that differs — and that one is the finding.
+
+**What the wider corpus refuses, and it is what the gate refused.** Rows 20
+and 21 read `identical` over the old corpus. Over this one they do not:
+
+- **row 20**, a `drop` after a take, is 2 programs, 1 identical and 1 text.
+- **row 21**, a `drop` of a borrow, is 3 programs, 2 identical and 1 text.
+
+Both texts are `examples/mustuse_abandoned.vyrn`, which the fixture oracle
+holds and no refusal corpus did. So the widening is not bookkeeping: it turns
+the licence that shipped a reverted deletion into a licence that refuses it
+before the deletion is written. **Nothing already deleted is contradicted.**
+Every rule that left is stated by the kernel alone, so both runs give the
+kernel and the answer is `identical` by construction; the seven sentences are
+held still by their census rows, which are green, and by `testsweep`, which is
+green.
+
+**The two disagreements that program named are closed, and it still refuses.**
+Both were real and both are fixed here.
+
+1. **An undeclared `self` is a `read` parameter.** The core gave a parameter of
+   a must-use type no `borrow_kind`, because RFC-0075 M1 excepts such a
+   parameter from a take — a stream parameter carries the obligation into the
+   callee. That exception is about OWNERSHIP. The capability the author wrote
+   is a fact about the NAME either way, and the two were one field.
+   `NameInfo::must_use_param` carries the exception now, at the two sites that
+   made it, and the kind stays. The kernel words `let ops = self.ops` inside
+   `fn release(self)` as the checker words it: a second name for the `read`
+   parameter `self`.
+2. **The order a file's refusals come out in is the source's.** The checker
+   walked top-level functions before `impl` methods; the placer walks bodies in
+   the lowering's order. The same two sentences came out swapped, which moves
+   the whole standard error even where every sentence is identical. Neither
+   walk order is a rule anybody wrote down. The source's order is, and it is
+   the only one a reader can predict, so both passes sort by line before they
+   print (`movecheck::check_accum`, `vyrn-cli`'s `kernel_refusals`). One
+   recorded output moves in the whole tree, and it is that program's.
+
+**And the rules stay, for a reason no wording closes.** The kernel is asked
+only of a program the checker ACCEPTED (`kernel_refuses` runs after the load
+returns `Ok`). `mustuse_abandoned.vyrn` is refused by the must-use walk as
+well, and the must-use walk is in `movecheck.rs`. So a deletion of rows 20 and
+21 does not move their sentences — it removes them. Measured, not argued: with
+the two rules cut out of the file the program prints four diagnostics where it
+printed six, and the two that go are the two the rules gave. The close-out
+called this "accumulation" and recorded that no program of either corpus was
+caught by it. One is, now, and it is the first program the deletion track
+reaches that has two kinds of error in it.
+
+That is a cost with a shape. The kernel says things this pass deliberately does
+not, so concatenating the two lists ADDS diagnostics rather than restoring
+them: `r31`'s second `close(s)` is a use after a take AND a must-use disposed
+twice. What the deletion needs is narrower — the kernel asked of a program
+whose only refusals are the checker's own ownership rules, which is a program
+the core can still lower — and it is a change to the driver rather than to a
+wording. It is what rows 20 and 21 wait on, and every rule after them that any
+real file also breaks another rule in.
+
+**Three wordings closed, and all three were about a NAME.**
+
+- **The path a reader wrote.** A read of a place binds a temporary the lowering
+  mints, and its refusals quoted `@borrow` — a name no program contains, so a
+  reader was told about the compiler instead of about the program. The
+  temporary carries the path now (`NameInfo::path`, spelled by
+  `movecheck::place_path` and `movecheck::element_path`), and the subject of the
+  sentence is `p.name`, `xs[i]`, `d.title`. With the path as the subject the
+  reason clause stops repeating it, which is the checker's own sentence: it is
+  read out of a place that owns it.
+- **How the taker takes.** A call took its argument in one wording and there
+  are three. A parameter the author declared `consume` is PASSED to it; a
+  builtin's sink and a store are STORED into; a variant constructor PUTS the
+  value into what it makes. The core recorded two of the three —
+  `Rhs::Call::declared` covered a builtin and a variant alike — so
+  `Rhs::Call::ctor` is beside it and `Kernel::may_not` states the verb once.
+- **The menus that follow from it.** An element handed to a declared parameter
+  names `swapRemove`, because an element has no take. A constructor names the
+  copy alone. A projection of a root this frame owns names the take first.
+
+Six census rows read `the same` after that — 01, 03, 14, 19, 27 and 34 — where
+they read `its own words` before.
+
+**Row 19 was licensed, and the corpus that could not see its own unit test is
+why.** Over 134 programs, `a borrow put into a constructor` had one program and
+it was identical, so the rule was ready to leave. The test that pins the rule
+(`a_borrow_wrapped_in_a_constructor_is_refused_and_the_copy_is_owned`) writes a
+SECOND program — a loop variable returned as `Some(m)` — and parses it itself,
+so the dump never held it. The two passes word that one differently: the
+checker says it is a loop variable, the kernel says it is read out of
+`c.members[..]`. The rule stays. This is the containment slice's lesson one
+level down again: the unit of the licence is a rule, the unit of the
+measurement is a program, and a program the instrument cannot see is a licence
+the instrument invents.
+
+**What every remaining family costs, in the kernel's own terms.** The rows
+are the checker's sentence. Every row with two or more programs is here; the
+fourteen with one each are left to the diffs.
+
+| the checker's sentence | programs | identical | text | accepted |
+|---|---|---|---|---|
+| a must-use obligation, never discharged | 27 | | 7 | 20 |
+| a must-use obligation, discharged twice | 11 | | 10 | 1 |
+| may not be passed to a `consume` parameter via — it is a `read` parameter | 9 | 6 | 3 | |
+| may not be stored into — it is a `read` parameter | 9 | 3 | 6 | |
+| is consumed inside a loop, so it would be used again | 7 | 5 | 2 | |
+| was moved here into | 6 | | 6 | |
+| may not be stored into — it is a loop variable | 5 | | 5 | |
+| may not be consumed — it is a `read` parameter | 5 | 2 | 3 | |
+| may not be passed to a `consume` parameter via — read out of a place | 5 | 3 | 2 | |
+| a capture that outlives the call | 4 | | | 4 |
+| may not be returned — it is module state | 4 | 3 | 1 | |
+| may not be passed to a `consume` parameter via — a second name | 3 | 2 | 1 | |
+| an exported function owns its result — a parameter | 3 | 2 | 1 | |
+| may not be returned — it is a `read` parameter | 3 | 2 | 1 | |
+| an exported function owns its result — read out of a place | 2 | | 2 | |
+| module state consumed by a `for` loop | 2 | | 2 | |
+| is dropped here but was already consumed by | 2 | 1 | 1 | |
+| may not be returned — a second name for a parameter | 2 | 1 | 1 | |
+| module state consumed by a take | 2 | | 2 | |
+
+Four obstacles hold the whole of it, and the biggest is no longer a wording:
+
+1. **Accumulation**, which rows 20 and 21 wait on and which this record prices
+   above. It is a change to the driver and not a sentence.
+2. **Row 07, a move into a binding**, is 8 programs and four separate reasons,
+   each now measured rather than guessed at. The kernel words a store into a
+   record literal's field as "a literal" where the checker names the field
+   (`R.s`); it words `for .. in consume` as "a value" where the checker names
+   the loop; its second line quotes the path at the USE (`d.a.byteLength`)
+   where the checker quotes the binding (`d.a`), and it carries no menu there;
+   and where the taker is a builtin's sink it gives rule 1's sentence at the
+   use rather than the move's two-line form, because the `State`'s taker does
+   not carry which of the two the checker would have given.
+   `Rhs::Call::declared` reaches the verb now and does not reach this.
+3. **A hole at a loop's back edge** (row 25) is the containment slice's
+   obstacle, unchanged: the hole must carry the line and the taker that made
+   it, which is a `State` field every join and every widen must merge. Two
+   programs.
+4. **A second diagnostic** (row 26): the checker prints the read and then rule 2
+   at the store that follows, and a `Refusal` is one message. Two programs, and
+   the second sentence is rule 2 at a store, which is not licensed either.
+
+**The structural census, re-measured.** 916 / 723 / 2,362 / 73 / 3,665 / 2,092
+over 9,831 lines, against 916 / 723 / 2,362 / 73 / 3,647 / 2,069 over 9,790 at
+the branch point. Nothing left the file this slice: the rules are untouched,
+shared machinery grew by the ordering rule the checker now states, and the
+tests grew by the corpus record the five blind programs needed. (The slice
+before recorded 2,360 and 3,646; the assertion said 2,362 and 3,647 at the same
+commit, so the prose was two lines and one line out and the numbers here are
+the test's.)
+
+**Gates.** In §1.4's order, one at a time, on a machine carrying other
+worktrees' gates: `cargo fmt --all --check`, clean; `cargo build --release -p
+vyrn-cli`; `cargo test -p vyrn-cli` with no filter, 532 passed, 73 ignored and
+one failure that is not this slice's — `vyx::an_origin_pointing_outside_the_-
+project_is_not_a_map` fails the same way at the branch point `5b191b63`, where
+a `//@origin` that climbs eight levels out of a scratch directory with no
+project above it resolves to a drive root instead of being refused as
+malformed; the `kernel`, `coretables`, `typed` and `effects` suites with
+`--ignored` (1, 1, 1 and 2, at 71 s, 71 s, 178 s and 209 s); `fixtures` with
+`--ignored`, the whole corpus against its recorded output including the one
+re-recorded order, 85 s; `vyrn-frontend`, 1,246; the workspace less `vyrn-cli`
+with `--skip _natively`, 1,422; `memory` with `--test-threads=1`, 10; parity in
+release with `--ignored`, 41 of 41 in 282 s; the residue ratchet, 219 s;
+`VYRN_WASM_MANIFEST=check` on `wasmhash`, green on all of them, so no emitted
+byte moved; the cross-engine generator test with a fresh `VYRN_GEN_CACHE_DIR`,
+12; `testsweep` with `--ignored`, 75 s; `vyrn doc --std -o ../docs/api
+--verify`, 41 files up to date; and the site — `vyrn run site/export.vyrn out`
+writes its 82 routes and 14 assets, and `vyrn test` is green over `export.vyrn`
+and `site/app`, 189 blocks.
+
+The whole-stderr snapshot over the 1,023 moved ONE program across the three
+commits, and it moved the right way: a `drop` of `r.xs` is refused by that name
+now instead of by `@borrow`.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
