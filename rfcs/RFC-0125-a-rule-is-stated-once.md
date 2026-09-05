@@ -4664,6 +4664,173 @@ blocks) and `site/app` (154).
 No blessed snapshot moved, and the structural census moves by one row: shared
 machinery 3,768 to 3,983, which is the cache and its fingerprint inside
 `movecheck.rs`.
+**The scrutinee slice (2026-09-05): the core counts its own reads, and round
+twenty-seven's table is gone.**
+
+The third of the five. `own::analyze` folded `movecheck`'s consuming-match
+candidates into `consuming_matches`, and the core asked the table twice —
+once to mint the temporary that takes a named scrutinee, once to decide the
+binding owns what the construct takes. Both emitters asked it too. The core
+derives the answer now, and `own.rs` states none.
+
+**What the derivation is.** The question has two halves, and the core states
+each of them where it can see it. The first half is "did THIS construct give
+the value away", and the note answers it: `Leak::Aliased` carries the line
+the alias was written at, and an arm's alias is written at the construct's
+own line, so the comparison is a line against the construct's arms. An arm
+that hands its payload to a call spells the same fact as `Fate::Moved` at the
+CALL's line, which is a line of one of those arms. The second half is
+"is the construct the last owner", and that is a count over the core: the
+first build records the candidate and takes nothing, `core::last_owner` reads
+the body it made, and the second build takes every scrutinee nothing reads
+after the construct. A body with no candidate is still built once.
+
+**The core says it better than the fold did.** The fold's three screens were
+an order window over `movecheck`'s event stream, and each of them is a
+plainer thing here. Its window is the order of a read. Its loop test is the
+nesting depth of a `St::Loop`. Its "no read of the scrutinee's own NAME
+inside the arm window" — the screen that had to tell a binder's read from the
+scrutinee's, because both resolve to one row — is the difference between two
+names: a payload binder is a name of its own in the core, so an arm reading
+the payload is not a read of the scrutinee and no window is needed to say so.
+A release the plan placed is a `Drop`, and it reads the name like anything
+else.
+
+**What a first reading got wrong, and what caught it.** A rule made of the
+note alone says yes at two sites the table refuses, and both are the counting
+half. `std/vyx:vyxProcessElem` matches a `consume` parameter whose six other
+arms answer `VyxOne { node: n }` — the arms read the scrutinee itself, so the
+construct is not its last owner. `examples/refutablelet.vyrn`'s `let
+Tagged(tag, n) = local` becomes ONE match per binder (RFC-0121), so the first
+of the two is not the last reader of `local` either. Reading the note without
+the count would take a value the next statement still wants. The corpus test
+is what said so, at both sites, before anything was deleted.
+
+**Nothing moved.** Over the corpus the core's answer is the answer it gave
+before, site for site: no site where the analysis took the scrutinee and the
+core does not, and 1,602 sites where the core takes one the table never named
+— the same 1,602 the slice above counted. `VYRN_WASM_MANIFEST=check` is green
+on all 173 modules: not one emitted byte.
+
+**What that let go.** `ReleasePlan::consuming_matches` and `match_consumes`;
+the fold in `own::analyze` and its three screens; `movecheck::MentionEv`,
+`Facts::mentions` and its sink, `ConsumeCand`, `Facts::consume_cands` and the
+two halves of the candidate the `match` walk pushed, and `quiet_mentions` —
+the flag that kept `gave_up_returned`'s bookkeeping out of the arm window,
+which was a repair on a window that no longer exists. A read still advances
+the event order, because every other fold compares orders. The textual
+backend read the table directly and reads the core now
+(`Gen::match_consumes`); the direct backend's core-first read lost its
+fallback, because there is nothing to fall back to.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/own.rs` | 4,987 | 4,922 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 9,573 | 9,480 |
+| `compiler/vyrn-codegen/src/lib.rs` | 19,139 | 19,154 |
+| `compiler/vyrn-codegen/src/direct.rs` | 16,737 | 16,735 |
+| `compiler/vyrn-lower/src/core.rs` | 4,032 | 4,290 |
+
+The structural census over `movecheck.rs` moves with it: placement rows
+2,295 → 2,250, shared machinery 3,474 → 3,426.
+
+**The cost is one more build, and only where there is a question.** `build`
+and `build_outside` build twice where the body holds a candidate, and once
+everywhere else. The site export is the longest reader of the core in the
+repo, and it exports its 82 routes in 364 s.
+
+**Gates.** As the slice above, and all green: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`, 548 and 74
+ignored; `kernel`, `coretables`, `typed`, `effects` with `--ignored` (1, 1, 1,
+2 at 111 s, 87 s, 214 s, 195 s); `fixtures` with `--ignored`, 48 s;
+`vyrn-frontend`, 1,249; the workspace less `vyrn-cli` with `--skip
+_natively`, 1,425; `vyrn-lsp`, 99, and `vyrn-genwasm`, 3; `memory` with
+`--test-threads=1`, 10; parity in release with `--ignored`, 41 of 41 in
+293 s; the residue ratchet, 188 s; `VYRN_WASM_MANIFEST=check`, 173 hashed and
+no byte moved; the generator test with a fresh `VYRN_GEN_CACHE_DIR` and
+`--features wasm-gen`, 12 and the cross-engine one; `testsweep` with
+`--ignored`, 30 s; `vyrn doc --std --verify`, 41 files; and the site — 82
+routes and 14 assets, and `vyrn test` green over `export.vyrn` and
+`site/app`.
+
+**Where the last two stop, after this one.** `arg_drops` and `store_owned`
+stand where the record above put them, and this slice moves neither. What it
+adds to that record is a shape: a rule the kernel cannot state can still be
+DERIVED, if the core can state it over its own body and the two-build
+arrangement can carry the answer from the first build to the second. That is
+what `store_owned` needs — its blocker is a `MissingKind` for a store, which
+is the same carriage one step further on — and it is not what `arg_drops`
+needs, whose three whole-program closures are still a post-pass over every
+body and must be hoisted before the core builds one.
+
+**Where `store_owned` stops, read at the source (2026-09-05).**
+
+The fourth of the five was built, measured and taken out again. What follows
+is what the attempt found, so the next slice starts from it rather than from
+the sentence above.
+
+**It is two folds under one name.** `own::analyze` fills `store_owned` twice.
+`fold_store_owned` reads `movecheck`'s store events — one row per
+`Stmt::Assign`, plus `Facts::global_stores` for module state — and carries the
+three per-binding repairs the record above names. The fold beside it reads
+`Facts::place_stores` — one row per FIELD and ELEMENT store — and screens each
+against `is_global`, `is_modify_param` and a take-clearance over the binding.
+The kernel answers the first. It has no opinion about the second: its
+"a store into a place that owns heap releases nothing" refusal fires only
+where the CORE hands it `Old::Unreleased`, and `old_for` never did.
+
+**Both halves have a rule, and both rules are statable.** Module state needs
+no judgment at all — a global owns what it holds for the whole module and
+nothing may `consume` it, so every store into one releases what it replaces,
+and the core states that where it lowers the store. For a place store the
+kernel's rule is: the store owes the release where the place is rooted in
+module state, or in a `modify` parameter, or in a name this frame owns and
+still holds. That is `is_global`, `is_modify_param` and
+`takes_clear || droppable`, one for one, with the per-path `Own::Held` doing
+the third. The hand-back guard is the CORE's and not the kernel's: `s.dense
+= s.dense.push(i)` — which is what `s.dense.push(i)` becomes — gives the
+buffer back, so a field store whose value mentions its base stands the release
+down exactly as a store to a name does. The fold had that guard folded into
+its rows; the core has to say it.
+
+Written that way, the derived answer agrees with the analysis at every site
+the corpus reaches: `coretables` finds no store where the core releases and
+the plan does not, and the twelve rows the `place at` rewrite leaves to the
+plan stay twelve.
+
+**And the residue ratchet refuses it.** Three programs gain residue —
+`placeorder` one block, `rest` 65, `regexredux` 130,044 — while no store
+answer moved. The loss is not in the row. It is in what the FIRST build
+states.
+
+**The blocker is not a missing `MissingKind`.** That is ten lines. A store
+answer is an INPUT to the judgment as well as an output of it: the first
+build must state something at every store, the kernel's per-path state
+depends on what it states, and every other row the placer writes — the exits,
+the arms, the edges — moves with it. The same run counted one more arm binder
+freed, 499 to 500, and two more taken scrutinees, in a corpus where not one
+store answer changed.
+
+The two tables derived before this one do not have that property. A `Drop`
+the first build omits at an arm's end or on a join's edge is one the kernel
+reports and then treats as released, so the state after it is the state the
+second build has, and the judgment the second build gets is the judgment the
+first one gave. A store the first build says nothing about changes the state
+at every statement after it, and the placement is then a placement of a
+program that is not the one the emitters will run.
+
+So the next slice needs a first build whose store answers do not move the
+judgment. Two shapes fit: a store word that means "released, and the row is
+still to be written", so the kernel's state is the second build's state while
+the answer is open; or a placement that reaches a fixpoint over its own
+output, which is the same arrangement `St::Loop` already has for a widened
+entry. Neither is large. Both are the slice, and neither was in the reading
+above.
+
+`arg_drops` is untouched, and stops where the record above puts it. It does
+not have this property either, for the reason it is not a judgment: the rule
+is over DECLARATIONS, and a first build that states no argument drop asks the
+kernel nothing.
 
 ### M4 — the runtime in Vyrn
 

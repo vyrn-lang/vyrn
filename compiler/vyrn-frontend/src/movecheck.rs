@@ -303,30 +303,6 @@ pub struct ExitEv {
     pub clean: bool,
 }
 
-/// One READ of a tracked binding (round twenty-seven): the resolved row key,
-/// the name it was read through (a binder over a scrutinee resolves to the
-/// scrutinee's row — the name tells the two apart), and the walk order.
-#[derive(Clone, Debug)]
-pub struct MentionEv {
-    pub key: usize,
-    pub name: String,
-    pub order: u32,
-}
-
-/// A `match` over a WHOLE named local (round twenty-seven): the candidate for
-/// the consuming-match upgrade. `start` is the order after the scrutinee walk,
-/// `end` after the arms; `loops` is the match's loop context, which must equal
-/// the binding's initializing write's for the per-iteration freshness argument.
-#[derive(Clone, Debug)]
-pub struct ConsumeCand {
-    pub match_id: usize,
-    pub key: usize,
-    pub scrut_name: String,
-    pub start: u32,
-    pub end: u32,
-    pub loops: Vec<u32>,
-}
-
 pub struct Facts {
     /// What every `let` owns at the end of its block — see [`ownership`].
     pub lets: HashMap<usize, LetOwnership>,
@@ -356,10 +332,6 @@ pub struct Facts {
     /// Round twenty-one: every `return` and `?` the walk met, with enough
     /// context to place an early release — see `own::fold_early_releases`.
     pub exit_sites: Vec<ExitEv>,
-    /// Round twenty-seven: every read of a tracked binding, in walk order.
-    pub mentions: Vec<MentionEv>,
-    /// Round twenty-seven: the consuming-match candidates.
-    pub consume_cands: Vec<ConsumeCand>,
     /// Round twenty-eight: statement-position calls whose OWNED heap result
     /// nothing binds — `remove(s, h)` for the return value's side effect —
     /// with the callee name for the lender screen. The backends free the
@@ -559,8 +531,6 @@ pub fn facts(program: &Program) -> Facts {
             .collect(),
         exit_orders: r.exit_orders,
         exit_sites: r.exit_sites,
-        mentions: r.mentions,
-        consume_cands: r.consume_cands,
         // Round twenty-eight: a wrapped lender's result names storage inside
         // its argument — freeing a discarded one is a use-after-free, so the
         // closed lending set screens here.
@@ -619,8 +589,6 @@ struct Run {
     mention_stores: Vec<(usize, Vec<(String, usize)>)>,
     param_escapers: HashSet<String>,
     exit_sites: Vec<ExitEv>,
-    mentions: Vec<MentionEv>,
-    consume_cands: Vec<ConsumeCand>,
     discarded: Vec<(usize, String)>,
 }
 
@@ -1249,9 +1217,6 @@ fn run(program: &Program, want: Want) -> Run {
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         carrying_locals: RefCell::new(HashSet::new()),
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        mentions: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        quiet_mentions: std::cell::Cell::new(false),
-        consume_cands: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         fnval_sigs: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
@@ -1491,11 +1456,6 @@ fn run(program: &Program, want: Want) -> Run {
             .map(RefCell::into_inner)
             .unwrap_or_default(),
         exit_sites: mc.exit_sites.map(RefCell::into_inner).unwrap_or_default(),
-        mentions: mc.mentions.map(RefCell::into_inner).unwrap_or_default(),
-        consume_cands: mc
-            .consume_cands
-            .map(RefCell::into_inner)
-            .unwrap_or_default(),
         discarded: mc.discarded.map(RefCell::into_inner).unwrap_or_default(),
     }
 }
@@ -1624,13 +1584,6 @@ struct MoveCheck<'a> {
     /// per body; consulted only where `param_escapers` records.
     carrying_locals: RefCell<HashSet<String>>,
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
-    mentions: Option<RefCell<Vec<MentionEv>>>,
-    /// Whether the walk is inside `gave_up_returned`'s bookkeeping over a
-    /// returned JOIN's scrutinee. A mention is a READ, and that walk reads
-    /// nothing. The order still advances, so every other fold sees the numbers
-    /// it saw before; only the sink is skipped.
-    quiet_mentions: std::cell::Cell<bool>,
-    consume_cands: Option<RefCell<Vec<ConsumeCand>>>,
     discarded: Option<RefCell<Vec<(usize, String)>>>,
     /// Round forty-six: for an argument of a call THROUGH A FN VALUE (a
     /// `fn`-typed parameter, field or binding), the callee's declared
@@ -2170,26 +2123,19 @@ impl MoveCheck<'_> {
     /// `continue`). The untake fold refuses any binding whose take-to-revive
     /// window contains one: on that exit the binding still holds the taken
     /// state, and the exit path's releases must not touch it.
-    /// Round twenty-seven: record one READ of a tracked binding. Bumps the
-    /// event order so a read is strictly ordered against the writes, takes and
-    /// exits around it; the folds that compare among their own events are
-    /// unaffected by the extra increments.
+    /// Round twenty-seven: one READ of a tracked binding advances the event
+    /// order, so a read is strictly ordered against the writes, takes and
+    /// exits around it and every fold that compares orders sees the numbers
+    /// it saw before.
+    ///
+    /// The reads themselves are nobody's since RFC-0125 §3 M3's third
+    /// derivation slice: the core counts the reads of a name over its own
+    /// statements, where a payload binder is a name of its own.
     fn mention_ev(&self, name: &str) {
-        let Some(sink) = &self.mentions else { return };
-        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
-        if key == 0 {
+        if self.lets.is_none() || self.nodes.borrow().get(name).copied().unwrap_or(0) == 0 {
             return;
         }
-        let o = self.ev_order.get();
-        self.ev_order.set(o + 1);
-        if self.quiet_mentions.get() {
-            return;
-        }
-        sink.borrow_mut().push(MentionEv {
-            key,
-            name: name.to_string(),
-            order: o,
-        });
+        self.ev_order.set(self.ev_order.get() + 1);
     }
 
     /// Round twenty-one: record a `return`/`?` with its placement context.
@@ -2526,16 +2472,8 @@ impl MoveCheck<'_> {
                 scrutinee, arms, ..
             } => {
                 // The scrutinee's row is marked, and NOT as a read: every arm
-                // has already written its own verdict there. Minting a read
-                // put a mention of the scrutinee's NAME inside the arm window,
-                // which is what `own`'s consuming-match screen refuses, so
-                // every `return match o { .. }` fell out of the upgrade — its
-                // binder stayed a borrow, `o` stayed held, and the placer then
-                // released a payload the arm had given away (RFC-0125 §3 M5,
-                // the seventh slice).
-                let was = self.quiet_mentions.replace(true);
+                // has already written its own verdict there.
                 self.gave_up_returned(scrutinee, gone);
-                self.quiet_mentions.set(was);
                 for arm in arms {
                     if let crate::ast::ArmBody::Expr(b) = &arm.body {
                         self.gave_up_returned(b, gone);
@@ -6131,21 +6069,6 @@ impl MoveCheck<'_> {
                 };
                 let mut any_moved = false;
                 let mut moved_gone: Option<Gone> = None;
-                // Round twenty-seven: a match over a WHOLE named local is a
-                // consuming-match candidate — if the fold can prove nothing
-                // reads the binding after this match, the extraction may free
-                // the payload BOX (the binding's row goes Aliased and never
-                // releases it, and the alias owns only the payload).
-                let cand_start = match &**scrutinee {
-                    Expr::Var { name, .. }
-                        if key != 0
-                            && self.consume_cands.is_some()
-                            && self.borrow_of(name).is_none() =>
-                    {
-                        Some((name.clone(), self.ev_order.get()))
-                    }
-                    _ => None,
-                };
                 let base = consumed.clone();
                 let mut arm_cs: Vec<Consumed> = Vec::new();
                 for arm in arms {
@@ -6235,22 +6158,6 @@ impl MoveCheck<'_> {
                                 pre_gone.clone()
                             };
                         }
-                    }
-                }
-                // Round twenty-seven, the candidate's other half: end order
-                // after the arms, so a binder's reads (which resolve to the
-                // scrutinee's row) sit inside the (start, end] window and the
-                // fold can tell them apart from a read of the scrutinee NAME.
-                if let Some((scrut_name, start)) = cand_start {
-                    if let Some(sink) = &self.consume_cands {
-                        sink.borrow_mut().push(ConsumeCand {
-                            match_id: e as *const Expr as usize,
-                            key,
-                            scrut_name,
-                            start,
-                            end: self.ev_order.get(),
-                            loops: self.loop_ids.borrow().clone(),
-                        });
                     }
                 }
                 // RFC-0114 Rule N at a MATCH join: a binding cleanly whole-taken

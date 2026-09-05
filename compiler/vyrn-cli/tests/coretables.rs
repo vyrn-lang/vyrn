@@ -61,14 +61,11 @@
 //! nothing for is a site a flipped emitter would stop releasing at, and a
 //! core answer the plan does not have is one it would release twice.
 //!
-//! One is half COUNTED and half pinned. `St::Switch`'s `consuming` is not
-//! the plan's `consuming_matches`: it is the whole disjunction the emitter
-//! computes in `frees_boxes` — a `consume`, a scrutinee that names no place,
-//! or the table — narrowed to an owned scrutinee with no placed release
-//! after the construct. So the core says yes at sites the table does not
-//! name, and that direction is counted; a site the plan calls consuming and
-//! the core does not is a payload box the emitter would stop freeing, and
-//! that direction is pinned (RFC-0125 §3 M3, row 14).
+//! `consuming` is DERIVED and no longer diffed either, since the third
+//! derivation slice. `St::Switch`'s answer is the whole disjunction the
+//! emitter computes in `frees_boxes` — a `consume`, a scrutinee that names
+//! no place, or a NAMED scrutinee the frame reads no more — and `own.rs`
+//! states none of it. Counted, like the other two.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -351,27 +348,13 @@ fn run() {
             }
         }
 
-        // `St::Switch`'s `consuming` is a WIDER rule than the plan's
-        // `consuming_matches`: it is the whole disjunction the emitter
-        // computes, a `consume` or a scrutinee that names no place
-        // included, so the core says yes at sites the table does not name
-        // and that direction is COUNTED. The other direction is PINNED
-        // (RFC-0125 §3 M3, row 14): a site the plan calls consuming and the
-        // core does not is a payload box the flipped emitter would stop
-        // freeing, and six such sites are what kept this row on the plan
-        // until the core stated a scrutinee's ownership apart from the
-        // decision it feeds.
-        for (site, took) in &facts.consuming {
+        // RFC-0125 §3 M3, the third derivation slice: `St::Switch`'s
+        // `consuming` is the core's own answer and `own.rs` states none, so
+        // there is no second opinion to diff. Counted; what a wrong answer
+        // fails is the ratchet (`residue`), the memory suite and parity.
+        for (_site, took) in &facts.consuming {
             *counted.entry("switch sites").or_default() += 1;
-            if *took {
-                *counted.entry("consuming: core only").or_default() +=
-                    usize::from(!own.plan.consuming_matches.contains(site));
-            } else if own.plan.consuming_matches.contains(site) {
-                diffs.push(format!(
-                    "{file}: site {site}: consuming: the plan took the                      scrutinee and the core did not (in {})",
-                    owner(site)
-                ));
-            }
+            *counted.entry("consuming: taken").or_default() += usize::from(*took);
         }
 
         // RFC-0125 §3 M6, the third judgment's third slice: every right-hand

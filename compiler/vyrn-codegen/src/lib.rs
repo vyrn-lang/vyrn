@@ -2943,6 +2943,21 @@ impl<'a> Gen<'a> {
         self.plan.arg_drop(node)
     }
 
+    /// Round twenty-seven's table read off the core (RFC-0125 §3 M3, the
+    /// third derivation slice): did the construct at `node` TAKE its named
+    /// scrutinee, so the boxes its binders came out of are its own to give
+    /// back? The core derives it and `own.rs` states none, so a site the
+    /// core has no answer for is a construct that took nothing.
+    fn match_consumes(&self, node: usize) -> bool {
+        let Some(f) = self.facts else {
+            return false;
+        };
+        f.consuming
+            .get(&self.plan.key_of(node))
+            .copied()
+            .unwrap_or(false)
+    }
+
     /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the derivation
     /// slice): the releases one edge of the join at `node` owes because
     /// another edge took the name. The core states each as a `St::Drop` at a
@@ -7258,11 +7273,11 @@ impl<'a> Gen<'a> {
             || map_lookup
             || (vyrn_frontend::movecheck::place_path(scrutinee).is_none()
                 && vyrn_frontend::movecheck::element_path(scrutinee).is_none())
-            // Round twenty-seven: a PLACE scrutinee the fold proved nobody
-            // reads after this match — the binding's row is Aliased and never
-            // released, the alias owns the payload, and the box is this
-            // match's to free.
-            || self.plan.match_consumes(key))
+            // Round twenty-seven: a PLACE scrutinee nothing reads after this
+            // match — the binding's row is Aliased and never released, the
+            // alias owns the payload, and the box is this match's to free.
+            // The core states it (`Gen::match_consumes`).
+            || self.match_consumes(key))
             && scrut_drop.is_none()
             // Inside a declared `release` the CALLER walks the boxes after
             // the call (`release_enum`, payloads false) — freeing them here
