@@ -429,3 +429,71 @@ fn run_corpus() {
         "the kernel accepted nothing, so it judged nothing"
     );
 }
+
+/// **One edit re-judges one body** — RFC-0125 §3 M3, the memo slice.
+///
+/// The kernel's judgment of a body is cached under one key: the module the
+/// body is declared in, that module's content hash, and the instance's
+/// spelling — under a fingerprint of every declaration in the program with the
+/// function bodies left out. So an edit inside one function re-judges the
+/// bodies of that function's module and nothing else, and this counts them.
+///
+/// Three runs of the same driver, over a program whose two imported modules
+/// hold one function each. The second run edits nothing, and every body it can
+/// key is served. The third edits `a`'s body — the same signature, the same
+/// line — and judges exactly ONE body more than the second did. That "one
+/// more" is the whole claim: it is `a`'s, and `b`'s is still served.
+#[test]
+fn one_edit_re_judges_one_body() {
+    vyrn_lower::install();
+    vyrn_frontend::movecheck::reuse_judgments();
+    let dir = std::env::temp_dir().join(format!("vyrn-judgmemo-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
+    write(
+        "b.vyrn",
+        "export fn bOne(x: Int64) -> Int64 { return x + 2 }\n",
+    );
+    write(
+        "main.vyrn",
+        "import { aOne } from \"./a\"\nimport { bOne } from \"./b\"\n\
+         fn main() -> Int64 { return aOne(1) + bOne(2) }\n",
+    );
+    // The load states the refusals itself (`check_and_synthesize`), so a load
+    // IS the keystroke this counts.
+    let run = || {
+        vyrn_frontend::movecheck::reset_judgment_tally();
+        load(&dir.join("main.vyrn")).expect("the program loads");
+        vyrn_frontend::movecheck::judgment_tally()
+    };
+
+    write(
+        "a.vyrn",
+        "export fn aOne(x: Int64) -> Int64 { return x + 1 }\n",
+    );
+    let (cold, served_cold) = run();
+    assert!(cold > 0, "the first run judges every body it can key");
+    assert_eq!(served_cold, 0, "nothing is served on the first run");
+
+    let (idle, served_idle) = run();
+    assert!(
+        served_idle > 0,
+        "a run that edits nothing is served its bodies"
+    );
+
+    // The same signature and the same line: only the body moves, so the
+    // fingerprint stands and `a`'s content hash does not.
+    write(
+        "a.vyrn",
+        "export fn aOne(x: Int64) -> Int64 { return x + 1 + 0 }\n",
+    );
+    let (edited, _) = run();
+    assert_eq!(
+        edited,
+        idle + 1,
+        "an edit inside one function re-judges that function's body and no other \
+         (idle {idle}, edited {edited}, cold {cold})"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
