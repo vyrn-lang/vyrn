@@ -730,7 +730,6 @@ fn method_tally_writes_back_in_place() {
 }
 
 #[test]
-#[ignore = "DEFECT (RFC-0125 §3 M5, the sixteenth slice): `m.tallyBytes(w, n)`                 emits invalid wasm on the direct backend — `type mismatch: expected                 i32 but nothing on stack`. Six lines reproduce it and the native                 route runs the same program. Only the tree-walker ever ran this                 builtin, so nothing caught it; no `std/` or example calls it."]
 fn method_tally_bytes_writes_back_in_place() {
     // The byte-keyed twin through the same fast path, with the buffer reused
     // between calls exactly as a counting loop reuses it.

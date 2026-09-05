@@ -3886,18 +3886,58 @@ impl<'p> Fn_<'_, 'p> {
         self.region_bump(b, -1);
     }
 
-    /// Call `std/runtime`'s `strFromBytes` with the destination, the bytes, their
-    /// count and the check's answer already on the stack: the two interned
-    /// messages are its constant tail (PLAN-0125-runtime §6 step 4).
+    /// Call `std/runtime`'s `strFromBytes` for the bytes at `src` — a local
+    /// holding an `Array<UInt8>` header — writing the `Result<String, String>`
+    /// it answers into the frame slot at `dest`.
+    ///
+    /// The WHOLE call, and that is the point: the destination, the data
+    /// pointer, the count, the check's answer and the two interned messages
+    /// (PLAN-0125-runtime §6 step 4). A callee's argument list is the callee's
+    /// rule, so it is stated once, here.
     ///
     /// The DFA table used to be the third argument. RFC-0125 §3 M6 (the third
     /// judgment's fifth slice) replaced it with the answer of `std/text`'s
-    /// `stringFault` — the one check every engine calls — so the runtime function
-    /// builds and decides nothing.
-    fn str_from_bytes_tail(&self, b: &mut Frame) {
+    /// `stringFault` — the one check every engine calls — so the runtime
+    /// function builds and decides nothing. That slice made the answer the
+    /// CALLER's to push, and this call has two callers: `stringFromBytes` was
+    /// given the new argument and [`Fn_::map_tally_bytes`] was not, so
+    /// `tallyBytes` emitted five operands into a six-operand signature and
+    /// wasmtime refused the module (RFC-0125 §3 M5, the eighteenth slice).
+    /// Neither caller can be short of an argument it does not spell.
+    fn str_from_bytes(
+        &mut self,
+        b: &mut Frame,
+        dest: u32,
+        src: u32,
+        al: &Layout,
+        line: usize,
+    ) -> Result<(), String> {
+        let check = vyrn_frontend::loader::STRING_FAULT;
+        let Some(check_idx) = self.cx.sigs.get(check).map(|s| s.index) else {
+            // `std/text` is injected into any program that mentions a builtin
+            // building a `String` out of bytes, so reaching this means a
+            // program built without a std root.
+            return unsupported(
+                "`stringFromBytes` with no `std/text` in the link (its check is Vyrn)",
+                line,
+            );
+        };
+        let fault = self.scratch(b, ValType::I32, 1);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::Call(check_idx));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(fault));
+        b.slot(dest);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(al.fields[1])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalGet(fault));
         b.ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
             .ins(&Instruction::I32Const(self.cx.rt.butf8 as i32))
             .ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+        Ok(())
     }
 
     /// The call about to be emitted (`on`), or just emitted (`!on`), allocates a
@@ -8226,30 +8266,8 @@ impl<'p> Fn_<'_, 'p> {
                 let src = self.scratch(b, ValType::I32, 0);
                 let al = self.layout_of(&bytes, line)?;
                 b.ins(&Instruction::LocalSet(src));
-                let check = vyrn_frontend::loader::STRING_FAULT;
-                let Some(check_idx) = self.cx.sigs.get(check).map(|s| s.index) else {
-                    // `std/text` is injected into any program that mentions
-                    // `stringFromBytes`, so reaching this means a program built
-                    // without a std root.
-                    return unsupported(
-                        "`stringFromBytes` with no `std/text` in the link (its check is Vyrn)",
-                        line,
-                    );
-                };
-                let fault = self.scratch(b, ValType::I32, 1);
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::Call(check_idx));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::LocalSet(fault));
                 let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I64Load(at(al.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::LocalGet(fault));
-                self.str_from_bytes_tail(b);
+                self.str_from_bytes(b, off, src, &al, line)?;
                 b.slot(off);
                 return Ok(ty);
             }
@@ -14068,10 +14086,7 @@ impl<'p> Fn_<'_, 'p> {
         let rty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
         let rl = layout::of_ll(&self.cx.ll(&rty)).expect("the Result shape");
         let dest = b.alloc(rl.size, rl.align);
-        b.slot(dest);
-        b.ins(&Instruction::LocalGet(wdata));
-        b.ins(&Instruction::LocalGet(wlen));
-        self.str_from_bytes_tail(b);
+        self.str_from_bytes(b, dest, wsrc, &al, line)?;
         b.slot(dest + rl.fields[0]);
         b.ins(&Instruction::I64Load(word8()));
         b.ins(&Instruction::I64Eqz);
