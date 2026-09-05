@@ -1213,7 +1213,7 @@ fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
 ///
 /// `pub(crate)` since census U5: the loader stamps every `panic` with its source
 /// site and needs the same complete walk this one already is. `pub` since
-/// RFC-0125 M5: `vyrn test --engine wasm` rewrites a body's test-only builtins
+/// RFC-0125 M5: `vyrn test` rewrites a body's test-only builtins
 /// before the direct backend sees them, and needs the same walk again.
 pub fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
     for s in &mut b.stmts {

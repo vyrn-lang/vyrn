@@ -188,14 +188,14 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
     assert_ne!(plain.stdout, passed.stdout);
 }
 
-/// `vyrn run --profile --engine wasm` reports phases and a count, not functions
-/// (RFC-0125 §3 M5, the `run-profile` row).
+/// `vyrn run --profile` reports phases and a count, not functions (RFC-0125 §3
+/// M5, the `run-profile` row).
 ///
 /// The compiled route has no per-call funnel to charge a span at, so it reports
 /// what it can see: the four phases the host owns, and the operations the guest
 /// executed. The count is wasmtime's fuel, so it is the same number twice — the
 /// one column of a profile that does not move with the machine. Stdout is the
-/// program's, with the flag as without it, exactly as under the interpreter.
+/// program's, with the flag as without it.
 #[test]
 fn the_compiled_profile_reports_phases_and_a_repeatable_count() {
     let dir = std::env::temp_dir().join("vyrn-cli-profile-wasm");
@@ -220,19 +220,15 @@ fn the_compiled_profile_reports_phases_and_a_repeatable_count() {
         Command::new(env!("CARGO_BIN_EXE_vyrn"))
             .arg("run")
             .arg("--profile")
-            .arg("--engine")
-            .arg("wasm")
             .arg(&file)
             .output()
-            .expect("vyrn run --profile --engine wasm")
+            .expect("vyrn run --profile")
     };
     let plain = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("run")
-        .arg("--engine")
-        .arg("wasm")
         .arg(&file)
         .output()
-        .expect("vyrn run --engine wasm");
+        .expect("vyrn run");
     let first = one();
     assert!(first.status.success());
     assert_eq!(

@@ -466,7 +466,7 @@ fn a_moved_row_refuses_in_the_words_the_pass_used() {
 ///
 /// `unused.vyrn` declares a host import and calls nothing. The direct backend
 /// (RFC-0077) emits no `(import "vyrn" ..)` for it, so the artifact asks the
-/// host for nothing and runs: `vyrn run --engine wasm unused.vyrn` prints and
+/// host for nothing and runs: `vyrn run unused.vyrn` prints and
 /// exits 0. The floor accepts it now; it used to refuse a program that runs.
 ///
 /// `used.vyrn` calls it. The backend emits the import, a plain wasmtime cannot

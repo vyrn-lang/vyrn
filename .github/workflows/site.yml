@@ -100,8 +100,8 @@ jobs:
         # 132 s of cargo, which is what this step removes on a warm run. The pole
         # is not a build. `The site's own tests` is 907 s of it, and 687 s of THAT
         # is `vyrn test site/export.vyrn`: 32 blocks, most of which render pages,
-        # against 175 routes. That number belongs to the interpreter and not to
-        # this file, and it is the next thing to attack here.
+        # against 175 routes. That number belongs to the compiler and not to this
+        # file, and it is the next thing to attack here.
         # Swatinem/rust-cache@v2
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:

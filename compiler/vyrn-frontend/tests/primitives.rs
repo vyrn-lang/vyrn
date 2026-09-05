@@ -14,21 +14,22 @@
 //! the tests below are the check — add an arm to `interp.rs` without a census
 //! row, or route a name the census claims, and this file fails.
 //!
-//! ## The method, stated so the next reader can reproduce it
+//! ## The method, and the half of it the deletion took
 //!
-//! The census covers every builtin the **interpreter** implements in Rust on the
-//! `Expr::Call` path, which is where M5's "count of Rust arms" lives. That is two
-//! regions of `interp.rs`, both located by content rather than by line number:
+//! The census used to be scanned out of `interp.rs`: every builtin the
+//! **interpreter** implemented in Rust on the `Expr::Call` path, two regions
+//! located by content, compared with the table both ways. RFC-0125 §3 M5 deleted
+//! that file, and the scan with it. What is left is the direction that does not
+//! need it — [`the_direct_backend_carries_the_census_too`] proves every censused
+//! name is lowered by the one backend there is, and its list of permitted
+//! absences is empty.
 //!
-//! - the `if name == "…"` guards between `Expr::Call { name, args, line } => {`
-//!   and `match name.as_str() {` — the builtins handled *before* the arguments
-//!   are evaluated, because they need the AST (`schemaOf`) or must write back
-//!   through a binding (`@pop`);
-//! - the arms of `match name.as_str() {` itself, up to its `_ => {` fallthrough.
-//!
-//! A name counts once, so `"lineAt" | "colAt"` is two entries and
-//! `"trace" | … | "error"` is five. At the commit this landed on that is **62**:
-//! 51 arm names in 46 arms, plus 11 guards.
+//! **The direction that is gone is the anti-rot one**: a builtin added to
+//! `vyrn-codegen/src/direct.rs` with no census row is no longer caught here. The
+//! anchor a future slice would scan is that file's own `match name {` in the
+//! call-emission path, with the guards above it — the same two-region shape, one
+//! engine over. RFC-0078 owns that, and it is recorded in RFC-0125 §3 M5 rather
+//! than left as a silence.
 //!
 //! Three things are deliberately outside it, and are named here so their absence
 //! is not mistaken for an omission:
@@ -122,11 +123,11 @@ enum Why {
 
 use Why::*;
 
-/// Every builtin the interpreter implements in Rust, and why.
+/// Every builtin an engine implements in Rust, and why.
 ///
-/// Checked against `interp.rs` by [`the_census_is_the_code`], so a new arm
-/// without a row here fails the suite rather than quietly joining the list of
-/// things nobody can explain.
+/// Checked against `direct.rs` by [`the_direct_backend_carries_the_census_too`],
+/// so a row whose name no backend lowers fails the suite rather than quietly
+/// joining the list of things nobody can explain.
 const CENSUS: &[(&str, Why, &str)] = &[
     // ---- Memory: the allocator and the containers standing on it ------------
     ("@push", Memory, "Array: append, reallocating"),
@@ -369,241 +370,13 @@ const CENSUS: &[(&str, Why, &str)] = &[
     // report the next finding.)
 ];
 
-/// The two regions of `interp.rs` the census covers, extracted by the method the
-/// module doc states. Anchors are matched on the trimmed line and must be unique,
-/// so a restructuring fails loudly here rather than silently shrinking the census.
-fn interp_builtin_names() -> BTreeSet<String> {
-    let src = include_str!("../src/interp.rs");
-    let lines: Vec<&str> = src.lines().collect();
-    let only = |needle: &str| -> usize {
-        let hits: Vec<usize> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.trim() == needle)
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(
-            hits.len(),
-            1,
-            "the census scan anchors on `{needle}` and found {} — see the method in \
-             this file's doc comment and RFC-0078's M1+M5 note",
-            hits.len()
-        );
-        hits[0]
-    };
-    let call = only("Expr::Call { name, args, line } => {");
-    let arms = only("match name.as_str() {");
-    assert!(call < arms, "the guards come before the dispatch");
-    let end = (arms + 1..lines.len())
-        .find(|&i| lines[i].trim() == "_ => {")
-        .expect("the dispatch's fallthrough arm");
-
-    let mut names = BTreeSet::new();
-    // The guards: `name == "X"` before any argument is evaluated. The `if` is not
-    // part of the needle, because a guard may cover two builtins — RFC-0083 M3's
-    // vector store is `if name == "@f32x4Store" || name == "@i32x4Store"`, one
-    // body for two widths — and anchoring on `if` would silently census only the
-    // first of them. Every `name == "` in this region is a guard; the assertion
-    // below is what says so if that stops being true.
-    for l in &lines[call..arms] {
-        let mut rest = *l;
-        while let Some(i) = rest.find("name == \"") {
-            rest = &rest[i + "name == \"".len()..];
-            let end = rest.find('"').expect("an unterminated guard literal");
-            names.insert(rest[..end].to_string());
-            rest = &rest[end..];
-        }
-    }
-    // The arms. A head is one or more string literals, optionally followed by a
-    // match guard, then `=>`. Anything else starting with a quote is data.
-    for l in &lines[arms + 1..end] {
-        let t = l.trim();
-        if !t.starts_with('"') {
-            continue;
-        }
-        let Some(head) = t.split("=>").next().filter(|h| *h != t) else {
-            continue;
-        };
-        let head = head.split(" if ").next().unwrap();
-        let parts: Vec<&str> = head.split('|').map(str::trim).collect();
-        assert!(
-            parts
-                .iter()
-                .all(|p| p.len() >= 3 && p.starts_with('"') && p.ends_with('"')),
-            "the census scan cannot read this arm head: {t:?}"
-        );
-        for p in parts {
-            names.insert(p.trim_matches('"').to_string());
-        }
-    }
-    names
-}
-
-/// The census is a statement about the code, so it is compared to the code.
+/// The engine the census is pinned against, and it is the only one left.
 ///
-/// A new Rust arm is a new primitive claim and has to be justified in writing;
-/// a deleted one has to leave the census with it. Either way the diff names the
-/// builtin, so the next reader edits one table instead of guessing.
-#[test]
-fn the_census_is_the_code() {
-    let found = interp_builtin_names();
-    let claimed: BTreeSet<String> = CENSUS.iter().map(|(n, ..)| n.to_string()).collect();
-    assert_eq!(
-        CENSUS.len(),
-        claimed.len(),
-        "a builtin is claimed twice in the census"
-    );
-    let missing: Vec<&String> = found.difference(&claimed).collect();
-    let stale: Vec<&String> = claimed.difference(&found).collect();
-    assert!(
-        missing.is_empty(),
-        "the interpreter implements {missing:?} and the census does not say why. \
-         Add a row with its category — and if it fits none of them, that is a \
-         finding for RFC-0078, not a row to invent."
-    );
-    assert!(
-        stale.is_empty(),
-        "the census claims {stale:?} and the interpreter no longer implements them. \
-         If they were routed into Vyrn, delete the rows and say so in RFC-0078."
-    );
-    // The count at the commit that landed this, by the stated method: 62 names,
-    // 51 in 46 arms plus 11 guards. It is here so a change to the boundary is a
-    // visible edit rather than a silently different census. 62 -> 61 when
-    // `@charCount` — the census's one `Unjustified` row — became `std/text`'s
-    // `charCountV`, 61 -> 62 when RFC-0079 M1 added `panic`, and 62 -> 61 when M3
-    // spent that abort on `slice`. The net of the whole RFC is one primitive
-    // traded for one primitive, and the one that left had three implementations
-    // where the one that arrived has three lines. 61 -> 64 when RFC-0083 M1 added
-    // a TYPE the language cannot name — three `View` rows and no operation, since
-    // the lane-wise arithmetic is a `BinOp` and never reaches this dispatch. 64 ->
-    // 70 when M2 added the memory pair (`Memory`, a bounds trap like `at`'s), the
-    // three total operations that are movable and priced (`Measured`), and the one
-    // that is not movable at all (`Sqrt`, `Semantics`). M2's comparison operators
-    // are `BinOp`s like M1's arithmetic, so the mask cost no rows either — and the
-    // operation M2 tried to add and could NOT justify, `select`, is not here
-    // because it is not in the interpreter. See RFC-0083's M2 note. 70 -> 72 when
-    // RFC-0075 M1 added `fromArray`/`close` — two `Memory` rows for a type that is
-    // `Array<T>` at runtime, so they are the array rows again. The pair is the
-    // price of the linearity being checkable: a stream has to be unforgeable, and
-    // an unforgeable type needs a constructor nothing else can spell. 72 -> 74
-    // when the mask reductions completed M2's surface: two more `Measured` rows,
-    // and the first pair whose ratio had to be quoted against a stated DATA
-    // distribution rather than a workload — a short-circuiting `||` chain is only
-    // slow when the branch is unpredictable. 74 -> 79 when the rest of M2's
-    // `F32x4` surface landed: `@replaceLane` is a `View` beside `@lane` (a lane
-    // written instead of read), and the four roundings are `Measured` rows whose
-    // refusal is decided by the WASM column for all four — natively they
-    // scalarize to libc calls and one of them, `trunc`, is slower than the Vyrn
-    // it replaces. The mask combinators and `-v` cost no rows at all: they are a
-    // `BinOp` and a `UnOp`, which this dispatch never sees, which is also why the
-    // comparison operators never appeared here. 79 -> 83 when RFC-0083 M3 added a
-    // second WIDTH: two `View` rows for building an `I32x4` and two `Memory` rows
-    // for moving one, and NOTHING else. `@lane`/`@replaceLane` serve both widths
-    // from one arm each, every operator is a `BinOp` or a `UnOp` this dispatch
-    // never sees, and the three named operations wasm offers at this width
-    // (`min_s`/`max_s`/`abs`) were built and deleted at 1.0x native / 1.05x wasm.
-    // A whole width for four rows, none of them `Measured`, is what it looks like
-    // when the census is asked BEFORE the arms are written rather than after.
-    // 83 -> 82 when M4 re-took `@f32x4Abs`'s number the way M3 took the integer
-    // ones — against a Vyrn spelling with no helper call in it — and got 1.07x on
-    // the column that had been keeping it. The row is the census's own failure
-    // mode caught by the census's own method: a `Measured` row can be wrong about
-    // the benchmark rather than about the operation, and the only defence is that
-    // the number says which shape it measured. The four roundings were re-taken
-    // in the same pass and all four survived, with corrected numbers. 82 -> 83
-    // when RFC-0075 M2b added `fromStep`: one `Memory` row for the producer a
-    // stream can now hold, beside the buffer it always could. No row for `next` —
-    // the pull is emitted inside `for … in` rather than named, so there is no
-    // dispatch here to census. 83 -> 84 when RFC-0074 M3a added `serveStream`:
-    // one `Syscall` row for the handoff, and none for the pull or the release —
-    // the host asks for those through the serve API rather than through a name a
-    // program can write, so there is again no dispatch here to census.
-    // 84 -> 86 when RFC-0075 M2c made the combinators lazy: `fromWrap` for the
-    // wrapper and `pull` for what its step reads. The second row is the one
-    // worth noticing — M2b recorded that the pull needed no row BECAUSE it was
-    // emitted inside `for … in` rather than named, and a lazy `map` is exactly
-    // the thing that has to name it. A combinator written in Vyrn cannot be
-    // written without it.
-    // 86 -> 87 when RFC-0090 M3 took the stream cursor off Path B: `fromWrap`
-    // and `pull` became `boxStream`, `unboxStream` and `pullAt`, which is three
-    // rows where there were two. The extra row is the honest one — M2c hid the
-    // source's release inside the runtime's walk, so nothing named it; the
-    // wrapper takes its own source back out now, and a name is what makes
-    // `movecheck` able to check that release.
-    // 86 -> 93 when RFC-0083 M4 added the third width: two `View` rows for
-    // building an `F64x2`, two `Memory` rows for moving one, `sqrt` as
-    // `Semantics` for the reason the narrow one is, and `min`/`max` as the only
-    // two `Measured` rows — at 2.5x, which is the narrow width's ratio and the
-    // narrow width's reason. Seven rows and not eleven: the four roundings exist
-    // at `f64x2` and were deliberately not taken. What did NOT need a row is the
-    // whole of the rest — every operator is a `BinOp` or a `UnOp`, and both lane
-    // accessors serve the new width from the arm they already had, since a lane
-    // accessor is about the lane index and only the RANGE changed.
-    // 93 -> 92 when `afree` was deleted, and it is the only row that ever left
-    // for having no callers rather than for being routed into Vyrn. It had zero
-    // uses in `examples/` and `std/`, and the direct wasm backend never lowered
-    // it, so a program that called it could not build for wasm at all. `drop a`
-    // is the reclamation, on all three engines. This test named the stale row
-    // before anything else did.
-    // 92 -> 93 when RFC-0089 M1b added `@copy`. A primitive rather than a Vyrn
-    // routine for the reason `@toArray` is one: the operation is the memory
-    // model, so its answer is the shape of the value, and a library written in
-    // Vyrn has no way to ask what a value is made of.
-    // 93 -> 94 when RFC-0090 M3 re-hosted the stream cursor: `fromWrap` and
-    // `pull` retired and `boxStream`, `unboxStream` and `pullAt` arrived.
-    // 94 -> 90 when RFC-0090 M4 deleted Path B. Four rows, and the largest single
-    // drop the census has recorded — the only other row that ever left was
-    // `afree`, alone. Nothing replaced them in the core: `std/slots` is a Vyrn
-    // library, so the primitive count went down by four and stayed down.
-    // 90 -> 91 when census U5 gave `panic` a source location. The one row the
-    // count gains that is NOT a new capability: `@panicAt` aborts exactly as
-    // `panic` does and differs only in carrying the site the loader stamped. It
-    // is here because the surface `panic` must stay a one-argument builtin, and
-    // an unspellable second name is how a compiler-written argument arrives
-    // without becoming an undocumented one users can write.
-    // 91 -> 89 when the verb forms `array()` and `alen(xs)` were removed. `[]`
-    // was always the array literal and `.length` was always a field read, so
-    // both rows were a second spelling of something the language already had.
-    // `push` and `at` stayed, under the unspellable names `@push` and `@at`,
-    // because the method and index forms need them.
-    //
-    // 89 -> 91 for RFC-0111's `writeFileBytes` and `writeStdout`. Both are new
-    // CAPABILITY and not a second spelling: before them a program could compute
-    // bytes that are not text and had no way to emit them, which is why
-    // `mandelbrot-200.expected` sat in the corpus with no program beside it.
-    //
-    // 91 -> 94 for RFC-0115's `@reserve`, `@append` and `@copyFrom`. Capacity
-    // is genuinely unspellable from inside the language — no composition of
-    // `push` can ask the allocator for room ahead of time; a bulk append that
-    // grows at most once is the same fact stated for `n` elements; and an
-    // overwrite that KEEPS the buffer cannot be said either, because every
-    // store keeps the length and `append` only grows.
-    //
-    // 94 -> 96 for RFC-0116's `@tally` and `@tallyBytes`: a read-then-store
-    // is two probes by construction, and no composition can make the find
-    // answer for both; and no composition can probe a map WITHOUT building
-    // the String key first — the whole point of the byte-keyed form is that
-    // the key exists only on a miss.
-    // 96 -> 97 for RFC-0119's `listDirKinds`: no composition can learn an
-    // entry's kind from `listDir` — the listing's error is one string for
-    // every failure, and the project refuses to parse OS wording — so a
-    // walker paid a second full listing per subdirectory to find out.
-    // 97 -> 98 for RFC-0115's addendum `@clear`: a length that goes to zero
-    // while the buffer stays is not spellable — `xs = []` is a fresh empty
-    // triple, and `pop` in a loop frees nothing but also keeps nothing that a
-    // later `push` could reuse without asking the allocator again. It is the
-    // "per-line assembly tax" RFC-0125 §1.4 read off reverse-complement:
-    // eight allocator calls per sixty-byte line, five million over the input.
-    assert_eq!(found.len(), 98, "the primitive core changed size");
-}
-
-/// The fourth engine, and nothing asked it anything until now (RFC-0094 M1).
-///
-/// [`the_census_is_the_code`] pins the INTERPRETER against the census.
-/// `direct.rs` is the only wasm backend since RFC-0077 M5, and it had no such
-/// pin at all — so the census had to find its gaps by reading, and found five.
+/// This pinned the FOURTH engine when there were four; `interp.rs` carried the
+/// other direction and is gone (RFC-0125 §3 M5). `direct.rs` had no pin at all
+/// once — so the census had to find its gaps by reading, and found five.
 /// One (`alen`) went with the verb forms, one (`fsyncFile`) was lowered, and
-/// the three test-only builtins were lowered when `vyrn test --engine wasm`
+/// the three test-only builtins were lowered when `vyrn test`
 /// stopped rewriting them (RFC-0125 §3 M5). The set below is empty; a name
 /// appearing here is a program that runs on three engines and refuses on the
 /// fourth.
@@ -758,8 +531,8 @@ fn the_refusals_keep_their_reasons() {
 ///
 /// What this deliberately does NOT check is whether the number is still true.
 /// Nothing can. `@str`'s row cited 511 deleted lines for two milestones while the
-/// suite stayed green, because [`the_census_is_the_code`] pairs arms with rows and
-/// never reads the reasons at all. This closes the half that is mechanizable and
+/// suite stayed green, because the pin pairs names with rows and never reads the
+/// reasons at all. This closes the half that is mechanizable and
 /// names the half that is not.
 #[test]
 fn a_measured_refusal_cites_its_measurement() {

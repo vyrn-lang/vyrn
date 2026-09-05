@@ -220,7 +220,7 @@ fn the_core_and_the_plan_agree_on_every_table() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
         .spawn(run)
         .unwrap()
         .join()
@@ -228,6 +228,11 @@ fn the_core_and_the_plan_agree_on_every_table() {
 }
 
 fn run() {
+    // A corpus example may import through a generator, and generation is the
+    // DRIVER's engine rather than the frontend's (RFC-0125 §3 M5). Without this
+    // those examples fail to link and the gate silently measures a smaller
+    // corpus. Installing is idempotent.
+    vyrn_genwasm::install();
     vyrn_lower::install();
     let mut diffs: Vec<String> = Vec::new();
     let mut counted: BTreeMap<&'static str, usize> = BTreeMap::new();

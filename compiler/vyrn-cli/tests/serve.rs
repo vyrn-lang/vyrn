@@ -152,18 +152,6 @@ fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
     }
 }
 
-/// The compiled route is the default (RFC-0125 §3 M5, the eleventh slice), so
-/// this adds nothing unless `VYRN_SERVE_ENGINE=interp` asks for the tree-walker
-/// — one set of assertions either way, because a served program must answer the
-/// same on both engines. `--workers` (RFC-0025) is included: the compiled route
-/// serves a pool as N resident instances since the fifteenth slice.
-fn engine_args(_extra: &[&str]) -> Vec<String> {
-    match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
-        Ok("interp") => vec!["--engine".to_string(), "interp".to_string()],
-        _ => Vec::new(),
-    }
-}
-
 /// Spawn `vyrn serve <tmp> --port 0 [extra args]` on `src` and wait for the
 /// startup line — which names the port the OS gave it — before returning.
 fn start_server_on(src: &str, extra: &[&str]) -> Serve {
@@ -172,7 +160,6 @@ fn start_server_on(src: &str, extra: &[&str]) -> Serve {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
-        .args(engine_args(extra))
         .arg(&path)
         .arg("--port")
         .arg("0")
@@ -427,7 +414,6 @@ fn handle(req: Request) -> Response {
 
     let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
-        .args(engine_args(&[]))
         .arg(&file.path)
         .arg("--port")
         .arg("0")

@@ -26,7 +26,6 @@ pub mod floor;
 pub mod fmt;
 pub mod gen;
 pub mod hash;
-pub mod interp;
 pub mod jsondec;
 pub mod jsonenc;
 pub mod lexer;

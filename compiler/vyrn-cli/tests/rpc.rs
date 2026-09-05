@@ -104,22 +104,10 @@ fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
 
 /// Spawn `vyrn serve examples/fullstack/server.vyrn` and wait for the startup
 /// line — which names the port the OS gave it — before returning.
-/// The compiled route is the default (RFC-0125 §3 M5, the eleventh slice), so
-/// this adds nothing unless `VYRN_SERVE_ENGINE=interp` asks for the tree-walker
-/// — one set of assertions either way, because a served program must answer the
-/// same on both engines.
-fn engine_args() -> Vec<String> {
-    match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
-        Ok("interp") => vec!["--engine".to_string(), "interp".to_string()],
-        _ => Vec::new(),
-    }
-}
-
 fn start_server() -> Serve {
     let server = repo_file("examples/fullstack/server.vyrn");
     let mut child = vyrn()
         .arg("serve")
-        .args(engine_args())
         .arg(&server)
         .arg("--port")
         .arg("0")

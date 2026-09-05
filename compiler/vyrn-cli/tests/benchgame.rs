@@ -14,8 +14,9 @@
 //! tunes these programs, and a tuned variant that stops printing the fixture
 //! fails here rather than on a chart.
 //!
-//! No clang, no wasmtime, no build — the interpreter is enough to check an
-//! answer — so it is not `#[ignore]`d and a plain `cargo test` runs it.
+//! No clang and no native build — `vyrn run` compiles the program and runs it
+//! in the embedded engine — so it is not `#[ignore]`d and a plain `cargo test`
+//! runs it.
 //!
 //! The two stdin-reading programs use the corpus's own convention
 //! (`examples/<name>.stdin`, fed by [`run_io`]), so there is one rule about

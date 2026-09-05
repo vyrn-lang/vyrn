@@ -1146,18 +1146,16 @@ pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
 /// run` (`list_dir_is_not_generation_only`) — so the one backend without a
 /// lowering refuses it itself, in a user's sentence rather than an emitter's
 /// note about its own gaps (RFC-0096 M3's addendum). The direct wasm backend
-/// lowers it over `fd_readdir` (RFC-0125 §3 M5).
+/// lowers it over `fd_readdir` (RFC-0125 §3 M5), which is what `vyrn run` runs.
 pub const LIST_DIR_NO_LOWERING: &str =
-    "`listDir` runs in the interpreter, at generation time and on the wasm target (RFC-0021, \
-     RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with \
-     `--target wasm`";
+    "`listDir` runs at generation time and on the wasm target (RFC-0021, RFC-0125); it has no \
+     native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with `--target wasm`";
 
 /// `listDirKinds`' copy of the sentence (RFC-0119) — same reasoning, its own
 /// name, so the diagnostic names the call the user wrote.
 pub const LIST_DIR_KINDS_NO_LOWERING: &str =
-    "`listDirKinds` runs in the interpreter, at generation time and on the wasm target \
-     (RFC-0119, RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn \
-     run` or with `--target wasm`";
+    "`listDirKinds` runs at generation time and on the wasm target (RFC-0119, RFC-0125); it has \
+     no native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with `--target wasm`";
 
 /// The atom-stream primitives the synthesized decoders are written against.
 ///
