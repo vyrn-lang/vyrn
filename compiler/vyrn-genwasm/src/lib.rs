@@ -19,7 +19,7 @@
 //! reads through `GenInputs.resolver`, which in the LSP serves unsaved buffers
 //! and elsewhere serves vendored or remote modules. So `readFile`/`listDir` are
 //! host imports backed by that resolver, mediated by the same
-//! [`vyrn_frontend::interp::gen_scoped_path`] the interpreter uses and recorded
+//! [`vyrn_frontend::gen::gen_scoped_path`] the interpreter uses and recorded
 //! into `GenOutput.reads` the same way, which is what the on-disk generator
 //! cache validates against.
 //!
@@ -46,7 +46,7 @@ use std::sync::mpsc;
 
 use vyrn_frontend::ast::{Block, Expr, Function, Param, Program, Stmt, Type};
 use vyrn_frontend::consteval::ConstVal;
-use vyrn_frontend::interp::{CodePiece, GenInputs, GenOutput, GenRead};
+use vyrn_frontend::gen::{CodePiece, GenInputs, GenOutput, GenRead, Spliced};
 
 /// What this path cannot serve. A generator reaching any of these is handed back
 /// to the interpreter — see [`engine`].
@@ -74,7 +74,7 @@ const RESULT_END: &str = "<<vyrn-genwasm-result-end>>";
 
 /// Install the wasm generation engine (RFC-0076). Called once from `main`.
 pub fn install() {
-    vyrn_frontend::interp::set_gen_engine(Box::new(engine));
+    vyrn_frontend::gen::set_gen_engine(Box::new(engine));
 }
 
 /// Claim a generation run, or decline it.
@@ -221,7 +221,7 @@ fn serve(
     // miss the generator cache (RFC-0031). The interpreter's own implementation,
     // called here, so the recorded reads cannot differ by engine.
     if mode == MODE_MODULE_INTERFACE {
-        return vyrn_frontend::interp::gen_module_interface_lit(
+        return vyrn_frontend::gen::gen_module_interface_lit(
             inputs.resolver,
             inputs.opts,
             &inputs.importer_dir,
@@ -232,7 +232,7 @@ fn serve(
         )
         .map(|lit| Served::Lit(Box::new(lit)));
     }
-    let resolved = vyrn_frontend::interp::gen_scoped_path(
+    let resolved = vyrn_frontend::gen::gen_scoped_path(
         &inputs.importer_dir,
         &inputs.allowed,
         &inputs.aliased,
@@ -1075,36 +1075,39 @@ fn cstr(data: &[u8], at: i32) -> wasmtime::Result<String> {
     Ok(String::from_utf8_lossy(&rest[..n]).into_owned())
 }
 
-/// Rebuild the interpreter value a `@codeSplice` call is splicing, from the tag
-/// codegen chose statically and the one word it sent (RFC-0076 M3a).
+/// Rebuild the value a `@codeSplice` call is splicing, from the tag codegen
+/// chose statically and the one word it sent (RFC-0076 M3a).
 ///
-/// The point of the round trip is that the splice rule then runs on a `Val`,
-/// which is what the interpreter would have handed it — so there is one rule,
-/// not two that agree. Floats cross as bit patterns because the formatting
-/// (`{f:?}`, shortest-roundtrip) belongs on this side; a guest-side rendering
-/// would be a second float formatter.
+/// The point of the round trip is that the ONE splice rule then runs on it — not
+/// a second one that agrees. `vyrn_frontend::gen::Spliced` has one case per tag
+/// this arm can send, which is why this is a match with no default and no
+/// conversion after it: it used to build an `interp::Val` for no other purpose
+/// than to hand it over (RFC-0125 §3 M5, the thirteenth slice). Floats cross as
+/// bit patterns because the formatting (shortest-roundtrip) belongs on this
+/// side; a guest-side rendering would be a second float formatter.
 fn splice_value(
     tag: i32,
     bits: i64,
     p: i32,
     data: &[u8],
     streams: &Streams,
-) -> wasmtime::Result<vyrn_frontend::interp::Val> {
-    use vyrn_frontend::interp::Val;
+) -> wasmtime::Result<Spliced> {
     Ok(match tag {
-        vyrn_codegen::TAG_STR => Val::Str(std::rc::Rc::new(cstr(data, p)?)),
-        vyrn_codegen::TAG_CODE => Val::Code(streams.pieces(bits)?.clone()),
-        vyrn_codegen::TAG_BOOL => Val::Bool(bits != 0),
-        // `Val::Int` renders as the signed decimal, which is what a signed
-        // integer of any width becomes after codegen's `sext`.
-        vyrn_codegen::TAG_INT => Val::Int(bits),
-        vyrn_codegen::TAG_UINT => Val::IntN {
+        vyrn_codegen::TAG_STR => Spliced::Str(cstr(data, p)?),
+        vyrn_codegen::TAG_CODE => Spliced::Code(streams.pieces(bits)?.clone()),
+        vyrn_codegen::TAG_BOOL => Spliced::Bool(bits != 0),
+        // A signed integer of any width has been `sext`ed by codegen, so the
+        // signed decimal is what it renders as.
+        vyrn_codegen::TAG_INT => Spliced::Int {
+            v: bits,
+            signed: true,
+        },
+        vyrn_codegen::TAG_UINT => Spliced::Int {
             v: bits,
             signed: false,
-            bits: 64,
         },
-        vyrn_codegen::TAG_F64 => Val::Float(f64::from_bits(bits as u64)),
-        vyrn_codegen::TAG_F32 => Val::Float32(f32::from_bits(bits as u32)),
+        vyrn_codegen::TAG_F64 => Spliced::F64(f64::from_bits(bits as u64)),
+        vyrn_codegen::TAG_F32 => Spliced::F32(f32::from_bits(bits as u32)),
         other => return Err(wasmtime::Error::msg(format!("bad splice tag {other}"))),
     })
 }
@@ -1569,7 +1572,7 @@ fn run_wasm(
                 // A splice violation — an identifier that is not one, a value of
                 // a type with no splice rule — is a trap under the interpreter,
                 // so it unwinds out of `_start` rather than becoming a value.
-                let pieces = vyrn_frontend::interp::gen_code_splice(&val, ctx)
+                let pieces = vyrn_frontend::gen::gen_code_splice(&val, ctx)
                     .map_err(|m| Error::new(Denied(m)))?;
                 Ok(caller.data_mut().intern(pieces))
             },
@@ -1593,7 +1596,7 @@ fn run_wasm(
             "render",
             |mut caller: Caller<'_, Streams>, h: i64| -> Result<i64> {
                 let s = caller.data_mut();
-                let text = vyrn_frontend::interp::render_code(s.pieces(h)?);
+                let text = vyrn_frontend::gen::render_code(s.pieces(h)?);
                 s.stash = text.into_bytes();
                 Ok(s.stash.len() as i64)
             },
@@ -1649,7 +1652,7 @@ fn run_wasm(
                         streams.stream(&Type::Named("ContractInfo".into()), &lit)
                     }
                     vyrn_codegen::REFLECT_LEX => {
-                        let lit = vyrn_frontend::interp::gen_lex_tokens_lit(&arg);
+                        let lit = vyrn_frontend::gen::gen_lex_tokens_lit(&arg);
                         streams.stream(&Type::Array(Box::new(Type::Named("Token".into()))), &lit)
                     }
                     other => Err(Error::msg(format!("bad reflect kind {other}"))),

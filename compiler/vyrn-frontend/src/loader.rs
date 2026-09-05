@@ -2041,11 +2041,11 @@ fn run_generator(
     });
 
     // 5b. Cache miss: run the generator in the mediated sandbox.
-    let out = crate::interp::generate(
+    let out = crate::gen::generate(
         &gen_program,
         name,
         &consts,
-        crate::interp::GenInputs {
+        crate::gen::GenInputs {
             resolver,
             opts,
             importer_dir,

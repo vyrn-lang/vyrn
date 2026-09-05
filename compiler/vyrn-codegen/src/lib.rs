@@ -1169,7 +1169,7 @@ pub use vyrn_frontend::checker::{GEN_NEXT_INT, GEN_NEXT_STR, GEN_REFLECT};
 
 /// `@__vyrn_code_splice`'s value tags — which interpreter `Val` the host is to
 /// rebuild from the word it was handed. Exactly the set the splice rule accepts
-/// (`interp::gen_code_splice`), no more: the checker has already rejected
+/// (`gen::gen_code_splice`), no more: the checker has already rejected
 /// anything else by the time codegen sees the call. `pub` so the host reads the
 /// same numbering it is emitted against, rather than a second copy of it.
 pub const TAG_STR: i32 = 0;

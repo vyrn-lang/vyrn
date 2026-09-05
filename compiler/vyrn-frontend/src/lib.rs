@@ -24,6 +24,7 @@ pub mod effects;
 pub mod finite;
 pub mod floor;
 pub mod fmt;
+pub mod gen;
 pub mod hash;
 pub mod interp;
 pub mod jsondec;

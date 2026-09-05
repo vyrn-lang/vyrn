@@ -6378,6 +6378,67 @@ statement twice: `fixtures` says the compiled route has not moved and `wasmhash`
 says its bytes are the same on four platforms, and neither can say that a second
 backend written from the same frontend agrees.
 
+#### The thirteenth slice (2026-09-05): the generation bridge moves, and stops naming a `Val`
+
+The tenth slice DECIDED this and did not do it, because a second value type
+beside `Val` is a cost only the tree-walker's last day pays back. The suites
+have moved and parity has moved, so the day is close enough: it is done here.
+
+**`vyrn-frontend/src/gen.rs`, 539 lines, none of which walk a tree.**
+`CodePiece`, `render_code`, the splice rule, `gen_lex_tokens_lit` and `lexed`,
+`GenRead`, `GenOutput`, `GenInputs`, `GenEngine`, `set_gen_engine`, `generate`,
+`gen_scoped_path` and `gen_module_interface_lit`. Each takes a resolver, a path
+and a source, and answers with an `Expr` or a `String`. What held them in
+`interp.rs` was the file they were written in.
+
+**The thirteenth reference was the decision, and the enum is the six tags.**
+`gen_code_splice` took an `interp::Val` — twenty variants, `Rc`, closures, a
+region depth — and read seven of them. `vyrn-genwasm` built one out of a tag and
+one word for no other purpose than to hand it over, and threw it away
+afterwards.
+
+```rust
+pub enum Spliced {
+    Str(String),
+    Code(Vec<CodePiece>),
+    Bool(bool),
+    Int { v: i64, signed: bool },
+    F64(f64),
+    F32(f32),
+}
+```
+
+Six cases, and they are the six `vyrn_codegen::TAG_*` enumerates, because a
+compiled generator has to name them across the wall. `Val::Int` and
+`Val::IntN` collapse into one case with the sign it renders by, which is the
+only thing the rule read them for.
+
+| | before | after |
+|---|---|---|
+| conversions | one in `vyrn-genwasm` (tag to `Val`) | one in `interp.rs` (`Val` to `Spliced`) |
+| `vyrn-genwasm`'s splice import | `interp::{Val, gen_code_splice}` | `gen::{Spliced, gen_code_splice}` |
+| where a value with no rule is refused | inside the rule, over `Val` | at the conversion, by `gen::no_splice_rule` |
+
+The refusal moved because only the interpreter's side knows what an Array is.
+The WORDING did not: `no_splice_rule` is one function both sides call, so
+"cannot splice a value into a code quote (expected String, number, Bool, or
+Code)" is written once. Every splice diagnostic is byte-identical, which the
+interpreter's own thirteen splice tests say and `tests/codequotes.rs` says over
+the corpus.
+
+**Every `interp::` caller, by file**, after this slice:
+
+| what it reaches for | files | refs |
+|---|---|---|
+| RUNNING — `run`, `run_with_args`, `run_tests`, `run_benches`, `serve`, `serve_pool`, the four `Serve*` types, `mounted_routes` | `vyrn-cli/src/main.rs` (35); `vyrn-play/src/lib.rs` (1); `vyrn-cli/tests/lowered.rs` (1) | 37 |
+| the fallback — `generate_interpreted`, when no engine is installed | `vyrn-frontend/src/gen.rs` (1) | 1 |
+| PROSE — a doc comment naming `on_deep_stack`, `coerce` or the type this slice replaced | `vyrn-frontend/src/{own,prof,codec,prelude}.rs`; `vyrn-genwasm/src/lib.rs` | 5 |
+
+The generation row is gone. What is left is the tree-walker, the one edge the
+deletion removes rather than moves, and five sentences.
+
+`interp.rs` is 11,549 lines to 11,105.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
