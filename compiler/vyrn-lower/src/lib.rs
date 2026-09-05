@@ -737,6 +737,38 @@ fn dispatched<'f>(
     out
 }
 
+/// `?` on a `Fallible` operand writes TWO calls and the checker records ONE.
+///
+/// It types the `?` by typing `Fallible__Key__success(operand)`, so that is the
+/// substitution recorded against the node; `isSuccess` is the tag test the
+/// engines emit beside it and nothing types it. Both bodies are the same impl at
+/// the same instantiation, so the twin is named here rather than guessed at —
+/// [`dispatched`]'s rule for the other call the language writes and the source
+/// does not. A NON-generic impl is a root of the worklist already, which is why
+/// `examples/fallible.vyrn` never showed the gap (RFC-0126 §8.16).
+fn fallible_twins(
+    calls: Vec<(&str, HashMap<String, Type>)>,
+) -> Vec<(String, HashMap<String, Type>)> {
+    let mut out = Vec::with_capacity(calls.len());
+    for (callee, solved) in calls {
+        if let Some(key) = callee
+            .strip_prefix(&format!("{}__", vyrn_frontend::types::FALLIBLE))
+            .and_then(|rest| rest.strip_suffix("__success"))
+        {
+            out.push((
+                vyrn_frontend::types::impl_method_name(
+                    vyrn_frontend::types::FALLIBLE,
+                    key,
+                    "isSuccess",
+                ),
+                solved.clone(),
+            ));
+        }
+        out.push((callee.to_string(), solved));
+    }
+    out
+}
+
 /// Turn the generic calls one body made into instantiations on the worklist.
 ///
 /// One function rather than one per root, because a module-state initializer
@@ -753,7 +785,8 @@ fn follow<'a>(
     queue: &mut VecDeque<(&'a Function, Vec<Type>)>,
     unresolved: &mut Vec<Unresolved>,
 ) {
-    for (callee, solved) in calls {
+    for (callee, solved) in fallible_twins(calls) {
+        let callee: &str = &callee;
         let mut stop = |why, line, args: Vec<Type>| {
             unresolved.push(Unresolved {
                 caller: caller.to_string(),
@@ -968,7 +1001,14 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
                 .collect();
             // A record literal solves parameters too, and it is not a call:
             // only a call adds an instance to the worklist.
-            if matches!(e, Expr::Call { .. } | Expr::Spawn { .. }) {
+            //
+            // `?` IS a call: on a `Fallible` operand the checker types it by
+            // typing `Fallible__Key__success(operand)`, and that is the node the
+            // substitution is recorded against. A GENERIC impl therefore reaches
+            // the worklist nowhere else — a non-generic one is a root already,
+            // which is why `examples/fallible.vyrn` never showed the gap and
+            // `examples/falliblegeneric.vyrn` does (RFC-0126 §8.16).
+            if matches!(e, Expr::Call { .. } | Expr::Spawn { .. } | Expr::Try { .. }) {
                 w.calls.push((callee.as_str(), solved.clone()));
             }
             chain.push(solved);

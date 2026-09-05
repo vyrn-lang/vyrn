@@ -1695,7 +1695,27 @@ pub fn result_payloads(ty: &Type) -> Option<(&Type, &Type)> {
 /// RESERVED (`checker::RESERVED`), so nothing a user declares can answer `true`
 /// here.
 pub fn is_sum_alias(base: &Type) -> bool {
-    option_payload(base).is_some() || result_payloads(base).is_some()
+    matches!(base, Type::Enum(vs) if is_builtin_sum(vs))
+}
+
+/// Whether a variant list is one of the two BUILT-IN sums — the question `?`
+/// asks, and the one [`is_sum_alias`] asks of a declaration's base.
+///
+/// **The names are the rule, not the arity.** `Option` and `Result` propagate on
+/// their own tag; every other sum reaches `Fallible` (RFC-0080 M3), and a
+/// declared sum with two variants is not a `Result` because it has two. Both
+/// emitters asked the arity instead — "two variants, the second carrying one
+/// payload" — so `?` on a `type Slot<T> = | Full(T) | Gone(String)` tested
+/// `Gone`'s tag and read `Gone`'s payload as the success type. The checker and
+/// `vyrn-lower` asked the names all along, which is why the interpreter ran the
+/// program the two compiled engines miscompiled (RFC-0126 §8.16).
+pub fn is_builtin_sum(vs: &[EnumVariant]) -> bool {
+    matches!(
+        vs,
+        [zero, one]
+            if (zero.name == "None" && one.name == "Some")
+                || (zero.name == "Err" && one.name == "Ok")
+    )
 }
 
 /// The variants a declaration DECLARES, or `None` if it declares no variants —

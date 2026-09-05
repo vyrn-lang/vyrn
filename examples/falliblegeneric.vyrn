@@ -1,0 +1,82 @@
+// A generic `Fallible` impl, at two payload types — RFC-0080 M3 through
+// RFC-0126 §8.16. `examples/fallible.vyrn` shows `?` on a user type; this shows
+// the two things that one does not: the impl is GENERIC, and the sum has
+// exactly TWO variants.
+//
+// Both halves are load-bearing. A generic impl means `Output` is the impl
+// head's own variable, so `Slot<Int64>` and `Slot<String>` read two different
+// success types out of one body. Two variants means the sum has the SHAPE of a
+// `Result` without being one — and that is the shape both compiled engines got
+// wrong, because they asked how many variants a sum has instead of what its
+// variants are named. `?` on `Slot<Int64>` tested `Gone`'s tag and read
+// `Gone`'s `String` payload as the success type, so `v * 2` multiplied a
+// pointer. The interpreter and the checker asked the names all along, which is
+// why the program ran and only the compiled route was wrong.
+//
+// The rule the engines share now: `Option` and `Result` propagate on their own
+// tag, and every OTHER sum — however many variants it has — asks `Fallible`.
+
+import { Fallible } from "std/fallible"
+
+// Two variants, both carrying a payload. `Gone`'s payload is a String at every
+// instantiation; `Full`'s is whatever `T` is.
+type Slot<T> = | Full(T) | Gone(String)
+
+impl<T> Fallible for Slot<T> {
+    type Output = T
+
+    fn isSuccess(self) -> Bool {
+        return match self {
+            Full(v) => true,
+            Gone(m) => false,
+        }
+    }
+
+    fn success(self) -> Output {
+        return match self {
+            Full(v) => v.copy(),
+            // `?` calls this only after `isSuccess` answered true, so this arm
+            // is unreachable and owes a `T` it has none of (RFC-0079).
+            Gone(m) => panic("Fallible.success on Gone"),
+        }
+    }
+}
+
+// `Output` is `Int64` here: the `?` yields a number, and the number multiplies.
+fn twice(s: Slot<Int64>) -> Slot<Int64> {
+    let v = s.copy()?
+    return Full(v * 2)
+}
+
+// `Output` is `String` here, out of the same impl body. If the two
+// instantiations shared one success type, one of these two functions would not
+// type-check — and if the sum's SHAPE picked the payload, neither would be
+// right.
+fn shout(s: Slot<String>) -> Slot<String> {
+    let v = s.copy()?
+    return Full(v + "!")
+}
+
+fn describeInt(s: Slot<Int64>) -> String {
+    return match s {
+        Full(v) => v.toString(),
+        Gone(m) => "gone " + m,
+    }
+}
+
+fn describeStr(s: Slot<String>) -> String {
+    return match s {
+        Full(v) => v.copy(),
+        Gone(m) => "gone " + m,
+    }
+}
+
+fn main() -> Int64 {
+    print(describeInt(twice(Full(21)))) // 42
+    // The failing variant arrives at the caller with its String intact — the
+    // whole value was copied out, and nobody looked inside it.
+    print(describeInt(twice(Gone("no number")))) // gone no number
+    print(describeStr(shout(Full("hi")))) // hi!
+    print(describeStr(shout(Gone("no word")))) // gone no word
+    return 0
+}

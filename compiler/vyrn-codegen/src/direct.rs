@@ -6752,7 +6752,9 @@ impl<'p> Fn_<'_, 'p> {
             Expr::Try { expr, line } => {
                 let st = self.peek(expr, *line)?;
                 match self.sum_of(&st).as_deref() {
-                    Some([_, one]) if one.payload.len() == 1 => one.payload[0].clone(),
+                    Some(vs @ [_, one]) if ftypes::is_builtin_sum(vs) && one.payload.len() == 1 => {
+                        one.payload[0].clone()
+                    }
                     _ => return unsupported(&format!("a branch yielding `?` on `{st}`"), *line),
                 }
             }
@@ -13361,10 +13363,12 @@ impl<'p> Fn_<'_, 'p> {
         // The success pattern's binder name is unread — `tag_test` and
         // `bind_payload` both take the type from `sum`, not from the pattern — so
         // it is spelled empty rather than invented.
-        // Tag 1 is the success side of every two-variant sum (§8.1); anything
-        // else asks `Fallible` (RFC-0080 M3) instead of the tag.
+        // Tag 1 is the success side of the two BUILT-IN sums (§8.1); every other
+        // sum asks `Fallible` (RFC-0080 M3) instead of the tag. The test is the
+        // variant NAMES, not the arity: a declared `| Full(T) | Gone(String)`
+        // has two variants and is not a `Result` (RFC-0126 §8.16).
         let (sum, ok_ty, ok_pat) = match self.sum_of(&st) {
-            Some(vs) if vs.len() == 2 && vs[1].payload.len() == 1 => {
+            Some(vs) if ftypes::is_builtin_sum(&vs) && vs[1].payload.len() == 1 => {
                 let ok_ty = vs[1].payload[0].clone();
                 let pat = Pattern::Variant(vs[1].name.clone(), vec![String::new()]);
                 (vs, ok_ty, pat)

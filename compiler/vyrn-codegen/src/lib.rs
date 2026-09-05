@@ -3084,6 +3084,15 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// Whether `ty` is one of the two BUILT-IN sums, under this emitter's
+    /// substitution — [`vyrn_frontend::types::is_builtin_sum`] asked of a type.
+    /// A release walks any two-variant sum alike ([`Gen::two_variant_sum`]); `?`
+    /// does not, and this is the question it asks.
+    fn builtin_sum(&self, ty: &Type) -> bool {
+        self.sum_vs(ty)
+            .is_some_and(|vs| vyrn_frontend::types::is_builtin_sum(&vs))
+    }
+
     /// The payload slot count of the sum `ty` — the shape's members less the tag.
     fn sum_slots(&self, ty: &Type) -> usize {
         self.sum_vs(ty)
@@ -8058,7 +8067,7 @@ impl<'a> Gen<'a> {
     /// function's result; otherwise continue with the unwrapped i64 payload.
     fn gen_try(&mut self, expr: &Expr, at: usize) -> Result<(String, Type), String> {
         let (agg, aty) = self.gen_expr(expr)?;
-        if self.two_variant_sum(&aty).is_none() {
+        if !self.builtin_sum(&aty) {
             let place = vyrn_frontend::movecheck::place_path(expr).is_some()
                 || vyrn_frontend::movecheck::element_path(expr).is_some();
             return self.gen_try_fallible(&agg, &aty, at, place);
