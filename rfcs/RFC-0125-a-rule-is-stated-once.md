@@ -4898,6 +4898,55 @@ stand-down reasons are the two above; `Facts::stood_down` carries them so the
 test can ask. 41,636 rows over the corpus are stand-downs, twelve are the
 `place at` rewrite's own statements, and none is unexplained.
 
+**The fourth table is the core's, and the folds are gone (2026-09-06).**
+
+`fold_store_owned`, the `place_stores` fold beside it, `store_owned_at` and
+`store_owned` are deleted, and with them `movecheck`'s `global_stores`,
+`place_stores`, `PlaceStore` and `note_place_store` — a producer for a table
+nobody read. Both compiled backends ask `store_fact` and take `false` where it
+answers nothing. `own.rs` loses 413 lines and `movecheck.rs` 111.
+
+**The twelve stopped being twelve.** RFC-0091 M2's `place at` rewrite builds
+the store statements a user container's `c[h] = v` becomes; the checker walked
+those and the core walks the SOURCE statement, so the plan's row and the
+core's answer stood on different nodes and a reader fell back. The kernel
+judges the source statement correctly — it always did — so what was missing
+was the mapping, not the judgment. The emitters already keep one
+(`ReleasePlan::alias_clones`, for `iterate_loop`'s cloned bodies), and the
+expansion is memoized and leaked, so the store inside it is pointed at the
+source node where it is walked. `project::store_node` names that one
+statement: the expansion is a prologue, the move-outs, the store, and the
+write-backs after it, and the store is the first statement that writes a
+place. Without this, `genref` leaked one block — the `strs[s] = tail` its own
+comment says the store releases.
+
+**The bytes moved, and they moved one way.** 124 of the 173 recorded modules
+at the store slice, six more here, none anywhere else. Every one is SMALLER,
+and the reason is one line of the rule: a store whose place OWNS NO HEAP
+stands the release down. The analysis's fold never asked the type, so it held
+a row at every `w = 2` and every `bytes[i] = b`; the emitters then took the
+row, built an empty snapshot, and kept the address they teed for it. The core
+asks the type at the store, the branch is not taken, and the dead local goes
+with it. Nothing observable moved: parity is 41 of 41, the ratchet is clean,
+the memory suite is green. The six here are the six user containers —
+`autorelease`, `container`, `copy`, `genref`, `membench`, `slots` — reading
+the core where they read the plan.
+
+**Four rules moved house with the answer.** `own.rs`'s store tests asked a
+table that is gone, and `vyrn-frontend` cannot ask the core, so they are
+`compiler/vyrn-cli/tests/stores.rs` now, with their wording and the defect
+each names: §26's field store and round forty-six's copying mention, round
+fifty-six's loop-local pairing, round fifty-six's escape screen, round
+fifty-seven's early-exiting take. `coretables` stops diffing the store table
+and counts it, as it does for `arm_frees` and `edge_releases`.
+
+`arg_drops` is the last of the five and it does not follow. Its rule is over
+DECLARATIONS and its three whole-program closures — `lending`, `retains`,
+`param_escapers` — are a post-pass over every body, so the core cannot ask
+before it builds. `direct.rs::expr` asks `arg_drop_row` at every expression
+node, and an over-wide derived set there is a double free, not a leak. It
+waits for the hoist the record above names.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

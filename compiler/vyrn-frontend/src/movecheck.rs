@@ -312,10 +312,6 @@ pub struct Facts {
     /// `own::analyze` folds it into the store-ownedness set; nothing else
     /// reads it.
     pub store_events: Vec<StoreEv>,
-    /// Assigns to MODULE STATE, which are always owned: a global owns what it
-    /// holds for the whole module and nothing may `consume` it, so every store
-    /// into one releases what it replaces (Phase 5's rule, now stated as data).
-    pub global_stores: std::collections::HashSet<usize>,
     /// RFC-0114 R1′: `.byteLength` reads whose receiver is an unnamed String
     /// temporary — `(Expr::Field address, producer)`, producer a function name
     /// or `@concat`/`@str`. Lenders are already filtered out; `own::analyze`
@@ -326,9 +322,6 @@ pub struct Facts {
     /// The walk-order positions of every early exit — see [`fold context`] in
     /// `own::fold_revived`, its only reader.
     pub exit_orders: Vec<u32>,
-    /// RFC-0114 §26 (steps 3–4): the field and element stores — see
-    /// [`PlaceStore`].
-    pub place_stores: Vec<PlaceStore>,
     /// Round twenty-one: every `return` and `?` the walk met, with enough
     /// context to place an early release — see `own::fold_early_releases`.
     pub exit_sites: Vec<ExitEv>,
@@ -386,34 +379,6 @@ pub struct StoreEv {
     /// untake fold needs: a CONDITIONAL revive must not qualify.
     pub branch: Vec<u32>,
     pub kind: EvKind,
-    /// The enclosing function — see [`ArgTemp::owner`].
-    pub owner: String,
-}
-
-/// RFC-0114 §26 (steps 3–4): one field or element store whose displaced
-/// value the target may own — `x.f = v` or `a[i] = v`, by the statement's
-/// node address. `own::analyze` decides ownedness against the droppable
-/// rows and module state; the value/index alias guards are applied at the
-/// record site, so a row's absence and a false answer mean the same thing.
-pub struct PlaceStore {
-    /// The `Stmt::SetField` / `Stmt::IndexSet` node address.
-    pub id: usize,
-    /// The target binding's `Stmt::Let` (or parameter) key; 0 when the
-    /// target is module state or unresolved.
-    pub key: usize,
-    /// Whether the target is a module-state global (frame 0, unshadowed).
-    pub is_global: bool,
-    /// Round twenty-nine: whether the target roots at a `modify` parameter —
-    /// exclusive access to the caller's storage, whose displaced elements the
-    /// caller can never see again (`check_exclusive` refuses the aliasing
-    /// call shapes), so the store releases them like a local's.
-    pub is_modify_param: bool,
-    /// Round thirty-two: the store's walk order and loop context, so the fold
-    /// can own a field store that happens BEFORE the binding's take — `let
-    /// mut out = httpCopy(self); out.derived = out.derived + ..; return out`
-    /// displaced one copied field per policy call with nothing to free it.
-    pub order: u32,
-    pub loops: Vec<u32>,
     /// The enclosing function — see [`ArgTemp::owner`].
     pub owner: String,
 }
@@ -517,7 +482,6 @@ pub fn facts(program: &Program) -> Facts {
         lets,
         arg_temps,
         store_events: r.store_events,
-        global_stores: r.global_stores,
         // A lender's result names storage inside its argument; freeing it
         // would free the argument. Filtered here because the lender set is
         // only complete once every body has been read.
@@ -539,7 +503,6 @@ pub fn facts(program: &Program) -> Facts {
             .into_iter()
             .filter(|(_, n)| !r.lending.contains(n))
             .collect(),
-        place_stores: r.place_stores,
         // The walk recorded the shape; the closures decide the callees. A
         // lender's result aliases its argument and a retaining position keeps
         // it — either one disqualifies the store from releasing what it
@@ -582,9 +545,7 @@ struct Run {
     arg_temps: Vec<ArgTemp>,
     projections: Vec<ProjectionSite>,
     store_events: Vec<StoreEv>,
-    global_stores: HashSet<usize>,
     receiver_temps: Vec<(usize, String, String)>,
-    place_stores: Vec<PlaceStore>,
     exit_orders: Vec<u32>,
     mention_stores: Vec<(usize, Vec<(String, usize)>)>,
     param_escapers: HashSet<String>,
@@ -1210,9 +1171,7 @@ fn run(program: &Program, want: Want) -> Run {
         param_ix: RefCell::new(HashMap::new()),
         arg_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        global_stores: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        place_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         mention_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         carrying_locals: RefCell::new(HashSet::new()),
@@ -1437,15 +1396,10 @@ fn run(program: &Program, want: Want) -> Run {
         arg_temps,
         projections,
         store_events: mc.store_events.map(RefCell::into_inner).unwrap_or_default(),
-        global_stores: mc
-            .global_stores
-            .map(RefCell::into_inner)
-            .unwrap_or_default(),
         receiver_temps: mc
             .receiver_temps
             .map(RefCell::into_inner)
             .unwrap_or_default(),
-        place_stores: mc.place_stores.map(RefCell::into_inner).unwrap_or_default(),
         exit_orders: mc.exit_orders.map(RefCell::into_inner).unwrap_or_default(),
         mention_stores: mc
             .mention_stores
@@ -1573,9 +1527,7 @@ struct MoveCheck<'a> {
     /// RFC-0114 M2: the write/take event stream (see [`StoreEv`]), and the
     /// assigns to module state, which are owned unconditionally.
     store_events: Option<RefCell<Vec<StoreEv>>>,
-    global_stores: Option<RefCell<HashSet<usize>>>,
     receiver_temps: Option<RefCell<Vec<(usize, String, String)>>>,
-    place_stores: Option<RefCell<Vec<PlaceStore>>>,
     mention_stores: Option<RefCell<Vec<(usize, Vec<(String, usize)>)>>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
     /// Round fifty-six: per-body provenance for the escape screen — locals
@@ -2246,52 +2198,6 @@ impl MoveCheck<'_> {
     /// place held — the buffer the take gave away. So the binding stops being
     /// skippable and leaks whole. Only a binding that already carries a hole is
     /// touched; a write to any other binding means nothing here.
-    /// RFC-0114 §26 (steps 3–4): record one field/element store for the
-    /// ownedness fold. The value/index alias guards are the CALLER's, so a
-    /// recorded row means only "the target may own what this displaces".
-    fn note_place_store(&self, s: &Stmt, name: &str) {
-        if std::env::var_os("VYRN_PLACE_DUMP").is_some() {
-            eprintln!("note_place_store: fn={} name={name}", self.cur_fn.borrow());
-        }
-        let Some(sink) = &self.place_stores else {
-            return;
-        };
-        let mut key = self.nodes.borrow().get(name).copied().unwrap_or(0);
-        // A write-through desugar temp (`grid[0][1] = v` stores into
-        // `grid[][]`; RFC-0082 names the temps after the paths they took) is
-        // nobody's binding, but the CHAIN is: every level is an `@at` view
-        // into the level above, so the ultimate root's ownedness is the
-        // element's — the container owns what its elements hold, however
-        // deep. The write-BACK stores stand down on their own (their targets
-        // are the bound view temps, which are borrows), so only the
-        // innermost store gains the displaced free (exit-residue round
-        // fifty).
-        if name.ends_with("[]") || name.contains("[]") {
-            let stripped = name.trim_end_matches("[]");
-            let base = stripped.split('.').next().unwrap_or(stripped);
-            let base = base.trim_end_matches("[]");
-            if let Some(k) = self.nodes.borrow().get(base).copied() {
-                key = k;
-            }
-        }
-        let is_global = self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0);
-        // The target may be a compound path (`s.vals[i] = v`); the borrow is
-        // the ROOT's.
-        let root = name.split('.').next().unwrap_or(name);
-        let is_modify_param = matches!(self.borrow_of(root), Some(Borrow::Modify(_)));
-        let o = self.ev_order.get();
-        self.ev_order.set(o + 1);
-        sink.borrow_mut().push(PlaceStore {
-            id: s as *const Stmt as usize,
-            key,
-            is_global,
-            is_modify_param,
-            order: o,
-            loops: self.loop_ids.borrow().clone(),
-            owner: self.cur_fn.borrow().clone(),
-        });
-    }
-
     fn wrote_into(&self, name: &str) {
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
@@ -4904,9 +4810,8 @@ impl MoveCheck<'_> {
                 let walked = self.walk_writeback(name, value, consumed, scope);
                 walked?;
                 // RFC-0114 M2: the write event, BEFORE the store's own effects
-                // (`took(Borrowed)`, revive) so the fold sees the state the
-                // store finds. A global is recorded in its own set — module
-                // state is owned unconditionally.
+                // (`took(Borrowed)`, revive) so a reader sees the state the
+                // store finds.
                 {
                     let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
                     let sid = s as *const Stmt as usize;
@@ -4918,10 +4823,6 @@ impl MoveCheck<'_> {
                                 owning: self.names_a_place(value).is_none(),
                             },
                         );
-                    } else if self.globals.contains(name) && !Self::in_scope(scope, name) {
-                        if let Some(g) = &self.global_stores {
-                            g.borrow_mut().insert(sid);
-                        }
                     }
                 }
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
@@ -5023,16 +4924,6 @@ impl MoveCheck<'_> {
                 // down — and the reason no drop flag is needed to say it.
                 revive(consumed, &format!("{name}.{field}"));
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
-                                       // Round thirty-two: a mention that provably cannot hand the
-                                       // old value back — a String `+` is a fresh concat — records
-                                       // like any other store (`out.derived = out.derived + " etag"`
-                                       // displaced one copied field per policy call).
-                if !mentions_place(value, name)
-                    || (matches!(value, Expr::Binary { op: BinOp::Add, .. })
-                        && self.concatenates(value))
-                {
-                    self.note_place_store(s, name);
-                }
                 self.note_carrying_store(name, value);
                 Ok(false)
             }
@@ -5101,9 +4992,6 @@ impl MoveCheck<'_> {
                 // OWNED element and the store still records the move.
                 let _ = self.store(index, &|| format!("`{name}`"), *line, true, consumed)?;
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
-                if !mentions_place(value, name) && !mentions_place(index, name) {
-                    self.note_place_store(s, name);
-                }
                 self.note_carrying_store(name, value);
                 Ok(false)
             }

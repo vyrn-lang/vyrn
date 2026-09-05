@@ -1689,7 +1689,8 @@ impl<'a> Builder<'a> {
                 // else a store displaces is the kernel's, and the first build
                 // leaves it open (RFC-0125 §3 M3, the store slice).
                 let handed_back = mentions && !fresh_str && !self.own.plan.store_fresh_at(sid);
-                let releases = !handed_back && placed_store(sid);
+                let key = self.store_key(sid);
+                let releases = !handed_back && placed_store(key);
                 let Some(n) = n else {
                     // Module state owns what it holds for the whole module
                     // and nothing may `consume` it, so a store into one
@@ -1708,7 +1709,7 @@ impl<'a> Builder<'a> {
                             Old::Pending
                         },
                         line: *line,
-                        site: Site::Node(sid),
+                        site: Site::Node(key),
                         releases,
                     });
                     return Ok(());
@@ -1731,7 +1732,7 @@ impl<'a> Builder<'a> {
                     value: v,
                     old,
                     line: *line,
-                    site: Site::Node(sid),
+                    site: Site::Node(key),
                     releases,
                 });
             }
@@ -1752,7 +1753,8 @@ impl<'a> Builder<'a> {
                 // buffer whatever it reads (RFC-0125 §3 M3, the store slice).
                 let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
                     && !self.fresh_str(&fty, value);
-                let releases = !handed_back && self.store_row(sid, &Site::Node(sid));
+                let key = self.store_key(sid);
+                let releases = !handed_back && placed_store(key);
                 out.push(St::Store {
                     place: Place::Field(Box::new(base), field.clone()),
                     value: v,
@@ -1762,7 +1764,7 @@ impl<'a> Builder<'a> {
                         self.old_for(&fty, releases)
                     },
                     line: *line,
-                    site: Site::Node(sid),
+                    site: Site::Node(key),
                     releases,
                 });
             }
@@ -1784,21 +1786,25 @@ impl<'a> Builder<'a> {
                 // A user container's `place at` yields the element's place
                 // (RFC-0091 M2), and the element's type is the value's. Such
                 // a store is REWRITTEN into a block of its own before the
-                // checker walks it, so the plan's row stands on a statement
-                // this pass never sees: no site, and a reader falls back to
-                // the plan (RFC-0125 §3 M3, the emitter-reads-the-core
-                // slice).
-                let (ety, site) = match self.elem_ty(&bty, *line) {
-                    Ok(t) => (t, Site::Node(sid)),
-                    Err(_) => (self.ty_of(value)?, Site::None),
+                // checker walks it, so the node a reader keys it by is the
+                // rewrite's and not this statement's — which is what
+                // `key_of` says, and why every store above keys by it too
+                // (RFC-0125 §3 M3, the store slice). This pass judges the
+                // SOURCE statement and files the answer where the emitters
+                // look.
+                let ety = match self.elem_ty(&bty, *line) {
+                    Ok(t) => t,
+                    Err(_) => self.ty_of(value)?,
                 };
+                let key = self.store_key(sid);
+                let site = Site::Node(key);
                 // The same hand-back, and the INDEX counts as well: `xs[i] =
                 // xs[j]` and `xs[xs.length - 1] = v` both read the buffer the
                 // store writes into, and neither displaces anything the
                 // container did not keep.
                 let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
                     || vyrn_frontend::movecheck::mentions_place(index, name);
-                let releases = !handed_back && self.store_row(sid, &site);
+                let releases = !handed_back && placed_store(key);
                 out.push(St::Store {
                     place,
                     value: v,
@@ -2163,14 +2169,16 @@ impl<'a> Builder<'a> {
         )
     }
 
-    /// A store this pass gave no key to — RFC-0091 M2's `place at` rewrite
-    /// builds the store statement itself, so the kernel has no node to key a
-    /// row by and the plan's row is the only answer there.
-    fn store_row(&self, sid: usize, site: &Site) -> bool {
-        match site {
-            Site::Node(_) => placed_store(sid),
-            _ => self.own.plan.store_owned_at(sid),
-        }
+    /// The node a store's row is keyed by, which is the node its READERS key
+    /// it by (RFC-0125 §3 M3, the store slice).
+    ///
+    /// Identity for every store written as one. RFC-0091 M2's `place at`
+    /// rewrite builds the store statements a user container's `c[h] = v`
+    /// becomes, and both compiled backends ask about the source statement
+    /// through the same mapping, so the answer is filed under the rewrite's
+    /// node and found there.
+    fn store_key(&self, sid: usize) -> usize {
+        self.own.plan.key_of(sid)
     }
 
     fn old_for(&self, ty: &Type, releases: bool) -> Old {

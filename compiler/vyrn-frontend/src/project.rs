@@ -733,6 +733,26 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
     }
 }
 
+/// The node the STORE of a [`store_index`] expansion stands on — RFC-0125 §3
+/// M3, the store slice.
+///
+/// The expansion is a prologue, the move-outs, the store, and the write-backs
+/// `place_receiver` adds after it. The prologue and the move-outs are `let`
+/// bindings; the store is the first statement that writes a place, and the
+/// write-backs after it target the view temporaries the prologue bound, which
+/// are borrows and release nothing.
+///
+/// An emitter walking the expansion asks the core about THIS node, and the
+/// core judged the source statement, so the emitter points one at the other.
+pub fn store_node(blk: &Block) -> Option<&Stmt> {
+    blk.stmts.iter().find(|s| {
+        matches!(
+            s,
+            Stmt::Assign { .. } | Stmt::SetField { .. } | Stmt::IndexSet { .. }
+        )
+    })
+}
+
 /// What `for x in xs` becomes when `xs` is a user container (RFC-0091 M3).
 ///
 /// A builtin container is walked by each backend's own element loop, which is
