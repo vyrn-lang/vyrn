@@ -5948,7 +5948,7 @@ fn bodies_wasm(
     let main = Block {
         stmts: vec![
             Stmt::IfLet {
-                pattern: Pattern::Some("__vyrnSlot".to_string()),
+                pattern: Pattern::Variant("Some".into(), vec!["__vyrnSlot".to_string()]),
                 scrutinee: Expr::Call {
                     name: "readLine".to_string(),
                     args: Vec::new(),

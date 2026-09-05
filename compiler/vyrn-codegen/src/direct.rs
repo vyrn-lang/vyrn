@@ -11243,7 +11243,8 @@ impl<'p> Fn_<'_, 'p> {
         b.slot(ooff);
         b.ins(&Instruction::LocalSet(oaddr));
         let sum = Sum::Opt(elem.clone());
-        self.tag_test(b, oaddr, &sum, &Pattern::Some(String::new()), line)?;
+        let some = Pattern::Variant("Some".into(), vec![String::new()]);
+        self.tag_test(b, oaddr, &sum, &some, line)?;
         b.ins(&Instruction::If(BlockType::Empty));
         let got = self.bind_payload(
             b,
@@ -13106,10 +13107,18 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Vec<(String, Type)>, String> {
         Ok(match (sum, pat) {
-            (Sum::Opt(t), Pattern::Some(n)) => vec![(n.clone(), t.clone())],
-            (Sum::Opt(_), Pattern::None) => vec![],
-            (Sum::Res(t, _), Pattern::Ok(n)) => vec![(n.clone(), t.clone())],
-            (Sum::Res(_, e), Pattern::Err(n)) => vec![(n.clone(), e.clone())],
+            // Since RFC-0126 §8 the built-in arms are variant patterns; the
+            // SCRUTINEE, here the `Sum`, is what says a name is a tag.
+            (Sum::Opt(t), Pattern::Variant(v, ns)) if v == "Some" => {
+                vec![(ns[0].clone(), t.clone())]
+            }
+            (Sum::Opt(_) | Sum::Res(..), Pattern::Variant(v, _)) if v == "None" => vec![],
+            (Sum::Res(t, _), Pattern::Variant(v, ns)) if v == "Ok" => {
+                vec![(ns[0].clone(), t.clone())]
+            }
+            (Sum::Res(_, e), Pattern::Variant(v, ns)) if v == "Err" => {
+                vec![(ns[0].clone(), e.clone())]
+            }
             // `??`'s type-agnostic pair (RFC-0079) — the sum decides which side
             // each names, which is the same thing `try_` does one screen down.
             (Sum::Opt(t), Pattern::Success(n)) | (Sum::Res(t, _), Pattern::Success(n)) => {
@@ -13316,8 +13325,16 @@ impl<'p> Fn_<'_, 'p> {
         // `bind_payload` both take the type from `sum`, not from the pattern — so
         // it is spelled empty rather than invented.
         let (sum, ok_ty, ok_pat) = match self.sum_of(&st) {
-            Some(Sum::Opt(t)) => (Sum::Opt(t.clone()), t, Pattern::Some(String::new())),
-            Some(Sum::Res(t, err)) => (Sum::Res(t.clone(), err), t, Pattern::Ok(String::new())),
+            Some(Sum::Opt(t)) => (
+                Sum::Opt(t.clone()),
+                t,
+                Pattern::Variant("Some".into(), vec![String::new()]),
+            ),
+            Some(Sum::Res(t, err)) => (
+                Sum::Res(t.clone(), err),
+                t,
+                Pattern::Variant("Ok".into(), vec![String::new()]),
+            ),
             // Anything else asks `Fallible` (RFC-0080 M3) instead of the tag.
             _ => return self.try_fallible(m, b, &st, line, at),
         };
@@ -13616,7 +13633,8 @@ impl<'p> Fn_<'_, 'p> {
         for s in &p.hit {
             self.stmt(m, b, s)?;
         }
-        if let Pattern::Some(bind) = pattern {
+        if let Pattern::Variant(_, binds) = pattern {
+            let bind = &binds[0];
             let synth = Stmt::Let {
                 name: bind.clone(),
                 mutable: false,
@@ -13667,7 +13685,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Const(1));
             }
             (_, p) => {
-                let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_));
+                let one = matches!(p, Pattern::Success(_))
+                    || matches!(p, Pattern::Variant(v, _) if v == "Some" || v == "Ok");
                 b.ins(&Instruction::I64Load(word8()));
                 b.ins(&Instruction::I64Const(i64::from(one)));
                 b.ins(&Instruction::I64Eq);
@@ -15452,13 +15471,9 @@ fn is_var(e: &Expr, name: &str) -> bool {
 /// binding, so the hoist is refused.
 fn binds(p: &Pattern, name: &str) -> bool {
     match p {
-        Pattern::Some(n)
-        | Pattern::Ok(n)
-        | Pattern::Err(n)
-        | Pattern::Success(n)
-        | Pattern::Failure(n) => n == name,
+        Pattern::Success(n) | Pattern::Failure(n) => n == name,
         Pattern::Variant(_, ns) => ns.iter().any(|n| n == name),
-        Pattern::None | Pattern::Other => false,
+        Pattern::Other => false,
     }
 }
 

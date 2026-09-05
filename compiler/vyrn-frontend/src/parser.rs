@@ -5372,11 +5372,11 @@ impl Parser {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Ok("@t".to_string()),
+                            pattern: Pattern::Variant("Ok".into(), vec!["@t".to_string()]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Err("@e".to_string()),
+                            pattern: Pattern::Variant("Err".into(), vec!["@e".to_string()]),
                             body: ArmBody::Expr(var("Missing")),
                         },
                     ],
@@ -5406,11 +5406,11 @@ impl Parser {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Ok("@t".to_string()),
+                            pattern: Pattern::Variant("Ok".into(), vec!["@t".to_string()]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Err("@e".to_string()),
+                            pattern: Pattern::Variant("Err".into(), vec!["@e".to_string()]),
                             body: ArmBody::Expr(default),
                         },
                     ],
@@ -5541,14 +5541,6 @@ impl Parser {
         Ok(Expr::StructLit { name, fields, line })
     }
 
-    /// Parse the `(name)` that binds a pattern's payload.
-    fn pattern_binding(&mut self) -> Result<String, Diagnostic> {
-        self.eat(&Tok::LParen)?;
-        let bind = self.expect_ident()?;
-        self.eat(&Tok::RParen)?;
-        Ok(bind)
-    }
-
     fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
         let line = self.line();
         let mut name = self.expect_ident()?;
@@ -5575,30 +5567,24 @@ impl Parser {
             }
             return Ok(Pattern::Variant(name, binds));
         }
-        match name.as_str() {
-            "Some" => Ok(Pattern::Some(self.pattern_binding()?)),
-            "Ok" => Ok(Pattern::Ok(self.pattern_binding()?)),
-            "Err" => Ok(Pattern::Err(self.pattern_binding()?)),
-            "None" => Ok(Pattern::None),
-            // Any other identifier is a user-enum variant: `V`, `V(x)`, `V(x, y)`.
-            _ => {
-                let _ = line;
-                let mut binds = Vec::new();
-                if *self.peek() == Tok::LParen {
+        // Every identifier is a variant name: `V`, `V(x)`, `V(x, y)`, and since
+        // RFC-0126 §8 that includes `Some`, `None`, `Ok` and `Err`. The parser
+        // has no scrutinee to ask what the name means, and it never needed one.
+        let _ = line;
+        let mut binds = Vec::new();
+        if *self.peek() == Tok::LParen {
+            self.advance();
+            while *self.peek() != Tok::RParen {
+                binds.push(self.expect_ident()?);
+                if *self.peek() == Tok::Comma {
                     self.advance();
-                    while *self.peek() != Tok::RParen {
-                        binds.push(self.expect_ident()?);
-                        if *self.peek() == Tok::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.eat(&Tok::RParen)?;
+                } else {
+                    break;
                 }
-                Ok(Pattern::Variant(name, binds))
             }
+            self.eat(&Tok::RParen)?;
         }
+        Ok(Pattern::Variant(name, binds))
     }
 }
 

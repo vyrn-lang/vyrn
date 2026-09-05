@@ -8090,7 +8090,7 @@ impl<'a> Gen<'a> {
         // The binder aliases the place — a handle copy, never drop-tracked,
         // exactly as a pattern payload binds.
         let (pv, pty) = self.gen_expr(&p.place)?;
-        if let Pattern::Some(bind) = pattern {
+        if let Some(bind) = pattern_binding(pattern) {
             let ll = self.llt(&pty);
             let slot = self.declare(bind, &pty);
             self.emit(format!("store {ll} {pv}, ptr {slot}"));
@@ -8181,24 +8181,23 @@ impl<'a> Gen<'a> {
                 }
                 Ok(())
             }
+            // The tag the pattern names decides which half it binds, and
+            // `pattern_is_one` is the one place that reading lives.
             Type::Option(inner) => {
-                if let Pattern::Some(bind) = pattern {
+                if let (true, Some(bind)) = (pattern_is_one(pattern), pattern_binding(pattern)) {
                     let pty = (**inner).clone();
                     self.bind_or_payload(sv, sr, bind, &pty);
                 }
                 Ok(())
             }
             Type::Result(ok, err) => {
-                match pattern {
-                    Pattern::Ok(bind) => {
-                        let pty = (**ok).clone();
-                        self.bind_or_payload(sv, sr, bind, &pty);
-                    }
-                    Pattern::Err(bind) => {
-                        let pty = (**err).clone();
-                        self.bind_or_payload(sv, sr, bind, &pty);
-                    }
-                    _ => {}
+                if let Some(bind) = pattern_binding(pattern) {
+                    let pty = if pattern_is_one(pattern) {
+                        (**ok).clone()
+                    } else {
+                        (**err).clone()
+                    };
+                    self.bind_or_payload(sv, sr, bind, &pty);
                 }
                 Ok(())
             }
@@ -14229,21 +14228,20 @@ impl<'a> Gen<'a> {
 /// Whether a pattern matches the tag-1 variant (`Some`/`Ok`). Only used on the
 /// Option/Result path; user-enum variants go through `gen_match_enum`.
 fn pattern_is_one(p: &Pattern) -> bool {
-    matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_))
+    matches!(p, Pattern::Success(_))
+        || matches!(p, Pattern::Variant(v, _) if v == "Some" || v == "Ok")
 }
 
 /// The name a pattern binds its payload to, if any.
 fn pattern_binding(p: &Pattern) -> Option<&str> {
     match p {
-        Pattern::Some(b) | Pattern::Ok(b) | Pattern::Err(b) => Some(b),
         // `??`'s pair (RFC-0079). `Failure` binds on the `Option` path too, where
         // the payload type is the `Type::Int` placeholder `gen_match` passes for
         // a tag-0 `Option` arm: a dead `alloca`+`store` of a word nothing reads,
         // which is cheaper than teaching this type-free helper about types.
         Pattern::Success(b) | Pattern::Failure(b) => Some(b),
-        // Variants route through gen_match_enum, not this Option/Result helper.
         Pattern::Variant(_, b) => b.first().map(|s| s.as_str()),
-        Pattern::None | Pattern::Other => None,
+        Pattern::Other => None,
     }
 }
 
@@ -14603,13 +14601,9 @@ fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
 /// The names a refutable pattern binds.
 fn pattern_names(p: &Pattern) -> Vec<String> {
     match p {
-        Pattern::Some(n)
-        | Pattern::Ok(n)
-        | Pattern::Err(n)
-        | Pattern::Success(n)
-        | Pattern::Failure(n) => vec![n.clone()],
+        Pattern::Success(n) | Pattern::Failure(n) => vec![n.clone()],
         Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None | Pattern::Other => Vec::new(),
+        Pattern::Other => Vec::new(),
     }
 }
 

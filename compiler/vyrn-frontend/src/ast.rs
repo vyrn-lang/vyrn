@@ -1442,15 +1442,10 @@ pub struct MatchArm {
 /// A pattern in a `match` arm. v0.1 supports the `Option` and `Result` variants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    /// `Some(name)` — binds the payload to `name`.
-    Some(String),
-    /// `None`.
-    None,
-    /// `Ok(name)` — binds the success payload.
-    Ok(String),
-    /// `Err(name)` — binds the error payload.
-    Err(String),
-    /// A user-enum variant pattern: `Circle(r)`, `Rect(w, h)`, or `Empty`.
+    /// A variant pattern: `Circle(r)`, `Rect(w, h)`, `Empty` — and, since
+    /// RFC-0126 §8, `Some(x)`, `None`, `Ok(x)` and `Err(e)` too. The parser
+    /// spells all of them one way; the SCRUTINEE decides what a name means, as
+    /// it always did for a declared enum.
     Variant(String, Vec<String>),
     /// The tag-1 arm — `Some` *or* `Ok`, whichever the scrutinee turns out to
     /// be. Unspellable in source; produced only by the `??` desugar (RFC-0079),

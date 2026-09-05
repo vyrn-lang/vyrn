@@ -2259,11 +2259,11 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 |---|---|---|
 | a rule the kernel now gives | 1,045 | 10 per cent |
 | a rule only the checker gives | 723 | 7 per cent |
-| placement rows for the engines | 2,349 | 23 per cent |
+| placement rows for the engines | 2,362 | 23 per cent |
 | a fix menu | 81 | 1 per cent |
-| shared machinery | 3,656 | 37 per cent |
-| tests | 2,169 | 22 per cent |
-| **the file** | **10,023** | |
+| shared machinery | 3,657 | 36 per cent |
+| tests | 2,187 | 22 per cent |
+| **the file** | **10,055** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
@@ -6199,6 +6199,10 @@ its record.
   and no other; parity 41 of 41. It needed one rung the design did not foresee,
   `Rung::Reshape`, because a generic enum now has one shape per type argument.
   RFC-0126 §8.9.
+- **M3 — a pattern names a variant (2026-09-05).** `Pattern::Some`/`None`/`Ok`/
+  `Err` become `Pattern::Variant`, and the SCRUTINEE says what the name means, as
+  it always did for a declared enum. Four constructors, 89 mentions to 0, 19 code
+  lines, zero bytes. RFC-0126 §8.10.
 
 ### What each milestone is worth on its own
 

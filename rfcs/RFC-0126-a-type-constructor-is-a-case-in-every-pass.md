@@ -552,7 +552,8 @@ foresee.** Done, 2026-09-05.
 `Pattern::Variant`. `Success` and `Failure` stay: they are the parser's untyped
 arms for `??` and `?`, they name a TAG and not a variant, and nothing else can
 name a tag before the checker runs. Surface only; zero bytes; priced in
-`Pattern` arms, which the census does not count.
+`Pattern` arms, which the census does not count. §8.10 took the step: **four
+constructors, 89 mentions to 0, 19 code lines, zero bytes.** Done, 2026-09-05.
 
 **M4 — `resolve` answers `Enum`.** As it already answers `Fn([], T)` for a
 `lazy T` (§4). Every engine calls `resolve` before it looks at a type, so
@@ -683,3 +684,46 @@ counts moved with it: 2,491 mentions became 2,505, because `Option` and `Result`
 are now ASKED for their shape in `native` where the shape used to be a string
 literal, and `Fn` is named four times less because the payload rule no longer
 names it.
+
+### 8.10 M3, taken: a pattern names a variant, and the scrutinee says what it means
+
+`Pattern::Some`, `Pattern::None`, `Pattern::Ok` and `Pattern::Err` are gone.
+`Some(x)`, `None`, `Ok(x)` and `Err(e)` parse as `Pattern::Variant`, which is
+what `Circle(r)` and `Empty` already parsed as. The parser loses the four-arm
+`match` on the name and the `pattern_binding` helper that went with it: an
+identifier followed by an optional parenthesised binder list is one production,
+and it always was.
+
+**The scrutinee is what says a name is a tag**, and every consumer already had
+it. The checker's `match` and `if let` both mapped a pattern to `(tag, bind)`
+and then compared the tag against the scrutinee's two — `Variant(v, binds)` is
+that pair, with no arm to write. The interpreter's `match_pattern` tests a
+pattern against a VALUE, so `Val::Option(Some(v))` decides that `Some` names its
+tag, beside the `Val::Enum` arm that already decided the same thing for a
+declared variant. Both backends read the tag through `pattern_is_one`, which now
+asks about a name.
+
+**`Success` and `Failure` stay**, and §8.6 said why: the `??` desugar runs in the
+parser, names a TAG rather than a variant, and nothing else can name a tag before
+the checker runs. They are two arms in the four places that read a pattern's
+binders and one arm each in the two that read its tag.
+
+**One rule moved out of the parser.** A built-in sum's arity was a parse rule —
+`pattern_binding` ate exactly one `(name)` — and it is now a check, because the
+production that replaces it accepts any arity. `sum_arm_arity` states it once for
+both `match` and `if let`: `None` binds nothing, the other three bind one. A
+declared enum states its arity in its declaration and is checked against that;
+these four have no declaration, which is the whole reason the rule needs a home.
+`Some(x, y)` reports "variant `Some` has 1 payload(s), but the pattern binds 2",
+which is the wording a declared enum's wrong arity already had.
+
+**One walk needed telling.** The loader collects the free names of a body, and a
+variant pattern's head is a reference to a declaration. These four refer to
+nothing, so `is_sum_arm` names them and the walk skips them. It is the same
+guard §8.5 predicted for the constructors, arriving one step early.
+
+**Priced.** Four constructors of `ast::Pattern`, 8 down to 4. **89 mentions of
+the four across the compiler, down to 0.** 19 code lines, one parser function
+deleted and two small ones added — the arity rule and the free-name guard, each
+one place where there had been none. Zero bytes:
+`VYRN_WASM_MANIFEST=check` is unchanged and parity is 41 of 41.
