@@ -4832,6 +4832,72 @@ not have this property either, for the reason it is not a judgment: the rule
 is over DECLARATIONS, and a first build that states no argument drop asks the
 kernel nothing.
 
+**The store word, and why the fixpoint was not needed (2026-09-06).**
+
+The record above offers two shapes and asks for a measurement of each. The
+first one wins, and the measurement of the second says why.
+
+**`old` decides a refusal and never a state.** That is the reading the record
+above did not have. At a store the kernel writes `Own::Held` — or `Static`,
+where the value is a literal — into the place whatever `old` says, because a
+place written to holds what was written to it. `Old` is read at exactly two
+lines, and both of them refuse. So a first build that refuses nothing at a
+store leaves the judgment at every LATER statement exactly where a first build
+reading a filled table left it, and the residue the reverted slice lost was
+never the store row: it was the body the store refusal made the placer skip
+whole.
+
+`Old::Pending` is that word. The first build states it at every store it does
+not already answer, the kernel reports the store it finds a held place at
+(`MissingKind::Store`), the placer writes the row, and the second build states
+`Released` there. Over the corpus the derived answer is the analysis's at
+every site but one, and the ratchet, the parity harness, the memory suite and
+the fixtures do not move.
+
+**The fixpoint converges in one round, everywhere.** Measured, on eight
+programs and 2,900 body judgments: a second build-judge-place round after the
+first adds ZERO store rows in every one. It cannot add any, for the reason
+above — the input it would iterate on does not feed the state it would change
+— and the round costs what a build and a judgment cost: `vyrn check
+graphql.vyrn` goes from 0.74 s to 1.04 s, forty per cent, for nothing. The
+fixpoint is the right shape for an input that moves the judgment. This one
+does not.
+
+**The rule, in four lines.** A store releases what its place holds:
+
+  - unless the value HANDS THE PLACE BACK — `xs = xs.push(v)`,
+    `s.dense.push(i)`, `xs[i] = xs[j]` — which the core reads off the
+    statement, with the String concatenation exception both compiled backends
+    already spell `fresh_str`;
+  - unless the place owns no heap, which the core reads off the type;
+  - at a NAME, exactly while the path has not made it `Gone` — a `Static`
+    place holds a literal and the emitters free it, so the first `out = out +
+    x` of every builder owes the release;
+  - at a FIELD, ELEMENT or KEY, over the ALIAS table's root and not the
+    place's, because RFC-0082 reads `t.xs` into a temporary before storing
+    through it: module state, a `modify` parameter, or a root this frame owns
+    and has not made `Gone`.
+
+The first two are the CORE's — they are properties of the statement. The last
+two are the KERNEL's — they are properties of the path.
+
+**One site parts, and the kernel is right there.** `root = kw` in
+`std/graphql`'s `gqlParseQuery`. `let mut root = "query"` binds a literal and
+the store displaces it, which is the shape `std/cli`'s `let mut out = "";
+out = out + x` has and the analysis releases at. The analysis refuses this one
+because `root` is taken between the `let` and the store — on two paths that
+`return`, so the take cannot have run where the store does. The kernel judges
+per path and sees the literal still held; the fold judges per binding and
+cannot. Counted and pinned at one, the way `receiver_malloc`'s direction is,
+so a second site is read rather than absorbed. The ratchet is clean either
+way: `graphql.vyrn` does not run that path.
+
+The corpus pin is two-way, and it is a rule and not a number. A plan row the
+core answers `false` for must be one the core STANDS DOWN at, and the two
+stand-down reasons are the two above; `Facts::stood_down` carries them so the
+test can ask. 41,636 rows over the corpus are stand-downs, twelve are the
+`place at` rewrite's own statements, and none is unexplained.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

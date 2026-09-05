@@ -49,7 +49,12 @@
 //!
 //!   - `store_owned` and `store_fresh`, from a `St::Store` at the store
 //!     statement's node — the core states the two as one answer, because
-//!     both compiled backends read them as one;
+//!     both compiled backends read them as one. DERIVED since the store
+//!     slice, and pinned as a RULE rather than as a number: a plan row the
+//!     core answers `false` for must be one the core STANDS DOWN at, either
+//!     because the value hands the place back (`xs = xs.push(v)`) or because
+//!     the place owns no heap (`w = 2`), and `Facts::stood_down` carries the
+//!     two so this test can ask. The other direction is counted, at one site;
 //!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
 //!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
 //!     bound;
@@ -227,10 +232,14 @@ fn run() {
             *counted.entry("store_owned").or_default() += 1;
             // The core's answer is the whole conjunction both compiled
             // backends compute, so only its `true` implies the plan's row.
+            //
+            // Since the store slice (RFC-0125 §3 M3) this direction is
+            // COUNTED and the count pinned, the way `receiver_malloc`'s is: a
+            // derived table states the rule and the analysis is the second
+            // opinion, so a site where the two part is read at the source
+            // rather than assumed wrong. There is one, and it is named below.
             if *core_says && !own.plan.store_owned.contains(at) {
-                diffs.push(format!(
-                    "{file}: site {at}: store_owned: the core releases the old                      value and the plan does not"
-                ));
+                *counted.entry("store_owned: core only").or_default() += 1;
             }
         }
         // A plan store row the core states no answer for. Every one in the
@@ -246,6 +255,32 @@ fn run() {
             .iter()
             .filter(|a| reached(a) && !facts.stores.contains_key(*a))
             .count();
+        // The other direction (RFC-0125 §3 M3, the store slice). A plan row
+        // the core answers `false` for is a store the STATEMENT stands down
+        // at, whatever any judgment says: the value hands the place back
+        // (`xs = xs.push(v)`, `s.dense.push(i)`), or the place owns no heap
+        // (`w = 2`). The plan states neither and leaves both to its reader;
+        // the core states them at the store. That is the whole exception, so
+        // this is a diff and not a count — a plan row the core neither
+        // releases nor stands down is a release that stopped being stated.
+        for at in own.plan.store_owned.iter().filter(|a| reached(a)) {
+            match facts.stores.get(at) {
+                Some(true) => {}
+                Some(false) => {
+                    *counted
+                        .entry("plan store rows the core stands down at")
+                        .or_default() += 1;
+                    if !facts.stood_down.contains(at) {
+                        diffs.push(format!(
+                            "{file}: site {at}: store_owned: the plan releases the old value, the core neither releases it nor stands down: in {}",
+                            own.plan.owners.get(at).cloned().unwrap_or_default()
+                        ));
+                    }
+                }
+                // The `place at` rewrite's own statements, counted below.
+                None => {}
+            }
+        }
 
         for at in &facts.discarded {
             *counted.entry("discarded_results").or_default() += 1;
@@ -443,6 +478,21 @@ fn run() {
             .unwrap_or(0),
         12,
         "the `place at` rewrite's own store statements, and nothing else"
+    );
+    // RFC-0125 §3 M3, the store slice: one site, `root = kw` in
+    // `std/graphql`'s `gqlParseQuery`. `let mut root = "query"` binds a
+    // literal and the store displaces it, which is the same shape
+    // `std/cli`'s `let mut out = ""; out = out + x` has and the analysis
+    // releases there. The analysis refuses this one because `root` is taken
+    // between the `let` and the store — on two paths that `return`, so the
+    // take cannot have run where the store does. The kernel judges per PATH
+    // and sees the literal still held; the fold judges per binding and
+    // cannot. The residue ratchet is clean either way: the path is not one
+    // `graphql.vyrn` runs.
+    assert_eq!(
+        counted.get("store_owned: core only").copied().unwrap_or(0),
+        1,
+        "`root = kw` in `gqlParseQuery`, and nothing else"
     );
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
     // slice): every `Rhs` in the corpus names the type its node produces.

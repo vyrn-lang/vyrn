@@ -378,6 +378,21 @@ pub enum Old {
     /// The stored value was built FROM the place's own value — `xs = xs.push(v)`
     /// hands the buffer back — so the name keeps holding without a release.
     Transferred,
+    /// The FIRST build's word at every other store: the place may hold a
+    /// value, and the row that releases it is still to be written (RFC-0125
+    /// §3 M3, the store slice).
+    ///
+    /// A store answer is an INPUT to the judgment as well as an output of it,
+    /// which is what stopped the slice before this one. This word is what
+    /// makes the input harmless: `old` decides a REFUSAL and never a state —
+    /// a place written to holds what was written to it, whatever it held
+    /// before — so a first build that refuses nothing at a store leaves the
+    /// judgment at every later statement exactly where a first build reading
+    /// a filled table left it. The kernel then reports the store it finds a
+    /// held place at ([`crate::kernel::MissingKind::Store`]), the placer
+    /// writes the row, and the second build states [`Old::Released`] or
+    /// [`Old::Nothing`] there.
+    Pending,
 }
 
 #[derive(Debug, Clone)]
@@ -1668,29 +1683,29 @@ impl<'a> Builder<'a> {
                 // slice). Module state takes the same rule: it is a name to
                 // both of them.
                 let mentions = vyrn_frontend::movecheck::mentions_place(value, name);
-                let fresh_str = matches!(
-                    vyrn_frontend::types::resolve(
-                        &ty,
-                        &vyrn_frontend::types::decl_map(self.program),
-                    ),
-                    Type::Str
-                ) && matches!(
-                    value,
-                    Expr::Binary {
-                        op: vyrn_frontend::ast::BinOp::Add,
-                        ..
-                    }
-                );
-                let releases = self.own.plan.store_owned_at(sid)
-                    && (fresh_str || !mentions || self.own.plan.store_fresh_at(sid));
+                let fresh_str = self.fresh_str(&ty, value);
+                // The hand-back is the CORE's answer and not the kernel's: it
+                // is read off the statement, not off the path. Everything
+                // else a store displaces is the kernel's, and the first build
+                // leaves it open (RFC-0125 §3 M3, the store slice).
+                let handed_back = mentions && !fresh_str && !self.own.plan.store_fresh_at(sid);
+                let releases = !handed_back && placed_store(sid);
                 let Some(n) = n else {
+                    // Module state owns what it holds for the whole module
+                    // and nothing may `consume` it, so a store into one
+                    // releases what it replaces whenever that owns heap.
+                    let owns = self.owns(&ty);
                     out.push(St::Store {
                         place: Place::Global(name.clone()),
                         value: v,
-                        old: if releases {
+                        old: if handed_back {
+                            Old::Transferred
+                        } else if !owns {
+                            Old::Nothing
+                        } else if releases {
                             Old::Released
                         } else {
-                            Old::Nothing
+                            Old::Pending
                         },
                         line: *line,
                         site: Site::Node(sid),
@@ -1698,14 +1713,18 @@ impl<'a> Builder<'a> {
                     });
                     return Ok(());
                 };
-                let old = if !self.body.names[n as usize].releases {
+                // The hand-back is read off the STATEMENT, so it is stated
+                // before the name's own obligation is: a name that owes no
+                // release still hands its buffer back, and the census reads
+                // the word to tell the two reasons for `false` apart.
+                let old = if handed_back {
+                    Old::Transferred
+                } else if !self.body.names[n as usize].releases {
                     Old::Nothing
                 } else if releases {
                     Old::Released
-                } else if mentions {
-                    Old::Transferred
                 } else {
-                    Old::Unreleased
+                    Old::Pending
                 };
                 out.push(St::Store {
                     place: Place::Name(n),
@@ -1725,17 +1744,26 @@ impl<'a> Builder<'a> {
                 let v = self.val(value, out)?;
                 let (base, bty) = self.named_place(name, *line)?;
                 let fty = self.field_ty(&bty, field, *line)?;
-                let old = self.old_for(&fty, sid);
+                // `s.dense.push(i)` IS `s.dense = s.dense.push(i)`: the
+                // receiver comes back through the result, so the store hands
+                // the buffer back and releases nothing — the same rule a
+                // store to a name takes, one dot down, with the same
+                // exception for a String concatenation, which builds a fresh
+                // buffer whatever it reads (RFC-0125 §3 M3, the store slice).
+                let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
+                    && !self.fresh_str(&fty, value);
+                let releases = !handed_back && self.store_row(sid, &Site::Node(sid));
                 out.push(St::Store {
                     place: Place::Field(Box::new(base), field.clone()),
                     value: v,
-                    old,
+                    old: if handed_back {
+                        Old::Transferred
+                    } else {
+                        self.old_for(&fty, releases)
+                    },
                     line: *line,
                     site: Site::Node(sid),
-                    // A field store takes the plan's row as it stands: the
-                    // value-alias guard is folded into the row itself
-                    // (`fold_store_owned`), so there is nothing to add here.
-                    releases: self.own.plan.store_owned_at(sid),
+                    releases,
                 });
             }
             Stmt::IndexSet {
@@ -1764,14 +1792,24 @@ impl<'a> Builder<'a> {
                     Ok(t) => (t, Site::Node(sid)),
                     Err(_) => (self.ty_of(value)?, Site::None),
                 };
-                let old = self.old_for(&ety, sid);
+                // The same hand-back, and the INDEX counts as well: `xs[i] =
+                // xs[j]` and `xs[xs.length - 1] = v` both read the buffer the
+                // store writes into, and neither displaces anything the
+                // container did not keep.
+                let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
+                    || vyrn_frontend::movecheck::mentions_place(index, name);
+                let releases = !handed_back && self.store_row(sid, &site);
                 out.push(St::Store {
                     place,
                     value: v,
-                    old,
+                    old: if handed_back {
+                        Old::Transferred
+                    } else {
+                        self.old_for(&ety, releases)
+                    },
                     line: *line,
                     site,
-                    releases: self.own.plan.store_owned_at(sid),
+                    releases,
                 });
             }
             Stmt::Return { value, line } => {
@@ -2108,13 +2146,45 @@ impl<'a> Builder<'a> {
     /// whole names, and a sub-place the plan knows to be empty — a payload
     /// already taken out, an `Option` already `None` — is not a name it can
     /// see. Sub-place ownership is M3's judgment, not M2's.
-    fn old_for(&self, ty: &Type, sid: usize) -> Old {
+    /// A String concatenation builds a fresh buffer whatever it reads, so
+    /// `s = s + x` displaces the old one and does not hand it back. Both
+    /// compiled backends spell this exception `fresh_str`; it stands here so
+    /// the one answer they read is this one.
+    fn fresh_str(&self, ty: &Type, value: &Expr) -> bool {
+        matches!(
+            vyrn_frontend::types::resolve(ty, &vyrn_frontend::types::decl_map(self.program)),
+            Type::Str
+        ) && matches!(
+            value,
+            Expr::Binary {
+                op: vyrn_frontend::ast::BinOp::Add,
+                ..
+            }
+        )
+    }
+
+    /// A store this pass gave no key to — RFC-0091 M2's `place at` rewrite
+    /// builds the store statement itself, so the kernel has no node to key a
+    /// row by and the plan's row is the only answer there.
+    fn store_row(&self, sid: usize, site: &Site) -> bool {
+        match site {
+            Site::Node(_) => placed_store(sid),
+            _ => self.own.plan.store_owned_at(sid),
+        }
+    }
+
+    fn old_for(&self, ty: &Type, releases: bool) -> Old {
         if !self.owns(ty) {
             Old::Nothing
-        } else if self.own.plan.store_owned_at(sid) {
+        } else if releases {
             Old::Released
         } else {
-            Old::Nothing
+            // The first build leaves it open and the kernel answers over the
+            // ROOT, which is the one place a sub-place's ownership can be
+            // read from (RFC-0125 §3 M3, the store slice). `Nothing` still
+            // stands where the type owns nothing: that is the core's answer,
+            // not a decision it defers.
+            Old::Pending
         }
     }
 
@@ -3766,6 +3836,20 @@ pub struct Facts {
     /// is one this pass states no answer for, and a reader falls back to the
     /// plan there.
     pub stores: std::collections::HashMap<usize, bool>,
+    /// The stores of that map the core STANDS DOWN at, whatever the judgment
+    /// would say — the two reasons a store releases nothing that the
+    /// statement itself carries (RFC-0125 §3 M3, the store slice):
+    ///
+    ///   - the value hands the place back (`xs = xs.push(v)`,
+    ///     `s.dense.push(i)`), so the buffer never leaves;
+    ///   - the place owns no heap (`w = 2`, `data = grown`), so there is
+    ///     nothing to release whatever holds it.
+    ///
+    /// Not read by an emitter: `stores` already has both folded in. It is
+    /// here so the corpus test can pin the equality with the plan's own table
+    /// as a RULE and not as a number — a plan row the core neither releases
+    /// nor stands down is a release that stopped being stated.
+    pub stood_down: std::collections::HashSet<usize>,
     /// Round twenty-eight: the statement-position calls whose owned result
     /// nothing binds and the core releases — a `St::Drop` at the
     /// statement's [`Site::Node`].
@@ -3809,6 +3893,17 @@ pub(crate) struct Placed {
     /// one edge owes because another edge took the name. A sub-place row is
     /// spelled `d.line`, which every reader resolves as a place.
     edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// The store table, derived: the store statements the kernel found a HELD
+    /// place at, which are the stores that owe the release of what they
+    /// displace. Keyed by the store's own node, which is how both compiled
+    /// backends key it.
+    stores: std::collections::HashSet<usize>,
+}
+
+/// Whether the kernel found this store's place still holding — read by the
+/// second build, empty on the first, where every store says [`Old::Pending`].
+fn placed_store(site: usize) -> bool {
+    PLACED.with(|p| p.borrow().stores.contains(&site))
 }
 
 /// The binders the kernel found held at the end of one arm, or `None` where
@@ -3865,9 +3960,13 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
             St::Store {
                 releases,
                 site: Site::Node(at),
+                old,
                 ..
             } => {
                 out.stores.insert(*at, *releases);
+                if matches!(old, Old::Transferred | Old::Nothing) {
+                    out.stood_down.insert(*at);
+                }
             }
             St::Drop(n, at, _) => match at {
                 Site::Node(at) => {
@@ -4347,6 +4446,21 @@ fn place_frames(
             }
         };
         for m in missing {
+            // A store's row is keyed by the STORE and by nothing else: the
+            // place it writes into may be module state or a sub-place, which
+            // is no binding of this frame, so this row is read before the
+            // name is (RFC-0125 §3 M3, the store slice).
+            if m.kind == MissingKind::Store {
+                let fresh = PLACED.with(|p| p.borrow_mut().stores.insert(m.site));
+                if fresh {
+                    if trace {
+                        eprintln!("placer: {} store at {} releases", body.name, m.site);
+                    }
+                    own.plan.owners.insert(m.site, owner.to_string());
+                    touched.insert(owner.to_string());
+                }
+                continue;
+            }
             let info = &body.names[m.name as usize];
             let kind = own.proto.release_kind(&info.ty);
             if trace {
@@ -4437,6 +4551,7 @@ fn place_frames(
                     continue;
                 }
                 MissingKind::Exit => {}
+                MissingKind::Store => unreachable!("read above, keyed by the store"),
             }
             // The unnamed receiver of a field read: R1′'s table, with the
             // field the read took as its hole. Freed right after the read,
