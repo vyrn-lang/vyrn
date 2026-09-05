@@ -6321,6 +6321,63 @@ in the tenth slice, and `vyrn test` is green over `export.vyrn` and `site/app`,
 (9 still ignored) on the default route, with `VYRN_SERVE_ENGINE=interp` now the
 switch that asks for the other one.
 
+#### The twelfth slice (2026-09-05): parity is the pair of compiling routes
+
+`tests/parity.rs` compared three engines and named the interpreter first, as
+the reference semantics. The eleventh slice made `vyrn run` the compiled route,
+so that column had quietly become a second reading of the wasm column. This
+slice makes the file say what it now measures: the NATIVE binary — the textual
+backend through clang — against the wasm the direct backend emits, under
+`wasmtime`.
+
+**Why here and not on the day the interpreter goes.** A gate that reads the
+thing being deleted has to be rewritten either way. Rewriting it while both
+answers can still be compared is the only order in which the rewrite can be
+checked, and it is checked: 41 of 41 green, in 208 s against 370 s for the
+three-column run the tenth slice recorded.
+
+| | before | after |
+|---|---|---|
+| the corpus loop | interp, then native, then wasm | native, then wasm |
+| the pins | `vyrn run` against a built module | `common::native_run` against a built module |
+| the helper | `three_engines` | `two_routes` |
+| what a red run names | `interp X vs native Y` | `native X vs wasm Y` |
+
+`common::native_run` is the one place a pin now builds and runs: `vyrn build`
+into the pin's own scratch directory, `VYRN_FREE_AUDIT=1`, `run_io`'s
+conventions. Twenty-four pins took it, which is why it is a function rather
+than a twenty-fourth copy.
+
+**One pin had never built natively, and the native route refused it.**
+`the_string_builtins_agree_with_the_native_route_about_their_failures`
+compared the interpreter with wasm, so its program had never been through
+clang. It does not go through clang:
+
+    fn main() -> Int64 {
+        print(show(stringFromBytes(['\xf0'])))
+        return 0
+    }
+
+    C:/…/c.ll:633:40: error: '%t0' defined with type '[1 x i64]'
+      but expected '{ ptr, i64, i64 }'
+
+The textual backend's `stringFromBytes` arm read its argument as a growable
+`{ptr,len,cap}` triple and the argument was a fixed aggregate. A builtin has no
+parameter list for the checker to push a type through, so the literal's elements
+were still `Int64` as well — two rungs missing, not one. The arm takes the same
+two coercions an annotated `let` takes: elementwise to `UInt8`, then heapify,
+with RFC-0114 §25's retarget so what is freed afterwards is the buffer the
+coercion allocated. `bytes("…")` and `[]` always worked, which is why 205
+examples and a fixture gate never saw it.
+
+**What is NOT deleted.** `NATIVE_UNSUPPORTED` stays: its one row is
+`listdir.vyrn`, and it exists because the textual backend has no lowering for
+`listDir`, not because of the interpreter. `KNOWN_DIVERGENT` was already empty.
+The CI job stays and is renamed — `parity (native == wasm)`. It is not the same
+statement twice: `fixtures` says the compiled route has not moved and `wasmhash`
+says its bytes are the same on four platforms, and neither can say that a second
+backend written from the same frontend agrees.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

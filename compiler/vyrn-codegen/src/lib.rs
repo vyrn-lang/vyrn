@@ -11841,7 +11841,42 @@ impl<'a> Gen<'a> {
                     "`stringFromBytes` is checked in Vyrn (`{f}`) and its module is not in                      the link — a std root is needed to compile a call to it"
                 ));
             }
-            let (arr, _) = self.gen_expr(&args[0])?;
+            // A contextual array literal is a fixed `[N x i8]` aggregate and this
+            // arm reads a growable `{ptr,len,cap}` triple, so the argument takes
+            // the same coercion an ordinary call's argument takes — including the
+            // RFC-0114 §25 retarget, so what is freed afterwards is the buffer
+            // the coercion allocated and not the aggregate it copied. Without it
+            // `stringFromBytes(['\xf0'])` emitted an `extractvalue` against the
+            // wrong type and clang refused the module (RFC-0125 §3 M5, the
+            // twelfth slice, found by making every parity pin build natively).
+            let frees_mark = self.arg_frees.len();
+            let (arr, aty) = self.gen_expr(&args[0])?;
+            let was_fixed = matches!(self.resolve(&aty), Type::ArrayN(..) | Type::SmallArray(..));
+            let byte = Type::IntN {
+                bits: 8,
+                signed: false,
+            };
+            // The literal's own elements are `Int64` until something tells them
+            // otherwise, and nothing does here: a builtin has no parameter list
+            // for the checker to push a type through. So the element step comes
+            // first and the heapify second, which is the two rungs an annotated
+            // `let` would have taken.
+            let (arr, aty) = match self.resolve(&aty) {
+                Type::ArrayN(_, n) => {
+                    let fixed = Type::ArrayN(Box::new(byte.clone()), n);
+                    self.coerce(arr, &aty, &fixed)?
+                }
+                _ => (arr, aty),
+            };
+            let (arr, cty) = self.coerce(arr, &aty, &Type::Array(Box::new(byte)))?;
+            if self.arg_frees.len() > frees_mark
+                && was_fixed
+                && matches!(self.resolve(&cty), Type::Array(_))
+            {
+                if let Some(last) = self.arg_frees.last_mut() {
+                    *last = (arr.clone(), cty.clone());
+                }
+            }
             let data = self.fresh_tmp();
             let len = self.fresh_tmp();
             self.emit(format!(
