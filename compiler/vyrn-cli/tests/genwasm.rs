@@ -6,12 +6,12 @@
 //! each test compares the engine against the reference rather than against a
 //! transcript nobody would notice going stale.
 //!
-//! `wasm-gen` is ON in the default build since RFC-0125 §3 M5's ninth slice, so
-//! these compare two engines rather than the interpreter with itself. They need
-//! no clang and no wasi sysroot: RFC-0076 M7 emits the generator's module
-//! directly. Under `--no-default-features` both runs are the interpreter and
-//! every assertion still holds, which is the shape a test of an optional engine
-//! has to have.
+//! These are meaningful only when the binary is built with `--features
+//! wasm-gen`; without it both runs are the interpreter and the tests pass by
+//! agreeing with themselves. That is deliberate — the engine is optional, and a
+//! test that failed without it would make the default build red. They need no
+//! clang and no wasi sysroot since RFC-0076 M7, which emits the generator's
+//! module directly.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -695,7 +695,7 @@ fn editing_a_generator_recompiles_its_artifact() {
 /// the guest is compiled by cranelift and a debug cranelift is the whole
 /// difference. Run it in release.
 #[test]
-#[ignore = "compiles every generator in the corpus twice: cargo test -p vyrn-cli --test genwasm -- --ignored"]
+#[ignore = "compiles every generator in the corpus twice: cargo test -p vyrn-cli --features wasm-gen --test genwasm -- --ignored"]
 fn every_generator_example_emits_the_same_source_under_both_engines() {
     // Without the feature both columns are the interpreter and the whole thing
     // agrees with itself. Loudly, because a silent skip is exactly the failure

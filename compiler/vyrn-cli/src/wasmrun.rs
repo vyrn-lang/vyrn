@@ -1070,11 +1070,54 @@ fn main() -> Int64 {
 }
 "#;
 
-    // The probe imports nothing, so the single-source check is the whole load
-    // the driver would do — and this module is the library target, which has no
-    // driver in it (see ../lib.rs).
+    // The probe imports nothing of its own, but a compiled program calls
+    // `std/runtime` for what the tree-walker answered in Rust, and the loader
+    // injects that from the std root. So the load is a load, over the two files
+    // it needs — this module is the library target and has no driver in it to
+    // find them on disk (see ../lib.rs).
     fn probe_bytes() -> Vec<u8> {
-        let program = vyrn_frontend::check(PROBE).expect("the probe checks");
+        let files = vyrn_frontend::loader::MapResolver(
+            [
+                (
+                    "std/runtime.vyrn".to_string(),
+                    include_str!("../../../std/runtime.vyrn").to_string(),
+                ),
+                (
+                    "std/mem.vyrn".to_string(),
+                    include_str!("../../../std/mem.vyrn").to_string(),
+                ),
+                (
+                    "std/text.vyrn".to_string(),
+                    include_str!("../../../std/text.vyrn").to_string(),
+                ),
+                (
+                    "std/strpred.vyrn".to_string(),
+                    include_str!("../../../std/strpred.vyrn").to_string(),
+                ),
+                (
+                    "std/num.vyrn".to_string(),
+                    include_str!("../../../std/num.vyrn").to_string(),
+                ),
+                (
+                    "std/codecs.vyrn".to_string(),
+                    include_str!("../../../std/codecs.vyrn").to_string(),
+                ),
+                (
+                    "std/hash.vyrn".to_string(),
+                    include_str!("../../../std/hash.vyrn").to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let opts = vyrn_frontend::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        let mut program =
+            vyrn_frontend::load(PROBE, "probe.vyrn", &opts, &files).expect("the probe loads");
+        let diags = vyrn_frontend::check_and_synthesize(&mut program);
+        assert!(diags.is_empty(), "the probe checks: {diags:?}");
         vyrn_codegen::direct::compile(&program).expect("the probe compiles")
     }
 
