@@ -140,6 +140,23 @@ struct Host {
     /// How long Cranelift took over the module. Measured in [`open`] and
     /// reported by [`run`], which is on the other side of the split.
     translate: std::time::Duration,
+    /// The host side of the `vyrn_gen` imports (RFC-0076), for a module
+    /// compiled as a generator host — `vyrn test` over a file whose `test`
+    /// bodies reach a `gen fn`. Empty for every other module, which imports
+    /// none of them.
+    gen: vyrn_genwasm::GenState,
+}
+
+/// The `vyrn_gen` imports are served by the crate that emits the generators
+/// they belong to, so a `test` block's generator meets the same arena, the same
+/// splice rule and the same atom stream a generation does.
+impl vyrn_genwasm::GenHost for Host {
+    fn gen(&mut self) -> &mut vyrn_genwasm::GenState {
+        &mut self.gen
+    }
+    fn memory(&self) -> Option<Memory> {
+        self.mem
+    }
 }
 
 /// One engine for the process. Cranelift's default is speed, which is what the
@@ -172,7 +189,7 @@ fn engine(metered: bool) -> &'static Engine {
 /// because that is the program's output and not this host's.
 pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
     let clock = std::time::Instant::now();
-    let (mut store, inst) = open(bytes, run.meter, &run)?;
+    let (mut store, inst) = open(bytes, run.meter, &run, None)?;
     // `open` compiles AND instantiates, so the compile comes back out of it and
     // the rest of the span is the instantiation.
     let translate = store.data().translate;
@@ -219,13 +236,23 @@ pub fn run(bytes: &[u8], run: Run) -> Result<Outcome, String> {
 /// something has to open it either way. RFC-0125 §3 M5's fifth slice measures a
 /// RESIDENT one through this door (`the_resident_instance_answers_after_start`),
 /// which is the shape `vyrn serve` would need.
-fn open(bytes: &[u8], meter: bool, run: &Run) -> Result<(Store<Host>, wasmtime::Instance), String> {
+fn open(
+    bytes: &[u8],
+    meter: bool,
+    run: &Run,
+    gen: Option<vyrn_genwasm::GenState>,
+) -> Result<(Store<Host>, wasmtime::Instance), String> {
     let engine = engine(meter);
     let clock = std::time::Instant::now();
     let module = Module::new(engine, bytes).map_err(|e| format!("wasm: {e:?}"))?;
     let translate = clock.elapsed();
     let mut linker: Linker<Host> = Linker::new(engine);
     link_wasi(&mut linker).map_err(|e| e.to_string())?;
+    // The generator host's own namespace. Defined unconditionally and imported
+    // by almost nothing: a module the emitter did not compile as a generator
+    // host names not one of these, so an ordinary program pays a linker entry
+    // and no import.
+    vyrn_genwasm::link(&mut linker).map_err(|e| e.to_string())?;
     // A directly-emitted module imports only what it calls after `sweep`, so a
     // `vyrn` import here is an `extern fn` (RFC-0012) the program REACHES. Only
     // a browser page supplies that namespace. A terminal answers each name with
@@ -285,6 +312,7 @@ fn open(bytes: &[u8], meter: bool, run: &Run) -> Result<(Store<Host>, wasmtime::
         started: std::time::Instant::now(),
         mem: None,
         translate,
+        gen: gen.unwrap_or_default(),
     };
     let mut store = Store::new(engine, host);
     // A budget nothing can exhaust: the counter is here to be READ, not to stop
@@ -324,8 +352,12 @@ const STR_HDR: i32 = 8;
 ///
 /// The exit code comes back with it: a served program whose `main` returns
 /// non-zero aborts the serve, exactly as it does under the interpreter.
-pub fn start(bytes: &[u8], run: &Run) -> Result<(Resident, i32), String> {
-    let (mut store, inst) = open(bytes, false, run)?;
+pub fn start(
+    bytes: &[u8],
+    run: &Run,
+    gen: Option<vyrn_genwasm::GenState>,
+) -> Result<(Resident, i32), String> {
+    let (mut store, inst) = open(bytes, false, run, gen)?;
     let entry = inst
         .get_typed_func::<(), ()>(&mut store, "_start")
         .map_err(|e| format!("_start: {e}"))?;
@@ -1148,7 +1180,7 @@ fn main() -> Int64 {
     fn a_resident_instance_answers_after_start_and_keeps_its_state() {
         let bytes = probe_bytes();
         let run = quiet();
-        let (mut store, inst) = open(&bytes, false, &run).expect("open");
+        let (mut store, inst) = open(&bytes, false, &run, None).expect("open");
         let start = inst
             .get_typed_func::<(), ()>(&mut store, "_start")
             .expect("_start");
@@ -1179,7 +1211,7 @@ fn main() -> Int64 {
     fn a_resident_answer_is_cheaper_than_a_fresh_instance() {
         let bytes = probe_bytes();
         let run = quiet();
-        let (mut store, inst) = open(&bytes, false, &run).expect("open");
+        let (mut store, inst) = open(&bytes, false, &run, None).expect("open");
         let start = inst
             .get_typed_func::<(), ()>(&mut store, "_start")
             .expect("_start");
@@ -1195,7 +1227,7 @@ fn main() -> Int64 {
         let m = 20;
         let clock = std::time::Instant::now();
         for _ in 0..m {
-            let (mut s, i) = open(&bytes, false, &run).expect("open");
+            let (mut s, i) = open(&bytes, false, &run, None).expect("open");
             let start = i.get_typed_func::<(), ()>(&mut s, "_start").unwrap();
             let _ = start.call(&mut s, ());
             i.get_typed_func::<(), i64>(&mut s, "bump")

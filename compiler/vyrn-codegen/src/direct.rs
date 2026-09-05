@@ -280,6 +280,47 @@ pub fn wat(program: &Program) -> Result<String, String> {
 /// `find_clang() == None` made it DECLINE — a `.vyx` keystroke was 54 ms or 250 ms
 /// depending on whether someone had installed a C toolchain, which is the shape
 /// RFC-0077 exists to remove and which M5 removed for `vyrn build` only.
+/// The functions with no run-time lowering because they reach a generator.
+///
+/// RFC-0021: a `gen fn` runs at generation time and has no runtime lowering at
+/// all, so neither has an ordinary function that calls one — nor one that calls
+/// THAT. [`compile`] skips the closure for the reason it skips an
+/// unspecializable shell: failing the whole build over a function nothing calls
+/// is the wrong answer. A call to a skipped name refuses at its own call site,
+/// naming it. `std/vyx-hints`'s `checkOf` is the shape: a helper its own test
+/// blocks call, in a module every `vyxHints` program imports.
+///
+/// Public because the driver asks the same question about a DOOR (RFC-0125 §3
+/// M5): a `test` body in this closure is a body that has to be compiled as
+/// generation, and the answer must be the one this backend gives, not a second
+/// walk that agrees with it today.
+pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
+    let mut reach: std::collections::HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_gen)
+        .map(|f| f.name.clone())
+        .collect();
+    loop {
+        let before = reach.len();
+        for f in &program.functions {
+            if f.is_extern || reach.contains(&f.name) {
+                continue;
+            }
+            if vyrn_frontend::checker::fn_calls(&f.body)
+                .iter()
+                .any(|c| reach.contains(c))
+            {
+                reach.insert(f.name.clone());
+            }
+        }
+        if reach.len() == before {
+            break;
+        }
+    }
+    reach
+}
+
 pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
     // The flag is thread-local because `llt_of` reads it (a `Code` is an `i64`
     // handle only here) and `llt_of` is shared with the textual emitter. Cleared
@@ -347,37 +388,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     }
     // Three kinds of function define nothing, and are skipped exactly as the
     // textual driver skips them (`lib.rs`, step 1). Lowering an unspecializable
-    // shell would fail the whole build over a function nothing calls.
-    // RFC-0021: a `gen fn` runs at generation time and has no runtime lowering
-    // at all, so neither has an ordinary function that calls one — nor one that
-    // calls THAT. The closure is skipped for the reason the three kinds below
-    // are skipped: failing the whole build over a function nothing calls is the
-    // wrong answer. A call to a skipped name refuses at its own call site,
-    // naming it. `std/vyx-hints`'s `checkOf` is the shape: a helper its own
-    // test blocks call, in a module every `vyxHints` program imports.
-    let mut gen_reach: std::collections::HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_gen)
-        .map(|f| f.name.clone())
-        .collect();
-    loop {
-        let before = gen_reach.len();
-        for f in &program.functions {
-            if f.is_extern || gen_reach.contains(&f.name) {
-                continue;
-            }
-            if vyrn_frontend::checker::fn_calls(&f.body)
-                .iter()
-                .any(|c| gen_reach.contains(c))
-            {
-                gen_reach.insert(f.name.clone());
-            }
-        }
-        if gen_reach.len() == before {
-            break;
-        }
-    }
+    // shell would fail the whole build over a function nothing calls. The
+    // fourth kind is [`gen_reach`]'s.
+    let gen_reach = gen_reach(program);
     let mut generics: HashMap<String, &Function> = HashMap::new();
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();

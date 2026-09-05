@@ -17,12 +17,13 @@
 # self-hosted Vyrn would have to do about them later.
 #
 # `vyrn-lsp` and `vyrn-genwasm` are EXCLUDED as MEMBERS: nothing needs their own
-# test suites to build or test the language. `vyrn-genwasm` is still in the
-# default resolve since RFC-0125 §3 M5's tenth slice, because `vyrn-cli`'s
-# `wasm-gen` feature is on by default — every command runs a `gen fn` as
-# compiled wasm. It costs the build nothing new: its dependencies are
-# `vyrn-frontend`, `vyrn-codegen` and `wasmtime`, all of which `vyrn-cli`
-# already resolves, and none of them is clang. `--no-default-features` drops it.
+# test suites to build or test the language. `vyrn-genwasm` is in the default
+# resolve since RFC-0125 §3 M5's tenth slice, and a required dependency of
+# `vyrn-cli` since its fourteenth — every command runs a `gen fn` as compiled
+# wasm, and the same crate serves the `vyrn_gen` imports a `test` block's
+# generator is compiled against. It costs the build nothing new: its
+# dependencies are `vyrn-frontend`, `vyrn-codegen` and `wasmtime`, all of which
+# `vyrn-cli` already resolves, and none of them is clang.
 #
 # `wasmtime` itself is in the default resolve since RFC-0125 M5: `vyrn-cli`
 # embeds it to run a program's wasm (`vyrn run --engine wasm`). It is pure

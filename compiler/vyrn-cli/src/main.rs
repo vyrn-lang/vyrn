@@ -315,7 +315,6 @@ fn real_main() -> ExitCode {
     // RFC-0076. Installed before anything can load a module, since generation
     // happens deep inside the load. `VYRN_NO_WASM_GEN=1` forces the
     // interpreter — the configuration the acceptance criteria compare against.
-    #[cfg(feature = "wasm-gen")]
     if std::env::var("VYRN_NO_WASM_GEN").is_err() {
         vyrn_genwasm::install();
     }
@@ -5216,7 +5215,7 @@ fn serve_cmd(path: &str, rest: &[String], engine: Engine) -> ExitCode {
             capture_stderr: true,
             meter: false,
         };
-        let mut res = match wasmrun::start(&bytes, &run) {
+        let mut res = match wasmrun::start(&bytes, &run, None) {
             Ok((res, 0)) => res,
             Ok((mut res, code)) => {
                 eprint!("{}", res.drain_err());
@@ -5518,7 +5517,7 @@ fn dev_cmd(rest: &[String], engine: Engine) -> ExitCode {
             capture_stderr: true,
             meter: false,
         };
-        let mut res = match wasmrun::start(&bytes, &run) {
+        let mut res = match wasmrun::start(&bytes, &run, None) {
             Ok((res, 0)) => res,
             Ok((mut res, code)) => {
                 eprint!("{}", res.drain_err());
@@ -6621,7 +6620,21 @@ fn bodies_wasm(
     prog.functions
         .push(function("main".to_string(), main, Type::Int, 0, false));
 
-    let bytes = match vyrn_codegen::direct::compile(&prog) {
+    // RFC-0125 §3 M5: a door that reaches a `gen fn` is generation code, so the
+    // whole module is compiled as a GENERATOR HOST — the same preparation and the
+    // same emitter RFC-0076's engine uses to run a generator anywhere else. A
+    // file whose doors reach no generator is untouched, which is why an ordinary
+    // `test` file pays for none of the `vyrn_gen` imports.
+    let reach = vyrn_codegen::direct::gen_reach(&prog);
+    let generation = (0..bodies.len()).any(|k| reach.contains(&format!("__vyrn_body_{k}")));
+    let compiled = if generation {
+        vyrn_genwasm::prepare(&mut prog)
+            .ok_or_else(|| "a `test` block calls a generator this route cannot compile".to_string())
+            .and_then(|()| vyrn_codegen::direct::compile_gen_host(&prog))
+    } else {
+        vyrn_codegen::direct::compile(&prog)
+    };
+    let bytes = match compiled {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
@@ -6638,7 +6651,8 @@ fn bodies_wasm(
         capture_stderr: true,
         meter: false,
     };
-    let mut res = match wasmrun::start(&bytes, &run) {
+    let gen = generation.then(|| vyrn_genwasm::GenState::new(&prog));
+    let mut res = match wasmrun::start(&bytes, &run, gen) {
         Ok((res, _)) => res,
         Err(e) => {
             eprintln!("error: {e}");
@@ -7517,7 +7531,7 @@ fn handle(req: Request) -> Response {
             capture_stderr: true,
             meter: false,
         };
-        let (mut res, code) = wasmrun::start(&bytes, &run).expect("start");
+        let (mut res, code) = wasmrun::start(&bytes, &run, None).expect("start");
         assert_eq!(code, 0, "main exits 0");
 
         let ask = |path: &str| ServeRequest {
