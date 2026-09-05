@@ -4965,6 +4965,46 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The type the checker gave the join at `key`, under this instance's
+    /// substitution — RFC-0125 §3 M5.
+    ///
+    /// A merge holds ONE value, and which type that value has is the
+    /// checker's answer for the whole expression. An ARM can only report the
+    /// type it happens to have produced, and two arms that agree on the type
+    /// can still disagree on the shape: `Array<String>` is `{ptr,len,cap}`
+    /// and `["z"]` is `[1 x ptr]`. An emitter that read one of the two fed
+    /// its `phi` the other.
+    ///
+    /// `None` where no lowering ran on this thread (`VYRN_NO_PLACER=1`, a
+    /// host that never linked `vyrn-lower`), and the caller reads the arms
+    /// there — the same stand-down every other reader of the core has.
+    fn join_ty(&self, key: usize) -> Option<Type> {
+        let t = vyrn_lower::core::join_ty(key)?;
+        Some(vyrn_frontend::types::substitute(&t, self.subst))
+    }
+
+    /// One join arm's value, AT the join's type.
+    ///
+    /// The expectation is pushed so a literal arm builds at the type the join
+    /// holds rather than at the shape it would take alone, and the value is
+    /// then coerced into it by the ladder every storage boundary crosses. A
+    /// `Never` arm crosses as `poison`, which is what it already was.
+    fn gen_join_arm(&mut self, e: &Expr, want: Option<&Type>) -> Result<(String, Type), String> {
+        let Some(w) = want else {
+            return self.gen_expr(e);
+        };
+        self.expect.push(w.clone());
+        let got = self.gen_expr(e);
+        self.expect.pop();
+        let (v, t) = got?;
+        // An arm that returned has no edge into the merge, and a terminated
+        // block takes no more instructions.
+        if self.terminated {
+            return Ok((v, t));
+        }
+        self.coerce(v, &t, w)
+    }
+
     /// The declared type of the binding a drop-stack slot names.
     ///
     /// A slot name is minted once per `declare` and carries a serial, so this
@@ -7313,6 +7353,7 @@ impl<'a> Gen<'a> {
         }
         // The payload type carried by each arm: for Option<T> the one-arm binds
         // `T`; for Result<T, E> the one-arm binds `T` and the zero-arm binds `E`.
+        let want = self.join_ty(key);
         let (one_ty, zero_ty) = match self.resolve(&sty) {
             Type::Option(inner) => (*inner, Type::Int),
             Type::Result(ok, err) => (*ok, *err),
@@ -7334,7 +7375,7 @@ impl<'a> Gen<'a> {
             .unwrap();
         let one_pf = self.arm_row(key, one_ix as u32);
         let (one_val, one_t) =
-            self.gen_arm_body(&sv, &sty, &arms[one_ix], &one_ty, free_boxes, one_pf)?;
+            self.gen_arm_body(&sv, &sty, &arms[one_ix], &one_ty, free_boxes, one_pf, &want)?;
         if !self.terminated {
             self.emit_edge_releases(ers, one_ix as u32);
         }
@@ -7348,8 +7389,15 @@ impl<'a> Gen<'a> {
             .position(|a| !pattern_is_one(&a.pattern))
             .unwrap();
         let zero_pf = self.arm_row(key, zero_ix as u32);
-        let (zero_val, zero_t) =
-            self.gen_arm_body(&sv, &sty, &arms[zero_ix], &zero_ty, free_boxes, zero_pf)?;
+        let (zero_val, zero_t) = self.gen_arm_body(
+            &sv,
+            &sty,
+            &arms[zero_ix],
+            &zero_ty,
+            free_boxes,
+            zero_pf,
+            &want,
+        )?;
         if !self.terminated {
             self.emit_edge_releases(ers, zero_ix as u32);
         }
@@ -7358,7 +7406,10 @@ impl<'a> Gen<'a> {
         let ty = if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
             Type::Unit
         } else {
-            join_never(one_t, zero_t)
+            match want {
+                Some(w) => w,
+                None => join_never(one_t, zero_t),
+            }
         };
         let zero_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
@@ -7392,6 +7443,9 @@ impl<'a> Gen<'a> {
     ) -> Result<(String, Type), String> {
         let else_branch =
             else_branch.ok_or("internal: `if` expression without `else` reached codegen")?;
+        // RFC-0125 §3 M5: the type of the merge, asked once, before either
+        // branch runs.
+        let want = self.join_ty(key);
         // RFC-0114 Rule N at an `if`-expression join.
         let ers = self.edge_rows(key);
         let (c, _) = self.gen_expr(cond)?;
@@ -7402,7 +7456,7 @@ impl<'a> Gen<'a> {
 
         // then branch
         self.emit_label(&then_l);
-        let (then_val, then_t) = self.gen_expr(then_branch)?;
+        let (then_val, then_t) = self.gen_join_arm(then_branch, want.as_ref())?;
         if !self.terminated {
             self.emit_edge_releases(&ers, 0);
         }
@@ -7413,11 +7467,14 @@ impl<'a> Gen<'a> {
 
         // else branch
         self.emit_label(&else_l);
-        let (else_val, else_t) = self.gen_expr(else_branch)?;
+        let (else_val, else_t) = self.gen_join_arm(else_branch, want.as_ref())?;
         if !self.terminated {
             self.emit_edge_releases(&ers, 1);
         }
-        let ty = join_never(then_t, else_t);
+        let ty = match want {
+            Some(w) => w,
+            None => join_never(then_t, else_t),
+        };
         let else_end = self.cur_block.clone();
         self.emit_term(format!("br label %{end_l}"));
 
@@ -7445,6 +7502,7 @@ impl<'a> Gen<'a> {
         free_boxes: bool,
         key: usize,
     ) -> Result<(String, Type), String> {
+        let want = self.join_ty(key);
         let ell = enum_ll(self.enum_slots(evs));
         let tag = self.fresh_tmp();
         self.emit(format!("{tag} = extractvalue {ell} {sv}, 0"));
@@ -7520,7 +7578,7 @@ impl<'a> Gen<'a> {
                 }
             }
             let (v, t) = match &arm.body {
-                ArmBody::Expr(e) => self.gen_expr(e)?,
+                ArmBody::Expr(e) => self.gen_join_arm(e, want.as_ref())?,
                 // A block arm (RFC-0118) is its statements and yields nothing;
                 // `has_block` below forces the void merge, so the empty value
                 // never reaches a `phi`.
@@ -7529,20 +7587,15 @@ impl<'a> Gen<'a> {
                     (String::new(), Type::Unit)
                 }
             };
-            // Reconcile the arms' reported type. All arms share one enum (the
-            // checker proved it), but different arms carry different knowledge of
-            // its type arguments: a payload-bearing arm that mentions the param
-            // (`Loaded(v)` → `LoadResult<StoreFile>`) is fully applied, while a
-            // nullary/param-free arm (`Missing`, `Corrupt([Issue])`) resolves the
-            // param to `Unit`. Prefer the fully-applied instantiation so a
-            // downstream `match` on this expression recovers the concrete payload
-            // type instead of the bare `Type::Param` (which lowers to an invalid
-            // `alloca void`). Every instantiation shares one LLVM layout, so this
-            // never disturbs the `phi` below — only the reported type.
-            // A `panic` arm (RFC-0079) reports `Never` and answers nothing: it
-            // is `poison` in the `phi`, and the arms that produce a value decide
-            // the type.
-            if !matches!(t, Type::Never)
+            // With no core to read (`VYRN_NO_PLACER=1`) the arms answer, and
+            // the answer is the FULLY APPLIED one rather than the last: a
+            // payload-bearing arm that mentions the parameter (`Loaded(v)` →
+            // `LoadResult<StoreFile>`) knows a type argument a nullary arm
+            // (`Missing`) resolves to `Unit`, and a downstream `match` on the
+            // bare `Type::Param` lowers to an invalid `alloca void`. A `panic`
+            // arm (RFC-0079) reports `Never` and answers nothing.
+            if want.is_none()
+                && !matches!(t, Type::Never)
                 && !(self.ty_is_concrete_app(&ty) && !self.ty_is_concrete_app(&t))
             {
                 ty = t;
@@ -7584,6 +7637,8 @@ impl<'a> Gen<'a> {
         // feed.
         if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
             ty = Type::Unit;
+        } else if let Some(w) = want {
+            ty = w;
         }
         let ll = self.llt(&ty);
         // Unit-typed arms (side effects only) have no value — `phi void` is
@@ -7980,6 +8035,7 @@ impl<'a> Gen<'a> {
         payload_ty: &Type,
         free_boxes: bool,
         payload_free: Option<Vec<(String, Vec<String>)>>,
+        want: &Option<Type>,
     ) -> Result<(String, Type), String> {
         self.scope.push(Vec::new());
         let mut bind_slot: Option<(String, String)> = None;
@@ -8003,7 +8059,7 @@ impl<'a> Gen<'a> {
             }
         }
         let out = match &arm.body {
-            ArmBody::Expr(e) => self.gen_expr(e)?,
+            ArmBody::Expr(e) => self.gen_join_arm(e, want.as_ref())?,
             // A block arm (RFC-0118): the statements, and no value — the
             // caller forces the void merge whenever one exists.
             ArmBody::Block(b) => {
