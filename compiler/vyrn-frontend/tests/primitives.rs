@@ -9,27 +9,26 @@
 //! cache. Twelve arms went outright (M2b's `toJson`, M4c's ten routes, M3's
 //! `fromJson`), so the count has already fallen.
 //!
-//! What was missing is this: a single statement of **why each remaining builtin
+//! What is missing is this: a single statement of **why each remaining builtin
 //! is a builtin**, checkable against the code. [`CENSUS`] is that statement and
-//! the tests below are the check — add an arm to `interp.rs` without a census
+//! the tests below are the check — add an arm to an emitter without a census
 //! row, or route a name the census claims, and this file fails.
 //!
-//! ## The method, and the half of it the deletion took
+//! ## The method, and the engines it is scanned against
 //!
 //! The census used to be scanned out of `interp.rs`: every builtin the
 //! **interpreter** implemented in Rust on the `Expr::Call` path, two regions
 //! located by content, compared with the table both ways. RFC-0125 §3 M5 deleted
-//! that file, and the scan with it. What is left is the direction that does not
-//! need it — [`the_direct_backend_carries_the_census_too`] proves every censused
-//! name is lowered by the one backend there is, and its list of permitted
-//! absences is empty.
+//! that file, and the scan with it. Both directions are back, one engine over,
+//! and there are two engines now to hold them:
 //!
-//! **The direction that is gone is the anti-rot one**: a builtin added to
-//! `vyrn-codegen/src/direct.rs` with no census row is no longer caught here. The
-//! anchor a future slice would scan is that file's own `match name {` in the
-//! call-emission path, with the guards above it — the same two-region shape, one
-//! engine over. RFC-0078 owns that, and it is recorded in RFC-0125 §3 M5 rather
-//! than left as a silence.
+//! - [`the_direct_backend_carries_the_census_too`] — every censused name is
+//!   lowered by the direct backend. Its list of permitted absences is empty.
+//! - [`the_backends_dispatch_on_nothing_the_census_omits`] — the ANTI-ROT
+//!   direction, which the deletion took and RFC-0125 §3 M5 recorded as a hole:
+//!   every name the two COMPILING backends branch on has a row. Add a builtin
+//!   to `direct.rs` or to the textual emitter and forget the row, and that is
+//!   what says so.
 //!
 //! Three things are deliberately outside it, and are named here so their absence
 //! is not mistaken for an omission:
@@ -427,6 +426,111 @@ fn the_direct_backend_carries_the_census_too() {
          LEFT this set is covered now — delete its row. A name that JOINED it \
          runs on three engines and refuses on the fourth, which is what the \
          census found by reading and this test exists to find by running."
+    );
+}
+
+/// Every name a COMPILING backend dispatches on, in the four spellings the two
+/// emitters use and no others: `name == "x"`, `matches!(name, "x" | "y")`, an
+/// arm of `match name`, and an arm of `match (name, args.len())`.
+///
+/// A substring scan, as `interp.rs`'s was, and for its reason: it reads the
+/// emitter rather than a list kept beside the emitter, so a name added to the
+/// emitter is a name this sees.
+fn dispatched(region: &str) -> BTreeSet<&str> {
+    /// The contents of every `"..."` in a segment that holds no escape.
+    fn quoted(seg: &str) -> impl Iterator<Item = &str> {
+        seg.split('"').skip(1).step_by(2).filter(|n| !n.is_empty())
+    }
+    let mut out = BTreeSet::new();
+    // `name == "x"` — the textual backend's chain.
+    for (i, m) in region.match_indices("name == \"") {
+        out.extend(quoted(&region[i + m.len() - 1..]).next());
+    }
+    // `matches!(name, "x" | "y")`, over one line or several. The alternation
+    // holds no parenthesis of its own, so the first `)` closes it.
+    for (i, m) in region.match_indices("matches!(") {
+        let tail = region[i + m.len()..].trim_start();
+        if let Some(alts) = tail.strip_prefix("name,") {
+            out.extend(quoted(&alts[..alts.find(')').unwrap_or(0)]));
+        }
+    }
+    // `("x", 1)` — a `match (name, args.len())` arm, whose second element is
+    // a literal arity, which is what tells it from every other tuple.
+    for (i, _) in region.match_indices("(\"") {
+        let Some((name, after)) = region[i + 2..].split_once('"') else {
+            continue;
+        };
+        let arity = after.trim_start_matches([',', ' ']);
+        let close = arity.trim_start_matches(|c: char| c.is_ascii_digit());
+        if !name.is_empty() && close.len() < arity.len() && close.starts_with(')') {
+            out.insert(name);
+        }
+    }
+    // An arm of `match name`, at the arm's own indent — twelve spaces, because
+    // both matches sit two blocks inside a method — continued on the lines
+    // below with `| "y"`.
+    for line in region.lines() {
+        let arm = line.trim_start();
+        if line.len() - arm.len() != 12 || !(arm.starts_with('"') || arm.starts_with("| \"")) {
+            continue;
+        }
+        let pat = arm.split(" if ").next().unwrap_or(arm);
+        out.extend(quoted(pat.split("=>").next().unwrap_or(pat)));
+    }
+    out
+}
+
+/// The anti-rot direction: a builtin an emitter branches on with no census row.
+///
+/// `interp.rs` carried this and RFC-0125 §3 M5 deleted it, naming the anchor a
+/// later slice would scan — `direct.rs`'s own `match name {` in the
+/// call-emission path, with the guards above it. This is that scan, and two
+/// regions the anchor did not name: the builtins that exist only while a
+/// generator runs, and the TEXTUAL backend, which no census ever read. Four
+/// regions, one census, and an emitter agrees with it or the suite fails.
+///
+/// There is no list of permitted exceptions, and that is a finding rather than
+/// a convenience: all 97 names the four regions dispatch on are censused today.
+/// One name the scan cannot see, and the forward direction already aliases it:
+/// `@panicAt` is spelled `ast::PANIC_AT`, the constant rather than the literal.
+#[test]
+fn the_backends_dispatch_on_nothing_the_census_omits() {
+    let direct = include_str!("../../vyrn-codegen/src/direct.rs");
+    let textual = include_str!("../../vyrn-codegen/src/lib.rs");
+    // Located by content, so an emitter that is reorganised fails here loudly
+    // rather than scanning nothing and passing.
+    let cut = |src: &'static str, from: &str, to: &str| -> &'static str {
+        let i = src
+            .find(from)
+            .unwrap_or_else(|| panic!("the region opening `{from}`"));
+        let j = src[i + from.len()..]
+            .find(to)
+            .unwrap_or_else(|| panic!("the region closing `{to}`"));
+        &src[i..i + from.len() + j]
+    };
+    let regions = [
+        // The guards, and the table under them: `call_inner` down to the
+        // fall-through arm that ends its `match name`.
+        cut(direct, "    fn call_inner(", "\n            _ => {}\n"),
+        // The builtins that exist only while a generator runs (RFC-0076 M7),
+        // and the three whose lowering is a synthesized Vyrn entry (M3b).
+        cut(direct, "    fn gen_builtin(", "\n    fn "),
+        cut(direct, "    fn gen_entry(", "\n    fn "),
+        // The textual backend's own chain.
+        cut(textual, "    fn gen_call_inner(", "\n    fn gen_spawn("),
+    ];
+    let censused: BTreeSet<&str> = CENSUS.iter().map(|(n, ..)| *n).collect();
+    let uncensused: BTreeSet<&str> = regions
+        .iter()
+        .flat_map(|r| dispatched(r))
+        .filter(|n| !censused.contains(n))
+        .collect();
+    assert!(
+        uncensused.is_empty(),
+        "a compiling backend dispatches on {uncensused:?}, and the census has \
+         no row for them. A builtin IS a name an emitter branches on, so either \
+         it gets a row saying why it is implemented in Rust, or the branch is \
+         not a builtin and belongs somewhere the census does not read."
     );
 }
 
