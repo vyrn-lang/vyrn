@@ -6627,6 +6627,100 @@ and its wording is unchanged; it is simply no longer an interpreter's.
 the isolation-gate test asks for no engine at all. All three pass on both
 columns: 27 tests with the default, 27 under `VYRN_SERVE_ENGINE=interp`.
 
+#### Why the deletion still does not follow (2026-09-05)
+
+The eleventh slice named three things that reach the tree-walker, and said two
+of them were decisions rather than obstacles. Both decisions are taken: a `test`
+block's generator is compiled (the fourteenth slice) and the pool is N stores
+(the fifteenth). `GEN_TESTED` is gone, the three pool tests run on the default
+engine, and every gate in the table below is green. The deletion is still not
+taken, and the row that stops it is named here the way the eleventh slice named
+its own.
+
+**The blocker: the playground RUNS the tree-walker in a browser tab.**
+
+| where | what names the interpreter |
+|---|---|
+| `compiler/vyrn-play/src/lib.rs:297` | `play_run` calls `interp::run_with_args` |
+| `compiler/vyrn-frontend/src/playhost.rs` | 105 lines of host boundary that only the interpreter reads |
+| `site/public/play-wasm.js`, `site/public/play.js` | the page's Run button, and the `{ stdout, stderr, exitCode }` it renders |
+
+`vyrn-play` is `vyrn-frontend` compiled to `wasm32-unknown-unknown`. It cannot
+instantiate a wasm module — it IS one — so the compiled route cannot be moved
+inside it. The port is real and has a shape: `play_run` answers the module's
+BYTES, and the page runs them with `web/wasi-min.js`, which already runs a
+`vyrn build --target wasm` module in a browser and already answers
+`{ exitCode, stdout, stderr }`. Three things stand in the way of it being one
+line. `runVyrn` takes no stdin and no clock, and the playground supplies both
+(`arm_host(stdin, now_ms)`). `vyrn-play` would gain `vyrn-codegen` and
+`vyrn-lower`, and the page DOWNLOADS this module — it is built `opt-level = "z"`
+for that reason. And the gate is a browser, not `cargo test`. That is a slice
+with a decision, a host and a gate in it, which is the same sentence the
+eleventh slice wrote about `gen fn` at run time, and the fourteenth slice is
+what that sentence is worth.
+
+**Three more name it, and each is one deletion on the day the row above
+closes.**
+
+| where | what |
+|---|---|
+| `compiler/vyrn-frontend/src/gen.rs:538` | `generate` falls through to `interp::generate_interpreted` when the engine declines. No program in this repo declines, so the fall-through becomes a refusal — but `VYRN_NO_WASM_GEN=1` goes with it, and `tests/genwasm.rs` is a DIFFERENTIAL suite whose second column is that variable. It and CI's generator job are rewritten, not edited |
+| `compiler/vyrn-cli/src/main.rs` | `Engine::Interp` (three sites), `interp::{run_with_args, run_tests, run_benches, serve, serve_pool}` — and `ServeCall`, `ServeAnswer`, `ServeRequest`, `ServeResponse`, which are the DRIVER's protocol types and are declared in `interp.rs`. They move rather than go |
+| `compiler/vyrn-lsp/src/main.rs:301` | `#[cfg(feature = "wasm-gen")]` around `vyrn_genwasm::install()`. The same argument the fourteenth slice made for `vyrn-cli`: an LSP built without it would have no generation engine at all |
+
+The mechanical remainder is `tests/lowered.rs:706` (one `interp::run`), fourteen
+`Carrier::Interp` rows in `tests/boundaries.rs`, the `VYRN_FIXTURES=interp`
+column in `tests/fixtures.rs`, `--engine interp` in the usage text, and
+`interp.rs` itself — 11,105 lines, of which 2,858 are its own `mod tests`.
+
+**The tree is not half-deleted.** `interp.rs` still compiles, still runs, and is
+still what `--engine interp` selects. What changed is that no SUITE needs it: the
+std sweep, the five topic suites and the three pool tests all run on the default
+engine, and the second columns that remain (`VYRN_FIXTURES=interp`,
+`VYRN_SERVE_ENGINE=interp`, `VYRN_NO_WASM_GEN=1`) are second opinions rather
+than the only opinion.
+
+#### The two slices' gates (2026-09-05)
+
+One table for the fourteenth and fifteenth slices, run in §1.4's order, one at a
+time, in the foreground, with `TMP` and `TEMP` pointed at a shallow scratch
+directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 551 passed, 74 ignored — the same counts the eleventh slice's table records |
+| `kernel` `--ignored` | 1, 27 s |
+| `coretables` `--ignored` | 1, 26 s |
+| `typed` `--ignored` | 1, 47 s |
+| `effects` `--ignored` | 2, 56 s |
+| `fixtures` `--ignored` | 205 compared, 18 s |
+| `fixtures` `--ignored`, `VYRN_FIXTURES=interp` | 205 compared, 56 s |
+| `vyrn-frontend` | 1,246 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,422 |
+| `vyrn-lsp`'s own tests | 99 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 173 s |
+| the residue ratchet | 199 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, no byte moved |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 25 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files, 9.4 s |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks |
+| `serve` / `rpc` / `universal_pages` | 27, 12, 9 ignored — and 27 and 12 again under `VYRN_SERVE_ENGINE=interp` |
+
+`--features wasm-gen` is off the `genwasm` command because the feature is gone;
+CI's generator job says the same.
+
+The workspace's `compiler/**/*.rs`, excluding `target`, is 204,164 lines to
+204,318 — up 154. `vyrn-genwasm` is up 50 (281 added, 231 removed) and every one
+of those moved: `prepare` and `link` are the two halves that were private to one
+function. `vyrn-cli`'s `main.rs` is up 106 and `wasmrun.rs` up 66, which is the
+pool and the translated module. The seven test files are down 65 between them.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
