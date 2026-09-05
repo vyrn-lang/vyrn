@@ -58,7 +58,7 @@ const CENSUS: &[Census] = &[
     },
     Census {
         capability: "test-state",
-        verdict: "no",
+        verdict: "yes",
     },
     Census {
         capability: "bench-check",
@@ -238,16 +238,17 @@ fn the_rfc_census_lists_exactly_these_capabilities() {
     );
 }
 
-/// The census's one live semantic claim, run rather than asserted: the `no` on
-/// the `test-state` row.
+/// The census's one live semantic claim, run rather than asserted: the
+/// `test-state` row.
 ///
-/// The interpreter initializes a module's state once per RUN; `--engine wasm`
-/// runs one fresh instance per body. The probe under `rfcs/probes-0125/` is
-/// twelve lines and disagrees on purpose, so this pins the disagreement rather
-/// than an engine. When the interpreter goes, the wasm answer is the one that
-/// stays (RFC-0125 §3 M5, the second slice).
+/// RFC-0029 locks one module instance per PROCESS, and `vyrn test` is one
+/// process, so a body reads what an earlier body wrote. Both engines answer
+/// that now — the compiled route on one resident instance with a door per body
+/// (RFC-0125 §3 M5, the ninth slice), where it used to run one fresh instance
+/// per body and disagree. The probe under `rfcs/probes-0125/` is twelve lines
+/// and is the whole claim.
 #[test]
-fn module_state_is_shared_across_test_bodies_only_under_the_interpreter() {
+fn module_state_is_shared_across_test_bodies_on_both_engines() {
     let probe = repo_root()
         .join("rfcs")
         .join("probes-0125")
@@ -263,15 +264,12 @@ fn module_state_is_shared_across_test_bodies_only_under_the_interpreter() {
     };
     let (interp_code, interp_out) = one(None);
     assert_eq!(interp_code, Some(0), "the interpreter's run:\n{interp_out}");
+    let (wasm_code, wasm_out) = one(Some("wasm"));
+    assert_eq!(wasm_code, Some(0), "the compiled run:\n{wasm_out}");
+    assert_eq!(interp_out, wasm_out, "the two engines disagree");
     assert!(
         interp_out.contains("2 passed, 0 failed"),
-        "the interpreter's run:\n{interp_out}"
-    );
-    let (wasm_code, wasm_out) = one(Some("wasm"));
-    assert_eq!(wasm_code, Some(1), "the compiled run:\n{wasm_out}");
-    assert!(
-        wasm_out.contains("1 != 2") && wasm_out.contains("1 passed, 1 failed"),
-        "the compiled run:\n{wasm_out}"
+        "both runs:\n{interp_out}"
     );
 }
 

@@ -1,15 +1,15 @@
-// RFC-0125 M5 probe: the one semantic difference the census found between the
-// two engines. The interpreter initializes a module's state once per RUN and
-// lets the bodies see each other's writes; `--engine wasm` runs one fresh
-// instance per body.
+// RFC-0125 M5 probe: module state across test bodies, on both engines.
 //
 //     vyrn test rfcs/probes-0125/module-state-across-test-bodies.vyrn
 //         2 passed, 0 failed
 //     vyrn test --engine wasm rfcs/probes-0125/module-state-across-test-bodies.vyrn
-//         FAILED: assertion failed at line 22: 1 != 2
+//         2 passed, 0 failed
 //
-// The wasm answer is the one to keep (RFC-0125 §3 M5, the second slice): a test
-// that reads what an earlier test wrote is a test with an order.
+// It used to be the census's one semantic difference: the compiled route ran
+// one fresh instance per body and answered `1 != 2`. RFC-0029 locks one module
+// instance per PROCESS, and `vyrn test` is one process, so sharing is a rule of
+// the language. The compiled route keeps one resident instance per file and a
+// door per body (RFC-0125 §3 M5, the ninth slice).
 let mut counter = 0
 
 test "the first body writes the module's state" {

@@ -6490,24 +6490,25 @@ struct Body {
 /// M5): the selected bodies, each run once as compiled wasm, with the lines
 /// the interpreter prints.
 ///
-/// One module, one instance per body. Each body is lifted into a function
-/// `__vyrn_body_<k>`, and the synthesized `main` reads ONE line from standard
-/// input and calls the body that line names; the host serves that line before
-/// the process's own input. That is how the host knows which body a trap
-/// belongs to without reading the program's output: a trap ends the instance
-/// with `error: <message>` on fd 2 and exit 1, and the host turns the message
-/// into the `FAILED:` line. `assert`, `assertEq` and `blackBox` are lowered by
-/// the direct backend like every other builtin; nothing is rewritten here.
-/// What differs from the interpreter, on record in RFC-0125 §3 M5: module
-/// state is initialized once per body rather than once per run, and input a
-/// body read ahead is not seen by the next.
+/// One module, ONE instance, one door per body. Each body is lifted into an
+/// RFC-0012 `export extern fn __vyrn_body_<k>`, `_start` runs the module's
+/// initializers and a `main` that does nothing else, and the store stays open
+/// behind it — so body `k+1` reads what body `k` wrote, which is RFC-0029's
+/// locked rule (one instance per process, state lives for the process) and
+/// what the interpreter does. The ninth slice of RFC-0125 §3 M5 decides it.
+///
+/// A trap inside a door writes `error: <message>` on fd 2 and exits the call
+/// and not the store, so the host turns the message into the `FAILED:` line
+/// and knocks on the next door. `assert`, `assertEq` and `blackBox` are
+/// lowered by the direct backend like every other builtin; nothing is
+/// rewritten here.
 fn bodies_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
     kind: &str,
     bodies: &[Body],
 ) -> ExitCode {
-    use vyrn_frontend::ast::{BinOp, Block, Expr, Function, Pattern, Stmt, Type};
+    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
     if bodies.is_empty() {
         // `test` said `no tests` before the filter; `bench` says it after.
         println!("no {kind}es");
@@ -6519,7 +6520,7 @@ fn bodies_wasm(
         .retain(|f| !(f.name == "main" && f.module.is_none()));
     prog.tests.clear();
     prog.benches.clear();
-    let function = |name: String, body: Block, ret: Type, line: usize| Function {
+    let function = |name: String, body: Block, ret: Type, line: usize, door: bool| Function {
         name,
         exported: false,
         module: None,
@@ -6532,57 +6533,32 @@ fn bodies_wasm(
         line,
         col: 0,
         is_extern: false,
-        is_export_extern: false,
+        // An export is what the host knocks on AND what makes the body a sweep
+        // root — the same two facts `vyrn serve --engine wasm`'s doors rest on.
+        is_export_extern: door,
         is_gen: false,
         is_mut: false,
     };
-    let mut dispatch: Vec<Stmt> = Vec::new();
     for (k, b) in bodies.iter().enumerate() {
-        let name = format!("__vyrn_body_{k}");
-        prog.functions
-            .push(function(name.clone(), b.body.clone(), Type::Unit, b.line));
-        dispatch.push(Stmt::If {
-            cond: Expr::Binary {
-                op: BinOp::Eq,
-                lhs: Box::new(Expr::Var {
-                    name: "__vyrnSlot".to_string(),
-                    line: 0,
-                }),
-                rhs: Box::new(Expr::Str(k.to_string())),
-                line: 0,
-            },
-            then_block: Block {
-                stmts: vec![Stmt::Expr(Expr::Call {
-                    name,
-                    args: Vec::new(),
-                    line: 0,
-                })],
-            },
-            else_block: None,
-            line: 0,
-        });
+        prog.functions.push(function(
+            format!("__vyrn_body_{k}"),
+            b.body.clone(),
+            Type::Unit,
+            b.line,
+            true,
+        ));
     }
+    // `_start` is what initializes the module's state, and it reaches it through
+    // `main`. This `main` does nothing else: the bodies are doors, not a
+    // dispatch, so nothing has to tell the guest which one to run.
     let main = Block {
-        stmts: vec![
-            Stmt::IfLet {
-                pattern: Pattern::Variant("Some".into(), vec!["__vyrnSlot".to_string()]),
-                scrutinee: Expr::Call {
-                    name: "readLine".to_string(),
-                    args: Vec::new(),
-                    line: 0,
-                },
-                then_block: Block { stmts: dispatch },
-                else_block: None,
-                line: 0,
-            },
-            Stmt::Return {
-                value: Some(Expr::Int(0)),
-                line: 0,
-            },
-        ],
+        stmts: vec![Stmt::Return {
+            value: Some(Expr::Int(0)),
+            line: 0,
+        }],
     };
     prog.functions
-        .push(function("main".to_string(), main, Type::Int, 0));
+        .push(function("main".to_string(), main, Type::Int, 0, false));
 
     let bytes = match vyrn_codegen::direct::compile(&prog) {
         Ok(b) => b,
@@ -6592,39 +6568,35 @@ fn bodies_wasm(
         }
     };
 
+    let run = wasmrun::Run {
+        argv: vec![path.to_string()],
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        // Read per body: a trap inside a door writes its wording there, and
+        // that line is the `FAILED:` message.
+        capture_stderr: true,
+        meter: false,
+    };
+    let mut res = match wasmrun::start(&bytes, &run) {
+        Ok((res, _)) => res,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     use std::io::Write;
     let (mut ok, mut failed) = (0usize, 0usize);
-    for (k, b) in bodies.iter().enumerate() {
-        let run = wasmrun::Run {
-            argv: vec![path.to_string()],
-            stdin_prefix: format!("{k}\n").into_bytes(),
-            capture_stdout: false,
-            capture_stderr: true,
-            meter: false,
-        };
-        let out = match wasmrun::run(&bytes, run) {
-            Ok(out) => out,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        // The trap's line is the last `error: ..` on fd 2; everything the body
-        // wrote there before it passes through.
-        let (rest, message) = if out.code == 0 {
-            (out.stderr.as_slice(), None)
-        } else {
-            let text = String::from_utf8_lossy(&out.stderr);
-            match text.rfind("error: ") {
-                Some(at) if at == 0 || text.as_bytes()[at - 1] == b'\n' => (
-                    &out.stderr[..at],
-                    Some(text[at + 7..].trim_end_matches('\n').to_string()),
-                ),
-                _ => (out.stderr.as_slice(), Some(format!("exit {}", out.code))),
-            }
-        };
+    {
+        // Whatever the module's initializers wrote, before the first body's
+        // line, as the interpreter streams it.
         let mut stderr = std::io::stderr().lock();
-        let _ = stderr.write_all(rest);
+        let _ = stderr.write_all(res.drain_err().as_bytes());
+        let _ = stderr.flush();
+    }
+    for (k, b) in bodies.iter().enumerate() {
+        let (rest, message) = res.call_body(&format!("__vyrn_body_{k}"));
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(rest.as_bytes());
         let _ = stderr.flush();
         let mut stdout = std::io::stdout().lock();
         match message {

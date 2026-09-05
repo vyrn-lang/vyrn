@@ -450,6 +450,39 @@ impl Resident {
         out.map_err(|e| self.trapped(door, e))
     }
 
+    /// Call a nullary door for its effect and hand back BOTH what the guest
+    /// wrote to standard error and, if it refused, the line it refused with.
+    ///
+    /// [`Resident::tell`] keeps only the refusal's first line, which is all a
+    /// serving loop logs. A test body's own output has to pass through whether
+    /// the body passed or failed, so this splits the drain the way the harness
+    /// needs it: everything before the last `error: ..` line, and that line.
+    pub fn call_body(&mut self, door: &str) -> (String, Option<String>) {
+        let outcome: Result<(), String> =
+            match self.inst.get_typed_func::<(), ()>(&mut self.store, door) {
+                Err(e) => Err(format!("{door}: {e}")),
+                Ok(f) => match f.call(&mut self.store, ()) {
+                    Ok(()) => Ok(()),
+                    Err(e) => match e.downcast_ref::<Exit>() {
+                        Some(Exit(0)) => Ok(()),
+                        Some(Exit(code)) => Err(format!("exit {code}")),
+                        None => Err(first_line(&format!("{e:?}")).to_string()),
+                    },
+                },
+            };
+        let said = self.drain_err();
+        let Err(host) = outcome else {
+            return (said, None);
+        };
+        match said.rfind("error: ") {
+            Some(at) if at == 0 || said.as_bytes()[at - 1] == b'\n' => (
+                said[..at].to_string(),
+                Some(said[at + 7..].trim_end_matches('\n').to_string()),
+            ),
+            _ => (said, Some(host)),
+        }
+    }
+
     /// A door that answers a `Bool`.
     pub fn ask_bool(&mut self, door: &str) -> Result<bool, String> {
         let f = self

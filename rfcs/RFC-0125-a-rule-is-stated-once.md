@@ -4658,7 +4658,7 @@ deleted here, and `--engine interp` is still the default.
 |---|---|---|---|
 | `run-default` | every user; 34 of `vyrn-cli`'s test suites, at 150 `vyrn run` call sites; the fixture recorder | yes — 204 examples run under both engines, all byte-identical since the fourth slice below (203 of 204 when this row was written), the same 58 exit non-zero | flipping one default. the corpus costs 89.1 s under the interpreter and 39.4 s under the compiled route, compile included |
 | `test-bodies` | 25 corpus files; `tests/testing.rs` | yes — all 25 byte-identical, `placeorder.vyrn` among them | 4.6 s against 5.3 s over the 25. The compiled route is SLOWER here: the bodies are small and the compile is the whole cost |
-| `test-state` | nothing in the corpus | no — one fresh instance per body, where the interpreter runs the module's state once and lets the bodies see each other's writes | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`: 2 passed under the interpreter, `1 != 2` under wasm. The cost is the semantics, and M5 retires them rather than reproducing them |
+| `test-state` | `rfcs/probes-0125/module-state-across-test-bodies.vyrn`; nothing else in the corpus | yes, since the ninth slice below — one resident instance per FILE, the shape `serve` has. Each body is an `export extern fn` door, `_start` runs the module's initializers and a `main` that does nothing else, and body `k+1` reads what body `k` wrote | RFC-0029 locks one instance per process and state that lives for the process, and `vyrn test` is one process, so this is a rule of the language and not the interpreter's accident. The probe is `2 passed, 0 failed` under both engines, and a file pays one instantiation rather than one per body |
 | `bench-check` | CI's "Bench --check" step; 17 corpus files | yes — all 17 byte-identical, after this slice's fix below | 52.3 s against 2.4 s over the 17, a factor of 22 |
 | `serve` | `vyrn serve`, `vyrn dev`; `tests/serve.rs`, `rpc.rs`, `universal_pages.rs` | yes, since the sixth slice below — `vyrn serve --engine wasm` compiles the served file with the direct backend and answers every request through doors in ONE resident instance, `main` having run once behind them. `vyrn dev` still takes no engine | the fifth slice measured the resident half — `proc_exit` unwinds the call and not the store, module state keeps what `main` wrote, and an answer costs 11 ns against 839 µs for a fresh instance — and named three pieces that remained: no door for `handle`, no marshalling for `Request` and `Response`, and `serveStream` trapping in both compiling backends. The sixth slice below closes all three in appended Vyrn rather than in an emitter, and moves no emitted byte for a program nobody serves. `tests/serve.rs` is 27 of 27 and `rpc.rs` 12 of 12 under `VYRN_SERVE_ENGINE=wasm`; `universal_pages.rs` waits on a miscompile of `examples/bin/server.vyrn` that has nothing to do with serving |
 | `mounted-routes` | `vyrn routes`, for the hand-written channel | yes, since the fifth slice below — a copy of the program with a synthesized `main` hands each `mount(..)`'s route lists to `std/http`'s `mountedRows` and prints them, compiled and run in the embedded engine | `examples/bin/server.vyrn` prints the same twelve-row table under both, byte for byte, at 2.61 s against 2.79 s. Both times are the page and RPC generators, not the reading |
@@ -5665,6 +5665,59 @@ with a fresh `VYRN_GEN_CACHE_DIR`, 12; `testsweep` with `--ignored`, 28 s; `vyrn
 doc --std -o ../docs/api --verify`, 41 files up to date; the site — `vyrn run
 site/export.vyrn out` writes its 82 routes and 14 assets in 232 s, and `vyrn
 test` is green over `export.vyrn` and `site/app`, 189 blocks.
+
+#### The ninth slice (2026-09-05): the four rows that were left
+
+The census had eleven `yes`, one `partial` and three `no`. This slice closes all
+four, in the order the table lists them. Each is a decision before it is a diff,
+and each decision is below with what it cost.
+
+**`test-state` is a rule, and the compiled route now keeps it.**
+
+RFC-0029's locked semantics say two things about a module's state: **one
+instance per process, per module**, and a lifetime "unchanged from RFC-0013 —
+state lives for the process". `vyrn test` is one process. A body that reads what
+an earlier body wrote is therefore reading the one instance the rule allows, and
+the compiled route's fresh instance per body was a SECOND instance in the same
+process. RFC-0015 says the same thing from the other side: it locks the bodies'
+declaration order, and an order is only observable when the bodies share a
+world. So the interpreter was right and the compiled route was wrong, and the
+census's earlier reading — semantics M5 retires rather than reproduces — is
+withdrawn.
+
+The compiled route takes the shape `serve` took in the sixth slice. Each
+selected body is lifted into an RFC-0012 `export extern fn __vyrn_body_<k>`
+rather than an ordinary function; `_start` runs the module's initializers and a
+`main` that does nothing else; `wasmrun::start` leaves the store open; and the
+host knocks on one door per body. Nothing in an emitter moved: an export was
+already a sweep root and already the only name a host may call.
+
+| | before | after |
+|---|---|---|
+| instances per file | one per body | one |
+| the body's name | a line the host wrote to standard input, which `main` read and dispatched on | an export |
+| `main` | a `readLine` and a chain of `if`s | `return 0` |
+| the probe | 2 passed under the interpreter, `1 != 2` under wasm | `2 passed, 0 failed` under both |
+
+**A trap still ends one body and not the run.** RFC-0015 requires the run to
+continue after a failing assert, and a resident instance keeps that: a trap
+unwinds the CALL and not the store, exactly as `proc_exit` does for `serve`. A
+four-body probe — a failed `assertEq`, a body that reads the state the failed
+one wrote, a `panic`, and a body after the `panic` — prints the same four lines
+and the same `2 passed, 2 failed` on both engines.
+
+`Resident::call_body` is what the harness knocks with. `tell` keeps only a
+refusal's first line, which is all a serving loop logs; a test body's own
+standard-error output has to pass through whether the body passed or failed, so
+`call_body` hands back both halves of the drain — everything before the last
+`error: ..` line, and that line as the message. It is the split the fresh-instance
+harness already made over `Outcome::stderr`, moved to where the store
+stays open.
+
+**What was re-run.** All 25 corpus files with `test` blocks, and all 17 with
+`bench` blocks, under both engines: every one byte-identical on stdout, stderr
+and the exit code, which is what the `test-bodies` and `bench-check` rows
+claimed and still claim.
 
 ### M6 — the other two judgments
 
@@ -7504,7 +7557,7 @@ shape has no business in the frontend. The rule stays where its inputs are.
 
 **The census, after.** This is the table
 `the_coercion_census_is_what_the_rfc_records` asserts, printed from the test's
-own rows (`cargo test -p vyrn-cli --test lowered -- --ignored --nocapture
+own rows (`cargo test -p vyrn-cli --test lowered — --ignored --nocapture
 the_coercion_census_as_a_table`), so the prose and the tree cannot drift apart
 by one edit. The two rows that did not move are in the census above.
 
