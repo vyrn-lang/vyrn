@@ -1237,7 +1237,19 @@ fn load_modules(
             // says a comment begins, so text a generator copied through from an
             // input file — a string literal in a `.vyx` — is data, not a control
             // line (RFC-0054's `lex()` exists for this class of problem).
-            let ctx = crate::origin::Context::new(&text, dir_of(importer), &opts.alias_base);
+            // RFC-0033 maps generated source to USER source. The project that
+            // bounds a directive is the manifest's directory, and without a
+            // manifest it is the entry file's own directory: what was loaded.
+            // Bounding it by the filesystem root instead made the refusal depend
+            // on how deep the project sat — eight `..` from a shallow temp dir
+            // climbed past the root and was refused, the same eight from a
+            // deeper one landed on a real directory and was mapped.
+            let project = if opts.alias_base.is_empty() {
+                dir_of(root_key)
+            } else {
+                opts.alias_base.as_str()
+            };
+            let ctx = crate::origin::Context::new(&text, dir_of(importer), project);
             origins.add_module(key, &text, &ctx);
             // RFC-0071 M2b, RFC-0099: the same line-scan lifts `//@diag`
             // directives into diagnostics at the severity the generator chose. A
