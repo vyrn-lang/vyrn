@@ -4934,12 +4934,46 @@ fifty-six's loop-local pairing, round fifty-six's escape screen, round
 fifty-seven's early-exiting take. `coretables` stops diffing the store table
 and counts it, as it does for `arm_frees` and `edge_releases`.
 
-`arg_drops` is the last of the five and it does not follow. Its rule is over
-DECLARATIONS and its three whole-program closures — `lending`, `retains`,
-`param_escapers` — are a post-pass over every body, so the core cannot ask
-before it builds. `direct.rs::expr` asks `arg_drop_row` at every expression
-node, and an over-wide derived set there is a double free, not a leak. It
-waits for the hoist the record above names.
+**Where `arg_drops` stops, read at the source (2026-09-06).**
+
+It is the last of the five, and it does not follow. The corpus pin above is
+green, so the reading was taken; what it found moves the blocker rather than
+clearing it.
+
+**The closures are not the blocker.** `arg_verdict` takes four inputs —
+`caps`, `retains`, `lending`, `decl` — and `Facts::lending` and
+`Facts::retains` are already public and already closed by the time the core
+builds. No hoist is owed. `param_escapers` is not `arg_verdict`'s at all: it
+screens `fresh_stores`, which is `store_fresh`, the one plan table the store
+slice above left standing. The record that named three closures named one
+that belongs to a different rule.
+
+**The blocker is `ArgTemp`.** The verdict is a rule over declarations, but it
+is asked ABOUT a record `movecheck` builds while walking: `producer` (the call
+that built the value), `elem_producers` (a heapified literal's), `view_copies`
+(whether a view's element for this argument is a heap-free copy), and `kind`.
+The core can state all four from its own body — an argument is a `Val::Name`
+whose `Rhs` says what produced it — but that is a restatement of four derived
+fields, not a judgment the kernel can be asked for. The other four tables were
+derived because the kernel already answered them; this one has nothing to ask.
+
+**And the flip is not a deletion.** `direct.rs::arg_drop_row` ORs the core's
+answer with the plan's, so today the core states 22,982 names' rows and every
+one of them was MIRRORED off `own.plan.arg_drops` — nothing is derived yet.
+Flipping means dropping the `or`, and `direct.rs::expr` asks at every
+expression node: a node the derived set answers too widely is a DOUBLE FREE,
+where every table before it risked a leak. The corpus pin has to be green on
+the derived answer before the `or` goes, not after.
+
+So the slice is: state the four `ArgTemp` fields in the core, diff the derived
+verdict against `arg_temps` over the corpus at zero differences in BOTH
+directions, and only then drop the `or`. It is not this one.
+
+`store_fresh` is the other row left. The store slice states its own mention
+guard and the `fresh_str` exception, but round eighteen's answer — every
+mention of the place is a read argument to a declared, non-lending,
+non-retaining function — is still `movecheck`'s, and `param_escapers` is the
+closure behind it. Two payers, one reading.
 
 ### M4 — the runtime in Vyrn
 
