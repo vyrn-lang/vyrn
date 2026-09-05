@@ -1477,7 +1477,7 @@ impl Parser {
                 Tok::Ident(name)
                     if name == "test" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
-                    match self.test_decl() {
+                    match self.named_block("test") {
                         Ok(mut t) => {
                             t.doc = doc;
                             tests.push(t);
@@ -1495,7 +1495,7 @@ impl Parser {
                 Tok::Ident(name)
                     if name == "bench" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
-                    match self.bench_decl() {
+                    match self.named_block("bench") {
                         Ok(mut b) => {
                             b.doc = doc;
                             benches.push(b);
@@ -2919,14 +2919,18 @@ impl Parser {
         })
     }
 
-    /// `test "name" { body }` — a test declaration (RFC-0015). `test` is a
-    /// contextual starter (a plain identifier elsewhere); the caller has already
-    /// confirmed the `test` / string-literal lookahead. The body parses like any
-    /// function block; `assert`/`assertEq` become legal inside it (enforced by the
-    /// checker, which knows it is in a test).
-    fn test_decl(&mut self) -> Result<TestDecl, Diagnostic> {
+    /// `test "name" { body }` (RFC-0015) and `bench "name" { body }` (RFC-0055)
+    /// — one production, because they are one declaration (RFC-0127 §8).
+    ///
+    /// Both words are contextual starters (a plain identifier elsewhere) and the
+    /// caller has already confirmed the word / string-literal lookahead, so
+    /// `word` is only what the refusal is worded with. The body parses like any
+    /// function block; `assert`/`assertEq` become legal inside a test and
+    /// `blackBox` inside a bench, both enforced by the checker, which knows
+    /// which field it is walking.
+    fn named_block(&mut self, word: &str) -> Result<NamedBlock, Diagnostic> {
         let line = self.line();
-        self.advance(); // `test` (a contextual Ident)
+        self.advance(); // `test` / `bench` (a contextual Ident)
         let name = match self.advance() {
             Tok::Str(s) => s,
             other => {
@@ -2934,48 +2938,16 @@ impl Parser {
                     self.line(),
                     self.col(),
                     "parse",
-                    format!("expected a test name string, found {other:?}"),
+                    format!("expected a {word} name string, found {other:?}"),
                 ))
             }
         };
-        // A test body sees no generic parameters (a test is monomorphic).
+        // The body sees no generic parameters (a test and a bench are both
+        // monomorphic).
         self.type_params.clear();
         let body = self.block()?;
         self.type_params.clear();
-        Ok(TestDecl {
-            name,
-            body,
-            doc: None,
-            module: None,
-            line,
-        })
-    }
-
-    /// `bench "name" { body }` — a benchmark declaration (RFC-0055). `bench` is a
-    /// contextual starter (a plain identifier elsewhere); the caller has already
-    /// confirmed the `bench` / string-literal lookahead. Structurally identical to
-    /// [`Parser::test_decl`]; the body parses like any function block, and
-    /// `blackBox` becomes legal inside it (enforced by the checker, which knows it
-    /// is in a bench).
-    fn bench_decl(&mut self) -> Result<BenchDecl, Diagnostic> {
-        let line = self.line();
-        self.advance(); // `bench` (a contextual Ident)
-        let name = match self.advance() {
-            Tok::Str(s) => s,
-            other => {
-                return Err(Diagnostic::error(
-                    self.line(),
-                    self.col(),
-                    "parse",
-                    format!("expected a bench name string, found {other:?}"),
-                ))
-            }
-        };
-        // A bench body sees no generic parameters (a bench is monomorphic).
-        self.type_params.clear();
-        let body = self.block()?;
-        self.type_params.clear();
-        Ok(BenchDecl {
+        Ok(NamedBlock {
             name,
             body,
             doc: None,
