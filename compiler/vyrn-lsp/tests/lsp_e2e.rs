@@ -94,7 +94,13 @@ impl LspClient {
             .env("VYRN_NO_GEN_CACHE", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // `VYRN_BUILD_PROFILE=1` makes the server print a phase table per
+            // analysis, and a table nobody can read measures nothing.
+            .stderr(if std::env::var("VYRN_BUILD_PROFILE").is_ok() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            })
             .spawn()?;
         let mut stdout = child.stdout.take().expect("stdout piped");
         let (tx, rx) = std::sync::mpsc::channel();
