@@ -133,19 +133,11 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
     symbols::analyze(source).diagnostics
 }
 
-/// Parse, check, then run `main` via the tree-walking interpreter.
-///
-/// Returns the integer value `main` returns (its exit code).
-pub fn run(source: &str) -> Result<i64, String> {
-    let program = check(source)?;
-    interp::run(&program)
-}
-
 /// Load a multi-module program (RFC-0010): parse `root_source`, resolve every
 /// `import` transitively through `resolver`, link into one [`ast::Program`],
 /// then type-check and move-check it. Single-file programs (no imports) take
-/// exactly the old path semantically — [`check`]/[`run`] remain the simple
-/// single-source entry points.
+/// exactly the old path semantically — [`check`] remains the simple
+/// single-source entry point.
 pub fn load(
     root_source: &str,
     root_path: &str,

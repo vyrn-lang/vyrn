@@ -26,8 +26,8 @@
 //! trap.
 //!
 //! The stack's SIZE is not a free choice either, and no longer clang's default:
-//! it holds [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] frames of
-//! [`vyrn_frontend::interp::FRAME_LIMIT`], so that the call counter always trips
+//! it holds [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] frames of
+//! [`vyrn_frontend::trap::FRAME_LIMIT`], so that the call counter always trips
 //! before the stack pointer does and a deep recursion stops with the same
 //! diagnostic here as under the interpreter and the native binary.
 //!
@@ -46,8 +46,8 @@ use wasm_encoder::{
 };
 
 /// How much shadow stack a generated module has: enough for
-/// [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] frames of
-/// [`vyrn_frontend::interp::FRAME_LIMIT`] bytes.
+/// [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] frames of
+/// [`vyrn_frontend::trap::FRAME_LIMIT`] bytes.
 ///
 /// It is a PRODUCT rather than a chosen size, and that is the whole recursion
 /// contract in one line: no accepted frame is bigger than `FRAME_LIMIT`, so at
@@ -67,7 +67,7 @@ use wasm_encoder::{
 /// 8,257,536 bytes is exactly 126 wasm pages. A module reserves them and touches
 /// only as many as it recurses into, so the cost is address space, not memory.
 pub const STACK_BYTES: u32 =
-    vyrn_frontend::interp::FRAME_LIMIT * vyrn_frontend::interp::CALL_DEPTH_LIMIT + 65_536;
+    vyrn_frontend::trap::FRAME_LIMIT * vyrn_frontend::trap::CALL_DEPTH_LIMIT + 65_536;
 /// Top of the generated module's shadow stack; it grows down from here to 0.
 pub const STACK_TOP: u32 = STACK_BYTES;
 /// First byte of the generated module's data segments. Statics grow up from
@@ -903,7 +903,7 @@ fn encode(f: Frame, n_params: usize) -> Function {
     // it would otherwise overwrite.
     //
     // It is a safety net and not the limit any more: a lowered body is refused
-    // above [`vyrn_frontend::interp::FRAME_LIMIT`], and [`STACK_BYTES`] holds
+    // above [`vyrn_frontend::trap::FRAME_LIMIT`], and [`STACK_BYTES`] holds
     // `CALL_DEPTH_LIMIT` of those, so nothing this backend accepts can reach the
     // wrap. What still can is a hand-built `Frame` in a test, which is what
     // `tests/wasm_runs.rs` uses it for.
@@ -1053,7 +1053,7 @@ impl Frame {
 
     /// How many bytes of shadow stack this body's prologue will claim — the same
     /// rounding [`encode`] applies, so a caller checking it against
-    /// [`vyrn_frontend::interp::FRAME_LIMIT`] is checking the number the prologue
+    /// [`vyrn_frontend::trap::FRAME_LIMIT`] is checking the number the prologue
     /// subtracts.
     pub fn bytes(&self) -> u32 {
         round_up(self.high, FRAME_ALIGN)

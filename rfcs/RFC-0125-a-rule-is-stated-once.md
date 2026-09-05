@@ -6014,6 +6014,47 @@ generator engines — 241 files, byte-identical, diffed tree against tree.
 **The census reads fifteen `yes`.** Nothing the interpreter alone provides is
 left.
 
+**The first deletable slice, taken.** The ninth slice named two steps and this
+one runs them.
+
+`vyrn_frontend::run` is gone. It was two lines — `check` then `interp::run` —
+and the ninth slice recorded it as caller-less. That was wrong by one: the
+interpreter's OWN unit tests called it six times, which a search for
+`interp::run` does not find because they spell it `crate::run`. A two-line
+convenience for one module's tests now lives in that module's tests, and the
+crate's public surface has one entry point fewer.
+
+The eight limits and wordings are DECLARED in `trap.rs`. Five constants
+(`CALL_DEPTH_LIMIT`, `FRAME_LIMIT`, `ARRAY_LIT_LIMIT`, `REGION_MAX`,
+`INTERP_STACK_BYTES`) and one sentence (`extern_unavailable`) moved; `trap.rs`
+read two of the five through `crate::interp::` and reads them directly now, and
+`interp.rs` imports the six unqualified, so every line that used one still reads
+the same. The other two names the ninth slice listed — `on_deep_stack` and
+`coerce` — did NOT move: neither is a limit or a wording, both are the
+tree-walker's own machinery, and all three references to them are prose in doc
+comments. Naming them was the ninth slice's own error and this is the
+correction.
+
+`interp.rs` is 107 lines shorter and 8 longer (the import), 11,648 to 11,549.
+No behaviour changed: a constant is the same constant wherever it is declared.
+
+| | ninth slice | now |
+|---|---|---|
+| `interp::` references | 98 | 56 |
+| files that name it | 24 | 12 |
+
+**Every `interp::` caller, by file**, and the three things they are:
+
+| what it reaches for | files | refs |
+|---|---|---|
+| the GENERATION bridge — `Val`, `gen_code_splice`, `gen_lex_tokens_lit`, `gen_module_interface_lit`, `generate`, `GenInputs`, `render_code`, `gen_scoped_path`, `set_gen_engine` | `vyrn-genwasm/src/lib.rs` (10); `vyrn-frontend/src/{loader,prelude}.rs` (3) | 13 |
+| RUNNING — `run`, `run_with_args`, `run_tests`, `run_benches`, `serve`, `serve_pool`, the four `Serve*` types, `mounted_routes` | `vyrn-cli/src/main.rs` (35); `vyrn-play/src/lib.rs` (1); `vyrn-cli/tests/{lowered,limits}.rs` (2); the module's own tests (1) | 39 |
+| PROSE — a doc comment naming `on_deep_stack`, `coerce` or `gen_code_splice` | `vyrn-frontend/src/{own,prof,codec}.rs`; `vyrn-codegen/src/lib.rs` | 4 |
+
+The limits row is empty. What is left is the tree-walker itself and the bridge
+the generation engine reaches through it, which is the next slice's question and
+the one the record states below.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

@@ -762,7 +762,7 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
                 "{what}: interp vs {other} exit"
             );
         }
-        let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
+        let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
         if what == "over" {
             assert!(
                 runtime_err(&w.stderr).contains(&format!("call depth exceeds {limit}")),

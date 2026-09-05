@@ -156,7 +156,7 @@ fn source_just_under_the_nesting_limit_still_runs() {
 /// the parity harness, byte for byte.
 #[test]
 fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
-    let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
+    let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
     let src = |n: u32| {
         format!(
             "fn down(n: Int64) -> Int64 {{\n    if n <= 0 {{\n        return 0\n    }}\n    \
@@ -290,7 +290,7 @@ fn an_ordinary_generic_still_compiles() {
 /// that can say so before either of them starts is the front end.
 #[test]
 fn an_array_literal_past_the_limit_is_a_diagnostic_not_a_two_minute_crash() {
-    let limit = vyrn_frontend::interp::ARRAY_LIT_LIMIT;
+    let limit = vyrn_frontend::trap::ARRAY_LIT_LIMIT;
     let n = limit + 1;
     let elems: Vec<String> = (0..n).map(|i| (i % 97).to_string()).collect();
     let src = format!(
@@ -333,7 +333,7 @@ fn an_array_literal_past_the_limit_is_a_diagnostic_not_a_two_minute_crash() {
 /// function, together with the array it becomes.
 #[test]
 fn an_array_literal_at_the_limit_still_runs() {
-    let limit = vyrn_frontend::interp::ARRAY_LIT_LIMIT;
+    let limit = vyrn_frontend::trap::ARRAY_LIT_LIMIT;
     let elems: Vec<String> = (0..limit).map(|i| (i % 97).to_string()).collect();
     let src = format!(
         "fn main() -> Int64 {{\n    let xs: Array<Int64> = [{}]\n    \
@@ -389,7 +389,7 @@ fn a_frame_that_cannot_fit_is_a_diagnostic_not_a_module_that_traps() {
         got.contains(vyrn_codegen::FRAME_LIMIT_NEEDLE)
             && got.contains(&format!(
                 "past the frame limit of {}",
-                vyrn_frontend::interp::FRAME_LIMIT
+                vyrn_frontend::trap::FRAME_LIMIT
             )),
         "expected the frame limit, got:\n{got}"
     );
@@ -598,7 +598,7 @@ fn statics_past_what_the_module_holds_are_a_diagnostic_not_a_panic() {
 /// moves the stack with it, and a stack sized by hand fails here.
 #[test]
 fn every_limit_has_one_source() {
-    use vyrn_frontend::interp::{ARRAY_LIT_LIMIT, CALL_DEPTH_LIMIT, FRAME_LIMIT, REGION_MAX};
+    use vyrn_frontend::trap::{ARRAY_LIT_LIMIT, CALL_DEPTH_LIMIT, FRAME_LIMIT, REGION_MAX};
     assert_eq!(
         vyrn_codegen::wasm::STACK_BYTES,
         FRAME_LIMIT * CALL_DEPTH_LIMIT + 65_536,

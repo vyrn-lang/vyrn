@@ -5187,7 +5187,7 @@ impl<'a> Checker<'a> {
                 // used to check `ok` in 0.1 s, run correctly under the
                 // interpreter, and then die `LLVM ERROR: out of memory` after
                 // clang had run for over two minutes.
-                if elems.len() > crate::interp::ARRAY_LIT_LIMIT {
+                if elems.len() > crate::trap::ARRAY_LIT_LIMIT {
                     return Err(cerr!(
                         line,
                         "this array literal has {} elements, past the limit of {}\n  \
@@ -5196,7 +5196,7 @@ impl<'a> Checker<'a> {
                          note: a table this long belongs in a file the program reads, not in \
                          the program",
                         elems.len(),
-                        crate::interp::ARRAY_LIT_LIMIT
+                        crate::trap::ARRAY_LIT_LIMIT
                     ));
                 }
                 let small_cap = match expected {

@@ -173,7 +173,7 @@ fn step_ty(
 #[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test typed -- --ignored"]
 fn the_typed_judgment_over_the_corpus() {
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
         .spawn(run_corpus)
         .unwrap()
         .join()

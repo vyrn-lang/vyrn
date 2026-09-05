@@ -220,7 +220,7 @@ fn the_core_and_the_plan_agree_on_every_table() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
         .spawn(run)
         .unwrap()
         .join()

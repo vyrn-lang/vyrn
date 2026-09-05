@@ -76,7 +76,7 @@ use vyrn_frontend::types::INT32;
 /// (wasm32-wasip1) LLVM lowers TLS to ordinary globals, so the shared IR is
 /// unchanged in behavior there.
 /// The call-depth counter every emitted function's prologue bumps
-/// ([`vyrn_frontend::interp::CALL_DEPTH_LIMIT`], audit A5.3).
+/// ([`vyrn_frontend::trap::CALL_DEPTH_LIMIT`], audit A5.3).
 ///
 /// Built rather than written out, so the number in the message and the number in
 /// the comparison are the same number — a trap whose wording drifts from the
@@ -90,7 +90,7 @@ use vyrn_frontend::types::INT32;
 /// emitter puts exactly one in front of every `ret` a prologue's function has,
 /// and a path that does not reach a `ret` (a trap) ends the process.
 fn call_depth_runtime() -> String {
-    let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
+    let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
     let (msg, len) = llvm_str(&vyrn_frontend::trap::line(
         &vyrn_frontend::trap::call_depth(),
     ));
@@ -127,7 +127,7 @@ entry:
     )
 }
 
-/// The region runtime, with [`vyrn_frontend::interp::REGION_MAX`] filled in.
+/// The region runtime, with [`vyrn_frontend::trap::REGION_MAX`] filled in.
 ///
 /// The number was written five times in the text below — three array lengths,
 /// one comparison and the trap's own wording — plus a sixth as the hand-counted
@@ -136,7 +136,7 @@ entry:
 /// already drifted apart in signedness. Now the text has holes and one constant
 /// fills them, the way [`call_depth_runtime`] already builds its own number in.
 fn region_runtime() -> String {
-    let n = vyrn_frontend::interp::REGION_MAX;
+    let n = vyrn_frontend::trap::REGION_MAX;
     let (msg, len) = llvm_str(&vyrn_frontend::trap::line(
         &vyrn_frontend::trap::region_depth(),
     ));
@@ -16968,7 +16968,7 @@ mod tests {
         assert!(
             ir.contains(&format!(
                 "@__vyrn_region_blocks = thread_local global [{} x ptr] zeroinitializer",
-                vyrn_frontend::interp::REGION_MAX
+                vyrn_frontend::trap::REGION_MAX
             )),
             "{ir}"
         );
@@ -18916,7 +18916,7 @@ mod tests {
         // Read from the constant, never spelled: this file used to write the
         // number in five places and the test in two more, and a limit a test
         // pins by hand is a limit the test can outlive.
-        let n = vyrn_frontend::interp::REGION_MAX;
+        let n = vyrn_frontend::trap::REGION_MAX;
         let src = "fn main() -> Int64 { region { } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(
