@@ -498,7 +498,7 @@ fn check_accum_inner(
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             for v in vs {
                 if RESERVED.contains(&v.name.as_str()) {
                     out.push(cerr!(t.line, "`{}` is a reserved name", v.name));
@@ -1018,7 +1018,10 @@ fn check_accum_inner(
         // resolution to travel from the checker instead, which needs call-site
         // identity — designed in RFC-0084 and deliberately not built.
         let ok_target = match &imp.ty {
-            Type::Int | Type::Bool | Type::Str | Type::Option(_) | Type::Result(..) => true,
+            Type::Int | Type::Bool | Type::Str => true,
+            // The two built-in sums, whichever way they are spelled
+            // (RFC-0126 §8.15): `impl<T> Show for Option<T>` keys `Option`.
+            _ if crate::types::is_sum_alias(&imp.ty) => true,
             Type::Named(n) | Type::App(n, _) => matches!(
                 types.get(n).map(|d| &d.base),
                 Some(Type::Enum(_) | Type::Record(_))
@@ -2499,8 +2502,7 @@ impl<'a> Checker<'a> {
         fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
             match ty {
                 Type::Stream(_) => true,
-                Type::Option(i)
-                | Type::Array(i)
+                Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
                 | Type::Task(i)
@@ -2508,7 +2510,7 @@ impl<'a> Checker<'a> {
                 // A `lazy T` field stores a T (forced on read), so a stream
                 // behind it is exactly the storage the scope rule forbids.
                 | Type::Lazy(i) => walk(i, types, seen),
-                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
+                Type::Map(a, b) | Type::Merge(a, b) => {
                     walk(a, types, seen) || walk(b, types, seen)
                 }
                 Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
@@ -2555,15 +2557,12 @@ impl<'a> Checker<'a> {
                 // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
                 // position a stored function value is kept out of.
                 Type::Fn(..) | Type::Lazy(_) => true,
-                Type::Option(i)
-                | Type::Array(i)
+                Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
                 | Type::Task(i)
                 | Type::Partial(i) => walk(i, types, seen),
-                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
-                }
+                Type::Map(a, b) | Type::Merge(a, b) => walk(a, types, seen) || walk(b, types, seen),
                 Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
                 Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
                 Type::Enum(vs) => vs
@@ -2648,17 +2647,16 @@ impl<'a> Checker<'a> {
         // DeleteResult = Result<Bool, String>`) is interchangeable with its
         // resolved form — it carries no `where` obligation of its own.
         let transparent = |b: &Type| {
-            matches!(
-                b,
-                Type::Result(..)
-                    | Type::Option(..)
-                    | Type::Map(..)
+            crate::types::is_sum_alias(b)
+                || matches!(
+                    b,
+                    Type::Map(..)
                     | Type::Array(_)
                     | Type::ArrayN(..)
                     // A named function type (`type Middleware = fn(..) -> ..`,
                     // RFC-0037) is interchangeable with its structural form.
                     | Type::Fn(..)
-            )
+                )
         };
         if let Type::Named(n) = to {
             if let Some(d) = self.types.get(n) {
@@ -2682,10 +2680,16 @@ impl<'a> Checker<'a> {
             }
         }
         // Option/Result are covariant in their payloads (values are immutable).
-        if let (Type::Option(a), Type::Option(b)) = (from, to) {
+        if let (Some(a), Some(b)) = (
+            crate::types::option_payload(from),
+            crate::types::option_payload(to),
+        ) {
             return self.assignable_d(a, b, depth + 1);
         }
-        if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
+        if let (Some((a, e1)), Some((b, e2))) = (
+            crate::types::result_payloads(from),
+            crate::types::result_payloads(to),
+        ) {
             return self.assignable_d(a, b, depth + 1) && self.assignable_d(e1, e2, depth + 1);
         }
         // A Map is covariant in its value type (keys recurse the same way;
@@ -3017,11 +3021,6 @@ impl<'a> Checker<'a> {
                 for a in args {
                     self.ensure_type_exists(a, line)?;
                 }
-            }
-            Type::Option(inner) => self.ensure_type_exists(inner, line)?,
-            Type::Result(ok, err) => {
-                self.ensure_type_exists(ok, line)?;
-                self.ensure_type_exists(err, line)?;
             }
             Type::Record(fields) => {
                 for f in fields {
@@ -3371,7 +3370,7 @@ impl<'a> Checker<'a> {
             return Ok(());
         }
         // Enum declaration (RFC-0002 §4).
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             if t.predicate.is_some() {
                 return Err(cerr!(t.line, "an enum type cannot have a `where` clause"));
             }
@@ -3391,12 +3390,12 @@ impl<'a> Checker<'a> {
         // codable `Result`/`Option` can be named and handed to `fromJson`/
         // `jsonSchema` by name (RFC-0024's RPC ripple). No `where` clause (its
         // payloads carry their own refinements); the payload types must exist.
-        if matches!(t.base, Type::Result(..) | Type::Option(..)) {
+        if crate::types::is_sum_alias(&t.base) {
             if t.predicate.is_some() {
                 return Err(cerr!(
                     t.line,
                     "a `{}` alias cannot have a `where` clause",
-                    if matches!(t.base, Type::Result(..)) {
+                    if crate::types::result_payloads(&t.base).is_some() {
                         "Result"
                     } else {
                         "Option"
@@ -4392,8 +4391,7 @@ impl<'a> Checker<'a> {
                         | Type::SmallArray(..)
                         | Type::Map(..)
                         | Type::Task(_)
-                ) || (matches!(t, Type::Option(_) | Type::Result(..))
-                    && crate::own::owns_heap(&t, &self.types))
+                ) || (crate::types::is_sum_alias(&t) && crate::own::owns_heap(&t, &self.types))
                 {
                     return Ok(false);
                 }
@@ -4473,10 +4471,7 @@ impl<'a> Checker<'a> {
                 Type::Enum(vs) => vs
                     .iter()
                     .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                Type::Option(inner) => walk(inner, types, seen),
-                Type::Result(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
-                }
+                Type::Merge(a, b) => walk(a, types, seen) || walk(b, types, seen),
                 Type::Omit(b, _) | Type::Pick(b, _) | Type::Partial(b) => walk(b, types, seen),
                 // A stored function value (RFC-0037) may hold heap captures
                 // (a snapshotted String/Array/record), so treat it as
@@ -5072,7 +5067,7 @@ impl<'a> Checker<'a> {
                         "`{name}` is built from {base}, but the argument is {aty}"
                     ));
                 }
-                Ok(Type::Option(Box::new(Type::Named(name.clone()))))
+                Ok(Type::option(Type::Named(name.clone())))
             }
             Expr::Spawn { name, args, line } => {
                 let (params, ret) = self
@@ -5514,28 +5509,37 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, Diagnostic> {
         let ety = self.expr(expr, scope, None, fn_ret)?;
         let ret = fn_ret.ok_or_else(|| cerr!(line, "`?` can only be used inside a function"))?;
-        match &ety {
-            Type::Option(t) => match ret {
-                Type::Option(_) => Ok((**t).clone()),
-                _ => Err(cerr!(
+        // The two built-in sums are read through their payloads, and the
+        // DECLARED `Fallible` is read after them (RFC-0126 §8.15). Both are a
+        // variant list now, so the ORDER is the rule: `?` on an `Option` or a
+        // `Result` is the built-in propagation, and a declared sum reaches the
+        // protocol below it.
+        if let Some(t) = crate::types::option_payload(&ety) {
+            return match crate::types::option_payload(ret) {
+                Some(_) => Ok(t.clone()),
+                None => Err(cerr!(
                     line,
                     "`?` on an Option requires the function to return Option, \
                      but it returns {ret}"
                 )),
-            },
-            Type::Result(t, e) => match ret {
-                Type::Result(_, re) if self.assignable(e, re) => Ok((**t).clone()),
-                Type::Result(_, re) => Err(cerr!(
+            };
+        }
+        if let Some((t, e)) = crate::types::result_payloads(&ety) {
+            return match crate::types::result_payloads(ret) {
+                Some((_, re)) if self.assignable(e, re) => Ok(t.clone()),
+                Some((_, re)) => Err(cerr!(
                     line,
                     "`?` propagates error {e}, but the function returns \
                      Result<_, {re}>"
                 )),
-                _ => Err(cerr!(
+                None => Err(cerr!(
                     line,
                     "`?` on a Result requires the function to return Result, \
                      but it returns {ret}"
                 )),
-            },
+            };
+        }
+        match &ety {
             other => {
                 let key = crate::types::type_key(other)
                     .filter(|k| self.impls.contains(&(FALLIBLE.to_string(), k.clone())));
@@ -5594,10 +5598,7 @@ impl<'a> Checker<'a> {
         // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
         let sty = match &raw_sty {
             Type::Named(n) => match self.types.get(n) {
-                Some(d)
-                    if d.predicate.is_none()
-                        && matches!(d.base, Type::Result(..) | Type::Option(..)) =>
-                {
+                Some(d) if d.predicate.is_none() && crate::types::is_sum_alias(&d.base) => {
                     crate::types::resolve(&raw_sty, self.types)
                 }
                 _ => raw_sty.clone(),
@@ -5844,12 +5845,13 @@ impl<'a> Checker<'a> {
 
     /// The type bound by pattern `tag` when matching a value of type `sty`.
     fn binding_type(&self, sty: &Type, tag: &str) -> Type {
-        match (sty, tag) {
-            (Type::Option(t), "Some") => (**t).clone(),
-            (Type::Result(t, _), "Ok") => (**t).clone(),
-            (Type::Result(_, e), "Err") => (**e).clone(),
-            _ => Type::Unit,
+        match tag {
+            "Some" => crate::types::option_payload(sty).cloned(),
+            "Ok" => crate::types::result_payloads(sty).map(|(t, _)| t.clone()),
+            "Err" => crate::types::result_payloads(sty).map(|(_, e)| e.clone()),
+            _ => None,
         }
+        .unwrap_or(Type::Unit)
     }
 
     /// Resolve a scrutinee's type through a transparent Option/Result/enum alias
@@ -5858,13 +5860,7 @@ impl<'a> Checker<'a> {
     fn resolve_scrutinee(&self, raw: &Type) -> Type {
         match raw {
             Type::Named(n) => match self.types.get(n) {
-                Some(d)
-                    if d.predicate.is_none()
-                        && matches!(
-                            d.base,
-                            Type::Result(..) | Type::Option(..) | Type::Enum(..)
-                        ) =>
-                {
+                Some(d) if d.predicate.is_none() && matches!(d.base, Type::Enum(..)) => {
                     crate::types::resolve(raw, self.types)
                 }
                 _ => raw.clone(),
@@ -5924,15 +5920,15 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, "the default arm belongs to an enum `match`"))
             }
         };
-        let want: [&str; 2] = match sty {
-            Type::Option(_) => ["Some", "None"],
-            Type::Result(_, _) => ["Ok", "Err"],
-            other => {
-                return Err(cerr!(
-                    line,
-                    "`if let` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
-            }
+        let want: [&str; 2] = if crate::types::option_payload(sty).is_some() {
+            ["Some", "None"]
+        } else if crate::types::result_payloads(sty).is_some() {
+            ["Ok", "Err"]
+        } else {
+            return Err(cerr!(
+                line,
+                "`if let` scrutinee must be an Option, Result, or enum, found {sty}"
+            ));
         };
         if !want.contains(&tag) {
             return Err(cerr!(
@@ -6959,7 +6955,7 @@ impl<'a> Checker<'a> {
                     args.len()
                 ));
             }
-            return Ok(Type::Option(Box::new(Type::Str)));
+            return Ok(Type::option(Type::Str));
         }
         if name == "readFile" {
             if args.len() != 1 {
@@ -6976,7 +6972,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`readFile` needs a String path, found {t}"));
             }
-            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Str, Type::Str));
         }
         // `listDir(path) -> Result<Array<String>, String>` (RFC-0021 family): the
         // entry names directly under `path` (no `.`/`..`, unsorted-by-OS order the
@@ -7065,10 +7061,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`{name}` needs a String path, found {t}"));
             }
-            return Ok(Type::Result(
-                Box::new(Type::Array(Box::new(Type::Str))),
-                Box::new(Type::Str),
-            ));
+            return Ok(Type::result(Type::Array(Box::new(Type::Str)), Type::Str));
         }
         // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
         // reflection over a module's exported surface. It is generation-ONLY —
@@ -7234,7 +7227,7 @@ impl<'a> Checker<'a> {
                     return Err(cerr!(line, "`writeFile` needs String arguments, found {t}"));
                 }
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0111: the byte sink. `writeFile` for bytes that are not text —
         // same create/truncate/write-all, same `Result<Bool, String>`, same
@@ -7273,7 +7266,7 @@ impl<'a> Checker<'a> {
                     "`writeFileBytes` needs an Array<UInt8>, found {b}"
                 ));
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0111: `print` for bytes. No result, for `print`'s reason — a
         // write to a closed stdout is not a condition a Vyrn program can act
@@ -7326,7 +7319,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0044: flush a file's contents to stable storage (the optional
         // power-durability upgrade over `writeAtomic`'s crash-consistency).
@@ -7345,7 +7338,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`fsyncFile` needs a String path, found {t}"));
             }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Bool, Type::Str));
         }
         // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
         if name == "readFileBytes" {
@@ -7366,12 +7359,12 @@ impl<'a> Checker<'a> {
                     "`readFileBytes` needs a String path, found {t}"
                 ));
             }
-            return Ok(Type::Result(
-                Box::new(Type::Array(Box::new(Type::IntN {
+            return Ok(Type::result(
+                Type::Array(Box::new(Type::IntN {
                     bits: 8,
                     signed: false,
-                }))),
-                Box::new(Type::Str),
+                })),
+                Type::Str,
             ));
         }
         if name == "stringFromBytes" {
@@ -7396,7 +7389,7 @@ impl<'a> Checker<'a> {
                     "`stringFromBytes` needs an Array<UInt8>, found {t}"
                 ));
             }
-            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
+            return Ok(Type::result(Type::Str, Type::Str));
         }
 
         // (`len(String)` was removed — see the migration hint above; its byte
@@ -7589,7 +7582,7 @@ impl<'a> Checker<'a> {
             if t != Type::Str {
                 return Err(cerr!(line, "`parse` needs a String, found {t}"));
             }
-            return Ok(Type::Option(Box::new(Type::Int)));
+            return Ok(Type::option(Type::Int));
         }
 
         // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
@@ -7909,7 +7902,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(&args[1], &key, line)?;
-                return Ok(Type::Option(val));
+                return Ok(Type::option(*val));
             }
             let elem = match self.base(&at) {
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
@@ -8147,7 +8140,7 @@ impl<'a> Checker<'a> {
             let elem = self.mut_array_receiver(&args[0], scope, line, name, "pop")?;
             return Ok(match elem {
                 Type::Err => Type::Err,
-                t => Type::Option(Box::new(t)),
+                t => Type::option(t),
             });
         }
         // `a.swapRemove(i)` (RFC-0011) — O(1) unordered remove: move the last
@@ -8568,9 +8561,9 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(&args[0], want, line)?;
-                return Ok(Type::Option(Box::new(want.clone())));
+                return Ok(Type::option(want.clone()));
             }
-            return Ok(Type::Option(Box::new(aty)));
+            return Ok(Type::option(aty));
         }
 
         // built-in: Ok(x) / Err(e) — need the other type parameter from context.
@@ -8615,7 +8608,7 @@ impl<'a> Checker<'a> {
                     "`{name}` payload is {aty} but {want_ty} was expected"
                 ));
             }
-            return Ok(Type::Result(Box::new(t), Box::new(e)));
+            return Ok(Type::result(t, e));
         }
 
         // enum variant construction with payload(s): `Circle(r)`, `Rect(w, h)`.
@@ -9964,17 +9957,23 @@ impl<'a> Checker<'a> {
                     Ok(())
                 }
             },
-            Type::Option(inner) => match aty {
-                Type::Option(a) => self.unify(inner, a, subst, line),
-                _ => Err(cerr!(line, "expected Option, found {aty}")),
-            },
-            Type::Result(pt, pe) => match aty {
-                Type::Result(at, ae) => {
-                    self.unify(pt, at, subst, line)?;
-                    self.unify(pe, ae, subst, line)
+            _ if crate::types::option_payload(pty).is_some() => {
+                let inner = crate::types::option_payload(pty).expect("an Option payload");
+                match crate::types::option_payload(aty) {
+                    Some(a) => self.unify(inner, a, subst, line),
+                    None => Err(cerr!(line, "expected Option, found {aty}")),
                 }
-                _ => Err(cerr!(line, "expected Result, found {aty}")),
-            },
+            }
+            _ if crate::types::result_payloads(pty).is_some() => {
+                let (pt, pe) = crate::types::result_payloads(pty).expect("Result payloads");
+                match crate::types::result_payloads(aty) {
+                    Some((at, ae)) => {
+                        self.unify(pt, at, subst, line)?;
+                        self.unify(pe, ae, subst, line)
+                    }
+                    None => Err(cerr!(line, "expected Result, found {aty}")),
+                }
+            }
             Type::App(pn, pargs) => match aty {
                 Type::App(an, aargs) if pn == an && pargs.len() == aargs.len() => {
                     for (p, a) in pargs.iter().zip(aargs) {
@@ -10772,11 +10771,27 @@ pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
                 && ap.iter().zip(bp).all(|(x, y)| fn_sigs_match(x, y))
                 && fn_sigs_match(ar, br)
         }
-        (Type::Option(x), Type::Option(y))
-        | (Type::Array(x), Type::Array(y))
+        (Type::Array(x), Type::Array(y))
         | (Type::Task(x), Type::Task(y))
         | (Type::Stream(x), Type::Stream(y)) => fn_sigs_match(x, y),
-        (Type::Result(x1, x2), Type::Result(y1, y2)) | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
+        (Type::Map(x1, x2), Type::Map(y1, y2)) => fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2),
+        // The two built-in sums, read through their payloads (RFC-0126 §8.15):
+        // a nested `Param` matches loosely through a payload the way it does
+        // through an `Array`'s element. A DECLARED enum still compares equal,
+        // which is the reading it had before the collapse.
+        _ if crate::types::option_payload(a).is_some()
+            && crate::types::option_payload(b).is_some() =>
+        {
+            fn_sigs_match(
+                crate::types::option_payload(a).expect("an Option payload"),
+                crate::types::option_payload(b).expect("an Option payload"),
+            )
+        }
+        _ if crate::types::result_payloads(a).is_some()
+            && crate::types::result_payloads(b).is_some() =>
+        {
+            let (x1, x2) = crate::types::result_payloads(a).expect("Result payloads");
+            let (y1, y2) = crate::types::result_payloads(b).expect("Result payloads");
             fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2)
         }
         _ => a == b,

@@ -509,8 +509,7 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
                 collect_params(a, out);
             }
         }
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -518,7 +517,7 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => collect_params(a, out),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             collect_params(a, out);
             collect_params(b, out);
         }
@@ -827,12 +826,6 @@ pub enum Type {
     Unit,
     /// A named validated type; resolved against the program's [`TypeDecl`]s.
     Named(String),
-    /// A built-in optional (RFC-0005). The inner type is a scalar or validated
-    /// scalar in v0.1.
-    Option(Box<Type>),
-    /// A built-in result (RFC-0005): `Result<T, E>`. Both payloads are scalar or
-    /// validated scalars in v0.1.
-    Result(Box<Type>, Box<Type>),
     /// A structural record type (RFC-0002): an ordered set of named fields.
     /// Compatibility is by shape (width subtyping), not name.
     Record(Vec<Field>),
@@ -961,6 +954,42 @@ pub enum Type {
 }
 
 impl Type {
+    /// `Option<T>` as the variant list it IS — RFC-0126 §8.1, and §8.15's M5
+    /// deleted the constructor that used to spell it. `None` is variant 0 and
+    /// `Some` is variant 1, which is the TAG order `Pattern::Failure` and
+    /// `Pattern::Success` have named since RFC-0079's `??` desugar.
+    ///
+    /// [`Display`](std::fmt::Display) prints this back as `Option<T>`, and
+    /// [`crate::types::option_payload`] reads it back, so nothing above the AST
+    /// has to know the sum lost a spelling.
+    pub fn option(t: Type) -> Type {
+        Type::Enum(vec![
+            EnumVariant {
+                name: "None".to_string(),
+                payload: Vec::new(),
+            },
+            EnumVariant {
+                name: "Some".to_string(),
+                payload: vec![t],
+            },
+        ])
+    }
+
+    /// `Result<T, E>` as the variant list it IS. [`Type::option`]'s twin, and
+    /// the tag order is the same rule: `Err` is variant 0.
+    pub fn result(ok: Type, err: Type) -> Type {
+        Type::Enum(vec![
+            EnumVariant {
+                name: "Err".to_string(),
+                payload: vec![err],
+            },
+            EnumVariant {
+                name: "Ok".to_string(),
+                payload: vec![ok],
+            },
+        ])
+    }
+
     /// Every variant of this enum, as a value.
     ///
     /// The lock a coverage test needs, and it has two halves that only work
@@ -989,8 +1018,6 @@ impl Type {
         "Str",
         "Unit",
         "Named",
-        "Option",
-        "Result",
         "Record",
         "Omit",
         "Pick",
@@ -1030,8 +1057,6 @@ impl Type {
             Type::Str => "Str",
             Type::Unit => "Unit",
             Type::Named(_) => "Named",
-            Type::Option(_) => "Option",
-            Type::Result(..) => "Result",
             Type::Record(_) => "Record",
             Type::Omit(..) => "Omit",
             Type::Pick(..) => "Pick",
@@ -1078,8 +1103,6 @@ impl std::fmt::Display for Type {
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
             Type::Named(n) | Type::Param(n) => write!(f, "{n}"),
-            Type::Option(t) => write!(f, "Option<{t}>"),
-            Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, fld) in fields.iter().enumerate() {

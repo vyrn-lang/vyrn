@@ -804,7 +804,14 @@ fn mangle(ty: &Type) -> Option<String> {
     Some(match ty {
         Type::Named(n) => n.clone(),
         Type::Array(t) => format!("Arr_{}", mangle(t)?),
-        Type::Option(t) => format!("Opt_{}", mangle(t)?),
+        // The built-in `Option`, whichever way it is spelled (RFC-0126 §8.15).
+        // The reflection channel's other end reads the same payload, in
+        // `encode`, and the two agree because they walk one type through one
+        // reader.
+        _ if vyrn_frontend::types::option_payload(ty).is_some() => format!(
+            "Opt_{}",
+            mangle(vyrn_frontend::types::option_payload(ty).expect("an Option payload"))?
+        ),
         Type::Str => "Str".into(),
         Type::Int => "Int".into(),
         Type::Bool => "Bool".into(),

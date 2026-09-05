@@ -184,7 +184,7 @@ impl Declared {
                 .map(|n| (n.to_string(), None))
                 .collect();
         for d in decls.values() {
-            if let Type::Enum(vs) = &d.base {
+            if let Some(vs) = crate::types::declared_variants(&d.base) {
                 for v in vs {
                     // A generic enum's bare name is an incomplete type, and a
                     // variant two enums share names neither — both answer
@@ -428,7 +428,7 @@ impl Declared {
                     }
                     args.first()
                         .and_then(|a| self.type_of(vars, a))
-                        .map(|t| Type::Option(Box::new(t)))
+                        .map(|t| Type::option(t))
                 })
                 .or_else(|| {
                     self.variants
@@ -538,9 +538,7 @@ impl Declared {
             // `if let` scrutinee, and the release then read the sum's TAG word as
             // a String pointer and freed it — an access violation on the first
             // line of the program.
-            Expr::TryConstruct { name, .. } => {
-                Some(Type::Option(Box::new(Type::Named(name.clone()))))
-            }
+            Expr::TryConstruct { name, .. } => Some(Type::option(Type::Named(name.clone()))),
             Expr::Spawn { name, .. } => self
                 .rets
                 .get(name)

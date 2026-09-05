@@ -1091,7 +1091,7 @@ pub(crate) const CODE_IMPORTS: &[(&str, &str)] = &[
 fn stream_step_sig(elem: &Type) -> Type {
     Type::Fn(
         vec![Type::Int, Type::Int, Type::Bool],
-        Box::new(Type::Option(Box::new(elem.clone()))),
+        Box::new(Type::option(elem.clone())),
     )
 }
 
@@ -1896,7 +1896,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     // Enum variant -> (tag index, enum name), for construction.
     let mut variants: HashMap<String, (i64, String)> = HashMap::new();
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = vyrn_frontend::types::declared_variants(&t.base) {
             for (i, v) in vs.iter().enumerate() {
                 variants.insert(v.name.clone(), (i as i64, t.name.clone()));
             }
@@ -3165,13 +3165,13 @@ impl<'a> Gen<'a> {
         // position's spelling then would declare a binder at `void`.
         let solved = |g: &Self, t: &Type| !matches!(g.resolve(t), Type::Param(_));
         let r = self.resolve(&want);
-        let take = match &fallback {
-            Type::Option(_) => {
-                vyrn_frontend::types::option_payload(&r).is_some_and(|i| solved(self, i))
-            }
-            Type::Result(..) => vyrn_frontend::types::result_payloads(&r)
-                .is_some_and(|(a, b)| solved(self, a) && solved(self, b)),
-            _ => false,
+        let take = if vyrn_frontend::types::result_payloads(&fallback).is_some() {
+            vyrn_frontend::types::result_payloads(&r)
+                .is_some_and(|(a, b)| solved(self, a) && solved(self, b))
+        } else if vyrn_frontend::types::option_payload(&fallback).is_some() {
+            vyrn_frontend::types::option_payload(&r).is_some_and(|i| solved(self, i))
+        } else {
+            false
         };
         if take {
             want
@@ -4301,7 +4301,7 @@ impl<'a> Gen<'a> {
             }
             // Every sum, one walk: §8.1's variant list is what a built-in sum
             // and a declared enum both answer (RFC-0126 §8.11, M4a).
-            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+            Type::Enum(_) => {
                 let vs = self.sum_vs(ty).unwrap_or_default();
                 self.copy_sum(v, &vs)
             }
@@ -4510,7 +4510,7 @@ impl<'a> Gen<'a> {
                 Ok(())
             }
             // Every sum, one walk — the mirror of `deep_copy`'s own arm.
-            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+            Type::Enum(_) => {
                 let vs = self.sum_vs(ty).unwrap_or_default();
                 self.release_sum(v, &vs, true)
             }
@@ -6647,7 +6647,7 @@ impl<'a> Gen<'a> {
                     // expectation's when there is one. Without an expectation
                     // the checker has fixed nothing, and `Option<Int64>` is the
                     // one-slot shape it always was.
-                    let oty = self.built_sum_ty(Type::Option(Box::new(Type::Int)));
+                    let oty = self.built_sum_ty(Type::option(Type::Int));
                     return Ok((self.const_sum(&oty, 0), oty));
                 }
                 // A nullary enum variant, e.g. `Empty`.
@@ -7104,7 +7104,7 @@ impl<'a> Gen<'a> {
         // The predicate answers an `i1`; the tag is a slot-wide integer.
         let tag = self.fresh_tmp();
         self.emit(format!("{tag} = zext i1 {pred_i1} to i64"));
-        let oty = Type::Option(Box::new(Type::Named(name.to_string())));
+        let oty = Type::option(Type::Named(name.to_string()));
         let c = self.build_sum(&oty, &tag, &[word]);
         Ok((c, oty))
     }
@@ -7568,7 +7568,7 @@ impl<'a> Gen<'a> {
     /// `sslot` is the header's ADDRESS, because answering writes to it.
     fn emit_stream_next(&mut self, sslot: &str, elem: &Type) -> Result<(String, String), String> {
         let ell = self.llt(elem);
-        let optll = self.llt(&Type::Option(Box::new(elem.clone())));
+        let optll = self.llt(&Type::option(elem.clone()));
         let stage = self.fresh_alloca(&ell);
 
         let buf_l = self.fresh_label("nbuf");
@@ -7684,7 +7684,7 @@ impl<'a> Gen<'a> {
         self.emit_term(format!("br i1 {some}, label %{some_l}, label %{ended_l}"));
 
         self.emit_label(&some_l);
-        let oty = Type::Option(Box::new(elem.clone()));
+        let oty = Type::option(elem.clone());
         let nw = self.payload_words(elem);
         let words = self.sum_words(&oty, &o, 1, nw);
         let v = self.decode_payload(&words, elem);
@@ -8000,8 +8000,7 @@ impl<'a> Gen<'a> {
     ) -> Result<String, String> {
         match sr {
             Type::Enum(evs) => {
-                let arity = evs.iter().map(|v| v.payload.len()).max().unwrap_or(0);
-                let ell = enum_ll(arity);
+                let ell = enum_ll(self.enum_slots(evs));
                 let vname = match pattern {
                     Pattern::Variant(n, _) => n,
                     _ => return Err("non-variant pattern on an enum scrutinee".into()),
@@ -8014,14 +8013,6 @@ impl<'a> Gen<'a> {
                 self.emit(format!("{tag} = extractvalue {ell} {sv}, 0"));
                 let m = self.fresh_tmp();
                 self.emit(format!("{m} = icmp eq i64 {tag}, {idx}"));
-                Ok(m)
-            }
-            Type::Option(_) | Type::Result(..) => {
-                let tag = self.sum_tag(sr, sv);
-                // `Some`/`Ok` match tag 1; `None`/`Err` match tag 0.
-                let want = i32::from(pattern_is_one(pattern));
-                let m = self.fresh_tmp();
-                self.emit(format!("{m} = icmp eq i64 {tag}, {want}"));
                 Ok(m)
             }
             other => Err(format!(
@@ -8061,39 +8052,8 @@ impl<'a> Gen<'a> {
                 }
                 Ok(())
             }
-            // The tag the pattern names decides which half it binds, and
-            // `pattern_is_one` is the one place that reading lives.
-            Type::Option(inner) => {
-                if let (true, Some(bind)) = (pattern_is_one(pattern), pattern_binding(pattern)) {
-                    let pty = (**inner).clone();
-                    self.bind_or_payload(sv, sr, bind, &pty);
-                }
-                Ok(())
-            }
-            Type::Result(ok, err) => {
-                if let Some(bind) = pattern_binding(pattern) {
-                    let pty = if pattern_is_one(pattern) {
-                        (**ok).clone()
-                    } else {
-                        (**err).clone()
-                    };
-                    self.bind_or_payload(sv, sr, bind, &pty);
-                }
-                Ok(())
-            }
             _ => Ok(()),
         }
-    }
-
-    /// Decode an Option/Result payload out of `sv`'s slots into a fresh binder
-    /// (the `if let` counterpart of a `match` arm's binding).
-    fn bind_or_payload(&mut self, sv: &str, sty: &Type, bind: &str, pty: &Type) {
-        let nw = self.payload_words(pty);
-        let words = self.sum_words(sty, sv, 1, nw);
-        let v = self.decode_payload(&words, pty);
-        let ll = self.llt(pty);
-        let slot = self.declare(bind, pty);
-        self.emit(format!("store {ll} {v}, ptr {slot}"));
     }
 
     /// Lower `expr?`: on `None`/`Err` (tag 0) return the aggregate as the
@@ -9873,7 +9833,7 @@ impl<'a> Gen<'a> {
     fn emit_stream_closer(&mut self, elem: &Type, out: &mut String) -> Result<(), String> {
         let sig = self.normalize_sig(&stream_step_sig(elem));
         let disp = mangle_dispatch_sym(&sig);
-        let optll = self.llt(&Type::Option(Box::new(elem.clone())));
+        let optll = self.llt(&Type::option(elem.clone()));
         let sym = stream_close_sym(&self.resolve(elem));
         out.push_str(&format!("define void @{sym}(ptr %s) {{\n"));
         out.push_str("entry:\n");
@@ -11261,7 +11221,7 @@ impl<'a> Gen<'a> {
             self.emit_label(&none_l);
             self.emit_term(format!("br label %{end_l}"));
             self.emit_label(&ok_l);
-            let oty = Type::Option(Box::new(Type::Str));
+            let oty = Type::option(Type::Str);
             let sll = self.llt(&oty);
             let none_v = self.const_sum(&oty, 0);
             let w0 = self.fresh_tmp();
@@ -11383,7 +11343,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{msg} = call ptr @__vyrn_read_err(ptr {path}, i32 {stphi})"
             ));
-            let rty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+            let rty = Type::result(Type::Str, Type::Str);
             let sll = self.llt(&rty);
             let ew = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
@@ -11426,7 +11386,7 @@ impl<'a> Gen<'a> {
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
             self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
-            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let rty = Type::result(Type::Bool, Type::Str);
             let sll = self.llt(&rty);
             let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
@@ -11473,7 +11433,7 @@ impl<'a> Gen<'a> {
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
             self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
-            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let rty = Type::result(Type::Bool, Type::Str);
             let sll = self.llt(&rty);
             let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
@@ -11513,7 +11473,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{msg} = call ptr @__vyrn_rename_err(ptr {to}, i32 {st})"
             ));
-            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let rty = Type::result(Type::Bool, Type::Str);
             let sll = self.llt(&rty);
             let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
@@ -11545,7 +11505,7 @@ impl<'a> Gen<'a> {
             self.emit_label(&err_l);
             let msg = self.fresh_tmp();
             self.emit(format!("{msg} = call ptr @__vyrn_write_err(ptr {path})"));
-            let rty = Type::Result(Box::new(Type::Bool), Box::new(Type::Str));
+            let rty = Type::result(Type::Bool, Type::Str);
             let sll = self.llt(&rty);
             let ok_v = self.build_sum_const(&rty, 1, &["1"]);
             let ew = self.fresh_tmp();
@@ -11582,12 +11542,12 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{msg} = call ptr @__vyrn_read_err(ptr {path}, i32 1)"
             ));
-            let bty = Type::Result(
-                Box::new(Type::Array(Box::new(Type::IntN {
+            let bty = Type::result(
+                Type::Array(Box::new(Type::IntN {
                     bits: 8,
                     signed: false,
-                }))),
-                Box::new(Type::Str),
+                })),
+                Type::Str,
             );
             let sll = self.llt(&bty);
             let ew = self.fresh_tmp();
@@ -11689,7 +11649,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "call void @llvm.memcpy.p0.p0.i64(ptr {msg}, ptr {src}, i64 {mlen}, i1 false)"
             ));
-            let rty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+            let rty = Type::result(Type::Str, Type::Str);
             let sll = self.llt(&rty);
             let ew = self.fresh_tmp();
             self.emit(format!("{ew} = ptrtoint ptr {msg} to i64"));
@@ -11918,7 +11878,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{v} = phi i64 [ {val}, %{done_l} ], [ 0, %{fail_l} ]"
             ));
-            let o2 = self.build_sum(&Type::Option(Box::new(Type::Int)), &tag, &[v]);
+            let o2 = self.build_sum(&Type::option(Type::Int), &tag, &[v]);
             // Backpatch the loop phis' back-edge values (emitted before cont).
             for line in self.body.iter_mut() {
                 if line.contains("{PNEXT}") {
@@ -11928,7 +11888,7 @@ impl<'a> Gen<'a> {
                     *line = line.replace("{ACCN}", &accn);
                 }
             }
-            return Ok((o2, Type::Option(Box::new(Type::Int))));
+            return Ok((o2, Type::option(Type::Int)));
         }
 
         // `Some(x)` / `Ok(x)` / `Err(e)` — build a { i1 tag, i64 payload } value.
@@ -12753,7 +12713,7 @@ impl<'a> Gen<'a> {
                     let v = self.fresh_tmp();
                     self.emit(format!("{ep} = getelementptr {vll}, ptr {vals}, i64 {idx}"));
                     self.emit(format!("{v} = load {vll} , ptr {ep}"));
-                    let oty = Type::Option(Box::new(val.clone()));
+                    let oty = Type::option(val.clone());
                     let sll = self.llt(&oty);
                     let none_v = self.const_sum(&oty, 0);
                     let words = self.encode_payload(&v, &val);
@@ -12902,7 +12862,7 @@ impl<'a> Gen<'a> {
             self.emit(format!("{sp} = call ptr @__vyrn_stream_box(i64 {av})"));
             let (has, stage) = self.emit_stream_next(&sp, &elem)?;
             let ell = self.llt(&elem);
-            let oty = Type::Option(Box::new(elem.clone()));
+            let oty = Type::option(elem.clone());
             let optll = self.llt(&oty);
             let nv = self.const_sum(&oty, 0);
             let some_l = self.fresh_label("psome");
@@ -12964,7 +12924,7 @@ impl<'a> Gen<'a> {
                     "{lenp} = getelementptr {sa_ll}, ptr {slot}, i64 0, i32 0"
                 ));
                 self.emit(format!("store i64 {nl}, ptr {lenp}"));
-                let oty = Type::Option(Box::new(elem.clone()));
+                let oty = Type::option(elem.clone());
                 let sll = self.llt(&oty);
                 let none_v = self.const_sum(&oty, 0);
                 let words = self.encode_payload(&v, &elem);
@@ -13013,7 +12973,7 @@ impl<'a> Gen<'a> {
                 "{nh} = insertvalue {{ ptr, i64, i64 }} {hdr}, i64 {nl}, 1"
             ));
             self.emit(format!("store {{ ptr, i64, i64 }} {nh}, ptr {slot}"));
-            let oty = Type::Option(Box::new(elem.clone()));
+            let oty = Type::option(elem.clone());
             let sll = self.llt(&oty);
             let none_v = self.const_sum(&oty, 0);
             let words = self.encode_payload(&v, &elem);
@@ -13026,7 +12986,7 @@ impl<'a> Gen<'a> {
             self.emit(format!(
                 "{r} = phi {sll} [ {none_v}, %{none_l} ], [ {s2}, %{some_end} ]"
             ));
-            return Ok((r, Type::Option(Box::new(elem))));
+            return Ok((r, Type::option(elem)));
         }
         // `a.swapRemove(i)` (RFC-0011) — bounds-check `i`, load element `i`
         // (the return value), move the last element into slot `i`, decrement the
@@ -13481,7 +13441,7 @@ impl<'a> Gen<'a> {
             // The SHAPE is the expectation's when it names one — a `Result`'s
             // slot count is the wider of its two halves, and since M2 that is
             // not always this payload's (RFC-0126 §8.4).
-            let oty = self.built_sum_ty(Type::Option(Box::new(ty.clone())));
+            let oty = self.built_sum_ty(Type::option(ty.clone()));
             let words = self.encode_payload(&v, &ty);
             let c = self.build_sum(&oty, "1", &words);
             return Ok((c, oty));
@@ -13515,9 +13475,9 @@ impl<'a> Gen<'a> {
             let (v, ty) = r?;
             let (v, ty) = self.coerce_into_payload(v, ty, payload_expect.as_ref())?;
             let out = if name == "Ok" {
-                Type::Result(Box::new(ty.clone()), Box::new(Type::Int))
+                Type::result(ty.clone(), Type::Int)
             } else {
-                Type::Result(Box::new(Type::Int), Box::new(ty.clone()))
+                Type::result(Type::Int, ty.clone())
             };
             // The SHAPE is the expectation's when it names one — a `Result`'s
             // slot count is the wider of its two halves, and the placeholder
@@ -13540,14 +13500,13 @@ impl<'a> Gen<'a> {
             // as a header (the RFC-0026 corruption bug). A generic variant whose
             // payload is still an unresolved type parameter keeps the argument's
             // own type (the inline-monomorphized path).
-            let decl_payload: Vec<Type> = match self.types.get(&enum_name).map(|d| d.base.clone()) {
-                Some(Type::Enum(vs)) => vs
-                    .iter()
-                    .find(|v| v.name == name)
-                    .map(|v| v.payload.clone())
-                    .unwrap_or_default(),
-                _ => Vec::new(),
-            };
+            let decl_payload: Vec<Type> = self
+                .types
+                .get(&enum_name)
+                .and_then(|d| vyrn_frontend::types::declared_variants(&d.base))
+                .and_then(|vs| vs.iter().find(|v| v.name == name))
+                .map(|v| v.payload.clone())
+                .unwrap_or_default();
             // gen each payload, coercing to its declared type, boxing any wider
             // than a word.
             let mut payloads = Vec::new();
@@ -14116,13 +14075,6 @@ impl<'a> Gen<'a> {
         self.emit(format!("{cond} = call i1 @{sym}({})", args.join(", ")));
         Ok(cond)
     }
-}
-
-/// Whether a pattern matches the tag-1 variant (`Some`/`Ok`). Only used on the
-/// Option/Result `if let` path; every `match` goes through `gen_match_sum`.
-fn pattern_is_one(p: &Pattern) -> bool {
-    matches!(p, Pattern::Success(_))
-        || matches!(p, Pattern::Variant(v, _) if v == "Some" || v == "Ok")
 }
 
 /// The name a pattern binds its payload to, if any.
@@ -15309,8 +15261,16 @@ fn mangle_ty(t: &Type) -> String {
         Type::Str => "Str".into(),
         Type::Unit => "Unit".into(),
         Type::Named(n) => sanitize(n),
-        Type::Option(inner) => format!("Opt{}", mangle_ty(inner)),
-        Type::Result(a, b) => format!("Res{}{}", mangle_ty(a), mangle_ty(b)),
+        // The two built-in sums still name their payloads (RFC-0126 §8.15):
+        // two instantiations of one sum must not share a symbol, and so a body.
+        _ if vyrn_frontend::types::option_payload(t).is_some() => format!(
+            "Opt{}",
+            mangle_ty(vyrn_frontend::types::option_payload(t).expect("an Option payload"))
+        ),
+        _ if vyrn_frontend::types::result_payloads(t).is_some() => {
+            let (a, b) = vyrn_frontend::types::result_payloads(t).expect("Result payloads");
+            format!("Res{}{}", mangle_ty(a), mangle_ty(b))
+        }
         Type::Record(_) => "Rec".into(),
         Type::Enum(_) => "Enum".into(),
         Type::App(n, args) => {
@@ -15420,8 +15380,6 @@ pub enum Rung {
 /// key [`coerce_plan`] compares when it asks whether two sums are one sum.
 pub(crate) fn sum_variants(ty: &Type) -> Option<Vec<String>> {
     match ty {
-        Type::Option(_) => Some(vec!["None".into(), "Some".into()]),
-        Type::Result(..) => Some(vec!["Err".into(), "Ok".into()]),
         Type::Enum(vs) => Some(vs.iter().map(|v| v.name.clone()).collect()),
         _ => None,
     }
@@ -15430,23 +15388,16 @@ pub(crate) fn sum_variants(ty: &Type) -> Option<Vec<String>> {
 /// The VARIANTS of a sum, in tag order — RFC-0126 §8.1, and the one reading of
 /// a sum's shape that both compiled engines have.
 ///
-/// `Option<T>` is `| None | Some(T)` and `Result<T, E>` is `| Err(E) | Ok(T)`,
-/// which is the declaration each would carry if it had one. Everything that
-/// walks a sum — a release, a copy, a match — asks here instead of matching the
-/// spelling, so a built-in sum and a declared enum of the same shape emit the
-/// same instructions (§8.11's M4a). It is what makes M4b's `resolve` answering
-/// `Enum` cost no bytes: the two spellings already meet here.
+/// `Option<T>` IS `| None | Some(T)` and `Result<T, E>` IS `| Err(E) | Ok(T)`
+/// since §8.15's M5 deleted the two constructors, so this is `resolve` and a
+/// shape test. It stays a named reading because everything that walks a sum — a
+/// release, a copy, a match — asks it, and the question "is this a sum" is worth
+/// one name.
 pub(crate) fn sum_variants_of(
     ty: &Type,
     types: &HashMap<String, TypeDecl>,
 ) -> Option<Vec<EnumVariant>> {
-    let var = |name: &str, payload: Vec<Type>| EnumVariant {
-        name: name.to_string(),
-        payload,
-    };
     match vyrn_frontend::types::resolve(ty, types) {
-        Type::Option(t) => Some(vec![var("None", Vec::new()), var("Some", vec![*t])]),
-        Type::Result(ok, err) => Some(vec![var("Err", vec![*err]), var("Ok", vec![*ok])]),
         Type::Enum(vs) => Some(vs),
         _ => None,
     }
@@ -15591,10 +15542,6 @@ pub(crate) fn llt_of(ty: &Type, types: &HashMap<String, TypeDecl>) -> String {
         // enum's `i64` rather than the sums' old `i1`: it costs no bytes (the
         // first member padded to 8 either way) and it makes one shape serve both,
         // which is what M4 needs when `resolve` starts answering `Enum` here.
-        Type::Option(ref t) => enum_ll(payload_words_of(t, types)),
-        Type::Result(ref a, ref b) => {
-            enum_ll(payload_words_of(a, types).max(payload_words_of(b, types)))
-        }
         // A growable array is { ptr data, i64 len, i64 cap }.
         Type::Array(_) => "{ ptr, i64, i64 }".into(),
         // A `Stream<T>` (RFC-0075 M2b) is a tagged header over two producers,
@@ -15845,14 +15792,11 @@ mod tests {
             ("String", Type::Str),
             // Since RFC-0126 §8.4 the built-in sums print the enum rows: one
             // slot for a one-word payload, two when the widest is two words.
-            ("Enum1", Type::Option(Box::new(Type::Int))),
-            (
-                "Enum1",
-                Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
-            ),
+            ("Enum1", Type::option(Type::Int)),
+            ("Enum1", Type::result(Type::Int, Type::Str)),
             (
                 "Enum2",
-                Type::Option(Box::new(Type::Fn(Vec::new(), Box::new(Type::Int)))),
+                Type::option(Type::Fn(Vec::new(), Box::new(Type::Int))),
             ),
             ("Array", Type::Array(Box::new(Type::Str))),
             ("Map", Type::Map(Box::new(Type::Str), Box::new(Type::Int))),
@@ -15920,8 +15864,6 @@ mod tests {
             Type::Str,
             Type::Unit,
             Type::Named("Nowhere".into()),
-            Type::Option(b(Type::Int)),
-            Type::Result(b(Type::Int), b(Type::Str)),
             Type::Record(Vec::new()),
             Type::Omit(b(Type::Record(Vec::new())), vec!["f".into()]),
             Type::Pick(b(Type::Record(Vec::new())), vec!["f".into()]),
@@ -16129,12 +16071,10 @@ mod tests {
                     out.push(k);
                 }
             }
-            Type::Option(a)
-            | Type::Array(a)
-            | Type::ArrayN(a, _)
-            | Type::SmallArray(a, _)
-            | Type::Stream(a) => go(a, under, out),
-            Type::Result(a, b) | Type::Map(a, b) => {
+            Type::Array(a) | Type::ArrayN(a, _) | Type::SmallArray(a, _) | Type::Stream(a) => {
+                go(a, under, out)
+            }
+            Type::Map(a, b) => {
                 go(a, under, out);
                 go(b, under, out);
             }
@@ -18502,7 +18442,7 @@ mod tests {
         for t in base {
             let b = || Box::new(t.clone());
             out.extend([
-                Type::Option(b()),
+                Type::option(t.clone()),
                 Type::Array(b()),
                 Type::Stream(b()),
                 Type::Task(b()),
@@ -18520,7 +18460,7 @@ mod tests {
         for a in pairs {
             for c in pairs {
                 out.extend([
-                    Type::Result(Box::new(a.clone()), Box::new(c.clone())),
+                    Type::result(a.clone(), c.clone()),
                     Type::Map(Box::new(a.clone()), Box::new(c.clone())),
                     Type::App("P".into(), vec![a.clone(), c.clone()]),
                     Type::Fn(vec![a.clone(), c.clone()], Box::new(Type::Unit)),
@@ -18562,7 +18502,7 @@ mod tests {
         // universe shared a readable mangle, the rows below would pass on the
         // unfixed code and prove nothing.
         assert_eq!(
-            mangle_ty(&Type::Option(Box::new(Type::Int))),
+            mangle_ty(&Type::option(Type::Int)),
             mangle_ty(&Type::Named("OptInt64".into())),
             "the generator no longer covers a pair the readable mangle collapses"
         );

@@ -284,8 +284,7 @@ fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
                 collect_type_names(a, out);
             }
         }
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -297,7 +296,7 @@ fn collect_type_names(ty: &Type, out: &mut Vec<String>) {
         // when the value is computed, not which declarations an interface's
         // type closure has to carry (RFC-0031).
         | Type::Lazy(a) => collect_type_names(a, out),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             collect_type_names(a, out);
             collect_type_names(b, out);
         }
@@ -467,7 +466,11 @@ pub fn render_type_decl(t: &TypeDecl, types: &HashMap<String, TypeDecl>) -> Stri
                 out.push_str(&crate::checker::pred_summary(pred));
             }
         }
-        Type::Enum(variants) => {
+        // A DECLARED variant list. An alias of a built-in sum is a variant
+        // list too since RFC-0126 §8.15's M5, and it spells itself
+        // `Result<T, E>` through the arm below, which is the source text
+        // the module wrote and a generator re-emits.
+        Type::Enum(variants) if !crate::types::is_sum_alias(&t.base) => {
             let rendered: Vec<String> = variants
                 .iter()
                 .map(|v| {

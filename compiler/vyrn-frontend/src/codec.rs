@@ -734,8 +734,8 @@ fn codable(
         // Preserve a payload-enum's precise variant/payload offender; re-badge
         // any other structural rejection with the user's name.
         return r.map_err(|e| {
-            if matches!(&d.base, Type::Enum(vs) if vs.iter().any(|v| !v.payload.is_empty()))
-                || matches!(d.base, Type::Result(..))
+            if crate::types::declared_variants(&d.base)
+                .is_some_and(|vs| vs.iter().any(|v| !v.payload.is_empty()))
             {
                 e
             } else {
@@ -849,8 +849,6 @@ mod tests {
             Type::Str,
             Type::Unit,
             Type::Named("R".into()),
-            Type::Option(b(Type::Int)),
-            Type::Result(b(Type::Int), b(Type::Str)),
             Type::Record(vec![Field {
                 name: "a".into(),
                 ty: Type::Int,
@@ -963,7 +961,7 @@ mod tests {
         for t in &seeds {
             let b = || Box::new(t.clone());
             all.extend([
-                Type::Option(b()),
+                Type::option(t.clone()),
                 Type::Array(b()),
                 Type::ArrayN(b(), 3),
                 Type::Lazy(b()),
@@ -981,11 +979,8 @@ mod tests {
         let pairs: Vec<Type> = all[..12].to_vec();
         for a in &pairs {
             for c in &pairs {
-                all.push(Type::Result(Box::new(a.clone()), Box::new(c.clone())));
-                all.push(Type::Option(Box::new(Type::Result(
-                    Box::new(a.clone()),
-                    Box::new(c.clone()),
-                ))));
+                all.push(Type::result(a.clone(), c.clone()));
+                all.push(Type::option(Type::result(a.clone(), c.clone())));
             }
         }
         assert!(all.len() > 500, "coverage shrank to {}", all.len());
@@ -1059,13 +1054,13 @@ mod tests {
                 module: None,
                 doc: None,
                 type_params: Vec::new(),
-                base: Type::Option(Box::new(Type::Int)),
+                base: Type::option(Type::Int),
                 predicate: None,
                 line: 0,
             },
         );
-        let aliased = Type::Option(Box::new(Type::Named("MaybeInt".into())));
-        let bare = Type::Option(Box::new(Type::Option(Box::new(Type::Int))));
+        let aliased = Type::option(Type::Named("MaybeInt".into()));
+        let bare = Type::option(Type::option(Type::Int));
         for ty in [&aliased, &bare] {
             assert!(encodable(ty, &types).is_err(), "{ty} encodes");
             assert!(decodable(ty, &types).is_err(), "{ty} decodes");
@@ -1212,11 +1207,17 @@ mod tests {
 fn type_display(ty: &Type) -> String {
     match ty {
         Type::Named(n) => n.clone(),
-        Type::Result(..) => "Result".to_string(),
+        // The two built-in sums, read through their payloads (RFC-0126 §8.15):
+        // a `Result` names itself and an `Option` spells its payload the same
+        // way, whichever way the sum was built.
+        _ if crate::types::result_payloads(ty).is_some() => "Result".to_string(),
         Type::Task(_) => "Task".to_string(),
         Type::Logger => "Logger".to_string(),
         Type::ArrayN(inner, n) => format!("Array<{}, {}>", type_display(inner), n),
-        Type::Option(inner) => format!("Option<{}>", type_display(inner)),
+        _ if crate::types::option_payload(ty).is_some() => format!(
+            "Option<{}>",
+            type_display(crate::types::option_payload(ty).expect("an Option payload"))
+        ),
         Type::Unit => "Unit".to_string(),
         other => format!("{other}"),
     }

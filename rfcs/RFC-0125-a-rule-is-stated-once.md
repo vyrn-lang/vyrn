@@ -7780,8 +7780,8 @@ by one edit. The two rows that did not move are in the census above.
 | `vyrn-codegen/src/lib.rs` `Gen::coerce` | no | native | the IR for the rung the plan placed | 118 |
 | `vyrn-codegen/src/direct.rs` `Fn_::coerce` | no | wasm | the wasm for the rung the plan placed | 192 |
 | `vyrn-frontend/src/interp.rs` `Interp::coerce` | yes | interp | the scalar targets that need no walk | 19 |
-| `vyrn-frontend/src/interp.rs` `coerce_walk` | yes | interp | the rung, by target type and value shape | 112 |
-| `vyrn-frontend/src/interp.rs` `coercion_is_noop` | yes | interp | whether the walk would change the value | 86 |
+| `vyrn-frontend/src/interp.rs` `coerce_walk` | yes | interp | the rung, by target type and value shape | 114 |
+| `vyrn-frontend/src/interp.rs` `coercion_is_noop` | yes | interp | whether the walk would change the value | 92 |
 | `vyrn-frontend/src/interp.rs` `coercion_is_identity` | yes | interp | whether a target type can change any value at all | 35 |
 
 **Four statements of one rule became two**, and
@@ -7794,7 +7794,9 @@ memory.
 
 **The line counts, and what they do and do not show.** The rung ladder was 533
 code lines and is 532. (RFC-0126 §8.9 took it to 562: one rung more, stated
-once in the plan and written by each emitter.) The native emitter grew by 7 and the direct one shrank
+once in the plan and written by each emitter. §8.15 took it to 570: the
+interpreter's walk reads the two built-in sums through their payloads where it
+matched a constructor.) The native emitter grew by 7 and the direct one shrank
 by 8. That is the same measurement the `where-scalar` row already carried and
 the same warning: the column that counts CARRIERS moves when a rule moves, and
 the column that counts LINES moves when a shape moves. What each emitter lost
@@ -7898,8 +7900,8 @@ its record.
   both ends of its reflection channel matched a resolved sum's spelling, so 12 of
   25 generator examples silently fell back to the interpreter. Both read
   `option_payload` now. RFC-0126 §8.13.
-- **M5 — not taken (2026-09-05), and it is not the guard §8.6 named.** Deleting
-  the two constructors is compiler-checked, so the risk is not the 270 mentions:
+- **M5, first refused (2026-09-05), and not for the guard §8.6 named.**
+  Deleting the two constructors is compiler-checked, so the risk is not the 270 mentions:
   115 are constructions a rewrite hides behind `Type::option` / `Type::result`,
   and most of the 100 remaining errors are a dead arm the `Type::Enum` arm beside
   it already covers. What blocks it is that `type Maybe = Option<Int64>` and
@@ -7912,6 +7914,27 @@ its record.
   late defect: with the constructors gone, an arm that can no longer be taken
   does not compile, including in the crate the workspace cannot type-check.
   RFC-0126 §8.14.
+- **M5 — the two sums stop having a constructor (2026-09-05).** `Type::Option`
+  and `Type::Result` are gone from `ast::Type`: `Option<T>` IS `| None |
+  Some(T)` and `Result<T, E>` IS `| Err(E) | Ok(T)`, at every pass. Two commits,
+  because §8.14's blocker is a RULE and it has to be stated before the sites it
+  governs. `types::is_sum_alias` and `types::declared_variants` say that an
+  alias of a built-in sum declares no variants, asked at TWENTY readers of a
+  declaration's base — nineteen the census found and one it did not, which had a
+  shape of its own. Then the deletion: 123 constructions became `Type::option` /
+  `Type::result`, eighteen walks lost a dead arm the `Type::Enum` arm beside
+  them already covered, and eleven sites became a READER, because a spelling a
+  user wrote has to come back out of a pass that no longer stores it — the
+  protocol key, the symbol mangle, `schemaOf`'s base word, the codec's rejection
+  wording, the two JSON codecs' anonymous-enum refusal, the source a generator
+  re-emits, the hover and the inlay hint, and the three checker rules that stay
+  narrow because widening them needs a payer. `?` reads them IN FRONT of
+  `Fallible`, which is the whole ordering rule now that every sum is a variant
+  list. **2,478 mentions to 2,288, 35 constructors to 33, 105 code lines out.**
+  Zero bytes, measured against the branch point rather than the manifest:
+  `examples/graphql.vyrn`'s recorded hash drifted before this branch, and the
+  modules this step brackets are byte-identical as files. Parity 41 of 41,
+  residue green, `genwasm` 25 of 25. RFC-0126 §8.15.
 
 ### What each milestone is worth on its own
 

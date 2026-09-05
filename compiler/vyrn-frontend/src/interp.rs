@@ -2882,7 +2882,7 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
     let mut variants: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut variant_lead = [false; 256];
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             for v in vs {
                 variants.insert(v.name.as_str());
                 if let Some(b) = v.name.as_bytes().first() {
@@ -2937,9 +2937,9 @@ fn new_interp<'a>(program: &'a Program, prog_args: &[String]) -> Result<Interp<'
         variant_enum: program
             .type_decls
             .iter()
-            .filter_map(|d| match &d.base {
-                Type::Enum(vs) => Some(vs.iter().map(|v| (v.name.clone(), d.name.clone()))),
-                _ => None,
+            .filter_map(|d| {
+                crate::types::declared_variants(&d.base)
+                    .map(|vs| vs.iter().map(|v| (v.name.clone(), d.name.clone())))
             })
             .flatten()
             .collect(),
@@ -8259,10 +8259,16 @@ impl<'a> Interp<'a> {
                 }
                 Ok(Val::Record(map, name))
             }
-            (Type::Option(inner), Val::Option(Some(p))) => {
+            // The two built-in sums are a variant list in the AST since
+            // RFC-0126 §8.15's M5, and two runtime values of their own; the
+            // VALUE is what says which, and the payload readers say what it
+            // carries.
+            (ty, Val::Option(Some(p))) if crate::types::option_payload(ty).is_some() => {
+                let inner = crate::types::option_payload(ty).expect("an Option payload");
                 Ok(Val::Option(Some(Box::new(self.coerce(*p, inner)?))))
             }
-            (Type::Result(tok, terr), Val::Result(is_ok, p)) => {
+            (ty, Val::Result(is_ok, p)) if crate::types::result_payloads(ty).is_some() => {
+                let (tok, terr) = crate::types::result_payloads(ty).expect("Result payloads");
                 let inner = if is_ok { tok } else { terr };
                 Ok(Val::Result(is_ok, Box::new(self.coerce(*p, inner)?)))
             }
@@ -8495,8 +8501,14 @@ impl<'a> Interp<'a> {
                     ok
                 })
             }
-            (Type::Option(inner), Val::Option(Some(p))) => self.coercion_is_noop(inner, p, d),
-            (Type::Result(ok, err), Val::Result(is_ok, p)) => {
+            (ty, Val::Option(Some(p))) if crate::types::option_payload(ty).is_some() => self
+                .coercion_is_noop(
+                    crate::types::option_payload(ty).expect("an Option payload"),
+                    p,
+                    d,
+                ),
+            (ty, Val::Result(is_ok, p)) if crate::types::result_payloads(ty).is_some() => {
+                let (ok, err) = crate::types::result_payloads(ty).expect("Result payloads");
                 self.coercion_is_noop(if *is_ok { ok } else { err }, p, d)
             }
             (Type::Map(_, val), Val::Map(pairs)) => {
@@ -8569,14 +8581,18 @@ impl<'a> Interp<'a> {
                         && self.coercion_is_identity(&decl.base, d)
                 }
             },
-            Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
+            Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => {
                 self.coercion_is_identity(i, d)
-            }
-            Type::Result(ok, err) => {
-                self.coercion_is_identity(ok, d) && self.coercion_is_identity(err, d)
             }
             Type::Map(_, val) => self.coercion_is_identity(val, d),
             Type::Record(fields) => fields.iter().all(|f| self.coercion_is_identity(&f.ty, d)),
+            // Every sum, whichever way it is spelled (RFC-0126 §8.15). The two
+            // built-in ones are `Val::Option` and `Val::Result` and the walk
+            // above coerces their payload; a declared enum's value the walk does
+            // not touch at all, so its payloads answer for it too.
+            Type::Enum(vs) => vs
+                .iter()
+                .all(|v| v.payload.iter().all(|p| self.coercion_is_identity(p, d))),
             // `IntN` wraps, `Float32` rounds, `Fn` adopts a signature.
             _ => false,
         }
@@ -8628,7 +8644,7 @@ impl<'a> Interp<'a> {
             }
             Expr::Call { name, args, .. } => {
                 if name == "Some" {
-                    return Some(Type::Option(Box::new(self.type_of(args.first()?, scope)?)));
+                    return Some(Type::option(self.type_of(args.first()?, scope)?));
                 }
                 if name == crate::project::AT && args.len() == 2 {
                     let at = self.type_of(&args[0], scope)?;
@@ -8644,15 +8660,15 @@ impl<'a> Interp<'a> {
                 // encode needs; the other parameter is a placeholder (RFC-0024,
                 // mirroring codegen's `Ok`/`Err` typing).
                 if name == "Ok" {
-                    return Some(Type::Result(
-                        Box::new(self.type_of(args.first()?, scope)?),
-                        Box::new(Type::Unit),
+                    return Some(Type::result(
+                        self.type_of(args.first()?, scope)?,
+                        Type::Unit,
                     ));
                 }
                 if name == "Err" {
-                    return Some(Type::Result(
-                        Box::new(Type::Unit),
-                        Box::new(self.type_of(args.first()?, scope)?),
+                    return Some(Type::result(
+                        Type::Unit,
+                        self.type_of(args.first()?, scope)?,
                     ));
                 }
                 // An enum variant constructor (`Circle(2)`) resolves to its enum.
@@ -8661,9 +8677,7 @@ impl<'a> Interp<'a> {
                 }
                 self.funcs.get(name.as_str()).map(|f| f.ret.clone())
             }
-            Expr::TryConstruct { name, .. } => {
-                Some(Type::Option(Box::new(Type::Named(name.clone()))))
-            }
+            Expr::TryConstruct { name, .. } => Some(Type::option(Type::Named(name.clone()))),
             _ => None,
         }
     }
@@ -8672,7 +8686,7 @@ impl<'a> Interp<'a> {
     /// any — used by `toJson` to recover an enum constructor's static type.
     fn enum_of_variant(&self, variant: &str) -> Option<String> {
         for (name, decl) in self.type_map.iter() {
-            if let Type::Enum(vs) = &decl.base {
+            if let Some(vs) = crate::types::declared_variants(&decl.base) {
                 if vs.iter().any(|v| v.name == variant) {
                     return Some(name.clone());
                 }

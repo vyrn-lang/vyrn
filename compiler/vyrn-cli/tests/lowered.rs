@@ -507,13 +507,11 @@ fn deep(t: &Type, decls: &HashMap<String, TypeDecl>, depth: usize) -> Type {
     let t = resolve(t, decls);
     let d = |x: &Type| Box::new(deep(x, decls, depth + 1));
     match &t {
-        Type::Option(a) => Type::Option(d(a)),
         Type::Array(a) => Type::Array(d(a)),
         Type::Stream(a) => Type::Stream(d(a)),
         Type::Task(a) => Type::Task(d(a)),
         Type::ArrayN(a, n) => Type::ArrayN(d(a), *n),
         Type::SmallArray(a, n) => Type::SmallArray(d(a), *n),
-        Type::Result(a, b) => Type::Result(d(a), d(b)),
         Type::Map(a, b) => Type::Map(d(a), d(b)),
         // Since RFC-0126 §8.11's M4b `resolve` answers `Enum` for the two
         // built-in sums, so an alias whose payload is a name comes back with the
@@ -582,14 +580,12 @@ fn defaulted(a: &Type, b: &Type) -> bool {
             return true;
         }
         match (a, b) {
-            (Type::Option(x), Type::Option(y))
-            | (Type::Array(x), Type::Array(y))
+            (Type::Array(x), Type::Array(y))
             | (Type::Stream(x), Type::Stream(y))
             | (Type::Task(x), Type::Task(y)) => walk(x, y),
             (Type::ArrayN(x, _), Type::ArrayN(y, _))
             | (Type::SmallArray(x, _), Type::SmallArray(y, _)) => walk(x, y),
-            (Type::Result(x1, x2), Type::Result(y1, y2))
-            | (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),
+            (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),
             // The resolved form of every sum since RFC-0126 §8.11's M4b — an
             // `Option` and a `Result` reach here as variant lists, and the
             // defaulted half is a payload rather than a type argument.
@@ -1513,7 +1509,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "the rung, by target type and value shape",
             true,
             true,
-            112,
+            114,
         ),
         site(
             "vyrn-frontend/src/interp.rs",
@@ -1522,7 +1518,7 @@ fn coercion_census() -> Vec<CoercionSite> {
             "whether the walk would change the value",
             true,
             true,
-            86,
+            92,
         ),
         site(
             "vyrn-frontend/src/interp.rs",
@@ -1640,8 +1636,8 @@ fn the_coercion_census_is_what_the_rfc_records() {
         }
     }
     assert_eq!(
-        ladder, 562,
-        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 562"
+        ladder, 570,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 570"
     );
     // The separate statements of the rung rule, which is what the milestone
     // moves: an engine that ASKS another site's statement is not one. It was

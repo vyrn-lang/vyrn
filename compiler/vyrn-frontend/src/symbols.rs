@@ -1763,7 +1763,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             doc: t.doc.clone(),
             file: None,
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             // Variants carry no AST line; find the name token between this decl's
             // line and the next top-level declaration (or EOF).
             let until = lines
@@ -1930,7 +1930,7 @@ fn index_imported_symbols(
                     doc: t.doc.clone(),
                     file: Some(file.clone()),
                 });
-                if let Type::Enum(variants) = &t.base {
+                if let Some(variants) = crate::types::declared_variants(&t.base) {
                     for v in variants {
                         out.push(Symbol {
                             name: v.name.clone(),
@@ -2102,7 +2102,7 @@ fn namespace_members(
             doc: t.doc.clone(),
             file: file(target),
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             for v in variants {
                 out.push(Symbol {
                     name: v.name.clone(),
@@ -2892,7 +2892,10 @@ fn field_detail(f: &ast::Field, all: &[TypeDecl]) -> String {
 
 fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
     match &t.base {
-        Type::Enum(vs) => {
+        // A DECLARED variant list. An alias of a built-in sum spells itself
+        // `Option<T>` / `Result<T, E>` (RFC-0126 §8.15), which is what the
+        // module wrote.
+        Type::Enum(vs) if !crate::types::is_sum_alias(&t.base) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("type {} = {}", t.name, arms)
         }
@@ -2957,7 +2960,7 @@ pub fn type_to_string(ty: &Type) -> String {
     // One source of truth: the AST's `Display` impl (the user-facing type
     // spelling). Enums keep the richer per-variant arm rendering for hovers.
     match ty {
-        Type::Enum(vs) => {
+        Type::Enum(vs) if !crate::types::is_sum_alias(ty) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("{{ {} }}", arms)
         }
@@ -3836,8 +3839,7 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
             | Type::SmallArray(..)
             | Type::Map(..)
             | Type::Record(_)
-            | Type::Option(_)
-            | Type::Result(..)
+            | Type::Enum(_)
     ) {
         out.extend(by_name("copy"));
     }

@@ -1134,11 +1134,11 @@ fn has_of(e: &Expr, kids: &[usize], w: &Walk<'_, '_>) -> Option<Type> {
             }),
         ),
         // A sum constructor names one side, and the other is unconstrained.
-        Expr::Var { name, .. } if name == "None" => Type::Option(Box::new(UNCONSTRAINED)),
+        Expr::Var { name, .. } if name == "None" => Type::option(UNCONSTRAINED),
         Expr::Call { name, args, .. } if args.len() == 1 => match name.as_str() {
-            "Some" => Type::Option(Box::new(kid(0)?)),
-            "Ok" => Type::Result(Box::new(kid(0)?), Box::new(UNCONSTRAINED)),
-            "Err" => Type::Result(Box::new(UNCONSTRAINED), Box::new(kid(0)?)),
+            "Some" => Type::option(kid(0)?),
+            "Ok" => Type::result(kid(0)?, UNCONSTRAINED),
+            "Err" => Type::result(UNCONSTRAINED, kid(0)?),
             _ => return None,
         },
         _ => return None,
