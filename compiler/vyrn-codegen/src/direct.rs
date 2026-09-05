@@ -1477,6 +1477,14 @@ impl<'a> Cx<'a> {
         1 + payload[..i].iter().map(|p| self.words(p)).sum::<usize>()
     }
 
+    /// The variants of the sum `ty`, in TAG order — [`crate::sum_variants_of`],
+    /// under this emitter's substitution. `Gen`'s own answer, for [`Cx::ll`]'s
+    /// reason, and what makes a release and a copy one walk per sum rather than
+    /// one per SPELLING of a sum (RFC-0126 §8.11, M4a).
+    fn sum_vs(&self, ty: &Type) -> Option<Vec<EnumVariant>> {
+        crate::sum_variants_of(&self.sub(ty), &self.types)
+    }
+
     /// The PROGRAM's own body for a lambda literal at this address, or `None`
     /// for a literal the program does not hold — see [`Cx::lambdas`].
     fn lambda(&self, at: &Expr) -> Option<&'a LambdaBody> {
@@ -3513,31 +3521,13 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.rel_each(m, b, a, count, stride, &inner, line)
             }
-            Type::Option(inner) => {
-                let l = self.layout_of(ty, line)?;
-                let w = self.word2(&inner)?;
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.rel_word(m, b, a, l.fields[1], &inner, w, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Result(ok, err) => {
-                let l = self.layout_of(ty, line)?;
-                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.rel_word(m, b, a, l.fields[1], &ok, wo, line)?;
-                b.ins(&Instruction::Else);
-                self.rel_word(m, b, a, l.fields[1], &err, we, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Enum(vs) => {
+            // ANY sum: the payload slots of the live variant, and only the ones
+            // whose declared type owns something. One walk since RFC-0126 §8.11's
+            // M4a — the built-in two used to have arms of their own here, testing
+            // only tag 1 and writing a `Result` as one `if`/`else` where the enum
+            // writes one `if` per variant in tag order.
+            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+                let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
                     if !var.payload.iter().any(|p| self.owns_heap(p)) {
@@ -12689,34 +12679,12 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(count));
                 self.copy_each(b, a, count, stride, &inner, line)
             }
-            Type::Option(inner) => {
-                let l = self.layout_of(ty, line)?;
-                let w = self.word2(&inner)?;
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.copy_word(b, a, l.fields[1], &inner, w, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Result(ok, err) => {
-                let l = self.layout_of(ty, line)?;
-                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                tag_eq(b, a, 1);
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.copy_word(b, a, l.fields[1], &ok, wo, line)?;
-                b.ins(&Instruction::Else);
-                self.copy_word(b, a, l.fields[1], &err, we, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            // A user enum: the payload slots of the live variant, and only the
-            // ones whose declared type owns something. The tag is the variant's
-            // position, exactly as `match` reads it.
-            Type::Enum(vs) => {
+            // ANY sum: the payload slots of the live variant, and only the ones
+            // whose declared type owns something. The tag is the variant's
+            // position, exactly as `match` reads it. The mirror of `rel_at`'s own
+            // arm, and one walk for the same reason (RFC-0126 §8.11, M4a).
+            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+                let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
                     if !var.payload.iter().any(|p| self.owns_heap(p)) {

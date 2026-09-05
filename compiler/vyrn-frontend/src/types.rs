@@ -1496,6 +1496,70 @@ pub fn resolve(ty: &Type, types: &HashMap<String, TypeDecl>) -> Type {
     resolve_d(ty, types, 0)
 }
 
+/// RFC-0126 §8.4's `words(t)`: how many `i64` slots a payload of type `t` rides
+/// in inside a sum. Two for the shapes that ARE `{ i64, i64 }` — a stored `fn`,
+/// a `lazy`, a record of exactly two words — and one for everything else, where
+/// a value wider than its slots is boxed and the slot holds the pointer.
+///
+/// It is a STRUCTURAL test rather than `llt_of(t) == "{ i64, i64 }"`, which is
+/// how §8.4 writes it, and the difference is TERMINATION. `llt_of` of a sum asks
+/// this question about the sum's payloads, so asking `llt_of` back from here
+/// loops the moment a type reaches itself — `type R = { a: Int64, b: Option<R> }`
+/// is legal, and it overflowed the stack.
+///
+/// The two readings differ in one place, and it is the place §8.7 already
+/// measured: a payload that is itself a ONE-SLOT SUM prints `{ i64, i64 }` and
+/// rides in one slot, boxed, which is what both conventions did for a nested sum
+/// before. Nothing else prints that shape.
+///
+/// It lives here, and not in the emitter that reads it back as a shape, because
+/// [`payload_boxed`] below is the same fact and `own` asks that one.
+pub fn payload_words(ty: &Type, types: &HashMap<String, TypeDecl>) -> usize {
+    // A member that prints `i64`. Structural, so it cannot descend anywhere.
+    let word = |t: &Type| matches!(resolve(t, types), Type::Int | Type::IntN { bits: 64, .. });
+    match resolve(ty, types) {
+        // A stored `fn` value (RFC-0037), and the deferral that lowers to one.
+        Type::Fn(..) | Type::Lazy(_) => 2,
+        Type::Record(fs) if fs.len() == 2 && fs.iter().all(|f| word(&f.ty)) => 2,
+        _ => 1,
+    }
+}
+
+/// Whether a sum payload of type `t` travels BOXED — a pointer in the slot
+/// rather than the value in it — so the sum owns one heap block per live payload
+/// whatever the payload itself holds.
+///
+/// **One statement of the rule** (RFC-0126 §8.11, M4a). It was three, all in
+/// `own::owns_heap`: one for `Option`, two for `Result` and one for `Enum`, each
+/// naming the word class by hand as `Int`, `Bool`, `Str`, `Fn`. That list ran
+/// two rules together — a payload two words WIDE rides in its slots, and a
+/// one-word payload rides in the word when the word is what it is — and §8.9
+/// moved the first of them. `Fn` was in the list for the width and `Int` for the
+/// word; a `lazy` and a record of two `Int64`s are two words and were in
+/// neither, so `owns_heap` called a payload the emitter puts inline heap-owning.
+///
+/// `Gen::payload_boxed` and `Fn_::word2` are the same rule asked of the LLVM
+/// shape, which is theirs to know. The two answers differ at one type the
+/// emitter names and the language cannot — `Code` on the generator-host path,
+/// which lowers to `i64` and rides in the word. This answers "boxed" there,
+/// which is the conservative half: it registers a release row that frees
+/// nothing.
+pub fn payload_boxed(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
+    if payload_words(ty, types) == 2 {
+        return false;
+    }
+    !matches!(
+        resolve(ty, types),
+        Type::Int
+            | Type::IntN { bits: 64, .. }
+            | Type::Bool
+            | Type::Str
+            | Type::Unit
+            | Type::Never
+            | Type::Param(_)
+    )
+}
+
 /// The fields of `ty` if it (resolves to) a record; otherwise `None`.
 pub fn record_fields(ty: &Type, types: &HashMap<String, TypeDecl>) -> Option<Vec<Field>> {
     match resolve(ty, types) {

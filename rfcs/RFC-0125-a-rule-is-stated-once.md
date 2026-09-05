@@ -7066,6 +7066,15 @@ its record.
   `Err` become `Pattern::Variant`, and the SCRUTINEE says what the name means, as
   it always did for a declared enum. Four constructors, 89 mentions to 0, 19 code
   lines, zero bytes. RFC-0126 §8.10.
+- **M4a — one emission per engine (2026-09-05).** §8.9 made the encoding one;
+  this makes the WALK one. `sum_variants_of` answers any sum's variants in tag
+  order, and a release, a copy and a `match` ask it instead of matching the
+  spelling. Four functions and four arms, 224 code lines out of the two crates;
+  25 of 173 wasm hashes moved, and the manifest is regenerated in that commit and
+  no other; parity 41 of 41. It also closed the drift §8.11 recorded: the sum
+  payload's width rule and boxing rule are one statement each, in
+  `vyrn_frontend::types`, where `own` used to keep a hand-written word list.
+  RFC-0126 §8.12.
 - **M4 and M5 — not taken (2026-09-05).** They are one step, and it is not zero
   bytes. `resolve` answering `Enum` turns 97 of `vyrn-frontend`'s 1,186 unit
   tests red on its own line, and `own::release_kind` records a drop with the

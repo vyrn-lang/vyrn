@@ -931,62 +931,29 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             | Type::Map(..)
             | Type::Stream(_)
             | Type::Task(_) => true,
-            // A SUM whose payload is wider than one word travels BOXED in the
-            // boxing representation, and that box is heap whatever else the
-            // payload holds — `Option<Handle>` is three words behind one
-            // pointer (round twenty-nine, the same argument the recursive-name
-            // rule above already made: the representation's box IS heap). The
-            // word-class four (`Int`, `Bool`, `Str`, `Fn`) mirror the
-            // emitter's `payload_boxed`.
-            Type::Option(t) => {
-                !matches!(
-                    crate::types::resolve(&t, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || deeper(&t)
-            }
+            // A SUM whose payload travels BOXED owns that box whatever else the
+            // payload holds — `Option<Handle>` is three words behind one pointer
+            // (round twenty-nine, the same argument the recursive-name rule above
+            // already made: the representation's box IS heap).
+            //
+            // One question, asked once, of every sum — `types::payload_boxed`,
+            // which is the emitter's own rule. It was written out here four
+            // times, as a hand-kept word list, and RFC-0126 §8.9 moved the rule
+            // out from under it: a payload two words wide rides in its slots now
+            // and the list still called it boxed (§8.11 recorded the drift).
+            Type::Option(t) => crate::types::payload_boxed(&t, types) || deeper(&t),
             Type::ArrayN(t, _) | Type::Lazy(t) => deeper(&t),
             Type::Result(a, b) => {
-                !matches!(
-                    crate::types::resolve(&a, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || !matches!(
-                    crate::types::resolve(&b, types),
-                    Type::Int
-                        | Type::Bool
-                        | Type::Str
-                        | Type::Fn(..)
-                        | Type::Unit
-                        | Type::Never
-                        | Type::Param(_)
-                ) || deeper(&a)
+                crate::types::payload_boxed(&a, types)
+                    || crate::types::payload_boxed(&b, types)
+                    || deeper(&a)
                     || deeper(&b)
             }
             Type::Record(fs) => fs.iter().any(|f| deeper(&f.ty)),
             Type::Enum(vs) => vs.iter().any(|v| {
-                v.payload.iter().any(|t| {
-                    !matches!(
-                        crate::types::resolve(t, types),
-                        Type::Int
-                            | Type::Bool
-                            | Type::Str
-                            | Type::Fn(..)
-                            | Type::Unit
-                            | Type::Never
-                            | Type::Param(_)
-                    ) || deeper(t)
-                })
+                v.payload
+                    .iter()
+                    .any(|t| crate::types::payload_boxed(t, types) || deeper(t))
             }),
             // A stored function value (RFC-0037) is `{ tag, captures }` and the
             // capture block IS heap — one `malloc` per evaluation of the lambda,
