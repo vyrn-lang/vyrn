@@ -233,12 +233,6 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
         // checks without loading.
         floor::forget();
     }
-    // A refused program is not handed on, so the analysis the ownership stage
-    // offered for it may not be taken by anything (RFC-0125 §3 M3, the
-    // accumulation slice).
-    if !diags.is_empty() {
-        own::forget_offer();
-    }
     diags
 }
 

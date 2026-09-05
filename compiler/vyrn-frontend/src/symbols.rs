@@ -623,14 +623,19 @@ fn analyze_inner(
     // not compile is an answer about a body nobody will run. This is also what
     // keeps it off the hot path — an editor spends most of a keystroke burst on
     // a document that does not parse.
+    //
+    // `remapped` counts, and it did not. A type error at an origin-governed
+    // line is published against its `.vyx` and leaves `diags` EMPTY (RFC-0033),
+    // so this guard read a program the checker refused as a clean one and asked
+    // the ownership stage about it. That was harmless while nothing was
+    // installed under `own::analyze`; with the placer in the editor (RFC-0125
+    // §3 M3, the accumulation slice) it lowers a body whose nodes are typed
+    // `<type error>`, and the lowering's own lint refuses that.
+    let errored =
+        |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
+    let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
     let memory = match &checked {
-        Some(prog)
-            if !diags
-                .iter()
-                .any(|d| d.severity == crate::diagnostics::Severity::Error) =>
-        {
-            memory_notes(prog)
-        }
+        Some(prog) if clean => memory_notes(prog),
         _ => Vec::new(),
     };
 

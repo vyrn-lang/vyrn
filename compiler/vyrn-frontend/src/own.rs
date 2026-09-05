@@ -1649,70 +1649,23 @@ thread_local! {
 impl<'a> Memo<'a> {
     /// Hold one analysis of `program` until the guard is dropped.
     ///
-    /// The load has already made that analysis — the ownership stage judges
-    /// every program it checks (RFC-0125 §3 M3, the accumulation slice) — so
-    /// the guard ADOPTS it rather than making a second one, which is what keeps
-    /// the count at "one analysis per build". See [`offer`] for why the offered
-    /// answer is this program's.
+    /// The load makes an analysis of its own — the ownership stage judges every
+    /// program it checks (RFC-0125 §3 M3, the accumulation slice) — and this
+    /// guard does NOT adopt it. It cannot: a projection is inlined into its
+    /// caller's block with a per-inline tag (`project.rs`), so the analysis the
+    /// load made names bindings `@p26.h` and the lowering a tool runs next
+    /// names them `@p31.h`. A plan whose rows are keyed by those names then
+    /// places nothing, and `examples/genref.vyrn` leaked a block that the
+    /// residue ratchet had recorded clean. Adoption is worth about a third of
+    /// `vyrn check site/export.vyrn` and it needs the inline to be memoized
+    /// across the load and the command, which the project memo is not.
     pub fn open(program: &'a Program) -> Memo<'a> {
         MEMO_FOR.with(|p| p.set(program as *const Program as usize));
-        MEMO.with(|m| *m.borrow_mut() = take_offer(program));
+        MEMO.with(|m| *m.borrow_mut() = None);
         Memo {
             program: std::marker::PhantomData,
         }
     }
-}
-
-thread_local! {
-    /// The analysis the ownership stage made during the load, and the address
-    /// of the function table it was made for. See [`offer`].
-    static OFFERED: std::cell::RefCell<Option<(usize, Ownership)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// The key an offer is filed under: the program's function table, which is a
-/// heap buffer the load allocates and `load_warned` MOVES rather than
-/// reallocates, so it is the one thing about a program that is the same before
-/// and after it is handed to a tool.
-fn table_key(program: &Program) -> usize {
-    program.functions.as_ptr() as usize
-}
-
-/// Offer the analysis of `program` to whoever loaded it — RFC-0125 §3 M3, the
-/// accumulation slice.
-///
-/// The ownership stage runs the placer to ask the kernel, and that IS the
-/// analysis every engine wants next. Without the offer the tool analysed a
-/// second time (`vyrn check site/export.vyrn`, 8.5 s to 11.7 s), because
-/// [`Memo`] keys on the program's own address and `load_warned` moves the
-/// program out.
-///
-/// Two things make the offer this program's and no other's. It is filed at the
-/// END of the one stage every load runs, so the slot holds the LAST program
-/// checked, which is the root the load is about to return; a generator's own
-/// load files earlier and is overwritten. And it is filed under [`table_key`],
-/// which the taker checks, so a tool that loaded nothing takes nothing. The
-/// slot is emptied when it is taken and when the next load files over it.
-pub fn offer(program: &Program, o: Ownership) {
-    OFFERED.with(|s| *s.borrow_mut() = Some((table_key(program), o)));
-}
-
-/// Withdraw an offer — the program it was made for is not being handed on, so
-/// nothing may take it and its function table is about to be freed.
-pub fn forget_offer() {
-    OFFERED.with(|s| *s.borrow_mut() = None);
-}
-
-/// The offered analysis, if it was made for `program`.
-fn take_offer(program: &Program) -> Option<Ownership> {
-    OFFERED.with(|s| {
-        let mine = s
-            .borrow()
-            .as_ref()
-            .is_some_and(|(k, _)| *k == table_key(program));
-        mine.then(|| s.borrow_mut().take().map(|(_, o)| o))
-            .flatten()
-    })
 }
 
 impl Drop for Memo<'_> {

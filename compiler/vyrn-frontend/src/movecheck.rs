@@ -932,9 +932,10 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
         in_source_order(&mut diags);
         return diags;
     }
-    // Runs the placer, which builds and judges a core body for every instance
-    // — under the ownership memo this is the analysis the build already made.
-    crate::own::offer(program, crate::own::analyze(program));
+    // Runs the placer, which builds and judges a core body for every instance.
+    // The answer is not handed on: see `own::Memo::open` for why a plan made
+    // here does not fit the lowering a tool runs next.
+    let _ = crate::own::analyze(program);
     let mut said: HashSet<(Option<String>, String)> = HashSet::new();
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
@@ -969,6 +970,11 @@ pub fn comptime<T>(f: impl FnOnce() -> T) -> T {
     let out = f();
     COMPTIME.with(|c| c.set(was));
     out
+}
+
+/// Whether the program being worked on is a generator's own — see [`comptime`].
+pub fn in_comptime() -> bool {
+    COMPTIME.with(|c| c.get())
 }
 
 /// The binding a refusal is about: the root of the first path its message

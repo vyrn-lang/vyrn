@@ -2040,24 +2040,30 @@ fn run_generator(
         fp
     });
 
-    // 5b. Cache miss: run the generator in the mediated sandbox.
-    let out = crate::interp::generate(
-        &gen_program,
-        name,
-        &consts,
-        crate::interp::GenInputs {
-            resolver,
-            opts,
-            importer_dir,
-            allowed,
-            aliased,
-            fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
-            max_output: GEN_MAX_OUTPUT_OVERRIDE
-                .with(|c| c.get())
-                .unwrap_or(GEN_MAX_OUTPUT),
-            sources_fingerprint: fingerprint,
-        },
-    )
+    // 5b. Cache miss: run the generator in the mediated sandbox. Marked
+    //     comptime, like the check above: the interpreter asks for this
+    //     program's ownership plan, and the kernel and the lowering's own lint
+    //     are both about a program a tool holds (RFC-0125 §3 M3, the
+    //     accumulation slice).
+    let out = crate::movecheck::comptime(|| {
+        crate::interp::generate(
+            &gen_program,
+            name,
+            &consts,
+            crate::interp::GenInputs {
+                resolver,
+                opts,
+                importer_dir,
+                allowed,
+                aliased,
+                fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
+                max_output: GEN_MAX_OUTPUT_OVERRIDE
+                    .with(|c| c.get())
+                    .unwrap_or(GEN_MAX_OUTPUT),
+                sources_fingerprint: fingerprint,
+            },
+        )
+    })
     .map_err(|trap| err(format!("generator `{name}({arg_repr})` failed: {trap}")))?;
     bump_gen_runs();
 

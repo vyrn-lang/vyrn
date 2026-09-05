@@ -4121,6 +4121,200 @@ The whole-stderr snapshot over the 1,023 moved ONE program across the three
 commits, and it moved the right way: a `drop` of `r.xs` is refused by that name
 now instead of by `@borrow`.
 
+**The accumulation slice (2026-09-05): the two passes are one list, and two
+rules leave.** The corpus slice ended by naming the driver as the obstacle, and
+it named two halves of it. The kernel was asked only of a program the checker
+ACCEPTED, so a rule that left took its sentence out of a file that breaks
+another rule as well; and `vyrn-lsp` depended only on `vyrn-frontend`, so every
+rule that has left is silent in the editor. Both are closed. Rows 20 and 21
+leave, five wordings close, and two rows stay for reasons this record states.
+
+**One driver, and the three rules that make its list.**
+`vyrn_frontend::movecheck::refusals` is the only entry point a tool should use:
+`vyrn check`, `vyrn fix` and the editor call it, and it states every ownership
+refusal a program earns.
+
+1. The kernel judges every program the CORE can lower, not one the checker
+   accepted. The gate is the lowering's own — the program type-checks — which
+   is what the callers already had.
+2. The kernel speaks about a binding the checker was silent about, and nowhere
+   else. A kernel refusal about a binding the file already refuses is dropped,
+   and so is one at a line it already refuses. The subject is read out of the
+   sentence, which both passes write first and in backticks, rather than out of
+   a field that two lists would have to keep in step.
+3. The order is the source's, for the whole list at once.
+
+Rule 2 is what keeps the merge from ADDING, and it is measured: six programs
+gain a second sentence about a binding the checker had already refused, and
+every one is one mistake said twice. `r31`'s second `close(s)` is a use after a
+take AND a must-use discharged twice. So a binding gets ONE refusal from the
+two passes together, which is the conservative direction: the program is
+refused either way, and no rule that leaves can make a binding silent.
+
+The kernel reaches `vyrn-frontend` the way the placer and the arm rows do,
+through a slot `vyrn_lower::install` fills. `vyrn-cli`'s own copy is gone:
+`kernel_refuses`, `kernel_refusals`, `kernel_diagnostics`, `RefusalScope` and
+the five call sites.
+
+**The editor asks the same driver.** `vyrn-lsp` depends on `vyrn-lower` now —
+which depends on nothing but `vyrn-frontend`, so this adds no external crate
+and no toolchain — and calls `vyrn_lower::install()` at start-up, the same call
+`vyrn` makes. `lsp_e2e` pins row 12's program: the TEXT and the line, in the
+editor, against what `vyrn check` prints. Before the slice the editor said
+nothing at all about it.
+
+**What a keystroke costs, and the two things that were paying it twice.** One
+`didChange` to `publishDiagnostics` on `site/app/chart.vyrn`, median of three
+alternating runs of the same test binary against two servers: 136 ms before,
+1,547 ms with the kernel asked as the driver first wrote it, 459 ms as it
+stands. `bench.vyrn` 24 → 68, `guide.vyrn` 127 → 134, `docs.vyrn` 318 → 771.
+
+The first half was the loader. `refusals` was asked of every program the load
+runs on the way to the one a tool holds, and a generator IS such a program.
+`movecheck::comptime` marks that load and the kernel stands aside inside it,
+which is the semantics `vyrn-cli`'s old `RefusalScope` had — it cleared the
+thread-local at the point the command's program was linked, so a generator's
+refusals were always dropped. 117 ms of a keystroke in `site/app/docs.vyrn`,
+which re-runs two generators.
+
+The second half was the memo. THREE readers want the analysis of one program in
+the editor — the kernel's refusals, the floor's effect judgment and
+`memory_notes` — and the server opened no `own::Memo`, so each lowered the
+whole program and built a core body per instance. The memo the CLI opens around
+a command is opened around a keystroke, where it outlives all three rather than
+inside the block that asks first, because `Memo` clears the slot when it drops.
+`guide.vyrn` ends at 134 ms against 127 ms before: the third reader was already
+there and is now free.
+
+The rest is the kernel doing its work, and the split is measured: lowering the
+whole program is 35 ms of it and building and judging 882 core bodies is 434.
+The next slice that wants this cheaper should look at the per-instance build
+and not at the lowering.
+
+**Rows 20 and 21 leave.** A `drop` of what a take already took, and a `drop` of
+a borrow. The kernel says both in the checker's own words at the checker's own
+line, menu included. `Stmt::Drop` keeps one refusal, row 22's hole, which the
+kernel accepts. `VYRN_NO_KERNEL=1` and `VYRN_NO_PLACER=1` accept both programs.
+
+The whole standard error over the 1,023 moves ONE line, and it is
+`examples/mustuse_abandoned.vyrn` — the file the two rows waited on. That file
+keeps five of its six diagnostics. Row 21's sentence about `ops` stands where it
+stood, which is what the rows were blocked on. Row 20's about `b` is gone, and
+it is gone to rule 2 rather than to the deletion: the must-use walk already
+refuses `b` on line 59 — a `Txn` disposed twice — so the kernel's second
+sentence about `b` on line 61 is the same mistake said twice, and is dropped
+exactly as `r31`'s is. The two programs were always the same shape: a summary
+refusal at the binding, and a refusal at the second disposal. The checker
+printed both only because two of its own rules fired, and one has left.
+
+**Five wordings close, and one cannot.** The corpus slice priced four of row
+07's; four are closed, and so is row 19's.
+
+- **Where the value went, when the reader wrote a record literal.**
+  `Rhs::Make` is a list of values with no names on it, so the kernel said "a
+  literal" where the checker names the field. The bound name carries where each
+  part goes, because the core keeps no statement kinds.
+- **Where the value went, when the reader wrote a loop.** `for x in consume xs`
+  lowers its take to `let @tN = xs`, the shape a move into any binding has, so
+  the kernel said "a value". The temporary says it is the loop's.
+- **Which name a move quotes.** Both lines name the STORAGE that moved, and a
+  read of `d.a.byteLength` after `consume d.a` quoted the read on the second
+  line and dropped the `.copy()` menu with it. Two programs.
+- **How the taker took.** The kernel chose between rule 1's sentence and the
+  move's two lines by the SHAPE of the taker's words — anything ending `(..)`
+  was a declared `consume` parameter — which reads a builtin's sink as one. The
+  core already records how a taker takes, so the taker carries it. The one
+  builtin that is not a sink carries the other exception: a LINEAR value is
+  disposed, not stored, and the must-use walk owns the wording, which is
+  exactly the case `movecheck::sinks` answers `false` for.
+- **What a loop variable IS.** The kernel read it off the alias table — "read
+  out of `c.members[..]`" — where the checker says what the reader wrote. It is
+  not a `borrow_kind`: a kind refuses every take of the name, and making it one
+  refused `std/vyx.vyrn`'s `for s in kids` and twenty-two programs with it. It
+  is a fact about the name, consulted where a take is already refused.
+
+**Row 07 stays, for a wording no kernel can close.** `take(consume s)` and
+`take(s)` hand the same value to the same declared parameter, and the checker
+words them differently — the move's two lines for the first, rule 1's sentence
+for the second — because the `consume` prefix records a consumption with a
+`.copy()` menu and a bare name records one without. The keyword changes nothing
+about the program. Reproducing that split in the core carries an accident into
+the one place this milestone is making canonical, so the honest close is a
+decision about the checker's own wording. `examples/a1_afterjoin.vyrn` is the
+one program left.
+
+**Row 19 stays, and the reason is about the INSTRUMENT.** Its own program and
+the loop-variable program its unit test writes both read `the same` now. It
+still may not leave: with the row cut out, `r19_read_parameter_wrapped_in_the_-
+result.vyrn` is refused by the checker's RETURN rule instead, which words it
+"may not be put into the value this function returns". The licence is measured
+by standing the WHOLE checker aside, so it cannot see a rule that shadows
+another rule of the same pass. The unit of the licence is a rule; the unit of
+the instrument is a pass; and a site behind a site needs both to go at once.
+
+**The licence, after.** 447 identical / 44 text / 27 accepted over the 1,023,
+against 437 / 57 / 27 at the branch point.
+
+**Three defects the slice found, each in a place nothing had looked.**
+
+1. **A plan does not survive the load that made it.** The driver first handed
+   the load's ownership analysis to whoever loaded the program, to keep the
+   count at one analysis per build; its own note measured `vyrn check
+   site/export.vyrn` at 8.5 s with it and 11.7 s without. It is not sound:
+   caller's block with a per-inline tag (`project.rs`), so the analysis the
+   load made names bindings `@p26.h` and the lowering a tool runs next names
+   them `@p31.h`. A plan whose rows are keyed by those names places nothing,
+   and `examples/genref.vyrn` leaked a block the residue ratchet had recorded
+   clean. The offer is gone. Reusing it needs the inline memoized across the
+   load and the command, which the project memo is not.
+2. **The lowering's lint was about the host.** It re-derives the types with a
+   fresh check, and a COMPTIME program is not the program that check admitted:
+   a generator is re-loaded as its own root and keeps helpers that use `lex`,
+   `render` and `Token`, which an ordinary check refuses as "only available
+   during generation" and records as `<type error>`. Whether the lint sees one
+   depends on which functions the instantiation reaches — the same generator
+   reaches 448 through `vyrn check` and 458 through the editor. It is scoped to
+   a program a tool holds.
+3. **A remapped diagnostic left the editor's guard reading a clean program.**
+   `memory_notes` runs only where the checks found nothing, and it counted
+   `diags` alone. A type error at an origin-governed line is published against
+   its `.vyx` and leaves `diags` empty (RFC-0033), so the guard asked the
+   ownership stage about a program the checker refused. Harmless while nothing
+   was installed under `own::analyze`; with the placer in the editor it lowered
+   a body typed `<type error>`, and it was 44 of `lsp_e2e`'s tests.
+
+**The structural census.** 916 / 723 / 2,375 / 73 / 3,768 / 2,092 over 9,947
+lines, against 916 / 723 / 2,375 / 73 / 3,671 / 2,092 over 9,850 at the branch
+point. `movecheck.rs` GREW: the two rules that left are 31 lines and the driver
+is 128, and both live inside `fn stmt` and `check_accum`'s section, which the
+census counts as shared machinery. The census's unit is a top-level item, so a
+rule deleted from inside one does not show in "a rule only the checker gives" —
+worth knowing before the next slice reads the column as a scoreboard.
+
+**Gates.** In §1.4's order, one at a time, on a machine carrying other
+worktrees' gates and with `TMP` set outside the checkout: `cargo fmt --all
+--check` and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests, clean;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` with no filter,
+550 passed and 74 ignored, no failure — the `vyx` origin row the corpus slice
+recorded red is green since `f38bb318`; the `kernel`, `coretables`, `typed` and
+`effects` suites with `--ignored` (1, 1, 1 and 2, at 35 s, 35 s, 94 s and
+98 s); `fixtures` with `--ignored`, the whole corpus against its recorded
+output including the one re-recorded file, 32 s; `vyrn-frontend`, 1,246; the
+workspace less `vyrn-cli` with `--skip _natively`, 1,422; `vyrn-lsp`'s own
+manifest, 100 and 5 ignored, which is where `lsp_e2e` runs; `memory` with
+`--test-threads=1`, 10; parity in release with `--ignored`, 41 of 41 in 383 s;
+the residue ratchet, 184 s; `VYRN_WASM_MANIFEST=check` on `wasmhash`, green, so
+no emitted byte moved; the cross-engine generator test with a fresh
+`VYRN_GEN_CACHE_DIR` and `--features wasm-gen`; `testsweep` with `--ignored`,
+37 s; `vyrn doc --std -o ../docs/api --verify`, 41 files up to date; and the
+site — `vyrn run site/export.vyrn out` writes its 82 routes and 14 assets, and
+`vyrn test` is green over `export.vyrn` (35 blocks) and `site/app` (154).
+
+One blessed snapshot moved and it is `projection.lowered`, whose inline tags
+renumber because the load runs one analysis more than it did. The whole-stderr
+snapshot over the 1,023 moved ONE line across the four commits, and it is the
+one this record names.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

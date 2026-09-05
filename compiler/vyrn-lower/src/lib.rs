@@ -414,10 +414,23 @@ pub fn lower_with<'a>(
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });
+    // The lint re-derives the types with a fresh check, and a COMPTIME program
+    // is not the program that check admitted: a generator is re-loaded as its
+    // own root and keeps helpers that use `lex`, `render` and `Token`, which an
+    // ordinary check refuses as "only available during generation" and records
+    // as `<type error>`. Whether the lint sees one at all depends on which
+    // functions the instantiation reaches — the same generator reaches 448
+    // through `vyrn check` and 458 through the editor, which is what made this
+    // assertion fire in one host and not the other. It stays armed for every
+    // program a tool holds (RFC-0125 §3 M3, the accumulation slice).
     debug_assert!(
-        lint(&lowered).is_empty(),
-        "the lowered form failed its own lint:\n  {}",
-        lint(&lowered).join("\n  ")
+        vyrn_frontend::movecheck::in_comptime() || lint(&lowered).is_empty(),
+        "the lowered form failed its own lint:
+  {}",
+        lint(&lowered).join(
+            "
+  "
+        )
     );
     lowered
 }
