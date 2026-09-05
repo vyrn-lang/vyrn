@@ -1742,7 +1742,7 @@ enum Place {
 fn stream_step_sig(elem: &Type) -> Type {
     Type::Fn(
         vec![Type::Int, Type::Int, Type::Bool],
-        Box::new(Type::Option(Box::new(elem.clone()))),
+        Box::new(Type::option(elem.clone())),
     )
 }
 
@@ -3328,9 +3328,7 @@ impl<'p> Fn_<'_, 'p> {
             // `[N x T]`. Whether they go is `own`'s answer, asked rather than
             // re-derived: it carries the stop for a type that reaches itself,
             // whose walk has no bottom.
-            Type::Option(_) | Type::Result(..) | Type::Fn(..) if self.owns_heap(&t) => {
-                Some(Rel::Deep(t, Vec::new()))
-            }
+            Type::Fn(..) if self.owns_heap(&t) => Some(Rel::Deep(t, Vec::new())),
             Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)
                 if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_))) =>
             {
@@ -3532,7 +3530,7 @@ impl<'p> Fn_<'_, 'p> {
             // M4a — the built-in two used to have arms of their own here, testing
             // only tag 1 and writing a `Result` as one `if`/`else` where the enum
             // writes one `if` per variant in tag order.
-            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+            Type::Enum(_) => {
                 let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
@@ -6363,7 +6361,7 @@ impl<'p> Fn_<'_, 'p> {
                     signed: false,
                 },
                 "floatFromBits" => Type::Float,
-                "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
+                "stringFromBytes" => Type::result(Type::Str, Type::Str),
                 // RFC-0014/RFC-0044's I/O as a BRANCH's value rather than a
                 // statement's — `std/storage`'s `Ok(done) => renameFile(tmp, path)`
                 // is the shape, and nothing in the corpus had put one in an arm
@@ -6450,7 +6448,7 @@ impl<'p> Fn_<'_, 'p> {
                         },
                         // `m[k]` is an honest lookup, so it is an `Option` where
                         // an array index is the element (RFC-0028).
-                        Type::Map(_, v) if name != "@swapRemove" => Type::Option(v),
+                        Type::Map(_, v) if name != "@swapRemove" => Type::option(*v),
                         // A user container answers with its `place at` — the
                         // same row `a[i]` resolves through (RFC-0091 M3). The
                         // DECLARED type keys it, because an impl head names the
@@ -6539,7 +6537,7 @@ impl<'p> Fn_<'_, 'p> {
                 "@pop" if args.len() == 1 => {
                     let a = self.peek(&args[0], line)?;
                     match self.cx.resolve(&a) {
-                        Type::Array(i) | Type::SmallArray(i, _) => Type::Option(i),
+                        Type::Array(i) | Type::SmallArray(i, _) => Type::option(*i),
                         other => return unsupported(&format!("a branch popping `{other}`"), line),
                     }
                 }
@@ -6561,7 +6559,7 @@ impl<'p> Fn_<'_, 'p> {
                         None => t,
                     }
                 }
-                "parse" if args.len() == 1 => Type::Option(Box::new(Type::Int)),
+                "parse" if args.len() == 1 => Type::option(Type::Int),
                 // `blackBox(v)` (RFC-0055) is `v`, which is exactly how `call`
                 // lowers it, so a branch that yields one has its argument's type.
                 // Found by RFC-0125 §3 M5's census: without this row
@@ -6741,7 +6739,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             // `Age?(n)` in a branch (RFC-0003) — an `Option` of the named type,
             // the one type `try_construct` can produce.
-            Expr::TryConstruct { name, .. } => Type::Option(Box::new(Type::Named(name.clone()))),
+            Expr::TryConstruct { name, .. } => Type::option(Type::Named(name.clone())),
             // `spawn f(a)` in a branch (RFC-0025) is `f(a)`'s type in a `Task`.
             // Peeked through the call rather than off `sigs`, so a generic or
             // higher-order callee is solved by the rows that already solve it.
@@ -8153,7 +8151,7 @@ impl<'p> Fn_<'_, 'p> {
             // never a carrier of the two `String` rows — it called the runtime —
             // and now the runtime is not one either.
             "stringFromBytes" if args.len() == 1 => {
-                let ty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+                let ty = Type::result(Type::Str, Type::Str);
                 let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
                     return unsupported("`stringFromBytes` returning a non-aggregate", line);
                 };
@@ -8477,7 +8475,7 @@ impl<'p> Fn_<'_, 'p> {
             // `std/runtime` function returning the `Option`, so the destination
             // leads, as it does for every aggregate result (`wasm_sig`).
             "parse" if args.len() == 1 => {
-                let ty = Type::Option(Box::new(Type::Int));
+                let ty = Type::option(Type::Int);
                 let l = self.layout_of(&ty, line)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
@@ -10978,7 +10976,7 @@ impl<'p> Fn_<'_, 'p> {
             Some(i) => i.clone(),
             None => return unsupported("a `pullAt` with no expected Option type", line),
         };
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
@@ -11130,7 +11128,7 @@ impl<'p> Fn_<'_, 'p> {
         self.depth -= 1;
         b.ins(&Instruction::Else);
         self.depth += 1;
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
@@ -11253,7 +11251,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(at(sl.fields[1])));
         b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
@@ -12133,7 +12131,7 @@ impl<'p> Fn_<'_, 'p> {
         };
         let elem = *elem;
         let al = self.layout_of(&aty, line)?;
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let ol = self.layout_of(&opt, line)?;
         let out = b.alloc(ol.size, ol.align);
         // `None` first, then the `Some` arm overwrites the tag and the payload:
@@ -12724,7 +12722,7 @@ impl<'p> Fn_<'_, 'p> {
             // whose declared type owns something. The tag is the variant's
             // position, exactly as `match` reads it. The mirror of `rel_at`'s own
             // arm, and one walk for the same reason (RFC-0126 §8.11, M4a).
-            Type::Option(_) | Type::Result(..) | Type::Enum(_) => {
+            Type::Enum(_) => {
                 let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
@@ -13018,7 +13016,7 @@ impl<'p> Fn_<'_, 'p> {
             // `Ok`/`Err` cannot, because the other half is unknowable.
             _ if name == "Some" => {
                 let p = self.peek(arg, line)?;
-                return Ok(Some((Type::Option(Box::new(p.clone())), p)));
+                return Ok(Some((Type::option(p.clone()), p)));
             }
             _ => return Ok(None),
         };
@@ -13540,7 +13538,7 @@ impl<'p> Fn_<'_, 'p> {
         if args.len() != 1 {
             return unsupported(&format!("`{name}?` at this arity"), line);
         }
-        let ty = Type::Option(Box::new(Type::Named(name.to_string())));
+        let ty = Type::option(Type::Named(name.to_string()));
         let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
             return unsupported("a fallible construction of a non-aggregate Option", line);
         };
@@ -13994,7 +13992,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         // miss: NOW the key exists — str_from_bytes, whose Err is the trap.
-        let rty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+        let rty = Type::result(Type::Str, Type::Str);
         let rl = layout::of_ll(&self.cx.ll(&rty)).expect("the Result shape");
         let dest = b.alloc(rl.size, rl.align);
         b.slot(dest);
@@ -14503,7 +14501,7 @@ impl<'p> Fn_<'_, 'p> {
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
 
-        let oty = Type::Option(Box::new(val.clone()));
+        let oty = Type::option(val.clone());
         let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
             return unsupported("an `Option` that is not an aggregate", line);
         };
@@ -15001,7 +14999,7 @@ impl<'p> Fn_<'_, 'p> {
             // `Option<T>`: `None` on empty, else the last element with the header
             // shrunk. Never un-spills, exactly like the LLVM path.
             "@pop" => {
-                let oty = Type::Option(Box::new(inner.clone()));
+                let oty = Type::option(inner.clone());
                 let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
                     return unsupported("an `Option` that is not an aggregate", line);
                 };
@@ -16374,10 +16372,7 @@ const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
 /// cannot size a destination slot differently from the value written into it —
 /// M2l's rule, and the shape `io_builtin_ty` exists for on the other builtins.
 fn gen_list_dir_ty() -> Type {
-    Type::Result(
-        Box::new(Type::Array(Box::new(Type::Str))),
-        Box::new(Type::Str),
-    )
+    Type::result(Type::Array(Box::new(Type::Str)), Type::Str)
 }
 
 /// The receivers that have a `.length` or a `.byteLength`, in ONE list.
@@ -16403,10 +16398,10 @@ fn length_ty(field: &str, base: &Type) -> Option<Type> {
 }
 
 fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
-    let str_err = |ok| Type::Result(Box::new(ok), Box::new(Type::Str));
+    let str_err = |ok| Type::result(ok, Type::Str);
     Some(match (name, argc) {
         ("args", 0) => Type::Array(Box::new(Type::Str)),
-        ("readLine", 0) => Type::Option(Box::new(Type::Str)),
+        ("readLine", 0) => Type::option(Type::Str),
         ("readFile", 1) => str_err(Type::Str),
         ("readFileBytes", 1) => str_err(Type::Array(Box::new(Type::IntN {
             bits: 8,
@@ -16575,7 +16570,7 @@ mod tests {
             })
         );
         assert_eq!(
-            c.repr(&Type::Option(Box::new(Type::Int)), 0).unwrap().val(),
+            c.repr(&Type::option(Type::Int), 0).unwrap().val(),
             Some(ValType::I32)
         );
     }
@@ -16609,7 +16604,7 @@ mod tests {
         // every `T` but its element STRIDE is not: the substitution has to reach
         // inside the shape, not just past the outermost one.
         assert_eq!(c.ll(&Type::ArrayN(Box::new(t.clone()), 3)), "[3 x i64]");
-        assert_eq!(c.ll(&Type::Option(Box::new(t))), "{ i64, i64 }");
+        assert_eq!(c.ll(&Type::option(t)), "{ i64, i64 }");
     }
 
     /// A validated type has the SAME representation as its base, so a lowering

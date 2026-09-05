@@ -169,7 +169,7 @@ fn rows() -> Vec<Function> {
     use Type::{Bool, Float, Int, Str, Unit};
     let t = || Type::Param("T".to_string());
     let arr = |e: Type| Type::Array(Box::new(e));
-    let opt = |e: Type| Type::Option(Box::new(e));
+    let opt = |e: Type| Type::option(e);
     let stm = |e: Type| Type::Stream(Box::new(e));
     let u8s = || {
         arr(Type::IntN {
@@ -239,7 +239,7 @@ fn rows() -> Vec<Function> {
             "stringFromBytes",
             &[],
             &[("b", Read, u8s())],
-            Type::Result(Box::new(Str), Box::new(Str)),
+            Type::result(Str, Str),
             &[],
         ),
         row("floatBits", &[], &[("x", Read, Float)], Int, &[]),
@@ -504,21 +504,21 @@ fn rows() -> Vec<Function> {
             "readFile",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(Str), Box::new(Str)),
+            Type::result(Str, Str),
             &[],
         ),
         row(
             "readFileBytes",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(u8s()), Box::new(Str)),
+            Type::result(u8s(), Str),
             &[],
         ),
         row(
             "writeFileBytes",
             &[],
             &[("p", Read, Str), ("b", Read, u8s())],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row("writeStdout", &[], &[("b", Read, u8s())], Type::Unit, &[]),
@@ -526,21 +526,21 @@ fn rows() -> Vec<Function> {
             "writeFile",
             &[],
             &[("p", Read, Str), ("s", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row(
             "renameFile",
             &[],
             &[("from", Read, Str), ("to", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row(
             "fsyncFile",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         // ---- the generation-time results (RFC-0021, RFC-0071) ---------------
@@ -562,7 +562,7 @@ fn rows() -> Vec<Function> {
             "listDir",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            Type::result(arr(Str), Str),
             &[],
         ),
         // `listDirKinds` (RFC-0119): the same listing, each directory entry's
@@ -572,7 +572,7 @@ fn rows() -> Vec<Function> {
             "listDirKinds",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            Type::result(arr(Str), Str),
             &[],
         ),
         row(

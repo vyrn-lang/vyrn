@@ -75,8 +75,9 @@ fn unspellable_lazy(ty: &Type) -> bool {
     match ty {
         Type::Lazy(_) => true,
         Type::Record(fs) => fs.iter().any(|f| unspellable_lazy(&f.ty)),
-        Type::Option(t) | Type::Array(t) | Type::ArrayN(t, _) => unspellable_lazy(t),
-        Type::Result(a, b) | Type::Map(a, b) => unspellable_lazy(a) || unspellable_lazy(b),
+        Type::Array(t) | Type::ArrayN(t, _) => unspellable_lazy(t),
+        Type::Map(a, b) => unspellable_lazy(a) || unspellable_lazy(b),
+        Type::Enum(vs) => vs.iter().any(|v| v.payload.iter().any(unspellable_lazy)),
         _ => false,
     }
 }
@@ -202,7 +203,10 @@ impl Walk<'_> {
         //   as a NAMED record's field. A named record's encoder never asks for
         //   one (the record arm forces the field first), so this is the guard for
         //   a type no source can write.
-        if matches!(ty, Type::Enum(_)) {
+        // The two built-in sums are a `Type::Enum` since RFC-0126 §8.15's M5,
+        // and `Display` spells them `Option<T>` and `Result<T, E>` — a spelling
+        // the parser accepts, which is the whole test this guard is making.
+        if matches!(ty, Type::Enum(_)) && !crate::types::is_sum_alias(ty) {
             return Err("toJson: cannot encode an anonymous enum".to_string());
         }
         if unspellable_lazy(ty) {
@@ -452,7 +456,7 @@ mod tests {
             Type::Str,
             Type::Bool,
             Type::Array(Box::new(Type::Int)),
-            Type::Option(Box::new(Type::Str)),
+            Type::option(Type::Str),
             Type::Record(vec![
                 Field {
                     name: "n".into(),
@@ -464,7 +468,7 @@ mod tests {
                 },
             ]),
             Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
-            Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+            Type::result(Type::Int, Type::Str),
         ] {
             let fns = gen(&ty);
             assert!(!fns.is_empty(), "no encoder for {ty}");

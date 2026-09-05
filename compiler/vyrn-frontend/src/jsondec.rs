@@ -220,10 +220,12 @@ impl Walk<'_> {
 
     /// Ensure a decoder for `ty` exists and return its placeholder call name.
     fn decoder(&mut self, ty: &Type) -> Result<String, String> {
-        if matches!(ty, Type::Enum(_)) {
+        if matches!(ty, Type::Enum(_)) && !crate::types::is_sum_alias(ty) {
             // An anonymous enum has no source spelling (`Display` renders
             // `enum { A | B }`), so it cannot be a return type. Every enum a
-            // program declares arrives as `Type::Named`.
+            // program declares arrives as `Type::Named`. The two built-in sums
+            // are a `Type::Enum` too since RFC-0126 §8.15's M5, and `Display`
+            // spells them `Option<T>` and `Result<T, E>`.
             return Err("fromJson: cannot decode an anonymous enum".to_string());
         }
         let ph = dec_ph(ty);
@@ -860,7 +862,7 @@ mod tests {
             Type::Bool,
             Type::Float,
             Type::Array(Box::new(Type::Int)),
-            Type::Option(Box::new(Type::Str)),
+            Type::option(Type::Str),
             Type::Record(vec![
                 Field {
                     name: "n".into(),
@@ -868,11 +870,11 @@ mod tests {
                 },
                 Field {
                     name: "s".into(),
-                    ty: Type::Option(Box::new(Type::Str)),
+                    ty: Type::option(Type::Str),
                 },
             ]),
             Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
-            Type::Result(Box::new(Type::Int), Box::new(Type::Str)),
+            Type::result(Type::Int, Type::Str),
         ] {
             let fns = gen(&ty);
             assert!(!fns.is_empty(), "no decoder for {ty}");

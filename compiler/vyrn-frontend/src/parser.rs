@@ -37,8 +37,7 @@ fn mark_member_type_params(ty: &mut Type) {
                 mark_member_type_params(a);
             }
         }
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -46,7 +45,7 @@ fn mark_member_type_params(ty: &mut Type) {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => mark_member_type_params(a),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             mark_member_type_params(a);
             mark_member_type_params(b);
         }
@@ -425,31 +424,31 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
             Field {
                 name: "min".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "max".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "multipleOf".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "minLength".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "maxLength".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
+                ty: Type::option(Type::Int),
             },
             Field {
                 name: "pattern".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
         ]),
         predicate: None,
@@ -692,7 +691,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
         ]),
         predicate: None,
@@ -715,7 +714,7 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
             },
             Field {
                 name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
+                ty: Type::option(Type::Str),
             },
             Field {
                 name: "open".to_string(),
@@ -3349,7 +3348,7 @@ impl Parser {
                 self.eat(&Tok::Lt)?;
                 let inner = self.type_()?;
                 self.eat(&Tok::Gt)?;
-                Type::Option(Box::new(inner))
+                Type::option(inner)
             }
             "Result" => {
                 self.eat(&Tok::Lt)?;
@@ -3357,7 +3356,7 @@ impl Parser {
                 self.eat(&Tok::Comma)?;
                 let err = self.type_()?;
                 self.eat(&Tok::Gt)?;
-                Type::Result(Box::new(ok), Box::new(err))
+                Type::result(ok, err)
             }
             // Compile-time transformers (RFC-0002 §7).
             "Omit" | "Pick" => {

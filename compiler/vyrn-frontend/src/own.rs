@@ -596,9 +596,8 @@ impl Owned {
             | Type::ArrayN(t, _)
             | Type::SmallArray(t, _)
             | Type::Stream(t)
-            | Type::Option(t)
             | Type::Partial(t) => self.reaches_declared_in(&t, seen),
-            Type::Result(a, b) | Type::Merge(a, b) => {
+            Type::Merge(a, b) => {
                 self.reaches_declared_in(&a, seen) || self.reaches_declared_in(&b, seen)
             }
             Type::Map(k, v) => {
@@ -792,12 +791,6 @@ impl Owned {
                     .then(|| DropKind::Deep(t))
             }
             Type::Lazy(_) => None,
-            // The surface spellings of the two built-in sums, which `resolve`
-            // no longer answers (RFC-0126 §8.11 M4b) but which a caller can still
-            // hand over unresolved. They take the enum's row, because they are it.
-            t @ (Type::Option(_) | Type::Result(..)) => (self.unbounded(ty).is_none()
-                && owns_heap(&t, &self.types))
-            .then(|| DropKind::Deep(t)),
             // ---- shapes that are not a runtime value ------------------------
             // A type operator survives only until `resolve` reaches its base, a
             // `Param` is erased by monomorphization, and an unresolved `Named`
@@ -866,14 +859,13 @@ fn self_referring_past(
         }
         let mut deeper = |t: &Type| go(t, types, stops, seen);
         match ty {
-            Type::Option(t)
-            | Type::Array(t)
+            Type::Array(t)
             | Type::ArrayN(t, _)
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
             | Type::Task(t)
             | Type::Stream(t) => deeper(t),
-            Type::Result(a, b) | Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
+            Type::Map(a, b) => deeper(a).or_else(|| deeper(b)),
             Type::Record(fs) => fs.iter().find_map(|f| go(&f.ty, types, stops, seen)),
             Type::Enum(vs) => vs
                 .iter()
@@ -4655,10 +4647,7 @@ pub(crate) mod tests {
             Some(Linear::Declared("Txn".into()))
         );
         assert_eq!(
-            owned.linear_kind(&Type::Option(Box::new(Type::Map(
-                Box::new(Type::Str),
-                Box::new(txn)
-            )))),
+            owned.linear_kind(&Type::option(Type::Map(Box::new(Type::Str), Box::new(txn)))),
             Some(Linear::Declared("Txn".into()))
         );
         assert_eq!(

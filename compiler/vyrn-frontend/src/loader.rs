@@ -3239,8 +3239,7 @@ impl NsResolver<'_> {
                     self.rewrite_type(a);
                 }
             }
-            Type::Option(a)
-            | Type::Array(a)
+            Type::Array(a)
             | Type::Task(a)
             | Type::Stream(a)
             | Type::Partial(a)
@@ -3248,7 +3247,7 @@ impl NsResolver<'_> {
             | Type::SmallArray(a, _)
             | Type::Omit(a, _)
             | Type::Pick(a, _) => self.rewrite_type(a),
-            Type::Result(a, b) | Type::Merge(a, b) => {
+            Type::Merge(a, b) => {
                 self.rewrite_type(a);
                 self.rewrite_type(b);
             }
@@ -4490,14 +4489,13 @@ fn type_names(ty: &Type) -> Vec<String> {
                     walk(a, out);
                 }
             }
-            Type::Option(a)
-            | Type::Array(a)
+            Type::Array(a)
             | Type::Task(a)
             | Type::Stream(a)
             | Type::Partial(a)
             | Type::ArrayN(a, _)
             | Type::SmallArray(a, _) => walk(a, out),
-            Type::Result(a, b) | Type::Merge(a, b) => {
+            Type::Merge(a, b) => {
                 walk(a, out);
                 walk(b, out);
             }
@@ -4581,8 +4579,7 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
                 rewrite_type(a, map);
             }
         }
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -4590,7 +4587,7 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => rewrite_type(a, map),
-        Type::Result(a, b) | Type::Merge(a, b) => {
+        Type::Merge(a, b) => {
             rewrite_type(a, map);
             rewrite_type(b, map);
         }

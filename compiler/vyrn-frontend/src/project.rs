@@ -566,7 +566,7 @@ pub struct OptionalProjection {
 /// result is an `Option<T>`, where the plain kind names the place's type
 /// bare. The checker enforces the body shape this classification implies.
 pub fn is_optional(f: &Function) -> bool {
-    matches!(f.ret, crate::ast::Type::Option(_))
+    crate::types::option_payload(&f.ret).is_some()
 }
 
 /// [`inline`] for an optional projection: split the body into its four
