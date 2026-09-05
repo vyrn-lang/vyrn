@@ -162,9 +162,12 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
         "the profile changed the program's own output"
     );
     let table = String::from_utf8_lossy(&profiled.stderr).replace("\r\n", "\n");
-    assert!(table.contains("function"), "no table on stderr:\n{table}");
-    assert!(table.contains("work"), "`work` is missing:\n{table}");
-    assert!(table.contains("main"), "`main` is missing:\n{table}");
+    // The rows are the phases of the compile and the run, and the count is the
+    // guest's operations (RFC-0125 §3 M5, the fifth slice: the per-function
+    // table was the tree-walker's, and it was replaced rather than ported).
+    assert!(table.contains("phase"), "no table on stderr:\n{table}");
+    assert!(table.contains("compile"), "`compile` is missing:\n{table}");
+    assert!(table.contains("run"), "`run` is missing:\n{table}");
     assert!(
         String::from_utf8_lossy(&plain.stderr).trim().is_empty(),
         "an unprofiled run printed a table"

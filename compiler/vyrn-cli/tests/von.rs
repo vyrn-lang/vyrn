@@ -51,8 +51,12 @@ fn combined(out: &std::process::Output) -> String {
 
 #[test]
 fn std_von_unit_tests_run_green() {
+    // `std/von`'s own `test` blocks call its `gen fn`s, which no compiling
+    // route lowers (`tests/std_suite.rs`'s `GEN_TESTED`); the tree-walker is the
+    // one engine that runs a generator as ordinary code.
     let out = vyrn()
         .arg("test")
+        .args(["--engine", "interp"])
         .arg(repo_file("std/von.vyrn"))
         .output()
         .expect("vyrn test");

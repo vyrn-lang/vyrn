@@ -1,14 +1,24 @@
-//! Corpus parity harness: every example must behave byte-identically under the
-//! interpreter (`vyrn run`, the reference semantics), the native binary
-//! (`vyrn build` + execute) and wasm (`vyrn build --target wasm` under
-//! `wasmtime`). Compares stdout, stderr, and exit code.
+//! Corpus parity harness: every example must behave byte-identically on the two
+//! COMPILING routes — the native binary (`vyrn build` + execute, the textual
+//! backend through clang) and wasm (`vyrn build --target wasm`, the direct
+//! backend, under `wasmtime`). Compares stdout, stderr, and exit code.
 //!
-//! Ignored by default (needs `clang` for the native column and builds every
-//! example — ~a minute):
+//! It was three columns with the interpreter first, as the reference semantics,
+//! until RFC-0125 §3 M5's twelfth slice. The tree-walker is the thing M5
+//! deletes, so a gate that reads it is a gate that has to be rewritten on the
+//! day it goes; it is rewritten here instead, while both answers can still be
+//! compared. What is lost is a THIRD independently written implementation. What
+//! replaces it is not this file: `tests/fixtures.rs` compares the compiled
+//! route with a recorded file on four platforms, and `tests/wasmhash.rs` says
+//! the module's bytes are the same on all four. This file holds the one thing
+//! neither of those can say — that two backends written from one frontend agree.
+//!
+//! Ignored by default (needs `clang` for the native column, `wasmtime` for the
+//! other, and builds every example twice):
 //!
 //!     cargo test -p vyrn-cli --test parity -- --ignored --nocapture
 //!
-//! Line endings are normalized (CRLF → LF): the interpreter writes LF while
+//! Line endings are normalized (CRLF → LF): the wasm guest writes LF while
 //! the native binary inherits the platform's text-mode CRLF — a documented,
 //! benign difference.
 //!
@@ -27,7 +37,7 @@
 //! reaches the path: a bounds message whose wrong wording reads exactly like a
 //! check that never fires, a DFA walk over a non-ASCII byte, a column off both
 //! ends of a buffer, a suppressed log call, a
-//! renumbering after the sweep. Each compares against the INTERPRETER's own
+//! renumbering after the sweep. Each compares against the NATIVE route's own
 //! answer rather than against a spelling written here, because two backends can be
 //! confidently wrong together.
 
@@ -38,7 +48,7 @@ use std::process::Command;
 
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
-fn examples_interp_native_parity() {
+fn examples_native_wasm_parity() {
     let dir = examples_dir();
     let out_dir = scratch("parity-corpus");
     // A `wasmtime` binary and nothing else: since RFC-0077 M5 the wasm column is
@@ -46,7 +56,8 @@ fn examples_interp_native_parity() {
     // between this harness and a module.
     let wasm = wasmtime();
     if wasm.is_none() {
-        eprintln!("NOTE: no wasmtime — verifying interp == native only");
+        eprintln!("SKIP: no wasmtime — there is no second route to compare against");
+        return;
     }
 
     let mut names: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -96,11 +107,6 @@ fn examples_interp_native_parity() {
         // to all three backends byte-identically. No fixture ⇒ empty argv.
         let prog_args = read_args(&path.with_extension("args"));
 
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(path);
-        interp_cmd.args(&prog_args);
-        let interp = run_io(interp_cmd, &dir, &stdin_fixture);
-
         let exe = out_dir.join(format!("{name}.exe"));
         let build = vyrn()
             .arg("build")
@@ -122,22 +128,12 @@ fn examples_interp_native_parity() {
         native_cmd.args(&prog_args);
         let native = run_io(native_cmd, &dir, &stdin_fixture);
 
-        let (i_out, n_out) = (norm(&interp.stdout), norm(&native.stdout));
-        let (i_err, n_err) = (runtime_err(&interp.stderr), runtime_err(&native.stderr));
-        let (i_code, n_code) = (interp.status.code(), native.status.code());
+        let (n_out, n_err) = (norm(&native.stdout), runtime_err(&native.stderr));
+        let n_code = native.status.code();
 
-        if i_out != n_out || i_err != n_err || i_code != n_code {
-            failures.push(format!(
-                "{name}: DIVERGED\n  exit: interp {i_code:?} vs native {n_code:?}\n{}{}",
-                first_diff("stdout", "interp", &i_out, "native", &n_out).unwrap_or_default(),
-                first_diff("stderr", "interp", &i_err, "native", &n_err).unwrap_or_default(),
-            ));
-            continue;
-        }
-
-        // Third column: the same program compiled to wasm32-wasi must match
-        // the interpreter byte-for-byte too (wasm writes LF like the interp;
-        // norm() makes it moot either way).
+        // The other compiling route: the same source through `direct.rs`, run
+        // under the wasmtime CLI. The two routes share a frontend and nothing
+        // below it, which is the whole of what this gate holds fixed.
         if let Some(wasmtime) = &wasm {
             let module = out_dir.join(format!("{name}.wasm"));
             let build = vyrn()
@@ -176,11 +172,11 @@ fn examples_interp_native_parity() {
             let w = run_io(wasm_cmd, &dir, &stdin_fixture);
             let (w_out, w_err) = (norm(&w.stdout), runtime_err(&w.stderr));
             let w_code = w.status.code();
-            if i_out != w_out || i_err != w_err || i_code != w_code {
+            if n_out != w_out || n_err != w_err || n_code != w_code {
                 failures.push(format!(
-                    "{name}: WASM DIVERGED\n  exit: interp {i_code:?} vs wasm {w_code:?}\n{}{}",
-                    first_diff("stdout", "interp", &i_out, "wasm", &w_out).unwrap_or_default(),
-                    first_diff("stderr", "interp", &i_err, "wasm", &w_err).unwrap_or_default(),
+                    "{name}: DIVERGED\n  exit: native {n_code:?} vs wasm {w_code:?}\n{}{}",
+                    first_diff("stdout", "native", &n_out, "wasm", &w_out).unwrap_or_default(),
+                    first_diff("stderr", "native", &n_err, "wasm", &w_err).unwrap_or_default(),
                 ));
                 continue;
             }
@@ -207,16 +203,16 @@ fn examples_interp_native_parity() {
 /// Not `#[ignore]`d: it compiles nothing and runs no engine.
 #[test]
 fn a_divergence_names_the_first_differing_line() {
-    let interp = "start\nsame\nsame\n42\ntail\n";
-    let native = "start\nsame\nsame\n43\ntail\n";
-    let msg = first_diff("stdout", "interp", interp, "native", native).expect("they differ");
+    let a = "start\nsame\nsame\n42\ntail\n";
+    let b = "start\nsame\nsame\n43\ntail\n";
+    let msg = first_diff("stdout", "native", a, "wasm", b).expect("they differ");
     assert!(
-        msg.contains("stdout: first differs at line 4 (interp 5 lines, native 5 lines)"),
+        msg.contains("stdout: first differs at line 4 (native 5 lines, wasm 5 lines)"),
         "{msg}"
     );
     assert!(msg.contains("same     3 | same"), "shared context:\n{msg}");
-    assert!(msg.contains("interp     4 | 42"), "{msg}");
-    assert!(msg.contains("native     4 | 43"), "{msg}");
+    assert!(msg.contains("native     4 | 42"), "{msg}");
+    assert!(msg.contains("wasm     4 | 43"), "{msg}");
     assert!(
         !msg.contains("start"),
         "a whole transcript is what this replaced:\n{msg}"
@@ -225,15 +221,15 @@ fn a_divergence_names_the_first_differing_line() {
     // Identical bytes is the only thing that passes, and a difference the line
     // view cannot see — here a missing trailing newline — is not laundered into
     // one: `lines()` reports the same two lines for both.
-    assert!(first_diff("stdout", "interp", interp, "native", interp).is_none());
-    let msg = first_diff("stdout", "interp", "a\nb\n", "wasm", "a\nb").expect("bytes differ");
+    assert!(first_diff("stdout", "native", a, "wasm", a).is_none());
+    let msg = first_diff("stdout", "native", "a\nb\n", "wasm", "a\nb").expect("bytes differ");
     assert!(
         msg.contains("the 2 lines are equal, the bytes are not — first differs at byte 3"),
         "{msg}"
     );
 
     // A line the other engine does not have at all.
-    let msg = first_diff("stderr", "interp", "a\nb\n", "wasm", "a\n").expect("they differ");
+    let msg = first_diff("stderr", "native", "a\nb\n", "wasm", "a\n").expect("they differ");
     assert!(msg.contains("first differs at line 2"), "{msg}");
     assert!(msg.contains("wasm     2 | <no such line>"), "{msg}");
 }
@@ -254,16 +250,16 @@ fn wasm_only_examples_trap_identically() {
     for (name, _why) in WASM_ONLY {
         let path = dir.join(name);
 
-        let interp = vyrn().arg("run").arg(&path).output().expect("run interp");
+        let nat = vyrn().arg("run").arg(&path).output().expect("vyrn run");
         assert_eq!(
-            interp.status.code(),
+            nat.status.code(),
             Some(1),
-            "{name}: interp must trap (exit 1)"
+            "{name}: the compiled route must trap (exit 1)"
         );
-        let i_err = norm(&interp.stderr);
+        let i_err = norm(&nat.stderr);
         assert!(
             i_err.contains("is not available on this target"),
-            "{name}: interp must print the canonical extern trap, got:\n{i_err}"
+            "{name}: the compiled route must print the canonical extern trap, got:\n{i_err}"
         );
 
         let exe = out_dir.join(format!("{name}.exe"));
@@ -291,11 +287,11 @@ fn wasm_only_examples_trap_identically() {
         assert_eq!(
             norm(&native.stderr),
             i_err,
-            "{name}: interp and native extern traps must be byte-identical"
+            "{name}: the two compiling routes' extern traps must be byte-identical"
         );
         assert_eq!(
             norm(&native.stdout),
-            norm(&interp.stdout),
+            norm(&nat.stdout),
             "{name}: stdout identical too"
         );
     }
@@ -308,12 +304,12 @@ fn wasm_only_examples_trap_identically() {
 /// wording printed exactly once on stderr, exit 1 — in all three modes.
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
-fn threaded_spawn_matches_sequential_and_interp() {
+fn threaded_spawn_matches_sequential_and_the_compiled_route() {
     let dir = examples_dir();
     let out_dir = scratch("parity-spawn");
     let path = dir.join("parallel.vyrn");
 
-    let interp = vyrn().arg("run").arg(&path).output().expect("run interp");
+    let nat = vyrn().arg("run").arg(&path).output().expect("vyrn run");
     let exe = out_dir.join("parallel-seq-check.exe");
     let build = vyrn()
         .arg("build")
@@ -344,18 +340,18 @@ fn threaded_spawn_matches_sequential_and_interp() {
     ] {
         assert_eq!(
             norm(&run.stdout),
-            norm(&interp.stdout),
-            "{label}: stdout != interp"
+            norm(&nat.stdout),
+            "{label}: stdout != the compiled route"
         );
         assert_eq!(
             norm(&run.stderr),
-            norm(&interp.stderr),
-            "{label}: stderr != interp"
+            norm(&nat.stderr),
+            "{label}: stderr != the compiled route"
         );
         assert_eq!(
             run.status.code(),
-            interp.status.code(),
-            "{label}: exit code != interp"
+            nat.status.code(),
+            "{label}: exit code != the compiled route"
         );
     }
 }
@@ -393,7 +389,7 @@ fn task_trap_prints_once_and_exits_1_threaded() {
         norm(&build.stderr)
     );
 
-    let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
+    let nat = vyrn().arg("run").arg(&file).output().expect("vyrn run");
     let threaded = Command::new(&exe)
         .env("VYRN_FREE_AUDIT", "1")
         .output()
@@ -405,7 +401,7 @@ fn task_trap_prints_once_and_exits_1_threaded() {
         .expect("run sequential");
 
     for (label, run) in [
-        ("interp", &interp),
+        ("native", &nat),
         ("threaded", &threaded),
         ("VYRN_SEQUENTIAL_SPAWN=1", &sequential),
     ] {
@@ -454,7 +450,7 @@ fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
         norm(&build.stderr)
     );
 
-    let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
+    let nat = vyrn().arg("run").arg(&file).output().expect("vyrn run");
     let threaded = Command::new(&exe)
         .env("VYRN_FREE_AUDIT", "1")
         .output()
@@ -466,7 +462,7 @@ fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
         .expect("run sequential");
 
     for (label, run) in [
-        ("interp", &interp),
+        ("native", &nat),
         ("threaded", &threaded),
         ("VYRN_SEQUENTIAL_SPAWN=1", &sequential),
     ] {
@@ -494,7 +490,7 @@ fn a_dropped_task_that_traps_still_prints_once_and_exits_1() {
 /// fn-param with a NON-SCALAR payload (`fn(User)`, `fn(Validation<User>)`,
 /// `fn(Result<User, String>)`) used to emit `error: unbound `cb`` where a scalar
 /// `fn(Int64)` built; the fix binds every signature identically. This pins the
-/// native build SUCCEEDING and matching the interpreter for each payload shape.
+/// native build SUCCEEDING and matching the native route for each payload shape.
 /// Needs clang, so it is `#[ignore]`d like the rest of this file's build tests.
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
@@ -540,11 +536,11 @@ fn stored_fn_param_compiles_for_any_payload() {
         let file = out_dir.join(format!("fnparam_{label}.vyrn"));
         std::fs::write(&file, &src).unwrap();
 
-        let interp = vyrn().arg("run").arg(&file).output().expect("run interp");
+        let nat = vyrn().arg("run").arg(&file).output().expect("vyrn run");
         assert!(
-            interp.status.success(),
-            "{label}: interp must succeed:\n{}",
-            norm(&interp.stderr)
+            nat.status.success(),
+            "{label}: the compiled route must succeed:\n{}",
+            norm(&nat.stderr)
         );
 
         let exe = out_dir.join(format!("fnparam_{label}.exe"));
@@ -568,12 +564,12 @@ fn stored_fn_param_compiles_for_any_payload() {
             .expect("run native");
         assert_eq!(
             norm(&native.stdout),
-            norm(&interp.stdout),
-            "{label}: native stdout must match the interpreter"
+            norm(&nat.stdout),
+            "{label}: native stdout must match the compiled route"
         );
         assert_eq!(
             native.status.code(),
-            interp.status.code(),
+            nat.status.code(),
             "{label}: exit code"
         );
     }
@@ -670,11 +666,11 @@ fn expected_check_failures_do_fail() {
 /// the limit would say so here rather than somewhere a user finds it.
 ///
 /// Both sides of the boundary, because a limit that refuses everything would
-/// pass the second half alone: under it, one answer on three engines; over it,
-/// one diagnostic on three engines.
+/// pass the second half alone: under it, one answer on both routes; over it,
+/// one diagnostic on both.
 #[test]
 #[ignore = "needs clang and wasmtime; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
-fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
+fn recursion_with_an_aggregate_local_stops_at_one_limit_on_both_routes() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
         return;
@@ -735,9 +731,7 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
         );
 
         let no_stdin = dir.join("no.stdin");
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let i = run_io(interp_cmd, &dir, &no_stdin);
+        let i = native_run(&path, &dir, &no_stdin, &[]);
         let mut n_cmd = Command::new(&exe);
         n_cmd.env("VYRN_FREE_AUDIT", "1");
         let n_out = run_io(n_cmd, &dir, &no_stdin);
@@ -749,17 +743,17 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
             assert_eq!(
                 runtime_err(&i.stderr),
                 runtime_err(&o.stderr),
-                "{what}: interp vs {other} stderr"
+                "{what}: native vs {other} stderr"
             );
             assert_eq!(
                 norm(&i.stdout),
                 norm(&o.stdout),
-                "{what}: interp vs {other} stdout"
+                "{what}: native vs {other} stdout"
             );
             assert_eq!(
                 i.status.code(),
                 o.status.code(),
-                "{what}: interp vs {other} exit"
+                "{what}: native vs {other} exit"
             );
         }
         let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
@@ -791,7 +785,7 @@ fn recursion_with_an_aggregate_local_stops_at_one_limit_on_all_three_engines() {
 /// different prefixes.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
-fn the_bounds_trap_says_what_the_interpreter_says() {
+fn the_bounds_trap_says_what_the_native_route_says() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
         return;
@@ -815,16 +809,14 @@ fn the_bounds_trap_says_what_the_interpreter_says() {
             .expect("build wasm");
         assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
 
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd.arg("run").arg(&module);
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
-        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&nat.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(nat.status.code(), w.status.code(), "{what}: exit");
         assert!(runtime_err(&w.stderr).contains(&format!("{what} index")), "{what}: wrong wording");
     }
 }
@@ -901,9 +893,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -912,17 +902,13 @@ fn main() -> Int64 {
     // and `twice<String>` are the same source and different code, and merging
     // them prints a plausible number where a string belongs.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "42\nhi\ntrue\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// The three things the `=~` walk (RFC-0077 M2m) can get wrong that the whole
@@ -934,7 +920,7 @@ fn main() -> Int64 {
 /// transition table and answers wrongly — no trap, because the table sits in the
 /// middle of a live address space. Checked by breaking it: with `i32.load8_s`,
 /// `regex`, `finitekeys`, `i18ndemo` and `twdemo` all still pass, and the two
-/// non-ASCII lines here go false where the interpreter says true and true where it
+/// non-ASCII lines here go false where the native route says true and true where it
 /// says false.
 ///
 /// The other two are the zero-length walk — the answer is whether the START state
@@ -942,12 +928,12 @@ fn main() -> Int64 {
 /// non-match that keeps walking after it is already lost, which is what the dead
 /// state absorbing every remaining byte means.
 ///
-/// Pinned against the interpreter's answer, not against a spelling written here:
+/// Pinned against the native route's answer, not against a spelling written here:
 /// `Dfa::matches` is the third walk over the same table and the one the checker
 /// already trusts.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
-fn the_dfa_walk_agrees_with_the_interpreter_on_what_no_example_reaches() {
+fn the_dfa_walk_agrees_with_the_native_route_on_what_no_example_reaches() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
         return;
@@ -985,9 +971,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -997,17 +981,13 @@ fn main() -> Int64 {
     // false because `.` is one BYTE and `é` is two — RFC-0046 runs a byte DFA, and
     // that is the fact both non-ASCII lines are really pinning.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "true\nfalse\nfalse\nfalse\ntrue\nfalse\ntrue\ntrue\nfalse\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// The two `modify` shapes the corpus does not have, and one it does (RFC-0077
@@ -1097,9 +1077,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -1107,17 +1085,13 @@ fn main() -> Int64 {
     // Spelled out rather than only compared, because the failure this is about is
     // a plausible number: 21 instead of 42, or a 5 that never became a 7.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "7\n14\n8\n42\nlabel\n7\n3\n100\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// The two builtins M2g landed that the corpus does not run, and the boxing bug
@@ -1180,9 +1154,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -1191,20 +1163,16 @@ fn main() -> Int64 {
     // a crash: garbage bytes where "hi there" belonged, and a byte count where a
     // character count belonged.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "hi there\ntrue\n-7\n5\n6\n0\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
-/// A temporary handed to a position that KEEPS it, on all three engines
+/// A temporary handed to a position that KEEPS it, on both compiling routes
 /// (`rfcs/census-call-arguments.md`).
 ///
 /// The call-argument rule releases a temporary after a call whose parameter is
@@ -1354,9 +1322,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&nb.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let n = run_io(Command::new(&native), &dir, &dir.join("no.stdin"));
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
@@ -1366,20 +1332,16 @@ fn main() -> Int64 {
     // crash, so the expected bytes are written down rather than compared engine
     // to engine alone.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "84476\nrow-7\nrow-8\nrow-3\nrow-203\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&n.stdout), "native stdout");
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "wasm stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&n.stderr),
-        "native"
-    );
-    assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "wasm");
-    assert_eq!(interp.status.code(), n.status.code(), "native exit");
-    assert_eq!(interp.status.code(), w.status.code(), "wasm exit");
+    assert_eq!(norm(&nat.stdout), norm(&n.stdout), "native stdout");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "wasm stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&n.stderr), "native");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "wasm");
+    assert_eq!(nat.status.code(), n.status.code(), "native exit");
+    assert_eq!(nat.status.code(), w.status.code(), "wasm exit");
 }
 
 /// `bytes` / `slice` / `stringFromBytes`, which no example reaches (RFC-0077 M2g).
@@ -1400,11 +1362,11 @@ fn main() -> Int64 {
 /// `slice`'s two failures used to be separate programs because a trap ended the
 /// run; RFC-0079 M3 made them VALUES, so they moved into the `ok` case beside
 /// everything else and the `traps` case is gone. The pin got stronger for free —
-/// the interpreter's own answer is asserted for the failing ranges too, where
+/// the native route's own answer is asserted for the failing ranges too, where
 /// before only "the stderr mentioned slice" could be.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
-fn the_string_builtins_agree_with_the_interpreter_about_their_failures() {
+fn the_string_builtins_agree_with_the_native_route_about_their_failures() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
         return;
@@ -1481,37 +1443,35 @@ fn main() -> Int64 {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd.arg("run").arg(&module);
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{name}: stdout");
+        assert_eq!(norm(&nat.stdout), norm(&w.stdout), "{name}: stdout");
         assert_eq!(
-            runtime_err(&interp.stderr),
+            runtime_err(&nat.stderr),
             runtime_err(&w.stderr),
             "{name}: stderr"
         );
-        assert_eq!(interp.status.code(), w.status.code(), "{name}: exit");
+        assert_eq!(nat.status.code(), w.status.code(), "{name}: exit");
         // Comparing two backends would pass if both were silently wrong about
-        // which failure happened, so the interpreter's own answer is pinned.
+        // which failure happened, so the native route's own answer is pinned.
         match what {
             "ok" => assert_eq!(
-                norm(&interp.stdout),
+                norm(&nat.stdout),
                 "ok:héllo\nok:\nok:😀\nhéllo\n\noob:9\nsplit:2\n3\n",
-                "the interpreter moved"
+                "the native route moved"
             ),
             "bad" => assert_eq!(
-                norm(&interp.stdout),
+                norm(&nat.stdout),
                 "err:bytes contain a NUL byte\n\
                  err:bytes are not valid UTF-8\n\
                  err:bytes are not valid UTF-8\n\
                  err:bytes are not valid UTF-8\n\
                  err:bytes are not valid UTF-8\n\
                  err:bytes are not valid UTF-8\n",
-                "the interpreter moved"
+                "the native route moved"
             ),
             other => panic!("unknown case `{other}`"),
         }
@@ -1542,7 +1502,7 @@ fn main() -> Int64 {
 /// guard written for `Int64` would silently return -128.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
-fn every_integer_width_wraps_where_the_interpreter_wraps() {
+fn every_integer_width_wraps_where_the_native_route_wraps() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
         return;
@@ -1638,9 +1598,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -1649,22 +1607,18 @@ fn main() -> Int64 {
     // together about a width, and every number here is one a wrong lowering also
     // produces.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "-56\n-5536\n-294967296\n-100\n\
          -59\n-300\n-7\n200\n4000000000\n18446744073709551615\n-59\n7\n\
          true\ntrue\ntrue\n\
          66\n2\n-3\n-1\n6148914691236517205\n1\n\
          -59\n4000000000\n0\n197\n-56\n65529\n\
          8\n-15\n50\n-4800\n58\n294967295\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 
     // The numeric traps, at widths other than `Int64` — the divide-overflow guard
     // is the one that has to know the width rather than assume 64 bits. Each is a
@@ -1718,21 +1672,19 @@ fn main() -> Int64 {
             .expect("build wasm");
         assert!(build.status.success(), "{what}: {}", String::from_utf8_lossy(&build.stderr));
 
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd.arg("run").arg(&module);
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
         assert!(
-            runtime_err(&interp.stderr).contains(wording),
-            "{what}: the interpreter moved: {:?}",
-            runtime_err(&interp.stderr)
+            runtime_err(&nat.stderr).contains(wording),
+            "{what}: the native route moved: {:?}",
+            runtime_err(&nat.stderr)
         );
-        assert_eq!(runtime_err(&interp.stderr), runtime_err(&w.stderr), "{what}: stderr");
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
-        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "{what}: stderr");
+        assert_eq!(norm(&nat.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(nat.status.code(), w.status.code(), "{what}: exit");
     }
 }
 
@@ -1853,9 +1805,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -1869,14 +1819,10 @@ fn main() -> Int64 {
          0.100000\n0.010000\n\
          -2\n44\n9223372036854775807\ninf\n"
     );
-    assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), want, "the native route moved");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// `std/num:f64Str` against the builtin `@str` on every engine (RFC-0081 M1).
@@ -1908,11 +1854,11 @@ fn main() -> Int64 {
 /// is the arrangement M2 chose deliberately: one implementation and one oracle,
 /// with a test enforcing the relation, rather than three peers with no reference
 /// among them. The `all_agree` at the end is what still checks the two compiled
-/// engines — against the interpreter's bytes, which are the oracle's.
+/// engines — against the native route's bytes, which are the oracle's.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
 fn the_vyrn_float_formatter_agrees_with_every_engines_own() {
-    let rows = three_engines(
+    let rows = two_routes(
         "f64str",
         "f64str",
         r#"
@@ -1997,12 +1943,12 @@ fn main() -> Int64 {
 /// - **`args` with an argv.** A token with a space in it is the one that says the
 ///   pointers are being read out of WASI's own array rather than re-split.
 ///
-/// Everything is pinned against the interpreter's own answer, not just compared
+/// Everything is pinned against the native route's own answer, not just compared
 /// between backends: two backends can be confidently wrong together about which
 /// failure happened, and every wrong answer here is a plausible-looking one.
 #[test]
 #[ignore = "needs wasmtime; run explicitly: cargo test -p vyrn-cli --release --test parity -- --ignored"]
-fn the_wasi_io_builtins_agree_with_the_interpreter_about_their_edges() {
+fn the_wasi_io_builtins_agree_with_the_native_route_about_their_edges() {
     let Some(wasmtime) = wasmtime() else {
         eprintln!("SKIP: no wasmtime");
         return;
@@ -2208,9 +2154,7 @@ fn main() -> Int64 {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path).args(&prog_args);
-        let interp = run_io(interp_cmd, &dir, &stdin_path);
+        let nat = native_run(&path, &dir, &stdin_path, &prog_args);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd
             .arg("run")
@@ -2220,14 +2164,14 @@ fn main() -> Int64 {
             .args(&prog_args);
         let w = run_io(wasm_cmd, &dir, &stdin_path);
 
-        assert_eq!(norm(&interp.stdout), want, "{what}: the interpreter moved");
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(norm(&nat.stdout), want, "{what}: the native route moved");
+        assert_eq!(norm(&nat.stdout), norm(&w.stdout), "{what}: stdout");
         assert_eq!(
-            runtime_err(&interp.stderr),
+            runtime_err(&nat.stderr),
             runtime_err(&w.stderr),
             "{what}: stderr"
         );
-        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert_eq!(nat.status.code(), w.status.code(), "{what}: exit");
     }
 }
 
@@ -2295,25 +2239,19 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "20000\n20101\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// `std/jsonread` through the direct backend (RFC-0077 M2k) — the claim that
@@ -2321,7 +2259,7 @@ fn main() -> Int64 {
 ///
 /// The reader is the module RFC-0078 M3's `fromJson` is built on, and it was
 /// unbuildable here for exactly two reasons: `?` (six sites) and `if let`. So this
-/// is the thing that says M3 can land on all three engines at once rather than on
+/// is the thing that says M3 can land on both compiling routes at once rather than on
 /// the interpreter and the native build while wasm waits — and it says it by
 /// PARSING, not by compiling: a `?` that copied the wrong width, took the wrong
 /// `br`, or skipped the payload decode builds fine and gets a different answer.
@@ -2383,9 +2321,7 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -2393,7 +2329,7 @@ fn main() -> Int64 {
     // Pinned, so a lowering that made both engines agree on nothing useful — an
     // `Err` for every input, say — is still red.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "{\"a\":[1,2,{\"b\":null}],\"c\":\"hi\u{e9}\"}\n\
          true\n\
          err: line 1, col 7: trailing comma before ']'\n\
@@ -2404,13 +2340,9 @@ fn main() -> Int64 {
          empty: []\n",
         "the reader moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// The RFC-0023 shapes the corpus does not reach (RFC-0077 M2m).
@@ -2541,28 +2473,22 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
-    // Pinned to the INTERPRETER's answers, because two backends can be
+    // Pinned to the NATIVE route's answers, because two backends can be
     // confidently wrong together — a merged specialization prints one lambda's
     // result for both.
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "1122\n1324\n605\n6\n60\n5\n515\n69\n12\nn=1\nn=2\nn=3\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// The RFC-0037 shapes `closures2` and `fnvalstore` do not reach (RFC-0077 M2m).
@@ -2640,25 +2566,19 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "shout 4\n297\n1112\n2122\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// The three things a `Task` (RFC-0025) can be that no example makes one of.
@@ -2680,7 +2600,7 @@ fn main() -> Int64 {
 /// - **A `Task<Unit>`**, which has no result to read and still has to be a value
 ///   `join` can consume.
 ///
-/// Pinned against the interpreter, not against numbers written here: eager
+/// Pinned against the native route, not against numbers written here: eager
 /// evaluation at the spawn point is the interpreter's own schedule, so there is
 /// one right answer and it is the one the interpreter gives.
 #[test]
@@ -2755,20 +2675,18 @@ fn a_task_that_escapes_its_frame_says_what_the_interpreter_says() {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd.arg("run").arg(&module);
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(norm(&nat.stdout), norm(&w.stdout), "{what}: stdout");
         assert_eq!(
-            runtime_err(&interp.stderr),
+            runtime_err(&nat.stderr),
             runtime_err(&w.stderr),
             "{what}: stderr"
         );
-        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert_eq!(nat.status.code(), w.status.code(), "{what}: exit");
         // A pass with no output at all would be two engines agreeing on nothing.
         assert!(!norm(&w.stdout).is_empty(), "{what}: printed nothing");
     }
@@ -2912,9 +2830,7 @@ fn main() -> Int64 {
             String::from_utf8_lossy(&build.stderr)
         );
 
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+        let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
         let mut wasm_cmd = Command::new(&wasmtime);
         wasm_cmd.arg("run").arg(&module);
         let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
@@ -2922,12 +2838,12 @@ fn main() -> Int64 {
         // The interpreter's own answers, not a spelling written here: two backends
         // can be confidently wrong about the depth bound together.
         assert_eq!(
-            runtime_err(&interp.stderr),
+            runtime_err(&nat.stderr),
             runtime_err(&w.stderr),
             "{what}: stderr"
         );
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
-        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert_eq!(norm(&nat.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(nat.status.code(), w.status.code(), "{what}: exit");
         // The two cases have to be opposite, or a run in which nothing at all
         // happened would satisfy every assertion above.
         assert_eq!(
@@ -2959,7 +2875,7 @@ fn main() -> Int64 {
 ///
 /// Plus a byte column on a line that is NOT the first, because `std/vyx.vyrn:165`
 /// documents `colAt` as counting chars and RFC-0078 M4b(2) measured that it counts
-/// bytes. Every row is compared against the interpreter AND spelled out: two
+/// bytes. Every row is compared against the native route AND spelled out: two
 /// backends can be confidently wrong together, which is how M2m's non-ASCII `=~`
 /// walk passed every example it had.
 #[test]
@@ -3017,25 +2933,19 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
     assert_eq!(
-        norm(&interp.stdout),
+        norm(&nat.stdout),
         "1:1\n1:1\n2:3\n1:1\n1:1\n1:1\n1:1\n2:1\n4:1\n4:1\n2:2\n2:3\n",
-        "the interpreter moved"
+        "the native route moved"
     );
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// A generic enum whose type argument comes from a `match` arm that is not the
@@ -3116,23 +3026,17 @@ fn main() -> Int64 {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
+    let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
     let mut wasm_cmd = Command::new(&wasmtime);
     wasm_cmd.arg("run").arg(&module);
     let w = run_io(wasm_cmd, &dir, &dir.join("no.stdin"));
 
     let want = "boxed first: 3 three\nboxed second: 99 fallback\n\
                 direct first: 42\ndirect second: -1\n";
-    assert_eq!(norm(&interp.stdout), want, "the interpreter moved");
-    assert_eq!(norm(&interp.stdout), norm(&w.stdout), "stdout");
-    assert_eq!(
-        runtime_err(&interp.stderr),
-        runtime_err(&w.stderr),
-        "stderr"
-    );
-    assert_eq!(interp.status.code(), w.status.code(), "exit");
+    assert_eq!(norm(&nat.stdout), want, "the native route moved");
+    assert_eq!(norm(&nat.stdout), norm(&w.stdout), "stdout");
+    assert_eq!(runtime_err(&nat.stderr), runtime_err(&w.stderr), "stderr");
+    assert_eq!(nat.status.code(), w.status.code(), "exit");
 }
 
 /// RFC-0008's two sinks and three thresholds the corpus does not reach
@@ -3253,13 +3157,9 @@ fn a_log_sink_is_whichever_descriptor_the_config_named() {
         // Twice each, so a sink that APPENDS where the interpreter truncates is a
         // failure rather than a coincidence.
         let _ = std::fs::remove_file(&log);
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        run_io(interp_cmd, &dir, &dir.join("no.stdin"));
-        let mut interp_cmd = vyrn();
-        interp_cmd.arg("run").arg(&path);
-        let interp = run_io(interp_cmd, &dir, &dir.join("no.stdin"));
-        let interp_log = read_log();
+        native_run(&path, &dir, &dir.join("no.stdin"), &[]);
+        let nat = native_run(&path, &dir, &dir.join("no.stdin"), &[]);
+        let nat_log = read_log();
 
         let _ = std::fs::remove_file(&log);
         let mut wasm_cmd = Command::new(&wasmtime);
@@ -3271,28 +3171,28 @@ fn a_log_sink_is_whichever_descriptor_the_config_named() {
         let wasm_log = read_log();
 
         assert_eq!(
-            norm(&interp.stdout),
+            norm(&nat.stdout),
             want_out,
-            "{what}: the interpreter moved (stdout)"
+            "{what}: the native route moved (stdout)"
         );
         assert_eq!(
-            runtime_err(&interp.stderr),
+            runtime_err(&nat.stderr),
             want_err,
-            "{what}: the interpreter moved (stderr)"
+            "{what}: the native route moved (stderr)"
         );
         assert_eq!(
-            interp_log,
+            nat_log,
             want_file.unwrap_or("").to_string(),
-            "{what}: the interpreter moved (file)"
+            "{what}: the native route moved (file)"
         );
-        assert_eq!(norm(&interp.stdout), norm(&w.stdout), "{what}: stdout");
+        assert_eq!(norm(&nat.stdout), norm(&w.stdout), "{what}: stdout");
         assert_eq!(
-            runtime_err(&interp.stderr),
+            runtime_err(&nat.stderr),
             runtime_err(&w.stderr),
             "{what}: stderr"
         );
-        assert_eq!(interp_log, wasm_log, "{what}: the log file");
-        assert_eq!(interp.status.code(), w.status.code(), "{what}: exit");
+        assert_eq!(nat_log, wasm_log, "{what}: the log file");
+        assert_eq!(nat.status.code(), w.status.code(), "{what}: exit");
     }
 }
 
@@ -3440,7 +3340,7 @@ fn the_rfc_0012_host_boundary_is_named_in_the_module() {
     );
 }
 
-/// Run one ad-hoc source under every engine and return `(interp, native, wasm)`
+/// Run one ad-hoc source on both compiling routes and return `(native, wasm)`
 /// as `(stdout, stderr, exit)` triples, normalized the way the corpus loop above
 /// normalizes.
 ///
@@ -3448,23 +3348,24 @@ fn the_rfc_0012_host_boundary_is_named_in_the_module() {
 /// RFC-0077 M2 could not have caught: those compared the interpreter against the
 /// direct wasm backend, and on each of these three the two of them AGREED and
 /// native was alone. So this helper exists rather than a fourth copy of the
-/// build-and-compare block, and the wasm column comes along because it is free
-/// and because a pin that names only two engines is how a third drifts.
+/// build-and-compare block. It was three columns while the tree-walker was one
+/// of them (RFC-0125 §3 M5, the twelfth slice); the two that remain are the two
+/// that ever caught anything here.
 #[allow(clippy::type_complexity)]
-fn three_engines(
+fn two_routes(
     tag: &str,
     what: &str,
     src: &str,
 ) -> Vec<(&'static str, String, String, Option<i32>)> {
-    three_engines_in(&scratch(&format!("parity-{tag}")), what, src)
+    two_routes_in(&scratch(&format!("parity-{tag}")), what, src)
 }
 
-/// [`three_engines`] over a directory the caller already has — for the one pin
+/// [`two_routes`] over a directory the caller already has — for the one pin
 /// whose program IMPORTS a second file, which has to be written beside it. Each
 /// scratch directory is now this process's alone, so "the same tag twice" is no
 /// longer a way to share one.
 #[allow(clippy::type_complexity)]
-fn three_engines_in(
+fn two_routes_in(
     dir: &Path,
     what: &str,
     src: &str,
@@ -3474,16 +3375,6 @@ fn three_engines_in(
     let no_stdin = dir.join("no.stdin");
 
     let mut out = Vec::new();
-    let mut interp_cmd = vyrn();
-    interp_cmd.arg("run").arg(&path);
-    let i = run_io(interp_cmd, &dir, &no_stdin);
-    out.push((
-        "interp",
-        norm(&i.stdout),
-        runtime_err(&i.stderr),
-        i.status.code(),
-    ));
-
     let exe = dir.join(format!("{what}.exe"));
     let b = vyrn()
         .arg("build")
@@ -3537,14 +3428,14 @@ fn three_engines_in(
     out
 }
 
-/// Assert every engine agrees with the INTERPRETER, and that the interpreter said
-/// what is expected — two backends can be confidently wrong together, and on all
-/// three of the defects below exactly two were.
+/// Assert the routes agree, and that the first of them printed something — two
+/// backends can be confidently wrong together, and on all three of the defects
+/// below exactly two were.
 fn all_agree(rows: &[(&str, String, String, Option<i32>)], what: &str) {
     let (_, out, err, code) = &rows[0];
     assert!(
         !out.is_empty() || !err.is_empty(),
-        "{what}: no engine printed anything"
+        "{what}: neither route printed anything"
     );
     for (eng, o, e, c) in &rows[1..] {
         assert_eq!(o, out, "{what}: {eng} stdout");
@@ -3564,7 +3455,7 @@ fn all_agree(rows: &[(&str, String, String, Option<i32>)], what: &str) {
 ///
 /// The other five arms are here because the same class could have hidden in any of
 /// them and no example compares against a NaN, so nothing would have said. They
-/// are all ordered on all three engines and all print `0` — which is what makes
+/// are all ordered on both compiling routes and both print `0` — which is what makes
 /// the `!=` rows load-bearing: they are the only two that are not `0`.
 ///
 /// `zero / zero` rather than a NaN literal: the language has no NaN literal, and a
@@ -3573,7 +3464,7 @@ fn all_agree(rows: &[(&str, String, String, Option<i32>)], what: &str) {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn a_nan_is_not_equal_to_itself_on_every_engine() {
-    let rows = three_engines(
+    let rows = two_routes(
         "nan",
         "nancmp",
         r#"
@@ -3597,7 +3488,7 @@ fn main() -> Int64 {
 "#,
     );
     all_agree(&rows, "nancmp");
-    // Spelled out as well as compared, because "all three engines say 0" is what
+    // Spelled out as well as compared, because "both routes say 0" is what
     // the bug looked like: the interpreter is the reference, so its answer is
     // asserted against IEEE 754 rather than against the other two.
     assert_eq!(
@@ -3629,7 +3520,7 @@ fn main() -> Int64 {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn a_sized_integer_array_literal_is_built_at_its_declared_width() {
-    let rows = three_engines(
+    let rows = two_routes(
         "sizedlit",
         "widths",
         r#"
@@ -3699,7 +3590,7 @@ fn main() -> Int64 {
     // The silent half: a validated element type, where the reshape skipped the
     // predicate because the representation matched. Its own program because the
     // expected outcome is a TRAP, and a trap ends the run.
-    let rows = three_engines(
+    let rows = two_routes(
         "sizedlit",
         "validated",
         r#"
@@ -3746,7 +3637,7 @@ fn main() -> Int64 {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn a_rendered_bool_owns_its_buffer_on_every_engine() {
-    let rows = three_engines(
+    let rows = two_routes(
         "boolstr",
         "boolrender",
         r#"
@@ -3799,7 +3690,7 @@ fn main() -> Int64 {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn a_return_out_of_a_region_balances_the_region_stack_on_every_engine() {
-    let rows = three_engines(
+    let rows = two_routes(
         "regionret",
         "balance",
         r#"
@@ -3947,7 +3838,7 @@ fn main() -> Int64 {
 
     // The depth bound itself still refuses at the same place, so the pop did not
     // just disable the check. Recursive, because the depth is dynamic.
-    let rows = three_engines(
+    let rows = two_routes(
         "regionret",
         "deep",
         r#"
@@ -4006,9 +3897,9 @@ fn main() -> Int64 {
 /// is that the message still arrives, in full, from two regions deep.
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
-fn a_panic_says_the_same_bytes_on_all_three_engines() {
+fn a_panic_says_the_same_bytes_on_both_routes() {
     // The message: a `\{}` hole, and `ø`/`«»`/`ä` outside ASCII.
-    let rows = three_engines(
+    let rows = two_routes(
         "panic",
         "bytes",
         r#"
@@ -4033,7 +3924,7 @@ fn main() -> Int64 {
     all_agree(&rows, "bytes");
     // Spelled out, not only compared: the failure this is about is a message that
     // still looks like a message — one byte short, or the prefix in the wrong
-    // place — and three engines can be wrong together about where `error: ` goes.
+    // place — and two engines can be wrong together about where `error: ` goes.
     assert_eq!(
         rows[0].1, "n=7\nrégion\n",
         "the live arm ran, and the region printed"
@@ -4046,7 +3937,7 @@ fn main() -> Int64 {
 
     // Two regions deep, as a bare statement rather than through a call: the
     // region stack is at depth 2 and the arena holds `hëld` when the process ends.
-    let rows = three_engines(
+    let rows = two_routes(
         "panic",
         "region",
         r#"
@@ -4080,7 +3971,7 @@ fn main() -> Int64 {
     // aggregate one (the direct backend allocates the destination before either
     // arm runs, from a type a `Never` arm cannot name), a user enum's `switch`, an
     // `if` in both arm positions, and a function whose whole body is a `panic`.
-    let rows = three_engines(
+    let rows = two_routes(
         "panic",
         "never",
         r#"
@@ -4139,7 +4030,7 @@ fn main() -> Int64 {
     assert_eq!(rows[0].3, Some(0), "exit 0");
 }
 
-/// A `panic` in a LIBRARY reports the library, on all three engines (census U5).
+/// A `panic` in a LIBRARY reports the library, on both compiling routes (census U5).
 ///
 /// This is the decision the census entry rested on, so it is pinned rather than
 /// described. `c[9]` is written in `site.vyrn`; the refusal is written in
@@ -4181,7 +4072,7 @@ impl Index for Cage {
 "#,
     )
     .unwrap();
-    let rows = three_engines_in(
+    let rows = two_routes_in(
         &dir,
         "site",
         r#"import { Cage, newCage } from "./bank"
@@ -4206,11 +4097,11 @@ fn main() -> Int64 {
     assert_eq!(rows[0].3, Some(1), "exit 1, like every trap");
 }
 
-/// `??` on both sums, on all three engines (RFC-0079 M2).
+/// `??` on both sums, on both compiling routes (RFC-0079 M2).
 ///
 /// `??` desugars in the parser to a `match` over two type-agnostic patterns, so
 /// what this pins is not an operator — it is that the desugar's `Success`/
-/// `Failure` pair resolves to the SAME tag on all three engines. Each of them
+/// `Failure` pair resolves to the SAME tag on both compiling routes. Each of them
 /// reads the tag its own way (an enum arm in the interpreter, an `i1` in the
 /// textual backend, a one-byte load in the direct one), and a pair that agreed
 /// on `Option` while disagreeing on `Result` would be silent in two columns out
@@ -4222,8 +4113,8 @@ fn main() -> Int64 {
 /// printed by then, which is what makes the stdout assertion load-bearing.
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
-fn nullish_and_panic_say_the_same_bytes_on_all_three_engines() {
-    let rows = three_engines(
+fn nullish_and_panic_say_the_same_bytes_on_both_routes() {
+    let rows = two_routes(
         "nullish",
         "both",
         r#"
@@ -4259,7 +4150,7 @@ fn main() -> Int64 {
     // fooled a reader before. This case says so out loud.
     assert_eq!(
         rows.len(),
-        3,
+        2,
         "wasmtime did not resolve, so wasm was never tested: {:?}",
         rows.iter().map(|r| r.0).collect::<Vec<_>>()
     );
@@ -4314,8 +4205,8 @@ fn main() -> Int64 {
 /// the failure mode no amount of "it ran" would have caught.
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
-fn a_string_accumulator_grown_in_place_says_the_same_bytes_on_all_three_engines() {
-    let rows = three_engines(
+fn a_string_accumulator_grown_in_place_says_the_same_bytes_on_both_routes() {
+    let rows = two_routes(
         "strappend",
         "accum",
         r#"
@@ -4374,7 +4265,7 @@ fn main() -> Int64 {
     );
     assert_eq!(
         rows.len(),
-        3,
+        2,
         "wasmtime did not resolve, so wasm was never tested: {:?}",
         rows.iter().map(|r| r.0).collect::<Vec<_>>()
     );
@@ -4386,7 +4277,7 @@ fn main() -> Int64 {
     );
 }
 
-/// `toJson` of a large array is LINEAR on all three engines, pinned by the wasm
+/// `toJson` of a large array is LINEAR on both compiling routes, pinned by the wasm
 /// address space rather than by a clock (RFC-0081).
 ///
 /// The copying lowering re-`malloc`s and re-copies the whole result per element,
@@ -4412,7 +4303,7 @@ fn main() -> Int64 {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn to_json_of_a_large_array_stays_within_the_wasm_address_space() {
-    let rows = three_engines(
+    let rows = two_routes(
         "jsonbig",
         "big",
         r#"
@@ -4432,7 +4323,7 @@ fn main() -> Int64 {
     );
     assert_eq!(
         rows.len(),
-        3,
+        2,
         "wasmtime did not resolve, so wasm was never tested: {:?}",
         rows.iter().map(|r| r.0).collect::<Vec<_>>()
     );
@@ -4694,7 +4585,7 @@ fn main() -> Int64 {
 #[test]
 #[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test parity -- --ignored"]
 fn two_instantiations_that_mangle_alike_are_still_two_bodies() {
-    let rows = three_engines(
+    let rows = two_routes(
         "mangle",
         "collide",
         r#"

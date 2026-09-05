@@ -2041,16 +2041,16 @@ fn run_generator(
     });
 
     // 5b. Cache miss: run the generator in the mediated sandbox. Marked
-    //     comptime, like the check above: the interpreter asks for this
+    //     comptime, like the check above: the generator asks for this
     //     program's ownership plan, and the kernel and the lowering's own lint
     //     are both about a program a tool holds (RFC-0125 §3 M3, the
     //     accumulation slice).
     let out = crate::movecheck::comptime(|| {
-        crate::interp::generate(
+        crate::gen::generate(
             &gen_program,
             name,
             &consts,
-            crate::interp::GenInputs {
+            crate::gen::GenInputs {
                 resolver,
                 opts,
                 importer_dir,

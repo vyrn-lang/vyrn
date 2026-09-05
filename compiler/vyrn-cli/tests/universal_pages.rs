@@ -124,12 +124,13 @@ fn bin_port() -> u16 {
     }
 }
 
-/// `--engine wasm` when the environment asks for it (RFC-0125 §3 M6). The whole
-/// suite then runs against the compiled route — one set of assertions rather
-/// than two, because a served program must answer the same on both engines.
+/// The compiled route is the default (RFC-0125 §3 M5, the eleventh slice), so
+/// this adds nothing unless `VYRN_SERVE_ENGINE=interp` asks for the tree-walker
+/// — one set of assertions either way, because a served program must answer the
+/// same on both engines.
 fn engine_args() -> Vec<String> {
     match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
-        Ok("wasm") => vec!["--engine".to_string(), "wasm".to_string()],
+        Ok("interp") => vec!["--engine".to_string(), "interp".to_string()],
         _ => Vec::new(),
     }
 }

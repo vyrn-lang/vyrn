@@ -62,6 +62,34 @@ fn declared_blocks(src: &str) -> usize {
 
 /// The number `vyrn test` reported as passing, from its `N passed, M failed`
 /// summary line.
+/// The std modules whose own `test` blocks call the module's `gen fn`s
+/// directly — `von`'s `roundTrip`, `vyx`'s `vyxParseScript`, and five more.
+///
+/// RFC-0021 runs a generator in the generation sandbox, and no compiling route
+/// lowers a call to one: the direct backend refuses such a body by name
+/// ("no lowering for the call `roundTrip`"), and so would a native build. The
+/// tree-walker is the one engine that runs a generator as ordinary code, so
+/// these seven files name it. RFC-0125 §3 M5's eleventh slice records the list
+/// as the interpreter's last consumer; it shrinks to nothing the day a test
+/// body may name a generator on a compiled route.
+const GEN_TESTED: &[&str] = &[
+    "i18n.vyrn",
+    "icons.vyrn",
+    "tw.vyrn",
+    "ui.vyrn",
+    "von.vyrn",
+    "vyx-hints.vyrn",
+    "vyx.vyrn",
+];
+
+fn engine_of(name: &str) -> &'static [&'static str] {
+    if GEN_TESTED.contains(&name) {
+        &["--engine", "interp"]
+    } else {
+        &[]
+    }
+}
+
 fn reported_passed(output: &str) -> Option<usize> {
     output
         .lines()
@@ -104,6 +132,7 @@ fn every_test_block_in_std_runs_and_passes() {
 
         let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
             .arg("test")
+            .args(engine_of(&name))
             .arg(loader_path(&path))
             .output()
             .expect("spawn vyrn test");

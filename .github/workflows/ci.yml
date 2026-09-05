@@ -376,9 +376,10 @@ jobs:
       - name: Build vyrn (release)
         working-directory: compiler
         # `--release`, and the bench step below is why. `vyrn bench --check` runs
-        # every bench body once under the INTERPRETER, so the interpreter's own
-        # speed is the whole cost of that step — and a debug interpreter is
-        # 4-7x slower per bench than an optimized one. Measured over the corpus
+        # every bench body once, compiling it first (RFC-0125 §3 M5, the eleventh
+        # slice: the compiled route is the default), so this binary's own speed
+        # is the whole cost of that step — and a debug one is 4-7x slower per
+        # bench than an optimized one. Measured over the corpus
         # on one machine: 323 s serial and 148 s at -P 4 with a debug binary,
         # against 62 s serial and 29 s at -P 4 with a release one. Release+serial
         # beats debug+parallel by 2.4x, so this is the larger of the two levers
@@ -389,17 +390,17 @@ jobs:
         # established answer here rather than a new idea.
         #
         # WHAT THE GATE LOSES BY NOT BEING DEBUG: nothing it could have caught.
-        # `--check` compiles no native code and runs no codegen, and the whole
+        # `--check` compiles no NATIVE code and runs no clang, and the whole
         # workspace carries four first-party `debug_assert!`s — two in
-        # vyrn-codegen, one in vyrn-lower, one in vyrn-genwasm — and NONE in the
-        # interpreter this step exercises. The 1753-test workspace suite still
+        # vyrn-codegen, one in vyrn-lower, one in vyrn-genwasm. The 1753-test
+        # workspace suite still
         # runs in debug, so every `debug_assert` that exists still has a job that
         # trips it. What the gate verifies — that each bench body still compiles
         # and still runs, deterministically — is unchanged, and so is the corpus.
         run: cargo build --quiet --release -p vyrn-cli
       - name: Bench --check (deterministic, RFC-0063)
         # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
-        # body ONCE under the interpreter — deterministic, no clang, no timing —
+        # body ONCE on the compiled route — deterministic, no clang, no timing —
         # so a bench that stops compiling/running fails the build. The corpus is
         # every example carrying `bench "` (benching, smallarray, and any future
         # one), discovered here exactly as the RFC specifies.
@@ -527,7 +528,7 @@ jobs:
         run: cargo test --quiet -p vyrn-cli --test typed -- --ignored --nocapture
 
   parity:
-    name: three-way parity (interp == native == wasm)
+    name: parity (native == wasm)
     # x86-64 only, on purpose, and here is the case for the ARM leg that is NOT
     # here so the next reader does not have to rebuild it.
     #
@@ -544,9 +545,9 @@ jobs:
     #
     # What it WOULD add: the NATIVE column on aarch64. That column is text IR
     # through clang to a real binary, and the harness compares its stdout byte
-    # for byte against the interpreter — so it is a genuine second ABI for
-    # everything the emitter decides (integer widths, float formatting, struct
-    # returns, trap wording).
+    # for byte against the wasm the direct backend emits — so it is a genuine
+    # second ABI for everything the emitter decides (integer widths, float
+    # formatting, struct returns, trap wording).
     #
     # What it would cost, measured against run 31724777591 (warm caches): this
     # job takes about 8 minutes and runs in parallel with the others, so the
@@ -662,8 +663,7 @@ jobs:
         # the test job does not.
         #
         # `bench --check`, the face the blocking gate runs, never loads the
-        # harness at all — it runs each body under the interpreter against the
-        # program as written. So nothing in CI exercised the merge that pulls
+        # harness at all — it runs each body against the program as written. So nothing in CI exercised the merge that pulls
         # `std/bench` in, and a defect lived there: a root program declaring a
         # name that a module the harness injects uses privately either failed to
         # compile, naming a type it had never imported, or compiled and called
@@ -721,10 +721,10 @@ jobs:
     # the CLI embeds — and compares stdout, stderr and the exit code byte for
     # byte against `examples/expected/`, which the same route records
     # (`VYRN_FIXTURES=write`) and a human reviews in the diff. With `wasmhash`
-    # (the same bytes everywhere) it is what the
-    # parity job becomes once the interpreter is gone; until then it is not a
-    # required check, and a red leg names the example and the first line that
-    # differs.
+    # (the same bytes everywhere) it says on four platforms what the parity job
+    # says on one; what parity says and these two cannot is that a SECOND
+    # backend, written from the same frontend, agrees. It is not a required
+    # check, and a red leg names the example and the first line that differs.
     #
     # Its own job for the reason `wasmhash` is one: no clang, no sysroot, no
     # external wasmtime, and the whole matrix, since the host it runs under is
