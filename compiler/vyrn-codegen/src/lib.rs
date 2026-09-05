@@ -3081,6 +3081,20 @@ impl<'a> Gen<'a> {
         )
     }
 
+    /// The two payloads of a TWO-VARIANT sum — `(variant 0's, variant 1's)`, each
+    /// `None` when that variant is nullary — or `None` for anything else.
+    ///
+    /// What the built-in sums' own arms used to ask, in the one spelling that
+    /// still works after RFC-0126 §8.11's M4b, where `resolve` answers `Enum` for
+    /// them. A declared two-variant enum answers too, which is the collapse.
+    fn two_variant_sum(&self, ty: &Type) -> Option<(Option<Type>, Option<Type>)> {
+        let vs = self.sum_vs(ty)?;
+        match vs.as_slice() {
+            [zero, one] => Some((zero.payload.first().cloned(), one.payload.first().cloned())),
+            _ => None,
+        }
+    }
+
     /// The payload slot count of the sum `ty` — the shape's members less the tag.
     fn sum_slots(&self, ty: &Type) -> usize {
         self.sum_vs(ty)
@@ -3142,9 +3156,13 @@ impl<'a> Gen<'a> {
         // A payload the instance has not fixed has no shape at all — taking the
         // position's spelling then would declare a binder at `void`.
         let solved = |g: &Self, t: &Type| !matches!(g.resolve(t), Type::Param(_));
-        let take = match (self.resolve(&want), &fallback) {
-            (Type::Option(i), Type::Option(_)) => solved(self, &i),
-            (Type::Result(a, b), Type::Result(..)) => solved(self, &a) && solved(self, &b),
+        let r = self.resolve(&want);
+        let take = match &fallback {
+            Type::Option(_) => {
+                vyrn_frontend::types::option_payload(&r).is_some_and(|i| solved(self, i))
+            }
+            Type::Result(..) => vyrn_frontend::types::result_payloads(&r)
+                .is_some_and(|(a, b)| solved(self, a) && solved(self, b)),
             _ => false,
         };
         if take {
@@ -5535,14 +5553,12 @@ impl<'a> Gen<'a> {
             // selects). The payload VALUE keeps the shallow rule: what it
             // owns leaks rather than risk reading through a value the store
             // is replacing.
-            Some(DropKind::Deep(t))
-                if matches!(self.resolve(&t), Type::Option(_) | Type::Result(..)) =>
-            {
-                let (box_some, box_zero) = match self.resolve(&t) {
-                    Type::Option(p) => (self.payload_boxed(&p), false),
-                    Type::Result(a, b) => (self.payload_boxed(&a), self.payload_boxed(&b)),
-                    _ => unreachable!(),
-                };
+            Some(DropKind::Deep(t)) if self.two_variant_sum(&t).is_some() => {
+                let (zero, one) = self.two_variant_sum(&t).expect("the guard just asked");
+                let (box_some, box_zero) = (
+                    one.map(|p| self.payload_boxed(&p)).unwrap_or(false),
+                    zero.map(|p| self.payload_boxed(&p)).unwrap_or(false),
+                );
                 if box_some || box_zero {
                     let sll = self.llt(&t);
                     let tag = self.fresh_tmp();
@@ -6187,8 +6203,8 @@ impl<'a> Gen<'a> {
                             && args.first().and_then(|a| self.static_ty(a)).is_some_and(
                                 |t| matches!(self.resolve(&t), Type::Map(..))));
                     if map_lookup && self.droppable.get(&key).is_none() && self.region_depth == 0 {
-                        if let Type::Option(inner) = &sr {
-                            if self.payload_boxed(inner) {
+                        if let Some(inner) = vyrn_frontend::types::option_payload(&sr).cloned() {
+                            if self.payload_boxed(&inner) {
                                 let sll = self.llt(&sr);
                                 let w0 = self.fresh_tmp();
                                 let q = self.fresh_tmp();
@@ -8032,17 +8048,16 @@ impl<'a> Gen<'a> {
     /// function's result; otherwise continue with the unwrapped i64 payload.
     fn gen_try(&mut self, expr: &Expr, at: usize) -> Result<(String, Type), String> {
         let (agg, aty) = self.gen_expr(expr)?;
-        if !matches!(self.resolve(&aty), Type::Option(_) | Type::Result(..)) {
+        if self.two_variant_sum(&aty).is_none() {
             let place = vyrn_frontend::movecheck::place_path(expr).is_some()
                 || vyrn_frontend::movecheck::element_path(expr).is_some();
             return self.gen_try_fallible(&agg, &aty, at, place);
         }
         // The type unwrapped on the success path.
-        let ok_ty = match self.resolve(&aty) {
-            Type::Option(inner) => *inner,
-            Type::Result(ok, _) => *ok,
-            _ => Type::Int,
-        };
+        let ok_ty = self
+            .two_variant_sum(&aty)
+            .and_then(|(_, one)| one)
+            .unwrap_or(Type::Int);
         // The propagated value is the WHOLE sum, byte for byte, which is only
         // sound if the two are the same shape. Since M2 a sum's slot count
         // follows its widest payload (RFC-0126 §8.4), so the two can differ and
@@ -9160,9 +9175,19 @@ pub(crate) fn normalize_fn_sig(t: &Type, types: &HashMap<String, TypeDecl>) -> T
         Type::Fn(ps, r) => Type::Fn(ps.iter().map(norm).collect(), Box::new(norm(&r))),
         Type::Array(i) => Type::Array(Box::new(norm(&i))),
         Type::ArrayN(i, n) => Type::ArrayN(Box::new(norm(&i)), n),
-        Type::Option(i) => Type::Option(Box::new(norm(&i))),
-        Type::Result(a, b) => Type::Result(Box::new(norm(&a)), Box::new(norm(&b))),
         Type::Map(k, v) => Type::Map(Box::new(norm(&k)), Box::new(norm(&v))),
+        // Every sum, one arm — since RFC-0126 §8.11's M4b the two built-in
+        // spellings resolve to variant lists, and a normalization that stopped
+        // at the list registered `Option<T>` under an UNnormalized payload while
+        // the dispatcher looked one up under a normalized one.
+        Type::Enum(vs) => Type::Enum(
+            vs.iter()
+                .map(|v| EnumVariant {
+                    name: v.name.clone(),
+                    payload: v.payload.iter().map(norm).collect(),
+                })
+                .collect(),
+        ),
         Type::Record(fs) => Type::Record(
             fs.iter()
                 .map(|f| Field {
@@ -12741,9 +12766,9 @@ impl<'a> Gen<'a> {
             let (fv, fty) = self.gen_expr(&args[2])?;
             let sig = self.normalize_sig(&fty);
             let elem = match &sig {
-                Type::Fn(_, r) => match self.resolve(r) {
-                    Type::Option(i) => *i,
-                    other => return Err(format!("fromStep step returns {other:?}")),
+                Type::Fn(_, r) => match vyrn_frontend::types::option_payload(&self.resolve(r)) {
+                    Some(i) => i.clone(),
+                    None => return Err(format!("fromStep step returns {:?}", self.resolve(r))),
                 },
                 other => return Err(format!("fromStep of non-fn {other:?}")),
             };
@@ -12810,11 +12835,12 @@ impl<'a> Gen<'a> {
         // an `Int64` whatever it addresses, so the call carries nothing to infer
         // from (the checker says the same thing in its own words).
         if name == "pullAt" {
-            let elem = match self.expect.last().map(|t| self.resolve(t)) {
-                Some(Type::Option(i)) => *i,
-                other => {
+            let want = self.expect.last().map(|t| self.resolve(t));
+            let elem = match want.as_ref().and_then(vyrn_frontend::types::option_payload) {
+                Some(i) => i.clone(),
+                None => {
                     return Err(format!(
-                        "`pullAt` needs an `Option<T>` context, found {other:?}"
+                        "`pullAt` needs an `Option<T>` context, found {want:?}"
                     ))
                 }
             };
@@ -13386,11 +13412,10 @@ impl<'a> Gen<'a> {
         if name == "Some" {
             // RFC-0037: an enclosing `Option<T>` expectation types the payload
             // (a lambda literal payload needs its fn signature).
-            let payload_expect: Option<Type> =
-                self.expect.last().and_then(|t| match self.resolve(t) {
-                    Type::Option(i) => Some(*i),
-                    _ => None,
-                });
+            let payload_expect: Option<Type> = self
+                .expect
+                .last()
+                .and_then(|t| vyrn_frontend::types::option_payload(&self.resolve(t)).cloned());
             let pushed = payload_expect.is_some();
             if let Some(t) = &payload_expect {
                 self.expect.push(t.clone());
@@ -13418,11 +13443,15 @@ impl<'a> Gen<'a> {
             _ => None,
         } {
             // RFC-0037: an enclosing `Result<T, E>` expectation types the arm.
-            let payload_expect: Option<Type> =
-                self.expect.last().and_then(|t| match self.resolve(t) {
-                    Type::Result(ok, err) => Some(if name == "Ok" { *ok } else { *err }),
-                    _ => None,
-                });
+            let payload_expect: Option<Type> = self.expect.last().and_then(|t| {
+                vyrn_frontend::types::result_payloads(&self.resolve(t)).map(|(ok, err)| {
+                    if name == "Ok" {
+                        ok.clone()
+                    } else {
+                        err.clone()
+                    }
+                })
+            });
             let pushed = payload_expect.is_some();
             if let Some(t) = &payload_expect {
                 self.expect.push(t.clone());

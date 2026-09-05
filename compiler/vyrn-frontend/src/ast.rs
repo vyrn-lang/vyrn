@@ -1094,10 +1094,32 @@ impl std::fmt::Display for Type {
             Type::Pick(b, keys) => write!(f, "Pick<{b}, {}>", keys.join(", ")),
             Type::Merge(a, b) => write!(f, "Merge<{a}, {b}>"),
             Type::Partial(b) => write!(f, "Partial<{b}>"),
-            Type::Enum(vs) => {
-                let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
-                write!(f, "enum {{ {} }}", names.join(" | "))
-            }
+            // The two built-in sums keep their SPELLING whichever way they were
+            // built. Since RFC-0126 §8.11's M4b `resolve` answers `| None |
+            // Some(T)` for an `Option<T>`, and a diagnostic that named it that
+            // way would be naming a shape at a user who wrote a name. It is
+            // §8.6's third guard, and it stands whether or not the constructors
+            // still exist.
+            Type::Enum(vs) => match vs.as_slice() {
+                [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
+                    match s.payload.first() {
+                        Some(t) => write!(f, "Option<{t}>"),
+                        None => write!(f, "enum {{ None | Some }}"),
+                    }
+                }
+                [e, o]
+                    if e.name == "Err"
+                        && o.name == "Ok"
+                        && e.payload.len() == 1
+                        && o.payload.len() == 1 =>
+                {
+                    write!(f, "Result<{}, {}>", o.payload[0], e.payload[0])
+                }
+                _ => {
+                    let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
+                    write!(f, "enum {{ {} }}", names.join(" | "))
+                }
+            },
             Type::App(n, args) => {
                 let rendered: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "{n}<{}>", rendered.join(", "))

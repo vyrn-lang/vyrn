@@ -1652,7 +1652,66 @@ fn resolve_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Type
         // the three places that must see it: the field READ (which forces), the
         // codec (which forces too) and reflection.
         Type::Lazy(inner) => Type::Fn(Vec::new(), Box::new(resolve_d(inner, types, depth + 1))),
+        // RFC-0126 §8.11 M4b: the two built-in sums ARE enums, and this is where
+        // they say so. §8.1's variant lists, in tag order — `None` and `Err` are
+        // variant 0, because `??`'s parser desugar names them that way without a
+        // type. Every consumer that resolves a type reads the sum through
+        // [`option_payload`] and [`result_payloads`], which answer for the
+        // surface spelling and for this one alike.
+        Type::Option(t) => Type::Enum(vec![
+            EnumVariant {
+                name: "None".to_string(),
+                payload: Vec::new(),
+            },
+            EnumVariant {
+                name: "Some".to_string(),
+                payload: vec![resolve_arg(t, types, depth)],
+            },
+        ]),
+        Type::Result(ok, err) => Type::Enum(vec![
+            EnumVariant {
+                name: "Err".to_string(),
+                payload: vec![resolve_arg(err, types, depth)],
+            },
+            EnumVariant {
+                name: "Ok".to_string(),
+                payload: vec![resolve_arg(ok, types, depth)],
+            },
+        ]),
         other => other.clone(),
+    }
+}
+
+/// What an `Option<T>` carries, whichever way the sum is spelled — RFC-0126
+/// §8.11's M4b. `Type::Option(T)` is the surface spelling; `| None | Some(T)` is
+/// what [`resolve`] answers for it, and what a user who writes those two variants
+/// out gets. One reader, so a consumer never has to know which it was handed.
+pub fn option_payload(ty: &Type) -> Option<&Type> {
+    match ty {
+        Type::Option(t) => Some(t),
+        Type::Enum(vs) => match vs.as_slice() {
+            [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
+                s.payload.first()
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What a `Result<T, E>` carries — `(T, E)`, ok first — whichever way the sum is
+/// spelled. [`option_payload`]'s twin, and the tag order is §8.1's: `Err` is
+/// variant 0.
+pub fn result_payloads(ty: &Type) -> Option<(&Type, &Type)> {
+    match ty {
+        Type::Result(ok, err) => Some((ok, err)),
+        Type::Enum(vs) => match vs.as_slice() {
+            [e, o] if e.name == "Err" && o.name == "Ok" => {
+                Some((o.payload.first()?, e.payload.first()?))
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -1671,6 +1730,15 @@ pub fn deferred(ty: &Type) -> Option<&Type> {
 /// itself. What a read of the field yields, and what the codec encodes.
 pub fn forced(ty: &Type) -> Type {
     deferred(ty).cloned().unwrap_or_else(|| ty.clone())
+}
+
+/// A payload as the enum form carries it. NOT resolved: a variant's payload is a
+/// declared type in the declared case, so the built-in sums' payloads stay the
+/// spelling they were given, and a consumer that wants the shape resolves it the
+/// way it resolves a declared enum's. `depth` is carried only so a runaway
+/// declaration still bottoms out.
+fn resolve_arg(ty: &Type, _types: &HashMap<String, TypeDecl>, _depth: usize) -> Type {
+    ty.clone()
 }
 
 fn fields_d(ty: &Type, types: &HashMap<String, TypeDecl>, depth: usize) -> Option<Vec<Field>> {

@@ -2259,11 +2259,11 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 |---|---|---|
 | a rule the kernel now gives | 1,045 | 10 per cent |
 | a rule only the checker gives | 723 | 7 per cent |
-| placement rows for the engines | 2,362 | 23 per cent |
+| placement rows for the engines | 2,365 | 23 per cent |
 | a fix menu | 81 | 1 per cent |
-| shared machinery | 3,657 | 36 per cent |
+| shared machinery | 3,668 | 36 per cent |
 | tests | 2,187 | 22 per cent |
-| **the file** | **10,055** | |
+| **the file** | **10,069** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
@@ -7075,12 +7075,21 @@ its record.
   payload's width rule and boxing rule are one statement each, in
   `vyrn_frontend::types`, where `own` used to keep a hand-written word list.
   RFC-0126 §8.12.
-- **M4 and M5 — not taken (2026-09-05).** They are one step, and it is not zero
-  bytes. `resolve` answering `Enum` turns 97 of `vyrn-frontend`'s 1,186 unit
-  tests red on its own line, and `own::release_kind` records a drop with the
-  RESOLVED type — so a sum's release routes to the enum's, and the two emit
-  different labels and a different arm order. One EMISSION per engine has to come
-  first. RFC-0126 §8.11 measures it and writes the order that works.
+- **M4b — `resolve` answers `Enum` (2026-09-05).** The two built-in sums resolve
+  to `| None | Some(T)` and `| Err(E) | Ok(T)`, and `option_payload` /
+  `result_payloads` are the one reading. 101 red frontend tests to 0; four
+  consumers were a MERGE rather than a reader — `check_match` is
+  `check_match_enum`, the direct backend's `Sum` is a variant list, `?` stopped
+  mistaking every sum for a `Fallible`, and `normalize_fn_sig` has to descend
+  into a sum's payloads. Two of §8.6's three M5 guards arrive here, because a
+  resolved sum reaches a user: `codec::wire` keeps `null` and `Ok`-first, and
+  `Display` keeps printing `Option<T>`. Zero bytes: the manifest is unchanged on
+  all 173, parity 41 of 41, residue green. RFC-0126 §8.13.
+- **M5 — the last step, and the only one left.** §8.11 measured M4 and M5 as one
+  step that is not zero bytes, and split it: M4a moved the bytes, M4b answered
+  `Enum` for none. What is left is deleting `Type::Option` and `Type::Result`,
+  with §8.6's third guard — the parser accepting `Some`/`Ok`/`Err` with no
+  declaration — the only one not already standing. RFC-0126 §8.11 and §8.13.
 
 ### What each milestone is worth on its own
 

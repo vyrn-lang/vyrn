@@ -559,9 +559,12 @@ impl Declared {
     /// (exit-residue round forty-one).
     fn success_payload(&self, vars: &Scopes<Option<Type>>, operand: &Expr) -> Option<Type> {
         let ot = self.type_of(vars, operand)?;
-        match crate::types::resolve(&ot, &self.decls) {
-            Type::Option(t) | Type::Result(t, _) => Some(*t),
-            _ => crate::types::type_key(&ot).and_then(|k| {
+        let r = crate::types::resolve(&ot, &self.decls);
+        match crate::types::option_payload(&r)
+            .or_else(|| crate::types::result_payloads(&r).map(|(t, _)| t))
+        {
+            Some(t) => Some(t.clone()),
+            None => crate::types::type_key(&ot).and_then(|k| {
                 self.rets
                     .get(&crate::types::impl_method_name(
                         crate::types::FALLIBLE,
