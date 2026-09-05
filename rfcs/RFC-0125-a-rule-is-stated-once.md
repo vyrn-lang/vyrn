@@ -2257,19 +2257,13 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 
 | kind | lines | share |
 |---|---|---|
-| a rule the kernel now gives | 1,009 | 10 per cent |
-| a rule only the checker gives | 723 | 7 per cent |
-| placement rows for the engines | 2,365 | 23 per cent |
-| a fix menu | 81 | 1 per cent |
-| shared machinery | 3,668 | 36 per cent |
-| tests | 2,187 | 22 per cent |
-| **the file** | **10,055** | |
-| placement rows for the engines | 2,373 | 24 per cent |
-| a fix menu | 81 | 1 per cent |
-| shared machinery | 3,657 | 37 per cent |
-| tests | 2,172 | 22 per cent |
-| **the file** | **10,015** | |
-| **the file** | **10,069** | |
+| a rule the kernel now gives | 916 | 9 per cent |
+| a rule only the checker gives | 725 | 7 per cent |
+| placement rows for the engines | 2,167 | 22 per cent |
+| a fix menu | 73 | 1 per cent |
+| shared machinery | 3,709 | 38 per cent |
+| tests | 2,092 | 22 per cent |
+| **the file** | **9,682** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
