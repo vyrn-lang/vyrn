@@ -16951,13 +16951,21 @@ mod tests {
     fn if_let_lowers_to_a_tag_test_and_payload_bind_no_phi() {
         // `if let Some(v) = e { .. }` extracts the tag, branches, and binds the
         // payload — a statement form, so no `phi` merge (RFC-0060).
+        //
+        // Since RFC-0125 §3 M5 it takes the switch every `match` takes, and the
+        // switch writes the two-way branch because the SHAPE is two arms and one
+        // tag — so this asks for the branch, not for the label a form of its own
+        // used to give it.
         let p = check(
             "fn f() -> Option<Int64> { return Some(3) } \
              fn main() -> Int64 { if let Some(v) = f() { return v } return 0 }",
         )
         .unwrap();
         let ir = emit(&p).unwrap();
-        assert!(ir.contains("il.then"), "if-let then block: {ir}");
+        assert!(
+            ir.contains("icmp eq i64") && ir.contains("br i1"),
+            "if-let is a two-way branch on a compare, not a switch: {ir}"
+        );
         assert!(
             ir.contains("extractvalue { i64, i64 }"),
             "tag/payload extraction: {ir}"
