@@ -6055,6 +6055,83 @@ The limits row is empty. What is left is the tree-walker itself and the bridge
 the generation engine reaches through it, which is the next slice's question and
 the one the record states below.
 
+**The generation bridge, and where it goes.** The middle row above is RFC-0076's
+reflection: thirteen references from `vyrn-genwasm` and the loader into
+`interp.rs`, for machinery that runs a `gen fn` and has nothing to do with
+walking a tree. This slice DECIDES the shape and does not move the code, because
+the move costs nothing extra on the day the tree-walker goes and costs a
+conversion every time until then.
+
+Read one at a time, twelve of the thirteen are already a `gen` module in the
+wrong file. `render_code`, `CodePiece`, `gen_lex_tokens_lit`,
+`gen_module_interface_lit`, `gen_scoped_path`, `GenInputs`, `GenRead`,
+`GenOutput`, `set_gen_engine` and `generate`'s dispatch half name no interpreter
+type at all: they take a resolver, a path and a source, and they answer with an
+`Expr` or a `String`. What holds them in `interp.rs` is the file they were
+written in.
+
+**The thirteenth is the decision.** `gen_code_splice` takes a `Val`, and a `Val`
+is the tree-walker's value: twenty variants, `Rc`, closures, a region depth. The
+splice rule reads SEVEN of them — `Str`, `Code`, `Bool`, `Int`, `IntN`, `Float`,
+`Float32` — and the seven are exactly the set `vyrn_codegen::TAG_*` enumerates,
+because a compiled generator has to name them across the wall. `vyrn-genwasm`
+already builds a `Val` from a tag and one word for no other purpose than to hand
+it to this function (`splice_value`), and throws it away afterwards.
+
+So the type the rule wants is the tag set, not the interpreter's value:
+
+```rust
+pub enum Spliced {
+    Str(String),
+    Code(Vec<CodePiece>),
+    Bool(bool),
+    Int { v: i64, signed: bool },
+    F64(f64),
+    F32(f32),
+}
+```
+
+One conversion in the interpreter, at the one place it splices; none in
+`vyrn-genwasm`, which builds a `Spliced` from the tag directly and stops naming
+`Val`. Then `gen.rs` depends on `ast`, `loader` and `trap`, and on nothing that
+walks. Its one remaining edge is `generate`'s fallback — no engine installed
+means run it interpreted — which is the edge the deletion removes rather than
+moves.
+
+That is the whole of it: one enum, one conversion, and a file move. It is
+recorded here rather than done because a second value type beside `Val` is a
+cost the tree-walker's last day pays back and no day before it does.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` and
+`TEMP` pointed at this worktree's own scratch directory: `cargo fmt --all
+--check`, clean; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`
+with no filter, 549 passed and 74 ignored (the 549th is this slice's pin); the
+`kernel`, `coretables`, `typed` and `effects` suites with `--ignored` (1, 1, 1
+and 2, at 25 s, 21 s, 55 s and 68 s); `fixtures` with `--ignored`, 205 compared
+in 26 s; `vyrn-frontend`, 1,246 — the same count, with the six `crate::run`
+tests now calling their own two-line helper; the workspace less `vyrn-cli` with
+`--skip _natively`, 1,422; `vyrn-genwasm`'s own tests, 3; `memory` with
+`--test-threads=1`, 10; parity in release with `--ignored`, 41 of 41 in 370 s;
+the residue ratchet, 276 s; `VYRN_WASM_MANIFEST=check` on `wasmhash`, green on
+all 173 — 38 rows moved, re-recorded with `write` and committed beside the
+change, and the other 135 did not; the cross-engine generator test with a fresh
+`VYRN_GEN_CACHE_DIR` and `--features wasm-gen`, 13, and its corpus test with
+`--ignored`, all 24 generators identical under both engines; `testsweep` with
+`--ignored`, 34 s; `vyrn doc --std -o ../docs/api --verify`, 41 files up to
+date; the site — `vyrn run site/export.vyrn out` writes its 82 routes and 14
+assets in 313 s, and `vyrn test` is green over `export.vyrn` and `site/app`, 189
+blocks over 26 files; and `VYRN_SERVE_ENGINE=wasm` over `serve` (27), `rpc` (12)
+and `universal_pages` (9 still ignored, as the sixth slice left them).
+
+Two suites had to be told about the default. `tests/vyx.rs` counts the
+generation cache's entries and read four where the rule is three: `wasm/`, the
+compiled engine's artifact store, lives INSIDE the generation cache so that
+clearing one clears the other, and it is a directory rather than a generation
+result. It counts files now. `testsweep` reassembles programs into a fixed
+directory under the system temp dir and is only meaningful when that directory
+starts empty — it read 139 runnable programs against a floor of 150 over one
+another gate had left behind, and 171 over a clean one.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
