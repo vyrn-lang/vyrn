@@ -5238,8 +5238,8 @@ other two arrangements, and every other match in the corpus is over a temporary.
 parameter in return position, with a type that declares `impl Owned` because the
 program that found it had one.
 
-**A second miscompile, native only, recorded and not fixed.** It was found
-reducing the first. Nine lines:
+**A second miscompile, native only, recorded here and fixed by the slice
+below.** It was found reducing the first. Nine lines:
 
 ```vyrn
 type Json =
@@ -5266,8 +5266,8 @@ both right. The cause is in `vyrn-codegen`'s match-expression emitter, which
 reconciles the join's type from the ARMS — the last arm that answers wins —
 rather than reading the type the checker gave the match node. It is an emitter's
 second copy of a rule the core states, which is the class M5 exists to delete,
-and the native route has no node-type map to read instead. So it waits for the
-route rather than for a patch. No example reaches it: an array LITERAL beside an
+and the native route had no node-type map to read instead. The eighth slice
+gives it one. No example reaches it: an array LITERAL beside an
 array VALUE in one join is a shape `std/` does not write, and `matchown.vyrn`'s
 own `emptyStrs()` is the spelling that avoids it.
 
@@ -5310,6 +5310,146 @@ three serving suites:
 | `universal_pages`, 9 tests, `--ignored` | 17.97 s | 18.66 s |
 
 The third row is the one the sixth slice could not write.
+
+#### The eighth slice (2026-09-05): a join holds one value
+
+The seventh slice found a second miscompile while it reduced the first, recorded
+it, and did not fix it. It is fixed, and so is the class it belongs to.
+
+**The program.** Thirteen lines, no imports, native only:
+
+```vyrn
+type Json =
+    | JNull
+    | JObj(Array<String>)
+
+fn main() -> Int64 {
+    let j = JObj(["$schema"])
+    let k = match j {
+        JObj(fs) => fs,
+        JNull => ["z"],
+    }
+    for f in k {
+        print(f)
+    }
+    return 0
+}
+```
+
+| route | before | after |
+|---|---|---|
+| the interpreter | `$schema` | `$schema` |
+| `vyrn run --engine wasm` | `$schema` | `$schema` |
+| `vyrn build`, text IR through clang | refuses to link | `$schema` |
+
+The link refusal is `'%t20' defined with type '{ ptr, i64, i64 }' but expected
+'[1 x ptr]'`. Write `[]` for the second arm and it links and prints a pointer
+where the String belongs, because two arms that disagree about a shape can still
+agree about a WIDTH. The same three answers come out of `if flag { names } else
+{ ["y"] }`, out of the same `match` over an `Option`, and out of `opt ?? ["z"]`,
+which the parser desugars to one.
+
+**One value, and the checker said which type it has.** `Array<String>` is
+`{ptr,len,cap}` and `["z"]` is `[1 x ptr]`. The two are the same TYPE in two
+SHAPES, and an arm reports the shape it built. `vyrn-codegen`'s three merges each
+read one arm and fed the merge the other: `gen_match_enum` took the last arm that
+answered, preferring a fully applied instantiation, and `gen_if_expr` and
+`gen_match_body_boxed` took the first arm that was not `Never`.
+
+The checker states the type of a `match` and of an `if` used as an expression at
+the node, once. The core reads it there already — `core.rs`'s `Expr::Match` arm
+asks `ty_of(e)` for the temporary every arm stores into. It reaches the emitters
+now.
+
+- `checker::Recorded::joins` is the subset of `node_types` at those two nodes.
+  The recording wrapper holds the `&Expr`, so it is the one place that can
+  separate them; an address alone cannot say which nodes are joins, and the
+  whole map is too large to hand an emitter.
+- `lower_with` publishes it beside the core's other answers
+  (`vyrn_lower::core::join_ty`). The types are the ones the checker WROTE, with a
+  generic body's parameters still spelled as parameters, and a reader inside a
+  monomorphized body substitutes its own instantiation in.
+- The textual emitter asks ONCE, before any arm runs. So the answer is also the
+  arm's expectation — a literal arm builds at the type the join holds — and each
+  arm's value then crosses into it through `coerce`, the ladder every storage
+  boundary crosses. `["z"]` heapifies; `[]` keeps its shape and gains the right
+  element type.
+- The direct backend's two joins already funnelled through one function,
+  `join_ty`, so the whole change there is what that function reads.
+
+**The class.** Every place in either emitter that derives a TYPE from operands,
+arms or branches rather than reading a recorded one. Line numbers are this
+commit's.
+
+| site | what it derives from | verdict |
+|---|---|---|
+| `lib.rs:7437` `gen_if_expr` | the first branch that is not `Never` | the same rule; reads the core |
+| `lib.rs:7339` `gen_match_body_boxed` | the first arm that is not `Never` | the same rule; reads the core |
+| `lib.rs:7496` `gen_match_enum` | the last arm, upgraded to a fully applied one | the same rule; reads the core |
+| `direct.rs:6190` `join_ty` | `peek` / `match_ty`, both first-arm-wins | the same rule; reads the core |
+| `direct.rs:6019` `match_ty` | the arms | the guess, and only where no lowering ran |
+| `lib.rs:15363` `join_never` | two arms | the guess, and only where no lowering ran |
+| `lib.rs:6915` `Expr::ArrayLit`, `direct.rs:11607` `array_lit` | the expectation, else `elems[0]` | the same rule, and it cannot disagree |
+| `lib.rs:7023` `Expr::MapLit`, `direct.rs:13885` `map_lit` | the expectation, else the first value | the same rule, and it cannot disagree |
+| `lib.rs:8277` `gen_try`, `direct.rs:13340` `try_` | the operand's own sum | the same rule; one operand, so no merge |
+| `lib.rs:8423` `gen_binary_inner`, `direct.rs:6815` `binary` | the operands | a second copy of `binop_type`; not this slice |
+| `lib.rs:7146` `gen_struct_lit`, `direct.rs:5910` `applied_record` | the field values, for what the expectation leaves open | a second copy of the checker's solve; not this slice |
+| `lib.rs:4917` `static_ty` | a binding, a field, an element, a call | the emitter's own, and it answers `None` rather than guess |
+| `direct.rs:6212` `peek` | every expression kind, twenty arms | the whole class, and M5's route deletes it |
+
+Four rows are fixed. Two are the guess that answers where no lowering ran —
+`VYRN_NO_PLACER=1`, or a host that never linked `vyrn-lower` — which is the
+stand-down every other reader of the core has.
+
+The `??` operator needs no row: the parser desugars it to an `Expr::Match` before
+the checker types it, so it is one of the three merges and it was broken and
+fixed with them. Block values need none either: RFC-0118 refuses a block arm in
+value position, so a block never carries one.
+
+**The two rows that cannot disagree, and why that is not the same as the
+merges.** An array literal builds at the expectation where a storage boundary
+names one, and at `elems[0]`'s type where none does. That reads like a guess and
+is not: the checker's own rule for a literal with no expectation IS the first
+element — `[4, n]` with `n: UInt8` is refused, `array elements must share a type:
+expected Int64, found UInt8` — so no program can make the two answer differently.
+A merge is different because a merge has two producers and the language lets them
+build the same type in different shapes.
+
+`?` is the third of these. It unwraps the operand's own sum, and there is one
+operand, so nothing can disagree with it. It stays a second copy and it stays
+harmless.
+
+**Ten wasm rows move and none of them is a defect.** Nine are one difference in
+one `std/strings` body — `substring`'s inner `match`, whose every arm ends in
+`panic`. `match_ty` read `Never` off the arms, so the join emitted `block` and a
+trailing `unreachable`; the checker types the node by the value the join WOULD
+carry, so it is `block (result i32)` now and the trailing `unreachable` is gone.
+One instruction shorter, and the same program: an arm that traps leaves the stack
+polymorphic, which is what lets the shorter form validate. The rows are
+`argsdemo`, `bytesrange`, `clidemo`, `clifail`, `herofield`, `regexredux`,
+`rest`, `strings` and `vlog`. The tenth is `branchtypes.vyrn`, which moves
+because the example changed.
+
+**The pin is `examples/branchtypes.vyrn`**, which exists because a backend that
+predicts an arm's type keeps a second list beside the emitting one and the two
+drift. It had no arm carrying one type in two shapes; it has three now — a
+`match`, an `if` expression, and the empty-literal spelling that is the silent
+half. The corpus parity gate builds it on all three engines, and `fixtures`,
+`wasmhash`, `residue` and `testsweep` each read it.
+
+**Gates.** In §1.4's order, one at a time, in the foreground: `cargo fmt --all
+--check`, clean; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`
+with no filter, 548 passed and 74 ignored; the `kernel`, `coretables`, `typed`
+and `effects` suites with `--ignored` (1, 1, 1 and 2, at 85 s, 73 s, 170 s and
+172 s); `fixtures` with `--ignored`, 22 s; `vyrn-frontend`, 1,246; the workspace
+less `vyrn-cli` with `--skip _natively`, 1,422; `memory` with
+`--test-threads=1`, 10; parity in release with `--ignored`, 41 of 41 in 308 s;
+the residue ratchet, 163 s; `VYRN_WASM_MANIFEST=check` on `wasmhash`, green on
+all 173 after the ten rows above were rewritten; the cross-engine generator test
+with a fresh `VYRN_GEN_CACHE_DIR`, 12; `testsweep` with `--ignored`, 28 s; `vyrn
+doc --std -o ../docs/api --verify`, 41 files up to date; the site — `vyrn run
+site/export.vyrn out` writes its 82 routes and 14 assets in 232 s, and `vyrn
+test` is green over `export.vyrn` and `site/app`, 189 blocks.
 
 ### M6 — the other two judgments
 
