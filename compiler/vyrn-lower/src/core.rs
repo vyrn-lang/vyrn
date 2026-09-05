@@ -489,10 +489,9 @@ pub struct Arm {
     /// rather than left to the reader's eye, because the edge drops of a
     /// join follow them and a position is not a key.
     ///
-    /// `None` where this pass does not state the answer: the `if let` and `?`
-    /// desugars build arms of their own and consult no table, so a reader
-    /// falls back to the plan for those sites. Closing that is the next
-    /// step, and the emitters this slice flips do not read the table there.
+    /// `None` where this pass does not state the answer. Every switch this
+    /// pass builds states one — a `match`, an `if let` and a `?` alike — so a
+    /// reader needs no second table.
     pub frees: Option<Vec<Name>>,
     pub body: Vec<St>,
     /// The `match` (or `if let`, or `?`) this arm belongs to, and which arm
@@ -1624,11 +1623,13 @@ impl<'a> Builder<'a> {
                 let binds = self.bind_pattern(pattern, &sty, consuming, *line, from, &mut t)?;
                 self.block(then_block, &mut t)?;
                 let frees = self.arm_frees(sid, 0, &binds, &mut t);
+                self.edge_drops(sid, 0, &mut t)?;
                 self.scope.truncate(mark);
                 let mut e = Vec::new();
                 if let Some(blk) = else_block {
                     self.block(blk, &mut e)?;
                 }
+                self.edge_drops(sid, 1, &mut e)?;
                 out.push(St::Switch {
                     on: sv,
                     arms: vec![
