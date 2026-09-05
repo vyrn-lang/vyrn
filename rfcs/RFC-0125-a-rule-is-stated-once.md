@@ -6135,6 +6135,31 @@ directory under the system temp dir and is only meaningful when that directory
 starts empty — it read 139 runnable programs against a floor of 150 over one
 another gate had left behind, and 171 over a clean one.
 
+#### The proof gate, run (2026-09-05)
+
+"The one gate that would prove the deletion safe" is above, and it had never
+been run as a diff. It is run here.
+
+`examples/expected/` was copied out of the checkout. `VYRN_FIXTURES=write`
+re-recorded all 205 examples from the compiled route — stdout, standard error
+and the exit code, 615 files. The two trees were compared file by file, byte
+for byte.
+
+| | |
+|---|---|
+| files compared | 615, over 205 examples |
+| files that differ | 0 |
+| the recorder | `vyrn run --engine wasm`, in 55 s |
+| the second column | `VYRN_FIXTURES=interp`, 205 compared in 253 s, green |
+
+**What this licenses and what it does not.** It licenses the deletion of the
+recorder's other engine: the file the interpreter would record is the file the
+compiled route records, on this platform, for every example in the corpus. It
+does not license the deletion of the interpreter, because the corpus is not the
+whole of what the interpreter runs — the sixteenth census row is a capability no
+example exercises, and the gate that would have caught it was `cargo test -p
+vyrn-cli`, not this one. A corpus gate proves the corpus.
+
 #### The eleventh slice (2026-09-05): the compiled route is the default
 
 The tenth slice left the census at fifteen `yes` and the default at `interp`.
