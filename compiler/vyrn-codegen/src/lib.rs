@@ -76,7 +76,7 @@ use vyrn_frontend::types::INT32;
 /// (wasm32-wasip1) LLVM lowers TLS to ordinary globals, so the shared IR is
 /// unchanged in behavior there.
 /// The call-depth counter every emitted function's prologue bumps
-/// ([`vyrn_frontend::interp::CALL_DEPTH_LIMIT`], audit A5.3).
+/// ([`vyrn_frontend::trap::CALL_DEPTH_LIMIT`], audit A5.3).
 ///
 /// Built rather than written out, so the number in the message and the number in
 /// the comparison are the same number — a trap whose wording drifts from the
@@ -90,7 +90,7 @@ use vyrn_frontend::types::INT32;
 /// emitter puts exactly one in front of every `ret` a prologue's function has,
 /// and a path that does not reach a `ret` (a trap) ends the process.
 fn call_depth_runtime() -> String {
-    let limit = vyrn_frontend::interp::CALL_DEPTH_LIMIT;
+    let limit = vyrn_frontend::trap::CALL_DEPTH_LIMIT;
     let (msg, len) = llvm_str(&vyrn_frontend::trap::line(
         &vyrn_frontend::trap::call_depth(),
     ));
@@ -127,7 +127,7 @@ entry:
     )
 }
 
-/// The region runtime, with [`vyrn_frontend::interp::REGION_MAX`] filled in.
+/// The region runtime, with [`vyrn_frontend::trap::REGION_MAX`] filled in.
 ///
 /// The number was written five times in the text below — three array lengths,
 /// one comparison and the trap's own wording — plus a sixth as the hand-counted
@@ -136,7 +136,7 @@ entry:
 /// already drifted apart in signedness. Now the text has holes and one constant
 /// fills them, the way [`call_depth_runtime`] already builds its own number in.
 fn region_runtime() -> String {
-    let n = vyrn_frontend::interp::REGION_MAX;
+    let n = vyrn_frontend::trap::REGION_MAX;
     let (msg, len) = llvm_str(&vyrn_frontend::trap::line(
         &vyrn_frontend::trap::region_depth(),
     ));
@@ -422,10 +422,13 @@ const STR_HDR: i64 = 16;
 ///
 /// All-ones rather than a flag bit because the free is an equality test: a heap
 /// block would have to answer `cap == 2^64-1` to be mistaken for a literal. The
-/// reserve arithmetic in [`Gen::emit_str_append`] compares capacities UNSIGNED,
-/// where all-ones reads as room for everything — it never sees a literal (step 1
-/// copies a buffer this path does not own before step 2 reads its capacity), and
-/// an equality test keeps that a separate question rather than a shared one.
+/// reserve arithmetic in [`Gen::emit_str_append_owned`] compares capacities
+/// UNSIGNED, where all-ones reads as room for everything — so step 1 tests this
+/// sentinel as well as the ownership flag, and a literal never reaches step 2.
+/// It used to test the flag alone, on the reading that step 1 already screened
+/// every borrowed buffer; the flag is set from the accumulator's DECLARATION,
+/// and `let mut acc = empty()` — a call that returns `""` — carried a literal
+/// past it and grew it in place over the next literal in the pool.
 const STR_STATIC: i64 = -1;
 
 /// `bytes(s)`: an `Array<UInt8>` ({ptr,len,cap}, i8 stride — RFC-0014 M2) of a
@@ -3713,12 +3716,29 @@ impl<'a> Gen<'a> {
         let vlen = self.str_len(val);
 
         // Step 1: the flag is 0 — copy the borrowed buffer into one we own.
+        //
+        // OR the header says static. The flag is set from the accumulator's
+        // DECLARATION, and a call that transfers a `String` may still hand back
+        // a data-segment literal (`fn empty() -> String { return "" }`), so
+        // [`STR_STATIC`] decides over it: without this the append grew a literal
+        // in place and wrote over the next literal in the pool. Same rule, same
+        // words, in `std/runtime.vyrn`'s `strAppend`.
         let own_l = self.fresh_label("app.own");
         let have_l = self.fresh_label("app.have");
         let f0 = self.fresh_tmp();
         let owned = self.fresh_tmp();
+        let flagged = self.fresh_tmp();
+        let cur0 = self.fresh_tmp();
+        let capp0 = self.fresh_tmp();
+        let cap0 = self.fresh_tmp();
+        let dynamic = self.fresh_tmp();
         self.emit(format!("{f0} = load i64, ptr {flag}"));
-        self.emit(format!("{owned} = icmp ne i64 {f0}, 0"));
+        self.emit(format!("{flagged} = icmp ne i64 {f0}, 0"));
+        self.emit(format!("{cur0} = load ptr, ptr {slot}"));
+        self.emit(format!("{capp0} = getelementptr i8, ptr {cur0}, i64 -8"));
+        self.emit(format!("{cap0} = load i64, ptr {capp0}"));
+        self.emit(format!("{dynamic} = icmp ne i64 {cap0}, {STR_STATIC}"));
+        self.emit(format!("{owned} = and i1 {flagged}, {dynamic}"));
         self.emit_term(format!("br i1 {owned}, label %{have_l}, label %{own_l}"));
         self.emit_label(&own_l);
         let ob = self.fresh_tmp();
@@ -16716,7 +16736,7 @@ mod tests {
         assert!(
             ir.contains(&format!(
                 "@__vyrn_region_blocks = thread_local global [{} x ptr] zeroinitializer",
-                vyrn_frontend::interp::REGION_MAX
+                vyrn_frontend::trap::REGION_MAX
             )),
             "{ir}"
         );
@@ -18664,7 +18684,7 @@ mod tests {
         // Read from the constant, never spelled: this file used to write the
         // number in five places and the test in two more, and a limit a test
         // pins by hand is a limit the test can outlive.
-        let n = vyrn_frontend::interp::REGION_MAX;
+        let n = vyrn_frontend::trap::REGION_MAX;
         let src = "fn main() -> Int64 { region { } return 0; }";
         let ir = emit(&check(src).unwrap()).unwrap();
         assert!(

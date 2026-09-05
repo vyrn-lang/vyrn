@@ -10,100 +10,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// The most Vyrn calls that may be in flight at once, in EVERY engine (audit
-/// A5.3, RFC-0016 addendum).
-///
-/// A recursion limit is the language's, not the interpreter's. Without one the
-/// three engines disagreed about the same program: at depth 30,000 the native
-/// binary printed the answer while the reference semantics aborted with a Rust
-/// runtime message, exit 127, no `file:line`. Counting the calls — here, and in
-/// each backend's function prologue — is what makes the outcome the same
-/// everywhere, and makes it a Vyrn diagnostic rather than a death.
-///
-/// 1,000 is what every engine reaches in every BUILD PROFILE, which is the part
-/// the first number (10,000) got wrong. The interpreter spends ~8.5 KB of Rust
-/// stack per Vyrn call in a release build and ~190 KB in a debug build — the
-/// unoptimized `expr`/`stmt` frames keep every local of a large match alive — so
-/// 10,000 fitted in release and died in debug, where CI runs the tests. A limit
-/// only one profile honors is not a limit.
-///
-/// Measured on the debug build against [`INTERP_STACK_BYTES`], with this counter
-/// lifted: depth 2,600 runs and 2,800 overflows, so 1,000 keeps 2.6x margin in
-/// the profile that has the least. The native binary and `wasmtime` run past
-/// 20,000 frames of an ordinary function in either profile. 1,000 is also where
-/// CPython settles, and it is past what a recursive descent over real data
-/// reaches: `.vyx` markup, a GraphQL selection set and a JSON document all nest
-/// in the tens. Data nested deeper than that is data no engine should try — it
-/// stops with the same diagnostic everywhere, which is the whole contract.
-///
-/// An `extern` is NOT counted: it is the host's frame, and no backend gives it a
-/// Vyrn prologue. Neither is a lambda body, which has no name to call itself by
-/// (RFC-0037) and so cannot recurse without passing through a named function.
-pub const CALL_DEPTH_LIMIT: u32 = 1_000;
-
-/// The most bytes one call frame may claim on the wasm backend's shadow stack.
-///
-/// A backend's stack is finite, and until this number existed nothing compared a
-/// frame against it. The wasm backend's whole stack was one 64 KB page, so a
-/// function with a 256-byte frame ran out of stack at depth 256 while
-/// [`CALL_DEPTH_LIMIT`] said 1,000 and the other two engines reached it — the
-/// program died there with `out of bounds memory access` at a wild address, and
-/// stopped with the shared diagnostic everywhere else.
-///
-/// Bounding the frame is what makes the depth one number again.
-/// `vyrn_codegen::wasm::STACK_BYTES` holds [`CALL_DEPTH_LIMIT`] of these, so at
-/// every depth the counter admits the stack pointer is still above 0: the
-/// counter is what stops the program, on every engine, with the same words. A
-/// frame past this is refused when it is built, naming the function and its
-/// line, because the backend that lays a frame out is the one that knows its
-/// size.
-///
-/// 8 KB is 1.5x the largest frame the corpus builds (5,552 bytes, `createForm`
-/// in `examples/shelf/boot.vyrn`), and the stack it implies costs 8,257,536
-/// bytes of linear memory — 126 wasm pages a module reserves and touches only as
-/// deep as it recurses.
-pub const FRAME_LIMIT: u32 = 8 * 1024;
-
-/// The most elements one array literal may have.
-///
-/// Half of [`FRAME_LIMIT`], over the eight bytes of an `Int64`: a literal is
-/// built in a frame slot, and the widest element type an ordinary literal has is
-/// what turns one bound into the other. HALF, because the slot is not all a
-/// literal costs — the array it becomes needs its own slot in the same frame, so
-/// a bound of a whole frame would let the checker admit a literal the backend
-/// then refuses. Wider elements — a literal of records — are caught by the frame
-/// bound itself, which knows the real stride.
-///
-/// The checker holds this rather than either backend, because the other half of
-/// the defect is one no frame can express: the textual backend lowers a literal
-/// to one `insertvalue` per element over an aggregate of the full width, so
-/// 100,000 elements ran clang for 2 m 53 s and died `LLVM ERROR: out of memory`,
-/// after `vyrn check` had said `ok` in 0.1 s. Refusing in the checker is what
-/// makes `check` predict the build, and makes all three engines refuse the same
-/// literal.
-///
-/// The corpus's largest literal has 24 elements, so this is 21x anything written
-/// so far. A table longer than it belongs in a data segment rather than in
-/// instructions, which is a lowering neither backend has yet.
-pub const ARRAY_LIT_LIMIT: usize = FRAME_LIMIT as usize / 16;
-
-/// How many `region` scopes may be open at once, in EVERY engine.
-///
-/// The two backends each keep a fixed stack of region records, so the number is
-/// the length of an array in one and a reserved block in the other, and it is in
-/// the trap's wording as well. It was written eight times across three engines
-/// before this constant, three of those inside string literals; the backends'
-/// comparisons had already drifted apart in signedness. One number, read by
-/// everything that has an opinion about it.
-pub const REGION_MAX: u32 = 64;
-
-/// The Rust stack every thread that runs the interpreter reserves.
-///
-/// Reserving is cheap — the pages are virtual until a frame touches them — and
-/// what is touched is [`CALL_DEPTH_LIMIT`] frames deep at worst: ~8.5 MB in a
-/// release build, ~190 MB in a debug one. Both sit well inside this, which is
-/// what gives the limit above room to be the same number in either profile.
-pub const INTERP_STACK_BYTES: usize = 512 * 1024 * 1024;
+// The language's limits and the `extern` refusal, declared in `trap.rs` since
+// RFC-0125 §3 M5's tenth slice. Imported unqualified because this file reads
+// them the way it always did.
+use crate::trap::{extern_unavailable, CALL_DEPTH_LIMIT, INTERP_STACK_BYTES, REGION_MAX};
 
 /// A fast, non-cryptographic hasher for the interpreter's own maps.
 ///
@@ -1016,15 +926,6 @@ fn val_kind(v: &Val) -> &'static str {
         Val::Code(_) => "Code",
         _ => "a value",
     }
-}
-
-/// The trap for calling an `extern` (RFC-0012) on a target that provides no
-/// host for it. Parity compares these bytes byte-for-byte
-/// (`vyrn-cli/tests/parity.rs`), so there is one definition: the interpreter
-/// raises it, and the native trap stub `vyrn_codegen::toolchain` writes prints
-/// it. Neither backend spells it a second time.
-pub fn extern_unavailable(name: &str) -> String {
-    format!("extern `{name}` is not available on this target")
 }
 
 /// Escape a `String` value into a Vyrn source string literal, quotes included —
@@ -8814,7 +8715,15 @@ mod tests {
     use super::{
         code_splice, lex_tokens, render_code, reserve_str, reserve_vec, CodePiece, Ctrl, Val,
     };
-    use crate::run;
+
+    /// Parse, check, then run `main` — the two lines `vyrn_frontend::run` was
+    /// until RFC-0125 §3 M5's tenth slice deleted it. These tests are the only
+    /// caller it had left, and a two-line convenience for one module's tests
+    /// belongs in that module's tests.
+    fn run(source: &str) -> Result<i64, String> {
+        let program = crate::check(source)?;
+        super::run(&program)
+    }
 
     /// RFC-0124's hypothesis, screened rather than assumed: the memo set
     /// holds exactly the nullary functions whose transitive effects are
@@ -11519,7 +11428,7 @@ mod tests {
                      let mut seen = 0 \
                      for v in fromStep(0, 1, tick) { seen = seen + v if v == 7 { break } } \
                      return steps }";
-        assert_eq!(crate::run(src), Ok(8));
+        assert_eq!(run(src), Ok(8));
     }
 
     /// RFC-0075 M2c's `map`, spelled the way `std/stream` spells it: no
@@ -11557,7 +11466,7 @@ mod tests {
                  if v == 6 {{ break }} }} \
                return steps }}"
         );
-        assert_eq!(crate::run(&src), Ok(4));
+        assert_eq!(run(&src), Ok(4));
     }
 
     #[test]
@@ -11582,7 +11491,7 @@ mod tests {
                  close(s) i = i + 1 }} \
                return closed }}"
         );
-        assert_eq!(crate::run(&src), Ok(10000));
+        assert_eq!(run(&src), Ok(10000));
     }
 
     #[test]
@@ -11591,7 +11500,7 @@ mod tests {
         // stops a program from calling it on a number. The wording is the one the
         // compiled backends print.
         let src = "fn main() -> Int64 { let x: Option<Int64> = pullAt(24) return 0 }";
-        match crate::run(src) {
+        match run(src) {
             Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
             other => panic!("expected a trap, got {other:?}"),
         }
@@ -11601,7 +11510,7 @@ mod tests {
                    fn main() -> Int64 { let a = boxStream(fromStep(0, 1, tick)) \
                      let s: Stream<Int64> = unboxStream(a) close(s) \
                      let t: Stream<Int64> = unboxStream(a) close(t) return 0 }";
-        match crate::run(src) {
+        match run(src) {
             Err(e) => assert!(e.contains("no stream in this box"), "unexpected trap: {e}"),
             other => panic!("expected a trap, got {other:?}"),
         }
@@ -11619,7 +11528,7 @@ mod tests {
                    fn main() -> Int64 { let mut i = 0 \
                      while i < 100000 { let s = fromStep(i, 1, tick) close(s) i = i + 1 } \
                      return closed }";
-        assert_eq!(crate::run(src), Ok(100000));
+        assert_eq!(run(src), Ok(100000));
     }
 
     #[test]

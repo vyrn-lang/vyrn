@@ -602,12 +602,22 @@ export fn strConcat(a: Int32, b: Int32) -> Int32 {
 /// per power of two), so PLAN-0125-runtime §8's class-aware realloc would
 /// never hit on this path. Only the grow branch frees; the other branch copied
 /// a pointer that was never ours.
+///
+/// THE FLAG IS ADVISORY; THE HEADER DECIDES. A caller sets `own` from the
+/// accumulator's DECLARATION — a `let` whose initializer the plan says it owns
+/// starts at 1 — and a call that transfers a `String` may still hand back a
+/// data-segment literal (`fn empty() -> String { return "" }`). So an all-ones
+/// capacity, RFC-0089 M1a's word for static, takes the copy branch whatever the
+/// flag says. Without it the append grew a literal in place: it wrote over the
+/// next literal's header in the string pool, and the length that header then
+/// carried sent the next concatenation reading megabytes out of the data
+/// segment.
 export fn strAppend(own: Int32, p: Int32, v: Int32) -> Int32 {
     let vlen = Int32(load32(v - 8))
     let len = Int32(load32(p - 8))
     let mut q = p
     let mut cap: Int32 = 0
-    if Int32(load32(own)) == 0 {
+    if Int32(load32(own)) == 0 || Int32(load32(p - 4)) == -1 {
         cap = len + vlen
         if UInt32(cap) < 32 {
             cap = 32

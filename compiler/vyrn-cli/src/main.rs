@@ -297,7 +297,7 @@ fn main() -> ExitCode {
     // CLI on a worker thread with the interpreter's own reserve, so generation
     // has the same headroom a run does.
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
         .spawn(|| {
             let code = real_main();
             // RFC-0125 §3 M4: the build-phase table, on the worker thread that
@@ -6939,7 +6939,7 @@ fn build_wasm2c(
         // 1000` stays the program's wording, as under the engine.
         .arg(format!(
             "-DWASM_RT_MAX_CALL_STACK_DEPTH={}",
-            4 * vyrn_frontend::interp::CALL_DEPTH_LIMIT
+            4 * vyrn_frontend::trap::CALL_DEPTH_LIMIT
         ));
     // The same `-O2 -ffp-contract=off -march=..` the text-IR route ships, so
     // the two routes' numbers differ by the route and nothing else.

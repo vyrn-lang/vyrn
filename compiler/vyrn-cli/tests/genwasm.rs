@@ -6,12 +6,12 @@
 //! each test compares the engine against the reference rather than against a
 //! transcript nobody would notice going stale.
 //!
-//! These are meaningful only when the binary is built with `--features
-//! wasm-gen`; without it both runs are the interpreter and the tests pass by
-//! agreeing with themselves. That is deliberate — the engine is optional, and a
-//! test that failed without it would make the default build red. They need no
-//! clang and no wasi sysroot since RFC-0076 M7, which emits the generator's
-//! module directly.
+//! `wasm-gen` is ON in the default build since RFC-0125 §3 M5's tenth slice, so
+//! these compare two engines rather than the interpreter with itself. They need
+//! no clang and no wasi sysroot: RFC-0076 M7 emits the generator's module
+//! directly. Under `--no-default-features` both runs are the interpreter and
+//! every assertion still holds, which is the shape a test of an optional engine
+//! has to have.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -416,6 +416,78 @@ fn a_splice_with_no_rule_traps_identically() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// An accumulator whose FIRST value came out of a CALL, beside a second one
+/// spliced into a code quote.
+///
+/// `note` returns `""` — a data-segment literal — through a call the plan says
+/// transfers, so the accumulator's append shadow started at "this buffer is
+/// mine" and the first `+` grew the literal IN PLACE, over the next literal's
+/// header in the string pool. The header that literal then carried sent the
+/// next concatenation copying megabytes out of the data segment, which is how
+/// `std/graphql`'s `sdl` — written in exactly this shape — came back with its
+/// report spliced into the middle of the document and repeated four times in
+/// front of it. The flag is advisory now and the all-ones capacity decides
+/// (`std/runtime.vyrn`'s `strAppend`, and its copy in the textual backend).
+#[test]
+fn an_accumulator_seeded_by_a_call_does_not_grow_a_literal_in_place() {
+    let dir = std::env::temp_dir().join(format!("vyrn_m5_seeded_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("gen.vyrn"),
+        "fn note(tag: String) -> String {\n\
+         \x20   if tag == \"loud\" {\n\
+         \x20       return \"// loud\\n\"\n\
+         \x20   }\n\
+         \x20   return \"\"\n\
+         }\n\
+         export gen fn mk(tag: String) -> String {\n\
+         \x20   let mut doc = \"# head\\n\"\n\
+         \x20   let mut notes = note(tag)\n\
+         \x20   doc = doc + \"type a\\n\"\n\
+         \x20   notes = notes + \"// the note\\n\"\n\
+         \x20   notes = notes + note(tag)\n\
+         \x20   return notes + render(vyrn\"export fn text() -> String { return \\{doc} }\")\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.vyrn"),
+        "import { mk } from \"./gen\"\n\
+         import { text } from mk(\"quiet\")\n\
+         fn main() -> Int64 { print(text()) return 0 }\n",
+    )
+    .unwrap();
+
+    let main = dir.join("main.vyrn");
+    let interp = emit_gen(&main, false);
+    let wasm = emit_gen(&main, true);
+    assert!(
+        interp.status.success() && wasm.status.success(),
+        "generation failed:\n{}{}",
+        String::from_utf8_lossy(&interp.stderr),
+        String::from_utf8_lossy(&wasm.stderr)
+    );
+    let out = String::from_utf8_lossy(&wasm.stdout).to_string();
+    assert_eq!(
+        String::from_utf8_lossy(&interp.stdout),
+        out,
+        "the wasm engine's emitted source diverged from the interpreter's"
+    );
+    // The document is the whole point: it is the accumulator's neighbour in the
+    // string pool, and it came back with the note in it.
+    assert!(
+        out.contains("return \"# head\\ntype a\\n\""),
+        "the spliced document is not intact:\n{out}"
+    );
+    assert_eq!(
+        out.matches("// the note").count(),
+        1,
+        "one note, once:\n{out}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `Code` is lowered ONLY on the generation path. In the language it is still
 /// comptime-only, and an ordinary build still says so — the `gen_host` flag must
 /// not leak a runtime meaning into a normal compile.
@@ -695,7 +767,7 @@ fn editing_a_generator_recompiles_its_artifact() {
 /// the guest is compiled by cranelift and a debug cranelift is the whole
 /// difference. Run it in release.
 #[test]
-#[ignore = "compiles every generator in the corpus twice: cargo test -p vyrn-cli --features wasm-gen --test genwasm -- --ignored"]
+#[ignore = "compiles every generator in the corpus twice: cargo test -p vyrn-cli --test genwasm -- --ignored"]
 fn every_generator_example_emits_the_same_source_under_both_engines() {
     // Without the feature both columns are the interpreter and the whole thing
     // agrees with itself. Loudly, because a silent skip is exactly the failure

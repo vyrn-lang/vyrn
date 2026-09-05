@@ -1321,11 +1321,19 @@ fn an_unchanged_rebuild_regenerates_no_provider() {
         );
         String::from_utf8_lossy(&out.stdout).to_string()
     };
-    // Every cache entry's name and modification time, so a REWRITE is visible and
-    // not just a new key.
+    // Every GENERATION entry's name and modification time, so a REWRITE is
+    // visible and not just a new key. `wasm/` is not one: it is the compiled
+    // engine's artifact store (RFC-0076), which lives inside the generation
+    // cache so that clearing one clears the other, and it is a directory rather
+    // than a generation result. Counting it made this test read four where the
+    // rule is three, on the day `wasm-gen` went on by default.
     let stamp = |cache: &Path| -> Vec<(String, std::time::SystemTime)> {
         let mut v: Vec<_> = std::fs::read_dir(cache)
             .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .is_ok_and(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            })
             .map(|e| {
                 let e = e.unwrap();
                 (

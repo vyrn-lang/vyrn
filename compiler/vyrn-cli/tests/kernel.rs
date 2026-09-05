@@ -192,7 +192,7 @@ fn the_kernel_over_the_corpus() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
         .spawn(run_corpus)
         .unwrap()
         .join()

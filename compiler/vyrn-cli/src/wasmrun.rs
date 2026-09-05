@@ -229,7 +229,7 @@ fn open(bytes: &[u8], meter: bool, run: &Run) -> Result<(Store<Host>, wasmtime::
     // A directly-emitted module imports only what it calls after `sweep`, so a
     // `vyrn` import here is an `extern fn` (RFC-0012) the program REACHES. Only
     // a browser page supplies that namespace. A terminal answers each name with
-    // the one refusal — `interp::extern_unavailable`'s sentence on fd 2, then
+    // the one refusal — `trap::extern_unavailable`'s sentence on fd 2, then
     // exit 1 — because that is what the interpreter prints and what native's C
     // stub prints (`vyrn_codegen::toolchain::extern_trap_stubs`), and a reached
     // `extern` must fail the same way on every engine. RFC-0125 §3 M5, the
@@ -244,7 +244,7 @@ fn open(bytes: &[u8], meter: bool, run: &Run) -> Result<(Store<Host>, wasmtime::
         };
         let msg = format!(
             "error: {}\n",
-            vyrn_frontend::interp::extern_unavailable(imp.name())
+            vyrn_frontend::trap::extern_unavailable(imp.name())
         );
         linker
             .func_new("vyrn", imp.name(), ty, move |mut caller, _, _| {

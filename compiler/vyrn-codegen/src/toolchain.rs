@@ -1106,7 +1106,7 @@ int main(int argc, char** argv) {
 ///
 /// Both halves belong to somebody, and neither is respelled here: the symbol is
 /// [`crate::extern_symbol`]'s (this crate emits the call that must resolve to
-/// it) and the wording is [`vyrn_frontend::interp::extern_unavailable`]'s (the
+/// it) and the wording is [`vyrn_frontend::trap::extern_unavailable`]'s (the
 /// interpreter raises it, and parity compares the two byte-for-byte). The driver
 /// used to write both by hand, third copies of each.
 ///
@@ -1138,7 +1138,7 @@ pub fn extern_trap_stubs(program: &vyrn_frontend::ast::Program) -> String {
         s.push_str(&format!(
             "void {sym}(void) {{ fputs(\"error: {msg}\\n\", stderr); exit(1); }}\n",
             sym = crate::extern_symbol(&f.name),
-            msg = vyrn_frontend::interp::extern_unavailable(&f.name),
+            msg = vyrn_frontend::trap::extern_unavailable(&f.name),
         ));
     }
     s
@@ -1824,7 +1824,7 @@ mod tests {
             "the stub must define the symbol codegen calls: {stubs}"
         );
         assert!(
-            stubs.contains(&vyrn_frontend::interp::extern_unavailable("jsBeep")),
+            stubs.contains(&vyrn_frontend::trap::extern_unavailable("jsBeep")),
             "the stub must print the interpreter's trap verbatim: {stubs}"
         );
         // RFC-0043 host-boundary externs are implemented by RUNTIME_SHIM on

@@ -2413,7 +2413,7 @@ fn lower_body(
 /// 256-byte frame reached the same trap at depth 256, while the other two
 /// engines ran the same program to 1,000 and stopped with
 /// `error: call depth exceeds 1000`. Both are one missing comparison, so both
-/// are this one — against [`vyrn_frontend::interp::FRAME_LIMIT`], which is the
+/// are this one — against [`vyrn_frontend::trap::FRAME_LIMIT`], which is the
 /// stack divided by the depth every engine allows.
 ///
 /// Naming the function and its line is the point: the size is the sum of its
@@ -2423,7 +2423,7 @@ fn lower_body(
 /// makes about a program the checker let through — the message names what is too
 /// big, and a note names the declaration.
 fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
-    let limit = vyrn_frontend::interp::FRAME_LIMIT;
+    let limit = vyrn_frontend::trap::FRAME_LIMIT;
     if b.bytes() <= limit {
         return Ok(());
     }
@@ -2435,7 +2435,7 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
          the heap — an `Array<T>` rather than a fixed `Array<T, N>` or a record of records",
         b.bytes(),
         crate::FRAME_LIMIT_NEEDLE,
-        vyrn_frontend::interp::CALL_DEPTH_LIMIT,
+        vyrn_frontend::trap::CALL_DEPTH_LIMIT,
     ))
 }
 
@@ -2458,7 +2458,7 @@ fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {
     b.ins(&Instruction::I32Const(at as i32))
         .ins(&Instruction::I32Load(word()))
         .ins(&Instruction::I32Const(
-            vyrn_frontend::interp::CALL_DEPTH_LIMIT as i32,
+            vyrn_frontend::trap::CALL_DEPTH_LIMIT as i32,
         ))
         .ins(&Instruction::I32GeU)
         .ins(&Instruction::If(BlockType::Empty))
@@ -15954,7 +15954,7 @@ struct Rt {
     /// The call-depth counter (audit A5.3): four reserved bytes holding how many
     /// Vyrn calls are in flight, in the same storage and for the same reason
     /// `region_sp` is. Every named function's prologue bumps it and its one exit
-    /// gives it back; past [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] it traps
+    /// gives it back; past [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] it traps
     /// with the words the interpreter and the native binary use.
     call_depth: u32,
 }
@@ -16121,13 +16121,13 @@ impl Rt {
 const SHDR: u32 = 8;
 
 /// How many `region` scopes may be open at once — the language's number, not
-/// this backend's ([`vyrn_frontend::interp::REGION_MAX`]).
+/// this backend's ([`vyrn_frontend::trap::REGION_MAX`]).
 ///
 /// It was declared here as well, with the same value, and then not used by the
 /// comparison a few thousand lines up, which spelled `64` again. Re-exported
 /// rather than deleted because the reservations below read better with a short
 /// name.
-use vyrn_frontend::interp::REGION_MAX;
+use vyrn_frontend::trap::REGION_MAX;
 
 /// `std/runtime`'s region routing flag, at this offset from `heapBase()`. The
 /// only address the module and the emitter both name: the module owns the
