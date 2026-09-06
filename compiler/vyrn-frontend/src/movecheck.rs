@@ -3346,37 +3346,21 @@ impl MoveCheck<'_> {
             self.lends();
         }
         let Some((b, root, path)) = found else {
-            // The census's finding 2, refused: `fn wrap(s: String) -> Option<String>
-            // { return Some(s) }` puts a borrow into the value it hands back, so
+            // The census's finding 2: `fn wrap(s: String) -> Option<String> {
+            // return Some(s) }` puts a borrow into the value it hands back, so
             // the caller may release NEITHER — not the argument, which escapes
             // into the constructor, nor the result, whose producer does not own
             // it. Both leak, 48.8 MB over a million turns, and no release rule
-            // may ever close it: freeing around a lend is the alias analysis this
-            // repo deleted. The fix is the signature, which is the language's own
-            // answer since RFC-0089 — a capability is declared, not inferred.
+            // may ever close it: freeing around a lend is the alias analysis
+            // this repo deleted. The fix is the signature, which is the
+            // language's own answer since RFC-0089 — a capability is declared,
+            // not inferred.
             //
-            // The narrowing is what makes it safe to refuse. This wrapper reading
-            // exists to RECORD, because `return Some(m)` over a loop element is
-            // most of the corpus, and an element is a [`Borrow::Element`] or a
-            // [`Borrow::Projection`]. A whole `read` parameter is the one root
-            // whose owner is the CALLER, so `consume` is a fix the author can
-            // always write, and it is the shape the census measured.
-            if let Some((b, root, path)) = wrapped {
-                if root == path
-                    && matches!(b, Borrow::Read(_) | Borrow::Modify(_))
-                    && self.param_ix.borrow().contains_key(&root)
-                {
-                    return Err(menu(
-                        line,
-                        format!(
-                            "`{path}` may not be put into the value this function returns — \
-                             it is {}, and a return is owned",
-                            b.what(&path)
-                        ),
-                        b.fixes(&root, &path),
-                    ));
-                }
-            }
+            // The refusal is the kernel's (RFC-0125 §3 M3, row 19), at the
+            // constructor rather than at the `return`: a value put into a
+            // constructor is taken wherever the constructor stands, and the
+            // return was the second place this pass said so. The wrapper
+            // reading stays, because it RECORDS the lend above.
             return Ok(());
         };
         // An export refuses every kind, so it is asked before the narrowing.
@@ -6283,28 +6267,17 @@ impl MoveCheck<'_> {
                         let taken = matches!(arg, Expr::Consume { .. });
                         if let Some((root, path)) = place_path(arg) {
                             let borrowed = self.borrow_of(&root).is_some();
+                            // A borrow put into a constructor is the kernel's
+                            // refusal now (RFC-0125 §3 M3, row 19). The
+                            // retention row is still this pass's: the value the
+                            // constructor makes holds the argument and outlives
+                            // the call.
                             if !taken
                                 && (path != root || borrowed)
                                 && self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t))
                             {
                                 self.note_retention(arg);
-                                return Err(menu(
-                                    *line,
-                                    format!(
-                                        "`{path}` may not be put into `{}(..)` — it is {}",
-                                        crate::parser::method_surface(name),
-                                        if borrowed {
-                                            self.borrow_of(&root)
-                                                .map(|b| b.what(&path))
-                                                .unwrap_or_else(|| "a borrow".to_string())
-                                        } else {
-                                            Borrow::Projection.what(&path)
-                                        }
-                                    ),
-                                    vec![format!("`{path}.copy()` if the value should own it")],
-                                ));
-                            }
-                            if root == path {
+                            } else if root == path {
                                 self.took(
                                     &root,
                                     Gone::Moved {
@@ -7936,42 +7909,25 @@ mod tests {
         .is_ok());
     }
 
-    /// Phase 10a. `openRule(c)` is `for m in c.members { return Some(m) }` — a
-    /// projection of a `read` parameter, wrapped in a constructor. Phase 5 named
-    /// this as the shape nothing could see, and Phase 10a paid for it: the
-    /// moment an `if let` scrutinee was released, `std/contract` read freed
-    /// members and the `components` generator emitted a mangled spelling.
+    /// The `.copy()` the constructor refusal names compiles, and what it makes
+    /// is OWNED: no row survives that would stop the caller reclaiming it.
     ///
-    /// The record is a LEND, never a refusal — refusing here would refuse
-    /// `return Some(m)` over any loop element, which is most of the corpus.
+    /// The refusal itself is the kernel's since row 19 left (RFC-0125 §3 M3),
+    /// and `tests/refusals.rs` asks it of the whole compiler — for this
+    /// program too, whose loop variable is the shape a census row could not
+    /// see (the corpus slice).
     #[test]
-    fn a_borrow_wrapped_in_a_constructor_is_refused_and_the_copy_is_owned() {
-        // Exit-residue round ten flipped this pin: the constructor position
-        // was the one door a borrow could smuggle through into a value the
-        // machinery releases as owned — round seven's two graphql dangles
-        // walked through it — and admitting constructor-built argument
-        // temporaries at all requires the door closed. So the wrapped
-        // borrow is REFUSED now, with the store rule's `.copy()` menu.
+    fn the_copy_a_wrapped_borrow_needs_is_owned() {
         let src = "type M = { name: String } \
                    type C = { members: Array<M> } \
-                   fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m) } \
+                   fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m.copy()) } \
                    return None } \
                    fn main() -> Int64 { let c = C { members: [] } \
                    if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        let err = super::check(&program).unwrap_err();
-        record(src, false);
-        assert!(
-            err.contains("may not be put into `Some(..)`"),
-            "the borrow is refused at the constructor position: {err}"
-        );
-        // The menu's spelling compiles, and the result is owned — no row
-        // survives that would stop the caller reclaiming it.
-        let src2 = src.replace("Some(m)", "Some(m.copy())");
-        let program2 = crate::parser::parse(crate::lexer::lex(&src2).unwrap()).unwrap();
-        let r2 = super::check(&program2);
-        record(&src2, r2.is_ok());
-        assert!(r2.is_ok());
+        let r = super::check(&program);
+        record(src, r.is_ok());
+        assert!(r.is_ok(), "{r:?}");
     }
 
     /// Phase 10a keyed the scrutinee row on `place_key == 0`, and 0 means two

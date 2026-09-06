@@ -34,7 +34,7 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21 and 07, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
+//! 28, 06, 20, 21, 07 and 19, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
 //! two must still agree. The row is what stops the sentence moving after the
 //! deletion, so it stays in the census.
 //!
@@ -907,6 +907,37 @@ fn the_shapes_row_sevens_unit_tests_pinned_are_still_refused() {
     );
 }
 
+/// A borrow put into a constructor is refused AT the constructor (RFC-0125 §3
+/// M3, row 19).
+///
+/// The rule left `movecheck.rs` with two sites, and the second is why it could
+/// not leave before: the pass stated it once at the constructor position and
+/// again at a `return` that wraps one, in different words, so cutting the
+/// first only handed the program to the second. Both are gone and the kernel
+/// states it once.
+///
+/// The census row `r19` is a whole `read` parameter. This is the other shape,
+/// the one the corpus could not see because its own unit test parsed for
+/// itself: a loop variable put into `Some(..)`, which is a borrow of the
+/// container the loop does not own.
+#[test]
+fn a_borrow_put_into_a_constructor_is_refused_at_the_constructor() {
+    let dir = common::scratch("row-nineteen");
+    let src = "type M = { name: String } \
+               type C = { members: Array<M> } \
+               fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m) } \
+               return None } \
+               fn main() -> Int64 { let c = C { members: [] } \
+               if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }";
+    std::fs::write(dir.join("loop_variable.vyrn"), src).expect("write the program");
+    let (ok, text) = refusal_in(dir.to_path_buf(), "loop_variable.vyrn", false);
+    assert!(!ok, "the wrapped borrow is accepted");
+    assert!(
+        text.contains("may not be put into `Some(..)`"),
+        "the borrow is refused at the constructor position: {text}"
+    );
+}
+
 /// A nullary constructor is a value with no owner, not a name (RFC-0126 §8.8).
 ///
 /// `take(None)` twice hands the callee two values. The checker keyed rule 1 on
@@ -1341,7 +1372,7 @@ fn sections() -> Vec<Section> {
         sec(
             "    fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic> {",
             Kernel,
-            "rule 3: a return is owned (rows 15, 16, 18, 19, 28)",
+            "rule 3: a return is owned (rows 15, 16, 18, 28)",
         ),
         sec(
             "    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) \
@@ -1595,12 +1626,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 870),
+        ("a rule the kernel now gives", 854),
         ("a rule only the checker gives", 725),
         ("placement rows for the engines", 2250),
         ("a fix menu", 73),
-        ("shared machinery", 3734),
-        ("tests", 2041),
+        ("shared machinery", 3723),
+        ("tests", 2024),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
