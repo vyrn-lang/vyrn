@@ -183,20 +183,12 @@ fn a_match_arm_may_assert() {
 ",
     )
     .unwrap();
-    for engine in [&["--engine", "wasm"][..], &["--engine", "interp"][..]] {
-        let out = vyrn()
-            .arg("test")
-            .args(engine)
-            .arg(&file)
-            .output()
-            .expect("vyrn test");
-        let said = norm(&out.stdout) + &norm(&out.stderr);
-        assert!(
-            out.status.success() && said.contains("2 passed, 0 failed"),
-            "{engine:?}:
-{said}"
-        );
-    }
+    let out = vyrn().arg("test").arg(&file).output().expect("vyrn test");
+    let said = norm(&out.stdout) + &norm(&out.stderr);
+    assert!(
+        out.status.success() && said.contains("2 passed, 0 failed"),
+        "{said}"
+    );
 }
 
 /// RFC-0125 §3 M5, the eleventh slice: an ordinary function that calls a `gen

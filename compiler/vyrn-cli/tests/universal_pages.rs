@@ -124,17 +124,6 @@ fn bin_port() -> u16 {
     }
 }
 
-/// The compiled route is the default (RFC-0125 §3 M5, the eleventh slice), so
-/// this adds nothing unless `VYRN_SERVE_ENGINE=interp` asks for the tree-walker
-/// — one set of assertions either way, because a served program must answer the
-/// same on both engines.
-fn engine_args() -> Vec<String> {
-    match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
-        Ok("interp") => vec!["--engine".to_string(), "interp".to_string()],
-        _ => Vec::new(),
-    }
-}
-
 fn spawn_bin_server() -> Result<u16, String> {
     let server = repo_file("examples/bin/server.vyrn");
     let dir = std::env::temp_dir().join(format!("vyrn_upages_{}", std::process::id()));
@@ -142,7 +131,6 @@ fn spawn_bin_server() -> Result<u16, String> {
     std::fs::create_dir_all(dir.join("data")).unwrap();
     let mut child = vyrn()
         .arg("serve")
-        .args(engine_args())
         .arg(&server)
         .arg("--port")
         .arg("0")

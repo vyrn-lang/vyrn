@@ -529,11 +529,18 @@ pub fn generate(
     args: &[crate::consteval::ConstVal],
     inputs: GenInputs<'_>,
 ) -> Result<GenOutput, String> {
-    // RFC-0076: an installed engine gets first refusal; `None` falls through.
-    if let Some(engine) = GEN_ENGINE.get() {
-        if let Some(out) = engine(program, fn_name, args, &inputs) {
-            return out;
-        }
-    }
-    crate::interp::generate_interpreted(program, fn_name, args, inputs)
+    // RFC-0076: the installed engine answers, or the generator is refused by
+    // name. There used to be a fall-through to the tree-walker here, and it is
+    // gone with it (RFC-0125 §3 M5) — a driver that installs no engine has no
+    // way to run a `gen fn` at all, and saying so is the only honest answer.
+    let Some(engine) = GEN_ENGINE.get() else {
+        return Err(format!(
+            "cannot run the generator `{fn_name}`: no generation engine is installed"
+        ));
+    };
+    engine(program, fn_name, args, &inputs).unwrap_or_else(|| {
+        Err(format!(
+            "cannot run the generator `{fn_name}`: the installed generation engine declined it"
+        ))
+    })
 }

@@ -173,9 +173,9 @@ fn the_committed_mandelbrot_fixture_now_has_a_program() {
 /// `examples_interp_native_parity` still passes. Measured, not reasoned about.
 ///
 /// So binary output gets its own comparison, with no normalisation anywhere in
-/// it. Native only: the interpreter is covered by the tests above and the wasm
-/// column has no text mode to get wrong. `#[ignore]` because a native build
-/// needs clang, like every other test that builds one.
+/// it. Native only: the wasm column has no text mode to get wrong, and the
+/// tests above cover it. `#[ignore]` because a native build needs clang, like
+/// every other test that builds one.
 #[test]
 #[ignore = "needs clang for the native build"]
 fn every_engine_writes_the_same_bytes_for_mandelbrot() {

@@ -1,8 +1,9 @@
 // Row 25 of the refusals census, over a take of a PROJECTION.
 //
-// Both passes refuse it and they do not say the same thing: the checker names
-// the loop, the kernel names the back edge. That is why row 25's rule stayed
-// in `movecheck.rs` (RFC-0125 §3 M3, the containment slice).
+// The two passes said different things about it — the checker named the loop
+// and the kernel named the back edge — and that is why row 25's rule stayed in
+// `movecheck.rs` for two slices. The kernel names the PATH the take emptied
+// now, in the checker's own sentence, and the rule is gone (RFC-0125 §3 M3).
 type Entry = { node: String, rest: Int64 }
 
 fn main() -> Int64 {

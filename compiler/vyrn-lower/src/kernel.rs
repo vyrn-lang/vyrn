@@ -117,6 +117,11 @@ pub enum MissingKind {
     EdgePlace { edge: u32, path: String },
     /// An arm's payload binder the arm never moved: the plan's arm table.
     ArmBinder { arm: u32 },
+    /// A store whose place is still HELD: the plan's store table. The row is
+    /// keyed by the STORE and by nothing else — the place written into may be
+    /// module state, which is no name of this frame — so `name` carries no
+    /// meaning here and a reader must take `site` alone.
+    Store,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -575,8 +580,17 @@ impl<'b> Kernel<'b> {
     /// A take of an alias: refused, because the place it reads still owns
     /// the buffer (RFC-0089 rule 2). Worded as `movecheck.rs` words each
     /// exit: the `consume` parameter, the `return`, the literal, the store.
-    fn alias_take(&self, st: &State, n: Name) -> Refusal {
-        let (s, src, by) = (self.src(n), self.src_text(st, n), &self.by);
+    fn alias_take(&self, st: &State, n: Name, write_back: bool) -> Refusal {
+        let (mut s, src, by) = (self.src(n), self.src_text(st, n), &self.by);
+        // A temporary the reader never wrote is named by the PLACE it reads,
+        // where that place is a spelling the reader can see: `sink(if c {
+        // d.title } else { "" })` binds an unnamed borrow of `d.title`, and the
+        // checker names the field the arm yielded (RFC-0125 §3 M3). A place
+        // the algebra spelled — an element, another temporary — is quoted in
+        // the sentence instead, below.
+        if s.starts_with('@') && !src.starts_with('@') && !src.contains("[..]") {
+            s = &src;
+        }
         // Module state read whole: RFC-0013's own sentence, which names the
         // reason — the global lives for the whole module and nothing ever
         // drops it, so there is no owner to take from.
@@ -615,6 +629,30 @@ impl<'b> Kernel<'b> {
                     .refuse_at::<()>(self.here, menu(msg, fixes))
                     .unwrap_err();
             }
+            // A PROJECTION of module state is module state too, and the
+            // checker says which fact refuses it rather than naming the place
+            // (RFC-0125 §3 M3). The way out is the copy alone: there is no
+            // owner to take the field from.
+            let is_module_state = "it is module state, which nothing may take";
+            let (msg, who) = if by == "a `return`" {
+                (
+                    format!("`{s}` may not be returned — {is_module_state}, and a return is owned"),
+                    "caller",
+                )
+            } else {
+                (format!("{} — {is_module_state}", self.may_not(s)), "callee")
+            };
+            return self
+                .refuse_at::<()>(
+                    self.here,
+                    menu(
+                        msg,
+                        vec![format!(
+                            "`{s}.copy()` — the {who} releases what it is handed"
+                        )],
+                    ),
+                )
+                .unwrap_err();
         }
         // A loop variable is what the READER wrote, and the checker says so
         // rather than naming the place the element sits in — the alias table
@@ -623,6 +661,43 @@ impl<'b> Kernel<'b> {
         if let Some(of) = &self.body.names[n as usize].loop_var {
             return self.param_take(n, &BorrowKind::LoopVar { of: of.clone() });
         }
+        // What the ROOT is, where the reader declared it: a `read` parameter,
+        // a `modify` one, a loop variable. Both sentences are true — the place
+        // owns the value AND the caller owns the place — and the checker says
+        // the second, because the way out is written on the declaration and
+        // not on the read (RFC-0125 §3 M3). A root this frame owns has no
+        // capability to name, and keeps the place's own sentence below.
+        //
+        // A `drop` is not one of them: its two ways out are both about the
+        // BINDING, and it words them below. Neither is a name the reader never
+        // wrote — a temporary with no path of its own is quoted with the place
+        // it reads, because a capability the reader can go and change is not
+        // what it has to be told about.
+        if by != "a `drop`" && !write_back && !s.starts_with('@') {
+            // The NEAREST name on the chain, which is the one the checker asks
+            // about: `p.name` inside `for p in ps` is read through `p`, and `p`
+            // is a loop variable however the parameter behind it was declared.
+            let mut m = st.alias[n as usize].as_ref().and_then(|a| a.via);
+            let root = match &st.alias[n as usize] {
+                Some(Alias {
+                    root: Root::N(r), ..
+                }) => Some(*r),
+                _ => None,
+            };
+            while let Some(k) = m.or(root) {
+                let info = &self.body.names[k as usize];
+                if let Some(b) = &info.borrow_kind {
+                    return self.param_take(n, b);
+                }
+                if let Some(of) = &info.loop_var {
+                    return self.param_take(n, &BorrowKind::LoopVar { of: of.clone() });
+                }
+                if m.is_none() {
+                    break;
+                }
+                m = st.alias[k as usize].as_ref().and_then(|a| a.via);
+            }
+        }
         // The name a refusal quotes is the reader's path where the lowering
         // minted this name for a read of a place, and the place is then the
         // subject rather than a second quotation of it: `b.xs` may not be
@@ -630,17 +705,23 @@ impl<'b> Kernel<'b> {
         // the checker words the same refusal (RFC-0125 §3 M3, the corpus
         // slice). A name the READER bound is quoted with the place it reads,
         // because the two are different words.
-        let minted = self.body.names[n as usize].path.is_some();
-        let what = if minted {
-            "it is read out of a place that owns it".to_string()
-        } else {
+        // The place is the SUBJECT where the lowering minted the name, and the
+        // sentence is the checker's own for every name a reader wrote: the
+        // place it reads out of is what the `.copy()` on the menu names, and
+        // the sentence says what the name IS. A temporary the reader never
+        // wrote is the one that keeps the place in the sentence, because its
+        // own spelling says nothing (RFC-0125 §3 M3).
+        let what = if s.starts_with('@') {
             format!("it is read out of `{src}`, a place that owns it")
+        } else {
+            "it is read out of a place that owns it".to_string()
         };
+        let minted = self.body.names[n as usize].path.is_some();
         // A named binding a call takes: at the binding, as the checker words
         // it, so the `.copy()` on the menu lands where the read is. A minted
         // name has no binding a reader can look at, so this form has nowhere
         // to stand.
-        if by.ends_with("(..)`") && !minted {
+        if write_back && by.ends_with("(..)`") && !minted {
             let (here, at) = (self.here, self.body.names[n as usize].line);
             return self
                 .refuse_at::<()>(
@@ -708,9 +789,26 @@ impl<'b> Kernel<'b> {
     /// turn. Empty for a name the reader bound, whose refusal quotes the place
     /// rather than being it.
     fn place_fixes(&self, st: &State, n: Name) -> Vec<String> {
-        let Some(path) = &self.body.names[n as usize].path else {
-            return Vec::new();
+        // A name the READER bound is its own spelling: the copy is the one way
+        // out, because `consume t` takes nothing out of a place. A temporary
+        // with neither a path nor a spelling has no menu at all — its refusal
+        // quotes the place instead (RFC-0125 §3 M3).
+        let own_name = self.src(n).to_string();
+        let read = self.src_text(st, n);
+        let path = match &self.body.names[n as usize].path {
+            Some(p) => p.clone(),
+            // The place an unnamed temporary reads is its spelling here too,
+            // so the ways out land on what the reader wrote.
+            None if own_name.starts_with('@')
+                && !read.starts_with('@')
+                && !read.contains("[..]") =>
+            {
+                read
+            }
+            None if own_name.starts_with('@') => return Vec::new(),
+            None => own_name,
         };
+        let path = &path;
         // An ELEMENT has no take — `check_take` refuses one — so where a
         // declared `consume` parameter is the taker the menu names the two
         // spellings that exist for it instead of a prefix take
@@ -720,7 +818,9 @@ impl<'b> Kernel<'b> {
         let root = match &st.alias[n as usize] {
             Some(Alias {
                 root: Root::N(m), ..
-            }) => self.src(*m),
+            }) if self.body.names[n as usize].path.is_some() || self.src(n).starts_with('@') => {
+                self.src(*m)
+            }
             _ => path.as_str(),
         };
         if self.takes == Taker::Declared && path.contains('[') {
@@ -934,7 +1034,7 @@ impl<'b> Kernel<'b> {
             // `drop` (RFC-0125 §3 M3, the census, rows 21 and 29).
             if st.alias[n as usize].is_some() {
                 let by = std::mem::replace(&mut self.by, "a `drop`".to_string());
-                let r = self.alias_take(st, n);
+                let r = self.alias_take(st, n, false);
                 self.by = by;
                 return Err(r);
             }
@@ -1101,7 +1201,7 @@ impl<'b> Kernel<'b> {
             if st.alias[*n as usize].is_some() {
                 self.alias_read(st, *n, "used")?;
                 if self.moves(*n, consume) {
-                    return Err(self.alias_take(st, *n));
+                    return Err(self.alias_take(st, *n, write_back));
                 }
                 return Ok(());
             }
@@ -1207,6 +1307,32 @@ impl<'b> Kernel<'b> {
     /// A store into a sub-place fills the hole there, and anything under it.
     /// A store under a hole writes into what left. Every alias of the place
     /// ends.
+    /// Record a store whose place this path still holds — RFC-0125 §3 M3, the
+    /// store slice.
+    ///
+    /// The row is keyed by the store's own node and by nothing else, so a
+    /// store this pass made up — a global's initializer, a desugar's
+    /// temporary, the block RFC-0091 M2's `place at` rewrite builds — states
+    /// no key and no reader could find the row by one.
+    fn owe_store(&mut self, site: &crate::core::Site) {
+        if self.mode != Mode::Place {
+            return;
+        }
+        let crate::core::Site::Node(at) = site else {
+            return;
+        };
+        if std::env::var("VYRN_KERNEL_TRACE").is_ok() {
+            eprintln!("owe-store: {} line {} site {at}", self.body.name, self.here);
+        }
+        self.missing.push(Missing {
+            exit: Exit::Block,
+            site: *at,
+            name: 0,
+            kind: MissingKind::Store,
+            holes: Vec::new(),
+        });
+    }
+
     fn store_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
         self.indices(st, p)?;
         self.wrote(st, p, &self.place_text(p));
@@ -1373,7 +1499,18 @@ impl<'b> Kernel<'b> {
                         format!("the binding `{}`", self.src(*n))
                     }
                     Place::Field(_, f) => format!("the field `{f}`"),
-                    _ => "a store".to_string(),
+                    // The checker names the CONTAINER an element or a key store
+                    // writes into, and module state by the words that say what
+                    // it is (RFC-0125 §3 M3). "A store" was what was left when
+                    // the place was neither a bare name nor a field, and it
+                    // names nothing a reader can go and look at.
+                    Place::Global(g) => format!("module state `{g}`"),
+                    p => match root_of(p) {
+                        Some((n, _)) if !self.src(n).starts_with('@') => {
+                            format!("`{}`", self.src(n))
+                        }
+                        _ => "a store".to_string(),
+                    },
                 };
             }
             St::Return { line, .. } => {
@@ -1457,7 +1594,11 @@ impl<'b> Kernel<'b> {
                 }
             }
             St::Store {
-                place, value, old, ..
+                place,
+                value,
+                old,
+                site,
+                ..
             } => {
                 // A borrow's binding rebound to another borrow (`t = d.title`
                 // after `let t = s.name`): the alias travels, as at a `let`.
@@ -1515,14 +1656,36 @@ impl<'b> Kernel<'b> {
                         st.own[*n as usize] = Own::Held;
                     }
                     Place::Name(n) if self.releases(*n) => {
-                        if st.own[*n as usize] == Own::Held
+                        // A store over a name this path still has a value in
+                        // owes the release of that value. `Static` counts:
+                        // `let mut out = ""` binds a literal the emitters
+                        // free like any other, and standing the release down
+                        // there would leave the first `out = out + x` of
+                        // every builder holding it (RFC-0125 §3 M3, the store
+                        // slice). What owes nothing is `Gone`.
+                        if *old == Old::Pending
+                            && self.mode == Mode::Place
+                            && st.own[*n as usize] != Own::Gone
+                        {
+                            self.owe_store(site);
+                        } else if st.own[*n as usize] == Own::Held
                             && *old != Old::Released
                             && *old != Old::Transferred
                         {
-                            return self.refuse(format!(
-                                "{} is overwritten while still held — the old value is never released",
-                                self.info(*n)
-                            ));
+                            // The first build says `Pending` here and the
+                            // answer is this line: a store into a place this
+                            // path still holds releases what it displaces
+                            // (RFC-0125 §3 M3, the store slice). Every other
+                            // word is a decision already made, and a held
+                            // place under one is the leak it always was.
+                            if *old == Old::Pending && self.mode == Mode::Place {
+                                self.owe_store(site);
+                            } else {
+                                return self.refuse(format!(
+                                    "{} is overwritten while still held — the old value is never released",
+                                    self.info(*n)
+                                ));
+                            }
                         }
                         if st.own[*n as usize] == Own::Gone && *old == Old::Released {
                             return self.refuse(format!(
@@ -1544,6 +1707,33 @@ impl<'b> Kernel<'b> {
                                 "a store into a place that owns heap releases nothing (line {})",
                                 self.line_of(value)
                             ));
+                        }
+                        // A sub-place holds no state of its own here — the
+                        // kernel tracks whole names — so the rule is over the
+                        // ROOT (RFC-0125 §3 M3, the store slice). Module
+                        // state owns what it holds for the whole module and
+                        // nothing may consume it, a `modify` parameter is the
+                        // caller's and holds what the caller gave it, and any
+                        // other root owes the release exactly while this path
+                        // still holds it.
+                        if *old == Old::Pending {
+                            // The ALIAS table's root and not the place's:
+                            // RFC-0082 reads `t.xs` into a temporary before
+                            // `t.xs[k] = v` stores through it, so the place
+                            // this statement writes names a borrow and the
+                            // ownership belongs to what the borrow reads.
+                            let owes = match self.src_of(st, other).root {
+                                Root::G(_) => true,
+                                Root::N(n) => {
+                                    matches!(
+                                        self.body.names[n as usize].borrow_kind,
+                                        Some(BorrowKind::Param { cap: "modify", .. })
+                                    ) || (self.owned(n) && st.own[n as usize] != Own::Gone)
+                                }
+                            };
+                            if owes {
+                                self.owe_store(site);
+                            }
                         }
                     }
                 }
@@ -1929,11 +2119,35 @@ impl<'b> Kernel<'b> {
                     self.info(n)
                 ));
             }
-            if self.holes_of(at, n) != self.holes_of(entry, n) {
-                return self.refuse(format!(
-                    "{} has a `consume` hole at a loop's back edge it did not have at entry",
-                    self.info(n)
-                ));
+            // A hole a turn made is a consumption the next turn would repeat,
+            // and the checker says it in rule 1's loop sentence — of the PATH
+            // the reader took, at the line of the take (RFC-0125 §3 M3, row
+            // 25). The taker needs no field of its own: a hole is what a
+            // prefix `consume` makes, and it is the only thing that makes one.
+            let (before, after) = (self.holes_of(entry, n), self.holes_of(at, n));
+            if before != after {
+                let s = self.src(n);
+                let path = after
+                    .iter()
+                    .find(|h| !before.contains(*h))
+                    .map(|h| h.replace(".[]", "[..]"));
+                return match path {
+                    Some(path) => self.refuse_at(
+                        self.hole_line(at, n, &path),
+                        menu(
+                            format!(
+                                "`{s}{path}` is consumed by `consume` inside a loop, so it \
+                                 would be used again on the next iteration"
+                            ),
+                            vec![format!("`{s}{path}.copy()` if both sides need a value")],
+                        ),
+                    ),
+                    None => self.refuse(format!(
+                        "{} has a `consume` hole at a loop's back edge it did not have at \
+                         entry",
+                        self.info(n)
+                    )),
+                };
             }
         }
         Ok(())

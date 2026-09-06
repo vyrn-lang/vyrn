@@ -92,7 +92,7 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     (
         "a1_afterjoin.vyrn",
         "A1's reach: a read AFTER the join of a conditional move (Theorem 4's          first case). The branch-disjoint read is accepted; this is not",
-        "used again here",
+        "already consumed by",
     ),
     (
         "a2_capture.vyrn",
@@ -254,11 +254,10 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
     "calls `extern` fns; only the browser provides the `vyrn` namespace",
 )];
 
-/// Examples the interpreter and the wasm target run and the text-IR backend
-/// refuses (`vyrn_codegen::LIST_DIR_NO_LOWERING`). Excluded from the parity
-/// loop's native column; the fixture gate (`fixtures.rs`) compares their wasm
-/// output with the interpreter's recording, and `residue-baseline.tsv` carries
-/// their `skip` row.
+/// Examples the wasm target runs and the text-IR backend refuses
+/// (`vyrn_codegen::LIST_DIR_NO_LOWERING`). Excluded from the parity loop's
+/// native column; the fixture gate (`fixtures.rs`) compares their output with
+/// the recorded one, and `residue-baseline.tsv` carries their `skip` row.
 /// Project entries under `examples/*/` that `vyrn check` must REFUSE, with the
 /// text the refusal must contain. `EXPECTED_CHECK_FAILURE` is the precedent and
 /// lists single files; a project's entry point is refused by its artifact's

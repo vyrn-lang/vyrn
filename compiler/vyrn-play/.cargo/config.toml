@@ -1,24 +1,20 @@
-# The interpreter recurses once per Vyrn call and spends ~8.5 KB of stack per
-# frame in a release build. `CALL_DEPTH_LIMIT` is 1,000 frames, so the deepest
-# program the language permits needs ~8.5 MB of it — and wasm-ld's default stack
-# is 1 MB, which runs out at around a tenth of the limit.
+# The stack this module needs is the COMPILER's now, not a program's.
 #
-# 16 MB is that with 1.9x of margin, and the stack sits at the bottom of linear
-# memory where an overflow traps instead of writing over the heap
-# (`--stack-first`, which rustc passes for this target). It is also what the
-# module's initial memory costs the page, so bigger is not free.
+# It used to be a program's: the tree-walking interpreter ran inside this module
+# and recursed once per Vyrn call at ~8.5 KB a frame, so the deepest program the
+# language permits — `CALL_DEPTH_LIMIT`, 1,000 frames — needed ~8.5 MB of linear
+# stack. RFC-0125 M5 moved the running out: `play_compile` answers a module and
+# the page runs it (`site/public/play-worker.js`), so what recurses in here is
+# the parser, the checker and the backend, over the syntax of one file.
 #
-# MEASURED, and the reason this number is not larger: the binding constraint is
-# NOT this stack. V8 gives each wasm call a frame on its own NATIVE stack, and
-# that gives out first — at ~996 nested Vyrn calls in node, and at 466 to 468 in
-# a Chrome worker, whose native stack is about half a main thread's. Both are
-# under the language's 1,000, and neither moves when this number changes: the
-# same binary search returned 995 with 32 MB here and 996 with 16 MB.
-#
-# So this is sized for the deepest run the ENGINE will allow — ~470 frames at
-# ~8.5 KB is ~4 MB — with 4x of margin for a browser whose stack is larger, and
-# `play-worker.js` catches the engine's `RangeError` and says whose ceiling it
-# was. Raising it further only costs the page initial memory.
+# wasm-ld's default is 1 MB and this is 16, because that is the number the
+# measurement above bought and there is no reason yet to spend a day finding a
+# smaller one: it is the module's INITIAL MEMORY, which the page pays for once,
+# and the deep-nesting programs that reach it are the ones a reader types into a
+# playground on purpose. The stack sits at the bottom of linear memory, where an
+# overflow traps instead of writing over the heap (`--stack-first`, which rustc
+# passes for this target), and `play-worker.js` catches the engine's `RangeError`
+# and says whose ceiling it was.
 #
 # Cargo reads this file from the working directory upward, so it only applies to
 # builds started in `compiler/vyrn-play`. See the note in Cargo.toml.

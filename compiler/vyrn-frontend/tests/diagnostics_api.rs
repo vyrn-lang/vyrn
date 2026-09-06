@@ -80,17 +80,19 @@ fn check_shim_matches_first_rendered() {
     );
 }
 
-/// A move-check error (rule 2 at a `consume` parameter) is reported with the
-/// right stage and accumulates with a type error in another function.
+/// A move-check error (rule 2 at a store) is reported with the right stage and
+/// accumulates with a type error in another function.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06). The subject is the accumulation, so it asks a rule that stays.
+/// row 06), and then a hand-over to a `consume` parameter until that one left
+/// too (rows 13 and 14). The subject is the accumulation, so it asks a rule
+/// that stays.
 #[test]
 fn movecheck_accumulates_with_check() {
     let src = "type T = { s: String };\n\
-               fn take(t: consume T) -> Int64 { return t.s.byteLength; }\n\
                fn bad() -> Int64 { return true; }\n\
-               fn borrow(x: read T) -> Int64 { return take(x); }\n\
+               fn borrow(x: read T) -> Int64 { let mut o: Array<String> = [];\n\
+               o.push(x.s); return o.length; }\n\
                fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
     // One check error (bad returns Bool) and one movecheck error (a `read`
@@ -100,9 +102,9 @@ fn movecheck_accumulates_with_check() {
     assert_eq!(check_errs, 1, "{:?}", diags);
     assert_eq!(move_errs, 1, "{:?}", diags);
     assert!(
-        diags.iter().any(|d| d.stage == "movecheck"
-            && d.message
-                .contains("may not be passed to a `consume` parameter")),
+        diags
+            .iter()
+            .any(|d| d.stage == "movecheck" && d.message.contains("may not be stored into")),
         "{diags:?}"
     );
 }
@@ -113,20 +115,21 @@ fn movecheck_accumulates_with_check() {
 /// `movecheck`-stage; lines follow the source.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06). The subject is the accumulation, so it asks a rule that stays.
+/// row 06), and then a hand-over to a `consume` parameter until that one left
+/// too (rows 13 and 14). The subject is the accumulation, so it asks a rule
+/// that stays.
 #[test]
 fn movecheck_accumulates_within_function_body() {
     let src = "type T = { s: String };\n\
-               fn take(t: consume T) -> Int64 { return t.s.byteLength; }\n\
-               fn borrow(x: read T, y: read T) -> Int64 {\n  let a = take(x);\n  let b = take(y);\n  return a + b;\n}\n\
+               fn borrow(x: read T, y: read T) -> Int64 {\n  let mut o: Array<String> = [];\n  o.push(x.s);\n  o.push(y.s);\n  return o.length;\n}\n\
                fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
     let move_errs: Vec<_> = diags.iter().filter(|d| d.stage == "movecheck").collect();
     assert_eq!(move_errs.len(), 2, "{:?}", diags);
     assert!(
-        move_errs.iter().all(|d| d
-            .message
-            .contains("may not be passed to a `consume` parameter")),
+        move_errs
+            .iter()
+            .all(|d| d.message.contains("may not be stored into")),
         "{:?}",
         move_errs
     );

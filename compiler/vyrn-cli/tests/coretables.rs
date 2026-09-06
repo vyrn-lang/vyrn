@@ -49,10 +49,16 @@
 //!
 //!   - `store_owned` and `store_fresh`, from a `St::Store` at the store
 //!     statement's node — the core states the two as one answer, because
-//!     both compiled backends read them as one;
+//!     both compiled backends read them as one. DERIVED and no longer
+//!     diffed since the store slice: `own.rs` states no store table, the
+//!     kernel's answer is the only one, and it is counted here;
 //!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
 //!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
-//!     bound;
+//!     bound. DERIVED and no longer diffed since the argument slice: the
+//!     core states the row from its own body and both directions are
+//!     counted, with both counts pinned. The emitters still keep the plan's
+//!     answer for a node the core states nothing for, so the reading beside
+//!     the counts below is what a change to either number means;
 //!   - `edge_releases`, from a `St::Drop` at a `Site::Edge` — DERIVED and no
 //!     longer diffed since the derivation slice, for the reason `arm_frees`
 //!     is not.
@@ -154,7 +160,7 @@ fn the_core_and_the_plan_agree_on_every_table() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::trap::INTERP_STACK_BYTES)
+        .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
         .spawn(run)
         .unwrap()
         .join()
@@ -162,6 +168,11 @@ fn the_core_and_the_plan_agree_on_every_table() {
 }
 
 fn run() {
+    // A corpus example may import through a generator, and generation is the
+    // DRIVER's engine rather than the frontend's (RFC-0125 §3 M5). Without this
+    // those examples fail to link and the gate silently measures a smaller
+    // corpus. Installing is idempotent.
+    vyrn_genwasm::install();
     vyrn_lower::install();
     let mut diffs: Vec<String> = Vec::new();
     let mut counted: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -204,10 +215,6 @@ fn run() {
         // The plan's own totals, so the census can be read off this test.
         for (what, n) in [
             (
-                "store_owned (plan)",
-                own.plan.store_owned.iter().filter(|a| reached(a)).count(),
-            ),
-            (
                 "discarded_results (plan)",
                 own.plan
                     .discarded_results
@@ -223,30 +230,18 @@ fn run() {
             *counted.entry(what).or_default() += n;
         }
 
-        for (at, core_says) in &facts.stores {
+        // RFC-0125 §3 M3, the store slice: `own.rs` states no store table any
+        // more, so there is nothing left to diff here either. The core's
+        // answer is the only one, and what a wrong answer fails is the
+        // residue ratchet, the parity harness and the memory suite, which
+        // measure. Counted, like `arm_frees` and `edge_releases`.
+        for (_, core_says) in &facts.stores {
             *counted.entry("store_owned").or_default() += 1;
-            // The core's answer is the whole conjunction both compiled
-            // backends compute, so only its `true` implies the plan's row.
-            if *core_says && !own.plan.store_owned.contains(at) {
-                diffs.push(format!(
-                    "{file}: site {at}: store_owned: the core releases the old                      value and the plan does not"
-                ));
+            if *core_says {
+                *counted.entry("stores that release").or_default() += 1;
             }
         }
-        // A plan store row the core states no answer for. Every one in the
-        // corpus stands on a statement RFC-0091 M2's `place at` rewrite
-        // BUILT: a user container's `c[h] = v` is checked on the rewritten
-        // block, and this pass walks the source statement. A reader falls
-        // back to the plan at such a site, so the count is pinned here
-        // rather than diffed — a thirteenth would be a site nobody looked
-        // at.
-        *counted.entry("store rows left to the plan").or_default() += own
-            .plan
-            .store_owned
-            .iter()
-            .filter(|a| reached(a) && !facts.stores.contains_key(*a))
-            .count();
-
+        *counted.entry("stores the core stands down at").or_default() += facts.stood_down.len();
         for at in &facts.discarded {
             *counted.entry("discarded_results").or_default() += 1;
             if !own.plan.discarded_results.contains(at) {
@@ -263,18 +258,42 @@ fn run() {
             }
         }
 
+        // RFC-0125 §3 M3, the argument slice: the core STATES this row now,
+        // from its own body, so the plan's is the ANALYSIS's own answer and a
+        // difference is a real second opinion. Both directions are counted
+        // and both counts are pinned, so a new site is read at the source
+        // rather than absorbed.
+        //
+        // The core states MORE. The analysis recognises an allocating
+        // argument by its SHAPE, because it has no lowering, and its reading
+        // of a type is the DECLARED one — so it loses a row wherever that
+        // reading cannot name the type. Three classes carry nearly all of
+        // them: an operand of a `+` over module state (`prettyOut = prettyOut
+        // + spaces(..)` in `std/json`, whose declared reading types no
+        // global); an array literal handed to a SEEDED row, whose parameter
+        // the declared table does not hold (`stringFromBytes(['h', '\x00',
+        // 'i'])`); and a `match` whose arms hand a payload out without
+        // spelling the unwrap (`Ok(s) => "ok", Err(e) => e`). Each is a value
+        // the caller built and nobody freed. The residue ratchet is what read
+        // the verdict: `assoctype` was the corpus's last leaking row and it
+        // is clean now.
+        //
+        // The core states LESS at one site, and one only: `render(raw(..))`
+        // in `examples/lib/gen_surface.vyrn`. `raw` hands back a `Code`, and
+        // `Code` is a name no declaration answers, so `owns_heap` says it
+        // holds nothing and this pass mints no temporary. The emitters keep
+        // the plan's answer for a node the core states nothing for, so the
+        // free stands; the row cannot leave `own.rs` until `Code` owns its
+        // buffer.
         for at in &facts.arg_drops {
             *counted.entry("arg_drops").or_default() += 1;
             if !own.plan.arg_drops.contains(at) {
-                diffs.push(format!("{file}: site {at}: arg_drops: core yes, plan no"));
+                *counted.entry("arg_drops: core only").or_default() += 1;
             }
         }
         for at in own.plan.arg_drops.iter().filter(|a| reached(a)) {
             if !facts.arg_drops.contains(at) {
-                diffs.push(format!(
-                    "{file}: site {at}: arg_drops: plan yes, core no (fn {})",
-                    owner(at)
-                ));
+                *counted.entry("arg_drops: plan only").or_default() += 1;
             }
         }
 
@@ -436,13 +455,17 @@ fn run() {
         1,
         "`gqlSplitDecl(src).rhs` in `gqlIsRecord`, and nothing else"
     );
+    // The argument slice's two counts, pinned in both directions — see the
+    // reading beside them above.
     assert_eq!(
-        counted
-            .get("store rows left to the plan")
-            .copied()
-            .unwrap_or(0),
-        12,
-        "the `place at` rewrite's own store statements, and nothing else"
+        counted.get("arg_drops: core only").copied().unwrap_or(0),
+        552,
+        "the values the declared reading could not name, which nobody freed          (548 at the argument slice, plus four in `tallybytes.vyrn` and          `falliblegeneric.vyrn`, which joined the corpus beside it)"
+    );
+    assert_eq!(
+        counted.get("arg_drops: plan only").copied().unwrap_or(0),
+        1,
+        "`render(raw(..))` in `gen_surface`, and nothing else"
     );
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
     // slice): every `Rhs` in the corpus names the type its node produces.

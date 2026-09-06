@@ -94,6 +94,20 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Lower the two generator guardrails on THIS thread, for a test that wants to
+/// reach one in a second rather than in an hour. `None` restores the default.
+///
+/// It is a function rather than two private thread-locals because the tests that
+/// use it moved out of this file: running a `gen fn` needs a generation engine,
+/// the engine is the driver's to install (RFC-0125 §3 M5), and a unit test in
+/// this crate that reaches for one compiles a second copy of this crate. So the
+/// two budget tests are integration tests now, in `tests/loader_run.rs`, and the
+/// knob they turn has to be reachable from outside.
+pub fn set_gen_budgets_for_test(fuel: Option<u64>, max_output: Option<usize>) {
+    GEN_FUEL_OVERRIDE.with(|c| c.set(fuel));
+    GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(max_output));
+}
+
 /// A resolver over an in-memory map — used by tests and always available.
 pub struct MapResolver(pub HashMap<String, String>);
 
@@ -5225,23 +5239,6 @@ mod tests {
     }
 
     /// The first message a load-and-check refuses `root` with.
-    fn gen_err(root: &str, files: &[(&str, &str)]) -> String {
-        match load(root, "main.vyrn", &opts(), &map(files)) {
-            Ok(p) => match crate::checker::check_accum(&p).first() {
-                Some(d) => d.message.clone(),
-                None => panic!("expected an error, load+check succeeded"),
-            },
-            Err(ds) => ds
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join(
-                    "
-",
-                ),
-        }
-    }
-
     #[test]
     fn a_generator_chain_nesting_past_the_cap_is_a_diagnostic_not_an_abort() {
         // Each nested generator load gets a fresh module-state map, so a chain
@@ -5345,33 +5342,5 @@ mod tests {
         let body = format!("{}\ndata/a.txt\tdeadbeef\nout", u64::MAX);
         let entry = format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body));
         assert!(read_cache_entry(key, &entry).is_none());
-    }
-
-    #[test]
-    fn generator_over_step_budget_fails_loudly() {
-        super::GEN_FUEL_OVERRIDE.with(|c| c.set(Some(500)));
-        let gen = "export gen fn spin(n: Int64) -> String { \
-                       let mut i = 0 \
-                       while i < 1000000000 { i = i + 1 } \
-                       return \"\" }";
-        let root = "import { spin } from \"./gen\" \
-                    import { z } from spin(1) \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        super::GEN_FUEL_OVERRIDE.with(|c| c.set(None));
-        assert!(e.contains("exceeded its step budget"), "{e}");
-    }
-
-    #[test]
-    fn generator_over_output_cap_fails_loudly() {
-        super::GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(Some(5)));
-        let gen = "export gen fn big(d: String) -> String { \
-                       return \"this is far more than five bytes\" }";
-        let root = "import { big } from \"./gen\" \
-                    import { z } from big(\"./d\") \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        super::GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(None));
-        assert!(e.contains("over the") && e.contains("cap"), "{e}");
     }
 }

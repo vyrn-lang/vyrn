@@ -58,7 +58,6 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
     ),
     ("native", &["vyrn-codegen/src/lib.rs"]),
     ("wasm", &["vyrn-codegen/src/direct.rs"]),
-    ("interp", &["vyrn-frontend/src/interp.rs"]),
     ("editor", &["vyrn-frontend/src/symbols.rs"]),
 ];
 
@@ -71,7 +70,6 @@ const DECL_COLUMNS: &[(&str, &[&str])] = &[
     ("checker", &["vyrn-frontend/src/checker.rs"]),
     ("project", &["vyrn-frontend/src/project.rs"]),
     ("native", &["vyrn-codegen/src/lib.rs"]),
-    ("interp", &["vyrn-frontend/src/interp.rs"]),
     ("editor", &["vyrn-frontend/src/symbols.rs"]),
     ("cli", &["vyrn-cli/src/main.rs"]),
 ];
@@ -345,8 +343,10 @@ fn table(text: &str, header: &str) -> Vec<Vec<String>> {
     rows
 }
 
-const FORM_HEADER: &str = "| form | parser | checker | movecheck | own | lower | native | wasm | interp | editor | all nine |";
-const DECL_HEADER: &str = "| declaration | parser | loader | checker | project | native | interp | editor | cli | all eight |";
+const FORM_HEADER: &str =
+    "| form | parser | checker | movecheck | own | lower | native | wasm | editor | all eight |";
+const DECL_HEADER: &str =
+    "| declaration | parser | loader | checker | project | native | editor | cli | all seven |";
 const KEYWORD_HEADER: &str = "| keyword | token | lexer | parser | fmt | all three |";
 const CONTEXTUAL_HEADER: &str = "| word | lexer | parser | checker | fmt | all four |";
 const VERDICT_HEADER: &str = "| form | what it is | RFC | verdict | the desugar, or the reason |";
@@ -444,7 +444,7 @@ fn the_form_census_is_what_the_rfc_records() {
     let text = rfc_text();
     let rows = table(&text, FORM_HEADER);
     let total = check_counts(&rows, FORM_COLUMNS, &|l| l.to_string(), 1);
-    let sentence = format!("{} mentions in nine files", grouped(total));
+    let sentence = format!("{} mentions in eight files", grouped(total));
     assert!(
         text.contains(&sentence),
         "the prose should say {sentence:?}"
@@ -467,7 +467,7 @@ fn the_declaration_census_is_what_the_rfc_records() {
         "RFC-0127's declaration table and `Program` list different fields"
     );
     let total = check_counts(&rows, DECL_COLUMNS, &|l| format!(".{l}"), 1);
-    let sentence = format!("{total} mentions in eight files");
+    let sentence = format!("{total} mentions in seven files");
     assert!(
         text.contains(&sentence),
         "the prose should say {sentence:?}"

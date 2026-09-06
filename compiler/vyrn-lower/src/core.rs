@@ -26,7 +26,8 @@
 use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
-    ArmBody, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program, Stmt, Type,
+    ArmBody, BinOp, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program,
+    Stmt, Type,
 };
 use vyrn_frontend::own::{DropKind, Exit, Fate, Leak, Owned, Ownership, Release};
 use vyrn_frontend::prelude;
@@ -202,6 +203,12 @@ impl BorrowKind {
     /// sentence is about: a second name for a parameter says so, which is
     /// how `movecheck::Borrow::what` words it.
     pub fn what(&self, at: &str) -> String {
+        // A PATH under the parameter is the parameter: `h.meta[0]` is read out
+        // of a `read` parameter and the reader is told so, where a name bound
+        // to one (`let t = r.s`) is a second name for it. The two are
+        // comparable at the root alone, which is `movecheck::Borrow::what`'s
+        // own test (RFC-0125 §3 M3).
+        let at = vyrn_frontend::movecheck::root_of(at);
         match self {
             BorrowKind::Param { cap, of } if at == of => format!("a `{cap}` parameter"),
             BorrowKind::Param { cap, of } => {
@@ -229,12 +236,16 @@ impl BorrowKind {
             BorrowKind::Capture => Vec::new(),
             // A loop variable has a second way out, and it comes first: let the
             // loop take the elements. It only works when the WHOLE element is
-            // handed on, which is the only shape this reaches — a field of one
-            // is read into a name of its own.
-            BorrowKind::LoopVar { of } => vec![
+            // handed on — a stored FIELD of one is a partial move — so a path
+            // under the variable is left with the copy alone
+            // (`movecheck::Borrow::fixes`).
+            BorrowKind::LoopVar { of } if vyrn_frontend::movecheck::root_of(path) == path => vec![
                 format!("`for {path} in consume {of}` if the loop should take the elements"),
                 format!("`{path}.copy()` if both sides need a value"),
             ],
+            BorrowKind::LoopVar { .. } => {
+                vec![format!("`{path}.copy()` if both sides need a value")]
+            }
         }
     }
 }
@@ -378,6 +389,21 @@ pub enum Old {
     /// The stored value was built FROM the place's own value — `xs = xs.push(v)`
     /// hands the buffer back — so the name keeps holding without a release.
     Transferred,
+    /// The FIRST build's word at every other store: the place may hold a
+    /// value, and the row that releases it is still to be written (RFC-0125
+    /// §3 M3, the store slice).
+    ///
+    /// A store answer is an INPUT to the judgment as well as an output of it,
+    /// which is what stopped the slice before this one. This word is what
+    /// makes the input harmless: `old` decides a REFUSAL and never a state —
+    /// a place written to holds what was written to it, whatever it held
+    /// before — so a first build that refuses nothing at a store leaves the
+    /// judgment at every later statement exactly where a first build reading
+    /// a filled table left it. The kernel then reports the store it finds a
+    /// held place at ([`crate::kernel::MissingKind::Store`]), the placer
+    /// writes the row, and the second build states [`Old::Released`] or
+    /// [`Old::Nothing`] there.
+    Pending,
 }
 
 #[derive(Debug, Clone)]
@@ -1050,6 +1076,7 @@ fn build_seeded(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
+        caps: Default::default(),
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -1150,6 +1177,7 @@ pub fn build_module_state<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
+        caps: Default::default(),
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1250,6 +1278,7 @@ fn build_outside_seeded<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
+        caps: Default::default(),
     };
     let mut out = Vec::new();
     b.block(block, &mut out)?;
@@ -1296,6 +1325,9 @@ struct Builder<'a> {
     /// [`last_owner`] decided over the build before it. Empty on the first
     /// build, which is where the candidates come from.
     seed: &'a std::collections::HashSet<usize>,
+    /// The capability of every declared position, built the once a body needs
+    /// it — see [`Builder::arg_released`].
+    caps: std::cell::OnceCell<HashMap<String, Vec<Capability>>>,
 }
 
 impl<'a> Builder<'a> {
@@ -1659,7 +1691,7 @@ impl<'a> Builder<'a> {
                 // that MENTIONS the place may be handing the old buffer back
                 // (`xs = xs.push(v)`) so the release stands down — unless the
                 // plan proved every mention a read argument to a function
-                // that cannot hand it back (`store_fresh_at`, exit-residue
+                // that cannot hand it back (`store_is_fresh`, exit-residue
                 // round eighteen), or the value is a String concatenation,
                 // which builds a fresh buffer whatever it reads (`s = s + x`).
                 // Both compiled backends spell the last exception
@@ -1668,51 +1700,56 @@ impl<'a> Builder<'a> {
                 // slice). Module state takes the same rule: it is a name to
                 // both of them.
                 let mentions = vyrn_frontend::movecheck::mentions_place(value, name);
-                let fresh_str = matches!(
-                    vyrn_frontend::types::resolve(
-                        &ty,
-                        &vyrn_frontend::types::decl_map(self.program),
-                    ),
-                    Type::Str
-                ) && matches!(
-                    value,
-                    Expr::Binary {
-                        op: vyrn_frontend::ast::BinOp::Add,
-                        ..
-                    }
-                );
-                let releases = self.own.plan.store_owned_at(sid)
-                    && (fresh_str || !mentions || self.own.plan.store_fresh_at(sid));
+                let fresh_str = self.fresh_str(&ty, value);
+                // The hand-back is the CORE's answer and not the kernel's: it
+                // is read off the statement, not off the path. Everything
+                // else a store displaces is the kernel's, and the first build
+                // leaves it open (RFC-0125 §3 M3, the store slice).
+                let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
+                let key = self.store_key(sid);
+                let releases = !handed_back && placed_store(key);
                 let Some(n) = n else {
+                    // Module state owns what it holds for the whole module
+                    // and nothing may `consume` it, so a store into one
+                    // releases what it replaces whenever that owns heap.
+                    let owns = self.owns(&ty);
                     out.push(St::Store {
                         place: Place::Global(name.clone()),
                         value: v,
-                        old: if releases {
+                        old: if handed_back {
+                            Old::Transferred
+                        } else if !owns {
+                            Old::Nothing
+                        } else if releases {
                             Old::Released
                         } else {
-                            Old::Nothing
+                            Old::Pending
                         },
                         line: *line,
-                        site: Site::Node(sid),
+                        site: Site::Node(key),
                         releases,
                     });
                     return Ok(());
                 };
-                let old = if !self.body.names[n as usize].releases {
+                // The hand-back is read off the STATEMENT, so it is stated
+                // before the name's own obligation is: a name that owes no
+                // release still hands its buffer back, and the census reads
+                // the word to tell the two reasons for `false` apart.
+                let old = if handed_back {
+                    Old::Transferred
+                } else if !self.body.names[n as usize].releases {
                     Old::Nothing
                 } else if releases {
                     Old::Released
-                } else if mentions {
-                    Old::Transferred
                 } else {
-                    Old::Unreleased
+                    Old::Pending
                 };
                 out.push(St::Store {
                     place: Place::Name(n),
                     value: v,
                     old,
                     line: *line,
-                    site: Site::Node(sid),
+                    site: Site::Node(key),
                     releases,
                 });
             }
@@ -1725,17 +1762,27 @@ impl<'a> Builder<'a> {
                 let v = self.val(value, out)?;
                 let (base, bty) = self.named_place(name, *line)?;
                 let fty = self.field_ty(&bty, field, *line)?;
-                let old = self.old_for(&fty, sid);
+                // `s.dense.push(i)` IS `s.dense = s.dense.push(i)`: the
+                // receiver comes back through the result, so the store hands
+                // the buffer back and releases nothing — the same rule a
+                // store to a name takes, one dot down, with the same
+                // exception for a String concatenation, which builds a fresh
+                // buffer whatever it reads (RFC-0125 §3 M3, the store slice).
+                let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
+                    && !self.fresh_str(&fty, value);
+                let key = self.store_key(sid);
+                let releases = !handed_back && placed_store(key);
                 out.push(St::Store {
                     place: Place::Field(Box::new(base), field.clone()),
                     value: v,
-                    old,
+                    old: if handed_back {
+                        Old::Transferred
+                    } else {
+                        self.old_for(&fty, releases)
+                    },
                     line: *line,
-                    site: Site::Node(sid),
-                    // A field store takes the plan's row as it stands: the
-                    // value-alias guard is folded into the row itself
-                    // (`fold_store_owned`), so there is nothing to add here.
-                    releases: self.own.plan.store_owned_at(sid),
+                    site: Site::Node(key),
+                    releases,
                 });
             }
             Stmt::IndexSet {
@@ -1756,22 +1803,36 @@ impl<'a> Builder<'a> {
                 // A user container's `place at` yields the element's place
                 // (RFC-0091 M2), and the element's type is the value's. Such
                 // a store is REWRITTEN into a block of its own before the
-                // checker walks it, so the plan's row stands on a statement
-                // this pass never sees: no site, and a reader falls back to
-                // the plan (RFC-0125 §3 M3, the emitter-reads-the-core
-                // slice).
-                let (ety, site) = match self.elem_ty(&bty, *line) {
-                    Ok(t) => (t, Site::Node(sid)),
-                    Err(_) => (self.ty_of(value)?, Site::None),
+                // checker walks it, so the node a reader keys it by is the
+                // rewrite's and not this statement's — which is what
+                // `key_of` says, and why every store above keys by it too
+                // (RFC-0125 §3 M3, the store slice). This pass judges the
+                // SOURCE statement and files the answer where the emitters
+                // look.
+                let ety = match self.elem_ty(&bty, *line) {
+                    Ok(t) => t,
+                    Err(_) => self.ty_of(value)?,
                 };
-                let old = self.old_for(&ety, sid);
+                let key = self.store_key(sid);
+                let site = Site::Node(key);
+                // The same hand-back, and the INDEX counts as well: `xs[i] =
+                // xs[j]` and `xs[xs.length - 1] = v` both read the buffer the
+                // store writes into, and neither displaces anything the
+                // container did not keep.
+                let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
+                    || vyrn_frontend::movecheck::mentions_place(index, name);
+                let releases = !handed_back && placed_store(key);
                 out.push(St::Store {
                     place,
                     value: v,
-                    old,
+                    old: if handed_back {
+                        Old::Transferred
+                    } else {
+                        self.old_for(&ety, releases)
+                    },
                     line: *line,
                     site,
-                    releases: self.own.plan.store_owned_at(sid),
+                    releases,
                 });
             }
             Stmt::Return { value, line } => {
@@ -2108,13 +2169,47 @@ impl<'a> Builder<'a> {
     /// whole names, and a sub-place the plan knows to be empty — a payload
     /// already taken out, an `Option` already `None` — is not a name it can
     /// see. Sub-place ownership is M3's judgment, not M2's.
-    fn old_for(&self, ty: &Type, sid: usize) -> Old {
+    /// A String concatenation builds a fresh buffer whatever it reads, so
+    /// `s = s + x` displaces the old one and does not hand it back. Both
+    /// compiled backends spell this exception `fresh_str`; it stands here so
+    /// the one answer they read is this one.
+    fn fresh_str(&self, ty: &Type, value: &Expr) -> bool {
+        matches!(
+            vyrn_frontend::types::resolve(ty, &vyrn_frontend::types::decl_map(self.program)),
+            Type::Str
+        ) && matches!(
+            value,
+            Expr::Binary {
+                op: vyrn_frontend::ast::BinOp::Add,
+                ..
+            }
+        )
+    }
+
+    /// The node a store's row is keyed by, which is the node its READERS key
+    /// it by (RFC-0125 §3 M3, the store slice).
+    ///
+    /// Identity for every store written as one. RFC-0091 M2's `place at`
+    /// rewrite builds the store statements a user container's `c[h] = v`
+    /// becomes, and both compiled backends ask about the source statement
+    /// through the same mapping, so the answer is filed under the rewrite's
+    /// node and found there.
+    fn store_key(&self, sid: usize) -> usize {
+        self.own.plan.key_of(sid)
+    }
+
+    fn old_for(&self, ty: &Type, releases: bool) -> Old {
         if !self.owns(ty) {
             Old::Nothing
-        } else if self.own.plan.store_owned_at(sid) {
+        } else if releases {
             Old::Released
         } else {
-            Old::Nothing
+            // The first build leaves it open and the kernel answers over the
+            // ROOT, which is the one place a sub-place's ownership can be
+            // read from (RFC-0125 §3 M3, the store slice). `Nothing` still
+            // stands where the type owns nothing: that is the core's answer,
+            // not a decision it defers.
+            Old::Pending
         }
     }
 
@@ -2537,21 +2632,260 @@ impl<'a> Builder<'a> {
     /// reads it (RFC-0096 M3), so the drop is queued for right after the
     /// binding that consumes it.
     fn read_val(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        self.read_at(e, out, None)
+    }
+
+    /// A read in an argument position, with the position it fills. An
+    /// operator is a call (`a + b` is `@concat(a, b)`), so its operands come
+    /// through here too.
+    fn read_arg(
+        &mut self,
+        e: &'a Expr,
+        out: &mut Vec<St>,
+        callee: &str,
+        ix: usize,
+    ) -> Result<Val, Gap> {
+        self.read_at(e, out, Some((callee, ix)))
+    }
+
+    fn read_at(
+        &mut self,
+        e: &'a Expr,
+        out: &mut Vec<St>,
+        at: Option<(&str, usize)>,
+    ) -> Result<Val, Gap> {
         let v = self.read_val_inner(e, out)?;
         // RFC-0114 M1's key, stated once for every read in an argument
-        // position (RFC-0125 §3 M3, the emitter-reads-the-core slice). An
-        // operator is a call to the plan (`a + b` is `@concat(a, b)`) and a
-        // `lazy` field read is one too, so the key is taken here rather than
-        // in `call`, which sees neither. Membership, not the query: the
-        // query records a row as consumed, and §26's finish check is the
-        // emitters' to discharge.
-        if let Val::Name(t) = v {
-            let node = e as *const Expr as usize;
-            if self.own.plan.arg_drops.contains(&node) {
-                self.body.names[t as usize].arg_drop = Some(node);
+        // position (RFC-0125 §3 M3, the argument slice). The key is taken
+        // here rather than in `call`, which sees neither an operator nor a
+        // `lazy` field read.
+        if let (Val::Name(t), Some((callee, ix))) = (&v, at) {
+            let t = *t;
+            if self.arg_released(e, t, callee, ix) {
+                self.body.names[t as usize].arg_drop = Some(e as *const Expr as usize);
             }
         }
         Ok(v)
+    }
+
+    /// Round eighteen's rule, stated by the core (RFC-0125 §3 M3): a store
+    /// whose value mentions the place it writes into may be handing the old
+    /// buffer back, UNLESS every mention is a read the value cannot hand
+    /// back. The shape is read off the statement; the three closures over the
+    /// call graph are the checker's, handed on beside the plan.
+    fn store_is_fresh(&self, value: &'a Expr, name: &str) -> bool {
+        // The recording gate: a value whose type owns no heap has nothing to
+        // hand back and no row is written for it.
+        if !self.ty_of(value).is_ok_and(|t| self.proto.owns_heap(&t)) {
+            return false;
+        }
+        let mut ms = Vec::new();
+        if !self.read_only_mentions(value, name, &mut ms) {
+            return false;
+        }
+        ms.iter().all(|(c, i)| {
+            !self.own.lending.contains(c)
+                && !self.own.retains.contains(&(c.clone(), *i))
+                && !self.own.escapers.contains(c)
+        })
+    }
+
+    /// Whether every mention of `root` in `e` is a read that cannot hand
+    /// `root`'s own storage back, collecting the `(callee, index)` positions
+    /// the closures then screen.
+    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {
+        use vyrn_frontend::movecheck as mc;
+        if !mc::mentions_place(e, root) {
+            return true;
+        }
+        // A mention whose TYPE owns no heap hands nothing back however it is
+        // read — `f = Frag { start: f.start, .. }` reads one scalar.
+        if self.ty_of(e).is_ok_and(|t| !self.proto.owns_heap(&t)) {
+            return true;
+        }
+        match e {
+            Expr::Call { name, args, .. } => args.iter().enumerate().all(|(ix, a)| {
+                let is_root_read = match a {
+                    Expr::Var { name: v, .. } => v == root,
+                    _ => mc::place_path(a).is_some_and(|(r, _)| r == root),
+                };
+                if !is_root_read {
+                    return self.read_only_mentions(a, root, out);
+                }
+                if !mc::call_may_forward(name) {
+                    true
+                } else if self.declares(name)
+                    && !name.starts_with('@')
+                    && prelude::signature(name).is_none()
+                {
+                    out.push((name.clone(), ix));
+                    true
+                } else {
+                    false
+                }
+            }),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.read_only_mentions(lhs, root, out) && self.read_only_mentions(rhs, root, out)
+            }
+            Expr::Unary { expr, .. } => self.read_only_mentions(expr, root, out),
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .all(|(_, v)| self.read_only_mentions(v, root, out)),
+            Expr::ArrayLit { elems, .. } => {
+                elems.iter().all(|v| self.read_only_mentions(v, root, out))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the program declares a callable of this name — a function, a
+    /// method, or a projection: `Declared::is_function`'s reading.
+    fn declares(&self, name: &str) -> bool {
+        self.program.functions.iter().any(|f| f.name == name)
+            || self
+                .program
+                .impls
+                .iter()
+                .any(|i| i.methods.iter().any(|m| m.name == name))
+            || self.projection(name).is_some()
+            || prelude::signature(name).is_some()
+    }
+
+    /// Whether the temporary this frame minted for an argument position is
+    /// the CALLER's to release after the call — RFC-0125 §3 M3, the argument
+    /// slice.
+    ///
+    /// `movecheck` recognises an allocating argument by its SHAPE, because it
+    /// has no lowering: a call, a String `+`, an array or struct literal the
+    /// boundary heapifies, a match whose every arm builds, a forced `lazy`
+    /// field. Sixteen shapes, each read off the source. This pass LOWERED the
+    /// argument, so it has already answered the same question: a name it
+    /// minted whose type owns heap, which no place was read into and no
+    /// lending producer handed back, IS the census's shape A and shape B.
+    /// [`NameInfo::releases`] is that answer, and it is the whole recording
+    /// rule.
+    ///
+    /// What the CALLEE does with the value is a second question and the same
+    /// one both passes ask: [`vyrn_frontend::movecheck::arg_verdict`], the
+    /// rule stated once. The four fields it reads that a walk derived are
+    /// stated here from the body instead — the producer, the element
+    /// producers, whether a view hands out a copy, and the release kind.
+    fn arg_released(&self, e: &'a Expr, t: Name, callee: &str, ix: usize) -> bool {
+        use vyrn_frontend::movecheck as mc;
+        // A named value is nobody's temporary: `f(s)` hands over what `s`
+        // owns, and the binding keeps the row.
+        if matches!(e, Expr::Var { .. } | Expr::Consume { .. }) {
+            return false;
+        }
+        // A forced `lazy` field read IS a call — nothing is cached, and every
+        // read is a fresh owned value (RFC-0085 M4a). This pass binds a
+        // BORROW for it, because the read names a place; the value behind the
+        // place is still the caller's to free, and the key says so whether or
+        // not this pass releases the temporary itself.
+        let info = &self.body.names[t as usize];
+        let forced = self.forces_a_thunk(e);
+        if !info.releases && !forced {
+            return false;
+        }
+        // A producer whose result IS its argument (`blackBox`) built nothing
+        // this frame may free — the seeded row hands the same bare type
+        // parameter back, which no body spelling says.
+        if let Expr::Call { name, .. } = e {
+            if mc::hands_back(name) {
+                return false;
+            }
+        }
+        let ty = if forced {
+            match self.forced_ty(e) {
+                Some(t) => t,
+                None => return false,
+            }
+        } else {
+            info.ty.clone()
+        };
+        let Some(kind) = self.proto.release_kind(&ty) else {
+            return false;
+        };
+        // How the value came to be, in the spelling `arg_verdict` partitions
+        // on: a call answers its own name, the one allocating OPERATOR
+        // answers nothing, and every other build answers a name no user
+        // function can have.
+        let producer = match e {
+            Expr::Call { name, .. } => Some(name.clone()),
+            Expr::Binary { op: BinOp::Add, .. } => None,
+            Expr::Match { .. } => Some("@match".to_string()),
+            Expr::StructLit { .. } => Some("@record".to_string()),
+            Expr::ArrayLit { .. } => Some("@heapify".to_string()),
+            Expr::Field { .. } => Some("@lazy".to_string()),
+            _ => Some("@build".to_string()),
+        };
+        // A heapified literal holds what its elements produced, and a
+        // lender's result inside one makes the deep free a use-after-free.
+        let elem_producers: Vec<String> = match e {
+            Expr::ArrayLit { elems, .. } => elems
+                .iter()
+                .filter_map(|x| match x {
+                    Expr::Call { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        // A view LENDS, unless the element it hands out is a heap-free copy.
+        let decls = vyrn_frontend::types::decl_map(self.program);
+        let view_copies = mc::lends_result(callee)
+            && matches!(
+                vyrn_frontend::types::resolve(&ty, &decls),
+                Type::Array(ref et)
+                    | Type::ArrayN(ref et, _)
+                    | Type::SmallArray(ref et, _)
+                    | Type::Stream(ref et) if !self.proto.owns_heap(et)
+            );
+        let s = mc::ArgTemp {
+            id: e as *const Expr as usize,
+            callee: callee.to_string(),
+            ix,
+            line: e.line(),
+            module: self.body.file.clone(),
+            producer,
+            kind,
+            verdict: mc::ArgVerdict::Unknown,
+            owner: self.func_name.clone(),
+            view_copies,
+            elem_producers,
+        };
+        let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
+            || self.is_variant(callee);
+        let cap = mc::arg_cap(
+            self.caps.get_or_init(|| mc::arg_caps(self.program)),
+            callee,
+            ix,
+        );
+        mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
+            == mc::ArgVerdict::Released
+    }
+
+    /// The type a forced `lazy` field read yields, or `None` where the read is
+    /// an ordinary field of a record — see [`Builder::arg_released`].
+    fn forced_ty(&self, e: &Expr) -> Option<Type> {
+        let Expr::Field {
+            expr: base, field, ..
+        } = e
+        else {
+            return None;
+        };
+        let decls = vyrn_frontend::types::decl_map(self.program);
+        let bt = self.ty_of(base).ok()?;
+        let Type::Record(fields) = vyrn_frontend::types::resolve(&bt, &decls) else {
+            return None;
+        };
+        let f = fields.iter().find(|f| &f.name == field)?;
+        let inner = vyrn_frontend::types::deferred(&f.ty)?;
+        self.proto.owns_heap(inner).then(|| inner.clone())
+    }
+
+    fn forces_a_thunk(&self, e: &Expr) -> bool {
+        self.forced_ty(e).is_some()
     }
 
     fn read_val_inner(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
@@ -2973,12 +3307,40 @@ impl<'a> Builder<'a> {
             Expr::Unary { expr, .. } => {
                 Ok(Rhs::Prim(vec![self.read_val(expr, out)?], self.produced(e)))
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
                 // An operator drains its operands' temporaries in both
                 // compiled backends (`binary`, `gen_binary`).
                 self.drain += 1;
-                let a = self.read_val(lhs, out)?;
-                let b = self.read_val(rhs, out)?;
+                // A String `+` is `@concat` written as an operator, and a
+                // String comparison and a `=~` read their operands the same
+                // way, so an allocating operand is an argument at
+                // `(@concat, side)` (RFC-0125 §3 M3, the argument slice).
+                // The `+` that concatenates is the one whose own type is
+                // `String`, which this pass reads off the node.
+                let concat = matches!(op, BinOp::Add)
+                    && self.ty_of(e).is_ok_and(|t| {
+                        matches!(
+                            vyrn_frontend::types::resolve(
+                                &t,
+                                &vyrn_frontend::types::decl_map(self.program)
+                            ),
+                            Type::Str
+                        )
+                    });
+                let compares = matches!(
+                    op,
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
+                );
+                let a = if concat || compares || matches!(op, BinOp::Match) {
+                    self.read_arg(lhs, out, "@concat", 0)?
+                } else {
+                    self.read_val(lhs, out)?
+                };
+                let b = if concat || compares {
+                    self.read_arg(rhs, out, "@concat", 1)?
+                } else {
+                    self.read_val(rhs, out)?
+                };
                 self.drain -= 1;
                 Ok(Rhs::Prim(vec![a, b], self.produced(e)))
             }
@@ -3520,23 +3882,18 @@ impl<'a> Builder<'a> {
                     self.val(a, out)?
                 }
             } else {
-                self.read_val(a, out)?
+                self.read_arg(a, out, name, k)?
             };
             if let Val::Name(t) = v {
-                let is_temp = !matches!(a, Expr::Var { .. } | Expr::Consume { .. });
-                if is_temp
-                    && *cap != Capability::Consume
-                    && self.body.names[t as usize].releases
-                    && self.own.plan.arg_drop(a as *const Expr as usize)
-                {
-                    // The key stands whether or not `read_val` already queued
-                    // the temporary: the drop is the same drop, and a reader
-                    // of the fold looks the row up by this node (RFC-0125 §3
-                    // M3, the emitter-reads-the-core slice).
-                    self.body.names[t as usize].arg_drop = Some(a as *const Expr as usize);
-                    if !self.after.contains(&t) {
-                        temps_to_drop.push(t);
-                    }
+                // The drop the key stands for: `read_arg` set it, and a
+                // temporary the read did not already queue is queued here
+                // (RFC-0125 §3 M3, the argument slice). The key stands on a
+                // BORROW too — a forced `lazy` field read is a fresh value
+                // behind a place — and only a name this frame releases is
+                // dropped.
+                let info = &self.body.names[t as usize];
+                if info.releases && info.arg_drop.is_some() && !self.after.contains(&t) {
+                    temps_to_drop.push(t);
                 }
             }
             vs.push((v, *cap));
@@ -3852,6 +4209,20 @@ pub struct Facts {
     /// is one this pass states no answer for, and a reader falls back to the
     /// plan there.
     pub stores: std::collections::HashMap<usize, bool>,
+    /// The stores of that map the core STANDS DOWN at, whatever the judgment
+    /// would say — the two reasons a store releases nothing that the
+    /// statement itself carries (RFC-0125 §3 M3, the store slice):
+    ///
+    ///   - the value hands the place back (`xs = xs.push(v)`,
+    ///     `s.dense.push(i)`), so the buffer never leaves;
+    ///   - the place owns no heap (`w = 2`, `data = grown`), so there is
+    ///     nothing to release whatever holds it.
+    ///
+    /// Not read by an emitter: `stores` already has both folded in. It is
+    /// here so the corpus test can pin the equality with the plan's own table
+    /// as a RULE and not as a number — a plan row the core neither releases
+    /// nor stands down is a release that stopped being stated.
+    pub stood_down: std::collections::HashSet<usize>,
     /// Round twenty-eight: the statement-position calls whose owned result
     /// nothing binds and the core releases — a `St::Drop` at the
     /// statement's [`Site::Node`].
@@ -3895,6 +4266,17 @@ pub(crate) struct Placed {
     /// one edge owes because another edge took the name. A sub-place row is
     /// spelled `d.line`, which every reader resolves as a place.
     edges: std::collections::HashMap<usize, Vec<(String, u32)>>,
+    /// The store table, derived: the store statements the kernel found a HELD
+    /// place at, which are the stores that owe the release of what they
+    /// displace. Keyed by the store's own node, which is how both compiled
+    /// backends key it.
+    stores: std::collections::HashSet<usize>,
+}
+
+/// Whether the kernel found this store's place still holding — read by the
+/// second build, empty on the first, where every store says [`Old::Pending`].
+fn placed_store(site: usize) -> bool {
+    PLACED.with(|p| p.borrow().stores.contains(&site))
 }
 
 /// The binders the kernel found held at the end of one arm, or `None` where
@@ -3951,9 +4333,13 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
             St::Store {
                 releases,
                 site: Site::Node(at),
+                old,
                 ..
             } => {
                 out.stores.insert(*at, *releases);
+                if matches!(old, Old::Transferred | Old::Nothing) {
+                    out.stood_down.insert(*at);
+                }
             }
             St::Drop(n, at, _) => match at {
                 Site::Node(at) => {
@@ -4422,6 +4808,21 @@ fn place_frames(
             }
         };
         for m in missing {
+            // A store's row is keyed by the STORE and by nothing else: the
+            // place it writes into may be module state or a sub-place, which
+            // is no binding of this frame, so this row is read before the
+            // name is (RFC-0125 §3 M3, the store slice).
+            if m.kind == MissingKind::Store {
+                let fresh = PLACED.with(|p| p.borrow_mut().stores.insert(m.site));
+                if fresh {
+                    if trace {
+                        eprintln!("placer: {} store at {} releases", body.name, m.site);
+                    }
+                    own.plan.owners.insert(m.site, owner.to_string());
+                    touched.insert(owner.to_string());
+                }
+                continue;
+            }
             let info = &body.names[m.name as usize];
             let kind = own.proto.release_kind(&info.ty);
             if trace {
@@ -4512,6 +4913,7 @@ fn place_frames(
                     continue;
                 }
                 MissingKind::Exit => {}
+                MissingKind::Store => unreachable!("read above, keyed by the store"),
             }
             // The unnamed receiver of a field read: R1′'s table, with the
             // field the read took as its hole. Freed right after the read,

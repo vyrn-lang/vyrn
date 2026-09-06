@@ -1355,8 +1355,7 @@ impl<'a> Cx<'a> {
     /// pass walks the source statement. `compiler/vyrn-cli/tests/coretables.rs`
     /// pins that residue at twelve rows over the corpus.
     fn store_row(&self, node: usize) -> bool {
-        self.store_fact(node)
-            .unwrap_or_else(|| self.plan.store_owned_at(node))
+        self.store_fact(node).unwrap_or(false)
     }
 
     /// The core's answer alone, or `None` where it states none — a body this
@@ -2954,7 +2953,7 @@ impl<'p> Fn_<'_, 'p> {
         // nothing is emitted for it — acknowledged, because §26's finish check
         // counts a placed decision the emission never looked at as a leak.
         for st in &stmts[..3] {
-            let _ = self.cx.plan.store_owned_at(st as *const Stmt as usize);
+            self.cx.plan.acknowledge(st as *const Stmt as usize);
         }
         // From here on, code is emitted: the same prefix as `Stmt::IndexSet`.
         let w = match self.walks.get(parent.as_str()).cloned() {
@@ -3859,18 +3858,58 @@ impl<'p> Fn_<'_, 'p> {
         self.region_bump(b, -1);
     }
 
-    /// Call `std/runtime`'s `strFromBytes` with the destination, the bytes, their
-    /// count and the check's answer already on the stack: the two interned
-    /// messages are its constant tail (PLAN-0125-runtime §6 step 4).
+    /// Call `std/runtime`'s `strFromBytes` for the bytes at `src` — a local
+    /// holding an `Array<UInt8>` header — writing the `Result<String, String>`
+    /// it answers into the frame slot at `dest`.
+    ///
+    /// The WHOLE call, and that is the point: the destination, the data
+    /// pointer, the count, the check's answer and the two interned messages
+    /// (PLAN-0125-runtime §6 step 4). A callee's argument list is the callee's
+    /// rule, so it is stated once, here.
     ///
     /// The DFA table used to be the third argument. RFC-0125 §3 M6 (the third
     /// judgment's fifth slice) replaced it with the answer of `std/text`'s
-    /// `stringFault` — the one check every engine calls — so the runtime function
-    /// builds and decides nothing.
-    fn str_from_bytes_tail(&self, b: &mut Frame) {
+    /// `stringFault` — the one check every engine calls — so the runtime
+    /// function builds and decides nothing. That slice made the answer the
+    /// CALLER's to push, and this call has two callers: `stringFromBytes` was
+    /// given the new argument and [`Fn_::map_tally_bytes`] was not, so
+    /// `tallyBytes` emitted five operands into a six-operand signature and
+    /// wasmtime refused the module (RFC-0125 §3 M5, the eighteenth slice).
+    /// Neither caller can be short of an argument it does not spell.
+    fn str_from_bytes(
+        &mut self,
+        b: &mut Frame,
+        dest: u32,
+        src: u32,
+        al: &Layout,
+        line: usize,
+    ) -> Result<(), String> {
+        let check = vyrn_frontend::loader::STRING_FAULT;
+        let Some(check_idx) = self.cx.sigs.get(check).map(|s| s.index) else {
+            // `std/text` is injected into any program that mentions a builtin
+            // building a `String` out of bytes, so reaching this means a
+            // program built without a std root.
+            return unsupported(
+                "`stringFromBytes` with no `std/text` in the link (its check is Vyrn)",
+                line,
+            );
+        };
+        let fault = self.scratch(b, ValType::I32, 1);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::Call(check_idx));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(fault));
+        b.slot(dest);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(al.fields[1])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalGet(fault));
         b.ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
             .ins(&Instruction::I32Const(self.cx.rt.butf8 as i32))
             .ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+        Ok(())
     }
 
     /// The call about to be emitted (`on`), or just emitted (`!on`), allocates a
@@ -4224,14 +4263,6 @@ impl<'p> Fn_<'_, 'p> {
                 // old buffer and hands it back, so freeing it would be a double
                 // free.
                 //
-                // A STRING `+` IS THE EXCEPTION, for the reason the textual
-                // backend's copy of this gives: a concat always allocates a fresh
-                // buffer and copies both operands into it, so it cannot hand back
-                // either input. The append spine above hides the common
-                // `s = s + x`; what reaches here is a PREPEND, and that leaked
-                // 9.9 GB over 50,000 calls of a 200-iteration loop.
-                let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
-                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
                 // RFC-0125 §3 M3: the rule above, the row, and round
                 // eighteen's `store_fresh` are ONE answer, and the core
                 // states it at the store's own node (`Cx::store_fact`). What
@@ -4244,12 +4275,7 @@ impl<'p> Fn_<'_, 'p> {
                 let owned_here = self
                     .cx
                     .store_fact(s as *const Stmt as usize)
-                    .unwrap_or_else(|| {
-                        self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                            && (fresh_str
-                                || !vyrn_frontend::movecheck::mentions_place(value, name)
-                                || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
-                    });
+                    .unwrap_or(false);
                 let snap = if owned_here && self.region_depth == 0 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
@@ -4659,7 +4685,18 @@ impl<'p> Fn_<'_, 'p> {
                 {
                     // The projection's own statements decide the release —
                     // acknowledged for §26's finish check.
-                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                    self.cx.plan.acknowledge(s as *const Stmt as usize);
+                    // RFC-0125 §3 M3, the store slice: the core judged THIS
+                    // statement and this pass walks the expansion, so the
+                    // store inside it is pointed back at the node the answer
+                    // is filed under. The expansion is memoized and leaked,
+                    // so the pair outlives every walk that reads it.
+                    if let Some(st) = vyrn_frontend::project::store_node(blk) {
+                        self.cx.plan.alias_clones(&[(
+                            st as *const Stmt as usize,
+                            s as *const Stmt as usize,
+                        )]);
+                    }
                     return self.block(m, b, blk);
                 }
                 // RFC-0125 M1: a header a `while` hoisted is already in
@@ -4686,7 +4723,7 @@ impl<'p> Fn_<'_, 'p> {
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
                     // The entry's release is `map_set`'s own two questions —
                     // acknowledged for §26's finish check.
-                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                    self.cx.plan.acknowledge(s as *const Stmt as usize);
                     return self
                         .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }
@@ -7141,8 +7178,7 @@ impl<'p> Fn_<'_, 'p> {
         // emitter calls: the generator host's resolver under a generation,
         // told the host's list mode, and WASI's `fd_readdir` on an ordinary
         // build (RFC-0125 §3 M5), told whether names carry kinds, so `vyrn
-        // run --engine wasm` lists the real filesystem the way the interpreter
-        // does.
+        // run` lists the real filesystem.
         if matches!(name, "listDir" | "listDirKinds") && args.len() == 1 {
             let ty = gen_list_dir_ty();
             let l = self.layout_of(&ty, line)?;
@@ -7628,30 +7664,8 @@ impl<'p> Fn_<'_, 'p> {
                 let src = self.scratch(b, ValType::I32, 0);
                 let al = self.layout_of(&bytes, line)?;
                 b.ins(&Instruction::LocalSet(src));
-                let check = vyrn_frontend::loader::STRING_FAULT;
-                let Some(check_idx) = self.cx.sigs.get(check).map(|s| s.index) else {
-                    // `std/text` is injected into any program that mentions
-                    // `stringFromBytes`, so reaching this means a program built
-                    // without a std root.
-                    return unsupported(
-                        "`stringFromBytes` with no `std/text` in the link (its check is Vyrn)",
-                        line,
-                    );
-                };
-                let fault = self.scratch(b, ValType::I32, 1);
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::Call(check_idx));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::LocalSet(fault));
                 let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I64Load(at(al.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
-                b.ins(&Instruction::LocalGet(fault));
-                self.str_from_bytes_tail(b);
+                self.str_from_bytes(b, off, src, &al, line)?;
                 b.slot(off);
                 return Ok(ty);
             }
@@ -13444,10 +13458,7 @@ impl<'p> Fn_<'_, 'p> {
         let rty = Type::result(Type::Str, Type::Str);
         let rl = layout::of_ll(&self.cx.ll(&rty)).expect("the Result shape");
         let dest = b.alloc(rl.size, rl.align);
-        b.slot(dest);
-        b.ins(&Instruction::LocalGet(wdata));
-        b.ins(&Instruction::LocalGet(wlen));
-        self.str_from_bytes_tail(b);
+        self.str_from_bytes(b, dest, wsrc, &al, line)?;
         b.slot(dest + rl.fields[0]);
         b.ins(&Instruction::I64Load(word8()));
         b.ins(&Instruction::I64Eqz);

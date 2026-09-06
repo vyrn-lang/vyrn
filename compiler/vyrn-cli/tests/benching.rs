@@ -172,19 +172,19 @@ fn a_branch_that_yields_blackbox_runs_under_both_engines() {
          }\n",
     )
     .unwrap();
-    let one = |engine: Option<&str>| {
-        let mut cmd = vyrn();
-        cmd.arg("bench");
-        if let Some(e) = engine {
-            cmd.arg("--engine").arg(e);
-        }
-        let out = cmd.arg(&file).arg("--check").output().unwrap();
-        (out.status.code(), norm(&out.stdout), norm(&out.stderr))
-    };
-    let interp = one(None);
-    let wasm = one(Some("wasm"));
-    assert_eq!(interp.0, Some(0), "interp stderr:\n{}", interp.2);
-    assert_eq!(wasm, interp, "the engines disagree");
+    let out = vyrn()
+        .arg("bench")
+        .arg(&file)
+        .arg("--check")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr:
+{}",
+        norm(&out.stderr)
+    );
 }
 
 // ---- strip guarantee --------------------------------------------------------

@@ -45,161 +45,6 @@ use std::collections::HashMap;
 use crate::ast::*;
 use crate::movecheck::{Gone, LetOwnership};
 
-/// What the INTERPRETER actually releases at a scope exit, made readable —
-/// RFC-0101 M4.
-///
-/// **It used to have three sites and now it has one, which is the deletion phase
-/// visible from outside.** The shadow phases made all three engines report their
-/// sequence so one gate could assert it against the placement. Both compiled
-/// backends READ that placement now, so comparing what they emit against it is
-/// comparing a value with itself. This engine still derives its own order, for
-/// the reason RFC-0101 §3 M4's ledger records, so it is still the one that needs
-/// gating — against `vyrn-cli/tests/lowered.rs`'s fixtures, because its walk
-/// happens when a block RUNS.
-///
-/// It lives here, in the file that DECIDES what is droppable, because the
-/// interpreter is in this crate and cannot import `vyrn_codegen::observe`.
-///
-/// Off by default, thread-local, and every hook records a step the engine was
-/// about to take anyway. Nothing here decides anything.
-pub mod trace {
-    pub use super::Exit;
-
-    /// One exit's release walk, as the interpreter ran it.
-    ///
-    /// The whole walk rather than one record per release, because the thing being
-    /// gated is the SEQUENCE: an exit that releases nothing is a fact too, and a
-    /// per-release trace cannot tell it apart from an exit the engine never
-    /// reached.
-    ///
-    /// **One record per exit, however many frames it crosses.** A compiled
-    /// backend walks every frame above a boundary index in one call. The
-    /// interpreter's walk happens as a signal propagates outward through
-    /// `Interp::block`, one frame at a time, so each frame [`joining`]s the walk
-    /// the signal opened and appends to it. Concatenating in emission order
-    /// instead does NOT work, and the fixture that found it out is worth the
-    /// sentence: a release is ordinary Vyrn, so running one emits the callee's
-    /// own block exits BETWEEN two frames of the walk being recorded.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Walk {
-        /// Which exit kind this walk belongs to.
-        pub exit: Exit,
-        /// The node the exit is AT: the `Block` for a fall-through exit, the
-        /// `match` / `if let` / `for in` for a construct's own temporary, and the
-        /// `Stmt::Break` / `Continue` / `Return` or `Expr::Try` for an early one.
-        /// It is the key a consumer looks the placed steps up by, so nothing
-        /// downstream re-derives a boundary index.
-        pub at: usize,
-        /// The bindings released, in the order the engine releases them.
-        pub bindings: Vec<usize>,
-    }
-
-    thread_local! {
-        static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static WALKS: std::cell::RefCell<Vec<Walk>> = const {
-            std::cell::RefCell::new(Vec::new())
-        };
-        static LEAVING: std::cell::Cell<(Exit, usize)> =
-            const { std::cell::Cell::new((Exit::Block, 0)) };
-        /// Where the walk the current signal is unwinding lives, or `NONE`.
-        static OPEN: std::cell::Cell<usize> = const { std::cell::Cell::new(NONE) };
-    }
-
-    /// No walk is open — a `usize` rather than an `Option` so the cell is `Copy`
-    /// and the hot path is a compare.
-    const NONE: usize = usize::MAX;
-
-    /// Start recording on this thread, discarding anything already collected.
-    pub fn start() {
-        WALKS.with(|s| s.borrow_mut().clear());
-        OPEN.with(|c| c.set(NONE));
-        ON.with(|o| o.set(true));
-    }
-
-    /// Stop recording and take what was collected.
-    pub fn take() -> Vec<Walk> {
-        ON.with(|o| o.set(false));
-        WALKS.with(|s| std::mem::take(&mut *s.borrow_mut()))
-    }
-
-    pub fn on() -> bool {
-        ON.with(|o| o.get())
-    }
-
-    /// Take back what a thread of the engine's own collected.
-    ///
-    /// The interpreter runs its program on a dedicated stack
-    /// (`interp::on_deep_stack`), so a thread-local sink would be left behind on
-    /// that thread. The recording is per thread on purpose — two tests in one
-    /// binary run in parallel and a global would interleave them — so the thread
-    /// that made the stack hands the rows back to the one that asked.
-    pub fn adopt(rows: Vec<Walk>) {
-        WALKS.with(|s| s.borrow_mut().extend(rows));
-    }
-
-    /// Name the exit an unwinding walk belongs to, at the point the SIGNAL is
-    /// made.
-    ///
-    /// Both compiled backends emit an early exit's walk at the site, with the
-    /// node in hand. The interpreter's walk happens as `Flow::Break` or
-    /// `Ctrl::Return` propagates outward, and neither signal carries a node — so
-    /// the site is left here by the statement that raised it, and each unwinding
-    /// frame reads it. Recording only; nothing the engine does depends on it.
-    pub fn leaving(exit: Exit, at: usize) {
-        if on() {
-            LEAVING.with(|c| c.set((exit, at)));
-            OPEN.with(|c| c.set(NONE));
-        }
-    }
-
-    /// Reserve this frame's place in the walk the current signal is unwinding.
-    ///
-    /// Called at the frame's ENTRY, before any release runs, and that is the
-    /// whole trick: a release is ordinary Vyrn, so running one pushes the
-    /// callee's own block exits into the log between this frame and the next.
-    /// A place reserved first survives them.
-    pub fn joining() -> usize {
-        if !on() {
-            return NONE;
-        }
-        let open = OPEN.with(|c| c.get());
-        if open != NONE {
-            return open;
-        }
-        let (exit, at) = LEAVING.with(|c| c.get());
-        WALKS.with(|s| {
-            let mut v = s.borrow_mut();
-            v.push(Walk {
-                exit,
-                at,
-                bindings: Vec::new(),
-            });
-            let idx = v.len() - 1;
-            OPEN.with(|c| c.set(idx));
-            idx
-        })
-    }
-
-    /// Add what one frame released to the place it reserved.
-    pub fn joined(slot: usize, bindings: Vec<usize>) {
-        if slot == NONE {
-            return;
-        }
-        WALKS.with(|s| s.borrow_mut()[slot].bindings.extend(bindings));
-        // The next frame out belongs to the SAME walk, whatever a release
-        // running under this one did to the cell.
-        OPEN.with(|c| c.set(slot));
-    }
-
-    /// Note one frame's worth of one exit's release walk.
-    pub fn note(exit: Exit, at: usize, bindings: Vec<usize>) {
-        if !on() {
-            return;
-        }
-        WALKS.with(|s| s.borrow_mut().push(Walk { exit, at, bindings }));
-    }
-}
-
 /// Which exit runs a release step — RFC-0101 §2.1 item 3 and [A9]'s axis.
 ///
 /// It lives here rather than in `vyrn-lower` because all three engines report
@@ -1248,18 +1093,11 @@ pub struct ReleasePlan {
     /// RFC-0114 M1: the call-argument expressions whose value the CALLER
     /// releases after the call — the `ArgVerdict::Released` rows, by the
     /// argument's node address.
+    ///
+    /// The core states this row from its own body since RFC-0125 §3 M3's
+    /// argument slice, and the emitters read the core first. What is left
+    /// here is the fallback for a node the core states nothing for.
     pub arg_drops: std::collections::HashSet<usize>,
-    /// RFC-0114 M2: the `Stmt::Assign` nodes whose old value the store
-    /// releases — see [`fold_store_owned`].
-    pub store_owned: std::collections::HashSet<usize>,
-    /// Exit-residue round eighteen: the `Stmt::Assign` nodes whose stored
-    /// VALUE provably cannot hand the old value back — every mention of the
-    /// place is a read argument to a declared, non-lending, non-retaining
-    /// function (`movecheck::Facts::fresh_stores`). The backends consult this
-    /// only where their `mentions_place` guard would otherwise stand the
-    /// snapshot down, so it is exempt from the finish check: a row here that
-    /// no emission asks about is a store some other rule already handled.
-    pub store_fresh: std::collections::HashSet<usize>,
     /// Round twenty-seven: droppable scrutinee rows minted INSIDE a region
     /// because their value is a callee's (malloc-side) allocation — the
     /// textual emission frees these with its region guard stood down; the
@@ -1382,14 +1220,6 @@ impl ReleasePlan {
         hit
     }
 
-    /// Round eighteen: can this store's VALUE not hand the old one back?
-    /// Asked by the backends only after `store_owned_at` said the place owns
-    /// its value and `mentions_place` said the value reads it.
-    pub fn store_fresh_at(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        self.store_fresh.contains(&at)
-    }
-
     /// Round twenty-seven: may this match free the boxes its arms extract,
     /// though its scrutinee is a PLACE? True only where the fold proved the
     /// binding is never read after the match.
@@ -1404,16 +1234,6 @@ impl ReleasePlan {
     pub fn discarded_result(&self, at: usize) -> bool {
         let at = self.resolve(at);
         self.discarded_results.contains(&at)
-    }
-
-    /// RFC-0114 M2: does this store release the value it replaces?
-    pub fn store_owned_at(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        let hit = self.store_owned.contains(&at);
-        if hit {
-            self.taken.borrow_mut().insert(at);
-        }
-        hit
     }
 
     /// RFC-0114 R1′: does this frame own (and free) the unnamed receiver?
@@ -1455,9 +1275,8 @@ impl ReleasePlan {
         emitted: &std::collections::HashSet<String>,
     ) -> Vec<(String, &'static str)> {
         let taken = self.taken.borrow();
-        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 3] = [
+        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 2] = [
             ("an argument drop", Box::new(self.arg_drops.iter())),
-            ("a store release", Box::new(self.store_owned.iter())),
             ("a receiver free", Box::new(self.receiver_frees.iter())),
         ];
         let mut out: Vec<(String, &'static str)> = Vec::new();
@@ -1523,6 +1342,18 @@ pub struct Ownership {
     /// the one order that used to be asserted separately by `Gen::drop_stack`,
     /// `Fn_::releases` and the interpreter's per-block `Vec`.
     pub releases: HashMap<String, Vec<Release>>,
+    /// The two closures over the call graph, handed on so the CORE can ask
+    /// [`crate::movecheck::arg_verdict`] the same question at the same
+    /// position (RFC-0125 §3 M3, the argument slice).
+    ///
+    /// Not a table: neither says anything a body states. `lending` names the
+    /// functions whose result the caller must not release and `retains` the
+    /// positions that KEEP a borrowed parameter, and both are answers only a
+    /// pass that has read every body can give. See
+    /// [`crate::movecheck::Facts::lending`] for why they still exist.
+    pub lending: std::collections::HashSet<String>,
+    pub retains: std::collections::HashSet<(String, usize)>,
+    pub escapers: std::collections::HashSet<String>,
 }
 
 /// One analysis per build — RFC-0125 §3 M3, the repetition slice.
@@ -1612,9 +1443,7 @@ fn analyze_now(program: &Program) -> Ownership {
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let mut facts = crate::movecheck::facts(program);
-    let mut store_owned = fold_store_owned(&facts);
     let revived = fold_revived(&facts);
-    let store_fresh = facts.fresh_stores;
     let exit_sites = std::mem::take(&mut facts.exit_sites);
     let lets = facts.lets;
 
@@ -2021,70 +1850,6 @@ fn analyze_now(program: &Program) -> Ownership {
         .filter(|(k, n, _)| receiver_frees.contains(k) && !n.starts_with('@'))
         .map(|(k, _, _)| *k)
         .collect();
-    // RFC-0114 §26 (steps 3–4): a field or element store releases what it
-    // displaces when the TARGET owns its contents — module state by rule
-    // (a global owns what it holds; rule 2 refuses storing a borrow into
-    // one), a local when this function releases the binding (its droppable
-    // row, read as a property of the slot exactly as RFC-0087 §4 asked).
-    // Folded here so both backends read one answer where each used to keep
-    // a per-binding registry guess (`slot_owns`/`place_owns`, §22's table).
-    // Round thirty-two: a field/element store into a binding whose take (if
-    // any) happens strictly AFTER the store, with no loop shared between a
-    // take and the store — the displaced value is the frame's at that point,
-    // whatever becomes of the binding later. Same exiting-take exemption as
-    // `fold_store_owned`, same final-gone veto.
-    let mut takes_of: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
-    for ev in &facts.store_events {
-        if matches!(ev.kind, crate::movecheck::EvKind::Take) {
-            takes_of.entry(ev.key).or_default().push(ev);
-        }
-    }
-    for ps in &facts.place_stores {
-        let plain_row = matches!(
-            lets.get(&ps.key).and_then(|r| r.gone.as_ref()),
-            None | Some(crate::movecheck::Gone::Moved { .. })
-                | Some(crate::movecheck::Gone::Dropped { .. })
-                | Some(crate::movecheck::Gone::Returned { .. })
-        );
-        // Round fifty-seven: the LOCAL `exit_sites`, not `facts.exit_sites` —
-        // the field is drained into the local at the top of `analyze`
-        // (round fifty-two's lesson, relearned here), so this screen read an
-        // empty vector and the exiting-take exemption never fired: httpApply's
-        // early `return answered` blocked the 304 branch's `answered.body =
-        // ""` from freeing the body it displaces, one representation per
-        // conditional GET.
-        let takes_clear = plain_row
-            && takes_of.get(&ps.key).map_or(true, |ts| {
-                ts.iter().all(|t| {
-                    let exits = exit_sites.iter().any(|x| {
-                        x.clean
-                            && x.order > t.order
-                            && t.loops.iter().all(|l| x.loops.contains(l))
-                            && !facts
-                                .store_events
-                                .iter()
-                                .any(|e| e.key == ps.key && e.order > t.order && e.order < x.order)
-                    });
-                    exits || (t.order > ps.order && !t.loops.iter().any(|l| ps.loops.contains(l)))
-                })
-            });
-        let owned = ps.is_global
-            || ps.is_modify_param
-            || (ps.key != 0
-                && (takes_clear
-                    || droppable
-                        .get(&ps.owner)
-                        .is_some_and(|d| d.contains_key(&ps.key))));
-        if std::env::var("VYRN_PLACE_DUMP").is_ok() {
-            eprintln!(
-                "place-store: owner={} key={} global={} modify={} takes_clear={takes_clear} owned={owned}",
-                ps.owner, ps.key, ps.is_global, ps.is_modify_param
-            );
-        }
-        if owned {
-            store_owned.insert(ps.id);
-        }
-    }
     // §26's finish check: every plan row remembers its function, read off
     // the walker's own attribution — the reachability half is then the
     // emitters' emitted-set, and dead code alarms nobody.
@@ -2098,18 +1863,6 @@ fn analyze_now(program: &Program) -> Ownership {
                 );
             }
             owners.insert(t.id, t.owner.clone());
-        }
-    }
-    for ev in &facts.store_events {
-        if let crate::movecheck::EvKind::Write { id, .. } = ev.kind {
-            if id != 0 && store_owned.contains(&id) {
-                owners.insert(id, ev.owner.clone());
-            }
-        }
-    }
-    for ps in &facts.place_stores {
-        if store_owned.contains(&ps.id) {
-            owners.insert(ps.id, ps.owner.clone());
         }
     }
     for (k, n, owner) in &facts.receiver_temps {
@@ -2130,8 +1883,6 @@ fn analyze_now(program: &Program) -> Ownership {
             .filter(|s| s.verdict == crate::movecheck::ArgVerdict::Released)
             .map(|s| s.id)
             .collect(),
-        store_owned,
-        store_fresh,
         malloc_scrutinees,
         discarded_results,
         receiver_frees,
@@ -2151,6 +1902,9 @@ fn analyze_now(program: &Program) -> Ownership {
         notes,
         proto,
         releases,
+        lending: facts.lending.clone(),
+        retains: facts.retains.clone(),
+        escapers: facts.escapers.clone(),
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
     // this analysis owes and did not place. It runs the lowering, which runs
@@ -2336,128 +2090,6 @@ fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<us
         out.insert(*key);
     }
     out
-}
-
-/// The assigns whose OLD value is provably this frame's to release when the
-/// store runs (RFC-0114 M2, the straight-line half).
-///
-/// The rule, folded from the walker's event stream: a store releases what it
-/// replaces iff the previous write into the binding was OWNING, no take of the
-/// binding sits between the two in walk order, and no take shares a loop with
-/// the store — a back edge makes walk order meaningless between two events in
-/// one loop, so a shared loop is refused. Refusal is the leak direction, which
-/// is exactly today's behaviour; every difference this fold makes is a NEW
-/// release of a value the old per-binding gate abandoned. The adversarial
-/// cases — take-then-`break`, a take later in the loop body, a conditional
-/// take before the join — are worked in the proof appendix §45.
-///
-/// The veto: a binding whose FINAL row says somebody else holds the value —
-/// borrowed, lent, captured, aliased, or holed — releases at no store, however
-/// clean the order looks, because the lender/retainer verdicts arrive after
-/// the walk and a projection may be alive at any store. `Moved`, `Dropped` and
-/// `Returned` do NOT veto: they are ordinary takes, already placed in the
-/// order, and vetoing them is the per-binding mistake this fold exists to
-/// retire. Module-state stores are owned unconditionally — nothing may
-/// `consume` a global.
-fn fold_store_owned(facts: &crate::movecheck::Facts) -> std::collections::HashSet<usize> {
-    use crate::movecheck::{EvKind, Gone};
-    let vetoed: std::collections::HashSet<usize> = facts
-        .lets
-        .iter()
-        .filter(|(_, r)| {
-            !matches!(
-                r.gone,
-                None | Some(Gone::Moved { .. })
-                    | Some(Gone::Dropped { .. })
-                    | Some(Gone::Returned { .. })
-            )
-        })
-        .map(|(k, _)| *k)
-        .collect();
-
-    let mut per: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
-    for ev in &facts.store_events {
-        per.entry(ev.key).or_default().push(ev);
-    }
-
-    let mut owned: std::collections::HashSet<usize> = facts.global_stores.clone();
-    for (key, evs) in &per {
-        if vetoed.contains(key) {
-            continue;
-        }
-        // Round fifty-six: the loops the binding's own `let` sits inside. A
-        // back edge through such a loop re-initializes the binding, so a take
-        // and a store sharing it are events of ONE incarnation, where walk
-        // order is execution order — `let mut name = first.copy()` inside the
-        // loop, conditionally reassigned, then pushed, leaked the copy at
-        // every reassignment (std/graphql's alias path). A loop the `let`
-        // does NOT sit inside still refuses: the value crosses its back edge.
-        let init_loops: Option<&Vec<u32>> = evs.iter().find_map(|e| match e.kind {
-            EvKind::Write { id: 0, .. } => Some(&e.loops),
-            _ => None,
-        });
-        for (i, ev) in evs.iter().enumerate() {
-            let EvKind::Write { id, .. } = ev.kind else {
-                continue;
-            };
-            if id == 0 {
-                continue; // a `let` initializer is a store into nothing
-            }
-            let Some(prev) = evs[..i]
-                .iter()
-                .rev()
-                .find(|e| matches!(e.kind, EvKind::Write { .. }))
-            else {
-                continue;
-            };
-            let EvKind::Write {
-                owning: prev_owning,
-                ..
-            } = prev.kind
-            else {
-                unreachable!("filtered to writes");
-            };
-            if !prev_owning {
-                continue;
-            }
-            let blocked = evs.iter().any(|t| {
-                if !matches!(t.kind, EvKind::Take) {
-                    return false;
-                }
-                // Round thirty-one: a take that flows STRAIGHT to a function
-                // exit inside its own loop context — `return f` in the middle
-                // of the loop that also reassigns `f` — cannot collide with
-                // any later store: if the take ran, the function left.
-                // "Straight to" = a clean `return`/`?` between this take and
-                // the row's next event, at loop depth covering the take's
-                // (`parseRepeat`'s frag stores were refused by exactly this
-                // take, one leaked holes-buffer per repetition operator).
-                let next_ev = evs
-                    .iter()
-                    .filter(|x| x.order > t.order)
-                    .map(|x| x.order)
-                    .min()
-                    .unwrap_or(u32::MAX);
-                let exits = facts.exit_sites.iter().any(|x| {
-                    x.clean
-                        && x.order > t.order
-                        && x.order < next_ev
-                        && t.loops.iter().all(|l| x.loops.contains(l))
-                });
-                if exits {
-                    return false;
-                }
-                (t.order > prev.order && t.order < ev.order)
-                    || t.loops.iter().any(|l| {
-                        ev.loops.contains(l) && !init_loops.is_some_and(|il| il.contains(l))
-                    })
-            });
-            if !blocked {
-                owned.insert(id);
-            }
-        }
-    }
-    owned
 }
 
 /// The placement as a consumer reads it: `(exit, the node the exit is AT)` maps
@@ -3418,101 +3050,6 @@ pub(crate) mod tests {
         assert_eq!(drop_count(src, "main"), 1);
     }
 
-    /// §26 steps 3–4: a field store into a binding this function releases
-    /// gets a `store_owned` row (the displaced value is the store's to
-    /// free); the same store into module state gets one by rule 4; and a
-    /// store whose value mentions the target gets none — the alias guard
-    /// folded with the ownedness.
-    #[test]
-    fn a_place_store_owns_by_the_plan() {
-        let src = "type B = { s: String }\n\
-                   let mut g = B { s: \"m\" }\n\
-                   fn main() -> Int64 {\n\
-                       let mut b = B { s: \"x\" + \"y\" }\n\
-                       b.s = \"p\" + \"q\"\n\
-                       g.s = \"r\" + \"t\"\n\
-                       b.s = b.s + \"!\"\n\
-                       return b.s.byteLength\n\
-                   }";
-        let (o, p) = analyze_src(src);
-        let stores: Vec<usize> = p.functions[0]
-            .body
-            .stmts
-            .iter()
-            .filter(|s| matches!(s, crate::ast::Stmt::SetField { .. }))
-            .map(|s| s as *const crate::ast::Stmt as usize)
-            .collect();
-        assert_eq!(stores.len(), 3);
-        assert!(o.plan.store_owned_at(stores[0]), "droppable local owns");
-        assert!(
-            o.plan.store_owned_at(stores[1]),
-            "module state owns by rule"
-        );
-        // Round forty-six: the field read types now (`Declared::type_of`
-        // gained its Field arm), so the mention screen can see that
-        // `b.s + \"!\"` only COPIES out of the target — the store owns what
-        // it displaces, exactly as round fifteen's append semantics say. The
-        // emission's own value-side guard still decides what is emitted.
-        assert!(
-            o.plan.store_owned_at(stores[2]),
-            "a copying mention of the target no longer stands the store down"
-        );
-    }
-
-    /// Exit-residue round fifty-six, the loop-local pairing: a take sharing a
-    /// loop with a store refuses the release ONLY when the binding's own `let`
-    /// sits outside that loop. Declared inside, the back edge re-initializes
-    /// the binding, so the conditional reassignment frees the copy it
-    /// displaces (`std/graphql`'s alias path leaked one per alias).
-    #[test]
-    fn a_loop_local_store_owns_past_a_same_loop_take() {
-        let src = "type P = { k: String, n: String }\n\
-                   fn tok(i: Int64) -> String { return \"t\" + \"x\" }\n\
-                   fn main() -> Int64 {\n\
-                       let mut out: Array<P> = []\n\
-                       let mut i = 0\n\
-                       while i < 4 {\n\
-                           let first = tok(i)\n\
-                           let mut name = first.copy()\n\
-                           if i > 1 {\n\
-                               name = tok(i)\n\
-                           }\n\
-                           out.push(P { k: first, n: name })\n\
-                           i = i + 1\n\
-                       }\n\
-                       return out.length\n\
-                   }";
-        let (o, p) = analyze_src(src);
-        fn collect(b: &crate::ast::Block, out: &mut Vec<usize>) {
-            for s in &b.stmts {
-                match s {
-                    crate::ast::Stmt::Assign { name, .. } if name == "name" => {
-                        out.push(s as *const crate::ast::Stmt as usize);
-                    }
-                    crate::ast::Stmt::While { body, .. } => collect(body, out),
-                    crate::ast::Stmt::If {
-                        then_block,
-                        else_block,
-                        ..
-                    } => {
-                        collect(then_block, out);
-                        if let Some(eb) = else_block {
-                            collect(eb, out);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        let mut assigns: Vec<usize> = Vec::new();
-        collect(&p.functions[1].body, &mut assigns);
-        assert_eq!(assigns.len(), 1);
-        assert!(
-            o.plan.store_owned_at(assigns[0]),
-            "the loop-local reassignment owns the copy it displaces"
-        );
-    }
-
     /// Round fifty-six: a scalar projection wrapped in a returned constructor
     /// lends nothing (`Ok(s.byteLength)` copies a number), so the function is
     /// neither a lender nor a retainer of its argument — and the caller's
@@ -3539,91 +3076,6 @@ pub(crate) mod tests {
             matches!(fs[0], Fate::Reclaimed(..)),
             "`arg` is reclaimed, not {:?}",
             fs[0]
-        );
-    }
-
-    /// Round fifty-six, the escape screen re-anchored: a function whose
-    /// interior hands a parameter to a lender is NOT an escaper when its
-    /// returns are all fresh — `replace(s, ..)` reads `s` through `slice`
-    /// but returns only copies and concats, so `out = replace(out, ..)`
-    /// releases what it displaces. A function that RETURNS the forwarded
-    /// buffer (directly or laundered through a local) still is one.
-    #[test]
-    fn the_escape_screen_reads_returns_not_interiors() {
-        let src = "fn tail(s: String) -> String {\n\
-                       let piece = slice(s, 0, 1) ?? panic(\"cut\")\n\
-                       return \"\" + piece\n\
-                   }\n\
-                   fn launder(a: Array<Int64>, v: Int64) -> Array<Int64> {\n\
-                       let r = a.push(v)\n\
-                       return r\n\
-                   }\n\
-                   fn go() -> String {\n\
-                       let mut out = \"x\" + \"y\"\n\
-                       let mut i = 0\n\
-                       while i < 3 {\n\
-                           out = tail(out)\n\
-                           i = i + 1\n\
-                       }\n\
-                       return out\n\
-                   }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (o, p) = analyze_src(src);
-        // `tail` copies its way out, so `go`'s loop store owns the old value.
-        let assigns: Vec<usize> = {
-            let mut v = Vec::new();
-            fn collect(b: &crate::ast::Block, out: &mut Vec<usize>) {
-                for s in &b.stmts {
-                    match s {
-                        crate::ast::Stmt::Assign { name, .. } if name == "out" => {
-                            out.push(s as *const crate::ast::Stmt as usize);
-                        }
-                        crate::ast::Stmt::While { body, .. } => collect(body, out),
-                        _ => {}
-                    }
-                }
-            }
-            collect(&p.functions[2].body, &mut v);
-            v
-        };
-        assert_eq!(assigns.len(), 1);
-        assert!(
-            o.plan.store_owned_at(assigns[0]),
-            "a lender read consumed by a copy does not stand the store down"
-        );
-        assert!(
-            o.plan.store_fresh_at(assigns[0]),
-            "the mention screen clears `out = tail(out)`"
-        );
-    }
-
-    /// The UAF direction of the same screen: a store through a callee that
-    /// launders a forwarded buffer through a local must NOT be marked fresh.
-    #[test]
-    fn a_laundered_forward_still_blocks_the_mention_store() {
-        let src = "fn launder(s: String) -> String {\n\
-                       let r = blackBox(s)\n\
-                       return r\n\
-                   }\n\
-                   fn go() -> Int64 {\n\
-                       let mut acc = \"x\" + \"y\"\n\
-                       acc = launder(acc)\n\
-                       return acc.byteLength\n\
-                   }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (o, p) = analyze_src(src);
-        let mut assigns = Vec::new();
-        for s in &p.functions[1].body.stmts {
-            if let crate::ast::Stmt::Assign { name, .. } = s {
-                if name == "acc" {
-                    assigns.push(s as *const crate::ast::Stmt as usize);
-                }
-            }
-        }
-        assert_eq!(assigns.len(), 1);
-        assert!(
-            !o.plan.store_fresh_at(assigns[0]),
-            "`launder` hands its argument's buffer back through a local"
         );
     }
 
@@ -3715,54 +3167,6 @@ pub(crate) mod tests {
             matches!(fs[0], Fate::Reclaimed(..)),
             "a lambda-captured binding reclaims, not {:?}",
             fs[0]
-        );
-    }
-
-    /// Round fifty-seven: the place-store fold reads the DRAINED
-    /// `exit_sites` local (round fifty-two's lesson, at its second reader),
-    /// so a field store AFTER an early `return` of the binding still frees
-    /// what it displaces — httpApply's 304 branch leaked one representation
-    /// per conditional GET on exactly this shape.
-    #[test]
-    fn a_field_store_past_an_early_return_still_owns() {
-        let src = "type R = { body: String }\n\
-                   fn mk() -> R { return R { body: \"x\" + \"y\" } }\n\
-                   fn go(c: Bool) -> R {\n\
-                       let mut answered = mk()\n\
-                       if c {\n\
-                           return answered\n\
-                       }\n\
-                       answered.body = \"\"\n\
-                       return answered\n\
-                   }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (o, p) = analyze_src(src);
-        let mut sets = Vec::new();
-        fn collect(b: &crate::ast::Block, out: &mut Vec<usize>) {
-            for s in &b.stmts {
-                match s {
-                    crate::ast::Stmt::SetField { .. } => {
-                        out.push(s as *const crate::ast::Stmt as usize);
-                    }
-                    crate::ast::Stmt::If {
-                        then_block,
-                        else_block,
-                        ..
-                    } => {
-                        collect(then_block, out);
-                        if let Some(eb) = else_block {
-                            collect(eb, out);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        collect(&p.functions[1].body, &mut sets);
-        assert_eq!(sets.len(), 1);
-        assert!(
-            o.plan.store_owned_at(sets[0]),
-            "the early exiting take does not block the later field store"
         );
     }
 
@@ -4344,72 +3748,6 @@ pub(crate) mod tests {
         ];
         want.sort();
         assert_eq!(got, want, "out's deep release, and the drained buffer");
-    }
-
-    /// Round eighteen: `dec = halve2(dec)` in a loop — the value mentions the
-    /// place, but only as a read argument to a declared non-lender, so the
-    /// store releases what it replaces. The bare mention (`x = x + ..` aside),
-    /// a builtin (`a = @push(a, i)` hands its own buffer back), and a lender
-    /// callee all stay out of the set.
-    #[test]
-    fn a_read_call_mention_lets_the_store_release_what_it_replaces() {
-        let src = "type D = { d: Array<Int64> } \
-                   fn halve2(x: D) -> D { let mut o: Array<Int64> = [] \
-                   let mut i = 0 \
-                   while i < x.d.length { o.push(x.d[i] / 2) i = i + 1 } \
-                   return D { d: o } } \
-                   fn main() -> Int64 { let mut dec = D { d: [8, 4] } \
-                   let mut k = 0 \
-                   while k < 3 { dec = halve2(dec) k = k + 1 } \
-                   return dec.d.length }";
-        let (o, _) = analyze_src(src);
-        assert_eq!(
-            o.plan.store_fresh.len(),
-            1,
-            "exactly the `dec = halve2(dec)` store"
-        );
-        // The lender screen: `h` forwards a lent element through an aggregate,
-        // so a store through it may NOT release — the result names storage
-        // inside the argument.
-        let src = "fn pick(xs: Array<String>) -> String \
-                   { for x in xs { return if true { x } else { \"\" } } return \"\" } \
-                   fn h(a: Array<String>) -> Array<String> { return [pick(a)] } \
-                   fn main() -> Int64 { let mut arr: Array<String> = [\"a\" + \"b\"] \
-                   arr = h(arr) \
-                   return arr.length }";
-        let (o, _) = analyze_src(src);
-        assert!(
-            o.plan.store_fresh.is_empty(),
-            "a lender's result may alias its argument"
-        );
-    }
-
-    /// Round twenty-two: the mention analysis reads STRUCT LITERALS and
-    /// scalar projections — `f = Frag { start: f.start, holes: [h] }` reads
-    /// one heap-free scalar out of the value it replaces, and `holes:
-    /// joinH(f.holes, ..)` reads a projection through a screened callee.
-    /// Both stores release the old record's buffers (std/regex's frag
-    /// merges leaked one holes-buffer per merge).
-    #[test]
-    fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
-        let src = "type Frag = { start: Int64, holes: Array<Int64> } \
-                   fn joinH(a: Array<Int64>, b: Array<Int64>) -> Array<Int64> { \
-                   let mut o: Array<Int64> = [] \
-                   for x in a { o.push(x) } for x in b { o.push(x) } return o } \
-                   fn main() -> Int64 { \
-                   let mut f = Frag { start: 0, holes: [1, 2] } \
-                   let mut i = 0 \
-                   while i < 3 { \
-                   f = Frag { start: f.start, holes: [i] } \
-                   f = Frag { start: 9, holes: joinH(f.holes, [7]) } \
-                   i = i + 1 } \
-                   return f.holes.length }";
-        let (o, _) = analyze_src(src);
-        assert_eq!(
-            o.plan.store_fresh.len(),
-            2,
-            "both frag stores release what they replace"
-        );
     }
 
     /// Round sixteen's other half: the `elem_only` attribution is exactly what

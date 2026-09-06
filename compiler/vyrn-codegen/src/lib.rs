@@ -1200,18 +1200,16 @@ pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
 /// run` (`list_dir_is_not_generation_only`) — so the one backend without a
 /// lowering refuses it itself, in a user's sentence rather than an emitter's
 /// note about its own gaps (RFC-0096 M3's addendum). The direct wasm backend
-/// lowers it over `fd_readdir` (RFC-0125 §3 M5).
+/// lowers it over `fd_readdir` (RFC-0125 §3 M5), which is what `vyrn run` runs.
 pub const LIST_DIR_NO_LOWERING: &str =
-    "`listDir` runs in the interpreter, at generation time and on the wasm target (RFC-0021, \
-     RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with \
-     `--target wasm`";
+    "`listDir` runs at generation time and on the wasm target (RFC-0021, RFC-0125); it has no \
+     native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with `--target wasm`";
 
 /// `listDirKinds`' copy of the sentence (RFC-0119) — same reasoning, its own
 /// name, so the diagnostic names the call the user wrote.
 pub const LIST_DIR_KINDS_NO_LOWERING: &str =
-    "`listDirKinds` runs in the interpreter, at generation time and on the wasm target \
-     (RFC-0119, RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn \
-     run` or with `--target wasm`";
+    "`listDirKinds` runs at generation time and on the wasm target (RFC-0119, RFC-0125); it has \
+     no native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with `--target wasm`";
 
 /// The atom-stream primitives the synthesized decoders are written against.
 ///
@@ -2950,8 +2948,7 @@ impl<'a> Gen<'a> {
     /// container's `c[h] = v` becomes, the checker walks those, and the core
     /// walks the source statement.
     fn store_row(&self, node: usize) -> bool {
-        self.store_fact(node)
-            .unwrap_or_else(|| self.plan.store_owned_at(node))
+        self.store_fact(node).unwrap_or(false)
     }
 
     /// The core's answer alone, or `None` where it states none — a body the
@@ -5922,8 +5919,6 @@ impl<'a> Gen<'a> {
                 // loop where the append form used 4.2 MB. So did `out = out + s`
                 // in a function whose `out` is later consumed into a record,
                 // because the spine declines a slot with no shadow.
-                let fresh_str = matches!(self.resolve(&tty), Type::Str)
-                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
                 // RFC-0114 M2: whether the place is OWNED here is the analysis's
                 // per-statement answer (`fold_store_owned`) — not the per-binding
                 // `slot_owns`, which abandoned every store of a binding whose
@@ -5941,12 +5936,7 @@ impl<'a> Gen<'a> {
                 // (§26's finish check).
                 let owned_here = self
                     .store_fact(stmt as *const Stmt as usize)
-                    .unwrap_or_else(|| {
-                        self.plan.store_owned_at(stmt as *const Stmt as usize)
-                            && (fresh_str
-                                || !vyrn_frontend::movecheck::mentions_place(value, name)
-                                || self.plan.store_fresh_at(stmt as *const Stmt as usize))
-                    });
+                    .unwrap_or(false);
                 let snap = if owned_here && self.region_depth == 0 {
                     self.snap_old(&slot, &tty)
                 } else {
@@ -6029,7 +6019,18 @@ impl<'a> Gen<'a> {
                     // The projection's own statements decide the release —
                     // acknowledged so §26's finish check knows the site was
                     // considered, not walked past.
-                    let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
+                    self.plan.acknowledge(stmt as *const Stmt as usize);
+                    // RFC-0125 §3 M3, the store slice: the core judged THIS
+                    // statement and this pass walks the expansion, so the
+                    // store inside it is pointed back at the node the answer
+                    // is filed under. The expansion is memoized and leaked,
+                    // so the pair outlives every walk that reads it.
+                    if let Some(st) = vyrn_frontend::project::store_node(blk) {
+                        self.plan.alias_clones(&[(
+                            st as *const Stmt as usize,
+                            stmt as *const Stmt as usize,
+                        )]);
+                    }
                     return self.gen_block(blk);
                 }
                 let bad_l = self.fresh_label("set.oob");
@@ -6136,7 +6137,7 @@ impl<'a> Gen<'a> {
                         // A fixed array's displaced element is not released
                         // here today (a recorded residue, preserved by this
                         // migration) — acknowledged for §26's finish check.
-                        let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
+                        self.plan.acknowledge(stmt as *const Stmt as usize);
                         self.emit(format!("store {ell} {v}, ptr {ep}"));
                         Ok(())
                     }
@@ -6144,7 +6145,7 @@ impl<'a> Gen<'a> {
                     Type::Map(key, val) => {
                         // A map entry's release is `emit_map_set`'s own two
                         // questions — acknowledged for §26's finish check.
-                        let _ = self.plan.store_owned_at(stmt as *const Stmt as usize);
+                        self.plan.acknowledge(stmt as *const Stmt as usize);
                         let key = *key;
                         let val = *val;
                         let (kv, _) = self.gen_expr(index)?;

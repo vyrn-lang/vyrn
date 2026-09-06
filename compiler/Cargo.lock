@@ -863,6 +863,7 @@ version = "0.0.0"
 dependencies = [
  "vyrn-cli",
  "vyrn-codegen",
+ "vyrn-genwasm",
 ]
 
 [[package]]

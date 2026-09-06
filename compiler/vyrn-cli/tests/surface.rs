@@ -33,10 +33,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// The seven files whose columns the census carries, in the RFC's order.
+/// The files whose columns the census carries, in the RFC's order.
+///
+/// There were seven. `interp` went with `interp.rs` (RFC-0125 §3 M5), and every
+/// number in the RFC's cost table moved with it — which is what a census is for:
+/// the sentence "the surface costs this much" is smaller by one engine, and the
+/// table says by how much.
 const COLUMNS: &[(&str, &str)] = &[
     ("checker", "vyrn-frontend/src/checker.rs"),
-    ("interp", "vyrn-frontend/src/interp.rs"),
     ("native", "vyrn-codegen/src/lib.rs"),
     ("wasm", "vyrn-codegen/src/direct.rs"),
     ("types", "vyrn-frontend/src/types.rs"),
@@ -197,7 +201,7 @@ fn table(text: &str, header: &str) -> Vec<Vec<String>> {
 }
 
 const COST_HEADER: &str =
-    "| constructor | checker | interp | native | wasm | types | prelude | editor | all seven |";
+    "| constructor | checker | native | wasm | types | prelude | editor | all six |";
 const VERDICT_HEADER: &str =
     "| constructor | what it is | RFC | verdict | the desugar, or the reason |";
 
@@ -241,7 +245,7 @@ fn the_surface_census_is_what_the_rfc_records() {
     let mut total = 0usize;
     let mut wrong: Vec<String> = Vec::new();
     for row in &rows {
-        assert_eq!(row.len(), 9, "a cost row has {} cells: {row:?}", row.len());
+        assert_eq!(row.len(), 8, "a cost row has {} cells: {row:?}", row.len());
         let name = row[0].trim_matches('`').trim_start_matches("Type::");
         let mut sum = 0usize;
         for (k, (col, _)) in COLUMNS.iter().enumerate() {
@@ -254,7 +258,7 @@ fn the_surface_census_is_what_the_rfc_records() {
             }
             sum += got;
         }
-        let want_sum: usize = row[8].parse().expect("the row total");
+        let want_sum: usize = row[7].parse().expect("the row total");
         if sum != want_sum {
             wrong.push(format!(
                 "Type::{name}: the row sums to {sum}, RFC says {want_sum}"
@@ -267,7 +271,7 @@ fn the_surface_census_is_what_the_rfc_records() {
         "the surface census has moved:\n  {}",
         wrong.join("\n  ")
     );
-    let sentence = format!("{} mentions in seven files", grouped(total));
+    let sentence = format!("{} mentions in six files", grouped(total));
     assert!(
         text.contains(&sentence),
         "the prose should say {sentence:?}"
@@ -327,7 +331,7 @@ fn the_surface_census_as_a_table() {
         .map(|(_, f)| code_only(&compiler_file(f)))
         .collect();
     println!("{COST_HEADER}");
-    println!("|---|---|---|---|---|---|---|---|---|");
+    println!("|---|---|---|---|---|---|---|---|");
     let mut total = 0usize;
     for name in constructors() {
         let counts: Vec<usize> = (0..COLUMNS.len())
@@ -338,5 +342,5 @@ fn the_surface_census_as_a_table() {
         let cells: Vec<String> = counts.iter().map(|c| c.to_string()).collect();
         println!("| `Type::{name}` | {} | {sum} |", cells.join(" | "));
     }
-    println!("\n{total} mentions in seven files");
+    println!("\n{total} mentions in six files");
 }
