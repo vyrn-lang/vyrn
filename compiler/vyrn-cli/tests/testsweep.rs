@@ -218,6 +218,10 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "rows 15, 16 and 18, rule 3 at the return",
     ),
     ("may not be returned from an exported function", "row 17"),
+    (
+        "may not be stored into",
+        "rows 01, 02, 03, 27 and 34, rule 2 at a store",
+    ),
     ("is dropped here but was already consumed by", "row 20"),
     ("may not be dropped — it is", "row 21"),
     ("was moved here into", "row 07, rule 1's move"),
