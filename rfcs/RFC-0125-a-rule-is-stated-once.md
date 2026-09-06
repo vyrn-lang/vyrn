@@ -2259,26 +2259,26 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 |---|---|---|
 | a rule the kernel now gives | 916 | 9 per cent |
 | a rule only the checker gives | 725 | 7 per cent |
-| placement rows for the engines | 2,217 | 23 per cent |
+| placement rows for the engines | 2,139 | 22 per cent |
 | a fix menu | 73 | 1 per cent |
-| shared machinery | 3,699 | 38 per cent |
+| shared machinery | 3,671 | 38 per cent |
 | tests | 2,092 | 22 per cent |
-| **the file** | **9,722** | |
+| **the file** | **9,616** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
 | `pub struct OwningSite` | 129 | shared machinery | the module's own statement of the rules, and the two recorded measurements (RFC-0089 rule 1's sites, RFC-0092's projections) |
 | `pub enum Gone` | 134 | placement rows for the engines | why a binding does not hold its value at its block's end, and the row `own.rs` reads it from |
 | `pub enum ArgVerdict` | 24 | placement rows for the engines | what a callee does with the temporary at a call-argument position |
-| `pub struct ExitEv` | 120 | placement rows for the engines | the event records: exits, reads, consuming matches, stores, Rule N edges, place stores |
-| `pub fn facts(program: &Program) -> Facts` | 119 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
-| `enum Want` | 29 | shared machinery | what a run is for, and one run's outputs |
-| `pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>>` | 151 | placement rows for the engines | the capability of a position, the producer screens, and the verdict for one argument temporary — read at a position instead of at a binding, by this pass and by the core alike |
+| `pub struct ExitEv` | 116 | placement rows for the engines | the event records: exits, reads, consuming matches, stores, Rule N edges, place stores |
+| `pub fn facts(program: &Program) -> Facts` | 104 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
+| `enum Want` | 28 | shared machinery | what a run is for, and one run's outputs |
+| `pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>>` | 163 | placement rows for the engines | the capability of a position, the producer screens, and the verdict for one argument temporary — read at a position instead of at a binding, by this pass and by the core alike |
 | `fn let_id(s: &Stmt) -> usize` | 52 | placement rows for the engines | the key of a `let`, the lending builtins, and the projection names |
 | `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 388 | shared machinery | the entry points a caller uses |
-| `fn run(program: &Program, want: Want) -> Run` | 317 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
+| `fn run(program: &Program, want: Want) -> Run` | 312 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
 | `pub fn check(program: &Program) -> Result<(), String>` | 10 | shared machinery | the historical string shim |
-| `struct MoveCheck<'a>` | 148 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
+| `struct MoveCheck<'a>` | 147 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
 | `enum Borrow` | 48 | a rule the kernel now gives | what a borrow is, in words — `core::BorrowKind::what` is this sentence |
 | `fn fixes(&self, root: &str, path: &str) -> Vec<String>` | 24 | a fix menu | the named ways out of a borrow error |
 | `enum TakeForm` | 19 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
@@ -2305,8 +2305,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize)` | 27 | placement rows for the engines | the retention and hand-over records the call graph is closed over |
 | `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 525 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
 | `fn ctor_valued(&self, e: &Expr) -> bool` | 57 | placement rows for the engines | what an expression builds: a variant, a String, a concatenation |
-| `fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String])` | 84 | placement rows for the engines | an arm that yields a place, and what naming one costs |
-| `fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool` | 98 | placement rows for the engines | the mention guard, and what a call may forward |
+| `fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String])` | 111 | placement rows for the engines | an arm that yields a place, and what naming one costs |
 | `fn carries_param_storage(&self, e: &Expr) -> bool` | 171 | placement rows for the engines | the escape screen: storage flow rather than mention |
 | `fn lends(&self)` | 34 | placement rows for the engines | the lending record, and the lend a wrapper hides |
 | `fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 54 | a rule the kernel now gives | the first borrow a returned expression yields |
@@ -2314,7 +2313,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 77 | placement rows for the engines | the same question through a constructor, to record a lend and never to refuse one |
 | `fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>)` | 40 | shared machinery | RFC-0089 rule 1's instrument |
 | `fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool` | 32 | shared machinery | a block, and whether it diverges |
-| `fn stmt` | 807 | shared machinery | the walk over statements: it calls the refusal helpers and writes the plan's rows in the same arm |
+| `fn stmt` | 786 | shared machinery | the walk over statements: it calls the refusal helpers and writes the plan's rows in the same arm |
 | `fn capture_site(&self, name: &str, line: usize)` | 75 | placement rows for the engines | a lambda's captures, recorded for the enclosing block |
 | `fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), Diagnostic>` | 35 | a rule only the checker gives | a `modify` borrow is exclusive (row 23) |
 | `fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 43 | a rule only the checker gives | a closure that outlives the call may not capture a borrow (row 24) |
@@ -5022,9 +5021,39 @@ not about this table. Until then the plan's fold is the fallback for one site,
 and the corpus pin counts both directions with both counts pinned exactly
 (`coretables`), so a second such site is read at the source.
 
-`store_fresh` is untouched, and the reading above says why it is a different
-job: `param_escapers` is its closure, round eighteen's answer is still
-`movecheck`'s, and nothing in this slice moves it.
+**The fifth table is the core's, and the fold is gone (2026-09-06).**
+
+`store_fresh` follows, and it follows exactly. Round eighteen's rule splits the
+same way every derived table has: a SHAPE read off the statement, and closures
+over the call graph that only a pass which has read every body can give.
+`Builder::store_is_fresh` is the shape — every mention of the stored place is a
+read the value cannot hand back, walked through calls, operators, struct
+literals and array literals — and the three closures are handed on beside the
+plan (`Ownership::lending`, `retains`, `escapers`). `movecheck::call_may_forward`
+is public now, the same reading both passes use.
+
+**It agrees at every store.** 3,036 stores over the corpus mention the place
+they write into. The core clears 35 and stands 3,001 down, and so does the
+analysis: no site disagrees, in either direction. That is the pin round
+eighteen's rule needed, and unlike the argument table it is green.
+
+So `ReleasePlan::store_fresh`, `store_fresh_at`, `Facts::fresh_stores`,
+`Run::mention_stores` and `MoveCheck::read_only_mentions` are all deleted.
+`own.rs` loses 94 lines and `movecheck.rs` 106. Not one wasm byte moves: the
+manifest is 173 of 173, parity is 41 of 41, the ratchet is clean.
+
+**Two of the moved tests could not move.** The store slice's precedent puts a
+rule where its answer is, and `stores.rs` loads a real program. Round
+eighteen's mention test and round twenty-two's struct-literal test move
+straight over. The lender screen's witness and round nineteen's launderer do
+not: `pick` returns an ELEMENT, which the checker allows and the KERNEL
+refuses, and `blackBox` is refused outside a `bench` or a `test` block. Both
+were unit tests of a closure rather than of an emitted program, and both
+closures keep their own witnesses where they are computed.
+
+`own.rs` now states one table: `arg_drops`, and only as the fallback for the
+one node above. Everything else in it is `Fate`, `Leak` and the report behind
+`vyrn why --memory`.
 
 ### M4 — the runtime in Vyrn
 

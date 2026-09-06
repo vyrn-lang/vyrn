@@ -1297,11 +1297,6 @@ fn sections() -> Vec<Section> {
             "an arm that yields a place, and what naming one costs",
         ),
         sec(
-            "    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {",
-            Rows,
-            "the mention guard, and what a call may forward",
-        ),
-        sec(
             "    fn carries_param_storage(&self, e: &Expr) -> bool {",
             Rows,
             "the escape screen: storage flow rather than mention",
@@ -1522,9 +1517,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 725),
-        ("placement rows for the engines", 2217),
+        ("placement rows for the engines", 2139),
         ("a fix menu", 73),
-        ("shared machinery", 3699),
+        ("shared machinery", 3671),
         ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");

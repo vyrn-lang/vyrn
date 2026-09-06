@@ -353,14 +353,10 @@ pub struct Facts {
     /// slice).
     pub lending: HashSet<String>,
     pub retains: HashSet<(String, usize)>,
-    /// Exit-residue round eighteen: `Stmt::Assign` nodes whose value mentions
-    /// the assigned place ONLY as the bare name in plain argument positions of
-    /// user-declared, non-lending, non-retaining functions — so the stored
-    /// value cannot hand the old one back, and the store may release what it
-    /// replaces. The value-side guard the backends carry (`mentions_place`)
-    /// refuses every mention alike, which is right for `a = @push(a, i)` and
-    /// a 360-block leak for `dec = halveBy(dec, m)`.
-    pub fresh_stores: std::collections::HashSet<usize>,
+    /// Round nineteen's third closure: the functions whose result can HOLD a
+    /// borrowed parameter's storage. Screened beside the other two in
+    /// `core::Builder::store_is_fresh`, and handed on to the core with them.
+    pub escapers: HashSet<String>,
 }
 
 /// One ownership-relevant event on one binding (RFC-0114 M2).
@@ -503,24 +499,9 @@ pub fn facts(program: &Program) -> Facts {
             .into_iter()
             .filter(|(_, n)| !r.lending.contains(n))
             .collect(),
-        // The walk recorded the shape; the closures decide the callees. A
-        // lender's result aliases its argument and a retaining position keeps
-        // it — either one disqualifies the store from releasing what it
-        // replaces.
-        fresh_stores: r
-            .mention_stores
-            .into_iter()
-            .filter(|(_, ms)| {
-                ms.iter().all(|(c, i)| {
-                    !r.lending.contains(c)
-                        && !r.retains.contains(&(c.clone(), *i))
-                        && !r.param_escapers.contains(c)
-                })
-            })
-            .map(|(id, _)| id)
-            .collect(),
         lending: r.lending,
         retains: r.retains,
+        escapers: r.param_escapers,
     }
 }
 
@@ -547,7 +528,6 @@ struct Run {
     store_events: Vec<StoreEv>,
     receiver_temps: Vec<(usize, String, String)>,
     exit_orders: Vec<u32>,
-    mention_stores: Vec<(usize, Vec<(String, usize)>)>,
     param_escapers: HashSet<String>,
     exit_sites: Vec<ExitEv>,
     discarded: Vec<(usize, String)>,
@@ -607,6 +587,18 @@ pub fn hands_back(name: &str) -> bool {
         matches!(&f.ret, Type::Param(r)
             if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
     })
+}
+
+/// Can a call to `name` return storage one of its arguments holds? The
+/// copying builtins cannot — `@concat`, `@str`, `@copy` and every seeded row
+/// that neither hands an argument back (identity-typed return), views, nor
+/// lends builds a fresh value. Everything else — an `@`-desugar like `@push`,
+/// a user function — is assumed able to, which is the leak direction.
+///
+/// Public because the core asks it at the store it is lowering (RFC-0125 §3
+/// M3, the fresh-store slice).
+pub fn call_may_forward(name: &str) -> bool {
+    MoveCheck::call_may_forward_body(name)
 }
 
 /// Whether the builtin `name` hands back a pointer into its argument — see
@@ -1213,7 +1205,6 @@ fn run(program: &Program, want: Want) -> Run {
         arg_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        mention_stores: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         carrying_locals: RefCell::new(HashSet::new()),
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
@@ -1448,10 +1439,6 @@ fn run(program: &Program, want: Want) -> Run {
             .map(RefCell::into_inner)
             .unwrap_or_default(),
         exit_orders: mc.exit_orders.map(RefCell::into_inner).unwrap_or_default(),
-        mention_stores: mc
-            .mention_stores
-            .map(RefCell::into_inner)
-            .unwrap_or_default(),
         param_escapers: mc
             .param_escapers
             .map(RefCell::into_inner)
@@ -1575,7 +1562,6 @@ struct MoveCheck<'a> {
     /// assigns to module state, which are owned unconditionally.
     store_events: Option<RefCell<Vec<StoreEv>>>,
     receiver_temps: Option<RefCell<Vec<(usize, String, String)>>>,
-    mention_stores: Option<RefCell<Vec<(usize, Vec<(String, usize)>)>>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
     /// Round fifty-six: per-body provenance for the escape screen — locals
     /// whose value may HOLD a borrowed parameter's storage (`let r =
@@ -4143,79 +4129,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Exit-residue round eighteen. For a store `x = <e>` whose value mentions
-    /// `x`: can the stored value hand the OLD value back? Every mention of
-    /// `root` must be the bare name in a plain (non-`consume`) argument
-    /// position of a USER-declared function — a builtin's hand-back rows are
-    /// seeded, not declared, and `a = @push(a, i)` is exactly the value that
-    /// returns its own argument's buffer. The callee positions are collected
-    /// for `facts()` to screen against the lending and retention closures,
-    /// which are only settled after every body is read. Any other mention
-    /// shape — the bare name itself, a projection, a `consume`, a scrutinee —
-    /// answers false, which is the leak direction.
-    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {
-        if !mentions_place(e, root) {
-            return true;
-        }
-        // A mention whose TYPE owns no heap hands nothing back however it is
-        // read — `f = Frag { start: f.start, .. }` reads one scalar out of the
-        // value it replaces (round twenty-two).
-        if self.type_of(e).is_some_and(|t| !self.decl.owns_heap(&t)) {
-            return true;
-        }
-        match e {
-            Expr::Call { name, args, .. } => args.iter().enumerate().all(|(ix, a)| {
-                // The bare name, or a projection rooted at it — `f.holes` as
-                // an argument reads the same storage `f` does, and the same
-                // screens answer for it (the callee must not lend, retain, or
-                // forward a parameter's storage).
-                let is_root_read = match a {
-                    Expr::Var { name: v, .. } => v == root,
-                    _ => place_path(a).is_some_and(|(r, _)| r == root),
-                };
-                if is_root_read {
-                    // A callee that cannot forward its argument's storage —
-                    // `@concat` copies both operands — needs no screening at
-                    // all: `line = "\\{line}\\{d}"`, the interpolation
-                    // spelling of an accumulator, is round twenty-four's
-                    // witness (one abandoned line per appended digit).
-                    if !self.call_may_forward(name) {
-                        true
-                    } else if self.decl.is_function(name)
-                        && !name.starts_with('@')
-                        && crate::prelude::signature(name).is_none()
-                    {
-                        // Declared in Vyrn, and NOT a builtin: `is_function`
-                        // also answers for the seeded rows, and `a = @push(a,
-                        // i)` — the desugar every `.push` becomes — is
-                        // exactly the callee that hands its own argument's
-                        // buffer back.
-                        out.push((name.clone(), ix));
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    self.read_only_mentions(a, root, out)
-                }
-            }),
-            Expr::Binary { lhs, rhs, .. } => {
-                self.read_only_mentions(lhs, root, out) && self.read_only_mentions(rhs, root, out)
-            }
-            Expr::Unary { expr, .. } => self.read_only_mentions(expr, root, out),
-            // A struct or array literal holds what its parts BUILT; the parts
-            // answer for themselves (round twenty-two: `f = Frag { start: sp,
-            // holes: joinHoles(f.holes, [h]) }`, std/regex's frag merges).
-            Expr::StructLit { fields, .. } => fields
-                .iter()
-                .all(|(_, v)| self.read_only_mentions(v, root, out)),
-            Expr::ArrayLit { elems, .. } => {
-                elems.iter().all(|v| self.read_only_mentions(v, root, out))
-            }
-            _ => false,
-        }
-    }
-
     /// Can a call to `name` return storage one of its arguments holds? The
     /// copying builtins cannot — `@concat`, `@str`, `@copy` and every seeded
     /// row that neither hands an argument back (identity-typed return), views,
@@ -4223,6 +4136,11 @@ impl MoveCheck<'_> {
     /// `@push`, a user function — is assumed able to, which is the leak
     /// direction.
     fn call_may_forward(&self, name: &str) -> bool {
+        call_may_forward(name)
+    }
+
+    /// The body of the free [`call_may_forward`], kept beside its one caller.
+    fn call_may_forward_body(name: &str) -> bool {
         if matches!(name, "@concat" | "@str" | "@copy") {
             return false;
         }
@@ -4233,14 +4151,11 @@ impl MoveCheck<'_> {
         if name.starts_with('@') {
             return true;
         }
-        if let Some(f) = crate::prelude::signature(name) {
-            let hands_back = matches!(&f.ret, Type::Param(r)
-                if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)));
-            return hands_back || views(name) || crate::prelude::lends(name);
+        if crate::prelude::signature(name).is_some() {
+            return hands_back(name) || views(name) || crate::prelude::lends(name);
         }
         true
     }
-
     /// Can evaluating `e` yield a value that HOLDS a borrowed parameter's
     /// storage? Storage flow, not mention (round nineteen): a copying builtin
     /// (`bytes`, `@concat`, `@str`, `@copy`) and an operator both build fresh
@@ -4905,27 +4820,6 @@ impl MoveCheck<'_> {
                         .and_then(|_| Self::read_of(value).map(|p| (p, *line)));
                     self.borrows.borrow_mut().rebind(name, b);
                     self.reads.borrow_mut().rebind(name, read);
-                }
-                // Exit-residue round eighteen: record the store whose value
-                // mentions the place only through read arguments of declared
-                // functions — `dec = halveBy(dec, m)` — so `facts()` can
-                // screen the callees against the lending and retention
-                // closures and clear the store to release what it replaces.
-                if !global {
-                    if let Some(sink) = &self.mention_stores {
-                        if mentions_place(value, name)
-                            && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t))
-                        {
-                            let mut ms = Vec::new();
-                            // An EMPTY callee list is the safest answer of
-                            // all: every mention was provably scalar
-                            // (`f = Frag { start: f.start, .. }`), and the
-                            // facts() screen passes it vacuously.
-                            if self.read_only_mentions(value, name, &mut ms) {
-                                sink.borrow_mut().push((s as *const Stmt as usize, ms));
-                            }
-                        }
-                    }
                 }
                 // Round fifty-six: a store of a carrying value into module
                 // state parks the storage where it outlives the call — the

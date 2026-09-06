@@ -1681,7 +1681,7 @@ impl<'a> Builder<'a> {
                 // that MENTIONS the place may be handing the old buffer back
                 // (`xs = xs.push(v)`) so the release stands down — unless the
                 // plan proved every mention a read argument to a function
-                // that cannot hand it back (`store_fresh_at`, exit-residue
+                // that cannot hand it back (`store_is_fresh`, exit-residue
                 // round eighteen), or the value is a String concatenation,
                 // which builds a fresh buffer whatever it reads (`s = s + x`).
                 // Both compiled backends spell the last exception
@@ -1695,7 +1695,7 @@ impl<'a> Builder<'a> {
                 // is read off the statement, not off the path. Everything
                 // else a store displaces is the kernel's, and the first build
                 // leaves it open (RFC-0125 §3 M3, the store slice).
-                let handed_back = mentions && !fresh_str && !self.own.plan.store_fresh_at(sid);
+                let handed_back = mentions && !fresh_str && !self.store_is_fresh(value, name);
                 let key = self.store_key(sid);
                 let releases = !handed_back && placed_store(key);
                 let Some(n) = n else {
@@ -2656,6 +2656,89 @@ impl<'a> Builder<'a> {
             }
         }
         Ok(v)
+    }
+
+    /// Round eighteen's rule, stated by the core (RFC-0125 §3 M3): a store
+    /// whose value mentions the place it writes into may be handing the old
+    /// buffer back, UNLESS every mention is a read the value cannot hand
+    /// back. The shape is read off the statement; the three closures over the
+    /// call graph are the checker's, handed on beside the plan.
+    fn store_is_fresh(&self, value: &'a Expr, name: &str) -> bool {
+        // The recording gate: a value whose type owns no heap has nothing to
+        // hand back and no row is written for it.
+        if !self.ty_of(value).is_ok_and(|t| self.proto.owns_heap(&t)) {
+            return false;
+        }
+        let mut ms = Vec::new();
+        if !self.read_only_mentions(value, name, &mut ms) {
+            return false;
+        }
+        ms.iter().all(|(c, i)| {
+            !self.own.lending.contains(c)
+                && !self.own.retains.contains(&(c.clone(), *i))
+                && !self.own.escapers.contains(c)
+        })
+    }
+
+    /// Whether every mention of `root` in `e` is a read that cannot hand
+    /// `root`'s own storage back, collecting the `(callee, index)` positions
+    /// the closures then screen.
+    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {
+        use vyrn_frontend::movecheck as mc;
+        if !mc::mentions_place(e, root) {
+            return true;
+        }
+        // A mention whose TYPE owns no heap hands nothing back however it is
+        // read — `f = Frag { start: f.start, .. }` reads one scalar.
+        if self.ty_of(e).is_ok_and(|t| !self.proto.owns_heap(&t)) {
+            return true;
+        }
+        match e {
+            Expr::Call { name, args, .. } => args.iter().enumerate().all(|(ix, a)| {
+                let is_root_read = match a {
+                    Expr::Var { name: v, .. } => v == root,
+                    _ => mc::place_path(a).is_some_and(|(r, _)| r == root),
+                };
+                if !is_root_read {
+                    return self.read_only_mentions(a, root, out);
+                }
+                if !mc::call_may_forward(name) {
+                    true
+                } else if self.declares(name)
+                    && !name.starts_with('@')
+                    && prelude::signature(name).is_none()
+                {
+                    out.push((name.clone(), ix));
+                    true
+                } else {
+                    false
+                }
+            }),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.read_only_mentions(lhs, root, out) && self.read_only_mentions(rhs, root, out)
+            }
+            Expr::Unary { expr, .. } => self.read_only_mentions(expr, root, out),
+            Expr::StructLit { fields, .. } => fields
+                .iter()
+                .all(|(_, v)| self.read_only_mentions(v, root, out)),
+            Expr::ArrayLit { elems, .. } => {
+                elems.iter().all(|v| self.read_only_mentions(v, root, out))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether the program declares a callable of this name — a function, a
+    /// method, or a projection: `Declared::is_function`'s reading.
+    fn declares(&self, name: &str) -> bool {
+        self.program.functions.iter().any(|f| f.name == name)
+            || self
+                .program
+                .impls
+                .iter()
+                .any(|i| i.methods.iter().any(|m| m.name == name))
+            || self.projection(name).is_some()
+            || prelude::signature(name).is_some()
     }
 
     /// Whether the temporary this frame minted for an argument position is
