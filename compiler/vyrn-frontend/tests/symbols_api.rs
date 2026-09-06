@@ -474,13 +474,13 @@ fn main() -> Int64 { return 0; }
         .find(|d| d.stage == "movecheck" && d.message.contains("may not be captured"))
         .expect("a movecheck row-24 diagnostic");
     // Line 2: `    let g: fn() -> Int64 = () -> s.byteLength;` — the captured
-    // `s` is at col 33.
+    // `s` is at col 34.
     assert_eq!(d.line, 2);
     assert_eq!(
-        d.col, 33,
+        d.col, 34,
         "pinned to the captured `s`, not col 0 (whole line)"
     );
-    assert_eq!(d.end_col, 34);
+    assert_eq!(d.end_col, 35);
 }
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is
