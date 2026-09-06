@@ -1567,9 +1567,13 @@ the checker to refuse `consume s` on one branch followed by a read AFTER the
 join. It does:
 
 ```
-`s` was moved here into `consume`
-line 14: ... and `s` is used again here
+`s.byteLength` is used here but was already consumed by `take(..)` on line 12
+  (a `consume` parameter takes ownership; the value can't be used afterward)
 ```
+
+The sentence is the kernel's since RFC-0125 §3 M3 deleted row 07: the checker
+worded a prefix `consume` as a move into a binding and a bare name as a
+consumption, and the two are one program. The verdict is the same verdict.
 
 And it is exactly path-sensitive where the model needs it: the variant reading
 `s` ON the other branch (states disjoint by path, no conflicting join) is

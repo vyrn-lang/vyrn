@@ -149,8 +149,8 @@ the_form_census_as_a_table` and checked against the code by
 | `Expr::Unary` | 4 | 8 | 7 | 2 | 6 | 6 | 3 | 2 | 38 |
 | `Expr::Binary` | 3 | 7 | 14 | 3 | 6 | 8 | 3 | 1 | 45 |
 | `Expr::Call` | 22 | 13 | 41 | 4 | 20 | 12 | 13 | 1 | 126 |
-| `Expr::Match` | 7 | 10 | 17 | 4 | 6 | 6 | 5 | 1 | 56 |
-| `Expr::IfExpr` | 1 | 8 | 15 | 2 | 6 | 6 | 3 | 1 | 42 |
+| `Expr::Match` | 7 | 10 | 16 | 4 | 6 | 6 | 5 | 1 | 55 |
+| `Expr::IfExpr` | 1 | 8 | 14 | 2 | 6 | 6 | 3 | 1 | 41 |
 | `Expr::Try` | 1 | 7 | 6 | 2 | 6 | 6 | 5 | 1 | 34 |
 | `Expr::StructLit` | 2 | 8 | 10 | 2 | 7 | 6 | 4 | 1 | 40 |
 | `Expr::Field` | 6 | 7 | 17 | 3 | 12 | 8 | 3 | 1 | 57 |
