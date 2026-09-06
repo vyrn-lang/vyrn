@@ -575,6 +575,12 @@ enum Want {
 /// One run's outputs.
 struct Run {
     diags: Vec<Diagnostic>,
+    /// The `(file, binding)` of every must-use refusal in `diags` — RFC-0075's
+    /// walk, which is a rule about a TYPE's obligation and not about
+    /// ownership. [`refusals`] reads it: the two judgments meet on one binding
+    /// and a reader is owed one sentence, so the kernel says nothing more
+    /// about a binding the obligation already named.
+    mustuse: HashSet<(Option<String>, String)>,
     sites: Vec<OwningSite>,
     lets: HashMap<usize, LetOwnership>,
     lending: HashSet<String>,
@@ -792,38 +798,40 @@ fn in_source_order(diags: &mut [Diagnostic]) {
 ///    file. The core lowers every body now, so the condition is the one the
 ///    lowering itself has: the program type-checks, which is what the callers
 ///    gate on.
-/// 2. **The kernel speaks about a binding the checker was silent about, and
-///    nowhere else.** Where the checker spoke, its sentence stands — at its
-///    line, with its menu, in the wording the census pins. This is the rule
-///    that keeps the merge from ADDING: measured over the corpus, six programs
-///    gain a second sentence about a binding the checker had already refused,
-///    and every one of them is one mistake said twice — `xs` moved into
-///    `fromArray(..)` and then read, refused by the checker at the move and by
-///    the kernel at the read; a `Task` joined twice, refused as a must-use
-///    obligation discharged twice and as a use after a take. The checker never
-///    printed those pairs (`examples/expected/*.stderr` was recorded before
-///    the first rule left and holds one sentence each), so printing them now
-///    would be new noise and not a restored refusal. So a kernel refusal about
-///    a binding this file already refuses is dropped, and so is one at a line
-///    it already refuses.
+/// 2. **The kernel speaks at a line the checker was silent about.** Where the
+///    checker spoke, its sentence stands — at its line, with its menu, in the
+///    wording the census pins. This is the rule that keeps the merge from
+///    ADDING one mistake said twice: `xs` moved into `fromArray(..)` and then
+///    read is refused by the checker at the move and by the kernel at the
+///    read, and the two are one mistake at one line.
+///
+///    The LINE is the key, and it was the line OR the binding until the
+///    judgment became a list (`vyrn_lower`'s `kernel::Kernel::refusals`). The
+///    binding clause was what a judgment that stopped at its first refusal
+///    needed: a body said one thing, so a second sentence about the same
+///    binding at another line could not be told from the first one said again,
+///    and the merge dropped it. A body that states every refusal it has needs
+///    no such guess — `r26_rebuild_a_borrowed_receiver.vyrn` is two mistakes
+///    about `mt` at two lines, and a reader is owed both.
+///
+///    What the binding clause was really carrying is the must-use walk, and
+///    that is a rule about a TYPE's obligation rather than about ownership: a
+///    `Stream` closed twice is a must-use refusal AND a use after a take, at
+///    two lines, and it is still one mistake. So a binding the obligation
+///    names silences the kernel about that binding for the whole file, and
+///    nothing else does. Measured over the corpus, six programs turn on it.
 /// 3. **The order is the source's**, for the whole list at once — the rule
 ///    [`check_accum`] states, applied after the two passes are one.
-///
-/// The cost of rule 2, stated so the next reader does not have to measure it
-/// again: a binding gets ONE refusal from these two passes together. Where the
-/// checker refuses a binding for one reason and the kernel would refuse it for
-/// another, the reader is told once. That is the conservative direction — the
-/// program is refused either way, and no rule that leaves this file can make
-/// a binding silent.
 ///
 /// `VYRN_NO_MOVECHECK=1` stands the checker aside so the kernel's own sentence
 /// is reachable, which is the licence table's instrument, and it belongs here
 /// now that this is the only place both passes are asked.
 pub fn refusals(program: &Program) -> Vec<Diagnostic> {
-    let mut diags = if std::env::var("VYRN_NO_MOVECHECK").is_ok_and(|v| v == "1") {
-        Vec::new()
+    let (mut diags, mustuse) = if std::env::var("VYRN_NO_MOVECHECK").is_ok_and(|v| v == "1") {
+        (Vec::new(), HashSet::new())
     } else {
-        run(program, Want::Check).diags
+        let r = run(program, Want::Check);
+        (r.diags, r.mustuse)
     };
     // A comptime program is judged by the checker alone: its refusals were
     // always discarded (`vyrn-cli`'s old `RefusalScope` cleared the
@@ -846,17 +854,14 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
     JUDGING.with(|j| j.set(true));
     let _ = crate::own::analyze(program);
     JUDGING.with(|j| j.set(false));
-    let mut said: HashSet<(Option<String>, String)> = HashSet::new();
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
         lines.insert((d.file.clone(), d.line));
-        if let Some(s) = subject(&d.message) {
-            said.insert((d.file.clone(), s.to_string()));
-        }
     }
     diags.extend(crate::own::kernel_refusals().into_iter().filter(|d| {
         !lines.contains(&(d.file.clone(), d.line))
-            && !subject(&d.message).is_some_and(|s| said.contains(&(d.file.clone(), s.to_string())))
+            && !subject(&d.message)
+                .is_some_and(|s| mustuse.contains(&(d.file.clone(), s.to_string())))
     }));
     in_source_order(&mut diags);
     diags
@@ -1305,7 +1310,12 @@ fn run(program: &Program, want: Want) -> Run {
     // may-analysis (consumed on either branch ⇒ consumed after), and "disposed
     // exactly once" is a must-analysis. Folding them would have made one of the
     // two wrong at every branch.
-    out.extend(linear::check(program, &decl));
+    let owed = linear::check(program, &decl);
+    let mustuse: HashSet<(Option<String>, String)> = owed
+        .iter()
+        .filter_map(|d| Some((d.file.clone(), subject(&d.message)?.to_string())))
+        .collect();
+    out.extend(owed);
     // Close the lending set: a function that returns what a lender returned is
     // a lender too. It only grows and the function count bounds it, so the loop
     // stops. Two passes settle the whole corpus; the loop is here because
@@ -1430,6 +1440,7 @@ fn run(program: &Program, want: Want) -> Run {
     }
     Run {
         diags: out,
+        mustuse,
         sites: mc.sites.map(RefCell::into_inner).unwrap_or_default(),
         lets: mc.lets.map(RefCell::into_inner).unwrap_or_default(),
         lending,
@@ -6069,51 +6080,13 @@ impl MoveCheck<'_> {
                     {
                         // The receiver of a write-back statement (`xs = xs.push(v)`,
                         // `s.dense.push(i)`): the call takes the buffer and hands
-                        // it back through the result, into the same place. That
-                        // is this frame's own business when the frame owns the
-                        // place, and the caller's when the place IS a `modify`
-                        // parameter, lent for exactly this. A borrowed LOCAL is
-                        // neither: `let mut mt = h.meta` then `mt.push(x)`
-                        // rebuilds a buffer `h.meta` still owns, and the caller
-                        // and the callee both release it (RFC-0125 §3 M5,
-                        // `rfcs/probes-0125/take-out-of-a-read-parameter.vyrn`).
-                        // Rule 2: a borrow may not be consumed.
-                        let path = store_path(arg).unwrap_or_default();
-                        let root = root_of(&path).to_string();
-                        let borrowed = match self.borrow_of(&root) {
-                            None => None,
-                            Some(Borrow::Modify(p)) if p == root => None,
-                            Some(b) => Some(b),
-                        };
-                        if let Some(b) = borrowed {
-                            if self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t)) {
-                                let surface = crate::parser::method_surface(name);
-                                let read = self.reads.borrow().get(&root).cloned().flatten();
-                                return Err(match read {
-                                    Some((src, at)) => menu(
-                                        at,
-                                        format!(
-                                            "`{root}` is read out of `{src}` here — a place that \
-                                             owns it\nline {line}: ... and `{surface}(..)` takes \
-                                             `{path}`, so `{root}` must be a value of its own"
-                                        ),
-                                        vec![format!(
-                                            "`{src}.copy()` if `{root}` should own what \
-                                             `{surface}(..)` rebuilds"
-                                        )],
-                                    ),
-                                    None => menu(
-                                        *line,
-                                        format!(
-                                            "`{path}` may not be passed to a `consume` parameter \
-                                             via `{surface}(..)` — it is {}",
-                                            b.what(&path)
-                                        ),
-                                        self.fixes_here(&b, &root, &path),
-                                    ),
-                                });
-                            }
-                        }
+                        // it back through the result, into the same place, so
+                        // rule 1 has nothing to record. Whether the receiver is
+                        // a borrow — `let mut mt = h.meta` then `mt.push(x)`
+                        // rebuilds a buffer `h.meta` still owns — is the
+                        // KERNEL's question now (RFC-0125 §3 M3, row 26): it
+                        // asks it of the value, at the `let` where the borrow
+                        // was read, with the same menu.
                     } else if self.sinks(name, i) {
                         // A builtin whose parameter declares `consume`. Rule 1
                         // governs it exactly as it governs `xs = [.., v]`, which

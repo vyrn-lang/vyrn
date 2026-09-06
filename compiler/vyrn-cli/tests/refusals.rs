@@ -34,9 +34,9 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13 and 14, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
-//! two must still agree. The row is what stops the sentence moving after the
-//! deletion, so it stays in the census.
+//! 28, 06, 20, 21, 07, 19, 25, 13, 14 and 26, RFC-0125 §3 M3 — is refused by
+//! the kernel in both runs, and the two must still agree. The row is what stops
+//! the sentence moving after the deletion, so it stays in the census.
 //!
 //! A census row is one program with one error in it, which is what makes it a
 //! census and what it cannot see. Accumulation — a file with two kinds of error
@@ -1858,7 +1858,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 725),
         ("placement rows for the engines", 2250),
         ("a fix menu", 73),
-        ("shared machinery", 3669),
+        ("shared machinery", 3642),
         ("tests", 1781),
     ];
     assert_eq!(got, want, "the structural census has moved");

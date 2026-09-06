@@ -200,6 +200,10 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "inside a loop, so it would be used again",
         "row 25, rule 1 across a back edge",
     ),
+    (
+        "must be a value of its own",
+        "row 26, a rebuilding builtin takes its receiver",
+    ),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {

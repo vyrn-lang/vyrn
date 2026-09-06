@@ -4863,6 +4863,96 @@ commits. The first is `a1_afterjoin.vyrn`, above. The second is
 identical and whose LINE is one lower, because row 25's own record at the head
 of that file is one line longer than the record it replaced.
 
+**The second-sentence slice (2026-09-06): a judgment that stops at its first
+refusal cannot be merged by the line, and row 26 leaves as soon as it can.**
+The residue record left five reasons. Two of them were one reason — row 26 and
+`fix-33`, both programs where a body has two mistakes and the kernel states
+one — and this is the commit that states both. Row 26 leaves `movecheck.rs`
+with 27 lines, `fix-33` becomes identical, and the driver's rule 2 stops
+guessing.
+
+**What the judgment was, and what it is.** `kernel::placement` returned
+`Result<Vec<Missing>, Refusal>`, so a body said one thing and stopped. It now
+returns `Result<Vec<Missing>, Vec<Refusal>>` and a refused body is walked a
+SECOND time, stepping over each refused statement, so it states every refusal
+it has. The second walk is what a body that is already refused pays; a body
+that is not pays nothing, which is every body of every program that compiles.
+
+Two rules make that walk say the program's mistakes rather than the walk's own.
+
+- **A refused statement is UNDONE.** The half-judged state is not a state the
+  program ever has: a rebuilding call that refused never handed its receiver
+  back, and a temporary it minted was never bound, so a walk that carried on
+  refused the receiver as moved and the temporary as used after a release.
+  Measured before the rule: 24 programs of the corpus gained such a sentence
+  and four of them printed one to a reader.
+- **What the statement BOUND still stands.** A `let` the reader wrote is named
+  by every statement after it. Undoing the binding as well refused the next
+  store as a use of a name the body never bound.
+
+A third rule is about the loop and not about the refusal: a body whose loop
+widens is walked twice, and the second walk REPLACES the first's refusals
+rather than adding to them. Without it every mistake inside a widening loop is
+said twice.
+
+**Rule 2 of the driver, exactly.** It dropped a kernel refusal at a line the
+checker already refused OR about a binding it already refused, anywhere in the
+file. The binding clause was the guess a stopping judgment needed, and it is
+what kept row 26: the kernel's line-6 refusal about `mt` was dropped because
+the checker refused `mt` at line 8. The clause is gone. What it was really
+carrying is one class and one class only — the must-use walk, which is a rule
+about a TYPE's obligation and not about ownership, and which meets the
+ownership judgment on one binding at two lines. `Run::mustuse` names those
+bindings now, and the kernel is silent about them for the whole file. The six
+duplications the accumulation slice measured are the six that class has.
+
+**Row 26 leaves.** The checker stated it at the receiver of a write-back
+statement — `let mut mt = h.meta` then `mt.push(x)` rebuilds a buffer `h.meta`
+still owns. The kernel states it at the `let`, in the same sentence, and now
+with the same menu: ``fix: `h.meta.copy()` if `mt` should own what `push(..)`
+rebuilds``. The arm stays as the exemption it also is — rule 1 has nothing to
+record about a call that hands its receiver back — and only the refusal inside
+it is gone.
+
+`refusal_diagnostics` also stops collapsing a body's own repetition.
+`out.push(s) out.push(s)` on one line is two mistakes and the checker prints
+two sentences; the identity is the file, the line, the message AND the count
+within one body's run, so only the second instance of the same generic body
+repeats. That is `fix-33`, and it reads identical now.
+
+**The licence, before and after**, over a frozen corpus of 988 programs
+collected the way the corpus slice collects one — every program under
+`examples/` and `site/`, every program `movecheck.rs`'s own tests write, every
+literal `testsweep` lifts out of `tests/*.rs`, and the census rows with their
+counterexamples. 498 compile under both runs and say nothing.
+
+| answer | before | after |
+|---|---|---|
+| identical | 439 | 440 |
+| menu | 0 | 0 |
+| text | 24 | 23 |
+| accepted | 27 | 27 |
+
+**What moved, and it is one program.** The whole-stderr snapshot over the 988
+moved `r26_rebuild_a_borrowed_receiver.vyrn` and nothing else. Its line-6
+sentence and menu are the kernel's now, word for word. A THIRD sentence
+appears, at line 7: `s` is a `read` parameter and `mt.push(s)` stores it, which
+the checker refuses on its own and always did — the row-26 site returned at the
+receiver, so the walk never reached the argument. The file is refused for three
+reasons and it has three. It still reads `text`, and for the last reason the
+residue record gives it: line 8's wording is the record-literal one, which is
+the fifth entry's.
+
+**The structural census.** 651 / 725 / 2,250 / 73 / 3,642 / 1,781 over 9,122
+lines. Row 26 is −27, and the census counts them under shared machinery
+because the site sits inside the argument walk, which is one section and is
+shared. The rule had no unit test of its own: the census row `r26` is its pin,
+and `testsweep`'s exemption list names the sentence with it.
+
+**Gates.** `cargo test -p vyrn-cli` with no filter, 76 suites and no failure;
+`fixtures --ignored` 139 s; `kernel --ignored` 132 s; `testsweep --ignored`
+130 s; `vyrn-frontend` 1,215.
+
 **The scrutinee slice (2026-09-05): the core counts its own reads, and round
 twenty-seven's table is gone.**
 
