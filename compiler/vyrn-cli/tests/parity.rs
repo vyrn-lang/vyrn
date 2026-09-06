@@ -4622,11 +4622,22 @@ fn main() -> Int64 {
 
 /// RFC-0114 SS25's completeness instrument, pinned from both sides: under
 /// `VYRN_LEAK_CHECK=1` a clean program (heap locals, heap module state — the
-/// teardown's job) exits 0 with an empty audit table, and a program holding
-/// the fold's recorded loop-store conservatism (`s = p.name.copy()` inside a
-/// `for` never releases the displaced copy) exits 135 naming the leak. The
-/// instrument being two-sided is what makes its silence on a program MEAN
-/// something.
+/// teardown's job) exits 0 with an empty audit table, and a program holding a
+/// recorded conservatism exits 135 naming the leak. The instrument being
+/// two-sided is what makes its silence on a program MEAN something.
+///
+/// The leaky side is the whole-value ALIAS (RFC-0125 §3 M3, the named-binding
+/// slice): an arm of a join that yields a name bound outside it hands the
+/// value on for one edge and not the other, so neither name may be released
+/// and the buffer the other edge built is never freed. RFC-0089 has no word
+/// for a shared owner, and the leak is what it takes over a double free.
+///
+/// It used to be the loop-store conservatism (`s = p.name.copy()` inside a
+/// `for` never released the displaced copy). That one is gone: the plan
+/// typed `p.name` through its declared reading, got nothing for a loop
+/// binder's field, and read `.copy()` as a copied HANDLE — so it stood the
+/// binding's release down and every displaced buffer stayed. The core states
+/// the binding's ownership off the value it lowered, and the store releases.
 #[test]
 #[ignore]
 fn leak_check_is_two_sided() {
@@ -4672,19 +4683,10 @@ fn main() -> Int64 {
     );
     let leaky = build_and_run(
         "leakleak",
-        r#"type P = { name: String }
-
-fn main() -> Int64 {
-    let people = [P { name: "a name long enough to allocate" }]
-    let mut s = ""
-    let mut i = 0
-    while i < 3 {
-        for p in people {
-            s = p.name.copy()
-        }
-        i = i + 1
-    }
-    print(s.byteLength)
+        r#"fn main() -> Int64 {
+    let st = "a name long enough to allocate" + "!"
+    let rel = if st.byteLength > 100 { st } else { "x" + "y" }
+    print(rel.byteLength)
     return 0
 }
 "#,
@@ -4692,7 +4694,7 @@ fn main() -> Int64 {
     assert_eq!(
         leaky.status.code(),
         Some(135),
-        "the recorded loop-store conservatism must be VISIBLE to the instrument:
+        "the recorded whole-value alias must be VISIBLE to the instrument:
 {}",
         norm(&leaky.stderr)
     );
