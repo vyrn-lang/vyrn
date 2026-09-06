@@ -9102,6 +9102,87 @@ to say so. The structural census (`tests/refusals.rs`) and the coercion census
 (`tests/lowered.rs`) are unchanged, because neither counts an emitter's own
 typing.
 
+#### The `for` over an unnamed temporary: whose slot it is (2026-09-06)
+
+The red row above is closed, and the cause is not the one it named. The
+downgrade to `Rel::Buffers(vec![0])` is right, and so is `handed_over`: the
+loop variable of `for a in [mk("a"), mk("b")]` takes no element out, so the
+walk must release the elements and it does. Nothing frees an element twice.
+What the second statement released twice was the FIRST statement's SLOT.
+
+**The rule that was wrong.** M1 gave a statement its temporaries back. The body
+walker takes `Frame::mark` before each statement and `Frame::reset`s to it after
+one that left the scope as it found it. `Frame::alloc`'s own words are "a slot
+is a statement's unless the statement bound a name", and the walker tested
+exactly that: the scope's length. A NAME is not the only thing that outlives a
+statement. A `for` over an unnamed iterable, an `if let` over a temporary and a
+`match` over one each copy that value into a slot and register a release row for
+it, and WHERE that row runs is the core's answer. For the shape above the core
+says the function's exit. The statement bound no name, so the walker gave the
+slot back; the next `for` built its own array over it; and the two rows at the
+exit walked one slot. The second array's strings went back twice — the trap at
+address -16, which is `free` reading a header below a null buffer — and the
+first array's leaked. On the one-statement form the two rows are one and the
+program is right, which is why that form only ever printed a wrong answer.
+
+**Why the row sits at the function's exit, which is the finding under the
+finding.** `own` writes no row for this temporary at all. `movecheck` notes it,
+and notes it with the type `declared::type_of` answers, and that reading REFUSES
+an array literal on purpose: `[1, 2, 3]` is an `ArrayN` held inline, `[]`
+annotated `Array<T>` is three words around a buffer, and annotated
+`SmallArray<T, N>` is a header whose buffer is null until it spills. Three
+layouts, one syntax, and answering `Array` for all of them once freed a fixed
+array's stack storage. So the row carries no type, `fate` reads
+`Leak::NoRelease`, and `place_body` places nothing at the loop's own end. The
+kernel then finds the value still held at the function's exit and the placer
+files the row there. A `for` over a CALL — `for a in two("a", "b")` — is typed,
+takes `own`'s row at `Exit::Scrutinee`, and releases at the loop's own
+fall-through, which is why the corpus never showed this. It is this RFC's own
+class, one pass further down: a second copy of the typing rule, weaker than the
+checker's, deciding where a release goes. The core's answer is not WRONG — a
+release at the function's exit is late, not absent — so nothing here waits on
+it, and the row stays open beside `static_ty` and `binop_type` above.
+
+**The rule as stated now.** A registration raises a floor, once, in
+`register_rel`, and the walker resets to `mark.max(floor)`. A row leaves the
+list when it is released on a FALL-THROUGH exit — a block's, or a construct's
+own — because the path that carries on is the path that no longer holds the
+value. A release at a `return`, a `?`, a `break` or a `continue` is on a BRANCH:
+the fall-through still holds the value, so the floor stands. Both simpler
+readings were written and both are wrong. Clearing on every release gives a slot
+back on a path that still names it, which is this defect again with a `return`
+inside the loop. Keeping every row to the end of the body sums a statement's
+temporaries again, which is the thing M1 deleted: 250
+`print(match parseFloat64(..) { .. })` statements in one `main` then wanted
+10,048 bytes of a frame limited to 8,192, and `tests/numbers.rs` refused it.
+
+**The other forms take the same rule and needed no case of their own.** A
+`while` owns no temporary. An `if let` and a `match` own one, register it the
+same way, and read the same floor: they are covered because the floor is stated
+where every construct registers and not at any construct. Neither can reach the
+untyped shape today, because a scrutinee is a sum and an array literal is not
+one. The textual emitter never had the defect and takes no change — it gives
+each temporary a C variable of its own, so no statement can build over another's
+— and its release site is the one the core placed, unchanged.
+
+**What moved.** No recorded wasm byte. The manifest takes one new row,
+`looptemp.vyrn`, and no changed one: the corpus had no program of this shape,
+which is the sentence the red record ended on, read the other way.
+`tests/coretables.rs` moves one count from 552 to 554 — the new example's two
+`print(a[0])` calls are argument temporaries the declared reading cannot name,
+because the loop variable's type is the element type of an array literal, and
+the core states the rows the analysis does not. The surface census (RFC-0126
+§3), the form census (RFC-0127 §3.1), the structural census and the coercion
+census do not move: none of them counts a frame.
+
+**What pins it, and what cannot.** `examples/looptemp.vyrn` holds both shapes
+and prints `a a b b c d e f`. Three gates read it: the recorded fixture, parity
+on both routes, and the manifest. The wasm memory census cannot, and a row was
+written there and then taken out again — the leaked first array and the
+twice-freed second one cancel in `memory.buffer.byteLength`, so the row read
+steady with the defect in place. A measurement that measures nothing is what the
+census's own canary is there to catch, so it is not left in.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
