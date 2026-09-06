@@ -4948,6 +4948,129 @@ where the editor is pinned against what `vyrn check` prints.
 No blessed snapshot moved, and the structural census moves by one row: shared
 machinery 3,738 to 3,750, which is the rule's own statement in `movecheck.rs`.
 
+**The one-check slice (2026-09-06): the analysis checks the program, and the
+lowering reads what that check decided.**
+The rows slice left one item above the target and named it: `checker::record`,
+which is `check_accum_full` over the LINKED program, run inside the lowering the
+placer runs — a SECOND whole-program type check, after the analysis's own
+`check_accum_reusing`. One program, one analysis, two checks.
+
+**The two are halves of one pass.** The checker decides a node's type while it
+checks the node; `record` turns a sink on and asks for the same pass again to
+watch it. So the pass is asked once and both halves are kept.
+`recording_check` is that pass. `check_accum_recording` is the analysis's own
+entry to it — the diagnostics and the inferred-`let` table as before, with the
+record held beside them — and `checker::recorded` serves the record to
+`lower_with`. The key is the program's address and the generator-host flag, held
+for the span `own::Memo` already borrows the program over, which is the memo's
+own proof that an address is a sound key, reused word for word.
+
+**Reuse and recording are alternatives, not companions.** A reused body is one
+the pass does not walk, so it records nothing for it, and a record with holes in
+it is not a record. There is no third option while a keystroke re-parses: the
+record is keyed by node address, and an address does not survive an edit. So the
+caller picks, and it picks on whether the record has a reader —
+`own::placer_installed`. A host with no placer lowers nothing, keeps the memo,
+and is the column this is measured against.
+
+**The command line keeps one ask of its own, for a stated reason.**
+`check_and_synthesize` checks and then EXTENDS the program with the JSON codecs
+and the `where` constructors it synthesizes, so a record from its check would be
+missing exactly the bodies it added. There the placer's `lower_with` pays and
+the engine's is served: `vyrn check` runs two whole-program records where it ran
+three. `vyrn build` runs two and hits none, because the native emitter reads the
+core's facts rather than calling `lower` — it never had a second reader to
+serve.
+
+**What a keystroke costs**, the same test and the same four files, medians of
+five alternating runs, all three columns in one sitting:
+
+| file | before the kernel | with the kernel | with the memo | above the first column |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 106 ms | 919 ms | 207 ms | 101 ms — was 98 |
+| site/app/docs.vyrn | 113 ms | 734 ms | 147 ms | 34 ms — was 58 |
+| site/app/guide.vyrn | 61 ms | 263 ms | 88 ms | 27 ms — was 42 |
+| site/app/bench.vyrn | 24 ms | 121 ms | 58 ms | 34 ms — was 36 |
+
+**Two later sittings were discarded, and the control is why.** The first column
+runs the same server on the same files with the kernel stood aside, so it
+measures the machine and nothing else. It read 106, 113, 61 and 24 ms in the
+sitting above; in the two sittings after it, it read 133, 128, 111 and 36, and
+then 165, 132, 106 and 46. A control that moves by half is a machine under other
+load, and a table read off it says nothing about this change. The phase table
+below is the evidence that does not depend on the machine being quiet, because
+it is a split of one analysis rather than a difference between two.
+
+**The phase table**, one analysis under `VYRN_BUILD_PROFILE=1`, before this
+slice and after it:
+
+| file | `check: the analysis's own` | `lower: checker::record` | `placer: lower_with` | the placer |
+|---|---|---|---|---|
+| chart.vyrn | 14.6 → 28.4 ms | 25.3 → 0.0 ms | 34.3 → 10.4 ms | 61.6 → 38.6 ms |
+| docs.vyrn | 11.5 → 24.2 ms | 23.7 → 0.0 ms | 32.4 → 11.1 ms | 42.1 → 23.7 ms |
+| guide.vyrn | 5.7 → 12.0 ms | 10.3 → 0.0 ms | 13.7 → 6.5 ms | 25.8 → 20.2 ms |
+| bench.vyrn | 2.7 → 4.2 ms | 4.4 → 0.0 ms | 6.2 → 2.1 ms | 27.4 → 22.9 ms |
+
+The second check is gone: `lower: checker::record` is a lookup. The check and
+the placer together fall from 76 to 67 ms on `chart.vyrn`, from 54 to 48 on
+`docs.vyrn` and from 30 to 27 on `bench.vyrn`, and hold at 32 on `guide.vyrn`.
+
+**What the one check costs, which is the next door and the same door.** The
+analysis's check RISES — 14.6 to 28.4 ms on `chart.vyrn` — and the rise is
+exactly the reuse it gave up: a full check walks the imported bodies the memo
+served, and it records them. That difference, 13.8, 12.7, 6.3 and 1.5 ms, is the
+price of a record that has to be complete, and it is the identity question the
+rows slice already wrote down: a record that survives an edit for an unchanged
+module needs node keys that survive an edit. Nothing else buys it back.
+
+**What else is left.** `lower: build` is 9.8, 10.6, 6.2 and 2.0 ms, and it
+builds a row for EVERY instance of the linked program — the ones the placer then
+serves included. The rows slice made the placer skip a served body; the lowering
+that hands it the instance list does not skip it, so those rows are built and
+dropped. That is a nearer door than the identity one, and it needs the serve
+decision to be readable before the walk rather than after it. After that the
+placer is `core::build` and `build_outside` over the ROOT's own bodies, which is
+what the residue slice said it would be.
+
+**The pin.** `the_analysiss_own_check_records_what_the_lowering_reads` holds the
+two halves together: what the analysis's check holds is what a check of its own
+would make, and a record is held for ONE program — a second program borrowed at
+the same time, and the same program with no analysis open, each make their own.
+`VYRN_WASM_MANIFEST=check` is green on `wasmhash`, so no emitted byte moved, and
+`a_rule_that_left_the_checker_is_still_shown_in_the_editor` passes, which is
+where the editor is pinned against what `vyrn check` prints.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` and
+`TEMP` pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 562 passed, 75 ignored |
+| `kernel` `--ignored` | 1, 29 s |
+| `coretables` `--ignored` | 1, 30 s |
+| `typed` `--ignored` | 1, 104 s |
+| `effects` `--ignored` | 2, 101 s |
+| `fixtures` `--ignored` | 1, 27 s |
+| `vyrn-frontend` | 1,250 — the pin is the new row |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,426 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored — where `lsp_e2e` runs |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 16 s |
+| `parity` `--ignored`, release | 41 of 41, 260 s |
+| the residue ratchet | 1, 294 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 40 s, no byte moved |
+| `genwasm` release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 44 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes and 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 blocks and 154 over 25 files |
+
+No blessed snapshot moved and no census row moved: the change is 174 lines
+across `checker.rs`, `own.rs`, `symbols.rs` and `vyrn-lower`'s `lib.rs`, none of
+which the structural census counts.
+
 **The scrutinee slice (2026-09-05): the core counts its own reads, and round
 twenty-seven's table is gone.**
 
