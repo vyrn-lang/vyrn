@@ -1986,6 +1986,29 @@ pub fn kernel_refusals() -> Vec<crate::diagnostics::Diagnostic> {
     REFUSALS.get().map(|f| f()).unwrap_or_default()
 }
 
+/// The must-use judgment — RFC-0125 §3 M3, the obligation slice.
+///
+/// The fourth slot of the same shape, and for the same reason as [`Refusals`]:
+/// the rule is a TYPE's obligation and not an ownership one, so it left
+/// `movecheck.rs` for the typed judgment (`vyrn_lower::typed::obligation`),
+/// which this crate sits below. Unlike the kernel's drain this one is asked of
+/// a PROGRAM: the walk reads the tree a reader wrote and holds no state
+/// between calls.
+pub type MustUse = fn(&Program) -> Vec<crate::diagnostics::Diagnostic>;
+
+static MUST_USE: std::sync::OnceLock<MustUse> = std::sync::OnceLock::new();
+
+/// Install the must-use judgment. The first installation wins.
+pub fn install_must_use(f: MustUse) {
+    let _ = MUST_USE.set(f);
+}
+
+/// What the must-use judgment refuses about `program`. Empty where nothing is
+/// installed — a host that never linked the lowering.
+pub fn must_use_refusals(program: &Program) -> Vec<crate::diagnostics::Diagnostic> {
+    MUST_USE.get().map(|f| f(program)).unwrap_or_default()
+}
+
 /// RFC-0114 untake: the bindings whose value was taken and then provably
 /// re-established, so block exit releases the FINAL value. The rules, all
 /// refusing toward the leak:

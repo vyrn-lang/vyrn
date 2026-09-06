@@ -252,6 +252,21 @@ struct Kernel<'b> {
     body: &'b Body,
     mode: Mode,
     missing: Vec<Missing>,
+    /// Every refusal this body earns, in walk order — RFC-0125 §3 M3, the
+    /// second-sentence slice. The judgment used to stop at the first, so the
+    /// driver could not tell a second mistake from the first one said again:
+    /// it dropped a kernel refusal about any binding the checker had already
+    /// named, anywhere in the file. A body that states all of them lets the
+    /// driver merge by the binding AND the line, which is what a reader
+    /// compares.
+    refusals: Vec<Refusal>,
+    /// Whether a refused statement is stepped over ([`Kernel::refusals`]).
+    ///
+    /// Only a body already known to be refused is walked this way, because
+    /// the step costs a copy of the state per statement and the answer is the
+    /// same for every body that is not. So `run` walks once to find out and
+    /// again to say everything.
+    recover: bool,
     /// The line of the statement being judged, and what it takes with, in
     /// the checker's words — recorded against every name it consumes.
     here: usize,
@@ -304,21 +319,34 @@ struct LoopCtx {
 }
 
 pub fn check(body: &Body) -> Result<(), Refusal> {
-    run(body, Mode::Judge).map(|_| ())
+    run(body, Mode::Judge, false)
+        .map(|_| ())
+        .map_err(|mut rs| rs.remove(0))
 }
 
 /// The releases the plan owes this body and did not place. `Err` when the
 /// body is refused for another reason — a double free, a use after release —
-/// which no placement repairs.
-pub fn placement(body: &Body) -> Result<Vec<Missing>, Refusal> {
-    run(body, Mode::Place)
+/// which no placement repairs. Every such refusal of the body is there, not
+/// only the first: see [`Kernel::refusals`].
+pub fn placement(body: &Body) -> Result<Vec<Missing>, Vec<Refusal>> {
+    match run(body, Mode::Place, false) {
+        Ok(m) => Ok(m),
+        // Refused: walk it again, stepping over each refused statement, so
+        // the body states every mistake it has and not only the first.
+        Err(one) => Err(match run(body, Mode::Place, true) {
+            Ok(_) => one,
+            Err(all) => all,
+        }),
+    }
 }
 
-fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
+fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refusal>> {
     let mut k = Kernel {
         body,
         mode,
         missing: Vec::new(),
+        refusals: Vec::new(),
+        recover,
         loops: Vec::new(),
         here: 0,
         by: String::new(),
@@ -343,16 +371,21 @@ fn run(body: &Body, mode: Mode) -> Result<Vec<Missing>, Refusal> {
             st.own[*p as usize] = Own::Held;
         }
     }
-    k.stmts(&body.stmts, &mut st)?;
+    let walked = k.stmts(&body.stmts, &mut st);
+    k.also(walked);
     if !st.ended {
         // The parameters: the plan releases them at the body's own block.
         let site = match body.stmts.first() {
             Some(St::Block { site, .. }) => *site,
             _ => 0,
         };
-        k.scope_end(&mut st, &all_names(body), Exit::Block, site)?;
+        let ended = k.scope_end(&mut st, &all_names(body), Exit::Block, site);
+        k.also(ended);
     }
-    Ok(k.missing)
+    match k.refusals.is_empty() {
+        true => Ok(k.missing),
+        false => Err(k.refusals),
+    }
 }
 
 fn all_names(body: &Body) -> Vec<Name> {
@@ -726,9 +759,14 @@ impl<'b> Kernel<'b> {
             return self
                 .refuse_at::<()>(
                     at,
-                    format!(
-                        "`{s}` is read out of `{src}` here — a place that owns it\nline {here}: \
-                         ... and {by} takes `{s}`, so `{s}` must be a value of its own"
+                    menu(
+                        format!(
+                            "`{s}` is read out of `{src}` here — a place that owns it\nline \
+                             {here}: ... and {by} takes `{s}`, so `{s}` must be a value of its own"
+                        ),
+                        vec![format!(
+                            "`{src}.copy()` if `{s}` should own what {by} rebuilds"
+                        )],
                     ),
                 )
                 .unwrap_err();
@@ -1435,6 +1473,13 @@ impl<'b> Kernel<'b> {
         self.stmts_at(stmts, st, 0)
     }
 
+    /// Record a refusal and carry on ([`Kernel::refusals`]).
+    fn also(&mut self, r: Result<(), Refusal>) {
+        if let Err(r) = r {
+            self.refusals.push(r);
+        }
+    }
+
     fn stmts_at(&mut self, stmts: &[St], st: &mut State, site: usize) -> Result<(), Refusal> {
         let mut bound_here: Vec<Name> = Vec::new();
         for s in stmts {
@@ -1443,7 +1488,37 @@ impl<'b> Kernel<'b> {
                 // already refused what it can; nothing here runs.
                 break;
             }
-            self.stmt(s, st, &mut bound_here)?;
+            if !self.recover {
+                self.stmt(s, st, &mut bound_here)?;
+                continue;
+            }
+            // A refused statement is UNDONE, and the next one is judged in
+            // the state before it. The half-judged state is not a state the
+            // program ever has: a rebuilding call that refused never handed
+            // its receiver back, and a temporary it minted was never bound,
+            // so the walk that carried on would refuse the receiver as moved
+            // and the temporary as used after a release — sentences about
+            // machinery, not about the program (RFC-0125 §3 M3).
+            let before = st.clone();
+            let bound = bound_here.len();
+            let missing = self.missing.len();
+            let one = self.stmt(s, st, &mut bound_here);
+            if one.is_err() {
+                *st = before;
+                bound_here.truncate(bound);
+                self.missing.truncate(missing);
+                // What the statement BOUND still stands, because the reader
+                // wrote a `let` and every statement after it names what the
+                // `let` names. Undoing that too would refuse the next store
+                // as a use of a name this body never bound.
+                if let St::Let(n, _) = s {
+                    if self.owned(*n) {
+                        st.own[*n as usize] = Own::Held;
+                        bound_here.push(*n);
+                    }
+                }
+            }
+            self.also(one);
         }
         if !st.ended {
             self.scope_end(st, &bound_here, Exit::Block, site)?;
@@ -1817,6 +1892,7 @@ impl<'b> Kernel<'b> {
                     bound_inside: Vec::new(),
                 });
                 let mut a = st.clone();
+                let mark = self.refusals.len();
                 self.stmts(body, &mut a)?;
                 let mut ctx = self.loops.pop().unwrap();
                 // A literal the body replaced: the second turn starts with
@@ -1839,6 +1915,12 @@ impl<'b> Kernel<'b> {
                         bound_inside: Vec::new(),
                     });
                     a = ctx.entry.clone();
+                    // The body is judged AGAIN, not a second time: the state
+                    // it really has on the second turn is the widened one, so
+                    // the first walk's refusals are what this walk replaces.
+                    // Keeping both would say every mistake inside a widening
+                    // loop twice (RFC-0125 §3 M3).
+                    self.refusals.truncate(mark);
                     self.stmts(body, &mut a)?;
                     ctx = self.loops.pop().unwrap();
                 }

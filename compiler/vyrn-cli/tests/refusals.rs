@@ -34,9 +34,9 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13 and 14, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
-//! two must still agree. The row is what stops the sentence moving after the
-//! deletion, so it stays in the census.
+//! 28, 06, 20, 21, 07, 19, 25, 13, 14 and 26, RFC-0125 §3 M3 — is refused by
+//! the kernel in both runs, and the two must still agree. The row is what stops
+//! the sentence moving after the deletion, so it stays in the census.
 //!
 //! A census row is one program with one error in it, which is what makes it a
 //! census and what it cannot see. Accumulation — a file with two kinds of error
@@ -319,14 +319,14 @@ fn census() -> Vec<Row> {
             "a must-use obligation is discharged on every path",
             "RFC-0075",
             "`s` is a `Stream` and is never disposed",
-            Kernel::No,
+            Kernel::Elsewhere,
         ),
         row(
             "r31_stream_disposed_twice.vyrn",
             "a must-use obligation is discharged exactly once",
             "RFC-0075",
             "`s` is a `Stream` and is disposed more than once",
-            Kernel::Other("was already consumed by `close(..)` on line 5"),
+            Kernel::Elsewhere,
         ),
         row(
             "r32_region_store_escapes.vyrn",
@@ -1694,10 +1694,10 @@ fn sections() -> Vec<Section> {
             "whether a stored value mentions the place it is stored into",
         ),
         sec(
-            "mod linear {",
-            Checker,
-            "the must-use obligation: acquired once, disposed exactly once (rows \
-             30, 31)",
+            "pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {",
+            Shared,
+            "what an expression names, and on which of its paths — the tree \
+             questions the must-use judgment asks from the lowering",
         ),
         sec(
             "fn store_path(e: &Expr) -> Option<String> {",
@@ -1840,11 +1840,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("a rule the kernel now gives", 651),
-        ("a rule only the checker gives", 725),
-        ("placement rows for the engines", 1539),
+        ("a rule only the checker gives", 78),
+        ("placement rows for the engines", 2139),
         ("a fix menu", 73),
-        ("shared machinery", 3507),
-        ("tests", 1594),
+        ("shared machinery", 3735),
+        ("tests", 1451),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

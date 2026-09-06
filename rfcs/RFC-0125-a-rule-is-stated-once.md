@@ -5240,6 +5240,96 @@ commits. The first is `a1_afterjoin.vyrn`, above. The second is
 identical and whose LINE is one lower, because row 25's own record at the head
 of that file is one line longer than the record it replaced.
 
+**The second-sentence slice (2026-09-06): a judgment that stops at its first
+refusal cannot be merged by the line, and row 26 leaves as soon as it can.**
+The residue record left five reasons. Two of them were one reason — row 26 and
+`fix-33`, both programs where a body has two mistakes and the kernel states
+one — and this is the commit that states both. Row 26 leaves `movecheck.rs`
+with 27 lines, `fix-33` becomes identical, and the driver's rule 2 stops
+guessing.
+
+**What the judgment was, and what it is.** `kernel::placement` returned
+`Result<Vec<Missing>, Refusal>`, so a body said one thing and stopped. It now
+returns `Result<Vec<Missing>, Vec<Refusal>>` and a refused body is walked a
+SECOND time, stepping over each refused statement, so it states every refusal
+it has. The second walk is what a body that is already refused pays; a body
+that is not pays nothing, which is every body of every program that compiles.
+
+Two rules make that walk say the program's mistakes rather than the walk's own.
+
+- **A refused statement is UNDONE.** The half-judged state is not a state the
+  program ever has: a rebuilding call that refused never handed its receiver
+  back, and a temporary it minted was never bound, so a walk that carried on
+  refused the receiver as moved and the temporary as used after a release.
+  Measured before the rule: 24 programs of the corpus gained such a sentence
+  and four of them printed one to a reader.
+- **What the statement BOUND still stands.** A `let` the reader wrote is named
+  by every statement after it. Undoing the binding as well refused the next
+  store as a use of a name the body never bound.
+
+A third rule is about the loop and not about the refusal: a body whose loop
+widens is walked twice, and the second walk REPLACES the first's refusals
+rather than adding to them. Without it every mistake inside a widening loop is
+said twice.
+
+**Rule 2 of the driver, exactly.** It dropped a kernel refusal at a line the
+checker already refused OR about a binding it already refused, anywhere in the
+file. The binding clause was the guess a stopping judgment needed, and it is
+what kept row 26: the kernel's line-6 refusal about `mt` was dropped because
+the checker refused `mt` at line 8. The clause is gone. What it was really
+carrying is one class and one class only — the must-use walk, which is a rule
+about a TYPE's obligation and not about ownership, and which meets the
+ownership judgment on one binding at two lines. `Run::mustuse` names those
+bindings now, and the kernel is silent about them for the whole file. The six
+duplications the accumulation slice measured are the six that class has.
+
+**Row 26 leaves.** The checker stated it at the receiver of a write-back
+statement — `let mut mt = h.meta` then `mt.push(x)` rebuilds a buffer `h.meta`
+still owns. The kernel states it at the `let`, in the same sentence, and now
+with the same menu: ``fix: `h.meta.copy()` if `mt` should own what `push(..)`
+rebuilds``. The arm stays as the exemption it also is — rule 1 has nothing to
+record about a call that hands its receiver back — and only the refusal inside
+it is gone.
+
+`refusal_diagnostics` also stops collapsing a body's own repetition.
+`out.push(s) out.push(s)` on one line is two mistakes and the checker prints
+two sentences; the identity is the file, the line, the message AND the count
+within one body's run, so only the second instance of the same generic body
+repeats. That is `fix-33`, and it reads identical now.
+
+**The licence, before and after**, over a frozen corpus of 988 programs
+collected the way the corpus slice collects one — every program under
+`examples/` and `site/`, every program `movecheck.rs`'s own tests write, every
+literal `testsweep` lifts out of `tests/*.rs`, and the census rows with their
+counterexamples. 498 compile under both runs and say nothing.
+
+| answer | before | after |
+|---|---|---|
+| identical | 439 | 440 |
+| menu | 0 | 0 |
+| text | 24 | 23 |
+| accepted | 27 | 27 |
+
+**What moved, and it is one program.** The whole-stderr snapshot over the 988
+moved `r26_rebuild_a_borrowed_receiver.vyrn` and nothing else. Its line-6
+sentence and menu are the kernel's now, word for word. A THIRD sentence
+appears, at line 7: `s` is a `read` parameter and `mt.push(s)` stores it, which
+the checker refuses on its own and always did — the row-26 site returned at the
+receiver, so the walk never reached the argument. The file is refused for three
+reasons and it has three. It still reads `text`, and for the last reason the
+residue record gives it: line 8's wording is the record-literal one, which is
+the fifth entry's.
+
+**The structural census.** 651 / 725 / 2,250 / 73 / 3,642 / 1,781 over 9,122
+lines. Row 26 is −27, and the census counts them under shared machinery
+because the site sits inside the argument walk, which is one section and is
+shared. The rule had no unit test of its own: the census row `r26` is its pin,
+and `testsweep`'s exemption list names the sentence with it.
+
+**Gates.** `cargo test -p vyrn-cli` with no filter, 76 suites and no failure;
+`fixtures --ignored` 139 s; `kernel --ignored` 132 s; `testsweep --ignored`
+130 s; `vyrn-frontend` 1,215.
+
 **The scrutinee slice (2026-09-05): the core counts its own reads, and round
 twenty-seven's table is gone.**
 
@@ -5832,6 +5922,140 @@ reading the argument slice took, one binding form over: the core states a named
 binding's ownership from its own lowered body. Until that lands, `own.rs` is
 the `Owned` type table, the note walk, the six readings above and the
 `why --memory` report, and it cannot say what it is.
+
+**The obligation slice (2026-09-06): a must-use rule is a TYPE's, so the walk
+that states it is the typed judgment's and leaves the checker.** The residue
+record left five reasons for what stays in `movecheck.rs`. This is the second
+of them, and it is the largest: the file loses 829 lines, more than the three
+reasons that are still open hold between them.
+
+**Why the kernel could never take it.** The kernel judges OWNERSHIP. Must-use
+is not an ownership rule: a `Stream<T>` is owed a disposal because of what its
+type declares, not because of where its value went. §2.2 states three
+judgments, and the typed one is where a type's obligation is stated once. The
+walk was already separate from the move check's — the two want the OPPOSITE
+merge at an `if`, because use-after-consume is a may-analysis (consumed on
+either branch ⇒ consumed after) and "disposed exactly once" is a must-analysis
+— so nothing had to be untangled. It had to be moved.
+
+**Where it went, and how it comes back.** `linear::check` is
+`vyrn_lower::typed::obligation::judge`, 532 lines of `typed.rs`. It reaches a
+reader through a fourth slot of the shape the kernel's own drain already has:
+`own::install_must_use`, filled by `vyrn_lower::install`, read by
+`movecheck::refusals`. The slot is asked of a PROGRAM rather than drained,
+because the walk reads the tree a reader wrote and holds nothing between calls;
+a host that never linked the lowering gets an empty list, which is what that
+host already got from every other judgment.
+
+Three AST predicates stayed in `movecheck.rs` and are public now: `sub_blocks`,
+`stmt_mentions` and `paths`. They are not the rule. They answer what an
+expression NAMES and on which of its paths, which is a question about the tree,
+and a pass below the lowering asks them too. That is why the shared kind rises
+while the checker kind falls: 148 lines were counted with the rule and are
+counted with the machinery now.
+
+**`VYRN_NO_MOVECHECK=1` no longer stands the obligation aside.** The knob names
+one FILE, and the rule is not in it, so both runs state it. Census rows 30 and
+31 read `Kernel::Elsewhere` for that reason, where they read `nothing` and `its
+own words` before — the same reading row 32 has for the region rule.
+
+**The walk's own unit tests moved to `compiler/vyrn-cli/tests/mustuse.rs`**, 15
+of them. They asked `vyrn_frontend::check`, and the frontend no longer states
+the rule; the CLI crate links the lowering, so the programs are asked of `vyrn
+check` there. That also keeps them in the corpus a licence is read from,
+through the lift `testsweep` does over `tests/*.rs` — the same precedent the
+store slice set with `tests/stores.rs`.
+
+**The licence, before and after.** Measured over the 374 programs on disk —
+every `.vyrn` under `examples/`, `site/` and `compiler/vyrn-cli/tests/` — with
+`vyrn check` twice per program, once plain and once under
+`VYRN_NO_MOVECHECK=1`.
+
+| answer | before | after |
+|---|---|---|
+| identical | 61 | 67 |
+| menu | 0 | 0 |
+| text | 16 | 10 |
+| accepted | 297 | 297 |
+
+**Nothing a reader sees moved.** The plain run's whole standard error is
+byte-identical on all 374 programs. Six programs move under the knob, and they
+are the six the rule is about: `r30_stream_never_disposed`,
+`r31_stream_disposed_twice`, `mustuse_abandoned`, `stream_abandoned`,
+`stream_combinator_abandoned` and `task_abandoned`. Each went from "the kernel
+says nothing" or "the kernel says its own words" to "the same sentence", which
+is what moving the rule out of the file the knob names means.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/movecheck.rs` | 9,122 | 8,293 |
+| `compiler/vyrn-lower/src/typed.rs` | 380 | 912 |
+| `compiler/vyrn-frontend/src/own.rs` | 4,803 | 4,826 |
+| `compiler/vyrn-cli/tests/mustuse.rs` | — | 396 |
+
+**The structural census.** The checker-only kind falls 725 to 78 and the tests
+kind 1,781 to 1,451; the shared kind rises 3,642 to 3,790 for the three
+predicates. The kernel, rows and menu kinds do not move. RFC-0127's form census
+moves the same way — mentions out of the `movecheck` column and into `lower`,
+with every row's total unchanged — and `typed.rs` joins the `lower` column's
+file list, because a form the must-use judgment walks is a form that column
+states.
+
+**Then the core line merged in (862dca33).** Both conflicts were pinned
+numbers, and both sides had moved them. The structural census keeps this
+slice's checker (78) and tests (1,451) kinds and takes the core line's rows
+(2,139) and shared (3,735): 8,127 lines, which is the two deltas added. The
+form census takes the core line's `Expr::Unary`, `Binary`, `Call` and `Match`
+rows, which moved for the shared lowering, and this slice's `Expr::Var` — one
+mention out of `movecheck` and one into `lower`. The section list merged with
+no help: the core line renamed the `arg_verdict` anchor to `arg_caps` and added
+the mention guard, and this slice replaced `mod linear` with the predicates
+that stayed.
+
+**What is left of the five, and why each is still here.**
+
+1. Row 26 and `fix-33` — **closed** by the slice above.
+2. The must-use walk, rows 30 and 31 — **closed** here.
+3. An exported function owns its result, row 17 (4 programs). An `export extern
+   fn`'s `return` reaches the kernel as a store, because the lowering does not
+   carry the exit. The core states exits for ordinary bodies; this is one more
+   kind of exit, and it is a lowering change, not a rule change.
+4. The prefix `consume` form, rows 10, 11 and 29 (7 programs). For two of the
+   seven the kernel refuses a DIFFERENT binding at a different line — the
+   element at the `push`, not the container at the loop — so the slice has to
+   decide which sentence is right before it can delete one.
+5. A record literal's field, inline (1 program). `NameInfo::fields` is written
+   only where a `let` binds a literal; it wants writing where the literal
+   stands.
+
+#### Gates (2026-09-06, the obligation slice)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --check`, all three manifests | clean |
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 586 passed, 75 ignored — up 15 for the moved tests, and `mustuse.rs` is the new binary |
+| `kernel` `--ignored` | 1, 176 s |
+| `coretables` `--ignored` | 1, 123 s |
+| `typed` `--ignored` | 1, 235 s |
+| `effects` `--ignored` | 2, 366 s |
+| `fixtures` `--ignored` | 1, 97 s |
+| `vyrn-frontend` | 1,196 — down 15, which is `movecheck.rs`'s own must-use tests leaving the file |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,372 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 273 s |
+| the residue ratchet | 173 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 48 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 28 files |
 
 ### M4 — the runtime in Vyrn
 

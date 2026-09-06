@@ -91,7 +91,7 @@ and neither of those files ever matches a statement.
 | `checker` | `vyrn-frontend/src/checker.rs` | what a program means |
 | `movecheck` | `vyrn-frontend/src/movecheck.rs` | where a value is moved |
 | `own` | `vyrn-frontend/src/own.rs` | where a value is released |
-| `lower` | `vyrn-lower/src/lib.rs`, `core.rs` | the lowered form and RFC-0125's core |
+| `lower` | `vyrn-lower/src/lib.rs`, `core.rs`, `typed.rs` | the lowered form, RFC-0125's core, and the must-use judgment, which reads the tree a reader wrote (RFC-0125 §3 M3) |
 | `native` | `vyrn-codegen/src/lib.rs` | the textual-IR emitter |
 | `wasm` | `vyrn-codegen/src/direct.rs` | the direct wasm emitter |
 | `interp` | `vyrn-frontend/src/interp.rs` | the interpreter's engine |
@@ -126,38 +126,38 @@ the_form_census_as_a_table` and checked against the code by
 
 | form | parser | checker | movecheck | own | lower | native | wasm | editor | all eight |
 |---|---|---|---|---|---|---|---|---|---|
-| `Stmt::Let` | 8 | 10 | 5 | 4 | 6 | 6 | 5 | 1 | 45 |
-| `Stmt::Assign` | 2 | 6 | 4 | 3 | 5 | 6 | 3 | 1 | 30 |
-| `Stmt::SetField` | 4 | 6 | 3 | 3 | 5 | 6 | 4 | 1 | 32 |
-| `Stmt::IndexSet` | 4 | 6 | 3 | 3 | 5 | 6 | 3 | 1 | 31 |
-| `Stmt::Return` | 1 | 12 | 5 | 3 | 5 | 8 | 4 | 3 | 41 |
-| `Stmt::Break` | 2 | 6 | 4 | 3 | 5 | 6 | 2 | 1 | 29 |
-| `Stmt::Continue` | 1 | 6 | 4 | 3 | 5 | 6 | 2 | 1 | 28 |
-| `Stmt::If` | 2 | 9 | 7 | 3 | 5 | 6 | 2 | 1 | 35 |
-| `Stmt::IfLet` | 2 | 7 | 7 | 3 | 5 | 6 | 3 | 1 | 34 |
-| `Stmt::While` | 2 | 9 | 6 | 3 | 5 | 6 | 2 | 1 | 34 |
-| `Stmt::ForIn` | 1 | 10 | 6 | 3 | 5 | 6 | 3 | 1 | 35 |
-| `Stmt::Drop` | 1 | 7 | 3 | 3 | 5 | 6 | 3 | 1 | 29 |
-| `Stmt::Expr` | 2 | 6 | 4 | 3 | 5 | 6 | 4 | 1 | 31 |
-| `Stmt::Region` | 1 | 9 | 6 | 3 | 5 | 6 | 2 | 1 | 33 |
-| `Expr::Int` | 4 | 9 | 7 | 2 | 8 | 5 | 3 | 2 | 40 |
+| `Stmt::Let` | 8 | 10 | 3 | 4 | 8 | 6 | 5 | 1 | 45 |
+| `Stmt::Assign` | 2 | 6 | 2 | 3 | 7 | 6 | 3 | 1 | 30 |
+| `Stmt::SetField` | 4 | 6 | 2 | 3 | 6 | 6 | 4 | 1 | 32 |
+| `Stmt::IndexSet` | 4 | 6 | 2 | 3 | 6 | 6 | 3 | 1 | 31 |
+| `Stmt::Return` | 1 | 12 | 2 | 3 | 8 | 8 | 4 | 3 | 41 |
+| `Stmt::Break` | 2 | 6 | 1 | 3 | 8 | 6 | 2 | 1 | 29 |
+| `Stmt::Continue` | 1 | 6 | 1 | 3 | 8 | 6 | 2 | 1 | 28 |
+| `Stmt::If` | 2 | 9 | 4 | 3 | 8 | 6 | 2 | 1 | 35 |
+| `Stmt::IfLet` | 2 | 7 | 4 | 3 | 8 | 6 | 3 | 1 | 34 |
+| `Stmt::While` | 2 | 9 | 4 | 3 | 7 | 6 | 2 | 1 | 34 |
+| `Stmt::ForIn` | 1 | 10 | 4 | 3 | 7 | 6 | 3 | 1 | 35 |
+| `Stmt::Drop` | 1 | 7 | 2 | 3 | 6 | 6 | 3 | 1 | 29 |
+| `Stmt::Expr` | 2 | 6 | 2 | 3 | 7 | 6 | 4 | 1 | 31 |
+| `Stmt::Region` | 1 | 9 | 3 | 3 | 8 | 6 | 2 | 1 | 33 |
+| `Expr::Int` | 4 | 9 | 8 | 2 | 8 | 5 | 3 | 2 | 41 |
 | `Expr::Byte` | 2 | 7 | 5 | 2 | 8 | 5 | 3 | 2 | 34 |
-| `Expr::Float` | 2 | 7 | 6 | 2 | 8 | 5 | 3 | 2 | 35 |
-| `Expr::Bool` | 4 | 5 | 6 | 2 | 8 | 5 | 3 | 2 | 35 |
-| `Expr::Str` | 7 | 6 | 6 | 4 | 8 | 10 | 8 | 3 | 52 |
-| `Expr::Var` | 25 | 23 | 20 | 3 | 24 | 33 | 36 | 1 | 165 |
+| `Expr::Float` | 2 | 7 | 7 | 2 | 8 | 5 | 3 | 2 | 36 |
+| `Expr::Bool` | 4 | 5 | 7 | 2 | 8 | 5 | 3 | 2 | 36 |
+| `Expr::Str` | 7 | 6 | 10 | 4 | 8 | 10 | 8 | 3 | 56 |
+| `Expr::Var` | 25 | 23 | 22 | 3 | 25 | 33 | 36 | 1 | 168 |
 | `Expr::Unary` | 4 | 8 | 6 | 2 | 7 | 6 | 3 | 2 | 38 |
-| `Expr::Binary` | 3 | 7 | 9 | 3 | 8 | 8 | 3 | 1 | 42 |
-| `Expr::Call` | 22 | 13 | 31 | 4 | 24 | 12 | 13 | 1 | 120 |
-| `Expr::Match` | 7 | 10 | 14 | 4 | 7 | 6 | 5 | 1 | 54 |
-| `Expr::IfExpr` | 1 | 8 | 13 | 2 | 6 | 6 | 3 | 1 | 40 |
+| `Expr::Binary` | 3 | 7 | 13 | 3 | 8 | 8 | 3 | 1 | 46 |
+| `Expr::Call` | 22 | 13 | 38 | 4 | 26 | 12 | 13 | 1 | 129 |
+| `Expr::Match` | 7 | 10 | 15 | 4 | 8 | 6 | 5 | 1 | 56 |
+| `Expr::IfExpr` | 1 | 8 | 13 | 2 | 7 | 6 | 3 | 1 | 41 |
 | `Expr::Try` | 1 | 7 | 6 | 2 | 6 | 6 | 5 | 1 | 34 |
 | `Expr::StructLit` | 2 | 8 | 8 | 2 | 9 | 6 | 4 | 1 | 40 |
 | `Expr::Field` | 6 | 7 | 16 | 3 | 14 | 8 | 3 | 1 | 58 |
 | `Expr::TryConstruct` | 1 | 7 | 5 | 2 | 5 | 6 | 5 | 1 | 32 |
 | `Expr::ArrayLit` | 5 | 7 | 6 | 2 | 9 | 7 | 6 | 2 | 44 |
 | `Expr::MapLit` | 3 | 5 | 6 | 2 | 6 | 6 | 4 | 1 | 33 |
-| `Expr::Spawn` | 1 | 7 | 6 | 2 | 6 | 6 | 6 | 1 | 35 |
+| `Expr::Spawn` | 1 | 7 | 5 | 2 | 7 | 6 | 6 | 1 | 35 |
 | `Expr::Lambda` | 1 | 10 | 6 | 3 | 9 | 8 | 10 | 1 | 48 |
 | `Expr::Consume` | 1 | 5 | 10 | 2 | 11 | 7 | 7 | 1 | 44 |
 | `Pattern::Variant` | 11 | 5 | 2 | 0 | 1 | 4 | 6 | 1 | 30 |

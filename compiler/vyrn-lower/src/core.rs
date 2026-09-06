@@ -4429,15 +4429,34 @@ pub fn take_refusals() -> Vec<crate::kernel::Refusal> {
 /// file, the line and the message are the identity. `file` is `None` for the
 /// root module, which is what tells `vyrn fix` an edit is its to make. Ordering
 /// is the caller's: it orders the two passes' lists together.
+///
+/// **What the identity may not collapse is one body's own repetition.**
+/// `out.push(s) out.push(s)` on one line is two mistakes, and the checker
+/// prints two sentences. A body is judged once and its refusals arrive
+/// together, so the count of an identical sentence WITHIN one body's run is
+/// part of the identity, and only the second instance of the same generic body
+/// repeats it (RFC-0125 §3 M3).
 pub fn refusal_diagnostics() -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
     if !refuses() {
         let _ = take_refusals();
         return Vec::new();
     }
     let mut seen = std::collections::HashSet::new();
+    let mut body = String::new();
+    let mut nth: std::collections::HashMap<(Option<String>, usize, String), usize> =
+        Default::default();
     take_refusals()
         .into_iter()
-        .filter(|r| seen.insert((r.file.clone(), r.line, r.message.clone())))
+        .filter(|r| {
+            if r.body != body {
+                body = r.body.clone();
+                nth.clear();
+            }
+            let key = (r.file.clone(), r.line, r.message.clone());
+            let n = nth.entry(key.clone()).or_default();
+            *n += 1;
+            seen.insert((key, *n))
+        })
         .map(|r| {
             let mut d =
                 vyrn_frontend::diagnostics::Diagnostic::error(r.line, 0, "movecheck", r.message);
@@ -4752,14 +4771,18 @@ fn place_frames(
         drop(ks);
         let missing = match placed {
             Ok(m) => m,
-            Err(r) => {
-                if trace {
-                    eprintln!("placer: refused: {}: {}", r.body, r.message);
+            Err(rs) => {
+                for r in rs {
+                    if trace {
+                        eprintln!("placer: refused: {}: {}", r.body, r.message);
+                    }
+                    // A refusal no placement repairs: a double free, a use
+                    // after release, a join whose edges disagree. A refusal,
+                    // not a gap: the CLI fails the command with it. Every one
+                    // the body earns, so the driver can merge by the binding
+                    // and the line (RFC-0125 §3 M3).
+                    REFUSALS.with(|v| v.borrow_mut().push(r));
                 }
-                // A refusal no placement repairs: a double free, a use after
-                // release, a join whose edges disagree. A refusal, not a
-                // gap: the CLI fails the command with it.
-                REFUSALS.with(|v| v.borrow_mut().push(r));
                 continue;
             }
         };
