@@ -1727,11 +1727,6 @@ fn root_of(path: &str) -> &str {
 struct Consumption {
     /// Where the move happened.
     line: usize,
-    /// What took it, in words: ``​`take(..)`​``, ``​`drop`​``, "the binding `t`".
-    by: String,
-    /// The named fixes. Empty for a `consume` parameter, which keeps its own
-    /// historical wording — the capability IS the fix there.
-    fixes: Vec<String>,
     /// Whether this consumption left a HOLE — a take of a projection, and the
     /// only thing that makes reading the root as a whole an error (RFC-0093).
     ///
@@ -1776,14 +1771,6 @@ impl Consumed {
             .or_default()
             .entry(path)
             .or_insert(c);
-    }
-
-    fn get(&self, path: &str) -> Option<&Consumption> {
-        self.0.get(root_of(path))?.get(path)
-    }
-
-    fn contains_key(&self, path: &str) -> bool {
-        self.get(path).is_some()
     }
 
     fn remove(&mut self, path: &str) {
@@ -1887,18 +1874,6 @@ fn under(long: &str, short: &str) -> bool {
 /// that was moved away whole.
 fn revive(consumed: &mut Consumed, path: &str) {
     consumed.revive(path);
-}
-
-impl Consumption {
-    /// A `consume` capability took it — the wording this pass has always used.
-    fn by_capability(line: usize, by: String) -> Self {
-        Consumption {
-            line,
-            by,
-            fixes: Vec::new(),
-            hole: false,
-        }
-    }
 }
 
 impl MoveCheck<'_> {
@@ -2887,15 +2862,7 @@ impl MoveCheck<'_> {
             ));
         }
         self.took(&root, Gone::Moved { line, by: into() });
-        consumed.insert(
-            root,
-            Consumption {
-                line,
-                by: into(),
-                fixes: vec![format!("`{path}.copy()` if both sides need a value")],
-                hole: false,
-            },
-        );
+        consumed.insert(root, Consumption { line, hole: false });
         Ok(true)
     }
 
@@ -5250,14 +5217,9 @@ impl MoveCheck<'_> {
                 let mut body_c = consumed.clone();
                 self.expr(cond, &mut body_c, scope)?;
                 let outer_continue = self.continue_seen.replace(false);
-                let body_div = self.block(body, &mut body_c, scope);
-                // A `continue` reaches the top again, so a consumption on its
-                // path is still a next-iteration reuse; only a body every
-                // path of which LEAVES the loop runs at most once.
-                let leaves_loop = body_div && !self.continue_seen.get();
+                let _ = self.block(body, &mut body_c, scope);
                 self.continue_seen.set(outer_continue);
                 self.loop_ids.borrow_mut().pop();
-                self.check_loop_reuse(consumed, &body_c, scope, leaves_loop)?;
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
                 }
@@ -5364,18 +5326,13 @@ impl MoveCheck<'_> {
                     }
                 }
                 let outer_continue = self.continue_seen.replace(false);
-                let body_div = self.block(body, &mut body_c, scope);
+                let _ = self.block(body, &mut body_c, scope);
                 self.exit();
                 // The loop variable is fresh on every iteration, so a move of it
                 // is not a move of anything the enclosing scope can still name.
                 body_c.remove(var);
-                // A `continue` reaches the top of the NEXT iteration, so it is
-                // not the runs-at-most-once divergence the reuse check may
-                // skip on — see the `while` arm.
-                let leaves_loop = body_div && !self.continue_seen.get();
                 self.loop_ids.borrow_mut().pop(); // RFC-0114 M2: for-loop extent ends
                 self.continue_seen.set(outer_continue);
-                self.check_loop_reuse(consumed, &body_c, scope, leaves_loop)?;
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
                 }
@@ -5387,7 +5344,6 @@ impl MoveCheck<'_> {
                     // readable — the same hole the prefix makes, recorded the
                     // same way and handed to the same walk (M2).
                     if let Some((root, path)) = place_path(iter) {
-                        let fixes = vec![format!("`{path}.copy()` if both sides need a value")];
                         if root == path {
                             self.took(
                                 &root,
@@ -5408,8 +5364,6 @@ impl MoveCheck<'_> {
                             path.clone(),
                             Consumption {
                                 line: *line,
-                                by: "the `for .. in consume` loop".into(),
-                                fixes,
                                 hole: root != path,
                             },
                         );
@@ -5514,7 +5468,10 @@ impl MoveCheck<'_> {
                 self.took(name, Gone::Dropped { line: *line });
                 consumed.insert(
                     name.clone(),
-                    Consumption::by_capability(*line, "`drop`".to_string()),
+                    Consumption {
+                        line: *line,
+                        hole: false,
+                    },
                 );
                 Ok(false)
             }
@@ -5672,45 +5629,6 @@ impl MoveCheck<'_> {
             ),
             b.fixes(name, name),
         ))
-    }
-
-    /// The loop-body reuse check: a variable consumed in the body (`body_c`) that
-    /// was live before the loop would be consumed *again* on the next iteration.
-    /// Skipped when the body **diverges unconditionally** (`body_div`) — it then
-    /// runs at most once (a straight-line `consume(x); break`), so the
-    /// consumption is legal and flows out to the enclosing scope instead.
-    fn check_loop_reuse(
-        &self,
-        consumed: &Consumed,
-        body_c: &Consumed,
-        scope: &[HashSet<String>],
-        body_div: bool,
-    ) -> Result<(), Diagnostic> {
-        if body_div {
-            return Ok(());
-        }
-        for (k, c) in body_c {
-            // RFC-0093 keys a take of a projection by its dotted PATH, but
-            // the frames of `scope` hold binding NAMES: after `consume
-            // er.node`, `k` is `"er.node"`, which no frame contains, so a
-            // full-path test silently skipped every partial take. Membership
-            // is asked of the key's ROOT — but a key carrying a `[` is
-            // RFC-0082's place desugar, one binding and not a path, and it
-            // relates to nothing but itself (the same sentence [`under`]
-            // says).
-            if !k.contains('[') && !consumed.contains_key(k) && Self::in_scope(scope, root_of(k)) {
-                let (line, consumer) = (c.line, &c.by);
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{k}` is consumed by {consumer} inside a loop, \
-                         so it would be used again on the next iteration"
-                    ),
-                    c.fixes.clone(),
-                ));
-            }
-        }
-        Ok(())
     }
 
     fn expr(
@@ -5915,8 +5833,6 @@ impl MoveCheck<'_> {
                     path.clone(),
                     Consumption {
                         line: *line,
-                        by: "`consume`".into(),
-                        fixes: vec![format!("`{path}.copy()` if both sides need a value")],
                         hole: root != path,
                     },
                 );
@@ -6226,10 +6142,10 @@ impl MoveCheck<'_> {
                                 );
                                 consumed.or_insert(
                                     v.clone(),
-                                    Consumption::by_capability(
-                                        *line,
-                                        format!("`{}(..)`", crate::parser::method_surface(name)),
-                                    ),
+                                    Consumption {
+                                        line: *line,
+                                        hole: false,
+                                    },
                                 );
                             }
                         }
@@ -6307,13 +6223,6 @@ impl MoveCheck<'_> {
                                     root.clone(),
                                     Consumption {
                                         line: *line,
-                                        by: format!(
-                                            "`{}(..)`",
-                                            crate::parser::method_surface(name)
-                                        ),
-                                        fixes: vec![format!(
-                                            "`{root}.copy()` if both sides need a value"
-                                        )],
                                         hole: false,
                                     },
                                 );
@@ -6522,10 +6431,10 @@ impl MoveCheck<'_> {
                             if !self.names_a_constructor(v) {
                                 consumed.or_insert(
                                     v.clone(),
-                                    Consumption::by_capability(
-                                        *line,
-                                        format!("`spawn {name}(..)`"),
-                                    ),
+                                    Consumption {
+                                        line: *line,
+                                        hole: false,
+                                    },
                                 );
                             }
                         }
@@ -7763,18 +7672,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_consume_in_while_condition() {
-        // The condition re-runs every iteration — consuming there is the same
-        // bug as consuming in the body.
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Bool { return t.id > 0; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; \
-                                      while take(x) { let y = 1; } return 0; }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("inside a loop"), "{e}");
-    }
-
-    #[test]
     fn rejects_drop_after_a_partial_take() {
         // F2-049: the taken field belongs to whoever received it, and `drop`
         // reclaims storage by TYPE — freeing the whole binding here frees
@@ -7784,30 +7681,6 @@ mod tests {
                                       consume t.name; drop t; return 0; }";
         let e = run(src).unwrap_err();
         assert!(e.contains("may not be dropped"), "{e}");
-    }
-
-    #[test]
-    fn rejects_consume_before_a_trailing_continue() {
-        // F2-052: `continue` starts the NEXT iteration, so the body re-runs —
-        // it is not the runs-at-most-once divergence the reuse check skips on.
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; \
-                                      for i in [1, 2] { let a = take(x); continue; } \
-                                      return 0; }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("inside a loop"), "{e}");
-    }
-
-    #[test]
-    fn rejects_partial_take_repeated_across_iterations() {
-        // F2-053: a take of a projection is keyed by its dotted PATH, which
-        // no scope frame contains — the reuse check must ask the key's ROOT.
-        let src = "type T = { node: String, rest: Int64 }; \
-                   fn main() -> Int64 { let er = T { node: \"n\", rest: 0 }; \
-                                      for i in [1, 2] { consume er.node } return 0; }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("inside a loop"), "{e}");
     }
 
     #[test]
@@ -9635,15 +9508,5 @@ mod tests {
             returns, 0,
             "RFC-0092 M3: a projection return came back — see the list above"
         );
-    }
-
-    #[test]
-    fn rejects_consume_in_loop() {
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; let mut i = 0; \
-                                      while i < 3 { let a = take(x); i = i + 1; } return 0; }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("inside a loop"), "{e}");
     }
 }

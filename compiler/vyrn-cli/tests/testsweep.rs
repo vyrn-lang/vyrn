@@ -196,6 +196,10 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     ("may not be dropped — it is", "row 21"),
     ("was moved here into", "row 07, rule 1's move"),
     ("may not be put into", "row 19, a borrow into a constructor"),
+    (
+        "inside a loop, so it would be used again",
+        "row 25, rule 1 across a back edge",
+    ),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {

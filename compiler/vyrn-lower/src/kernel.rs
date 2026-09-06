@@ -1929,11 +1929,35 @@ impl<'b> Kernel<'b> {
                     self.info(n)
                 ));
             }
-            if self.holes_of(at, n) != self.holes_of(entry, n) {
-                return self.refuse(format!(
-                    "{} has a `consume` hole at a loop's back edge it did not have at entry",
-                    self.info(n)
-                ));
+            // A hole a turn made is a consumption the next turn would repeat,
+            // and the checker says it in rule 1's loop sentence — of the PATH
+            // the reader took, at the line of the take (RFC-0125 §3 M3, row
+            // 25). The taker needs no field of its own: a hole is what a
+            // prefix `consume` makes, and it is the only thing that makes one.
+            let (before, after) = (self.holes_of(entry, n), self.holes_of(at, n));
+            if before != after {
+                let s = self.src(n);
+                let path = after
+                    .iter()
+                    .find(|h| !before.contains(*h))
+                    .map(|h| h.replace(".[]", "[..]"));
+                return match path {
+                    Some(path) => self.refuse_at(
+                        self.hole_line(at, n, &path),
+                        menu(
+                            format!(
+                                "`{s}{path}` is consumed by `consume` inside a loop, so it \
+                                 would be used again on the next iteration"
+                            ),
+                            vec![format!("`{s}{path}.copy()` if both sides need a value")],
+                        ),
+                    ),
+                    None => self.refuse(format!(
+                        "{} has a `consume` hole at a loop's back edge it did not have at \
+                         entry",
+                        self.info(n)
+                    )),
+                };
             }
         }
         Ok(())

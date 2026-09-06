@@ -34,7 +34,7 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07 and 19, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
+//! 28, 06, 20, 21, 07, 19 and 25, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
 //! two must still agree. The row is what stops the sentence moving after the
 //! deletion, so it stays in the census.
 //!
@@ -665,13 +665,12 @@ fn counterexamples() -> Vec<Uncovered> {
              next iteration",
             "heap",
         ),
-        worded(
+        covered(
             "u25b_partial_take_across_iterations.vyrn",
             "25",
             "`er.node` is consumed by `consume` inside a loop, so it would be used again on \
              the next iteration",
             "spelling",
-            "`er` (line 9) has a `consume` hole at a loop's back edge it did not have at entry",
         ),
     ]
 }
@@ -935,6 +934,68 @@ fn a_borrow_put_into_a_constructor_is_refused_at_the_constructor() {
     assert!(
         text.contains("may not be put into `Some(..)`"),
         "the borrow is refused at the constructor position: {text}"
+    );
+}
+
+/// The shapes row 25's own unit tests pinned, still refused after the rule
+/// left `movecheck.rs` (RFC-0125 §3 M3, row 25).
+///
+/// A consumption inside a loop would run again on the next turn. The kernel
+/// judges the loop's BACK EDGE against its entry, which is one rule where the
+/// checker had four readings of the body: a `while` body, a `while`
+/// CONDITION, a body that ends in `continue`, and a take of a projection whose
+/// key is a path no scope frame holds. Each unit test named one of those, and
+/// each used the refusal to see it, so they are asked of the whole compiler
+/// here.
+#[test]
+fn the_shapes_row_twenty_fives_unit_tests_pinned_are_still_refused() {
+    const T: &str = "type T = { id: Int64 } \
+                     fn take(t: consume T) -> Int64 { return t.id } ";
+    let cases: &[(&str, String)] = &[
+        (
+            "a while body",
+            format!(
+                "{T} fn main() -> Int64 {{ let x = T {{ id: 1 }} let mut i = 0 \
+                 while i < 3 {{ let a = take(x) i = i + 1 }} return 0 }}"
+            ),
+        ),
+        (
+            "a while condition",
+            "type T = { id: Int64 } \
+             fn take(t: consume T) -> Bool { return t.id > 0 } \
+             fn main() -> Int64 { let x = T { id: 1 } \
+             while take(x) { let y = 1 } return 0 }"
+                .to_string(),
+        ),
+        (
+            "a trailing continue",
+            format!(
+                "{T} fn main() -> Int64 {{ let x = T {{ id: 1 }} \
+                 for i in [1, 2] {{ let a = take(x) continue }} return 0 }}"
+            ),
+        ),
+        (
+            "a take of a projection",
+            "type T = { node: String, rest: Int64 } \
+             fn main() -> Int64 { let er = T { node: \"n\", rest: 0 } \
+             for i in [1, 2] { consume er.node } return 0 }"
+                .to_string(),
+        ),
+    ];
+    let dir = common::scratch("row-twenty-five-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains("inside a loop") {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a consumption inside a loop is no longer refused:\n  {}",
+        bad.join("\n  ")
     );
 }
 
@@ -1466,11 +1527,6 @@ fn sections() -> Vec<Section> {
             "a closure that outlives the call may not capture a borrow (row 24)",
         ),
         sec(
-            "    fn check_loop_reuse(",
-            Kernel,
-            "rule 1 across a back edge (row 25)",
-        ),
-        sec(
             "    fn expr(",
             Shared,
             "the walk over expressions: the same traversal does both jobs",
@@ -1626,12 +1682,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 854),
+        ("a rule the kernel now gives", 807),
         ("a rule only the checker gives", 725),
         ("placement rows for the engines", 2250),
         ("a fix menu", 73),
-        ("shared machinery", 3723),
-        ("tests", 2024),
+        ("shared machinery", 3679),
+        ("tests", 1978),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
