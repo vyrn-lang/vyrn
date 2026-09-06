@@ -1477,6 +1477,321 @@ fn a_nullary_constructor_is_a_value_and_not_a_name() {
     );
 }
 
+/// The programs the pass's own unit tests read as ACCEPTED, asked of the whole
+/// compiler (RFC-0125 §3 M3, the safety slice).
+///
+/// They asserted `movecheck::check(..).is_ok()`, and this pass going quiet is
+/// not acceptance: the kernel states ownership rules the pass does not, and
+/// `vyrn-frontend` does not link the kernel, so the pass's own unit tests never
+/// ask it. Thirty-six readings of "this program compiles" were readings of "the
+/// checker has nothing to say". Thirty-five were right anyway. The thirty-sixth
+/// is the row that carries a sentence: the compiler refuses that program, and
+/// has refused it since the kernel came in.
+///
+/// A row with no sentence compiles. A row with one is refused, and the sentence
+/// is what a reader gets.
+#[test]
+fn the_programs_the_passs_unit_tests_read_as_accepted() {
+    let cases: &[(&str, Option<&str>, &str)] = &[
+        (
+            "a payload binding from module state",
+            None,
+            "type E = | Tag(Array<Int64>) | Blank\n\
+             let mut g: E = Blank\n\
+             fn main() -> Int64 {\n\
+                 let Tag(xs) = g\n\
+                 return xs.length\n\
+             }",
+        ),
+        (
+            "a read parameter read twice",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 } return peek(x) + peek(x) }",
+        ),
+        (
+            "a consume with no reuse",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 } return take(x) }",
+        ),
+        (
+            "a reassignment revives",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let mut x = T { id: 1 } let a = take(x) x = T { id: 2 } return a + take(x) }",
+        ),
+        (
+            "a partial take of the loop variable",
+            None,
+            "type E = { name: String, id: Int64 }\n\
+             fn main() -> Int64 { let mut out = 0\n\
+              let xs = [E { name: \"a\", id: 1 }, E { name: \"b\", id: 2 }]\n\
+              for u in consume xs { consume u.name } return out }",
+        ),
+        (
+            "a local shadowing a global",
+            None,
+            "type T = { id: Int64 }\n\
+             let g = T { id: 1 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn useIt() -> Int64 { let g = T { id: 2 } return take(g) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a consume on the break branch",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 } let mut s = 0\n\
+              for i in [0, 1, 2] { if i == 2 { let a = take(x) break }\n\
+              s = s + peek(x) }\n\
+              return s }",
+        ),
+        (
+            "a use after an unconditional break",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 }\n\
+              while true { break let a = take(x) let b = take(x) }\n\
+              return 0 }",
+        ),
+        (
+            "a last use of a string moves",
+            None,
+            "fn main() -> Int64 { let s = \"a\" + \"b\" let t = s return t.byteLength }",
+        ),
+        (
+            "a scalar alias never moves",
+            None,
+            "fn main() -> Int64 { let a = 1 let b = a return a + b }",
+        ),
+        (
+            "the consume fix for a returned borrow",
+            None,
+            "fn id(s: consume String) -> String { return s }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix for a returned borrow",
+            None,
+            "fn id(s: String) -> String { return s.copy() }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a wrapped borrows copy is owned",
+            None,
+            "type M = { name: String }\n\
+             type C = { members: Array<M> }\n\
+             fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m.copy()) }\n\
+             return None }\n\
+             fn main() -> Int64 { let c = C { members: [] }\n\
+             if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }",
+        ),
+        (
+            "an if let over a parameter",
+            None,
+            "fn show(v: Option<String>) -> Int64 {\n\
+             if let Some(s) = v { return s.byteLength } return 0 }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a returned scalar parameter",
+            None,
+            "fn id(n: Int64) -> Int64 { return n }\n\
+             fn main() -> Int64 { return id(1) }",
+        ),
+        (
+            "a loop variable copied out",
+            None,
+            "fn first(xs: Array<String>) -> String { for x in xs { return x.copy() }\n\
+             return \"\" }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "two fields read out of one record",
+            None,
+            "type R = { a: String, b: String }\n\
+             fn use2(r: R) -> Int64 { let x = r.a let y = r.b\n\
+             return x.byteLength + y.byteLength }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "module state copied out",
+            None,
+            "let mut title = \"x\"\n\
+             fn get() -> String { return title.copy() }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a record of scalars returned",
+            None,
+            "type R = { n: Int64 }\n\
+             let mut r = R { n: 1 }\n\
+             fn get() -> R { return r }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix in a match arm",
+            None,
+            "type Tag = | Word(String) | Num(Int64)\n\
+             let mut tag: Tag = Num(1)\n\
+             fn text() -> String { return match tag { Word(s) => s.copy(), Num(n) => \"num\", } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix in an exports match arm",
+            None,
+            "type Tag = | Word(String) | Num(Int64)\n\
+             let mut tag: Tag = Num(1)\n\
+             export extern fn text() -> String { return match tag { Word(s) => s.copy(), Num(n) => \"num\", } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "an export stores a copy into module state",
+            None,
+            "let mut kept = \"x\"\n\
+             export extern fn set(arg: String) { kept = arg.copy() }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the consume fix for a stored borrow",
+            None,
+            "type R = { s: String }\n\
+             fn keep(x: consume String) -> R { return R { s: x } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix for a stored borrow",
+            None,
+            "type R = { s: String }\n\
+             fn keep(x: String) -> R { return R { s: x.copy() } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a consuming loop stores its element",
+            None,
+            "fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]\n\
+             let mut out: Array<String> = []\n\
+             for x in consume xs { out.push(x) } return out.length }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a loop over a temporary stores its element",
+            None,
+            "fn make() -> Array<String> { return [\"a\" + \"b\"] }\n\
+             fn go() -> Int64 { let mut out: Array<String> = []\n\
+             for x in make() { out.push(x) } return out.length }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a function called consume",
+            None,
+            "fn consume(n: Int64) -> Array<Int64> { return [n] }\n\
+             fn main() -> Int64 { let mut t = 0 for x in consume(1) { t = t + x }\n\
+             return t }",
+        ),
+        (
+            "a call to consume in an argument",
+            None,
+            "fn consume(n: Int64) -> Array<Int64> { return [n] }\n\
+             fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }\n\
+             fn main() -> Int64 { return take(consume(1)) }",
+        ),
+        (
+            "a sibling field survives a take",
+            None,
+            "type Bag = { a: String, b: String }\n\
+             fn make() -> Bag { return Bag { a: \"x\" + \"y\", b: \"p\" + \"q\" } }\n\
+             fn go() -> Int64 { let d = make() let mut o: Array<String> = [] o.push(consume d.a) o.push(consume d.b) return o.length }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a write fills the hole",
+            None,
+            "type Bag = { a: String, b: String }\n\
+             fn make() -> Bag { return Bag { a: \"x\" + \"y\", b: \"p\" + \"q\" } }\n\
+             fn go() -> Int64 { let mut d = make() let mut o: Array<String> = [] o.push(consume d.a) d.a = \"z\" return d.a.byteLength }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "an owned capture at a consume fn parameter",
+            None,
+            "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) }\n\
+             fn go() -> Int64 { let s = \"a\" + \"b\" return reg(n -> n + s.byteLength) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a borrowing capture at a plain fn parameter",
+            None,
+            "fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) }\n\
+             fn go(q: read String) -> Int64 { return apply(n -> n + q.byteLength) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a lender forwarded through an aggregate",
+            Some("`@borrow` may not be returned"),
+            "type R = { name: String }\n\
+             fn pick(xs: Array<String>) -> String\n\
+             { for x in xs { return if true { x } else { \"\" } } return \"\" }\n\
+             fn g(a: Array<String>) -> R { return R { name: pick(a) } }\n\
+             fn h(a: Array<String>) -> Array<String> { return [pick(a)] }\n\
+             fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]\n\
+             let r = g(arr) let s2 = h(arr)\n\
+             return r.name.byteLength + s2[0].byteLength }",
+        ),
+        (
+            "a copied map key",
+            None,
+            "fn build(ks: Array<String>) -> Map<String, Int64>\n\
+             { let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a fresh map key",
+            None,
+            "fn main() -> Int64 { let mut m: Map<String, Int64> = [:]\n\
+             m[\"a\" + \"b\"] = 1 return 0 }",
+        ),
+        (
+            "a capture in a lambda the callee borrows",
+            None,
+            "fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
+             fn go(s: String) -> Int64 { return apply(n -> n + s.byteLength) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+    ];
+    let dir = common::scratch("read-as-accepted");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, refused, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        match refused {
+            None if !ok => bad.push(format!("{what}: refused — {text}")),
+            Some(sentence) if ok => bad.push(format!("{what}: accepted, wanted `{sentence}`")),
+            Some(sentence) if !text.contains(sentence) => {
+                bad.push(format!("{what}: wanted `{sentence}`, got {text}"))
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a program the pass's unit tests read as accepted no longer reads that way:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// Every program under `tests/unlicensed/` is a counterexample, and every
 /// counterexample is a program.
 #[test]
@@ -1724,9 +2039,10 @@ fn sections() -> Vec<Section> {
              stamps",
         ),
         sec(
-            "pub fn check(program: &Program) -> Result<(), String> {",
+            "pub fn refusal(program: &Program) -> String {",
             Shared,
-            "the historical string shim",
+            "the historical string shim, and the door that has no acceptance \
+             answer in it",
         ),
         sec(
             "struct MoveCheck<'a> {",
@@ -2069,8 +2385,8 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 78),
         ("placement rows for the engines", 2139),
         ("a fix menu", 73),
-        ("shared machinery", 3730),
-        ("tests", 1394),
+        ("shared machinery", 3751),
+        ("tests", 1137),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
