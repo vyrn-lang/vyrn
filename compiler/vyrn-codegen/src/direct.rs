@@ -1997,6 +1997,33 @@ struct Fn_<'a, 'p> {
     rel_slots: HashMap<usize, RelSlot>,
     /// Registrations so far, which is what a [`RelSlot::seq`] counts.
     rel_seq: u32,
+    /// The rows that still name a frame slot, each with the frame top it was
+    /// registered at — the floor below which no statement may give a slot back.
+    ///
+    /// [`Frame::alloc`]'s rule reads "a slot is a statement's unless the
+    /// statement bound a name", and the body walker tested exactly that: the
+    /// scope's length. A NAME is not the only thing that outlives a statement.
+    /// A `for` over an unnamed iterable, an `if let` over a temporary and a
+    /// `match` over one each copy that value into a slot and register a release
+    /// row for it, and WHERE that row runs is the core's answer, not this
+    /// emitter's: for a `for` over an array literal the core says the
+    /// function's exit, because `declared::type_of` names no array literal's
+    /// type and `own` therefore places nothing at the loop's own end. The
+    /// statement bound no name, so the walker gave the slot back, the next
+    /// statement built its own temporary over it, and the two rows at the exit
+    /// released the second statement's value twice — a trap at address -16 in
+    /// `free`, on two `for` loops in one body.
+    ///
+    /// A row leaves this list when it is released on a FALL-THROUGH exit — a
+    /// block's or a construct's own — because the path that carries on is the
+    /// path that no longer holds it. A release at a `return`, a `?`, a `break`
+    /// or a `continue` is on a branch, and the fall-through still holds the
+    /// value, so such a row keeps its floor. Clearing on every release instead
+    /// would give the slot back on a path that still names it; keeping every
+    /// row to the end of the body instead summed a statement's temporaries
+    /// again, and 250 `print(match parseFloat64(..) { .. })` statements in one
+    /// `main` then wanted 10,048 bytes of a frame limited to 8,192.
+    rel_pending: Vec<(usize, u32)>,
     /// RFC-0101 M4: the release steps placed at every exit of this body, keyed
     /// by the node the exit is AT. Read, never derived.
     placed: HashMap<(ExitKind, usize), Vec<(usize, Option<Vec<String>>)>>,
@@ -2091,6 +2118,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         rel_seq: 0,
+        rel_pending: Vec::new(),
         placed: HashMap::new(),
         cursors: Vec::new(),
         region_depth: 0,
@@ -2219,6 +2247,7 @@ fn lower_body(
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         rel_seq: 0,
+        rel_pending: Vec::new(),
         // RFC-0101 M4: the order this body releases in, decided once in
         // `own::place_body` and read here.
         placed: cx
@@ -2314,7 +2343,7 @@ fn lower_body(
             let key = p as *const vyrn_frontend::ast::Param as usize;
             if cx_fn.drops.contains_key(&key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
-                    cx_fn.register_rel(key, place, r);
+                    cx_fn.register_rel(&b, key, place, r);
                 }
             }
         }
@@ -2855,15 +2884,19 @@ impl<'p> Fn_<'_, 'p> {
             // on `Frame::alloc`); one that did — a `let`, a refutable `let` —
             // keeps everything it took, binding and temporaries alike, because
             // the cheap test is the scope's length and not which slot is which.
+            //
+            // A NAME is not the only thing that outlives a statement:
+            // [`Fn_::rel_pending`] is the floor the release rows that still
+            // name a slot raise, and the reset stops there.
             let (frame, scope) = (b.mark(), self.scope.len());
             if let Some(n) = self.elem_field_store(m, b, &blk.stmts[k..])? {
                 k += n;
-                b.reset(frame);
+                b.reset(frame.max(self.rel_floor()));
                 continue;
             }
             self.stmt(m, b, &blk.stmts[k])?;
             if self.scope.len() == scope {
-                b.reset(frame);
+                b.reset(frame.max(self.rel_floor()));
             }
             k += 1;
         }
@@ -3089,6 +3122,14 @@ impl<'p> Fn_<'_, 'p> {
             ExitKind::Return | ExitKind::Try => self.cursors.clone(),
             _ => Vec::new(),
         };
+        // A FALL-THROUGH exit ends what the row holds on the path that carries
+        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
+        // A `return`, a `?`, a `break` or a `continue` releases on a BRANCH and
+        // leaves the fall-through holding the value, so the floor stands.
+        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
+            self.rel_pending
+                .retain(|(k, _)| !steps.iter().any(|(step, _)| step == k));
+        }
         let mut run: Vec<(Place, Rel)> = Vec::new();
         for (step, holes) in steps {
             let Some(r) = self.rel_slots.get(&step) else {
@@ -3120,11 +3161,29 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
+    /// The floor the rows that still name a frame slot hold — see
+    /// [`Fn_::rel_pending`].
+    fn rel_floor(&self) -> u32 {
+        self.rel_pending
+            .iter()
+            .map(|(_, at)| *at)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Say what one owned binding is released WITH. The placement already said
     /// where and in what order.
-    fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {
+    fn register_rel(&mut self, b: &Frame, key: usize, place: Place, rel: Rel) {
         let seq = self.rel_seq;
         self.rel_seq += 1;
+        // The row names this slot until the exit the core placed it at, which
+        // may be past the statement that made it. So the statement cannot give
+        // the slot back: [`Fn_::rel_pending`] states the floor once, here, for
+        // every construct that registers one.
+        if matches!(place, Place::Slot(_)) {
+            self.rel_pending.retain(|(k, _)| *k != key);
+            self.rel_pending.push((key, b.mark()));
+        }
         self.rel_slots.insert(key, RelSlot { place, rel, seq });
     }
 
@@ -4136,7 +4195,7 @@ impl<'p> Fn_<'_, 'p> {
                                 .filter(|r| matches!(r, Rel::Buffers(_))),
                         };
                         if let Some(r) = r {
-                            self.register_rel(s as *const Stmt as usize, place, r);
+                            self.register_rel(b, s as *const Stmt as usize, place, r);
                         }
                     }
                 }
@@ -4151,7 +4210,7 @@ impl<'p> Fn_<'_, 'p> {
                         {
                             *holes = h.clone();
                         }
-                        self.register_rel(s as *const Stmt as usize, place, r);
+                        self.register_rel(b, s as *const Stmt as usize, place, r);
                     }
                 }
             }
@@ -4586,7 +4645,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => return unsupported("a `for` over a Unit value", *line),
                         }
-                        self.register_rel(key, place, r);
+                        self.register_rel(b, key, place, r);
                         b.ins(&Instruction::LocalGet(src));
                     }
                 }
@@ -4640,7 +4699,7 @@ impl<'p> Fn_<'_, 'p> {
                         if let (Rel::Deep(_, holes), Some(h)) = (&mut r, self.cx.holes.get(&vkey)) {
                             *holes = h.clone();
                         }
-                        self.register_rel(vkey, place, r);
+                        self.register_rel(b, vkey, place, r);
                     }
                 }
 
@@ -12622,7 +12681,7 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
-                self.register_rel(key, Place::Slot(own), r);
+                self.register_rel(b, key, Place::Slot(own), r);
             }
         }
         // A block arm (RFC-0118) makes this a STATEMENT match: the merge
