@@ -1,16 +1,26 @@
 //! RFC-0101 M1: the lowered form, checked against the copies it will replace.
 //!
-//! Three engines derive the static type of every expression, and the parity
-//! suite proves only that the programs they emit behave the same. It cannot see
-//! a type. So "the two copies agree" has been an assumption for as long as there
-//! have been two copies, and this file is the first thing that turns it into a
-//! gate — before M3 deletes either one.
+//! Three engines derived the static type of every expression, and the parity
+//! suite proved only that the programs they emit behave the same. It could not
+//! see a type. So "the copies agree" was an assumption for as long as there were
+//! copies, and this file is the thing that turned it into a gate — before M3
+//! deleted them.
 //!
 //! RFC-0101 M1 asked for one assertion, at every expression both compiled
-//! backends type:
+//! backends typed:
 //!
 //!   `peek`'s answer  ==  the native backend's threaded `(String, Type)` answer
 //!                    ==  the type `vyrn-lower` recorded from the checker.
+//!
+//! **One engine is left, and the gate grew rather than shrank.** RFC-0125 §3 M4's
+//! fourth slice deleted the text-IR route, so the `Site::Native` column and the
+//! middle line above went with it. The corpus did the opposite: the native
+//! backend REFUSED 35 of the 208 examples, and a refusal was a `continue` here,
+//! so those programs were never compared at all. 138 examples became 173, and
+//! 1,026,227 backend answers are compared where 570,960 were. The one difference
+//! that surfaced is recorded on [`InstRule`]: RFC-0114 §25's leak-check teardown
+//! was the text-IR route's, and `vyrn-lower` was still queueing the releases it
+//! would have emitted.
 //!
 //! **Measured, that is false, and finding it false is what M1 was for.** Over
 //! 138 corpus programs and 570,960 typed expression answers, 22,283 differ from
@@ -38,8 +48,8 @@
 //! half removes rather than reconciles.
 //!
 //! It runs in-process rather than through `vyrn`, because the thing being
-//! compared never reaches a process boundary: both backends' answers come out of
-//! `vyrn_codegen::observe`, a sink that records what each emitter was about to
+//! compared never reaches a process boundary: the backend's answers come out of
+//! `vyrn_codegen::observe`, a sink that records what the emitter was about to
 //! return anyway.
 //!
 //! **M2c halved the residue this gate reports.** 9,505 of the answers above were
@@ -91,7 +101,7 @@
 //! when a block RUNS.
 //!
 //! **M2 added a second comparison over the same run: the instance LISTS.** Each
-//! backend runs its own monomorphization worklist and nothing outside a backend
+//! backend ran its own monomorphization worklist and nothing outside a backend
 //! could see either, so "the lowering builds what the backends build" was a
 //! claim with no gate. It is one now — set equality on `(callee, type
 //! arguments)`, resolved through every alias so one instance has one spelling —
@@ -377,10 +387,21 @@ struct Tally {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum InstRule {
     /// A `gen fn` (RFC-0021) runs in the compiler's interpreter at generation
-    /// time and is never called in a shipped binary, so neither backend emits a
+    /// time and is never called in a shipped binary, so the emitter emits no
     /// body for it. The lowering has one, because the program does.
     GenFn,
 }
+
+// `<teardown>` was a ROOT rather than a rule, and it is gone rather than
+// explained — RFC-0125 §3 M4's fourth slice. RFC-0114 §25's leak check dropped
+// every module-state binding after `main`, and `vyrn_lower` queued the generic
+// releases that teardown would reach so that "the lowering is the worklist"
+// covered it. The teardown was the text-IR route's alone; with the route gone
+// the root queued four bodies (`Owned__Slots__release<{ pos: Int64, src: Int64
+// }>`, `std/stream`'s module-state slab, in `membench`, `streamlazy`,
+// `streamops` and `streamunfold`) that no engine can emit. It surfaced here the
+// moment the corpus grew, which is the failure that file prefers, and the root
+// comes back with the teardown rather than before it.
 
 // `InstRule::ImplicitDispatch` was here and is RETIRED — RFC-0101 M5. It named
 // the flattened protocol-impl method the SOURCE never calls: the `release` a
@@ -716,21 +737,10 @@ fn gate() {
         }
 
         observe::start();
-        let native = vyrn_codegen::emit(&program);
-        let mut rows = observe::take();
-        let mut insts = observe::take_insts();
-        let mut crossings = observe::take_crossings();
-        if native.is_err() {
-            // A program the native backend refuses is not a program this gate
-            // can compare; the wasm column would be answering about a different
-            // walk. Parity already owns that failure.
-            continue;
-        }
-        observe::start();
         let wasm = vyrn_codegen::direct::compile(&program);
-        rows.extend(observe::take());
-        insts.extend(observe::take_insts());
-        crossings.extend(observe::take_crossings());
+        let rows = observe::take();
+        let insts = observe::take_insts();
+        let crossings = observe::take_crossings();
         if wasm.is_err() {
             continue;
         }
@@ -1262,15 +1272,6 @@ fn coercion_census() -> Vec<CoercionSite> {
             54,
         ),
         site(
-            "vyrn-codegen/src/lib.rs",
-            "fn coerce(&mut self, op: String, from: &Type, to: &Type) -> Result<(String, Type), String> {",
-            "native",
-            "the IR for the rung the plan placed",
-            true,
-            false,
-            118,
-        ),
-        site(
             "vyrn-codegen/src/direct.rs",
             "fn coerce(",
             "wasm",
@@ -1278,15 +1279,6 @@ fn coercion_census() -> Vec<CoercionSite> {
             true,
             false,
             192,
-        ),
-        site(
-            "vyrn-codegen/src/lib.rs",
-            "fn coerce_flow(",
-            "native",
-            "whether RFC-0020's containment proof skips the check",
-            false,
-            false,
-            15,
         ),
         site(
             "vyrn-frontend/src/checker.rs",
@@ -1386,18 +1378,20 @@ fn the_coercion_census_is_what_the_rfc_records() {
         }
     }
     // 562 until RFC-0125 §3 M5's sixteenth slice, which deleted `interp.rs` and
-    // the four rows it carried — 252 of those lines. What is left is the two
-    // emitters, which STATE nothing: they write the rung the plan placed.
+    // the four rows it carried — 252 of those lines; 310 until §3 M4's fourth
+    // slice deleted the text-IR route and the 118-line ladder it carried. What
+    // is left is ONE emitter, which STATES nothing: it writes the rung the plan
+    // placed.
     assert_eq!(
-        ladder, 310,
-        "the rung ladder is {ladder} code lines and RFC-0125 §3 M6 records 310"
+        ladder, 192,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M4 records 192"
     );
     // The separate statements of the rung rule, which is what the milestone
     // moves: an engine that ASKS another site's statement is not one. It was
     // four — the two emitters, the interpreter, and a plan nobody asked; the
     // sixth slice made it two, and RFC-0125 §3 M5's sixteenth made it ONE, by
-    // deleting the interpreter. The plan is what is left, and both emitters ask
-    // it.
+    // deleting the interpreter. The plan is what is left, and the one emitter
+    // asks it.
     let statements: std::collections::BTreeSet<&str> = census
         .iter()
         .filter(|s| s.states_rung)

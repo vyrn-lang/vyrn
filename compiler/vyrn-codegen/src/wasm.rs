@@ -34,10 +34,9 @@
 //! **`i1` does not exist in wasm.** LLVM widens `i1` to `i32` at the C boundary
 //! silently — which is how `declare ptr @__vyrn_vj_bool(i1)` has been calling
 //! `VJ* __vyrn_vj_bool(int)` correctly all along. A direct emitter gets no such
-//! favour, so [`abi`] widens, and `tests/imports_vs_shim.rs` checks the widened
-//! signatures against the C the shim actually defines.
+//! favour, so [`abi`] widens exactly once, in one place.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 pub use wasm_encoder::{BlockType, Instruction, MemArg, ValType};
 use wasm_encoder::{
     CodeSection, ConstExpr, CustomSection, DataSection, EntityType, ExportKind, ExportSection,
@@ -74,10 +73,11 @@ pub const STACK_TOP: u32 = STACK_BYTES;
 /// here, so the stack below can only reach them by underflowing past 0 — which
 /// traps.
 pub const DATA_BASE: u32 = STACK_BYTES;
-/// Where the RFC-0076 shim's data and heap begin, and where its stack starts
-/// growing back down. The one address the two modules have to agree about, so it
-/// is written down once: [`crate::toolchain::shim_wasm`] passes it to
-/// `--global-base`/`-z stack-size`, and `STATICS_LIMIT` is derived from it.
+/// The ceiling this module's own data may never reach. It was the address the
+/// RFC-0076 shim's data and heap began at, back when a build linked two modules
+/// and both had to agree about it; the shim went with the text-IR route
+/// (RFC-0125 §3 M4), and what the number still buys is the headroom
+/// [`STATICS_LIMIT`] is derived from.
 ///
 /// Twice what it was, because the stack below it grew: half of this is where the
 /// statics must end, and the room between [`DATA_BASE`] and that line is the same
@@ -85,9 +85,9 @@ pub const DATA_BASE: u32 = STACK_BYTES;
 pub const SHIM_BASE: u32 = 32 * 1024 * 1024;
 
 /// Everything this module statically occupies must end below here: half of
-/// [`SHIM_BASE`], the gap that keeps the shim's downward-growing frames from ever
-/// reaching our data. `compile_split` checks the same number on the linked bytes
-/// today; a direct emitter knows it before it writes it.
+/// [`SHIM_BASE`], which leaves the same ~8 MB of headroom above the statics that
+/// the second module used to grow its frames down through. The emitter knows the
+/// line before it writes a byte.
 pub const STATICS_LIMIT: u32 = SHIM_BASE / 2;
 
 /// What `std/runtime` occupies at `heapBase()` before its first allocated block:
@@ -137,53 +137,11 @@ pub fn abi(ll: &str) -> Option<ValType> {
 
 /// One boundary signature: the wasm type of each parameter and of the result,
 /// `None` where the C says `void`.
-pub type Sig = (Vec<Option<ValType>>, Option<ValType>);
-
-/// Every function the textual emitter `declare`s, as the wasm signature it
-/// crosses as — `None` for the three variadic ones, which wasm cannot express at
-/// all (RFC-0077 M3).
-///
-/// Read off the `declare` lines rather than written down, because those lines are
-/// the side `tests/imports_vs_shim.rs` proves agrees with the C the shim defines.
-/// A second list here would be a second chance to get a signature wrong, and a
-/// wrong import signature is not a link error — it is a misread argument. The
-/// boundary declarations are unconditional, which is what makes one trivial
-/// program a complete census of them.
-pub fn boundary() -> &'static BTreeMap<String, Option<Sig>> {
-    static ONCE: std::sync::OnceLock<BTreeMap<String, Option<Sig>>> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| {
-        let toks = vyrn_frontend::lexer::lex("fn main() -> Int64 { return 0 }").expect("lex");
-        let program = vyrn_frontend::parser::parse(toks).expect("parse");
-        let ir = crate::emit(&program).expect("the boundary declarations are unconditional");
-        let mut out = BTreeMap::new();
-        for line in ir.lines() {
-            let Some(rest) = line.strip_prefix("declare ") else {
-                continue;
-            };
-            let (ret, rest) = rest.split_once(" @").expect("declare RET @NAME(..)");
-            let (name, rest) = rest.split_once('(').expect("declare RET @NAME(..)");
-            // `llvm.memcpy` is an intrinsic, not an import: it becomes `memory.copy`.
-            if name.starts_with("llvm.") {
-                continue;
-            }
-            let args = rest.rsplit_once(')').expect("declare RET @NAME(..)").0;
-            let sig = if args.contains("...") {
-                None
-            } else {
-                Some((split_args(args).iter().map(|a| abi(a)).collect(), abi(ret)))
-            };
-            out.insert(name.to_string(), sig);
-        }
-        out
-    })
-}
-
 /// One `RET @NAME(ARGS)` declaration as the wasm signature it crosses as.
 ///
-/// The same three-line parse [`boundary`] does over the emitted `declare` lines,
-/// exposed for the lists that are declarations in Rust rather than lines in IR —
-/// `CODE_IMPORTS` and `GEN_READ_IMPORT` (RFC-0076 M7). The direct backend imports
-/// those by name, and a signature respelled in wasm types beside the LLVM one
+/// The lists it reads are declarations in Rust rather than lines in IR —
+/// `CODE_IMPORTS` and `GEN_READ_IMPORT` (RFC-0076 M7). The emitter imports those
+/// by name, and a signature respelled in wasm types beside the LLVM spelling
 /// would be a second chance to get a widening wrong; here `i1`/`i8`/`ptr` all go
 /// through [`abi`] exactly once.
 pub fn declare_sig(decl: &str) -> (Vec<ValType>, Vec<ValType>) {
@@ -1140,58 +1098,6 @@ mod tests {
         assert!(
             bytes.windows(6).any(|w| w == b"memory"),
             "an imported memory must still be exported, or WASI cannot read an iovec"
-        );
-    }
-
-    /// The census is the emitter's own `declare` lines, so a signature here
-    /// cannot disagree with the one the audit checks against the C.
-    #[test]
-    fn the_boundary_census_is_the_declare_lines() {
-        let b = boundary();
-        // The census used to lead with `__vyrn_vj_bool(i1)` — M0's one widening,
-        // an LLVM `i1` crossing as an `i32`. RFC-0078 M2b retired the JSON DOM
-        // BUILDERS along with the shim's serializer, and that was the boundary's
-        // only sub-i32 argument, so the widening is now a fact about `abi`
-        // (asserted in the next test) with no live crossing to point at. M3 took
-        // the rest of the DOM, so the census has no JSON row at all — pinned as an
-        // absence, since a returning row would mean a second reader appeared.
-        assert!(
-            !b.keys().any(|k| k.starts_with("__vyrn_vj_")),
-            "the DOM is gone"
-        );
-        // A `ptr -> i64` crossing, which is where a pointer's widening to `i32` and
-        // a 64-bit return meet. This used to be `__vyrn_charcount`; RFC-0078's census
-        // called that the one builtin with no justification for being one and it is
-        // `std/text`'s `charCountV` now, so the witness is `__vyrn_strlen` — the same
-        // signature, and one that CANNOT move, because `byteLength` is a view.
-        assert_eq!(
-            b["__vyrn_strlen"],
-            Some((vec![Some(ValType::I32)], Some(ValType::I64)))
-        );
-        assert!(
-            !b.contains_key("__vyrn_charcount"),
-            "`charCount` is Vyrn, not a crossing"
-        );
-        assert_eq!(
-            b["__vyrn_malloc"],
-            Some((vec![Some(ValType::I64)], Some(ValType::I32)))
-        );
-        assert_eq!(b["__vyrn_now_millis"], Some((vec![], Some(ValType::I64))));
-        // RFC-0114 SS25: every free goes through the shim's one choke point,
-        // so the audit can see it. `free` itself no longer crosses.
-        assert_eq!(
-            b["__vyrn_free"],
-            Some((vec![Some(ValType::I32)], None)),
-            "void is None"
-        );
-        assert!(
-            !b.contains_key("free"),
-            "`free` is the shim's, not a crossing"
-        );
-        assert_eq!(b["printf"], None, "variadic has no wasm signature at all");
-        assert!(
-            !b.contains_key("llvm.memcpy.p0.p0.i64"),
-            "an intrinsic is not an import"
         );
     }
 

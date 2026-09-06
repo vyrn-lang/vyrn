@@ -1803,164 +1803,10 @@ fn the_census_shapes_hold_their_measured_baseline() {
 }
 
 // ---------------------------------------------------------------------------
-// RFC-0095 M1 / census §10 — the native half, which is where the handle lives.
-// ---------------------------------------------------------------------------
-
-// How many handles a live process holds, and how much memory one ever held. The
-// two Win32 calls this file makes, because each names the resource its census
-// row is about — §10 is handles, and C2.3 is bytes.
-//
-// `K32GetProcessMemoryInfo` answers for a process that has already exited, as
-// long as the handle is still open: `Child` holds it until it is dropped. So the
-// String row needs no park and no polling — run it, wait, read the peak.
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetProcessHandleCount(process: *mut std::ffi::c_void, count: *mut u32) -> i32;
-    fn K32GetProcessMemoryInfo(
-        process: *mut std::ffi::c_void,
-        counters: *mut ProcessMemoryCounters,
-        cb: u32,
-    ) -> i32;
-}
-
-/// `PROCESS_MEMORY_COUNTERS`, in declaration order. Only `peak_working_set` is
-/// read; the rest are here because the struct's size is the argument.
-#[cfg(windows)]
-#[repr(C)]
-#[derive(Default)]
-struct ProcessMemoryCounters {
-    cb: u32,
-    page_fault_count: u32,
-    peak_working_set: usize,
-    working_set: usize,
-    quota_peak_paged_pool: usize,
-    quota_paged_pool: usize,
-    quota_peak_nonpaged_pool: usize,
-    quota_nonpaged_pool: usize,
-    pagefile: usize,
-    peak_pagefile: usize,
-}
-
-/// One program that parks TWICE: after `first` spawns, and again once `total`
-/// have run. Both handle counts are then read from ONE process, so everything
-/// the count holds that is not a task — the standard streams, the loader's, the
-/// machine's virus scanner reading a freshly built image — is the same number
-/// on both sides of the comparison and cancels out of it. Two processes cannot
-/// promise that: 30 launches of this very program, sampled 40 times each,
-/// answered a rock-steady 68 for a warm image and 74 for a cold one — six
-/// handles of difference that has nothing to do with a task.
-///
-/// Each park announces itself by WRITING A FILE rather than by printing: a
-/// piped stdout is block-buffered, so a line printed before the park does not
-/// arrive until the process ends, and waiting for it would deadlock against the
-/// process waiting for stdin. A line on stdin releases each park.
-#[cfg(windows)]
-fn spawn_loop_source(first: usize, total: usize, park_a: &str, park_b: &str) -> String {
-    format!(
-        r#"fn work(n: Int64) -> Int64 {{
-    return n + 1
-}}
-
-fn park(path: String, acc: Int64) -> Int64 {{
-    let parked = match writeFile(path, "spawned \{{acc}}") {{
-        Ok(b) => b,
-        Err(e) => false,
-    }}
-    if parked {{
-        if let Some(line) = readLine() {{
-            print(line)
-        }}
-    }}
-    return 0
-}}
-
-fn main() -> Int64 {{
-    let mut i = 0
-    let mut acc = 0
-    while i < {first} {{
-        let t = spawn work(i)
-        acc = acc + t.join()
-        i = i + 1
-    }}
-    acc = acc + park("{park_a}", acc)
-    while i < {total} {{
-        let t = spawn work(i)
-        acc = acc + t.join()
-        i = i + 1
-    }}
-    acc = acc + park("{park_b}", acc)
-    return 0
-}}
-"#
-    )
-}
-
-/// The handles a parked process holds STEADILY.
-///
-/// A transient only ever ADDS a handle — the marker file the runtime has
-/// created and not yet closed, a worker thread the last `join` released that
-/// the operating system has not finished tearing down — so the smallest count
-/// over a short window is the steady state, and the poll that spots the marker
-/// cannot race the write that made it.
-#[cfg(windows)]
-fn steady_handle_count(child: &std::process::Child) -> u32 {
-    use std::os::windows::io::AsRawHandle;
-    (0..10)
-        .map(|k| {
-            if k > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let mut n: u32 = 0;
-            let ok = unsafe { GetProcessHandleCount(child.as_raw_handle(), &mut n) };
-            assert_ne!(ok, 0, "GetProcessHandleCount failed");
-            n
-        })
-        .min()
-        .expect("ten samples")
-}
-
-// ---------------------------------------------------------------------------
 // Audit C2.3 — the native half again, and for the same reason: the wasm free
 // discriminates on the ADDRESS, so this row is steady there whatever the header
 // says, and only the textual backend reads a capacity to answer the question.
 // ---------------------------------------------------------------------------
-
-#[cfg(windows)]
-fn empty_string_loop_source(turns: usize, len: usize) -> String {
-    let bytes = "y".repeat(len);
-    format!(
-        r#"fn blank() -> String {{
-    return "{bytes}"
-}}
-
-fn main() -> Int64 {{
-    let mut i = 0
-    while i < {turns} {{
-        let a = blank()
-        let b = blank()
-        let c = a + b
-        i = i + 1
-    }}
-    return 0
-}}
-"#
-    )
-}
-
-/// The peak working set a finished process ever held.
-#[cfg(windows)]
-fn peak_bytes(child: &std::process::Child) -> usize {
-    use std::os::windows::io::AsRawHandle;
-    let size = std::mem::size_of::<ProcessMemoryCounters>() as u32;
-    let mut c = ProcessMemoryCounters {
-        cb: size,
-        ..Default::default()
-    };
-    let ok = unsafe { K32GetProcessMemoryInfo(child.as_raw_handle(), &mut c, size) };
-    assert_ne!(ok, 0, "K32GetProcessMemoryInfo failed");
-    c.peak_working_set
-}
 
 // ---------------------------------------------------------------------------
 // Census §14 at a `match` — the textual backend's half of the `matchTemporary`
@@ -1968,71 +1814,12 @@ fn peak_bytes(child: &std::process::Child) -> usize {
 // their own release, and one of them being right proves nothing about the other.
 // ---------------------------------------------------------------------------
 
-/// A loop whose body is a statement-position `match` over a heap temporary, or
-/// the identical `if let` — the control, because the `if let` has had the row
-/// since Phase 10a and the `match` had none.
-#[cfg(windows)]
-fn match_loop_source(turns: usize, if_let: bool) -> String {
-    let body = if if_let {
-        "        if let Ok(s) = makeResult(i) {\n            c = c + Int64(s.byteLength)\n        }\n"
-    } else {
-        "        let d = match makeResult(i) {\n            Ok(s) => s.byteLength,\n            \
-         Err(e) => e.byteLength,\n        }\n        c = c + Int64(d)\n"
-    };
-    format!(
-        r#"fn makeResult(n: Int64) -> Result<String, String> {{
-    if n % 2 == 0 {{
-        return Ok("ok-\{{n}}")
-    }}
-    return Err("er-\{{n}}")
-}}
-
-fn main() -> Int64 {{
-    let mut i = 0
-    let mut c = 0
-    while i < {turns} {{
-{body}        i = i + 1
-    }}
-    print(c)
-    return 0
-}}
-"#
-    )
-}
-
 // ---------------------------------------------------------------------------
 // RFC-0028 — a map entry the map gives up, on the textual backend. The wasm
 // half is two rows in the table above; this is the same two defects measured
 // where `mapRepeatKey` cannot reach, because the two backends emit their own
 // release and one of them being right proves nothing about the other.
 // ---------------------------------------------------------------------------
-
-/// A loop that replaces the value under ONE key, and optionally removes the
-/// entry each turn. The key is built rather than written (`"k" + "ey"` is a heap
-/// String; a literal lives in the data segment and is never freed), so the entry
-/// this map gives up owns two buffers, not one.
-#[cfg(windows)]
-fn map_churn_source(turns: usize, remove: bool) -> String {
-    let pad = "z".repeat(200);
-    let rm = if remove {
-        "        m.remove(\"key\")\n"
-    } else {
-        ""
-    };
-    format!(
-        r#"fn main() -> Int64 {{
-    let mut m: Map<String, String> = [:]
-    let mut i = 0
-    while i < {turns} {{
-        m["k" + "ey"] = "{pad}\{{i}}"
-{rm}        i = i + 1
-    }}
-    print(m.length)
-    return 0
-}}
-"#
-    )
-}
 
 /// `a ?? b` is a `match` the parser spells, so the reporter had no recorded
 /// type for its result and called a String "unknown … owns no heap"

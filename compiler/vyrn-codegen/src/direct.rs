@@ -10078,8 +10078,8 @@ impl<'p> Fn_<'_, 'p> {
     /// corpus and concluded "there IS a function table, and it is `spawn`". All
     /// nine are the *textual* emitter's `call @__vyrn_spawn(ptr @__vyrn_task_*,
     /// ptr)`, and the half of that finding which is about wasm is wrong. Read what
-    /// the shim does with the pointer on this target (`toolchain::RUNTIME_SHIM`,
-    /// `#if defined(__wasi__)`): wasm has no threads, so `__vyrn_spawn` calls
+    /// the retired C shim did with the pointer on this target: wasm has no
+    /// threads, so its `__vyrn_spawn` called
     /// `thunk(frame)` **inline** and returns a `VTask` holding the frame. The
     /// pointer is formed and consumed in one C statement, and it exists only
     /// because the LLVM path routes an eager call through a C function that cannot

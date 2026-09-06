@@ -276,9 +276,12 @@ fn no_program_a_test_writes_is_accepted_without_the_kernel_and_refused_with_it()
     );
     // A lift that stops finding programs must fail rather than pass quietly.
     // The floor is under the count this ran at, not a target: 169 literals
-    // across 71 test sources reassemble into something the compiler accepts.
+    // across 71 test sources reassembled into something the compiler accepts.
+    // It is 142 across 72 sources since RFC-0125 §3 M4's fourth slice, which
+    // deleted `parity.rs`, `residue.rs` and the `_natively` half of `memory.rs`
+    // — the sources, not the lift, so the floor moves with them.
     assert!(
-        programs >= 150,
+        programs >= 130,
         "the lift found only {programs} runnable programs across {} test sources — \
          it stopped reassembling them",
         files.len()

@@ -2059,21 +2059,24 @@ fn print_toolchain(start: &Path) {
         pin("wasi-builtins").as_deref(),
         "$WASI_BUILTINS, beside the sysroot",
     ));
-    // The wasm2c route's two tools (RFC-0125 §2.5): discovered like clang, so
-    // wasm2c's row is a probe too, and simde's is a path with no version to ask.
+    // The native route's two tools (RFC-0125 §2.5). Both are pinned, under the
+    // names the lock file uses — `wabt` ships the `wasm2c` binary — so both rows
+    // read their version off the pin. wasm2c's is the exception the other way:
+    // the binary answers `--version`, and that probe runs whether or not a pin
+    // named it, so its row prints what the binary said.
     rows.push(match vyrn_codegen::toolchain::wasm2c_from(start) {
         Ok(Some(t)) => ("wasm2c".into(), show_path(&t.exe), t.version, t.why.into()),
         other => tool_row(
             "wasm2c",
             other.map(|o| o.map(|t| (t.exe, t.why))),
-            None,
+            pin("wabt").as_deref(),
             "$VYRN_WASM2C, tools/",
         ),
     });
     rows.push(tool_row(
         "simde",
         Ok(vyrn_codegen::toolchain::simde_from(start)),
-        None,
+        pin("simde").as_deref(),
         "$VYRN_SIMDE, tools/",
     ));
 

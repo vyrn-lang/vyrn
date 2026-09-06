@@ -135,11 +135,11 @@ fn c_program() -> String {
         // `c_decl` produces need no names of their own.
         src.push_str(&format!("typedef {};\n", c_decl(ll, &format!("T{i}"))));
     }
-    // The one struct that is not a transcription: the shim's own `VMap`, copied
-    // verbatim from RUNTIME_SHIM. `Map<String, V>` is the single aggregate whose
-    // bytes BOTH halves of a build touch — the emitted code builds it, the shim
-    // grows it through a pointer — so its layout is not a convention this crate
-    // may choose, it is one it must match.
+    // The one struct that is not a transcription: the `VMap` the runtime grows
+    // through a pointer. `Map<String, V>` is the single aggregate whose bytes two
+    // separate compilations touch — the emitted code builds it, the runtime grows
+    // it — so its layout is not a convention this crate may choose, it is one it
+    // must match.
     src.push_str("typedef struct { char** keys; char* vals; long long len, cap; } VMap;\n");
     src.push_str("int main(void) {\n");
     for (i, (name, ll)) in SHAPES.iter().enumerate() {
@@ -243,7 +243,7 @@ fn clang_agrees_with_the_layout_engine_on_wasm32() {
 
     let mut disagreements = Vec::new();
     let mut checked = 0usize;
-    // The shim's `VMap` rides along with the transcribed shapes: it is checked
+    // `VMap` rides along with the transcribed shapes: it is checked
     // against what `llt` gives a `Map<String, V>`, which is the agreement that
     // is not this crate's to choose.
     let cases = SHAPES

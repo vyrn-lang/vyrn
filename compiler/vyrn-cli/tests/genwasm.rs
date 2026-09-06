@@ -316,8 +316,8 @@ fn reflection_outside_a_generator_is_still_the_same_error() {
 /// build it.
 ///
 /// It was `list_dir_is_refused_natively_and_built_for_wasm`: the textual route
-/// had no lowering and said so from `vyrn_codegen::LIST_DIR_NO_LOWERING`. The
-/// route went and took the refusal with it, which is one example off
+/// had no lowering and said so in a constant of its own. The route went and took
+/// both the refusal and the constant with it, which is one example off
 /// `NATIVE_UNSUPPORTED` and onto every gate the rest of the corpus is on.
 #[test]
 fn list_dir_builds_for_both_targets() {

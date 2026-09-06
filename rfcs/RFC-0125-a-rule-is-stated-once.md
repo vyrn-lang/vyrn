@@ -9448,6 +9448,128 @@ ran one last time on the flipped route and read 40 of 41 — the one failure was
 `leak_check_is_two_sided`, the residue instrument again, and it is deleted with
 the rest of the shim's readers rather than left red.
 
+#### One emitter: the text-IR route is deleted (2026-09-07)
+
+The route is gone from the tree. `vyrn-codegen/src/lib.rs` was 19,179 lines and
+is 2,465: `pub fn emit`, `struct Gen`, both of its `impl` blocks, and the 42
+private items nothing reached once they went — the string runtime, the region
+runtime, the stream runtime, the regex runtime, the encoding table, the symbol
+manglers, the static-string pool, the higher-order call machinery, the drop-slot
+and loop-context types. What is left in that file is what RFC-0101 put there for
+BOTH emitters and the direct one still asks: `coerce_plan` and `Rung`, `layout`,
+`llt_of`, `observe`, `check_instantiations`, `solve_with_expected`, the trap and
+I/O wordings re-exported from `vyrn-frontend`, and the builtin declaration
+tables.
+
+**The C shim went with it.** `RUNTIME_SHIM_TEMPLATE` (1,086 lines of C),
+`runtime_shim`, `extern_trap_stubs`, `shim_key`, `shim_key_sysroot_component`,
+`shim_key_clang_component`, `shim_wasm` and `shim_cache_dir` are deleted from
+`toolchain.rs`, which was 1,837 lines and is 702. It had been dead in production
+since RFC-0076 M7 — the generator host stopped linking two modules — and the
+flip took its last caller. `wasi_host.c` is what a native build links now, and
+`layout_vs_clang` still compares the layout engine against clang, `VMap`
+included, because that agreement is between the emitter and `std/runtime` rather
+than between two compilations of C.
+
+**Every suite that tested the route rather than the language.** `parity.rs`
+(4,621 lines), `residue.rs`, `shim_link.rs` and `imports_vs_shim.rs` are
+deleted; `common/mod.rs` loses `native_run` and `NATIVE_UNSUPPORTED`;
+`memory.rs` loses the Win32 handle and peak-bytes probes with the four
+`_natively` tests they served; `wasm.rs` loses `the_boundary_census_is_the_declare_lines`,
+which parsed the emitter's own `declare` lines. `lib.rs`'s own unit tests fell
+from 131 to **5**: 126 of them called `emit`, and the five that remain pin the
+layout engine against `llt`, every shape it was verified on, and RFC-0086's
+unsolvable parameter positions. The crate's `--lib` run is 42 tests.
+
+**Four censuses moved, and each moved by regenerating rather than by hand.**
+
+| census | what moved | why |
+| --- | --- | --- |
+| coercion (`tests/lowered.rs`, §3 M6's table) | six rows to three; the rung ladder 310 → **192** code lines | the two `native` rows were `Gen::coerce` (118 lines) and `Gen::coerce_flow` (15). The rung rule is still STATED once — by the plan — and now exactly one emitter asks it |
+| form (`tests/forms.rs`, RFC-0127 §3.1/§3.2) | the `native` column is `shared`; 1,590 → **1,432** mentions in eight files, 340 → **289** in seven | the column's file is `vyrn-codegen/src/lib.rs`, which was the emitter AND the shared lowering. The file stayed; the column is renamed to what is left in it rather than deleted, because the count is not zero |
+| surface (`tests/surface.rs`, RFC-0126 §3) | the same rename; 2,110 → **1,611** mentions in six files | same file, same reason. 499 of the surface's cost was the text-IR emitter's `match` on `ast::Type` |
+| builtin (`vyrn-frontend/tests/primitives.rs`) | four scanned regions to three | `the_backends_dispatch_on_nothing_the_census_omits` scanned `Gen::gen_call_inner`'s chain as its fourth region. Every name the remaining three dispatch on is censused |
+
+The wasm manifest did not move: `VYRN_WASM_MANIFEST=check` is green with no row
+rewritten, which is the assertion that this slice deleted an emitter and touched
+no emitted byte.
+
+**The gate found a real difference the moment the corpus grew.** `lowered.rs`
+skipped any program the text-IR backend refused, and it refused 35 of the 208
+examples; with the route gone, 138 compared programs became 173 and 570,960
+compared answers became 1,026,227. Four of the newly compared programs
+(`membench`, `streamlazy`, `streamops`, `streamunfold`) reported an instance the
+lowering built and no engine emits: `Owned__Slots__release<{ pos: Int64, src:
+Int64 }>`, `std/stream`'s module-state slab. The cause is `vyrn-lower`'s
+`<teardown>` root, which modeled RFC-0114 §25's leak check dropping every
+module-state binding after `main`. That teardown was the text-IR route's, and it
+was retired with the residue ratchet in the previous slice, so the root queued
+bodies nothing could emit. The root is deleted; RFC-0114 §25's restoration
+design brings it back with the teardown, not before it.
+
+`testsweep`'s floor moved 150 → 130 for the same kind of reason: the sweep lifts
+programs out of `vyrn-cli/tests/*.rs`, and deleting `parity.rs`, `residue.rs`
+and half of `memory.rs` took 27 of them with it. 142 across 72 sources today.
+
+**Line count, the whole track.** Rust under `compiler/` outside `target/`:
+**195,566 → 171,432**, −24,134 over four slices, of which −23,669 is this one. C
+the same way: 574 → **584**, the ten lines being `wasi_host.c`'s extern-stub
+marker from the second slice. The route's C is not in the repository at all —
+wasm2c writes it at build time.
+
+| file | net |
+| --- | --- |
+| `vyrn-codegen/src/lib.rs` | −16,714 |
+| `vyrn-cli/tests/parity.rs` | −4,704 (deleted) |
+| `vyrn-codegen/src/toolchain.rs` | −1,135 |
+| `vyrn-cli/tests/memory.rs` | −582 |
+| `vyrn-codegen/tests/shim_link.rs` | −344 (deleted) |
+| `vyrn-codegen/tests/imports_vs_shim.rs` | −269 (deleted) |
+| `vyrn-cli/tests/residue.rs` | −163 (deleted) |
+| `vyrn-cli/src/main.rs` | −122 |
+| `vyrn-codegen/src/wasm.rs` | −94 |
+| `vyrn-cli/tests/simd.rs` | −89 |
+| `vyrn-cli/tests/fallible.rs` | −44 |
+| `vyrn-lower/src/lib.rs` | −27 |
+| `vyrn-cli/tests/route.rs` | +65 |
+| `vyrn-frontend/src/toolpin.rs` | +52 |
+| `vyrn-codegen/src/direct.rs` | +47 (`blackBox`'s barrier) |
+| `vyrn-codegen/src/wasi_host.c` | +10 |
+
+**What is left for a later track, named rather than implied.**
+
+- The exit-residue ratchet. The design is in the previous record; it costs every
+  recorded wasm hash and a load/add/store per block, so it is its own slice.
+- `vyrn-lower`'s `<teardown>` root comes back with it.
+- wabt's linux and macos pins. `tool_platforms("wabt")` is `["x86_64-windows"]`
+  and `tool_url` refuses the rest by name, because an asset nobody has hashed is
+  not a pin. CI's `route` and `bench` jobs are red until one `vyrn update wabt`
+  on a linux machine writes that row.
+- RFC-0127 §3.1.1's illustrative "all nine" table quotes 31/32/51 against a
+  census that read 28/29/45 before this slice. It was already drifting; it is
+  prose beside a generated table and neither the form census nor the verdict
+  test reads it. Regenerating it means deciding what the floor sentence should
+  say now, which is RFC-0127's to decide.
+- `direct.rs`'s `Rt::next_is` and the unused `slot` closure in `Rt::slots` are
+  dead and were dead at `f094ee20`. Untouched: they belong to the emitter this
+  track keeps.
+
+Gate, in the brief's order: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (75 suites, all
+green); the ignored corpus suites `kernel` (166 s), `coretables` (131 s),
+`typed` (331 s), `effects` (354 s), `fixtures` (96 s) and `testsweep` (98 s);
+`cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (6 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**175 checked, 33
+skipped, 0 failed**, plus the extern refusal, 359 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (no byte moved);
+`--release --test genwasm -- --ignored`; `vyrn doc --std -o ../docs/api --verify`
+(41 files, up to date); the site export (31 s, 82 routes and 14 assets) and
+`vyrn test` per site file (**189 test blocks**). `residue -- --ignored` and
+`parity -- --ignored` are not in the list because neither suite exists.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

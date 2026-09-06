@@ -442,7 +442,7 @@ fn dispatched(region: &str) -> BTreeSet<&str> {
         seg.split('"').skip(1).step_by(2).filter(|n| !n.is_empty())
     }
     let mut out = BTreeSet::new();
-    // `name == "x"` — the textual backend's chain.
+    // `name == "x"` — a guard above the table.
     for (i, m) in region.match_indices("name == \"") {
         out.extend(quoted(&region[i + m.len() - 1..]).next());
     }
@@ -486,17 +486,18 @@ fn dispatched(region: &str) -> BTreeSet<&str> {
 /// later slice would scan — `direct.rs`'s own `match name {` in the
 /// call-emission path, with the guards above it. This is that scan, and two
 /// regions the anchor did not name: the builtins that exist only while a
-/// generator runs, and the TEXTUAL backend, which no census ever read. Four
-/// regions, one census, and an emitter agrees with it or the suite fails.
+/// generator runs, and the three whose lowering is a synthesized Vyrn entry. A
+/// fourth region was the TEXTUAL backend's chain, which no census ever read, and
+/// it went with the route (RFC-0125 §3 M4). Three regions, one census, and the
+/// emitter agrees with it or the suite fails.
 ///
 /// There is no list of permitted exceptions, and that is a finding rather than
-/// a convenience: all 97 names the four regions dispatch on are censused today.
+/// a convenience: every name the three regions dispatch on is censused today.
 /// One name the scan cannot see, and the forward direction already aliases it:
 /// `@panicAt` is spelled `ast::PANIC_AT`, the constant rather than the literal.
 #[test]
 fn the_backends_dispatch_on_nothing_the_census_omits() {
     let direct = include_str!("../../vyrn-codegen/src/direct.rs");
-    let textual = include_str!("../../vyrn-codegen/src/lib.rs");
     // Located by content, so an emitter that is reorganised fails here loudly
     // rather than scanning nothing and passing.
     let cut = |src: &'static str, from: &str, to: &str| -> &'static str {
@@ -516,8 +517,6 @@ fn the_backends_dispatch_on_nothing_the_census_omits() {
         // and the three whose lowering is a synthesized Vyrn entry (M3b).
         cut(direct, "    fn gen_builtin(", "\n    fn "),
         cut(direct, "    fn gen_entry(", "\n    fn "),
-        // The textual backend's own chain.
-        cut(textual, "    fn gen_call_inner(", "\n    fn gen_spawn("),
     ];
     let censused: BTreeSet<&str> = CENSUS.iter().map(|(n, ..)| *n).collect();
     let uncensused: BTreeSet<&str> = regions

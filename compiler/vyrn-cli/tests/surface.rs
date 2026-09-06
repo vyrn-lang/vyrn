@@ -39,9 +39,14 @@ use std::path::{Path, PathBuf};
 /// number in the RFC's cost table moved with it — which is what a census is for:
 /// the sentence "the surface costs this much" is smaller by one engine, and the
 /// table says by how much.
+///
+/// `shared` was `native` for the same reason. `vyrn-codegen/src/lib.rs` was the
+/// text-IR emitter AND the lowering both emitters call; RFC-0125 §3 M4's fourth
+/// slice deleted the emitter and left the lowering, so the column measures the
+/// shared statement now and its numbers fell with the route.
 const COLUMNS: &[(&str, &str)] = &[
     ("checker", "vyrn-frontend/src/checker.rs"),
-    ("native", "vyrn-codegen/src/lib.rs"),
+    ("shared", "vyrn-codegen/src/lib.rs"),
     ("wasm", "vyrn-codegen/src/direct.rs"),
     ("types", "vyrn-frontend/src/types.rs"),
     ("prelude", "vyrn-frontend/src/prelude.rs"),
@@ -201,7 +206,7 @@ fn table(text: &str, header: &str) -> Vec<Vec<String>> {
 }
 
 const COST_HEADER: &str =
-    "| constructor | checker | native | wasm | types | prelude | editor | all six |";
+    "| constructor | checker | shared | wasm | types | prelude | editor | all six |";
 const VERDICT_HEADER: &str =
     "| constructor | what it is | RFC | verdict | the desugar, or the reason |";
 

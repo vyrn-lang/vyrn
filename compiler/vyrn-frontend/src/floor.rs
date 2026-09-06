@@ -51,10 +51,10 @@ pub enum Capability {
     /// because it behaves differently (the direct backend has no lowering for
     /// it, so a wasm build is refused outright), but that is a missing
     /// lowering — a filed regression — and not a second capability. The floor
-    /// names the capability; the backend keeps its own refusal. `listDir` and
-    /// `listDirKinds` are the same case on the native target
-    /// (`NATIVE_UNSUPPORTED`), and on a page they degrade to the canonical
-    /// `Err` the floor exists to refuse.
+    /// names the capability; the emitter keeps its own refusal. `listDir` and
+    /// `listDirKinds` degrade on a page to the canonical `Err` the floor exists
+    /// to refuse; on the native route they run, because that route IS the
+    /// module (RFC-0125 §2.5).
     Fs,
     /// Standard input: `readLine`.
     Stdin,

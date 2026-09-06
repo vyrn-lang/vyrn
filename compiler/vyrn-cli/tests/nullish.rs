@@ -72,19 +72,6 @@ fn prints(name: &str, exprs: &[&str]) -> String {
     norm(&out.stdout)
 }
 
-/// Compile-only, expecting a diagnostic containing `needle`.
-fn rejects(name: &str, main: &str, needle: &str) {
-    let src = format!("{PRELUDE}\nfn main() -> Int64 {{\n{main}\n    return 0\n}}\n");
-    let path = write(name, &src);
-    let out = vyrn().arg("check").arg(&path).output().expect("vyrn check");
-    let all = norm(&out.stdout) + &norm(&out.stderr);
-    assert!(!out.status.success(), "{name} was accepted:\n{all}");
-    assert!(
-        all.contains(needle),
-        "{name}: expected {needle:?}, got:\n{all}"
-    );
-}
-
 #[test]
 fn nullish_unwraps_an_option() {
     assert_eq!(
