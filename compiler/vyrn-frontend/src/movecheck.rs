@@ -553,6 +553,68 @@ struct Run {
     discarded: Vec<(usize, String)>,
 }
 
+/// The capability map [`arg_verdict`] answers a position under: a declared
+/// function's parameters, and a protocol method's over them (a method call
+/// reaches this pass under its SURFACE name, and the protocol is what both
+/// sides agreed on).
+///
+/// Public because a second pass states the same rule at the same position
+/// (RFC-0125 §3 M3, the argument slice): the core lowers the call and asks
+/// [`arg_verdict`] there, so both must read the position the same way.
+pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>> {
+    let mut caps: HashMap<String, Vec<Capability>> = program
+        .functions
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| p.capability).collect(),
+            )
+        })
+        .collect();
+    for p in &program.protocols {
+        for m in &p.methods {
+            let mut cs = vec![m.recv];
+            cs.extend(m.param_caps.iter().copied());
+            caps.insert(m.name.clone(), cs);
+        }
+    }
+    caps
+}
+
+/// The capability of one position: the declaration's word where there is one,
+/// the seeded row's otherwise, and `None` where neither answers — which is
+/// [`ArgVerdict::Unknown`] and frees nothing.
+pub fn arg_cap(
+    caps: &HashMap<String, Vec<Capability>>,
+    callee: &str,
+    ix: usize,
+) -> Option<Capability> {
+    caps.get(callee)
+        .and_then(|c| c.get(ix))
+        .copied()
+        .or_else(|| crate::prelude::capability(callee, ix))
+}
+
+/// Whether the producer of an argument HANDS ITS ARGUMENT BACK — `blackBox`,
+/// whose seeded row returns the same bare type parameter one of its own
+/// parameters has. The result IS the argument, so no temporary stands here.
+///
+/// Public for the same reason [`arg_caps`] is: the core screens the same
+/// producer at the same position.
+pub fn hands_back(name: &str) -> bool {
+    crate::prelude::signature(name).is_some_and(|f| {
+        matches!(&f.ret, Type::Param(r)
+            if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
+    })
+}
+
+/// Whether the builtin `name` hands back a pointer into its argument — see
+/// [`views`], which this is the public name of.
+pub fn lends_result(name: &str) -> bool {
+    views(name)
+}
+
 /// What the callee does with the temporary at `(callee, ix)`.
 ///
 /// Every clause is a rule that already shipped, read at a position instead of at
@@ -562,12 +624,12 @@ struct Run {
 /// declaration. Rules 2 and 3 are what make `read` mean "keeps nothing": a
 /// borrow may not be stored and may not be returned, and `59c8a0c` closed the
 /// hand-over exit.
-fn arg_verdict(
+pub fn arg_verdict(
     s: &ArgTemp,
-    caps: &HashMap<String, Vec<Capability>>,
+    constructs: bool,
+    cap: Option<Capability>,
     retains: &HashSet<(String, usize)>,
     lending: &HashSet<String>,
-    decl: &Declared,
 ) -> ArgVerdict {
     // The producer handed back storage it does not own, so there is no
     // temporary here at all — the same rule [`ownership`] applies to a `let`
@@ -592,7 +654,7 @@ fn arg_verdict(
     // A variant constructor is a literal that reads like a call: the value it
     // builds holds the argument and outlives the call. It has no signature, so
     // it is asked for first.
-    if decl.constructs(&s.callee) {
+    if constructs {
         return ArgVerdict::Retained;
     }
     if retains.contains(&(s.callee.clone(), s.ix)) {
@@ -633,11 +695,6 @@ fn arg_verdict(
     if s.callee == "@copy" && s.ix == 0 {
         return ArgVerdict::Released;
     }
-    let cap = caps
-        .get(&s.callee)
-        .and_then(|c| c.get(s.ix))
-        .copied()
-        .or_else(|| crate::prelude::capability(&s.callee, s.ix));
     match cap {
         Some(Capability::Read) => ArgVerdict::Released,
         Some(Capability::Consume) => ArgVerdict::Transferred,
@@ -1100,30 +1157,14 @@ fn run(program: &Program, want: Want) -> Run {
             .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
             .collect();
     });
-    let mut caps: HashMap<String, Vec<Capability>> = program
-        .functions
-        .iter()
-        .map(|f| {
-            (
-                f.name.clone(),
-                f.params.iter().map(|p| p.capability).collect(),
-            )
-        })
-        .collect();
     // A method call is written `s.insert(v)` and reaches this pass as
     // `insert(s, v)` — the SURFACE name, because the impl is selected by the
     // receiver's type and this pass does not select impls. The protocol is what
     // both sides agree on (conformance compares capabilities), so its
     // declaration is the discipline every call site reads: without this the
     // exclusivity rule and the `consume` move would both go silent the moment a
-    // function became a method.
-    for p in &program.protocols {
-        for m in &p.methods {
-            let mut cs = vec![m.recv];
-            cs.extend(m.param_caps.iter().copied());
-            caps.insert(m.name.clone(), cs);
-        }
-    }
+    // function became a method. Stated once, in [`arg_caps`].
+    let caps = arg_caps(program);
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
     // `export extern fn` names. Rule 3 is stricter here, because the caller is
     // JS and JS frees every String it is handed (RFC-0089 M3b).
@@ -1342,7 +1383,13 @@ fn run(program: &Program, want: Want) -> Run {
     }
     let mut arg_temps = arg_temps;
     for s in &mut arg_temps {
-        s.verdict = arg_verdict(s, &caps, &retains, &lending, &decl);
+        s.verdict = arg_verdict(
+            s,
+            decl.constructs(&s.callee),
+            arg_cap(&caps, &s.callee, s.ix),
+            &retains,
+            &lending,
+        );
         if s.verdict != ArgVerdict::Unknown {
             continue;
         }
@@ -3464,14 +3511,7 @@ impl MoveCheck<'_> {
             // freed `s` through the alias — every bench body that passes a
             // binding through `blackBox` heap-faulted (0xC0000374) before
             // its report line.
-            Expr::Call { name, .. }
-                if crate::prelude::signature(name).is_some_and(|f| {
-                    matches!(&f.ret, Type::Param(r)
-                        if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
-                }) =>
-            {
-                return
-            }
+            Expr::Call { name, .. } if hands_back(name) => return,
             // The tagged-template desugar (RFC-0007) wraps both built arrays
             // in `@list`, so the array-literal arm below never sees them and
             // both heapified triples leaked per call (exit-residue round

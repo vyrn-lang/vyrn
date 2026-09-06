@@ -1116,10 +1116,11 @@ fn sections() -> Vec<Section> {
             "what a run is for, and one run's outputs",
         ),
         sec(
-            "fn arg_verdict(",
+            "pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>> {",
             Rows,
-            "the verdict for one argument temporary, read at a position instead \
-             of at a binding",
+            "the capability of a position, the producer screens, and the \
+             verdict for one argument temporary — read at a position instead \
+             of at a binding, by this pass and by the core alike",
         ),
         sec(
             "fn let_id(s: &Stmt) -> usize {",
@@ -1521,9 +1522,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 725),
-        ("placement rows for the engines", 2167),
+        ("placement rows for the engines", 2217),
         ("a fix menu", 73),
-        ("shared machinery", 3709),
+        ("shared machinery", 3699),
         ("tests", 2092),
     ];
     assert_eq!(got, want, "the structural census has moved");

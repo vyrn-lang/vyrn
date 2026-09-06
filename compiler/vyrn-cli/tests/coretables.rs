@@ -54,7 +54,11 @@
 //!     kernel's answer is the only one, and it is counted here;
 //!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
 //!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
-//!     bound;
+//!     bound. DERIVED and no longer diffed since the argument slice: the
+//!     core states the row from its own body and both directions are
+//!     counted, with both counts pinned. The emitters still keep the plan's
+//!     answer for a node the core states nothing for, so the reading beside
+//!     the counts below is what a change to either number means;
 //!   - `edge_releases`, from a `St::Drop` at a `Site::Edge` — DERIVED and no
 //!     longer diffed since the derivation slice, for the reason `arm_frees`
 //!     is not.
@@ -249,18 +253,42 @@ fn run() {
             }
         }
 
+        // RFC-0125 §3 M3, the argument slice: the core STATES this row now,
+        // from its own body, so the plan's is the ANALYSIS's own answer and a
+        // difference is a real second opinion. Both directions are counted
+        // and both counts are pinned, so a new site is read at the source
+        // rather than absorbed.
+        //
+        // The core states MORE. The analysis recognises an allocating
+        // argument by its SHAPE, because it has no lowering, and its reading
+        // of a type is the DECLARED one — so it loses a row wherever that
+        // reading cannot name the type. Three classes carry nearly all of
+        // them: an operand of a `+` over module state (`prettyOut = prettyOut
+        // + spaces(..)` in `std/json`, whose declared reading types no
+        // global); an array literal handed to a SEEDED row, whose parameter
+        // the declared table does not hold (`stringFromBytes(['h', '\x00',
+        // 'i'])`); and a `match` whose arms hand a payload out without
+        // spelling the unwrap (`Ok(s) => "ok", Err(e) => e`). Each is a value
+        // the caller built and nobody freed. The residue ratchet is what read
+        // the verdict: `assoctype` was the corpus's last leaking row and it
+        // is clean now.
+        //
+        // The core states LESS at one site, and one only: `render(raw(..))`
+        // in `examples/lib/gen_surface.vyrn`. `raw` hands back a `Code`, and
+        // `Code` is a name no declaration answers, so `owns_heap` says it
+        // holds nothing and this pass mints no temporary. The emitters keep
+        // the plan's answer for a node the core states nothing for, so the
+        // free stands; the row cannot leave `own.rs` until `Code` owns its
+        // buffer.
         for at in &facts.arg_drops {
             *counted.entry("arg_drops").or_default() += 1;
             if !own.plan.arg_drops.contains(at) {
-                diffs.push(format!("{file}: site {at}: arg_drops: core yes, plan no"));
+                *counted.entry("arg_drops: core only").or_default() += 1;
             }
         }
         for at in own.plan.arg_drops.iter().filter(|a| reached(a)) {
             if !facts.arg_drops.contains(at) {
-                diffs.push(format!(
-                    "{file}: site {at}: arg_drops: plan yes, core no (fn {})",
-                    owner(at)
-                ));
+                *counted.entry("arg_drops: plan only").or_default() += 1;
             }
         }
 
@@ -421,6 +449,18 @@ fn run() {
             .unwrap_or(0),
         1,
         "`gqlSplitDecl(src).rhs` in `gqlIsRecord`, and nothing else"
+    );
+    // The argument slice's two counts, pinned in both directions — see the
+    // reading beside them above.
+    assert_eq!(
+        counted.get("arg_drops: core only").copied().unwrap_or(0),
+        548,
+        "the values the declared reading could not name, which nobody freed"
+    );
+    assert_eq!(
+        counted.get("arg_drops: plan only").copied().unwrap_or(0),
+        1,
+        "`render(raw(..))` in `gen_surface`, and nothing else"
     );
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
     // slice): every `Rhs` in the corpus names the type its node produces.

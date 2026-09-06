@@ -1510,6 +1510,17 @@ pub struct Ownership {
     /// the one order that used to be asserted separately by `Gen::drop_stack`,
     /// `Fn_::releases` and the interpreter's per-block `Vec`.
     pub releases: HashMap<String, Vec<Release>>,
+    /// The two closures over the call graph, handed on so the CORE can ask
+    /// [`crate::movecheck::arg_verdict`] the same question at the same
+    /// position (RFC-0125 §3 M3, the argument slice).
+    ///
+    /// Not a table: neither says anything a body states. `lending` names the
+    /// functions whose result the caller must not release and `retains` the
+    /// positions that KEEP a borrowed parameter, and both are answers only a
+    /// pass that has read every body can give. See
+    /// [`crate::movecheck::Facts::lending`] for why they still exist.
+    pub lending: std::collections::HashSet<String>,
+    pub retains: std::collections::HashSet<(String, usize)>,
 }
 
 /// One analysis per build — RFC-0125 §3 M3, the repetition slice.
@@ -2054,6 +2065,8 @@ fn analyze_now(program: &Program) -> Ownership {
         notes,
         proto,
         releases,
+        lending: facts.lending.clone(),
+        retains: facts.retains.clone(),
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
     // this analysis owes and did not place. It runs the lowering, which runs

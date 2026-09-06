@@ -2259,57 +2259,54 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 |---|---|---|
 | a rule the kernel now gives | 916 | 9 per cent |
 | a rule only the checker gives | 725 | 7 per cent |
-| placement rows for the engines | 2,167 | 22 per cent |
+| placement rows for the engines | 2,217 | 23 per cent |
 | a fix menu | 73 | 1 per cent |
-| shared machinery | 3,709 | 38 per cent |
+| shared machinery | 3,699 | 38 per cent |
 | tests | 2,092 | 22 per cent |
-| **the file** | **9,682** | |
+| **the file** | **9,722** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
 | `pub struct OwningSite` | 129 | shared machinery | the module's own statement of the rules, and the two recorded measurements (RFC-0089 rule 1's sites, RFC-0092's projections) |
 | `pub enum Gone` | 134 | placement rows for the engines | why a binding does not hold its value at its block's end, and the row `own.rs` reads it from |
 | `pub enum ArgVerdict` | 24 | placement rows for the engines | what a callee does with the temporary at a call-argument position |
-| `pub struct ExitEv` | 218 | placement rows for the engines | the event records: exits, reads, consuming matches, arm payloads, stores, Rule N edges, place stores |
-| `pub fn facts(program: &Program) -> Facts` | 139 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
-| `enum Want` | 35 | shared machinery | what a run is for, and one run's outputs |
-| `fn arg_verdict` | 94 | placement rows for the engines | the verdict for one argument temporary, read at a position instead of at a binding |
+| `pub struct ExitEv` | 120 | placement rows for the engines | the event records: exits, reads, consuming matches, stores, Rule N edges, place stores |
+| `pub fn facts(program: &Program) -> Facts` | 119 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
+| `enum Want` | 29 | shared machinery | what a run is for, and one run's outputs |
+| `pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>>` | 151 | placement rows for the engines | the capability of a position, the producer screens, and the verdict for one argument temporary — read at a position instead of at a binding, by this pass and by the core alike |
 | `fn let_id(s: &Stmt) -> usize` | 52 | placement rows for the engines | the key of a `let`, the lending builtins, and the projection names |
-| `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 27 | shared machinery | the entry points a caller uses |
-| `fn run(program: &Program, want: Want) -> Run` | 348 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
+| `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 388 | shared machinery | the entry points a caller uses |
+| `fn run(program: &Program, want: Want) -> Run` | 317 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
 | `pub fn check(program: &Program) -> Result<(), String>` | 10 | shared machinery | the historical string shim |
-| `struct MoveCheck<'a>` | 158 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
+| `struct MoveCheck<'a>` | 148 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
 | `enum Borrow` | 48 | a rule the kernel now gives | what a borrow is, in words — `core::BorrowKind::what` is this sentence |
 | `fn fixes(&self, root: &str, path: &str) -> Vec<String>` | 24 | a fix menu | the named ways out of a borrow error |
-| `enum TakeForm` | 18 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
-| `fn nothing_to_take(self) -> String` | 13 | a rule the kernel now gives | `consume` with nothing to take (row 09) |
-| `fn drop_it(self) -> String` | 8 | a fix menu | the `drop` a take's menu offers |
-| `fn root_of(path: &str) -> &str` | 211 | shared machinery | the path algebra and the consumed table: overlap, reach, revival |
+| `enum TakeForm` | 19 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
+| `fn root_of(path: &str) -> &str` | 194 | shared machinery | the path algebra and the consumed table: overlap, reach, revival |
 | `impl MoveCheck<'_>` | 89 | shared machinery | one body, with its parameters and its return type |
 | `fn enter(&self)` | 35 | shared machinery | the three scope stacks, read as one environment |
-| `fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed)` | 37 | a rule the kernel now gives | a write to a place ends every alias that reads out of it (row 05) |
 | `fn place_key(&self, e: &Expr) -> usize` | 20 | placement rows for the engines | the key a row is written under |
-| `fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize` | 492 | placement rows for the engines | the recording: temporaries, store events, branches, reads, exits, takes, holes, place stores, hand-overs at a `return` |
+| `fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize` | 431 | placement rows for the engines | the recording: temporaries, store events, branches, reads, exits, takes, holes, place stores, hand-overs at a `return` |
 | `fn is_bound_name(&self, e: &Expr) -> bool` | 18 | placement rows for the engines | whether a `let` names storage somebody else owns, for reclamation |
 | `fn names_a_place(&self, value: &Expr) -> Option<&'static str>` | 76 | a rule the kernel now gives | whether a value reads a place that owns it — the kernel's alias table |
 | `fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String>` | 36 | a fix menu | the ways out that exist in THIS function |
-| `fn is_module_state(&self, name: &str) -> bool` | 72 | shared machinery | module state, the borrow table, and the type reading |
+| `fn is_module_state(&self, name: &str) -> bool` | 88 | shared machinery | module state, the borrow table, and the type reading |
 | `fn sinks(&self, name: &str, i: usize) -> bool` | 47 | a rule the kernel now gives | a rebuilding builtin takes its receiver, and the write-back statement excepted (row 26) |
-| `fn store` | 113 | a rule the kernel now gives | rule 1's move and rule 2's refusal at a store (rows 01, 02, 03, 27, 34) |
+| `fn store` | 112 | a rule the kernel now gives | rule 1's move and rule 2's refusal at a store (rows 01, 02, 03, 27, 34) |
 | `fn borrow_from(&self, value: &Expr) -> Option<Borrow>` | 68 | a rule the kernel now gives | the borrow status a `let` of a value gives its binding |
-| `fn payload_binding` | 60 | shared machinery | what a pattern's binders name, and whether an iterable is a place |
-| `fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic>` | 79 | a rule the kernel now gives | rule 1 asked of a path: is the storage still all there (rows 04, 06, 07) |
-| `fn check_take` | 57 | a rule the kernel now gives | a take's refusals: an element, and nothing to take — `core::take_prefix` states both (rows 08, 09) |
+| `fn payload_binding` | 73 | shared machinery | what a pattern's binders name, and whether an iterable is a place |
+| `fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic>` | 45 | a rule the kernel now gives | rule 1 asked of a path: is the storage still all there (rows 04, 06, 07) |
+| `fn check_take` | 48 | a rule the kernel now gives | a take's refusals: an element, and nothing to take — `core::take_prefix` states both (rows 08, 09) |
 | `fn check_handover(&self, arg: &Expr, callee: &str, line: usize) -> Result<(), Diagnostic>` | 123 | a rule the kernel now gives | rule 2 at the third exit: a borrow may not be consumed (rows 11, 12, 13, 14) |
 | `fn refuse_projected_arg` | 34 | a rule the kernel now gives | the refusal a projected argument to a `consume` parameter gets |
 | `fn arm_binder(&self, name: &str) -> bool` | 24 | shared machinery | an arm's binders, and whether a callee keeps a `fn` value |
 | `fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic>` | 132 | a rule the kernel now gives | rule 3: a return is owned (rows 15, 16, 18, 19, 28) |
 | `fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic` | 47 | a rule the kernel now gives | the one exit every returned borrow leaves by, the exported function's own sentence with it (row 17) |
 | `fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize)` | 27 | placement rows for the engines | the retention and hand-over records the call graph is closed over |
-| `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 527 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
+| `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 525 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
 | `fn ctor_valued(&self, e: &Expr) -> bool` | 57 | placement rows for the engines | what an expression builds: a variant, a String, a concatenation |
 | `fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String])` | 84 | placement rows for the engines | an arm that yields a place, and what naming one costs |
-| `fn value_cannot_alias(&self, e: &Expr, root: &str) -> bool` | 119 | placement rows for the engines | Rule N's edge guard, the mention guard, and what a call may forward |
+| `fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool` | 98 | placement rows for the engines | the mention guard, and what a call may forward |
 | `fn carries_param_storage(&self, e: &Expr) -> bool` | 171 | placement rows for the engines | the escape screen: storage flow rather than mention |
 | `fn lends(&self)` | 34 | placement rows for the engines | the lending record, and the lend a wrapper hides |
 | `fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 54 | a rule the kernel now gives | the first borrow a returned expression yields |
@@ -2317,22 +2314,21 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 77 | placement rows for the engines | the same question through a constructor, to record a lend and never to refuse one |
 | `fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>)` | 40 | shared machinery | RFC-0089 rule 1's instrument |
 | `fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool` | 32 | shared machinery | a block, and whether it diverges |
-| `fn stmt` | 890 | shared machinery | the walk over statements: it calls the refusal helpers and writes the plan's rows in the same arm |
+| `fn stmt` | 807 | shared machinery | the walk over statements: it calls the refusal helpers and writes the plan's rows in the same arm |
 | `fn capture_site(&self, name: &str, line: usize)` | 75 | placement rows for the engines | a lambda's captures, recorded for the enclosing block |
 | `fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), Diagnostic>` | 35 | a rule only the checker gives | a `modify` borrow is exclusive (row 23) |
 | `fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 43 | a rule only the checker gives | a closure that outlives the call may not capture a borrow (row 24) |
 | `fn check_loop_reuse` | 39 | a rule the kernel now gives | rule 1 across a back edge (row 25) |
-| `fn expr` | 1,039 | shared machinery | the walk over expressions: the same traversal does both jobs |
-| `fn reject_consume_global` | 36 | a rule the kernel now gives | module state may not be taken (rows 10, 12, 15, 29) |
+| `fn expr` | 835 | shared machinery | the walk over expressions: the same traversal does both jobs |
 | `pub fn mentions_place(e: &Expr, base: &str) -> bool` | 95 | shared machinery | whether a stored value mentions the place it is stored into |
-| `mod linear` | 645 | a rule only the checker gives | the must-use obligation: acquired once, disposed exactly once (rows 30, 31) |
+| `mod linear` | 647 | a rule only the checker gives | the must-use obligation: acquired once, disposed exactly once (rows 30, 31) |
 | `fn store_path(e: &Expr) -> Option<String>` | 27 | shared machinery | the place an expression names, as the store arms spell it |
 | `fn sinks(decl: &Declared, name: &str, i: usize) -> bool` | 24 | a rule the kernel now gives | whether a builtin's parameter takes its argument for good |
 | `fn reads(e: &Expr) -> Vec<String>` | 141 | shared machinery | the names an expression reads, and the calls in it |
 | `pub fn element_path(e: &Expr) -> Option<(String, String)>` | 84 | shared machinery | the place spellings every rule above compares |
 | `fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic` | 13 | a fix menu | one diagnostic with its menu of fixes |
-| `fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>)` | 56 | shared machinery | the names a block declares, and a pattern's binders |
-| `mod tests` | 2,169 | tests | the pass's own unit tests |
+| `fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>)` | 55 | shared machinery | the names a block declares, and a pattern's binders |
+| `mod tests` | 2092 | tests | the pass's own unit tests |
 
 Four things the structural census says, and the third is the finding.
 
@@ -4974,6 +4970,61 @@ guard and the `fresh_str` exception, but round eighteen's answer — every
 mention of the place is a read argument to a declared, non-lending,
 non-retaining function — is still `movecheck`'s, and `param_escapers` is the
 closure behind it. Two payers, one reading.
+
+**The core states `arg_drops`, and one name stops it leaving (2026-09-06).**
+
+The four fields are stated. `arg_verdict` is public now and takes what it
+reads: `constructs` and the position's `cap`, instead of a `Declared` and a
+capability map. `movecheck` answers both from its own tables; the core answers
+them from the program at the call it is lowering. `arg_caps`, `arg_cap` and
+`hands_back` are the shared readings, so neither pass keeps a second copy.
+`Ownership` carries `lending` and `retains` on to the core, which is a hand-on
+and not a table: neither is anything a body states, and both are empty over
+the corpus.
+
+**The recording rule is the core's own, and it is not the walk's.** `movecheck`
+recognises an allocating argument by its SHAPE — sixteen of them, each read off
+the source, because it has no lowering. The core lowered the argument, so it
+has already answered: a name it minted whose type owns heap, which no place was
+read into and no lending producer handed back, IS the census's shape A and
+shape B. `NameInfo::releases` is that answer. One line replaces the sixteen
+shapes, and it does not agree with them.
+
+**The core frees 548 sites the analysis does not.** Three classes carry nearly
+all of them, and all three are the DECLARED reading failing to name a type: an
+operand of a `+` over module state (`prettyOut = prettyOut + spaces(..)` in
+`std/json`, whose declared reading types no global); an array literal handed
+to a SEEDED row, whose parameter the declared table does not hold
+(`stringFromBytes(['h', 'i'])`); and a `match` whose arms hand a payload out
+without spelling the unwrap (`Ok(s) => "ok", Err(e) => e`). Each is a value
+the caller built and nobody freed.
+
+**The ratchet read the verdict.** `assoctype` was the corpus's last leaking row
+— one block, recorded with the reading that the analysis says `T` owns no heap
+in a generic body. The core states the row off the name it minted rather than
+off the declared type, and the row is `clean`. Nothing else moved: parity is 41
+of 41, the memory suite is green, and six of the 173 recorded wasm modules
+change — `assoctype`, `contractquery`, `ifexpr`, `pagesdemo`, `rest`,
+`strings`, each one free longer.
+
+**One site goes the other way, and it is the blocker.** `render(raw(..))` in
+`examples/lib/gen_surface.vyrn`. `raw` hands back a `Code`; `Code` is a name no
+declaration answers, so `owns_heap` says it holds nothing and the core mints no
+temporary for it. The emitters keep the plan's answer for a node the core
+states nothing for — the `or` that `valuecount.vyrn` already needs — so the
+free stands and no byte moves there. But that `or` is the plan's table, so the
+table cannot go: dropping it leaks one generation-time `Code` per generator
+call, silently, where no ratchet looks.
+
+So `arg_drops` is STATED by the core and still READ from both. What closes it
+is `Code` owning its buffer, which is a question about a type's declaration and
+not about this table. Until then the plan's fold is the fallback for one site,
+and the corpus pin counts both directions with both counts pinned exactly
+(`coretables`), so a second such site is read at the source.
+
+`store_fresh` is untouched, and the reading above says why it is a different
+job: `param_escapers` is its closure, round eighteen's answer is still
+`movecheck`'s, and nothing in this slice moves it.
 
 ### M4 — the runtime in Vyrn
 
