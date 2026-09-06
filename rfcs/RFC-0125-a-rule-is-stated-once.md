@@ -5788,6 +5788,51 @@ two branches edited.
   plan table there is no second answer to diff, and the count is recorded like
   every other derived table.
 
+#### The last table's gates, after the merge (2026-09-06)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Every gate is run
+on the MERGED tree, so each row measures this slice's deletion and the core
+line's together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the two excluded manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 571 passed, 75 ignored, 0 failed — the one red at the branch point, `fallible.rs::a_generic_impl_serves_every_payload_type`, is fixed by the merge |
+| `kernel` `--ignored` | 1, 170 s |
+| `coretables` `--ignored` | 1, 133 s, over 169 programs |
+| `typed` `--ignored` | 1, 332 s |
+| `effects` `--ignored` | 2, 356 s |
+| `fixtures` `--ignored` | 1, 89 s |
+| `vyrn-frontend` | 1,207, against 1,245 at the branch point — the tree-walker's tests went with it |
+| the workspace less `vyrn-cli` | 1,383, against 1,421, for the same reason |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 261 s |
+| the residue ratchet | 347 s, and `rpc.vyrn` and `rpcsplit.vyrn` are Clean — the fn-value meet above is what makes them so |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 175, no byte moved |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 116 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 29 s |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
+
+Lines per file, at the merge: `movecheck.rs` 8,089, `own.rs` 4,213, `core.rs`
+4,931. This slice's own deltas are the paragraph above; the rest is the core
+line's.
+
+**What the last table leaves open.** `Fate` is still an INPUT to the core and
+not only its report: `Builder::fate_owned` reads it to decide whether a named
+binding is this frame's, `Builder::takes_scrutinee` reads the line off
+`Leak::Aliased` and `Fate::Moved`, and three more sites read `Leak::Hole`,
+`Leak::Borrowed` and `Leak::Region`. Six readings. What closes them is the same
+reading the argument slice took, one binding form over: the core states a named
+binding's ownership from its own lowered body. Until that lands, `own.rs` is
+the `Owned` type table, the note walk, the six readings above and the
+`why --memory` report, and it cannot say what it is.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
