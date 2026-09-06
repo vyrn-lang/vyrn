@@ -34,7 +34,7 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13, 14 and 26, RFC-0125 §3 M3 — is refused by
+//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11 and 29, RFC-0125 §3 M3 — is refused by
 //! the kernel in both runs, and the two must still agree. The row is what stops
 //! the sentence moving after the deletion, so it stays in the census.
 //!
@@ -164,16 +164,18 @@ fn census() -> Vec<Row> {
             "r10_consume_module_state.vyrn",
             "module state may not be taken: a prefix `consume`",
             "RFC-0013",
-            "module state `names` may not be consumed by a take — nothing may take ownership of \
-             module state (it lives for the whole module and is never dropped)",
-            Kernel::Other("module state `names` may not be passed to a `consume` parameter"),
+            "module state `names` may not be passed to a `consume` parameter via `take(..)` — \
+             nothing may take ownership of module state (it lives for the whole module and is \
+             never dropped)",
+            Kernel::Same,
         ),
         row(
             "r11_consume_a_read_parameter.vyrn",
             "rule 2: a prefix `consume` of a `read` parameter",
             "RFC-0089",
-            "`ys` may not be consumed — it is a `read` parameter",
-            Kernel::Other("via `take(..)` — it is a `read` parameter"),
+            "`ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
+             parameter",
+            Kernel::Same,
         ),
         row(
             "r12_module_state_to_a_consume_parameter.vyrn",
@@ -310,9 +312,10 @@ fn census() -> Vec<Row> {
             "r29_for_in_consume_module_state.vyrn",
             "module state may not be taken: `for .. in consume`",
             "RFC-0013",
-            "module state `names` may not be consumed by a `for` loop — nothing may take \
-             ownership of module state (it lives for the whole module and is never dropped)",
-            Kernel::Other("module state `names` may not be consumed by a `drop`"),
+            "module state `names` may not be consumed by the `for .. in consume` loop — nothing \
+             may take ownership of module state (it lives for the whole module and is never \
+             dropped)",
+            Kernel::Same,
         ),
         row(
             "r30_stream_never_disposed.vyrn",
@@ -1183,6 +1186,229 @@ fn the_shapes_rows_thirteen_and_fourteens_unit_tests_pinned_are_still_refused() 
     );
 }
 
+/// The shapes rows 10, 11 and 29's own unit tests pinned, still refused after
+/// the rule left `movecheck.rs` (RFC-0125 §3 M3, rows 10, 11 and 29).
+///
+/// The prefix `consume` form. The pass named the FORM a reader wrote — "a
+/// take", "a `for` loop" — and the kernel names the TAKER the value reaches:
+/// the `consume` parameter a call hands it to, or the loop that took the
+/// container. Both are true and the kernel's is the more exact of the two,
+/// because it says which taker, so the checker's copy went.
+///
+/// One case moved as text and it is the third here: `for x in consume r.xs`
+/// on a record this frame owns. The unit test asserted it COMPILES, and it
+/// does not — it asked `vyrn_frontend::check`, which is the checker alone, and
+/// the whole compiler has refused that program since the kernel came in. The
+/// pin says what the compiler says.
+#[test]
+fn the_shapes_rows_ten_eleven_and_twenty_nines_unit_tests_pinned_are_still_refused() {
+    const DECLS: &str = "type Bag = { a: String } \
+                         type R = { xs: Array<String> } \
+                         let g: String = \"m\" \
+                         let gs: Array<String> = [] \
+                         fn make() -> R { return R { xs: [\"a\"] } } \
+                         fn take(xs: consume Array<String>) -> Int64 { return xs.length } ";
+    let go = |sig: &str, body: &str| {
+        format!(
+            "{DECLS} fn go({sig}) -> Int64 {{ let mut o: Array<String> = [] {body} \
+             return o.length }} fn main() -> Int64 {{ return 0 }}"
+        )
+    };
+    let cases: Vec<(&str, Vec<&str>, String)> = vec![
+        (
+            "a consuming loop over a read parameter",
+            vec![
+                "`xs` may not be stored into the `for .. in consume` loop — it is a `read` \
+                 parameter",
+                "fix: declare the parameter `xs: consume ..`",
+            ],
+            go(
+                "xs: read Array<String>",
+                "for x in consume xs { o.push(x) }",
+            ),
+        ),
+        (
+            "a consuming loop over a field of a read parameter",
+            vec![
+                "`r.xs` may not be stored into the `for .. in consume` loop — it is a `read` \
+                 parameter",
+                "fix: declare the parameter `r: consume ..`",
+            ],
+            go("r: read R", "for x in consume r.xs { o.push(x) }"),
+        ),
+        (
+            "a consuming loop over a field this frame owns",
+            vec![
+                "`r.xs` may not be stored into the `for .. in consume` loop — it is read out of \
+                 a place that owns it",
+                "fix: `consume r.xs`",
+            ],
+            go("", "let r = make() for x in consume r.xs { o.push(x) }"),
+        ),
+        (
+            "a consuming loop over module state",
+            vec![
+                "module state `gs` may not be consumed by the `for .. in consume` loop",
+                "nothing may take ownership of module state",
+            ],
+            go("", "for x in consume gs { o.push(x) }"),
+        ),
+        (
+            "a prefix take of a field of a read parameter",
+            vec![
+                "`d` may not be consumed — it is a `read` parameter",
+                "fix: `d.a.copy()`",
+            ],
+            go("d: read Bag", "o.push(consume d.a)"),
+        ),
+        (
+            "a prefix take of module state",
+            vec![
+                "module state `g` may not be passed to a `consume` parameter via `push(..)`",
+                "nothing may take ownership of module state",
+            ],
+            go("", "o.push(consume g)"),
+        ),
+        (
+            "a prefix take of module state at a call",
+            vec!["module state `gs` may not be passed to a `consume` parameter via `take(..)`"],
+            go("", "let n = take(consume gs) o.push(\"x\")"),
+        ),
+    ];
+    let dir = common::scratch("prefix-consume-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, needles, src) in &cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = whole_refusal_in(dir.to_path_buf(), &name);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+            continue;
+        }
+        for needle in needles {
+            if !text.contains(needle) {
+                bad.push(format!("{what}: wanted `{needle}`, got {text}"));
+            }
+        }
+    }
+    // The ways out compile, and a container this frame owns is still the
+    // loop's to take.
+    let compiles: &[(&str, String)] = &[
+        (
+            "the consume signature",
+            go(
+                "xs: consume Array<String>",
+                "for x in consume xs { o.push(x) }",
+            ),
+        ),
+        (
+            "a container this frame owns",
+            go(
+                "",
+                "let xs: Array<String> = [\"a\" + \"b\"] for x in consume xs { o.push(x) }",
+            ),
+        ),
+        (
+            "the take at the place the field is bound",
+            go(
+                "",
+                "let r = make() let ys = consume r.xs for x in consume ys { o.push(x) }",
+            ),
+        ),
+    ];
+    for (what, src) in compiles {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if !ok {
+            bad.push(format!("{what}: refused: {text}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "the prefix `consume` form has moved:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// A record literal's part names the FIELD it goes into, at both doors a
+/// literal is bound through (RFC-0125 §3 M3, row 07).
+///
+/// `let r = R { s: x }` and `return R { s: x }` are one literal written twice.
+/// The core wrote the field names on the binding a reader's `let` makes and
+/// not on the temporary an inline literal gets, so the second was told the
+/// value went into "the literal" — a word for the machinery, where the first
+/// was told the field. No program of the corpus spells the second with a
+/// borrow in it, which is why this is a pin and not a fixture: the licence
+/// could not see the difference, and the next reader would meet it.
+///
+/// Both passes are asked, because both state the sentence today.
+#[test]
+fn a_record_literals_part_names_its_field_at_both_doors() {
+    const DECLS: &str = "type R = { s: String } \
+                         fn mk() -> String { return \"a\" + \"b\" } \
+                         fn take(r: consume R) -> Int64 { return r.s.byteLength } ";
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "a borrow into a let's literal",
+            "the field `R.s`",
+            "fn go(x: read String) -> Int64 { let r = R { s: x } return r.s.byteLength } \
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a borrow into an inline literal",
+            "the field `R.s`",
+            "fn go(x: read String) -> R { return R { s: x } } \
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a move into a let's literal",
+            "the field `R.s`",
+            "fn go() -> Int64 { let d = mk() let r = R { s: d } \
+             return r.s.byteLength + d.byteLength } fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a move into an inline literal",
+            "the field `R.s`",
+            "fn go() -> Int64 { let d = mk() let n = take(R { s: d }) \
+             return n + d.byteLength } fn main() -> Int64 { return 0 }",
+        ),
+        // An array has no field names, so neither pass invents one. The two
+        // still spell the literal differently — "the array literal" and "the
+        // literal" — and that is the store rule's wording, not this row's.
+        (
+            "an array literal, which has no field to name",
+            "literal",
+            "fn go(x: read String) -> Int64 { let a: Array<String> = [x] return a.length } \
+             fn main() -> Int64 { return 0 }",
+        ),
+    ];
+    let dir = common::scratch("literal-parts");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, needle, body) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), format!("{DECLS} {body}")).expect("write the program");
+        for kernel_mode in [false, true] {
+            let (ok, text) = refusal_in(dir.to_path_buf(), &name, kernel_mode);
+            let pass = if kernel_mode {
+                "the kernel"
+            } else {
+                "the checker"
+            };
+            if ok {
+                bad.push(format!("{what}: {pass} accepted it"));
+            } else if !text.contains(needle) {
+                bad.push(format!("{what}: {pass} wanted `{needle}`, got {text}"));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a literal's part has lost its field:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// A nullary constructor is a value with no owner, not a name (RFC-0126 §8.8).
 ///
 /// `take(None)` twice hands the callee two values. The checker keyed rule 1 on
@@ -1519,11 +1745,6 @@ fn sections() -> Vec<Section> {
             "the named ways out of a borrow error",
         ),
         sec(
-            "enum TakeForm {",
-            Kernel,
-            "which form wrote the `consume`, and how a refusal names it",
-        ),
-        sec(
             "pub fn root_of(path: &str) -> &str {",
             Shared,
             "the path algebra and the consumed table: overlap, reach, revival",
@@ -1591,12 +1812,6 @@ fn sections() -> Vec<Section> {
             "    fn payload_binding(",
             Shared,
             "what a pattern's binders name, and whether an iterable is a place",
-        ),
-        sec(
-            "    fn check_take(",
-            Kernel,
-            "a take's refusals: an element, and nothing to take — \
-             `core::take_prefix` states both (rows 08, 09)",
         ),
         sec(
             "    fn callee_keeps(&self, callee: &str, i: usize) -> bool {",
@@ -1839,7 +2054,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 651),
+        ("a rule the kernel now gives", 584),
         ("a rule only the checker gives", 78),
         ("placement rows for the engines", 1539),
         ("a fix menu", 73),

@@ -1650,25 +1650,6 @@ impl Borrow {
     }
 }
 
-/// Which form wrote the `consume` — the two share [`MoveCheck::check_take`] and
-/// differ only in how the first refusal reads.
-#[derive(Clone, Copy)]
-enum TakeForm {
-    /// `for x in consume xs`.
-    Loop,
-    /// `consume p` as a prefix on a place (RFC-0093).
-    Prefix,
-}
-
-impl TakeForm {
-    fn what(self) -> &'static str {
-        match self {
-            TakeForm::Loop => "a `for` loop",
-            TakeForm::Prefix => "a take",
-        }
-    }
-}
-
 /// The base name of a place path: `r.a[0]` is `r`.
 ///
 /// A message names a PATH and a borrow names the PARAMETER it came from, so the
@@ -2917,54 +2898,6 @@ impl MoveCheck<'_> {
             }
             _ => false,
         }
-    }
-
-    /// A take: `consume p` as a prefix (RFC-0093), or the `p` of
-    /// `for x in consume p`. Three refusals, and RFC-0093 M1 deleted the fourth.
-    ///
-    /// The deleted one refused a PROJECTION — `consume b.tags` — on the ground
-    /// that it would leave a hole in `b`. It offered `for .. in consume b`
-    /// instead, which does not typecheck when `b` is a record, so the reader was
-    /// sent to a second error. A hole is now a thing the pass can say, so the
-    /// menu no longer has to name the root: the path is the answer.
-    ///
-    /// `by` names the form for the message — a loop and a prefix refuse the same
-    /// three things and word the first one differently.
-    fn check_take(
-        &self,
-        e: &Expr,
-        line: usize,
-        scope: &[HashSet<String>],
-        by: TakeForm,
-    ) -> Result<(), Diagnostic> {
-        // A `consume` whose operand names no place — an element, or a value
-        // that is already owned — is refused by the desugar that writes the
-        // take (`vyrn_lower::core::take_names_a_place`), in these same words
-        // and with this same menu (RFC-0125 §3 M3, rows 08 and 09).
-        let Some((root, path)) = place_path(e) else {
-            return Ok(());
-        };
-        if self.globals.contains(&root) && !Self::in_scope(scope, &root) {
-            return Err(Diagnostic::error(
-                line,
-                0,
-                "movecheck",
-                format!(
-                    "module state `{root}` may not be consumed by {} — \
-                     nothing may take ownership of module state (it lives for the whole module \
-                     and is never dropped)",
-                    by.what()
-                ),
-            ));
-        }
-        if let Some(b) = self.borrow_of(&root) {
-            return Err(menu(
-                line,
-                format!("`{root}` may not be consumed — it is {}", b.what(&root)),
-                b.fixes(&root, &path),
-            ));
-        }
-        Ok(())
     }
 
     /// Whether the callee may KEEP a `fn` value passed as argument `i` — the
@@ -4253,9 +4186,6 @@ impl MoveCheck<'_> {
                 self.loop_ids.borrow_mut().push(m2_lid);
                 self.expr(iter, consumed, scope)?;
                 self.site("iterate", *line, iter, None);
-                if *consuming {
-                    self.check_take(iter, *line, scope, TakeForm::Loop)?;
-                }
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
                 // RFC-0089 rule 2: the loop variable is a borrow only while the
                 // container outlives the loop. A `consume`d container is the
@@ -4765,12 +4695,10 @@ impl MoveCheck<'_> {
                     self.expr(expr, consumed, scope)
                 }
             },
-            // RFC-0093 — the take. `check_take` says whether the frame may give
-            // this place away; the record below is what makes a later read of it,
-            // or of anything overlapping it, a rule-1 error.
+            // RFC-0093 — the take. The record below is what makes a later read
+            // of this place, or of anything overlapping it, a rule-1 error.
             Expr::Consume { place, line } => {
                 self.expr(place, consumed, scope)?;
-                self.check_take(place, *line, scope, TakeForm::Prefix)?;
                 // A `consume` of what names no place is the desugar's refusal
                 // now (rows 08 and 09), so this walk records nothing for it.
                 let Some((root, path)) = place_path(place) else {
@@ -6500,38 +6428,6 @@ mod tests {
     }
 
     #[test]
-    fn a_consuming_loop_needs_a_container_it_may_take() {
-        // A borrow is not the loop's to give away, and the two-step fix says so.
-        let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in consume xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("`xs` may not be consumed — it is a `read` parameter"),
-            "{e}"
-        );
-        assert!(run("fn go(xs: consume Array<String>) -> Int64 { let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-        // A field of a BORROWED record is still refused, and RFC-0093 moved the
-        // reason to the true one: the frame does not own `r`, so it may not give
-        // any part of it away. The old refusal said "would leave a hole" and
-        // offered `for .. in consume r`, which does not typecheck for a record —
-        // one question, two answers. That branch is gone.
-        let src = "type R = { xs: Array<String> }                    fn go(r: R) -> Int64 { let mut out: Array<String> = []                    for x in consume r.xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("`r` may not be consumed — it is a `read` parameter"),
-            "{e}"
-        );
-        assert!(!e.contains("for .. in consume r`"), "{e}");
-        // A field of a record this frame OWNS is the take, and it is legal now.
-        assert!(run("type R = { xs: Array<String> }                      fn make() -> R { return R { xs: [\"a\"] } }                      fn go() -> Int64 { let r = make() let mut out: Array<String> = []                      for x in consume r.xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-        // Module state lives for the whole module and is nobody's to take.
-        let src = "let g: Array<String> = []                    fn go() -> Int64 { let mut out: Array<String> = []                    for x in consume g { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("module state `g` may not be consumed"), "{e}");
-    }
-
-    #[test]
     fn a_loop_over_a_temporary_owns_its_elements() {
         // 91 of the corpus sites. `for o in diff(..)` iterates a container
         // nobody else holds, so the elements are the loop's with no word for it.
@@ -6580,31 +6476,6 @@ mod tests {
         // 07 left: `tests/refusals.rs` asks it of the whole compiler.
         // A write fills the hole.
         assert!(go("let mut d = make() let mut o: Array<String> = [] o.push(consume d.a) d.a = \"z\" return d.a.byteLength").is_ok());
-    }
-
-    /// The two refusals that stay, each with the menu it prints. The other two
-    /// — an element, and a value already owned — left with rows 08 and 09
-    /// (RFC-0125 §3 M3): the desugar states both, from the syntax.
-    #[test]
-    fn a_take_needs_a_place_the_frame_owns() {
-        const DECLS: &str = "type Bag = { a: String } \
-                             let g: String = \"m\" \
-                             fn fresh() -> String { return \"f\" } ";
-        let go = |sig: &str, body: &str| {
-            run(&format!("{DECLS} fn go({sig}) -> Int64 {{ let mut o: Array<String> = [] {body} return o.length }} fn main() -> Int64 {{ return 0 }}"))
-        };
-        // A borrowed root: the frame does not own it, so it may not give it away.
-        let e = go("d: read Bag", "o.push(consume d.a)").unwrap_err();
-        assert!(
-            e.contains("`d` may not be consumed — it is a `read` parameter"),
-            "{e}"
-        );
-        // Module state is nobody's to take.
-        let e = go("", "o.push(consume g)").unwrap_err();
-        assert!(
-            e.contains("module state `g` may not be consumed by a take"),
-            "{e}"
-        );
     }
 
     /// The menu RFC-0092 M1 could only answer with `.copy()` names the take

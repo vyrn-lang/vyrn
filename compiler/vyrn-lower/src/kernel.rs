@@ -898,7 +898,19 @@ impl<'b> Kernel<'b> {
     fn may_not(&self, s: &str) -> String {
         let by = &self.by;
         if by == "a literal" {
-            return format!("`{s}` may not be stored into the literal");
+            // A part of a RECORD literal goes into a field, and the checker
+            // names it. "The literal" is what is left where the core has no
+            // field names — an array, a map, a variant (RFC-0125 §3 M3, row
+            // 07). The same list [`Kernel::gone`] reads for a rule-1 move.
+            return match self
+                .part
+                .get()
+                .checked_sub(1)
+                .and_then(|i| self.made.get(i))
+            {
+                Some(field) => format!("`{s}` may not be stored into {field}"),
+                None => format!("`{s}` may not be stored into the literal"),
+            };
         }
         if !by.ends_with("(..)`") {
             return format!("`{s}` may not be stored into {by}");
@@ -1070,8 +1082,20 @@ impl<'b> Kernel<'b> {
             // rule 4 refused: the place that owns the value releases it, and
             // this frame is not that place. Worded as the checker words a
             // `drop` (RFC-0125 §3 M3, the census, rows 21 and 29).
+            //
+            // A `for x in consume xs` is the exception, and it is the reason
+            // rows 10, 11 and 29 could not leave the checker: the container's
+            // release is where the loop's take lands, and a reader who wrote
+            // the loop was told about a `drop` no program of theirs contains.
+            // The form is on the name the core bound the container to, as it
+            // is at the `let` ([`crate::core::NameInfo::for_consume`]).
             if st.alias[n as usize].is_some() {
-                let by = std::mem::replace(&mut self.by, "a `drop`".to_string());
+                let form = if self.body.names[n as usize].for_consume {
+                    "the `for .. in consume` loop"
+                } else {
+                    "a `drop`"
+                };
+                let by = std::mem::replace(&mut self.by, form.to_string());
                 let r = self.alias_take(st, n, false);
                 self.by = by;
                 return Err(r);
