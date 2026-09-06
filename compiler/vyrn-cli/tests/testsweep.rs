@@ -194,6 +194,7 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     ("may not be returned from a closure", "row 28"),
     ("is dropped here but was already consumed by", "row 20"),
     ("may not be dropped — it is", "row 21"),
+    ("was moved here into", "row 07, rule 1's move"),
 ];
 
 fn check(path: &Path, no_kernel: bool) -> (bool, String) {

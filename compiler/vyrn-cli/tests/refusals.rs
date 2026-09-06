@@ -34,7 +34,7 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20 and 21, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
+//! 28, 06, 20, 21 and 07, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the
 //! two must still agree. The row is what stops the sentence moving after the
 //! deletion, so it stays in the census.
 //!
@@ -824,6 +824,89 @@ fn the_shapes_rule_ones_unit_tests_pinned_are_still_refused() {
     );
 }
 
+/// The shapes row 07's own unit tests pinned, still refused after the rule
+/// left `movecheck.rs` (RFC-0125 §3 M3, row 07).
+///
+/// Rule 1's move — a value moved into a binding, a container, a field, a loop
+/// or a hole, and read afterwards — is the kernel's sentence now. The unit
+/// tests that pinned it asked `vyrn_frontend::check` alone, and each named a
+/// SHAPE rather than the rule: what a builtin's sink takes, what a record
+/// literal takes, what a `for .. in consume` leaves behind, what a prefix take
+/// leaves a hole in, what a take on one arm does to the other, and what a
+/// stream producer takes. The row's own program is the census row `r07`; these
+/// are the shapes around it, asked of the whole compiler.
+#[test]
+fn the_shapes_row_sevens_unit_tests_pinned_are_still_refused() {
+    const BAG: &str = "type Bag = { a: String, b: String } \
+                       fn make() -> Bag { return Bag { a: \"x\" + \"y\", b: \"p\" + \"q\" } } ";
+    let cases: &[(&str, &str, String)] = &[
+        (
+            "a builtins sink",
+            "was moved here into `push(..)`",
+            "fn main() -> Int64 { let s = \"a\" + \"b\" let mut xs: Array<String> = [] \
+             xs.push(s) return s.byteLength }"
+                .to_string(),
+        ),
+        (
+            "a record literals field",
+            "was moved here into the field `R.s`",
+            "type R = { s: String } \
+             fn main() -> Int64 { let s = \"a\" + \"b\" let r = R { s: s } \
+             return s.byteLength + r.s.byteLength }"
+                .to_string(),
+        ),
+        (
+            "a consuming loops container",
+            "`xs` was moved here into the `for .. in consume` loop",
+            "fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"] \
+             let mut out: Array<String> = [] \
+             for x in consume xs { out.push(x) } return xs.length } \
+             fn main() -> Int64 { return 0 }"
+                .to_string(),
+        ),
+        (
+            "a prefix takes hole",
+            "`d.a` was moved here into `consume`",
+            format!(
+                "{BAG} fn go() -> Int64 {{ let d = make() let mut o: Array<String> = [] \
+                 o.push(consume d.a) return d.a.byteLength }} \
+                 fn main() -> Int64 {{ return 0 }}"
+            ),
+        ),
+        (
+            "a take on one arm",
+            "`d.a` was moved here into `consume`",
+            format!(
+                "{BAG} fn go(n: Int64) -> Int64 {{ let d = make() let mut o: Array<String> = [] \
+                 if n > 0 {{ o.push(consume d.a) }} return d.a.byteLength }} \
+                 fn main() -> Int64 {{ return 0 }}"
+            ),
+        ),
+        (
+            "a stream producer",
+            "moved here into `fromArray(..)`",
+            "fn main() -> Int64 { let xs: Array<Int64> = [1, 2] \
+             let s = fromArray(xs) close(s) return xs.length }"
+                .to_string(),
+        ),
+    ];
+    let dir = common::scratch("row-seven-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, needle, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok || !text.contains(needle) {
+            bad.push(format!("{what}: {}", if ok { "accepted" } else { &text }));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "rule 1's move no longer refuses:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// A nullary constructor is a value with no owner, not a name (RFC-0126 §8.8).
 ///
 /// `take(None)` twice hands the callee two values. The checker keyed rule 1 on
@@ -1233,13 +1316,6 @@ fn sections() -> Vec<Section> {
             "what a pattern's binders name, and whether an iterable is a place",
         ),
         sec(
-            "    fn check_use(&self, path: &str, line: usize, consumed: &Consumed) \
-             -> Result<(), Diagnostic> {",
-            Kernel,
-            "rule 1 asked of a path: is the storage still all there (rows 04, 06, \
-             07)",
-        ),
-        sec(
             "    fn check_take(",
             Kernel,
             "a take's refusals: an element, and nothing to take — \
@@ -1519,12 +1595,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 916),
+        ("a rule the kernel now gives", 870),
         ("a rule only the checker gives", 725),
         ("placement rows for the engines", 2250),
         ("a fix menu", 73),
-        ("shared machinery", 3738),
-        ("tests", 2092),
+        ("shared machinery", 3734),
+        ("tests", 2041),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

@@ -92,7 +92,7 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     (
         "a1_afterjoin.vyrn",
         "A1's reach: a read AFTER the join of a conditional move (Theorem 4's          first case). The branch-disjoint read is accepted; this is not",
-        "used again here",
+        "already consumed by",
     ),
     (
         "a2_capture.vyrn",

@@ -1761,10 +1761,6 @@ struct Consumption {
 struct Consumed(HashMap<String, HashMap<String, Consumption>>);
 
 impl Consumed {
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     fn insert(&mut self, path: String, c: Consumption) {
         self.0
             .entry(root_of(&path).to_string())
@@ -3044,51 +3040,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Rule 1, asked of a PATH: is the storage `path` names still all there?
-    ///
-    /// It refuses an overlap in either direction. `er.node` after `consume er`
-    /// reads part of something that is gone; `er` after `consume er.node` reads
-    /// a whole record with a hole in it. The second message is RFC-0093's own,
-    /// and it names the take rather than the read, because the take is the line
-    /// the reader has to change.
-    fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic> {
-        if consumed.is_empty() {
-            return Ok(());
-        }
-        // Deterministic: the earliest consumption wins, ties broken by path, so
-        // one program prints one message however the map is laid out.
-        //
-        // A WHOLE read of a name a take left a hole in is not one of them: the
-        // kernel refuses it, in these same words and with this same menu
-        // (RFC-0125 §3 M3, row 04). This arm held two rules, and this is the
-        // filter that lets the licensed one leave while rule 1 stays.
-        // A consumption a `consume` capability made — a parameter, a `drop` —
-        // is not one either: the kernel refuses the use after it, in the same
-        // sentence at the same line (RFC-0125 §3 M3, row 06). The capability
-        // IS the fix there, so such a consumption carries no menu, and the
-        // empty menu is what tells the two rules apart.
-        let Some((key, c)) = consumed
-            .overlapping(path)
-            .filter(|(k, c)| !(c.hole && under(k, path)) && !c.fixes.is_empty())
-            .min_by(|(ak, a), (bk, b)| (a.line, *ak).cmp(&(b.line, *bk)))
-        else {
-            return Ok(());
-        };
-        // RFC-0089 rule 1, worded exactly as Phase 4b left it. Both lines name
-        // the storage that moved rather than the longer path that reads it: the
-        // line number already says which read, and `vyrn fix` looks for the
-        // moved name.
-        Err(menu(
-            c.line,
-            format!(
-                "`{key}` was moved here into {}\nline {line}: ... and `{key}` is \
-                 used again here",
-                c.by
-            ),
-            c.fixes.clone(),
-        ))
-    }
-
     /// A take: `consume p` as a prefix (RFC-0093), or the `p` of
     /// `for x in consume p`. Three refusals, and RFC-0093 M1 deleted the fourth.
     ///
@@ -3152,8 +3103,7 @@ impl MoveCheck<'_> {
     /// [`MoveCheck::store`] and is right, and this path is what was missing. So
     /// the question here is `store`'s question — a borrowed root, and RFC-0092's
     /// projection of any root — asked with the move left where it is, because a
-    /// capability keeps the wording it has always had (see
-    /// [`MoveCheck::check_use`]).
+    /// capability keeps the wording it has always had.
     ///
     /// **A linear type stands aside**, exactly as [`sinks`] stands aside for it.
     /// A `Stream<T>` carries its disposal obligation on the type and the
@@ -5792,7 +5742,7 @@ impl MoveCheck<'_> {
                 self.capture_site(name, *line);
                 self.check_capture(name, *line)?;
                 self.note_capture(name, *line);
-                self.check_use(name, *line, consumed)
+                Ok(())
             }
             Expr::Unary { expr, .. } => self.expr(expr, consumed, scope),
             Expr::Binary { op, lhs, rhs, line } => {
@@ -5843,14 +5793,14 @@ impl MoveCheck<'_> {
             // Walking into the root instead would ask it of `er` and refuse
             // `er.next` after `consume er.node`, which is the case RFC-0093
             // exists to allow. The root still gets its capture bookkeeping.
-            Expr::Field { expr, field, line } => match place_path(e) {
-                Some((_, path)) => {
+            Expr::Field { expr, field, .. } => match place_path(e) {
+                Some(_) => {
                     let (root, rline) = root_var(e);
                     self.mention_ev(root);
                     self.capture_site(root, rline);
                     self.check_capture(root, rline)?;
                     self.note_capture(root, rline);
-                    self.check_use(&path, *line, consumed)
+                    Ok(())
                 }
                 None => {
                     // RFC-0114 R1′: a receiver with no name — `.byteLength` on
@@ -7956,18 +7906,6 @@ mod tests {
     // ---- RFC-0089 Phase 4b: rules 1 and 3 --------------------------------
 
     #[test]
-    fn a_store_of_an_owned_place_moves_it() {
-        // Rule 1. The binding takes the String; reading `s` afterward is the
-        // error, and the message prints both lines and the way out.
-        let src = "fn main() -> Int64 { let s = \"a\" + \"b\" let t = s \
-                   return s.byteLength + t.byteLength }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("`s` was moved here into the binding `t`"), "{e}");
-        assert!(e.contains("... and `s` is used again here"), "{e}");
-        assert!(e.contains("fix: `s.copy()`"), "{e}");
-    }
-
-    #[test]
     fn a_last_use_may_move() {
         // The half that keeps rule 1 usable: `let t = s` with no later `s` is
         // not an error, so the common rename costs nothing.
@@ -7976,22 +7914,6 @@ mod tests {
         .is_ok());
         // And a scalar never moves at all.
         assert!(run("fn main() -> Int64 { let a = 1 let b = a return a + b }").is_ok());
-    }
-
-    #[test]
-    fn a_move_into_a_container_is_a_move() {
-        // `push` stores its argument, so it is the `consume` parameter a builtin
-        // has no signature to declare.
-        let src = "fn main() -> Int64 { let s = \"a\" + \"b\" let mut xs: Array<String> = [] \
-                   xs.push(s) return s.byteLength }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("was moved here into `push(..)`"), "{e}");
-        // A record literal takes its operands the same way.
-        let src = "type R = { s: String } \
-                   fn main() -> Int64 { let s = \"a\" + \"b\" let r = R { s: s } \
-                   return s.byteLength + r.s.byteLength }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("was moved here into the field `R.s`"), "{e}");
     }
 
     #[test]
@@ -8324,13 +8246,9 @@ mod tests {
         // element is a move and needs no copy.
         assert!(run("fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]                      let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
             .is_ok());
-        // And the container is dead afterwards — rule 1's own error.
-        let src = "fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]                    let mut out: Array<String> = []                    for x in consume xs { out.push(x) } return xs.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("`xs` was moved here into the `for .. in consume` loop"),
-            "{e}"
-        );
+        // And the container is dead afterwards, which is row 07's error. The
+        // sentence is the kernel's since the row left, so `tests/refusals.rs`
+        // asks it of the whole compiler (RFC-0125 §3 M3, row 07).
     }
 
     #[test]
@@ -8410,25 +8328,10 @@ mod tests {
         // A sibling field survives the take. This is the sentence a whole-root
         // move cannot say, and the nine-line drain in `std/vyx` is made of it.
         assert!(go("let d = make() let mut o: Array<String> = [] o.push(consume d.a) o.push(consume d.b) return o.length").is_ok());
-        // The taken path does not.
-        let e = go("let d = make() let mut o: Array<String> = [] o.push(consume d.a) return d.a.byteLength").unwrap_err();
-        assert!(e.contains("`d.a` was moved here into `consume`"), "{e}");
+        // The taken path does not, and that sentence is the kernel's since row
+        // 07 left: `tests/refusals.rs` asks it of the whole compiler.
         // A write fills the hole.
         assert!(go("let mut d = make() let mut o: Array<String> = [] o.push(consume d.a) d.a = \"z\" return d.a.byteLength").is_ok());
-    }
-
-    /// The union at a branch join: a take on one arm is a take on both, so the
-    /// arm that did not take leaks rather than freeing something twice.
-    #[test]
-    fn a_take_on_one_branch_is_a_take_on_both() {
-        let src = "type Bag = { a: String } \
-                   fn make() -> Bag { return Bag { a: \"x\" + \"y\" } } \
-                   fn go(n: Int64) -> Int64 { let d = make() let mut o: Array<String> = [] \
-                       if n > 0 { o.push(consume d.a) } \
-                       return d.a.byteLength } \
-                   fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("`d.a` was moved here into `consume`"), "{e}");
     }
 
     /// The two refusals that stay, each with the menu it prints. The other two
@@ -9119,12 +9022,8 @@ mod tests {
              let s = fromStep(0, 0, run) close(s) return 0 }"
         ));
 
-        // Reading the name afterwards is the rule 1 error, and it says where the
-        // array went.
-        let e = run("fn main() -> Int64 { let xs: Array<Int64> = [1, 2] \
-                     let s = fromArray(xs) close(s) return xs.length }")
-        .unwrap_err();
-        assert!(e.contains("moved here into `fromArray(..)`"), "{e}");
+        // Reading the name afterwards is row 07's error, in the kernel's words
+        // since the row left: `tests/refusals.rs` asks it of the whole compiler.
 
         // A `read` parameter's buffer may not go into a stream: the caller still
         // owns it, and the stream's close would free it.
