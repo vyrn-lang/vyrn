@@ -6656,7 +6656,17 @@ impl<'p> Fn_<'_, 'p> {
         // one for `/`, `>>` and every comparison. `peek` is allowed to fail here:
         // "not obviously sized" is the answer the left operand already gave.
         let mut opty = lt.clone();
-        if n == Num::PLAIN {
+        // A LITERAL is not the sibling this rule means, and saying so is
+        // RFC-0125 §3 M5's one-reader slice: `peek` used to answer `Int` for
+        // every literal, which hid the distinction, and it answers the
+        // checker's own type now. `0 - eight` takes its width from `eight`, a
+        // sized VALUE. `c - 'a'` must not take one from `'a'`: a byte literal
+        // adapts to the position it is in, the checker types the whole
+        // expression `Int64`, and computing it at eight bits makes
+        // `'A' - 'a'` 224 where the other two engines say -32. The same is
+        // true of `b >= 'a'`, which is a signed 64-bit comparison in all three
+        // engines and would become an unsigned byte one here.
+        if n == Num::PLAIN && !matches!(rhs, Expr::Int(_) | Expr::Byte(_)) {
             if let Ok(rt) = self.peek(rhs, line) {
                 let rt = self.cx.resolve(&rt);
                 if let Some(rn) = Num::of(&rt).filter(|rn| *rn != Num::PLAIN) {

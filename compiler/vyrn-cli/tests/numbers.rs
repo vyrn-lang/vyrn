@@ -41,7 +41,7 @@ fn unit_tests_green(rel: &str, expected: &str) {
 
 #[test]
 fn number_conversion_pins_hold() {
-    unit_tests_green("examples/numbytes.vyrn", "7 passed, 0 failed");
+    unit_tests_green("examples/numbytes.vyrn", "8 passed, 0 failed");
 }
 
 #[test]
