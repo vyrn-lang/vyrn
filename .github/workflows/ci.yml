@@ -527,17 +527,14 @@ jobs:
     # x86-64 only, on purpose, and here is the case for the ARM leg that is NOT
     # here so the next reader does not have to rebuild it.
     #
-    # THE ROUTE IS NOT PINNED HERE YET, AND THIS JOB IS RED UNTIL IT IS.
     # RFC-0125 §2.5 gives one native route — the module `--target wasm` writes,
     # through wasm2c and clang — so this job compares that binary with the same
     # module under the `wasmtime` CLI (`tests/route.rs`). It needs wabt, and
-    # `vyrn.lock` pins exactly one wabt asset: `x86_64-windows`, the one whose
-    # bytes have been hashed. An asset name is a pin only once someone has
-    # downloaded it and recorded its sha256 (RFC-0102 M1), so the other three
-    # were left unrecorded rather than guessed. One `vyrn update wabt` on a
-    # machine with network access writes this platform's row, and this job goes
-    # green with no other change. `VYRN_REQUIRE_TOOLS=1` is what makes the
-    # missing pin fail here instead of skipping the corpus quietly.
+    # `vyrn.lock` pins one wabt asset per platform: the Windows one hashed from
+    # its bytes, the three others by the sha256 the release publishes beside
+    # each asset, which `vyrn update --locked` checks against what it downloads
+    # (RFC-0102 M1). `VYRN_REQUIRE_TOOLS=1` is what makes a missing tool fail
+    # here instead of skipping the corpus quietly.
     #
     # What an `ubuntu-24.04-arm` copy of this job would NOT add: a second layout
     # ABI. `vyrn-codegen/tests/layout_vs_clang.rs` compiles for wasm32-wasip1 and

@@ -64,13 +64,11 @@ pub fn tool_platforms(name: &str) -> &'static [&'static str] {
     match name {
         // simde is headers, so it is `any` for the same reason the sysroot is.
         "wasi-sysroot" | "wasi-builtins" | "simde" => &["any"],
-        // wabt publishes a binary release per operating system, and this table
-        // records the ONE asset name that has been checked against the bytes it
-        // names. The other three are not guesses here: an asset name is only a
-        // pin once someone has hashed what it downloads, and pinning a URL whose
-        // sha256 nobody recorded is the failure mode RFC-0102 exists to remove.
-        // `vyrn update wabt` on a machine with network access is what adds them.
-        "wabt" => &["x86_64-windows"],
+        // wabt publishes a binary release per operating system, one asset per
+        // platform below, each pinned in `vyrn.lock` by sha256. The Windows
+        // asset was hashed from the bytes on this machine; the three others
+        // carry the sha256 the release publishes beside each asset, which
+        // `vyrn update --locked` checks against the bytes it downloads.
         _ => &PLATFORMS,
     }
 }
@@ -172,16 +170,18 @@ pub fn tool_url(name: &str, version: &str, platform: &str) -> Result<String, Str
         // wabt names its assets `<os>-<arch>`, which PLATFORMS' vocabulary does
         // not spell, so the mapping is a table and an unknown platform is a
         // refusal rather than an invented URL.
-        "wabt" => match platform {
-            "x86_64-windows" => Ok(format!(
-                "https://github.com/WebAssembly/wabt/releases/download/{version}/\
-                 wabt-{version}-windows-x64.tar.gz"
-            )),
-            other => Err(format!(
-                "this table records no wabt asset for {other} — run `vyrn update wabt` on \
-                 that platform to add one"
-            )),
-        },
+        "wabt" => {
+            let asset = match platform {
+                "x86_64-linux" => "linux-x64",
+                "aarch64-linux" => "linux-arm64",
+                "aarch64-macos" => "macos-arm64",
+                "x86_64-windows" => "windows-x64",
+                other => return Err(format!("this table records no wabt asset for {other}")),
+            };
+            Ok(format!(
+                "https://github.com/WebAssembly/wabt/releases/download/{version}/wabt-{version}-{asset}.tar.gz"
+            ))
+        }
         // A source tag, not a release asset: simde is a header library and the
         // route only needs `simde/wasm/simd128.h` off it.
         "simde" => Ok(format!(
@@ -509,16 +509,19 @@ mod tests {
              are wasmtime, wasi-sysroot, wasi-builtins, cargo-nextest, wabt, simde"
         );
 
-        // The native route's two (RFC-0125 §2.5). wabt records ONE asset name,
-        // because a URL is a pin only once its bytes have been hashed, and a
-        // platform with no recorded asset is a refusal rather than a guess.
+        // The native route's two (RFC-0125 §2.5). wabt names its assets
+        // `<os>-<arch>`, one per platform, and a platform outside the table is
+        // a refusal rather than a guess.
         assert_eq!(
             tool_url("wabt", "1.0.41", "x86_64-windows").unwrap(),
-            "https://github.com/WebAssembly/wabt/releases/download/1.0.41/\
-             wabt-1.0.41-windows-x64.tar.gz"
+            "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz"
         );
-        assert!(tool_url("wabt", "1.0.41", "x86_64-linux").is_err());
-        assert_eq!(tool_platforms("wabt"), ["x86_64-windows"]);
+        assert_eq!(
+            tool_url("wabt", "1.0.41", "x86_64-linux").unwrap(),
+            "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz"
+        );
+        assert!(tool_url("wabt", "1.0.41", "riscv64-linux").is_err());
+        assert_eq!(tool_platforms("wabt"), PLATFORMS);
         assert_eq!(
             tool_url("simde", "0.8.2", "any").unwrap(),
             "https://github.com/simd-everywhere/simde/archive/refs/tags/v0.8.2.tar.gz"
