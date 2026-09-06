@@ -6212,6 +6212,194 @@ pointed at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
 
+**The type slice (2026-09-07): the plan asks what type a node has.** The
+checker decides the static type of every expression and writes it down
+(`checker::Recorded`, one record per analysis since the one-check slice). M5
+made the emitters read it. `compiler/vyrn-frontend/src/declared.rs` was a
+SECOND derivation of the same fact — 240 lines that read a literal's shape, a
+`let` annotation, a return type, a variant table and a protocol's declared
+return, propagated through a scope stack — and the ownership passes decided
+what a program frees with it. Two derivations of one fact, and RFC-0087
+records what that costs three times over.
+
+**The census: every reading of `declared.rs`, by the question it asks.** 84
+readings, in two files. `own.rs` and `vyrn-lower/src/core.rs` read this module
+nowhere: `own.rs` takes its types from the one walk `movecheck::facts` makes,
+and the core takes them from the record already.
+
+| the question | how it is spelled | readings | file | does the record answer it |
+|---|---|---|---|---|
+| the type of a NODE | `type_of` | 5 | `movecheck.rs` | **yes** — `Recorded::node_types`, keyed by the node's address |
+| what a named type IS | `decls` | 19 | `movecheck.rs` | no — a declaration, not a node |
+| whether a TYPE owns heap | `owns_heap` | 20 | `movecheck.rs` | no — `own::Owned`'s table |
+| how a TYPE is released | `release_kind`, `releases` | 15 | `movecheck.rs` | no — the same table |
+| whether a TYPE must be used | `linear_kind` | 1 + 1 | `movecheck.rs`, `typed.rs` | no — the same table |
+| whether a TYPE reaches a declared release | `reaches_declared` | 2 | `movecheck.rs` | no — the same table |
+| whether a NAME constructs | `constructs` | 10 | `movecheck.rs` | no — a declaration |
+| whether a NAME is a callable | `is_function` | 3 | `movecheck.rs` | no — a declaration |
+| the declared type of a PARAMETER | `param_ty` | 5 | `movecheck.rs` | no — a declaration |
+| the element type of a TYPE | `elem_of` | 2 | `movecheck.rs` | no — a type function |
+| module state, as a scope frame | `globals` | 1 | `movecheck.rs` | no — a declaration |
+
+**One row is the second derivation, and it is the only one.** Every other
+reading asks about a TYPE or a NAME, which the checker's record does not key
+and never answered. `must_use` had no reader at all.
+
+**Readings the record cannot reach: zero.** `movecheck::run` builds the table
+once per walk and hands it `checker::recorded(program)` there, so every one of
+the five node readings has a record. A record with a HOLE in it is a different
+question, and it was measured: over the 203 programs in `examples/`, the
+derivation answered 32 times behind the record, in 8 programs, all in
+synthesized JSON decoder bodies (`f0`, `a1` — `jsondec.rs`'s carriers). Those
+32 answers change nothing: with the derivation switched off, `vyrn why
+--memory` is byte-identical on all 203, and so is every gate below. The
+derivation is deleted.
+
+**The three defects, each a consequence.**
+
+1. **A copy of a place the declared reading could not name.** `x.copy()`
+   allocates for exactly the types `owns_heap` counts; everything else it is
+   called on is a handle, and a copied handle shares what it points at. So
+   `names_a_place` reads an UNNAMED copy as a handle's and stands the release
+   down. A pattern binder and a loop binder's field were unnamed, so
+   `s = p.name.copy()` inside a `for` had no release row at all — which is
+   the leak `parity.rs`'s own completeness instrument used as its LEAKY side.
+   It exits 0 now, and the instrument's leaky side moved (below).
+2. **A literal that could not name itself.** `Declared::type_of` refuses an
+   array literal a type on purpose: `ArrayN`, `Array<T>` and `SmallArray<T, N>`
+   share one syntax and only an annotation tells them apart. The checker HAS
+   the annotation at every literal, because it is the pass that made it agree.
+   `std/html`'s `isVoid` binds `let voids = [.. thirteen strings ..]`
+   unannotated: thirteen String buffers per call, in every program that renders
+   HTML. It is `Array<String, 13>` now and it releases at both exits.
+3. **A name resolved across a module boundary.** `Declared::type_of` resolved
+   a call by NAME, so `render(raw(..))` in `examples/lib/gen_surface.vyrn` read
+   `raw` as `examples/shadowbuiltin.vyrn`'s own `fn raw(s: String) -> String`
+   — the program written to catch exactly that resolution — and minted a
+   String free for a call that returns `Code`. The record is keyed by node, so
+   it cannot reach another module's declaration. This was the LAST
+   `arg_drops: plan only` row in the corpus table, and the count is 0.
+
+**Two rules were stated by ABSENCE, and the slice made them say themselves.**
+Both were true, both were written in a comment, and neither was in code: a
+reading that could not name the type was doing the work.
+
+- **A named projection lends** (RFC-0120). A result capability IS "the result
+  is a place the receiver owns", which is `views`'s whole definition, and
+  `views` answered only for the builtin half. Nothing fired on the user half
+  because `Declared::type_of` gave a projection call no type. With a type,
+  `examples/namedplace.vyrn` minted a temporary row for `led.wrapped(2)` and
+  the kernel refused the release. `views` reads
+  `prelude::lends(name) || named_projection(name)` now.
+- **`value` lends.** `prelude`'s own audit table says it: "It boxes the
+  caller's buffer rather than copying it, so it LENDS, and a row would double
+  free." The way it said it was by having no row, which made the declared
+  reading answer `None`. `prelude::lends` states it directly now.
+  `testsweep` found it — `protocol Show` over a record, matched on `value(p)`,
+  literal #344 of `vyrn-frontend/semantics`.
+
+**One check per analysis, and none added.** `movecheck::run` asks
+`checker::recorded`, which serves the analysis's own check where one was made.
+Two hosts had no holder for the span the move check runs in, so
+`check_and_synthesize` opens one (`checker::Held`) between the synthesis and
+the last judgment: the synthesis is over, so no node moves under the record's
+keys. Measured on `vyrn check site/export.vyrn`, `VYRN_BUILD_PROFILE=1`:
+
+| phase | before | after |
+|---|---|---|
+| `check` | 2, 71 ms | 2, 68 ms |
+| `movecheck: checker::record` | — | 4, 167 ms |
+| `lower: checker::record` | 3, 181 ms | 3, 1.3 µs |
+
+The record the lowering used to make is the record the move check now makes,
+and the lowering is served it. The editor pays nothing: driving `vyrn-lsp`
+over stdio on `site/app/docs.vyrn`, five edits after the open, the keystroke is
+125–168 ms against 140–161 ms before, and the per-analysis table says
+`movecheck: checker::record` 2 calls, 500 ns — the analysis's own recording
+check answers both.
+
+**The corpus rows that moved, and why each moved.**
+
+| pin | before | after | why |
+|---|---|---|---|
+| `coretables`, `arg_drops: core only` | 552 | 432 | 120 values the declared reading could not name. The core stated the drop from its own body; the plan states it too now, so the two agree at 120 more sites. |
+| `coretables`, `arg_drops: plan only` | 1 | 0 | Defect 3. The last second opinion in the table, and the plan's was the wrong one. |
+| `rfcs/census/wasm-sha256.tsv` | — | 12 of 175 | Every one gains release code, and no example loses any. |
+| `parity`, `leak_check_is_two_sided` | leaky | re-recorded | Defect 1 closed the program the instrument used as its leaky side. |
+
+The twelve wasm rows, read at the source. Six — `domdemo`, `htmlrefuse`,
+`htmltree`, `pagesdemo`, `twdemo`, `vyxdemo` — gain exactly 90 lines of the
+same shape: `std/html`'s `isVoid` releases its thirteen-element literal at
+both of its exits (defect 2). `rest` gains 128, which is that shape at a
+twelve-element literal, twice. `regex` gains 12: `Username("alice")`,
+`Email(..)` and `EveryOther(..)` are `where`-refined String constructions, and
+their three bindings had no release row. `fnvalstore` gains 10: `let sink:
+IntSink = double` was read as a second name for a value it did not take.
+`stringops` gains 4, one free. `closures2` gains 14, one free of a captured
+buffer. `nestedsum` gains 8 and trades one free for a `memory.copy`: the store
+now knows it owns what it holds. All 41 parity programs stay byte-identical and
+the residue ratchet does not turn.
+
+**The instrument stays two-sided.** `leak_check_is_two_sided` asserted that
+`s = p.name.copy()` inside a `for` leaks. It does not, and this slice is why.
+The leaky side is now a discarded call result inside a loop where the value the
+container holds was copied out of a place, which leaks two blocks on both this
+compiler and the one before it; the program that stopped leaking is pinned
+CLEAN beside it, so the fix cannot come back.
+
+**The lines.**
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/declared.rs` | 588 | 342 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 7,762 | 7,780 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 857 | 872 |
+| `compiler/vyrn-frontend/src/checker.rs` | 16,282 | 16,315 |
+
+`declared.rs` loses the derivation (240 lines), the `method_protos` table that
+only the derivation read, `must_use` (no reader), and the `vars` parameter of
+`type_of` (a lookup by address needs no scope stack). What is left is the
+program-level tables and the type predicates the census names. `movecheck.rs`
+gains 18: the record it asks for, the sentence `views` now says, and what
+`MoveCheck::type_of` says it reads first.
+
+**The structural census.** 584 / 78 / 2,148 / 73 / 3,760 / 1,137 over 7,780
+lines, against 584 / 78 / 2,139 / 73 / 3,751 / 1,137 over 7,762. Two kinds
+move: the rows kind rises 9 for `views`'s new sentence, and the shared kind 9
+for the record the walk asks for and for what `MoveCheck::type_of` says it is
+now first. No rule moved. RFC-0127's form census does
+not move either — the arms are the same arms — and neither does RFC-0126's
+surface census.
+
+#### Gates (2026-09-07, the type slice)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 589 passed, 75 ignored |
+| `kernel` `--ignored` | 1, 229 s |
+| `coretables` `--ignored` | 1, 194 s |
+| `typed` `--ignored` | 1, 332 s |
+| `effects` `--ignored` | 2, 305 s |
+| `fixtures` `--ignored` | 1, 97 s |
+| `vyrn-frontend` | 1,182 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,358 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own manifest | 3 |
+| `memory` `--test-threads=1` | 10, 22 s |
+| `parity` `--ignored`, release | 41 of 41, 366 s |
+| the residue ratchet | 1, 327 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green after `write`; 12 of 175 rows moved, each read at the source above |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 418 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
