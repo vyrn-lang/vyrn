@@ -487,3 +487,71 @@ fn one_edit_re_judges_one_body() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// **A body the placer wrote a row for is served too** — RFC-0125 §3 M3, the
+/// rows slice.
+///
+/// The memo slice recorded an entry only for an INERT body — one the placer
+/// wrote no row for — because serving a body skips its placement as well as
+/// its judgment. That excluded the expensive half: of `site/app/chart.vyrn`'s
+/// 122 bodies, 52 were imported, non-inert, and rebuilt on every keystroke.
+///
+/// Those rows have no reader in a host that armed the memo, which is the rule
+/// [`vyrn_frontend::movecheck::reuse_judgments`] states, so every keyed body is
+/// recorded now. The program below pins it: a string interpolation injects
+/// `std/text` (RFC-0078 M2b), whose `decodeUtf8` holds an array at its `return`
+/// and whose `test` block leaves a payload binder unmoved — two imported bodies
+/// the placer writes a row for, and the two the old rule rebuilt every time.
+///
+/// The count is the claim. A run that edits only the root judges ZERO keyed
+/// bodies and serves every one the cold run judged; under the `inert` rule it
+/// judged those two again, on every keystroke.
+#[test]
+fn a_placed_row_does_not_stop_a_body_being_served() {
+    vyrn_lower::install();
+    vyrn_frontend::movecheck::reuse_judgments();
+    let dir = std::env::temp_dir().join(format!("vyrn-judgrows-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
+    let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).expect("write");
+    write(
+        "b.vyrn",
+        "export fn bTwo(x: Int64) -> Int64 { return x + 2 }\n",
+    );
+    let run = || {
+        vyrn_frontend::movecheck::reset_judgment_tally();
+        load(&dir.join("main.vyrn")).expect("the program loads");
+        vyrn_frontend::movecheck::judgment_tally()
+    };
+    let root = |tail: &str| {
+        write(
+            "main.vyrn",
+            &format!(
+                "import {{ bTwo }} from \"./b\"\nfn main() -> Int64 {{\n  let s = \
+                 \"n=${{bTwo(2)}}{tail}\"\n  return s.byteLength\n}}\n"
+            ),
+        )
+    };
+
+    root("");
+    let (cold, served_cold) = run();
+    assert!(cold > 0, "the first run judges every body it can key");
+    assert_eq!(served_cold, 0, "nothing is served on the first run");
+
+    // Two edits of the ROOT, which is the module a keystroke changes. Its own
+    // bodies have no key and are built every time; every imported body keeps
+    // what it earned, the two the placer placed a row for included.
+    for tail in ["!", "!!"] {
+        root(tail);
+        let (judged, served) = run();
+        assert_eq!(
+            judged, 0,
+            "an edit in the root re-judges no imported body (served {served})"
+        );
+        assert_eq!(
+            served, cold,
+            "every body the cold run judged is served (cold {cold})"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
