@@ -1559,7 +1559,15 @@ impl<'a> Builder<'a> {
                 // = local`); the core says the scrutinee is this frame's and
                 // the binder names its payload, so the release is stated
                 // once, at the value that owns it.
-                Some(n) if !self.body.names[*n as usize].releases => {}
+                //
+                // A consuming loop's container is the exception: the row is
+                // the loop's TAKE, and the kernel refuses it there when the
+                // container is a `read` parameter's field or module state
+                // (rows 10, 11, 29). A borrow with no row is a take nobody
+                // judged.
+                Some(n)
+                    if !self.body.names[*n as usize].releases
+                        && !self.body.names[*n as usize].for_consume => {}
                 Some(n) => {
                     // The row's own set (a placer row, or round fifty-two's
                     // whole walk), else the binding's.

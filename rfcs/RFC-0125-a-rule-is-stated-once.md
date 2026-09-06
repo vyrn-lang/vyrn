@@ -6439,6 +6439,17 @@ the branch point, `core.rs` 4,921 against 4,931, `movecheck.rs` 8,089
 unchanged — this track deletes no checker rule, which is what keeps it out of
 the way of the one that does.
 
+**The two slices above, merged (2026-09-06).** The named-binding slice and
+the form slice were built apart and each was green alone. Together, rows 10,
+11 and 29 were accepted: the form slice moved the `for .. in consume` refusal
+to the kernel's release of the container temporary, and the named-binding
+slice made `drops_at` skip a plan row for a name the core does not own — and a
+container read out of module state or a `read` parameter's field is exactly
+such a name. A borrow with no row is a take nobody judged. The skip now keeps
+a row whose name is a consuming loop's container (`NameInfo::for_consume`),
+which is the loop's take, and the kernel refuses it there as before. Two lines
+in `core.rs`; the structural census does not move.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
