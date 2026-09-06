@@ -879,10 +879,22 @@ thread_local! {
 ///
 /// A body whose key is unchanged is not built and not judged, so the release
 /// rows the placer would have added for it are not added either, and its
-/// frames are not folded into the core's facts. Both are empty for a body the
-/// placer records as inert — which is the only kind of body an entry is
-/// written for — but the FACTS a body contributes are not, and an engine that
-/// emits reads them. So a host that lowers or emits must never arm this.
+/// frames are not folded into the core's facts. Neither has a reader HERE, and
+/// that is the whole condition — one rule, stated once, for both:
+///
+///   * the facts are read by the two compiled backends and by the
+///     interpreter's arm rows;
+///   * the placer's rows are read by the emitters, and inside one analysis by
+///     a later `core::build` of the SAME function — every table `place_frames`
+///     writes is keyed by a node, and a node belongs to one function, so the
+///     only bodies a served body's missing rows could reach are its own other
+///     instances, which carry the same module and the same content hash and
+///     are therefore served or built together.
+///
+/// So a host that lowers or emits must never arm this, and a host that arms it
+/// gets refusals and nothing else. The editor is the one such host: it shows
+/// diagnostics, and `memory_notes` reads the walk's own notes, which the placer
+/// does not write.
 pub fn reuse_judgments() {
     REUSE.with(|r| r.set(true));
 }
