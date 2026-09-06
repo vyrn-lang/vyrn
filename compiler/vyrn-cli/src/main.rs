@@ -1379,9 +1379,11 @@ fn json_str(s: &str) -> String {
 /// source says which is which. The compiler holds the exact answer and shows it
 /// to nobody. This is that answer at the shell.
 ///
-/// It is a **printer**. Every word comes out of `own::Ownership`, recorded by
-/// the walker that decided — never re-derived here. A second walk over the tree
-/// could disagree with the first, and the census records that defect three times.
+/// It is a **printer**. Every word comes out of `own::Ownership::memory`,
+/// which the CORE writes through the placer slot — never re-derived here, and
+/// no longer worded by a second walk of the tree either (RFC-0125 §3 M3, the
+/// report slice). Two walks could disagree, and the census records that defect
+/// three times.
 ///
 /// It reports; it does not gate. Exit 0 whenever it could answer.
 fn why_memory(file: &str) -> ExitCode {
@@ -1450,7 +1452,7 @@ fn why_memory(file: &str) -> ExitCode {
             // transfers, so the only other answer is that the type owns nothing.
             None => println!("    transfers: no — the return type {} owns no heap", f.ret),
         }
-        let notes = match own.notes.get(&f.name) {
+        let notes = match own.memory.get(&f.name) {
             Some(n) if !n.is_empty() => n,
             _ => {
                 println!("    (no bindings)");
@@ -1458,23 +1460,22 @@ fn why_memory(file: &str) -> ExitCode {
             }
         };
         for n in notes {
-            use vyrn_frontend::own::Fate;
+            use vyrn_frontend::own::Bucket;
             bindings += 1;
-            match &n.fate {
-                Fate::Reclaimed(..) => reclaimed += 1,
-                Fate::Moved { .. } => moved += 1,
-                Fate::Dropped { .. } => dropped += 1,
-                Fate::Static => statics += 1,
-                Fate::Discharged(_) => discharged += 1,
-                Fate::Leaked(reason) => {
-                    let key = reason.kind();
-                    match leaked.iter_mut().find(|(k, _)| *k == key) {
+            match n.bucket {
+                Bucket::Reclaimed => reclaimed += 1,
+                Bucket::Moved => moved += 1,
+                Bucket::Dropped => dropped += 1,
+                Bucket::Static => statics += 1,
+                Bucket::Discharged => discharged += 1,
+                Bucket::Leaked { reason, .. } => {
+                    match leaked.iter_mut().find(|(k, _)| *k == reason) {
                         Some((_, c)) => *c += 1,
-                        None => leaked.push((key, 1)),
+                        None => leaked.push((reason, 1)),
                     }
                 }
             }
-            println!("    line {:<5} {:<16} {}", n.line, n.name, n.fate.words());
+            println!("    line {:<5} {:<16} {}", n.line, n.name, n.text);
         }
     }
 

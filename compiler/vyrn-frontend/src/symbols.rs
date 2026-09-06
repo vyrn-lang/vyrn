@@ -197,14 +197,14 @@ pub struct Analysis {
 
 /// One binding's memory answer, positioned for the editor (RFC-0087 U1).
 ///
-/// [`crate::own::BindingNote`] with the prose already rendered, so the LSP is an
-/// adapter rather than a second opinion.
+/// [`crate::own::MemoryRow`], positioned, so the LSP is an adapter rather than
+/// a second opinion. The prose is the CORE's (RFC-0125 §3 M3).
 #[derive(Debug, Clone)]
 pub struct MemoryNote {
     pub name: String,
     /// 1-based line of the `let`.
     pub line: usize,
-    /// What happens to the value, in one line — [`crate::own::Fate::words`].
+    /// What happens to the value, in one line — [`crate::own::MemoryRow::text`].
     pub text: String,
     /// The line where the value stops being live, when there is one: a move or
     /// a `drop`. `None` for a binding that lives to block exit.
@@ -687,31 +687,22 @@ fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote> {
         .iter()
         .filter(|f| f.module.is_none() && !f.is_extern)
     {
-        let Some(notes) = own.notes.get(&f.name) else {
+        let Some(notes) = own.memory.get(&f.name) else {
             continue;
         };
         for n in notes {
             // A binding whose type owns no heap has nothing to reclaim, so
             // "NOT reclaimed" is the wrong sentence about it. `vyrn why --memory`
             // counts it in a summary; a hover on an `Int64` would just alarm.
-            if matches!(
-                &n.fate,
-                crate::own::Fate::Leaked(crate::own::Leak::NoRelease {
-                    owns_heap: false,
-                    ..
-                })
-            ) {
+            if matches!(n.bucket, crate::own::Bucket::Leaked { heap: false, .. }) {
                 continue;
             }
             out.push(MemoryNote {
                 name: n.name.clone(),
                 line: n.line,
-                text: n.fate.words(),
-                last_use: n.fate.last_use(),
-                moved_into: match &n.fate {
-                    crate::own::Fate::Moved { into, .. } => Some(into.clone()),
-                    _ => None,
-                },
+                text: n.text.clone(),
+                last_use: n.last_use,
+                moved_into: n.moved_into.clone(),
             });
         }
     }
