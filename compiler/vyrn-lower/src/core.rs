@@ -4257,20 +4257,6 @@ pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
-/// Round forty's answer for one arm, handed down to the interpreter through
-/// [`vyrn_frontend::own::install_arm_rows`] — the one engine that cannot name
-/// this crate. `None` where this pass states no answer (an `if let`, a `?`),
-/// and the reader falls back to the plan there.
-pub fn arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
-    let f = facts()?;
-    let rows = f.arms.get(&(key, arm))?;
-    Some(
-        rows.iter()
-            .filter_map(|(n, h, k)| k.clone().map(|k| (n.clone(), k, h.clone())))
-            .collect(),
-    )
-}
-
 /// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
 /// the binding (RFC-0093 M2).
 fn plan_holes(holes: &[String]) -> Vec<String> {

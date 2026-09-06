@@ -5974,6 +5974,89 @@ Not one generator byte moves, which is the answer to the obvious worry about
 widening ownership: the 22 sites are all in bodies the generators do not
 compile, and the manifest is 175 of 175.
 
+**What `own.rs` is, with a reader against every part (2026-09-06).**
+
+`Fate` is out of the core, so the file can be said. 4,186 lines, 2,983 of
+code and 1,203 of tests, in ten parts. Every part below has a named reader; one
+part did not, and it is deleted here.
+
+| part | lines | who reads it |
+|---|---|---|
+| the vocabulary — `Exit`, `Release`, `DropKind`, `Linear` | 196 | every pass. The emitters key a row by `Exit`, the kernel and the core name a `DropKind`, `movecheck` and `declared` name a `Linear` |
+| the type table — `Owned`, `self_referring`, the free `owns_heap` | 609 | the checker, `declared`, `movecheck`, `types`, the core (`Builder::owns` is three of its rows), both emitters, `render`. Not a placement row at all |
+| the report — `Leak`, `Fate`, `BindingNote` | 246 | `vyrn why --memory` in `main.rs`, and the LSP's inlay hints in `symbols.rs`. Nothing else, since this slice |
+| the plan the emitters read — `ReleasePlan` | 191 | both compiled emitters, through `key_of`, `acknowledge`, `discarded_result`, `receiver_free`, `receiver_holes_at`, `receiver_malloc_at`, `malloc_scrutinee`, `unconsumed` and the alias map. The CORE writes `receiver_frees`, `receiver_holes` and `owners` into it |
+| `Ownership` and `Memo` | 126 | every command, and the one analysis per build |
+| the fold — `analyze`, `analyze_now` | 486 | it builds everything above and runs the placer |
+| the channels — `for_var_key`, `Placer`, `Refusals` | 64 | `vyrn-lower` installs both slots, `symbols` asks `placer_installed`, `movecheck` drains `kernel_refusals` |
+| `fold_revived` and `placed` | 117 | the note walk, and both emitters |
+| the placement walk — `Live`, `Place`, `place_body` | 328 | `Ownership::releases`, read by the CORE (`Builder::placed`, `drops_at`) and by both emitters |
+| the note walk — `Emit`, `emit_body`, `fate` | 565 | it writes `notes` for the report, and `droppable`, `early`, `holes` and the plan's four sets for the emitters |
+
+**The one part with no reader is the arm slot, and the interpreter took its
+reader with it.** `ArmRows`, `install_arm_rows` and `core_arm_rows` handed
+round forty's answer DOWN from `vyrn-lower` to `vyrn-frontend`, for the one
+engine that could not name the lowering crate. The tree-walker is deleted, so
+nothing calls `core_arm_rows`: the two compiled backends ask
+`vyrn_lower::core::facts()` themselves. The slot, its `OnceLock`, its
+installation in `vyrn-lower`'s `install`, and `core::arm_rows` behind it all
+go. It is the shape of every deletion this milestone has made, one level up:
+a channel outlives the reader that needed it, and it looks alive because
+something still fills it.
+
+**What the core still reads out of `own.rs`, which is the next track's
+list.** Five things, and none of them is `Fate`:
+
+  - `proto`, the type table. It is a declaration and it stays;
+  - `releases`, the placement walk's rows, through `Builder::placed`. The
+    core adds the rows the analysis owes and did not place, so the two halves
+    are still one answer written twice;
+  - `holes`, RFC-0093 M2's skippable set;
+  - `droppable`, at two sites;
+  - `lending`, `retains`, `escapers` and `fnval_clear` — the four answers only
+    a pass that has read every body can give, handed on rather than tabled.
+
+**And what the text-IR backend's retirement takes with it.** Every
+`ReleasePlan` reading in the table above is made TWICE, once in
+`vyrn-codegen/src/lib.rs` and once in `direct.rs`; `malloc_scrutinee` is read
+by the text emitter alone, so it goes whole. What would be left of the plan
+after that track is the direct emitter's readings and the core's own
+`releases`, which is the pair the placement walk exists to serve.
+
+#### The census slice's gates (2026-09-06)
+
+The full list again, on the tree with the arm slot deleted, in §1.4's order
+and one at a time in the foreground.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the two excluded manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 571 passed, 75 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 121 s |
+| `coretables` `--ignored` | 1, 108 s |
+| `typed` `--ignored` | 1, 269 s |
+| `effects` `--ignored` | 2, 288 s |
+| `fixtures` `--ignored` | 1, 91 s |
+| `vyrn-frontend` | 1,207 |
+| the workspace less `vyrn-cli` | 1,383 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 232 s |
+| the residue ratchet | 224 s, clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 175 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 101 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks |
+
+Lines per file at the end of the two slices: `own.rs` 4,186 against 4,213 at
+the branch point, `core.rs` 4,921 against 4,931, `movecheck.rs` 8,089
+unchanged — this track deletes no checker rule, which is what keeps it out of
+the way of the one that does.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
