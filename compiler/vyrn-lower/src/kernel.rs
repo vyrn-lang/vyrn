@@ -278,6 +278,11 @@ struct Kernel<'b> {
     part: std::cell::Cell<usize>,
     /// How that taker takes ([`Taker`]).
     takes: Taker,
+    /// Whether the name being consumed is leaving its SCOPE rather than
+    /// being taken: the release this pass places, and a literal whose scope
+    /// ends. Nothing took it, so the report records no taker — the statement
+    /// around the exit is a `return` and would otherwise lend it its words.
+    ending: std::cell::Cell<bool>,
     /// Whether the taker of the statement being judged is a BUILTIN call —
     /// which is how a must-use value is disposed of rather than moved
     /// (`movecheck::sinks` answers false at a linear parameter, so the
@@ -416,6 +421,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>
         part: std::cell::Cell::new(0),
         takes: Taker::Stores,
         how: TookHow::Other,
+        ending: std::cell::Cell::new(false),
         builtin: false,
         took: std::cell::RefCell::new(vec![None; body.names.len()]),
         released: std::cell::RefCell::new(vec![None; body.names.len()]),
@@ -514,7 +520,7 @@ impl<'b> Kernel<'b> {
         // placed, a scope end — takes nothing, and a rebind clears the row
         // again, so what is left is the last take the binding was not given a
         // value back after.
-        if !by.is_empty() {
+        if !by.is_empty() && !self.ending.get() {
             self.took.borrow_mut()[n as usize] = Some(Took {
                 line: self.here,
                 by,
@@ -1128,6 +1134,19 @@ impl<'b> Kernel<'b> {
     /// Every name in `names` that is still held is a leak at this scope's
     /// end — refused when judging, recorded and released when placing.
     fn scope_end(
+        &mut self,
+        st: &mut State,
+        names: &[Name],
+        exit: Exit,
+        site: usize,
+    ) -> Result<(), Refusal> {
+        self.ending.set(true);
+        let out = self.scope_end_inner(st, names, exit, site);
+        self.ending.set(false);
+        out
+    }
+
+    fn scope_end_inner(
         &mut self,
         st: &mut State,
         names: &[Name],

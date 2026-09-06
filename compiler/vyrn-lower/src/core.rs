@@ -335,7 +335,7 @@ pub enum Site {
 pub enum Val {
     Name(Name),
     /// A literal: nothing to own. A string literal is static data
-    /// ([`vyrn_frontend::own::Fate::Static`]).
+    /// ([`NotOwned::Static`]).
     Lit,
 }
 
@@ -2783,7 +2783,7 @@ impl<'a> Builder<'a> {
     ///
     /// Round twenty-seven's question used to be asked of the plan's note, and
     /// the note answered it the wrong way round: `let o = tag(7)` in `let s =
-    /// match o { Some(v) => v, .. }` is `Leak::Aliased`, because the
+    /// match o { Some(v) => v, .. }` is an ALIAS out of the join, because the
     /// construct hands the payload out and `s` reclaims it. Read as "never
     /// owned", that made this pass bind `o` as a borrow, so the rule that
     /// asks whether the construct TOOK it rested on the decision it feeds.
@@ -5192,8 +5192,10 @@ fn report(
             exits.entry(m.name).or_insert_with(|| plan_holes(&m.holes));
         }
     }
-    let proto = own.proto.clone();
-    let rows = own.memory.entry(owner.to_string()).or_default();
+    // The rows are built against a borrowed `own` and put in at the end: the
+    // type table is a map of every declaration in the program, and a copy of
+    // it per frame is a copy per keystroke.
+    let mut rows = std::mem::take(own.memory.entry(owner.to_string()).or_default());
     for (i, info) in body.names.iter().enumerate() {
         // The report is about the `let`s a reader wrote. A parameter, a `for`
         // variable, a pattern binder and a temporary this pass minted are all
@@ -5209,7 +5211,6 @@ fn report(
         {
             continue;
         }
-        let ty = info.ty.to_string();
         let name = info.source.clone();
         let line = info.line;
         let took = took.get(i).and_then(|t| t.as_ref());
@@ -5225,12 +5226,12 @@ fn report(
             // What the type releases, asked first, because a reader told that
             // the type reclaims nothing needs no second sentence.
             (Some(NotOwned::NoRelease { heap: false }), _) => leaked(
-                format!("NOT reclaimed — the type {ty} owns no heap"),
+                format!("NOT reclaimed — the type {} owns no heap", info.ty),
                 "the type owns no heap",
                 false,
             ),
             (Some(NotOwned::NoRelease { heap: true }), _) => leaked(
-                format!("NOT reclaimed — nothing releases the type {ty} yet"),
+                format!("NOT reclaimed — nothing releases the type {} yet", info.ty),
                 "the type has no release rule",
                 true,
             ),
@@ -5310,7 +5311,7 @@ fn report(
                 bucket: Bucket::Discharged,
             },
             (None, None) => match (
-                proto.release_kind(&info.ty),
+                own.proto.release_kind(&info.ty),
                 exits
                     .get(&(i as Name))
                     .cloned()
@@ -5337,6 +5338,7 @@ fn report(
         rows.push(row);
     }
     rows.sort_by_key(|r| r.line);
+    own.memory.insert(owner.to_string(), rows);
 }
 
 /// "reclaimed at block exit — …", with the places a `consume` took out of the
@@ -5414,7 +5416,9 @@ fn place_frames(
                 continue;
             }
         };
+        let rp = vyrn_frontend::prof::phase("placer: report");
         report(body, owner, &missing, &took, &released, own);
+        drop(rp);
         for m in missing {
             // A store's row is keyed by the STORE and by nothing else: the
             // place it writes into may be module state or a sub-place, which

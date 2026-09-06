@@ -305,6 +305,8 @@ fn main() -> Int64 {
     let ticket = mint(1)
     let second = ticket
     let held = a + b
+    let joined = a + b
+    let picked = if c { joined } else { a + b }
     let sent = a + b
     let job = spawn takes(sent)
     let doubled = job.join()
@@ -317,6 +319,7 @@ fn main() -> Int64 {
     print(grown)
     print(branch)
     print(alias)
+    print(picked)
     print(given)
     return n + second.id + f(1) + doubled
 }
@@ -361,12 +364,24 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     has("arena            NOT reclaimed — it is inside a `region`");
     has("c                NOT reclaimed — the type Bool owns no heap");
     // Round fifty-seven: a LAMBDA's capture is a deep snapshot, so the
-    // captured binding reclaims; only a `spawn`'s capture stays a leak.
+    // captured binding reclaims. RFC-0125 §3 M3, the report slice: a SPAWN's
+    // capture reclaims too, because the core owns the binding and the kernel
+    // places its release — the walk that worded this report used to say
+    // "`sent` NOT reclaimed — a lambda or a spawn captures it at line 55"
+    // about a row the placer had already placed.
     has("held             reclaimed at block exit — freeing the String buffer");
-    has("sent             NOT reclaimed — a lambda or a spawn captures it at line");
+    has("sent             reclaimed at block exit — freeing the String buffer");
     has("named            NOT reclaimed — it is a borrow of somebody else's value");
-    has("ticket           NOT reclaimed — another binding aliases it at line");
-    has("second           NOT reclaimed — it is a second name for a value it did not take");
+    // The same slice: `let second = ticket` TAKES the value, so the report
+    // names the two halves of one move. It used to say "`ticket` NOT
+    // reclaimed — another binding aliases it" and "`second` NOT reclaimed —
+    // it is a second name for a value it did not take", which is nobody
+    // reclaiming a value the emitters release.
+    has("ticket           moved at line 52 into the binding `second`");
+    has("second           reclaimed at block exit — calling `Owned__Ticket__release`");
+    // An alias is what a JOIN makes: one edge hands the binding's value on
+    // and the other does not, so the frame stops answering for it.
+    has("joined           NOT reclaimed — another binding aliases it at line");
     // Not leaks, and the report must not call them leaks.
     has("a                static data");
     has("gone             reclaimed by `drop` at line");
@@ -422,7 +437,6 @@ fn why_memory_counts_the_whole_file() {
         "{text}"
     );
     assert!(text.contains("aliased by another binding"), "{text}");
-    assert!(text.contains("captured by a lambda or a spawn"), "{text}");
     assert!(text.contains("it names somebody else's value"), "{text}");
 }
 
