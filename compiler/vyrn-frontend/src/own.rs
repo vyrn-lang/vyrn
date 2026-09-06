@@ -796,6 +796,10 @@ impl Owned {
             // `Param` is erased by monomorphization, and an unresolved `Named`
             // or `App` is a name with no declaration. None of them reaches a
             // binding whose cleanup this decides.
+            //
+            // `Code` (RFC-0054) is the one BUILT-IN name that arrives here,
+            // and its `None` is a decision rather than a default — see the
+            // note [`owns_heap`] carries at the same line.
             Type::Omit(..)
             | Type::Pick(..)
             | Type::Merge(..)
@@ -912,6 +916,17 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
             if seen.iter().any(|x| x == n) {
                 return true;
             }
+            // A name with no declaration owns nothing, and `Code` (RFC-0054)
+            // is the one BUILT-IN such name — the answer is stated here
+            // rather than assumed (RFC-0125 §3 M3, the last table's slice).
+            // A `Code` is a HANDLE: an index into the piece arena, which is
+            // the interpreter's whether the generator runs interpreted or
+            // compiled. The compiled route holds the index as an `i64` and
+            // reaches the arena through `vyrn_gen` imports, and that import
+            // list — `text`, `splice`, `rawAt`, `concat`, `render` — has no
+            // release in it, because there is nothing guest-side to release.
+            // So `Code` owns no buffer, and the temporary a `Code`-valued
+            // argument would need is one no engine could free.
             if !types.contains_key(n) {
                 return false;
             }
@@ -1245,14 +1260,6 @@ pub struct BindingNote {
 /// and the backends' runtime registries are built from them.)
 #[derive(Clone, Default)]
 pub struct ReleasePlan {
-    /// RFC-0114 M1: the call-argument expressions whose value the CALLER
-    /// releases after the call — the `ArgVerdict::Released` rows, by the
-    /// argument's node address.
-    ///
-    /// The core states this row from its own body since RFC-0125 §3 M3's
-    /// argument slice, and the emitters read the core first. What is left
-    /// here is the fallback for a node the core states nothing for.
-    pub arg_drops: std::collections::HashSet<usize>,
     /// Round twenty-seven: droppable scrutinee rows minted INSIDE a region
     /// because their value is a callee's (malloc-side) allocation — the
     /// textual emission frees these with its region guard stood down; the
@@ -1364,17 +1371,6 @@ impl ReleasePlan {
         self.taken.borrow_mut().insert(at);
     }
 
-    /// RFC-0114 M1: does the caller release this argument after the call?
-    /// A hit is recorded as consumed — see [`ReleasePlan::unconsumed`].
-    pub fn arg_drop(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        let hit = self.arg_drops.contains(&at);
-        if hit {
-            self.taken.borrow_mut().insert(at);
-        }
-        hit
-    }
-
     /// Round twenty-seven: may this match free the boxes its arms extract,
     /// though its scrutinee is a PLACE? True only where the fold proved the
     /// binding is never read after the match.
@@ -1430,10 +1426,8 @@ impl ReleasePlan {
         emitted: &std::collections::HashSet<String>,
     ) -> Vec<(String, &'static str)> {
         let taken = self.taken.borrow();
-        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 2] = [
-            ("an argument drop", Box::new(self.arg_drops.iter())),
-            ("a receiver free", Box::new(self.receiver_frees.iter())),
-        ];
+        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 1] =
+            [("a receiver free", Box::new(self.receiver_frees.iter()))];
         let mut out: Vec<(String, &'static str)> = Vec::new();
         for (label, it) in classes {
             for at in it {
@@ -1509,6 +1503,11 @@ pub struct Ownership {
     pub lending: std::collections::HashSet<String>,
     pub retains: std::collections::HashSet<(String, usize)>,
     pub escapers: std::collections::HashSet<String>,
+    /// Round forty-six's meet, by signature key — see
+    /// [`crate::movecheck::Facts::fnval_clear`]. The fourth answer only a
+    /// pass that has read every body can give, and the core asks it at a call
+    /// through a fn value, where no capability row answers.
+    pub fnval_clear: std::collections::HashSet<String>,
 }
 
 /// One analysis per build — RFC-0125 §3 M3, the repetition slice.
@@ -2003,17 +2002,6 @@ fn analyze_now(program: &Program) -> Ownership {
     // the walker's own attribution — the reachability half is then the
     // emitters' emitted-set, and dead code alarms nobody.
     let mut owners: HashMap<usize, String> = HashMap::new();
-    for t in &facts.arg_temps {
-        if t.verdict == crate::movecheck::ArgVerdict::Released {
-            if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
-                eprintln!(
-                    "plan-debug arg_drop id={} owner={} callee={} ix={} line={}",
-                    t.id, t.owner, t.callee, t.ix, t.line
-                );
-            }
-            owners.insert(t.id, t.owner.clone());
-        }
-    }
     for (k, n, owner) in &facts.receiver_temps {
         if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
             eprintln!(
@@ -2026,12 +2014,6 @@ fn analyze_now(program: &Program) -> Ownership {
         }
     }
     let plan = ReleasePlan {
-        arg_drops: facts
-            .arg_temps
-            .iter()
-            .filter(|s| s.verdict == crate::movecheck::ArgVerdict::Released)
-            .map(|s| s.id)
-            .collect(),
         malloc_scrutinees,
         discarded_results,
         receiver_frees,
@@ -2054,6 +2036,7 @@ fn analyze_now(program: &Program) -> Ownership {
         lending: facts.lending.clone(),
         retains: facts.retains.clone(),
         escapers: facts.escapers.clone(),
+        fnval_clear: facts.fnval_clear.clone(),
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
     // this analysis owes and did not place. It runs the lowering, which runs
@@ -3220,29 +3203,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Round fifty-six: a constructor-built argument of a plain call answers
-    /// no type of its own (`Ok(User { .. })` names only `Result`), so the row
-    /// is typed from the callee's declared parameter — and the temporary
-    /// frees the payload box it travels in.
-    #[test]
-    fn a_generic_ctor_argument_is_typed_from_the_callee() {
-        let src = "type User = { id: Int64, name: String }\n\
-                   fn show(r: Result<User, String>) -> Int64 {\n\
-                       return match r {\n\
-                           Ok(u) => u.id,\n\
-                           Err(e) => 0,\n\
-                       }\n\
-                   }\n\
-                   fn main() -> Int64 {\n\
-                       return show(Ok(User { id: 42, name: \"z\" + \"d\" }))\n\
-                   }";
-        let (o, _) = analyze_src(src);
-        assert!(
-            !o.plan.arg_drops.is_empty(),
-            "the ctor-built argument has a released row"
-        );
-    }
-
     /// Round fifty-six: the codec forms build fresh values, so a binding read
     /// through `fromJson` in a returned match is not moved into the return.
     #[test]
@@ -3311,90 +3271,33 @@ pub(crate) mod tests {
         );
     }
 
-    /// Round fifty-eight: an argument produced by a HANDS-BACK row mints no
-    /// released row — `copyString(n, blackBox(s))`'s temporary IS `s`, and
-    /// round fifty-seven's param-typing fallback briefly minted it: the
-    /// drain freed `s` through the alias and every bench body passing a
-    /// binding through `blackBox` heap-faulted before its report line.
-    #[test]
-    fn a_hands_back_producer_mints_no_row() {
-        let src = "fn takes(s: String) -> Int64 { return s.byteLength }\n\
-                   fn main() -> Int64 { return 0 }\n\
-                   bench \"alias\" {\n\
-                       let s = \"x\" + \"y\"\n\
-                       blackBox(takes(blackBox(s)))\n\
-                   }";
-        let (o, _) = analyze_src(src);
-        assert!(
-            o.plan.arg_drops.iter().all(|at| {
-                o.plan
-                    .owners
-                    .get(at)
-                    .is_none_or(|f| !f.starts_with("bench@"))
-            }),
-            "no released row inside the bench body"
-        );
-    }
-
-    /// Round fifty-seven: a scalar literal is an owned heapify element, so a
-    /// nested literal in argument position mints its row — `sumFirst([[10,
-    /// 11], [12]])` leaked both inner buffers and the outer one.
-    #[test]
-    fn a_nested_scalar_literal_argument_mints_a_row() {
-        let src = "fn sum(g: Array<Array<Int64>>) -> Int64 { return g.length }\n\
-                   fn main() -> Int64 { return sum([[10, 11], [12]]) }";
-        let (o, _) = analyze_src(src);
-        assert!(
-            !o.plan.arg_drops.is_empty(),
-            "the nested literal has a released row"
-        );
-    }
-
-    /// Round fifty-seven: a `+` chain over element reads types as `Str` when
-    /// one operand settles it (`adds_strings`), so `print(xs[0] + \"|\" +
-    /// xs[1])` frees its rendered line.
-    #[test]
-    fn a_concat_over_elements_mints_a_print_row() {
-        let src = "fn main() -> Int64 {\n\
-                       let mut xs: Array<String> = []\n\
-                       xs.push(\"a\" + \"b\")\n\
-                       print(xs[0] + \"|\" + xs[0])\n\
-                       return 0\n\
-                   }";
-        let (o, _) = analyze_src(src);
-        assert!(
-            o.plan
-                .arg_drops
-                .iter()
-                .any(|at| o.plan.owners.get(at).map(String::as_str) == Some("main")),
-            "the rendered line has a released row in main"
-        );
-    }
-
     /// RFC-0114 §26's finish check, mechanism-tested: a plan row in an
     /// emitted function that no query hit is reported, a queried one is not,
     /// and a row in an UNEMITTED function alarms nobody (the reachability
     /// answer the check waited for).
+    ///
+    /// One class is left to check it on. The argument drops went with their
+    /// table (RFC-0125 §3 M3, the last table's slice), and a receiver free is
+    /// the other row the check has always covered.
     #[test]
     fn a_missed_plan_row_is_loud_and_a_taken_or_dead_one_is_not() {
-        // `takes(a + b)` releases the argument temporary after the call —
-        // one `arg_drops` row in `main`.
-        let src = "fn takes(s: String) -> Int64 { return s.byteLength }\n\
-                   fn main() -> Int64 { return takes(\"x\" + \"y\") }";
+        // `("x" + "y").byteLength` reads a field off a String nothing names —
+        // one `receiver_frees` row in `main`.
+        let src = "fn main() -> Int64 { return (\"x\" + \"y\").byteLength }";
         let (o, _) = analyze_src(src);
-        assert_eq!(o.plan.arg_drops.len(), 1, "the fixture's one row");
-        let at = *o.plan.arg_drops.iter().next().unwrap();
+        assert_eq!(o.plan.receiver_frees.len(), 1, "the fixture's one row");
+        let at = *o.plan.receiver_frees.iter().next().unwrap();
         assert_eq!(o.plan.owners.get(&at).map(String::as_str), Some("main"));
-        let emitted: HashSet<String> = ["main".to_string(), "takes".to_string()].into();
+        let emitted: HashSet<String> = ["main".to_string()].into();
         // Unqueried and emitted: loud.
         assert_eq!(
             o.plan.unconsumed(&emitted),
-            vec![("main".to_string(), "an argument drop")]
+            vec![("main".to_string(), "a receiver free")]
         );
         // Unemitted: silent — dead code is not the emitters' to discharge.
         assert!(o.plan.unconsumed(&HashSet::new()).is_empty());
         // Queried: consumed, and quiet thereafter.
-        assert!(o.plan.arg_drop(at));
+        assert!(o.plan.receiver_free(at));
         assert!(o.plan.unconsumed(&emitted).is_empty());
     }
 

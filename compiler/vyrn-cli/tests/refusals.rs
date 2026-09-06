@@ -1281,17 +1281,6 @@ fn sections() -> Vec<Section> {
             "the retention and hand-over records the call graph is closed over",
         ),
         sec(
-            "    fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize) {",
-            Rows,
-            "the argument-temporary row: its producer, its type and its release \
-             kind",
-        ),
-        sec(
-            "    fn ctor_valued(&self, e: &Expr) -> bool {",
-            Rows,
-            "what an expression builds: a variant, a String, a concatenation",
-        ),
-        sec(
             "    fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String]) {",
             Rows,
             "an arm that yields a place, and what naming one costs",
@@ -1517,10 +1506,10 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 725),
-        ("placement rows for the engines", 2139),
+        ("placement rows for the engines", 1539),
         ("a fix menu", 73),
-        ("shared machinery", 3671),
-        ("tests", 2092),
+        ("shared machinery", 3564),
+        ("tests", 1905),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

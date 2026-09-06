@@ -2257,28 +2257,28 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 
 | kind | lines | share |
 |---|---|---|
-| a rule the kernel now gives | 916 | 9 per cent |
-| a rule only the checker gives | 725 | 7 per cent |
-| placement rows for the engines | 2,139 | 22 per cent |
+| a rule the kernel now gives | 916 | 11 per cent |
+| a rule only the checker gives | 725 | 8 per cent |
+| placement rows for the engines | 1,539 | 18 per cent |
 | a fix menu | 73 | 1 per cent |
-| shared machinery | 3,671 | 38 per cent |
-| tests | 2,092 | 22 per cent |
-| **the file** | **9,616** | |
+| shared machinery | 3,564 | 41 per cent |
+| tests | 1,905 | 22 per cent |
+| **the file** | **8,722** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
 | `pub struct OwningSite` | 129 | shared machinery | the module's own statement of the rules, and the two recorded measurements (RFC-0089 rule 1's sites, RFC-0092's projections) |
 | `pub enum Gone` | 134 | placement rows for the engines | why a binding does not hold its value at its block's end, and the row `own.rs` reads it from |
 | `pub enum ArgVerdict` | 24 | placement rows for the engines | what a callee does with the temporary at a call-argument position |
-| `pub struct ExitEv` | 116 | placement rows for the engines | the event records: exits, reads, consuming matches, stores, Rule N edges, place stores |
-| `pub fn facts(program: &Program) -> Facts` | 104 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
+| `pub struct ExitEv` | 127 | placement rows for the engines | the event records: exits, reads, consuming matches, stores, Rule N edges, place stores |
+| `pub fn facts(program: &Program) -> Facts` | 111 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
 | `enum Want` | 28 | shared machinery | what a run is for, and one run's outputs |
 | `pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>>` | 163 | placement rows for the engines | the capability of a position, the producer screens, and the verdict for one argument temporary — read at a position instead of at a binding, by this pass and by the core alike |
 | `fn let_id(s: &Stmt) -> usize` | 52 | placement rows for the engines | the key of a `let`, the lending builtins, and the projection names |
 | `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 388 | shared machinery | the entry points a caller uses |
-| `fn run(program: &Program, want: Want) -> Run` | 312 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
+| `fn run(program: &Program, want: Want) -> Run` | 256 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
 | `pub fn check(program: &Program) -> Result<(), String>` | 10 | shared machinery | the historical string shim |
-| `struct MoveCheck<'a>` | 147 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
+| `struct MoveCheck<'a>` | 139 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
 | `enum Borrow` | 48 | a rule the kernel now gives | what a borrow is, in words — `core::BorrowKind::what` is this sentence |
 | `fn fixes(&self, root: &str, path: &str) -> Vec<String>` | 24 | a fix menu | the named ways out of a borrow error |
 | `enum TakeForm` | 19 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
@@ -2303,10 +2303,8 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic>` | 132 | a rule the kernel now gives | rule 3: a return is owned (rows 15, 16, 18, 19, 28) |
 | `fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic` | 47 | a rule the kernel now gives | the one exit every returned borrow leaves by, the exported function's own sentence with it (row 17) |
 | `fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize)` | 27 | placement rows for the engines | the retention and hand-over records the call graph is closed over |
-| `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 525 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
-| `fn ctor_valued(&self, e: &Expr) -> bool` | 57 | placement rows for the engines | what an expression builds: a variant, a String, a concatenation |
 | `fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String])` | 111 | placement rows for the engines | an arm that yields a place, and what naming one costs |
-| `fn carries_param_storage(&self, e: &Expr) -> bool` | 171 | placement rows for the engines | the escape screen: storage flow rather than mention |
+| `fn carries_param_storage(&self, e: &Expr) -> bool` | 135 | placement rows for the engines | the escape screen: storage flow rather than mention |
 | `fn lends(&self)` | 34 | placement rows for the engines | the lending record, and the lend a wrapper hides |
 | `fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 54 | a rule the kernel now gives | the first borrow a returned expression yields |
 | `fn note_returned_projection(&self, e: &Expr, line: usize)` | 59 | shared machinery | RFC-0092's instrument |
@@ -2318,7 +2316,7 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), Diagnostic>` | 35 | a rule only the checker gives | a `modify` borrow is exclusive (row 23) |
 | `fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 43 | a rule only the checker gives | a closure that outlives the call may not capture a borrow (row 24) |
 | `fn check_loop_reuse` | 39 | a rule the kernel now gives | rule 1 across a back edge (row 25) |
-| `fn expr` | 835 | shared machinery | the walk over expressions: the same traversal does both jobs |
+| `fn expr` | 792 | shared machinery | the walk over expressions: the same traversal does both jobs |
 | `pub fn mentions_place(e: &Expr, base: &str) -> bool` | 95 | shared machinery | whether a stored value mentions the place it is stored into |
 | `mod linear` | 647 | a rule only the checker gives | the must-use obligation: acquired once, disposed exactly once (rows 30, 31) |
 | `fn store_path(e: &Expr) -> Option<String>` | 27 | shared machinery | the place an expression names, as the store arms spell it |
@@ -2327,7 +2325,8 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `pub fn element_path(e: &Expr) -> Option<(String, String)>` | 84 | shared machinery | the place spellings every rule above compares |
 | `fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic` | 13 | a fix menu | one diagnostic with its menu of fixes |
 | `fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>)` | 55 | shared machinery | the names a block declares, and a pattern's binders |
-| `mod tests` | 2092 | tests | the pass's own unit tests |
+| `mod tests` | 1905 | tests | the pass's own unit tests |
+test the_structural_census_as_a_table ... ok
 
 Four things the structural census says, and the third is the finding.
 
@@ -5083,6 +5082,92 @@ ownership in the first place. Porting the report would leave `Fate` behind for
 the core anyway. What would close it is the core stating a named binding's
 ownership from its own body, the way it now states an argument's — and that is
 the same reading the argument slice took, one binding form over.
+
+**The last table, and what `Code` owns (2026-09-06).**
+
+`own.rs` states no argument table any more, so it states no placement table at
+all. What the emitters read is [`vyrn_lower::core::Facts`]'s `arg_drops`, and
+nothing else: the `or` that kept the plan's answer for a node the core states
+nothing for is gone from both, and `arg_drop_row` is two lines.
+
+The corpus pin was read before the table went, at 863857ff, over 167 programs:
+**548** rows the core alone states, **1** the plan alone does. Both sides were
+read at the source, and the core is right on both.
+
+**The one plan-only row, read at the source.** It is `render(raw(..))` in
+`examples/lib/gen_surface.vyrn`, and it is a row that should never have been
+stated. The plan types `raw(..)` through [`Declared::type_of`], which reads
+the LINKED program — and the one program that reaches this body is
+`examples/shadowbuiltin.vyrn`, which declares `fn raw(s: String) -> String` of
+its own. So the plan reads `raw(..)` as a String and mints a String temporary
+for it. Resolving a builtin across a module boundary is the exact defect
+`shadowbuiltin.vyrn` was written to catch, one level down: in a placement
+table rather than in an engine.
+
+**`Code` owns no buffer, and that is now stated where the type is answered.** A
+`Code` (RFC-0054) is a HANDLE — an index into the piece arena, which is the
+interpreter's whether a generator runs interpreted or compiled. The compiled
+route holds the index as an `i64` and reaches the arena through the `vyrn_gen`
+imports, and that list is `read`, `fetch`, `text`, `splice`, `rawAt`, `concat`,
+`render`, `reflect`, `nextInt`, `nextStr`. There is no release in it, because
+there is nothing guest-side to release. So `owns_heap` and `release_kind`
+answer nothing for `Code`, and each now says so in a sentence rather than
+falling through the undeclared-name arm.
+
+**Zero bytes move, and the row was never emitted.** Both emitters read
+`release_kind` off their OWN type at the drain, so the plan's row emitted
+nothing for a `Code` even where it fired. It could not fire on the route that
+compiles this body either: the generator engine compiles the generator's own
+module tree, where `gen_surface.vyrn` declares neither name and `raw` means the
+builtin. `rfcs/census/wasm-sha256.tsv` is unchanged, and so is every corpus
+count the coretables test takes — 23,529 argument drops, 268 receiver frees,
+55,874 stores, all identical either side of the deletion.
+
+**What the deletion took.** `ReleasePlan::arg_drops` and `arg_drop`, the fold
+that built them, and everything that existed only to feed them: `movecheck`'s
+`note_arg_temp` (525 lines), its `arg_temps` sink, the whole-program verdict
+post-pass over it, and the four screens only that row asked — `ctor_valued`,
+`concatenates`, `adds_strings`, `owned_literal_elem`. `ArgTemp`, `ArgVerdict`
+and `arg_verdict` STAY: the core builds its own row and asks the same rule
+(`Builder::arg_released`), which is what the 548 are.
+
+§26's finish check loses one of its two classes with the table. A receiver free
+is the other, and it is what the mechanism test asks now.
+
+**One screen was not the table's, and the ratchet is what said so.** Round
+forty-six's fn-value MEET went out with the post-pass it was written inside,
+and `examples/rpc.vyrn` and `examples/rpcsplit.vyrn` came back leaking 6 and 5
+blocks. A call through a fn value names no function, so no capability row
+answers for its positions and every argument temporary there stands aside —
+`usersById(req, onGetUser)` reaches a generated dispatcher whose body is
+`cb(Done(..))`, and the built reply is the caller's to free. The meet is the
+answer: any runtime value of `Fn(ps) -> r` is a program function of exactly
+that signature or a lambda, and a signature whose every member reads its
+positions, retains nothing and lends nothing is clear.
+
+That is not a placement row. It is the fourth thing only a pass that has read
+every body can say, beside `lending`, `retains` and `escapers` — so it is stated
+where those are and handed to the core the way those are:
+`movecheck::Facts::fnval_clear`, a set of SIGNATURE keys, with `fn_sig_key`
+spelling the key once for both sides. `Builder::arg_released` asks it where the
+verdict falls to `Unknown`. It is stricter than the plan's version, which
+cleared one position: a key is clear only where every member reads every
+position, which loses rows in the leak direction and never the other.
+
+**The pin did not catch this, and the reason is worth the line.** `coretables`
+walks `examples/*.vyrn` and loads 167 of the 205 — `rpc.vyrn` is one of the 38
+it cannot load, so no count of its moved. The corpus test measures the tables;
+the ratchet measures the program. Both are gates for a reason.
+
+Lines per file: `movecheck.rs` 9,616 to 8,722, `own.rs` 4,451 to 4,354,
+`coretables.rs` 479 to 426, `refusals.rs` 1,560 to 1,549. `core.rs` is up 43:
+the placer channel that used to ride through the plan's set — the placer writes
+a borrowed receiver's producer, the second build reads it back, and neither was
+ever the table's answer, so it sits in `Placed` beside the store rows now — and
+the fn-value reading above. `vyrn-codegen` is down 12 across the two emitters.
+
+The structural census, after: kernel 916, checker 725, placement rows 1,539,
+fix menu 73, shared 3,564, tests 1,905.
 
 ### M4 — the runtime in Vyrn
 

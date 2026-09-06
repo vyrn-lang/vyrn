@@ -2976,24 +2976,19 @@ impl<'a> Gen<'a> {
         f.discarded.contains(&self.plan.key_of(node)) || self.plan.discarded_result(node)
     }
 
-    /// RFC-0114 M1 read off the core (RFC-0125 §3 M3, the deletion slice):
-    /// does the caller free this argument's value after the call or operator
-    /// above it? The core carries the key on the name the argument bound
-    /// ([`vyrn_lower::core::NameInfo`]'s `arg_drop`), which is where an
-    /// operator's operand gets one too — `a + b` is `@concat(a, b)` to the
-    /// plan.
+    /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
+    /// slice): does the caller free this argument's value after the call or
+    /// operator above it? The core carries the key on the name the argument
+    /// bound ([`vyrn_lower::core::NameInfo`]'s `arg_drop`), which is where an
+    /// operator's operand gets one too — `a + b` is `@concat(a, b)` here.
+    ///
+    /// There is no second answer to fall back to. `own.rs` states no argument
+    /// table any more, and a body the core cannot lower states no row at all
+    /// — which is the same answer the plan gave for such a body, because the
+    /// plan's own rows there were never read.
     fn arg_drop_row(&self, node: usize) -> bool {
-        let Some(f) = self.facts else {
-            return self.plan.arg_drop(node);
-        };
-        if f.arg_drops.contains(&self.plan.key_of(node)) {
-            self.plan.acknowledge(node);
-            return true;
-        }
-        // A node the core states nothing for keeps the plan's answer: a body
-        // the core cannot lower states no row at all, and `valuecount.vyrn`
-        // in the parity suite is one.
-        self.plan.arg_drop(node)
+        self.facts
+            .is_some_and(|f| f.arg_drops.contains(&self.plan.key_of(node)))
     }
 
     /// Round twenty-seven's table read off the core (RFC-0125 §3 M3, the

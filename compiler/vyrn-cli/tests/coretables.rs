@@ -54,11 +54,9 @@
 //!     kernel's answer is the only one, and it is counted here;
 //!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
 //!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
-//!     bound. DERIVED and no longer diffed since the argument slice: the
-//!     core states the row from its own body and both directions are
-//!     counted, with both counts pinned. The emitters still keep the plan's
-//!     answer for a node the core states nothing for, so the reading beside
-//!     the counts below is what a change to either number means;
+//!     bound. DERIVED and no longer diffed since the LAST table's slice:
+//!     `own.rs` states no argument table, the emitters read the core alone,
+//!     and the row is counted here;
 //!   - `edge_releases`, from a `St::Drop` at a `Site::Edge` — DERIVED and no
 //!     longer diffed since the derivation slice, for the reason `arm_frees`
 //!     is not.
@@ -207,23 +205,13 @@ fn run() {
             *counted.entry("arm binders freed").or_default() += core_says.len();
         }
 
-        // The plan's own totals, so the census can be read off this test.
-        for (what, n) in [
-            (
-                "discarded_results (plan)",
-                own.plan
-                    .discarded_results
-                    .iter()
-                    .filter(|a| reached(a))
-                    .count(),
-            ),
-            (
-                "arg_drops (plan)",
-                own.plan.arg_drops.iter().filter(|a| reached(a)).count(),
-            ),
-        ] {
-            *counted.entry(what).or_default() += n;
-        }
+        // The plan's own total, so the census can be read off this test.
+        *counted.entry("discarded_results (plan)").or_default() += own
+            .plan
+            .discarded_results
+            .iter()
+            .filter(|a| reached(a))
+            .count();
 
         // RFC-0125 §3 M3, the store slice: `own.rs` states no store table any
         // more, so there is nothing left to diff here either. The core's
@@ -253,44 +241,15 @@ fn run() {
             }
         }
 
-        // RFC-0125 §3 M3, the argument slice: the core STATES this row now,
-        // from its own body, so the plan's is the ANALYSIS's own answer and a
-        // difference is a real second opinion. Both directions are counted
-        // and both counts are pinned, so a new site is read at the source
-        // rather than absorbed.
-        //
-        // The core states MORE. The analysis recognises an allocating
-        // argument by its SHAPE, because it has no lowering, and its reading
-        // of a type is the DECLARED one — so it loses a row wherever that
-        // reading cannot name the type. Three classes carry nearly all of
-        // them: an operand of a `+` over module state (`prettyOut = prettyOut
-        // + spaces(..)` in `std/json`, whose declared reading types no
-        // global); an array literal handed to a SEEDED row, whose parameter
-        // the declared table does not hold (`stringFromBytes(['h', '\x00',
-        // 'i'])`); and a `match` whose arms hand a payload out without
-        // spelling the unwrap (`Ok(s) => "ok", Err(e) => e`). Each is a value
-        // the caller built and nobody freed. The residue ratchet is what read
-        // the verdict: `assoctype` was the corpus's last leaking row and it
-        // is clean now.
-        //
-        // The core states LESS at one site, and one only: `render(raw(..))`
-        // in `examples/lib/gen_surface.vyrn`. `raw` hands back a `Code`, and
-        // `Code` is a name no declaration answers, so `owns_heap` says it
-        // holds nothing and this pass mints no temporary. The emitters keep
-        // the plan's answer for a node the core states nothing for, so the
-        // free stands; the row cannot leave `own.rs` until `Code` owns its
-        // buffer.
-        for at in &facts.arg_drops {
-            *counted.entry("arg_drops").or_default() += 1;
-            if !own.plan.arg_drops.contains(at) {
-                *counted.entry("arg_drops: core only").or_default() += 1;
-            }
-        }
-        for at in own.plan.arg_drops.iter().filter(|a| reached(a)) {
-            if !facts.arg_drops.contains(at) {
-                *counted.entry("arg_drops: plan only").or_default() += 1;
-            }
-        }
+        // RFC-0125 §3 M3, the last table's slice: `own.rs` states no
+        // argument table any more, so there is nothing left to diff. The two
+        // counts this was pinned at said the equality had been read — 548
+        // rows the core alone stated, and ONE the plan alone did — and both
+        // sides were read at the source before the table went. The core was
+        // right both times; the RFC's record says why. Counted, like every
+        // other derived table, and a wrong answer fails the residue ratchet,
+        // the parity harness and the memory suite, which measure.
+        *counted.entry("arg_drops").or_default() += facts.arg_drops.len();
 
         // RFC-0125 §3 M3, the derivation slice: Rule N's rows are the
         // kernel's `equalize` and nothing else, so there is no second answer
@@ -449,18 +408,6 @@ fn run() {
             .unwrap_or(0),
         1,
         "`gqlSplitDecl(src).rhs` in `gqlIsRecord`, and nothing else"
-    );
-    // The argument slice's two counts, pinned in both directions — see the
-    // reading beside them above.
-    assert_eq!(
-        counted.get("arg_drops: core only").copied().unwrap_or(0),
-        548,
-        "the values the declared reading could not name, which nobody freed"
-    );
-    assert_eq!(
-        counted.get("arg_drops: plan only").copied().unwrap_or(0),
-        1,
-        "`render(raw(..))` in `gen_surface`, and nothing else"
     );
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
     // slice): every `Rhs` in the corpus names the type its node produces.

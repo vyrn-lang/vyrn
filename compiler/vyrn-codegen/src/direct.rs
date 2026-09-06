@@ -1378,25 +1378,18 @@ impl<'a> Cx<'a> {
         f.discarded.contains(&self.plan.key_of(node)) || self.plan.discarded_result(node)
     }
 
-    /// RFC-0114 M1 read off the core (RFC-0125 §3 M3, the
-    /// emitter-reads-the-core slice): does the caller free this argument's
-    /// value after the call or operator above it? The core carries the key
-    /// on the name the argument bound ([`vyrn_lower::core::NameInfo`]'s
-    /// `arg_drop`), which is where an operator's operand gets one too — `a +
-    /// b` is `@concat(a, b)` to the plan.
+    /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
+    /// slice): does the caller free this argument's value after the call or
+    /// operator above it? The core carries the key on the name the argument
+    /// bound ([`vyrn_lower::core::NameInfo`]'s `arg_drop`), which is where an
+    /// operator's operand gets one too — `a + b` is `@concat(a, b)` here.
+    ///
+    /// There is no second answer to fall back to, exactly as [`Cx::store_row`]
+    /// has none: `own.rs` states no argument table any more.
     fn arg_drop_row(&self, node: usize) -> bool {
-        let Some(f) = &self.facts else {
-            return self.plan.arg_drop(node);
-        };
-        if f.arg_drops.contains(&self.plan.key_of(node)) {
-            self.plan.acknowledge(node);
-            return true;
-        }
-        // A node the core states nothing for keeps the plan's answer, the way
-        // every other reader here does: a body the core cannot lower states
-        // no row at all, and `valuecount.vyrn` in the parity suite is one —
-        // a field read off a string literal is a place this pass refuses.
-        self.plan.arg_drop(node)
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.arg_drops.contains(&self.plan.key_of(node)))
     }
 
     /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the derivation
