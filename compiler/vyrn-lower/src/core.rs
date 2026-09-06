@@ -202,6 +202,12 @@ impl BorrowKind {
     /// sentence is about: a second name for a parameter says so, which is
     /// how `movecheck::Borrow::what` words it.
     pub fn what(&self, at: &str) -> String {
+        // A PATH under the parameter is the parameter: `h.meta[0]` is read out
+        // of a `read` parameter and the reader is told so, where a name bound
+        // to one (`let t = r.s`) is a second name for it. The two are
+        // comparable at the root alone, which is `movecheck::Borrow::what`'s
+        // own test (RFC-0125 §3 M3).
+        let at = vyrn_frontend::movecheck::root_of(at);
         match self {
             BorrowKind::Param { cap, of } if at == of => format!("a `{cap}` parameter"),
             BorrowKind::Param { cap, of } => {
@@ -229,12 +235,16 @@ impl BorrowKind {
             BorrowKind::Capture => Vec::new(),
             // A loop variable has a second way out, and it comes first: let the
             // loop take the elements. It only works when the WHOLE element is
-            // handed on, which is the only shape this reaches — a field of one
-            // is read into a name of its own.
-            BorrowKind::LoopVar { of } => vec![
+            // handed on — a stored FIELD of one is a partial move — so a path
+            // under the variable is left with the copy alone
+            // (`movecheck::Borrow::fixes`).
+            BorrowKind::LoopVar { of } if vyrn_frontend::movecheck::root_of(path) == path => vec![
                 format!("`for {path} in consume {of}` if the loop should take the elements"),
                 format!("`{path}.copy()` if both sides need a value"),
             ],
+            BorrowKind::LoopVar { .. } => {
+                vec![format!("`{path}.copy()` if both sides need a value")]
+            }
         }
     }
 }
