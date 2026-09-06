@@ -59,7 +59,14 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
     ("own", &["vyrn-frontend/src/own.rs"]),
     (
         "lower",
-        &["vyrn-lower/src/lib.rs", "vyrn-lower/src/core.rs"],
+        &[
+            "vyrn-lower/src/lib.rs",
+            "vyrn-lower/src/core.rs",
+            // The must-use judgment reads the tree a reader wrote, and it
+            // moved here with the rule (RFC-0125 §3 M3, the obligation
+            // slice). A form it walks is a form this column states.
+            "vyrn-lower/src/typed.rs",
+        ],
     ),
     ("shared", &["vyrn-codegen/src/lib.rs"]),
     ("wasm", &["vyrn-codegen/src/direct.rs"]),

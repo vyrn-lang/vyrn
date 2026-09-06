@@ -134,39 +134,39 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Never` | 4 | 2 | 4 | 2 | 0 | 0 | 12 |
 | `Type::Err` | 138 | 1 | 0 | 1 | 0 | 0 | 140 |
 |---|---|---|---|---|---|---|---|
-| `Type::Int` | 68 | 46 | 47 | 10 | 0 | 2 | 173 |
-| `Type::IntN` | 33 | 31 | 13 | 21 | 2 | 2 | 102 |
-| `Type::Float` | 22 | 21 | 20 | 5 | 0 | 2 | 70 |
-| `Type::Float32` | 23 | 24 | 17 | 5 | 0 | 1 | 70 |
-| `Type::F32x4` | 7 | 10 | 7 | 1 | 0 | 0 | 25 |
-| `Type::I32x4` | 11 | 9 | 7 | 1 | 0 | 0 | 28 |
-| `Type::F64x2` | 8 | 10 | 10 | 1 | 0 | 0 | 29 |
-| `Type::Mask32x4` | 5 | 5 | 5 | 1 | 0 | 0 | 16 |
-| `Type::Mask64x2` | 6 | 6 | 6 | 1 | 0 | 0 | 19 |
-| `Type::Bool` | 38 | 29 | 28 | 6 | 0 | 2 | 103 |
-| `Type::Str` | 90 | 55 | 76 | 8 | 0 | 4 | 233 |
-| `Type::Unit` | 34 | 35 | 29 | 9 | 1 | 0 | 108 |
-| `Type::Named` | 40 | 32 | 9 | 9 | 3 | 6 | 99 |
-| `Type::Record` | 14 | 15 | 6 | 18 | 0 | 5 | 58 |
-| `Type::Omit` | 5 | 4 | 0 | 9 | 0 | 0 | 18 |
-| `Type::Pick` | 5 | 3 | 0 | 9 | 0 | 0 | 17 |
-| `Type::Merge` | 5 | 3 | 0 | 9 | 0 | 0 | 17 |
-| `Type::Partial` | 5 | 3 | 0 | 9 | 0 | 0 | 17 |
-| `Type::Enum` | 14 | 14 | 9 | 12 | 0 | 3 | 52 |
-| `Type::Param` | 18 | 14 | 9 | 4 | 8 | 1 | 54 |
-| `Type::App` | 17 | 8 | 1 | 11 | 0 | 0 | 37 |
-| `Type::Array` | 49 | 45 | 41 | 7 | 2 | 5 | 149 |
-| `Type::ArrayN` | 18 | 31 | 18 | 9 | 0 | 4 | 80 |
-| `Type::SmallArray` | 24 | 28 | 21 | 7 | 1 | 4 | 85 |
-| `Type::ConstInt` | 2 | 4 | 0 | 1 | 0 | 0 | 7 |
-| `Type::Map` | 26 | 20 | 18 | 7 | 6 | 4 | 81 |
-| `Type::Stream` | 18 | 10 | 9 | 7 | 1 | 1 | 46 |
-| `Type::Task` | 10 | 7 | 4 | 7 | 1 | 1 | 30 |
-| `Type::Logger` | 2 | 4 | 2 | 1 | 0 | 1 | 10 |
-| `Type::Fn` | 28 | 32 | 24 | 10 | 1 | 0 | 95 |
-| `Type::Lazy` | 7 | 4 | 1 | 9 | 0 | 0 | 21 |
-| `Type::Never` | 4 | 10 | 4 | 2 | 0 | 0 | 20 |
-| `Type::Err` | 138 | 2 | 0 | 1 | 0 | 0 | 141 |
+| `Type::Int` | 68 | 3 | 47 | 10 | 0 | 2 | 130 |
+| `Type::IntN` | 33 | 4 | 13 | 21 | 2 | 2 | 75 |
+| `Type::Float` | 22 | 3 | 20 | 5 | 0 | 2 | 52 |
+| `Type::Float32` | 23 | 3 | 17 | 5 | 0 | 1 | 49 |
+| `Type::F32x4` | 7 | 1 | 7 | 1 | 0 | 0 | 16 |
+| `Type::I32x4` | 11 | 1 | 7 | 1 | 0 | 0 | 20 |
+| `Type::F64x2` | 8 | 1 | 10 | 1 | 0 | 0 | 20 |
+| `Type::Mask32x4` | 5 | 1 | 5 | 1 | 0 | 0 | 12 |
+| `Type::Mask64x2` | 6 | 1 | 6 | 1 | 0 | 0 | 14 |
+| `Type::Bool` | 38 | 2 | 28 | 6 | 0 | 2 | 76 |
+| `Type::Str` | 90 | 2 | 76 | 8 | 0 | 4 | 180 |
+| `Type::Unit` | 34 | 4 | 29 | 9 | 1 | 0 | 77 |
+| `Type::Named` | 40 | 3 | 9 | 9 | 3 | 6 | 70 |
+| `Type::Record` | 14 | 3 | 6 | 18 | 0 | 5 | 46 |
+| `Type::Omit` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
+| `Type::Pick` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
+| `Type::Merge` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
+| `Type::Partial` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
+| `Type::Enum` | 14 | 5 | 9 | 12 | 0 | 3 | 43 |
+| `Type::Param` | 18 | 2 | 9 | 4 | 8 | 1 | 42 |
+| `Type::App` | 17 | 3 | 1 | 11 | 0 | 0 | 32 |
+| `Type::Array` | 49 | 4 | 41 | 7 | 2 | 5 | 108 |
+| `Type::ArrayN` | 18 | 7 | 18 | 9 | 0 | 4 | 56 |
+| `Type::SmallArray` | 24 | 2 | 21 | 7 | 1 | 4 | 59 |
+| `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
+| `Type::Map` | 26 | 3 | 18 | 7 | 6 | 4 | 64 |
+| `Type::Stream` | 18 | 1 | 9 | 7 | 1 | 1 | 37 |
+| `Type::Task` | 10 | 1 | 4 | 7 | 1 | 1 | 24 |
+| `Type::Logger` | 2 | 1 | 2 | 1 | 0 | 1 | 7 |
+| `Type::Fn` | 28 | 5 | 24 | 10 | 1 | 0 | 68 |
+| `Type::Lazy` | 7 | 1 | 1 | 9 | 0 | 0 | 18 |
+| `Type::Never` | 4 | 2 | 4 | 2 | 0 | 0 | 12 |
+| `Type::Err` | 138 | 1 | 0 | 1 | 0 | 0 | 140 |
 
 The counts are this branch's tip, after §8.13. §8.7 took them 16 below the
 census's first reading — `has_nested_wrap` and its two callers, one function
@@ -202,13 +202,6 @@ most useful one in the table, because the interpreter is the one engine that has
 already answered §2.8's questions by building a representation:
 
 | `Type` constructors | the `Val` they become | what that says |
-|---|---|---|
-| `Array`, `ArrayN`, `SmallArray` | `Val::Array` | the three array kinds ARE one at runtime, in one engine |
-| `Map` | `Val::Map`, `Val::MapI`, `Val::MapU` | one constructor is THREE representations (RFC-0117) |
-| `Stream` | `Val::Stream` | not `Val::Array` since RFC-0075 M2b — see §6 |
-| `Fn`, `Lazy` | `Val::Fn` | `resolve` already answers `Fn([], T)` for a `lazy T` |
-| `Named`, `App`, `Omit`, `Pick`, `Merge`, `Partial` | whatever they resolve to | no representation of their own |
-| `ConstInt`, `Never`, `Err`, `Param`, `Task`, `Logger` | none | a compile-time constructor, or another `Val` |
 
 So §2.8's two headline candidates point in opposite directions. The three array
 kinds are already ONE representation in the interpreter and three in the
