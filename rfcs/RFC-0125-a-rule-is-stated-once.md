@@ -9183,6 +9183,98 @@ twice-freed second one cancel in `memory.buffer.byteLength`, so the row read
 steady with the defect in place. A measurement that measures nothing is what the
 census's own canary is there to catch, so it is not left in.
 
+#### The retirement census: what the text-IR route alone reads (2026-09-06)
+
+RFC-0125 §2.5 gives one emitter and one native route: the direct backend writes
+the wasm, wasm2c writes the C, clang writes the executable. The M4 step-3
+record measured that route within 2x of the text-IR route on every kernel, and
+the tools are now approved and unpacked — wabt 1.0.41 and simde v0.8.2 under
+`tools/`, both discovered by `vyrn deps`. So the text-IR route goes. This is
+the census that says what goes with it, what the wasm2c route needs kept, and
+what loses a reader that is not this track's to delete.
+
+Cranelift AOT is not built. It measured outside 2x in the same step, and no
+program pays for it. It stays a later slice.
+
+**The sizes before the change.** Rust under `compiler/` outside `target/` is
+195,566 lines. C on disk is one file, `vyrn-codegen/src/wasi_host.c`, 574
+lines: the runtime shim's own 1,092 lines of C live inside a Rust raw string
+(`toolchain::RUNTIME_SHIM_TEMPLATE`) and count as Rust here.
+
+**What goes: the text-IR route reads it and nothing else does.**
+
+| Where | What | Lines | Its last reader |
+| --- | --- | --- | --- |
+| `vyrn-codegen/src/lib.rs` 1341–15354 | `emit` and the whole textual emitter — the trap table, the coercion ladder's emitting half, the placement walk, the C symbol mangler | ~14,014 | `main.rs`'s `build`, `bench` and `emit-ir` |
+| `vyrn-codegen/src/lib.rs` 15706–19179 | `mod tests`: 131 unit tests, 124 of which call `emit` | ~3,474 | itself |
+| `vyrn-codegen/src/toolchain.rs` 25–1149 | `RUNTIME_SHIM_TEMPLATE`, `runtime_shim`, `extern_trap_stubs` — the C shim text and its per-`extern` trap stubs | ~1,125 | `build`, `bench`, `shim_wasm`, three tests |
+| `vyrn-codegen/src/toolchain.rs` 1596–1721 | `shim_key`, `shim_key_sysroot_component`, `shim_key_clang_component`, `shim_wasm` — the shim compiled to wasm and cached under `~/.vyrn/cache/shim` | ~240 | `tests/shim_link.rs`, and nothing in production |
+| `vyrn-cli/src/main.rs` | `emit-ir`, the `--route` flag, the text-IR half of `build`, the text-IR compile in `bench` | ~180 | the CLI's own usage line |
+| `vyrn-cli/tests/parity.rs` | 45 tests, 41 ignored: the corpus loop's native column and 44 hand-written three-engine comparisons | 4,704 | CI's `parity` job |
+| `vyrn-codegen/tests/shim_link.rs` | a directly-emitted module linked against the shim under wasmtime | 15.2 KB | CI's codegen step |
+| `vyrn-codegen/tests/imports_vs_shim.rs` | the emitter's `declare` lines against the shim's C definitions | 10.3 KB | CI's codegen step |
+| `vyrn-codegen/src/wasm.rs` `boundary()` | the `__vyrn_*` signatures parsed out of the shim text | ~40 | the two tests above |
+| `vyrn-cli/tests/common/mod.rs` `native_run`, `NATIVE_UNSUPPORTED` | the native column's build-and-run helper, and the one example the text-IR route refuses | ~40 | `parity.rs` only |
+| `vyrn-cli/tests/memory.rs` | four `_natively` tests | ~400 | themselves |
+| `vyrn-cli/tests/genwasm.rs` | `list_dir_is_refused_natively_and_built_for_wasm` | ~40 | itself |
+
+`shim_wasm` is the finding inside the finding. It compiles the shim to a wasm
+reactor module and caches it under a four-part key, and the split build it
+serves does not exist any more: `direct::compile` imports
+`wasi_snapshot_preview1` and the `vyrn` extern namespace and nothing else. One
+test reads it. It has been dead since RFC-0076 M7 and the census is what says
+so.
+
+**What stays: the wasm2c route needs it, or the direct backend does.**
+
+| Where | What | Why it stays |
+| --- | --- | --- |
+| `vyrn-codegen/src/direct.rs` | the one emitter | RFC-0125 §2.5 |
+| `vyrn-codegen/src/wasm.rs` | the module encoder, the memory map, `abi` | the direct backend's scaffolding |
+| `vyrn-codegen/src/layout.rs` | `of_ll`, `SHAPES` | `direct.rs` calls `layout::of_ll` at eleven sites |
+| `vyrn-codegen/src/lib.rs` 15355–15643 | `Rung`, `coerce_plan`, `plan_disagrees`, `sum_variants_of`, `llt_of` | RFC-0101's shared lowering: `direct.rs` reads the same ladder |
+| `vyrn-codegen/src/lib.rs` 723–1340 | `two_way`, `extern_abi_ll`, `gen_host`/`set_gen_host`, `CODE_IMPORTS`, the `GEN_*`/`TAG_*`/`REFLECT_*` constants, `observe`, `check_inst_depth` | `direct.rs` names 35 items from `crate::`; these are them |
+| `vyrn-codegen/src/lib.rs` scattered 9093–15514 | `lambda_captures`, `normalize_fn_sig`, `applied_type`, `settles_type_args`, `expected_type_args`, `solve_with_expected`, `serve_stream_trap`, `utf8d_table`, `append_candidates`, `global_append_candidates`, `self_append_spine` | shared helpers that sit inside the emitter's line range and must be lifted out of it, not deleted with it |
+| `vyrn-codegen/src/lib.rs` 15706–19179, seven tests | `llt_prints_the_shapes_the_layout_engine_was_verified_on`, `llt_prints_every_shape_the_layout_engine_was_verified_on`, `rfc0086_unsolvable_parameter_positions_over_the_corpus`, `the_filled_arms_bind_a_parameter_the_fall_through_walked_past`, `the_checker_refuses_every_shape_the_fall_through_used_to_swallow`, `a_moved_builtin_never_reaches_the_emitter`, `a_mangled_symbol_is_injective_over_generated_types` | the only seven that never call `emit`: they pin the checker and the shared type printer |
+| `vyrn-codegen/src/wasi_host.c` | the WASI host the route links | the route's own host |
+| `toolchain::wasm2c_from`, `simde_from`, `WASI_HOST_C`, `find_clang`, `clang_from` | tool discovery | the route runs them |
+| `toolchain::wasi_sysroot_from`, `wasi_builtins_from`, `builtins_near_sysroot` | the wasi sysroot pin | `tests/layout_vs_clang.rs` compiles for wasm32-wasip1 with it, and `vyrn deps` reports it. The sysroot survives the shim |
+| `vyrn-codegen/tests/layout_vs_clang.rs`, `tests/wasm_runs.rs`, `tests/toolchain_pin.rs` | clang's own answer for the layout engine, the encoder run under wasmtime, the pin mechanism | none of the three touches the shim |
+| `NativeTarget`, `add_native_clang_flags`, `--native-target`, `nativeTarget` | `-O2 -ffp-contract=off -march=…` | the wasm2c route passes the same flags to the same clang. The flag machinery MOVES; it does not go |
+
+**What loses a reader and is not this track's to delete.** The answer is
+nothing, and that is worth stating rather than assuming. `own.rs` exports
+thirteen names to the textual emitter and thirteen to the direct one, and the
+two sets differ by one in each direction: the textual emitter reads
+`own::release_kind`, the direct one reads `own::Release`. `direct.rs` reads
+`release_kind` too, at six sites, through `Owned::release_kind`. So
+`own::analyze`, `place_body`, `placed`, `holes_under`, `for_var_key`,
+`owns_heap`, `str_temporary`, `Ownership`, `Owned`, `ReleasePlan`, `DropKind`
+and `Exit` all keep a live reader after the deletion. No table and no walk in
+`own.rs` falls to this track. The same holds for `vyrn_lower::core`: the
+textual emitter names `decide`, `facts`, `join_ty`, `Facts`, `NameInfo` and
+`St`, and `direct.rs` names all of those but `St` — whose only other mention is
+a doc link. Nothing in the core loses its last reader either.
+
+**What the census cannot promise.** 124 unit tests go with `emit`. Each one
+was written against the textual emitter's output, and a rule one of them is the
+only pin for would go with it silently. The seven above are the ones that
+provably assert something else; the rest are read as the emitter's own
+regression suite, which is what the deletion is. `parity.rs`'s 44
+hand-written tests are the same question at a larger size: each compares the
+interpreter, the textual route and wasm, and after the flip the second and
+third are the same module. What survives of them is the interpreter-against-wasm
+half, which `tests/fixtures.rs` already runs over the whole corpus.
+
+**The route's corpus arithmetic, before slice 2.** `examples/` holds 208
+`.vyrn` files. `tests/route.rs` skips three lists — `KNOWN_DIVERGENT` (empty),
+`EXPECTED_CHECK_FAILURE` (programs that never build, by design) and `WASM_ONLY`
+(`externdemo.vyrn`) — and checks the rest. `NATIVE_UNSUPPORTED`
+(`listdir.vyrn`) is not one of its skips: the route runs the wasm, and the wasm
+has the lowering. So the only example the route excludes for a reason that
+could change is `externdemo.vyrn`, whose `extern` imports only a browser
+supplies.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
