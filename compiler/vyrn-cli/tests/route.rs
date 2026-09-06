@@ -128,3 +128,71 @@ fn every_example_agrees_between_the_wasm2c_route_and_the_wasm_engine() {
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
+
+/// The one example the loop above cannot compare, compared against the engine
+/// that CAN answer for it (RFC-0012; RFC-0125 §3 M5's `extern-unavailable`
+/// row).
+///
+/// `externdemo.vyrn` calls `extern fn`s, and only a browser page supplies the
+/// `vyrn` import namespace. The `wasmtime` CLI cannot instantiate the module at
+/// all, so there is no wasm column to be byte-identical with — which is what
+/// `WASM_ONLY` says and why the loop skips it. What IS decided is the refusal: a
+/// reached `extern` prints `extern \`name\` is not available on this target` on
+/// fd 2 and exits 1, on every engine that is not a page. The embedded engine
+/// (`vyrn run`) is one of those, so it is the reference here.
+///
+/// This is the assertion `parity::wasm_only_examples_trap_identically` made for
+/// the text-IR route, moved to the route that replaces it.
+#[test]
+#[ignore = "needs clang, wasm2c and simde; run explicitly: cargo test -p vyrn-cli --release --test route -- --ignored"]
+fn the_extern_example_refuses_on_the_route_as_the_embedded_engine_does() {
+    if route_tools().is_none() {
+        eprintln!("SKIP: the wasm2c route's tools are not all present");
+        return;
+    }
+    let dir = examples_dir();
+    let out_dir = scratch("route-extern");
+    for (name, _why) in WASM_ONLY {
+        let path = dir.join(name);
+        let engine = vyrn().arg("run").arg(&path).output().expect("vyrn run");
+        assert_eq!(
+            engine.status.code(),
+            Some(1),
+            "{name}: the engine must trap"
+        );
+        assert!(
+            norm(&engine.stderr).contains("is not available on this target"),
+            "{name}: the engine must print the canonical extern trap, got:\n{}",
+            norm(&engine.stderr)
+        );
+
+        let exe = out_dir.join(format!("{name}.exe"));
+        let build = vyrn()
+            .arg("build")
+            .arg(&path)
+            .arg("--route")
+            .arg("wasm2c")
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .expect("build");
+        assert!(
+            build.status.success(),
+            "{name}: the route must build it — the `vyrn` namespace's stubs link:\n{}{}",
+            norm(&build.stdout),
+            norm(&build.stderr)
+        );
+        let route = Command::new(&exe).output().expect("run the route's binary");
+        assert_eq!(route.status.code(), Some(1), "{name}: the route must trap");
+        assert_eq!(
+            norm(&route.stderr),
+            norm(&engine.stderr),
+            "{name}: the two refusals must be byte-identical"
+        );
+        assert_eq!(
+            norm(&route.stdout),
+            norm(&engine.stdout),
+            "{name}: stdout identical too"
+        );
+    }
+}

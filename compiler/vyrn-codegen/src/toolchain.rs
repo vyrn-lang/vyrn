@@ -1444,6 +1444,114 @@ pub fn simde_from(start: &Path) -> Option<(PathBuf, &'static str)> {
 /// driver to the header wasm2c wrote.
 pub const WASI_HOST_C: &str = include_str!("wasi_host.c");
 
+/// The marker [`wasi_host_c`] fills with the `vyrn` namespace's stubs.
+const EXTERN_STUBS_MARKER: &str = "/*@VYRN_EXTERN_STUBS@*/";
+
+/// [`WASI_HOST_C`] with RFC-0012's `vyrn` namespace filled in, read off the
+/// header wasm2c just wrote.
+///
+/// A reached `extern` must fail the same way on every engine (RFC-0125 §3 M5,
+/// the `extern-unavailable` row): the embedded engine answers each name in the
+/// namespace with `trap::extern_unavailable`'s sentence on fd 2 and exit 1, and
+/// a native binary has no host to answer with anything else. The text-IR route
+/// wrote one nullary C stub per declaration and let the linker reconcile it;
+/// wasm2c writes a PROTOTYPE, so a stub with the wrong arity does not link.
+///
+/// So the signatures come from the header rather than from a second reading of
+/// the declarations. The one place that knows how a `String` argument crosses
+/// this boundary is `direct::extern_abi_sig`, and a transcription of it here
+/// would be the second chance to make the same mistake that this file's
+/// neighbours keep refusing. The header is machine-written and its types are
+/// wasm-rt's four, so the transform is textual: name each parameter, keep the
+/// return type, and give the body the refusal.
+///
+/// It also decides the arity of `wasm2c_prog_instantiate`, which takes one
+/// argument per imported namespace. A program with no reachable `extern` has no
+/// `vyrn` import at all — `Module::sweep` drops the ones nothing calls — so the
+/// macro is what lets one host source serve both shapes.
+pub fn wasi_host_c(w2c_header: &str) -> String {
+    let mut stubs = String::new();
+    for line in w2c_header.lines() {
+        let line = line.trim();
+        if !line.ends_with(");") {
+            continue;
+        }
+        let Some(open) = line.find('(') else { continue };
+        let Some((ret, sym)) = line[..open].rsplit_once(' ') else {
+            continue;
+        };
+        let Some(mangled) = sym.strip_prefix("w2c_vyrn_") else {
+            continue;
+        };
+        let name = demangle_w2c(mangled);
+        let inner = line[open + 1..line.len() - 2].trim();
+        let params: Vec<String> = if inner.is_empty() || inner == "void" {
+            Vec::new()
+        } else {
+            inner
+                .split(',')
+                .enumerate()
+                .map(|(i, t)| format!("{} a{i}", t.trim()))
+                .collect()
+        };
+        stubs.push_str(&format!(
+            "{ret} {sym}({}) {{\n",
+            if params.is_empty() {
+                "void".to_string()
+            } else {
+                params.join(", ")
+            }
+        ));
+        for i in 0..params.len() {
+            stubs.push_str(&format!("    (void)a{i};\n"));
+        }
+        stubs.push_str(&format!(
+            "    fputs({:?}, stderr);\n    exit(1);\n",
+            format!(
+                "error: {}\n",
+                vyrn_frontend::trap::extern_unavailable(&name)
+            )
+        ));
+        if ret != "void" {
+            stubs.push_str("    return 0;\n");
+        }
+        stubs.push_str("}\n");
+    }
+    let block = if stubs.is_empty() {
+        "#define VYRN_INSTANTIATE(inst, wasi) wasm2c_prog_instantiate((inst), (wasi))\n".to_string()
+    } else {
+        format!(
+            "struct w2c_vyrn {{\n    int unused;\n}};\nstatic struct w2c_vyrn g_vyrn;\n\
+             #define VYRN_INSTANTIATE(inst, wasi) \
+             wasm2c_prog_instantiate((inst), &g_vyrn, (wasi))\n{stubs}"
+        )
+    };
+    WASI_HOST_C.replace(EXTERN_STUBS_MARKER, &block)
+}
+
+/// A wasm2c C symbol back to the name the module imported. wasm2c writes any
+/// byte outside `[A-Za-z0-9_]` as `0x` and two upper-case hex digits — `_start`
+/// is `0x5Fstart` — and a Vyrn identifier may hold one: the lexer accepts every
+/// `is_alphabetic` char, so `δata` is a legal name and its UTF-8 bytes arrive
+/// here escaped.
+fn demangle_w2c(sym: &str) -> String {
+    let b = sym.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'0' && i + 3 < b.len() && b[i + 1] == b'x' {
+            if let Ok(v) = u8::from_str_radix(&sym[i + 2..i + 4], 16) {
+                out.push(v);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Turn a missing tool from a SKIP into a failure when `VYRN_REQUIRE_TOOLS` is
 /// set, and return it unchanged otherwise.
 ///
@@ -1722,6 +1830,50 @@ fn shim_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host's `vyrn` namespace, both ways round (RFC-0012). A module with no
+    /// `extern` import gets the two-argument instantiate and no stub; a module
+    /// with one gets the three-argument instantiate, the struct the host must
+    /// define, and a stub at the header's own arity — including the `String`
+    /// argument that crosses as two values, which is the fact a transcription
+    /// of the ABI here would be free to get wrong.
+    #[test]
+    fn the_host_takes_its_extern_stubs_from_the_header() {
+        let none = wasi_host_c("void wasm2c_prog_instantiate(w2c_prog*, struct w2c_x*);\n");
+        assert!(none.contains("wasm2c_prog_instantiate((inst), (wasi))"));
+        assert!(!none.contains("struct w2c_vyrn {"));
+        assert!(!none.contains(EXTERN_STUBS_MARKER));
+
+        let some = wasi_host_c(
+            "struct w2c_vyrn;\n\
+             void w2c_vyrn_jsLog(struct w2c_vyrn*, u32, u64);\n\
+             f64 w2c_vyrn_jsNow(struct w2c_vyrn*);\n",
+        );
+        assert!(some.contains("wasm2c_prog_instantiate((inst), &g_vyrn, (wasi))"));
+        assert!(some.contains("struct w2c_vyrn {"));
+        assert!(some.contains("void w2c_vyrn_jsLog(struct w2c_vyrn* a0, u32 a1, u64 a2) {"));
+        assert!(some.contains("f64 w2c_vyrn_jsNow(struct w2c_vyrn* a0) {"));
+        // The refusal is the one every other engine prints, and only the
+        // non-void stub returns.
+        assert!(some.contains("error: extern `jsNow` is not available on this target\\n"));
+        assert!(
+            some.contains("    exit(1);\n    return 0;\n}"),
+            "f64 returns"
+        );
+        assert!(some.contains("    exit(1);\n}"), "void does not");
+        // A forward declaration is not a prototype and must not become a stub.
+        assert!(!some.contains("struct w2c_vyrn; {"));
+    }
+
+    /// A Vyrn identifier may hold a byte wasm2c escapes: the lexer accepts every
+    /// `is_alphabetic` char, so `δata` is a legal `extern fn` name and the
+    /// refusal must spell it the way the other engines do.
+    #[test]
+    fn a_mangled_import_name_comes_back_as_the_name_the_program_wrote() {
+        assert_eq!(demangle_w2c("jsAdd"), "jsAdd");
+        assert_eq!(demangle_w2c("0x5Fstart"), "_start");
+        assert_eq!(demangle_w2c("0xCE0xB4ata"), "δata");
+    }
 
     /// The rule two test harnesses depend on, checked rather than assumed: with
     /// `VYRN_REQUIRE_TOOLS` set a missing tool PANICS, and without it the same

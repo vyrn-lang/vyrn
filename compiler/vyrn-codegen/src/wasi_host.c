@@ -71,6 +71,16 @@ struct w2c_wasi__snapshot__preview1 {
     int unused;
 };
 
+/* RFC-0012's `vyrn` namespace. Only a browser page implements it, so a binary
+   answers every name in it with the one refusal the interpreter and the
+   embedded engine give — `extern \`name\` is not available on this target` on
+   fd 2, exit 1 — and a program that never calls one never reaches a stub. The
+   driver writes this block from the header wasm2c just produced, so the
+   signatures cannot disagree with the module's imports, and it defines
+   `VYRN_INSTANTIATE` because the instantiate function takes one argument more
+   when the module has a `vyrn` import than when it has none. */
+/*@VYRN_EXTERN_STUBS@*/
+
 /* One open descriptor above the preopen: a file, or a directory listing read
    once at the open for `fd_readdir`. Numbers are handed out in order and never
    reused, as the wasm engine's host does. */
@@ -556,7 +566,7 @@ int main(int argc, char** argv) {
     g_started = mono_ns();
     static struct w2c_wasi__snapshot__preview1 wasi;
     wasm_rt_init();
-    wasm2c_prog_instantiate(&g_inst, &wasi);
+    VYRN_INSTANTIATE(&g_inst, &wasi);
     /* `wasm_rt_impl_try` spelled out, without the exceptions runtime it pulls
        in: the same save and setjmp. */
     WASM_RT_SAVE_STACK_DEPTH();

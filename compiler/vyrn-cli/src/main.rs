@@ -6765,14 +6765,27 @@ fn build_wasm2c(
             return ExitCode::FAILURE;
         }
     }
-    if !write(&host_path, vyrn_codegen::toolchain::WASI_HOST_C.as_bytes()) {
+    // The host is written from the header wasm2c just wrote, because RFC-0012's
+    // `vyrn` namespace is per-program: one trap stub per import, at the arity
+    // the module declares. See `toolchain::wasi_host_c`.
+    let h_path = out.with_extension("w2c.h");
+    let header = match std::fs::read_to_string(&h_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", h_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    if !write(
+        &host_path,
+        vyrn_codegen::toolchain::wasi_host_c(&header).as_bytes(),
+    ) {
         return ExitCode::FAILURE;
     }
 
     // The header is included by its bare name: the host sits beside it, and a
     // full path would put backslashes into a C string literal.
-    let h_name = out
-        .with_extension("w2c.h")
+    let h_name = h_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();

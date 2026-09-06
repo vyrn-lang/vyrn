@@ -9275,6 +9275,52 @@ has the lowering. So the only example the route excludes for a reason that
 could change is `externdemo.vyrn`, whose `extern` imports only a browser
 supplies.
 
+#### The route answers the `vyrn` namespace (2026-09-06)
+
+The one gap the step-3 record left is closed. An `extern fn` (RFC-0012) had no
+stub on the route, so `externdemo.vyrn` failed at link — `too few arguments to
+function call, expected 3, have 2` out of the host, because a module with a
+`vyrn` import gives `wasm2c_prog_instantiate` one namespace more than a module
+without one.
+
+**Where the signatures come from.** The text-IR route wrote one nullary C stub
+per declaration (`toolchain::extern_trap_stubs`) and let the linker reconcile
+it with the call. wasm2c writes a PROTOTYPE, so a stub of the wrong arity does
+not compile at all. The arity is not a free reading either: a `String` argument
+crosses this boundary as two values, which `direct::extern_abi_sig` is the one
+place that knows. So the stubs are read off the header wasm2c has just written,
+not transcribed from the declarations — `toolchain::wasi_host_c` names each
+parameter, keeps the return type, and gives the body the refusal. The same pass
+decides the instantiate arity, because a module whose `extern`s are all swept
+away has no `vyrn` import and takes the two-argument form.
+
+**What the stub prints.** ``error: extern `jsNow` is not available on this
+target`` on fd 2, exit 1: `trap::extern_unavailable`, the sentence the embedded
+engine's linker answers the namespace with and the one the text-IR route's stub
+printed. wasm2c escapes a byte outside `[A-Za-z0-9_]` as `0x` and two hex
+digits, and a Vyrn identifier may hold one — the lexer accepts every
+`is_alphabetic` char — so the symbol is demangled before it enters the message.
+
+**What pins it.** `tests/route.rs` gains
+`the_extern_example_refuses_on_the_route_as_the_embedded_engine_does`: it builds
+`externdemo.vyrn` on the route and compares stdout, stderr and exit code with
+`vyrn run`. It cannot compare against the `wasmtime` CLI, and that is the
+reason `WASM_ONLY` gives: no engine outside a browser page can instantiate the
+module, so there is no wasm column. This is
+`parity::wasm_only_examples_trap_identically` moved to the route that replaces
+it. Two unit tests in `toolchain.rs` cover the header transform and the
+demangling with no toolchain at all.
+
+**The route's corpus after the slice.** 175 checked, 33 skipped, 0 failed
+against the `wasmtime` CLI, over 208 examples — 32 of the skips are
+`EXPECTED_CHECK_FAILURE`, programs that never build by design, and the
+thirty-third is `externdemo.vyrn`, which the new test carries. No example is
+left off the route for a reason that could change.
+
+Gate: `cargo fmt --all --check`; `cargo build --release -p vyrn-cli`;
+`cargo test -p vyrn-codegen --lib toolchain` (6 passed); `cargo test --release
+-p vyrn-cli --test route -- --ignored --nocapture` (2 passed, 348 s).
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
