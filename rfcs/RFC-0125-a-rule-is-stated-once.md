@@ -9009,6 +9009,43 @@ modules and parity is 41 of 41. Nothing moved once the rule was corrected, which
 checker and this emitter agree about every type in the corpus, and the twenty
 arms were 715 lines of agreeing.
 
+**The second finding, and it is red: a `for` over an unnamed array literal.**
+`vyrn test site/app/docshell.vyrn` refuses on this branch, where it passes on
+the line this merged. The shape is two statements in one body:
+
+```vyrn
+fn mk(t: String) -> Array<String> { return [t.copy(), t.copy()] }
+fn main() -> Int64 {
+    for a in [mk("a"), mk("b")] { for s in a { print(s) } }
+    for a in [mk("c"), mk("d")] { for s in a { print(s) } }
+    return 0
+}
+```
+
+The loop's iterable is a TEMPORARY, so the statement owns it and releases it
+deep, and the deep walk frees an element's strings that the body's own walk
+already freed: the second statement traps `out of bounds memory access` at
+address -16, which is `free(0)` reading a header below a null buffer. It is
+the direct backend alone — the same program built natively prints `a a b b`.
+
+Neither half is this slice's. On the line this merged the FIRST statement
+alone already printed `a b b` — a silent wrong answer, one string short — and
+this slice makes that case right, because `peek` no longer guesses the
+temporary's element type. The two-statement case traps on that line too, in an
+ordinary `main`, so the defect is older than the slice. What the slice changed
+is who reaches it: a `test` body is checked now and lowers like ordinary code,
+and `docshell.vyrn` has two `for tree in [docsTree(..), guideTree(..)]` loops
+in one body. Before, an unchecked test body took a different route and missed
+it.
+
+So the row is open and it is named here rather than worked around: the release
+of a `for` statement's temporary must walk around the elements the body took,
+the way `DropKind::FreeArr` already makes it, and the emitter's downgrade
+(`direct.rs`, `Stmt::ForIn`) reads only that one kind. Every other gate in the
+table is green, including parity, the manifest and the residue ratchet, which
+is why this is a finding and not a revert: the corpus has no program of this
+shape.
+
 #### The class census after the slice (2026-09-06)
 
 Every site in either emitter that names a TYPE from operands, arms or branches
