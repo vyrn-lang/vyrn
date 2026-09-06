@@ -459,8 +459,8 @@ fn run() {
     // reading beside them above.
     assert_eq!(
         counted.get("arg_drops: core only").copied().unwrap_or(0),
-        548,
-        "the values the declared reading could not name, which nobody freed"
+        552,
+        "the values the declared reading could not name, which nobody freed          (548 at the argument slice, plus four in `tallybytes.vyrn` and          `falliblegeneric.vyrn`, which joined the corpus beside it)"
     );
     assert_eq!(
         counted.get("arg_drops: plan only").copied().unwrap_or(0),
