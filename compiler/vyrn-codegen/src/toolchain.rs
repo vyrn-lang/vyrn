@@ -1331,7 +1331,22 @@ fn discovered_wasmtime_from(start: &Path) -> Option<PathBuf> {
 /// The `tools/` walk every discovered tool takes: the first `tools/*/<rel>` that
 /// exists, walking up from `start`, the entries of each `tools/` sorted so the
 /// pick is deterministic when several versions are unpacked side by side.
+///
+/// Then the same walk from the RUNNING COMPILER, which is what makes a toolchain
+/// unpacked beside `vyrn` reach a program compiled anywhere. The source's
+/// ancestors come first, so a project that carries its own `tools/` still
+/// decides; the compiler's are the fallback, and `shim_wasm` has taken them for
+/// the sysroot since RFC-0102. The route needs this and the textual one did not:
+/// clang is on `PATH` and wabt is not, so `vyrn build` on a file in a temp
+/// directory found the compiler and then said `could not find wasm2c`.
 fn discovered_tool_from(start: &Path, rel: &Path) -> Option<PathBuf> {
+    tools_walk(start, rel).or_else(|| {
+        let exe = std::env::current_exe().ok()?;
+        tools_walk(exe.parent()?, rel)
+    })
+}
+
+fn tools_walk(start: &Path, rel: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let tools = dir.join("tools");
         if !tools.is_dir() {
@@ -1386,11 +1401,21 @@ pub fn wasm2c_from(start: &Path) -> Result<Option<Wasm2c>, String> {
     } else {
         "wasm2c"
     };
+    let rel = Path::new("bin").join(exe);
     let (exe, why) = match env_path("VYRN_WASM2C") {
         Some(p) => (p, "override: environment"),
-        None => match discovered_tool_from(start, &Path::new("bin").join(exe)) {
-            Some(p) => (p, "discovered: tools/"),
-            None => return Ok(None),
+        // The pin, then the `tools/` walk — `wasmtime_from`'s order (RFC-0102
+        // M2), which the route's tools joined when the route became the only
+        // one (RFC-0125 §2.5).
+        None => match pinned_tool_dir(start, "wabt")? {
+            Some(dir) => match vyrn_frontend::toolpin::tool_root(&dir, "bin") {
+                Some(root) => (root.join(&rel), "pinned"),
+                None => return Err(unpacked_without("wabt", &dir, "`bin` directory")),
+            },
+            None => match discovered_tool_from(start, &rel) {
+                Some(p) => (p, "discovered: tools/"),
+                None => return Ok(None),
+            },
         },
     };
     let root = exe
@@ -1431,6 +1456,17 @@ pub fn simde_from(start: &Path) -> Option<(PathBuf, &'static str)> {
     let marker = Path::new("simde").join("wasm").join("simd128.h");
     if let Some(p) = env_path("VYRN_SIMDE").filter(|p| p.join(&marker).exists()) {
         return Some((p, "override: environment"));
+    }
+    // The pin, then the walk. A pin that will not resolve panics rather than
+    // reading as "not installed", for the reason `find_wasmtime_from` does.
+    match pinned_tool_dir(start, "simde") {
+        Ok(Some(dir)) => {
+            if let Some(root) = vyrn_frontend::toolpin::tool_root(&dir, "simde") {
+                return Some((root, "pinned"));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => panic!("{e}"),
     }
     let hit = discovered_tool_from(start, &marker)?;
     // Back from `simde/wasm/simd128.h` to the directory that holds `simde/`.

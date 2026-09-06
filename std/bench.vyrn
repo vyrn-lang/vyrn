@@ -2,7 +2,7 @@
 ///
 /// This module is the runtime the `vyrn bench` transform links against: the
 /// per-bench timing loop (`benchOne`) plus the pure statistics and formatting it
-/// prints. It is never part of a `run`/`build`/`emit-ir` compile — only the
+/// prints. It is never part of a `run` or `build` compile — only the
 /// synthesized bench `main` imports it — so its host-effectful clock use is fine.
 ///
 /// The *pure* helpers (`minOf`/`median`/`mean`/`formatDuration`/`padRight`) do no

@@ -207,7 +207,7 @@ fn recursion_past_the_call_depth_limit_is_a_diagnostic() {
 /// shapes, because two different bounds catch them: a spine grows deep and never
 /// grows wide, a record grows wide and doubles per level.
 ///
-/// `check` is asserted alongside `emit-ir`, because the defect was as much that
+/// `check` is asserted alongside `emit-wat`, because the defect was as much that
 /// `check` did not predict the build as that the build never returned.
 ///
 /// Both programs write `.copy()` where a `read` parameter reaches a literal,
@@ -235,7 +235,7 @@ fn polymorphic_recursion_is_refused_by_check_and_by_the_backends() {
             "has more than 65536 parts once its records are written out",
         ),
     ] {
-        for cmd in ["check", "emit-ir"] {
+        for cmd in ["check", "emit-wat"] {
             let out = run(cmd, src, &format!("mono{what}"));
             let got = text(&out);
             assert!(
@@ -300,7 +300,7 @@ fn an_array_literal_past_the_limit_is_a_diagnostic_not_a_two_minute_crash() {
     );
     // Every command that reads a program, including the two that used to hand it
     // to a backend and wait.
-    for cmd in ["check", "run", "emit-ir", "build"] {
+    for cmd in ["check", "run", "emit-wat", "build"] {
         let (out, _) = if cmd == "build" {
             build_wasm(&src, "biglit")
         } else {
@@ -618,17 +618,17 @@ fn every_limit_has_one_source() {
          other half is for the array the literal becomes, in the same frame"
     );
 
-    // The region bound, in all three engines' own output. A copy re-written by
-    // hand shows up as a different number in exactly one of these.
+    // The region bound, in the emitter's own output and in the engine's. A copy
+    // re-written by hand shows up as a different number in exactly one of them.
+    //
+    // It read the textual backend's `[N x ptr]` and `icmp uge i64 %sp, N` as a
+    // third witness until the textual route went (RFC-0125 §2.5). What is left
+    // is the wording the module interns and the wording a run prints, which is
+    // the pair that would disagree if the number were written twice.
     let src = "fn main() -> Int64 {\n    region {\n    }\n    return 0\n}\n";
     let msg = format!("error: region nesting exceeds {REGION_MAX}");
-    let ir = text(&run("emit-ir", src, "regionsrc"));
-    assert!(ir.contains(&msg), "the textual backend's wording:\n{ir}");
-    assert!(
-        ir.contains(&format!("[{REGION_MAX} x ptr]"))
-            && ir.contains(&format!("icmp uge i64 %sp, {REGION_MAX}")),
-        "the textual backend's stack width and comparison:\n{ir}"
-    );
+    let wat = text(&run("emit-wat", src, "regionsrc"));
+    assert!(wat.contains(&msg), "the emitter's wording:\n{wat}");
     let (build, module) = build_wasm(src, "regionsrc");
     assert!(build.status.success(), "{}", text(&build));
     let bytes = std::fs::read(&module).unwrap();

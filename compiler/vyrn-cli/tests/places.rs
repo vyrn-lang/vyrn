@@ -13,62 +13,52 @@
 mod common;
 use common::*;
 
-/// The body of `fn <name>` in `src`'s emitted LLVM IR.
-fn body_of(src: &str, name: &str) -> String {
-    let dir = std::env::temp_dir().join("vyrn-places");
-    std::fs::create_dir_all(&dir).unwrap();
-    // Two tests here both emit `fn bump`, and cargo runs them concurrently, so
-    // the file name has to be unique per call and not per function.
+/// The module, and the one function in it that holds `marker`, as WAT.
+///
+/// These counts came out of `vyrn emit-ir` until the textual route went
+/// (RFC-0125 §2.5). What they count is now CALLS: a body that allocates or
+/// copies elementwise calls the allocator or `std/mem`'s copy, and a body that
+/// writes through the header it already has calls one function only — the trap
+/// its bounds checks branch to, which RFC-0125 §2.3 gives each function one of.
+fn module_and_body(src: &str, marker: &str) -> (String, String) {
     static NTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let nth = NTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let file = dir.join(format!("{name}-{nth}.vyrn"));
-    std::fs::write(&file, src).unwrap();
-    let out = vyrn()
-        .arg("emit-ir")
-        .arg(&file)
-        .output()
-        .expect("vyrn emit-ir");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let ir = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
-    let start = ir
-        .find(&format!("@vyrn_{name}("))
-        .unwrap_or_else(|| panic!("no `vyrn_{name}` in the emitted IR:\n{ir}"));
-    let start = ir[..start]
-        .rfind("\ndefine ")
-        .expect("no `define` before it")
-        + 1;
-    ir[start..start + ir[start..].find("\n}\n").expect("unterminated body")].to_string()
+    let dir = scratch("places-wat");
+    let name = format!("p{nth}");
+    (
+        common::wat_of(&dir, &name, src),
+        common::wat_func_containing(&dir, &name, src, marker),
+    )
 }
 
-/// Every `call` in a body, minus the trap path — which is unreachable on the
-/// hot path and prints and exits, never allocates. Phase 8d made that path one
-/// `@__vyrn_trap_*` call where it was `stderr`/`fprintf`/`exit` inline, so both
-/// spellings are listed and neither counts.
-fn allocating_calls(body: &str) -> Vec<&str> {
-    body.lines()
-        .filter(|l| l.contains("call ") || l.contains("call("))
-        .filter(|l| {
-            [
-                "@__vyrn_stderr",
-                "@fprintf",
-                "@exit",
-                "@__vyrn_trap_msg",
-                "@__vyrn_trap_idx",
-                "@__vyrn_panic",
-                // The call-depth counter (RFC-0004 addendum): a load, an add and
-                // a store on one global, in every prologue and before every
-                // `ret`. It allocates nothing, which is what this list is for.
-                "@__vyrn_call_enter",
-                "@__vyrn_call_exit",
-            ]
-            .iter()
-            .all(|f| !l.contains(f))
-        })
-        .collect()
+/// The DISTINCT functions a body calls, as their indices. Two calls to the same
+/// function are one entry: a bounds check per index expression is still one
+/// callee, and what an allocating lowering adds is a second one.
+fn callees(body: &str) -> Vec<String> {
+    let mut v: Vec<String> = body
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("call "))
+        .map(str::to_string)
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The one callee, asserted to be the trap: the function that ends in
+/// `proc_exit`, which is import 1 in every module this emitter writes. Without
+/// this the count alone would accept a body that called the allocator and never
+/// checked a bound.
+fn only_calls_the_trap(wat: &str, body: &str) -> bool {
+    let names = callees(body);
+    let [index] = names.as_slice() else {
+        return false;
+    };
+    wat.split("\n  (func ")
+        .skip(1)
+        .find(|f| f.starts_with(&format!("(;{index};)")))
+        .is_some_and(|f| f[..f.find("\n  )").expect("unterminated function")].contains("call 1"))
 }
 
 /// `s.xs[i] = 9` must lower to: load the `{ptr,len,cap}` header out of the
@@ -77,7 +67,7 @@ fn allocating_calls(body: &str) -> Vec<&str> {
 /// write instead of O(N).
 #[test]
 fn an_index_assign_through_a_record_field_allocates_nothing() {
-    let body = body_of(
+    let (wat, body) = module_and_body(
         "type Store = { xs: Array<Int64>, n: Int64 }\n\
          fn bump(s: modify Store, i: Int64) {\n\
          s.xs[i] = 9\n\
@@ -88,19 +78,19 @@ fn an_index_assign_through_a_record_field_allocates_nothing() {
          print(s.xs[0])\n\
          return 0\n\
          }\n",
-        "bump",
+        "i64.const 9",
     );
-    let calls = allocating_calls(&body);
     assert!(
-        calls.is_empty(),
-        "an index assignment through a field must not allocate or copy — a \
-         copying desugar would be correct and quadratic:\n{}\nin:\n{body}",
-        calls.join("\n")
+        only_calls_the_trap(&wat, &body),
+        "an index assignment through a field must not allocate or copy - a \n         copying desugar would be correct and quadratic; the only function a \n         correct body calls is the trap its bounds checks branch to: \n         {:?}
+in:
+{body}",
+        callees(&body)
     );
-    // The store itself is still there (an empty body would also allocate
-    // nothing), and there is exactly one — not one per element.
+    // The store itself is still there (an empty body would also call nothing),
+    // and there is exactly one — not one per element.
     assert_eq!(
-        body.matches("store i64 9, ptr").count(),
+        body.matches("i64.store").count(),
         1,
         "expected exactly one element store:\n{body}"
     );
@@ -110,11 +100,11 @@ fn an_index_assign_through_a_record_field_allocates_nothing() {
 /// whole statement rather than desugared inside the expression.
 #[test]
 fn a_pop_through_a_record_field_allocates_nothing() {
-    let body = body_of(
+    let (wat, body) = module_and_body(
         "type Store = { xs: Array<Int64>, n: Int64 }\n\
          fn take(s: modify Store) -> Int64 {\n\
          let x = s.xs.pop()\n\
-         return x ?? -1\n\
+         return x ?? -12345\n\
          }\n\
          fn main() -> Int64 {\n\
          let mut s = Store { xs: [1, 2, 3], n: 0 }\n\
@@ -122,14 +112,15 @@ fn a_pop_through_a_record_field_allocates_nothing() {
          print(s.xs.length)\n\
          return 0\n\
          }\n",
-        "take",
+        // A sentinel no other function interns: the marker must name exactly one.
+        "i64.const 12345",
     );
-    let calls = allocating_calls(&body);
     assert!(
-        calls.is_empty(),
-        "`pop` through a field must shrink the header in place, not rebuild the \
-         array:\n{}\nin:\n{body}",
-        calls.join("\n")
+        only_calls_the_trap(&wat, &body),
+        "`pop` through a field must shrink the header in place, not rebuild \n         the array: {:?}
+in:
+{body}",
+        callees(&body)
     );
 }
 
@@ -138,7 +129,7 @@ fn a_pop_through_a_record_field_allocates_nothing() {
 /// still independent of the array's length, which is the property that matters.
 #[test]
 fn a_nested_field_chain_allocates_nothing_either() {
-    let body = body_of(
+    let (wat, body) = module_and_body(
         "type Inner = { xs: Array<Int64> }\n\
          type Outer = { i: Inner, n: Int64 }\n\
          fn bump(o: modify Outer, k: Int64) {\n\
@@ -150,10 +141,15 @@ fn a_nested_field_chain_allocates_nothing_either() {
          print(o.i.xs[1])\n\
          return 0\n\
          }\n",
-        "bump",
+        "i64.const 9",
     );
-    let calls = allocating_calls(&body);
-    assert!(calls.is_empty(), "{}\nin:\n{body}", calls.join("\n"));
+    assert!(
+        only_calls_the_trap(&wat, &body),
+        "{:?}
+in:
+{body}",
+        callees(&body)
+    );
 }
 
 /// The interpreter timing the two ratios below are built from: the fastest of

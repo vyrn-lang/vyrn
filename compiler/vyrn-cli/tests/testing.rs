@@ -140,7 +140,7 @@ fn test_bodies_are_stripped_from_emitted_ir() {
          fn main() -> Int64 { print(1) return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("emit-ir").arg(&file).output().unwrap();
+    let out = vyrn().arg("emit-wat").arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let ir = norm(&out.stdout);
     assert!(

@@ -83,20 +83,15 @@
 //! — a `Task<String>` carrying ~900 bytes, dropped rather than joined, where the
 //! old row leaked 8 bytes a call and hid inside a page.
 //!
-//! **The handle is native-only, and it is the part that matters.** Bytes are a
-//! leak a program can live with; one operating-system handle per spawn is a
-//! server that meets a per-process ceiling and stops.
-//! [`the_spawn_handles_go_back_natively`] is that measurement, beside this table
-//! rather than in it, because it needs clang and a real process.
-//!
-//! **Audit finding C2.3 is native-only too, and for the opposite reason.** An
-//! empty String built at run time was never freed, because `cap == 0` named both
-//! "static literal" and "empty heap buffer" and the native `free` could not tell
-//! them apart. The wasm `free` discriminates on the ADDRESS, so this table would
-//! have read the row steady before the fix and steady after it, and seen
-//! nothing. [`an_empty_string_built_at_run_time_goes_back_natively`] is that
-//! measurement — the same relation, against a one-byte control instead of
-//! against a larger N.
+//! **What this table cannot see, and what used to see it.** Four measurements
+//! here ran the TEXTUAL route's binary under `VYRN_FREE_AUDIT`, which was the C
+//! shim's allocator counting its own live pointers: the operating-system handle
+//! a `spawn` takes, the empty String whose `cap == 0` named both "static
+//! literal" and "empty heap buffer" natively, a `match` scrutinee and a map
+//! entry. The instrument was the shim and went with it when the native route
+//! became this module through wasm2c (RFC-0125 §2.5); the wasm allocator has no
+//! audit of its own, and building one is its own slice. Three of the four rows
+//! are steady in this table anyway. The handle is not, and nothing sees it now.
 //!
 //! Two rows carry a finding the census did not have:
 //!
@@ -793,8 +788,8 @@ const ROWS: &[Row] = &[
               500 calls. It is a `Task<String>` now, dropped rather than joined, so a \
               missed release is ~900 bytes a call and the row moves. What this harness \
               still cannot see is the OPERATING-SYSTEM HANDLE, which is the part of §10 \
-              that matters and exists only natively — \
-              `the_spawn_handles_go_back_natively` below is the measurement beside it",
+              that matters and exists only natively. Nothing sees it since the shim's \
+              free audit went with the textual route (RFC-0125 §2.5)",
     },
     Row {
         export: "selfReferring",
@@ -1925,127 +1920,6 @@ fn steady_handle_count(child: &std::process::Child) -> u32 {
         .expect("ten samples")
 }
 
-/// The measurement the table above cannot make (RFC-0095 M1).
-///
-/// A task owns three things: a frame, a task record, and an operating-system
-/// handle — a Win32 event object, or a pthread mutex and condition variable. On
-/// wasm the first is all there is, so `spawnFrame` measures that one. Here the
-/// handle is measured, and it is the reason the milestone was worth building:
-/// RFC-0087 §10 recorded 81 bytes AND one handle per spawn, and bytes are a leak
-/// a program can live with while a per-process handle ceiling is a server that
-/// stops.
-///
-/// **A relation, not a number**, exactly as the table above asserts one: the
-/// handle count does not scale with the spawn count. Before M1 it was 20,076
-/// handles at 20,000 spawns and 200,076 at 200,000 — one per spawn, on the
-/// nose.
-///
-/// The two counts come from ONE process, at two parks 18,000 spawns apart. That
-/// is what makes the relation measurable rather than merely tolerable: the
-/// ambient half of the count — the standard streams, the loader's handles, a
-/// virus scanner's read of a freshly built image — is one number here, and it
-/// subtracts. The row used to run two processes and demand their counts be
-/// EQUAL, which is more precision than two launches can give: it flaked at a
-/// difference of one, four times in a week, and taught its readers to re-run a
-/// red gate. Against a signal of 18,000 that precision bought nothing.
-///
-/// Skips, loudly, without clang — the same posture this file takes for node —
-/// and compiles only on Windows, because `GetProcessHandleCount` is what names
-/// the resource. A pthread task leaks a mutex and a condition variable, which
-/// are memory rather than a handle, and the wasm row sees the shape of that.
-#[cfg(windows)]
-#[test]
-fn the_spawn_handles_go_back_natively() {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — RFC-0095 M1's handle release is unverified on this machine");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("vyrn-spawn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 2,000 spawns, then 18,000 more. An order of magnitude between the two
-    // parks, and the whole program still runs in about two seconds.
-    let (first, total) = (2000usize, 20_000usize);
-    let parks = [dir.join("park1.txt"), dir.join("park2.txt")];
-    let at = |p: &std::path::Path| p.display().to_string().replace('\\', "/");
-    let src = dir.join("spawn.vyrn");
-    std::fs::write(
-        &src,
-        spawn_loop_source(first, total, &at(&parks[0]), &at(&parks[1])),
-    )
-    .unwrap();
-    let exe = dir.join("spawn.exe");
-    let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .arg("build")
-        .arg(&src)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("vyrn build");
-    assert!(
-        build.status.success(),
-        "native build failed:\n{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-
-    let mut child = Command::new(&exe)
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("run the spawn loop");
-    let mut counts = Vec::new();
-    for (k, marker) in parks.iter().enumerate() {
-        // Wait for the park. Sixty seconds is a ceiling, not a timing
-        // assumption: 20,000 spawns take about two.
-        let start = std::time::Instant::now();
-        while !marker.exists() {
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(60),
-                "the spawn loop never reached park {}",
-                k + 1
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        counts.push(steady_handle_count(&child));
-        if k == 0 {
-            // Release the first park; the second is released by closing stdin.
-            let stdin = child.stdin.as_mut().expect("piped stdin");
-            stdin.write_all(b"go\n").expect("release the first park");
-            stdin.flush().expect("flush");
-        }
-    }
-    drop(child.stdin.take());
-    let status = child.wait().expect("wait");
-    assert!(status.success(), "the spawn loop exited {status}");
-
-    // The tolerance, and the argument for the number. The defect is one handle
-    // per spawn — census §10 measured 200,076 at 200,000 — so between the two
-    // parks, 18,000 spawns apart, that leak shows a difference of 18,000. This
-    // gate fires at 16, which is a leak of one handle per 1,125 spawns: it
-    // still catches a defect a thousand times smaller than the one it was
-    // built for. And it is far above the noise it must ignore, because the
-    // ambient count is shared by the two samples and cancels — 40 runs across
-    // both profiles, under parallel load, moved this difference by 0 every
-    // time. A wider window would weaken the gate; the single process is what
-    // removed the jitter, not the 16.
-    let slack = 16;
-    assert!(
-        counts[1] <= counts[0] + slack,
-        "the handle count grew with the spawn count: {} handles at the {first}-spawn park and \
-         {} at {total}, {} more for {} further spawns. A task owns an operating-system handle, \
-         and RFC-0095 M1 gives it back at the one join or at the `drop` — one per spawn is \
-         census §10, which measured 200,076 handles at 200,000 spawns.",
-        counts[0],
-        counts[1],
-        counts[1] - counts[0],
-        total - first
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 // ---------------------------------------------------------------------------
 // Audit C2.3 — the native half again, and for the same reason: the wasm free
 // discriminates on the ADDRESS, so this row is steady there whatever the header
@@ -2088,91 +1962,6 @@ fn peak_bytes(child: &std::process::Child) -> usize {
     c.peak_working_set
 }
 
-/// An empty String built at run time is given back (audit finding C2.3).
-///
-/// `cap == 0` was the header's word for "static literal, never free me", and it
-/// is also the capacity every empty String gets from `@__vyrn_str_new(0, 0)` —
-/// an empty `join`, a `slice` to nothing, a concat of two empties. So `free`
-/// read every one of them as a literal and returned. Three million empty concats
-/// peaked at 88.4 MB where the same program with one-byte strings peaked at 3.2.
-/// The sentinel is all ones now, which no allocation can return.
-///
-/// **A relation, not a number**, as every row in this file is: the loop with
-/// EMPTY strings must peak where the same loop with one-byte strings peaks. That
-/// is the comparison the audit made, and it is what makes the row negative — put
-/// the `0` back in `static_str_global` and the empty column grows by tens of
-/// megabytes while the control column does not move.
-///
-/// A second pair at four times the turns says it the other way: a leak scales
-/// with the turn count and a steady state does not.
-///
-/// Windows-only and clang-only, the same posture as the handle row above. It
-/// needs a real process, and `K32GetProcessMemoryInfo` is what names the bytes.
-#[cfg(windows)]
-#[test]
-fn an_empty_string_built_at_run_time_goes_back_natively() {
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — audit C2.3's empty-String release is unverified here");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("vyrn-emptystr-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 250,000 and 1,000,000. The leak was 17 bytes plus allocator overhead per
-    // turn, so the smaller run already shows megabytes and neither takes a
-    // second. `len` 0 is the shape under test; `len` 1 is the control, and the
-    // only difference between the two programs.
-    let mut peaks = Vec::new();
-    for turns in [250_000usize, 1_000_000] {
-        for len in [0usize, 1] {
-            let stem = format!("s{turns}_{len}");
-            let src = dir.join(format!("{stem}.vyrn"));
-            std::fs::write(&src, empty_string_loop_source(turns, len)).unwrap();
-            let exe = dir.join(format!("{stem}.exe"));
-            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-                .arg("build")
-                .arg(&src)
-                .arg("-o")
-                .arg(&exe)
-                .output()
-                .expect("vyrn build");
-            assert!(
-                build.status.success(),
-                "native build failed:\n{}",
-                String::from_utf8_lossy(&build.stderr)
-            );
-            let mut child = Command::new(&exe).spawn().expect("run the concat loop");
-            let status = child.wait().expect("wait");
-            assert!(status.success(), "the concat loop exited {status}");
-            peaks.push(peak_bytes(&child));
-        }
-    }
-    let (empty_small, one_small, empty_big, one_big) = (peaks[0], peaks[1], peaks[2], peaks[3]);
-
-    // A megabyte of slack over the control: the two programs differ by one byte
-    // of string literal, so anything larger is storage that was not handed back.
-    let slack = 1 << 20;
-    for (turns, empty, one) in [
-        (250_000, empty_small, one_small),
-        (1_000_000, empty_big, one_big),
-    ] {
-        assert!(
-            empty <= one + slack,
-            "an empty String is not being freed: {turns} turns peaked at {empty} bytes with \
-             `\"\"` and {one} with `\"y\"`. `cap == 0` meant `static literal` AND `empty heap \
-             buffer`, and `@__vyrn_str_free` read the second as the first — audit C2.3, which \
-             measured 88.4 MB against 3.2 MB at three million turns."
-        );
-    }
-    assert!(
-        empty_big <= empty_small + slack,
-        "the empty-String peak grew with the turn count: {empty_small} bytes at 250,000 turns \
-         and {empty_big} at 1,000,000. A steady state does not scale with the loop."
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 // ---------------------------------------------------------------------------
 // Census §14 at a `match` — the textual backend's half of the `matchTemporary`
 // row above, for the reason every native row here exists: the two backends emit
@@ -2211,88 +2000,6 @@ fn main() -> Int64 {{
     )
 }
 
-/// A `match` whose scrutinee is a temporary releases it (census §14, at the
-/// third construct that walks one).
-///
-/// `own` wrote a statement row for `Stmt::IfLet` and for `Stmt::ForIn` and none
-/// for `Expr::Match`, because a match is an EXPRESSION and there was no
-/// statement to key on. So the two spellings of one loop had two verdicts: the
-/// `if let` form freed its scrutinee every turn and the `match` form freed it
-/// never. The row is keyed by the match expression's own node address now, and
-/// both compiling backends release it where nothing else took it.
-///
-/// **A relation, not a number**, as every row in this file is — twice over. The
-/// peak at four times the turns must be the peak at N, and the `match` peak must
-/// be the `if let` peak, which is the comparison that names the defect. Measured
-/// at 3,000,000 turns before the fix: 141.7 MB for the `match` against 3.4 MB
-/// for the `if let`.
-///
-/// Windows-only and clang-only, the same posture as the rows above.
-#[cfg(windows)]
-#[test]
-fn a_match_over_a_temporary_gives_the_scrutinee_back_natively() {
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — census §14's `match` release is unverified on this machine");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("vyrn-matchloop-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 250,000 and 1,000,000. The leak was one `Result<String, String>`'s heap
-    // per turn, so the smaller run already shows tens of megabytes.
-    let slack = 1 << 20;
-    let mut peaks = Vec::new();
-    for if_let in [false, true] {
-        for turns in [250_000usize, 1_000_000] {
-            let stem = format!("ml{turns}_{if_let}");
-            let src = dir.join(format!("{stem}.vyrn"));
-            std::fs::write(&src, match_loop_source(turns, if_let)).unwrap();
-            let exe = dir.join(format!("{stem}.exe"));
-            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-                .arg("build")
-                .arg(&src)
-                .arg("-o")
-                .arg(&exe)
-                .output()
-                .expect("vyrn build");
-            assert!(
-                build.status.success(),
-                "native build failed:\n{}",
-                String::from_utf8_lossy(&build.stderr)
-            );
-            let mut child = Command::new(&exe)
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .expect("run the match loop");
-            let status = child.wait().expect("wait");
-            assert!(status.success(), "the match loop exited {status}");
-            peaks.push(peak_bytes(&child));
-        }
-    }
-    let (m_small, m_big, i_small, i_big) = (peaks[0], peaks[1], peaks[2], peaks[3]);
-
-    assert!(
-        m_big <= m_small + slack,
-        "the `match` peak grew with the turn count: {m_small} bytes at 250,000 turns and \
-         {m_big} at 1,000,000. A `match` over a temporary is that value's last owner, so it \
-         releases it — a steady state does not scale with the loop."
-    );
-    assert!(
-        m_small <= i_small + slack,
-        "the `match` form peaked at {m_small} bytes where the identical `if let` form peaked \
-         at {i_small}. One loop, two spellings, and only one of them freed its scrutinee — \
-         census §14, which `own` answered for `Stmt::IfLet` and `Stmt::ForIn` and not for \
-         `Expr::Match`."
-    );
-    assert!(
-        i_big <= i_small + slack,
-        "the `if let` control itself grew: {i_small} bytes at 250,000 turns and {i_big} at \
-         1,000,000. The control is what makes the comparison above mean anything."
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 // ---------------------------------------------------------------------------
 // RFC-0028 — a map entry the map gives up, on the textual backend. The wasm
 // half is two rows in the table above; this is the same two defects measured
@@ -2325,82 +2032,6 @@ fn map_churn_source(turns: usize, remove: bool) -> String {
 }}
 "#
     )
-}
-
-/// A map hands back the entry it gives up — the value a store replaces, and the
-/// key AND the value a `remove` drops (RFC-0028).
-///
-/// Two defects, one shape. `m[k] = v` over a key the map already holds stored
-/// the new value over the old one and released nothing: the key half of that
-/// rule was fixed one line below and the value half was missed, so
-/// `Map<String, String>` leaked the previous String on every repeat.
-/// `m.remove(k)` released neither half — `__vyrn_map_remove_at` is handed two
-/// strides and no types, so it can only shift pointers, and the call site never
-/// picked the obligation up.
-///
-/// **A relation, not a number**, as every row in this file is: the peak at
-/// 800,000 turns must be the peak at 200,000. Both loops keep exactly one entry
-/// (or none), so nothing about them scales except what is not handed back.
-///
-/// The measured numbers at 200,000 turns, before and after: 12.99 MB → 3.26 MB
-/// for the store, 19.48 MB → 3.26 MB for the store-and-remove. Unbounded either
-/// way — a histogram loop and a cache eviction loop are both this program.
-///
-/// Windows-only and clang-only, the same posture as the two rows above.
-#[cfg(windows)]
-#[test]
-fn a_map_entry_the_map_gives_up_goes_back_natively() {
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — RFC-0028's entry release is unverified on this machine");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("vyrn-mapchurn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 200,000 and 800,000. The leak was one ~200-byte value per turn (plus the
-    // key on the remove path), so the smaller run already shows megabytes and
-    // neither takes a second.
-    let slack = 1 << 20;
-    for (what, remove) in [("a store over an existing key", false), ("a remove", true)] {
-        let mut peaks = Vec::new();
-        for turns in [200_000usize, 800_000] {
-            let stem = format!("m{turns}_{remove}");
-            let src = dir.join(format!("{stem}.vyrn"));
-            std::fs::write(&src, map_churn_source(turns, remove)).unwrap();
-            let exe = dir.join(format!("{stem}.exe"));
-            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-                .arg("build")
-                .arg(&src)
-                .arg("-o")
-                .arg(&exe)
-                .output()
-                .expect("vyrn build");
-            assert!(
-                build.status.success(),
-                "native build failed:\n{}",
-                String::from_utf8_lossy(&build.stderr)
-            );
-            let mut child = Command::new(&exe)
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .expect("run the map churn loop");
-            let status = child.wait().expect("wait");
-            assert!(status.success(), "the map churn loop exited {status}");
-            peaks.push(peak_bytes(&child));
-        }
-        assert!(
-            peaks[1] <= peaks[0] + slack,
-            "the peak of {what} grew with the turn count: {} bytes at 200,000 turns and {} at \
-             800,000. The map takes the key and the value, so the map hands both back when it \
-             gives the entry up — a store releases the value it replaces and a `remove` \
-             releases the key and the value it drops. A steady state does not scale with the \
-             loop; this one held one entry throughout.",
-            peaks[0],
-            peaks[1]
-        );
-    }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `a ?? b` is a `match` the parser spells, so the reporter had no recorded

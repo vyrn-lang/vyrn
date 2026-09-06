@@ -8,97 +8,31 @@
 //! are that half, in the shape of `places.rs`: a structural count, not a
 //! duration, so a loaded machine cannot make them flaky.
 //!
-//! The wasm column used to have no equivalent pin — there was no text form of a
-//! module in this workspace to count instructions in. `vyrn emit-wat` is that
-//! form, and [`a_vector_load_is_bounds_checked_once_on_wasm_too`] is the same
-//! count on the other compiled backend. `examples/simdoob.vyrn` /
-//! `examples/simdoobstore.vyrn` still prove the two branches of the check trap
-//! identically on all three engines; what they cannot say is how many checks ran.
+//! Every count here is read out of `vyrn emit-wat`, which is the one emitter's
+//! own text (RFC-0125 §2.5). They were read out of `vyrn emit-ir` until the
+//! textual route went, and the move made them BETTER pins rather than worse
+//! ones: the rules are wasm's — `f32x4.min` propagates a NaN and `f32x4.pmin`
+//! does not, `f32x4.nearest` is roundTiesToEven — so the assertion now names
+//! the decision this compiler makes instead of the intrinsic a second compiler
+//! was asked for. `examples/simdoob.vyrn` / `examples/simdoobstore.vyrn` still
+//! prove the two branches of the check trap identically on every engine; what
+//! they cannot say is how many checks ran.
 
 mod common;
 use common::*;
 
-/// The body of `fn <name>` in `src`'s emitted LLVM IR.
-fn body_of(src: &str, name: &str) -> String {
-    // `scratch`, not a hand-rolled path: this helper used to build
-    // `$TMP/vyrn-simd/<name>-<nth>` from a process-local counter, which is
-    // unique across the THREADS of one `cargo test` and not across processes.
-    // Two tests here pass the same `name`, so a runner that gives each test its
-    // own process — `cargo nextest`, which CI now uses — had them both write
-    // `read-0.vyrn` and race: whichever wrote last is the source both compiled,
-    // and the count came back 1 where 4 was asserted. `scratch` puts the pid in
-    // the path, which is exactly the missing half.
-    let dir = scratch("simd-ir");
-    let file = dir.join(format!("{name}.vyrn"));
-    std::fs::write(&file, src).unwrap();
-    let out = vyrn()
-        .arg("emit-ir")
-        .arg(&file)
-        .output()
-        .expect("vyrn emit-ir");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let ir = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
-    let start = ir
-        .find(&format!("@vyrn_{name}("))
-        .unwrap_or_else(|| panic!("no `vyrn_{name}` in the emitted IR:\n{ir}"));
-    let start = ir[..start]
-        .rfind("\ndefine ")
-        .expect("no `define` before it")
-        + 1;
-    ir[start..start + ir[start..].find("\n}\n").expect("unterminated body")].to_string()
-}
-
-/// How many bounds-check traps a body emits — one `fprintf` of `@.trap.aoob`
-/// per check, which is the branch's only unambiguous fingerprint.
-fn checks(body: &str) -> usize {
-    body.matches("@.trap.aoob").count()
-}
-
-/// The one function in `src`'s WASM module whose body contains `marker`, printed
-/// as WAT (`vyrn emit-wat`).
-///
-/// It is `body_of` for the other compiled backend, and it finds its function by
-/// content rather than by name because the module carries no name section — a
-/// function is an index there, and an index moves whenever the runtime does.
-/// `wasmprinter` indents every function's opening `(func` by two spaces and
-/// closes it with a `)` at the same column, which is what makes the slice exact.
+/// [`common::wat_func_containing`], with the check that makes a bounds COUNT
+/// mean something: the module has to have interned the wording a check reports,
+/// or the count below is counting a check that cannot report.
 fn wat_func_containing(src: &str, marker: &str) -> String {
     let dir = scratch("simd-wat");
-    let file = dir.join("vec.vyrn");
-    std::fs::write(&file, src).unwrap();
-    let out = vyrn()
-        .arg("emit-wat")
-        .arg(&file)
-        .output()
-        .expect("vyrn emit-wat");
+    let body = common::wat_func_containing(&dir, "vec", src, marker);
     assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        common::wat_of(&dir, "vec", src).contains("error: array index "),
+        "the module does not intern the bounds wording, so the count is counting \
+         a check that cannot report"
     );
-    let wat = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
-    assert!(
-        wat.contains("error: array index "),
-        "the module interns the interpreter's bounds wording, or the count below \
-         is counting a check that cannot report:\n{wat}"
-    );
-    let bodies: Vec<&str> = wat
-        .split("\n  (func ")
-        .skip(1)
-        .map(|f| &f[..f.find("\n  )").expect("unterminated function")])
-        .filter(|f| f.contains(marker))
-        .collect();
-    assert_eq!(
-        bodies.len(),
-        1,
-        "expected exactly one function containing `{marker}`, found {}",
-        bodies.len()
-    );
-    bodies[0].to_string()
+    body
 }
 
 const PROLOGUE: &str = "fn main() -> Int64 {\n\
@@ -107,56 +41,15 @@ const PROLOGUE: &str = "fn main() -> Int64 {\n\
                         return 0\n\
                         }\n";
 
+/// RFC-0083 M2's claim, read out of the module that ships: what it contains is
+/// `bounds_check_span`'s single branch — the signed pair `i < 0 || i > len - 4`
+/// joined by `i32.or`, and NOT four copies of `bounds_check`'s scalar
+/// `i64.ge_u` — and one `v128.load` where four lane loads would otherwise be.
+///
+/// It had a twin over `vyrn emit-ir`, asserting the same count about the textual
+/// route's own check. The route went; the count stayed here.
 #[test]
 fn a_vector_load_is_bounds_checked_once_and_not_per_lane() {
-    let body = body_of(
-        &format!(
-            "fn read(xs: Array<Float32>, i: Int64) -> Float32 {{\n\
-             let v = F32x4.load(xs, i)\n\
-             return v.lane(0) + v.lane(1) + v.lane(2) + v.lane(3)\n\
-             }}\n{PROLOGUE}"
-        ),
-        "read",
-    );
-    assert_eq!(checks(&body), 1, "one check for four lanes:\n{body}");
-    // And one 16-byte access rather than four 4-byte ones. Counted by the
-    // `align 4` the access carries, because the plain `load <4 x float>` spelling
-    // also matches the reloads of the binding's own alloca. `align 4` and not 16:
-    // the buffer is an array of `float`, so nothing guarantees the alignment a
-    // vector would like, and claiming it would be a promise the allocator never
-    // made.
-    assert_eq!(
-        body.matches("load <4 x float>, ptr").count()
-            - body.matches("load <4 x float>, ptr %v.addr").count(),
-        1,
-        "one load from the array, the rest reload the binding:\n{body}"
-    );
-    assert_eq!(
-        body.matches(", align 4").count(),
-        1,
-        "the one array access is unaligned-safe:\n{body}"
-    );
-    assert_eq!(
-        body.matches("getelementptr float, ptr").count(),
-        1,
-        "one element address for four lanes:\n{body}"
-    );
-    // The four `lane` reads add no check of their own — the index is constant
-    // and in range by the checker's rule, which is M1's claim still holding.
-    assert_eq!(body.matches("extractelement <4 x float>").count(), 4);
-}
-
-/// The same property on the OTHER compiled backend (RFC-0077), read out of
-/// `vyrn emit-wat`.
-///
-/// Both backends emit the check from their own code, so the claim "one check for
-/// four lanes" was pinned on one of them and asserted about the other. What the
-/// wasm module actually contains is `bounds_check_span`'s single branch — the
-/// signed pair `i < 0 || i > len - 4` joined by `i32.or`, and NOT four copies of
-/// `bounds_check`'s scalar `i64.ge_u` — and one `v128.load` where four lane loads
-/// would otherwise be.
-#[test]
-fn a_vector_load_is_bounds_checked_once_on_wasm_too() {
     let body = wat_func_containing(
         &format!(
             "fn read(xs: Array<Float32>, i: Int64) -> Float32 {{\n\
@@ -205,20 +98,29 @@ fn a_vector_load_is_bounds_checked_once_on_wasm_too() {
 /// the next one.
 #[test]
 fn the_same_four_elements_read_scalarly_cost_four_checks() {
-    let body = body_of(
+    let body = wat_func_containing(
         &format!(
             "fn read(xs: Array<Float32>, i: Int64) -> Float32 {{\n\
              return xs[i] + xs[i + 1] + xs[i + 2] + xs[i + 3]\n\
              }}\n{PROLOGUE}"
         ),
-        "read",
+        "f32.add",
     );
-    assert_eq!(checks(&body), 4, "four scalar reads, four checks:\n{body}");
+    assert_eq!(
+        body.matches("i64.ge_u").count(),
+        4,
+        "four scalar reads, four checks:\n{body}"
+    );
+    assert_eq!(
+        body.matches("f32.load").count(),
+        4,
+        "and four four-byte loads, not one sixteen-byte one:\n{body}"
+    );
 }
 
 #[test]
 fn a_vector_store_is_bounds_checked_once_and_not_per_lane() {
-    let body = body_of(
+    let body = wat_func_containing(
         "fn write(xs: Array<Float32>, i: Int64) {\n\
          F32x4.store(xs, i, F32x4.splat(1.0))\n\
          }\n\
@@ -228,11 +130,20 @@ fn a_vector_store_is_bounds_checked_once_and_not_per_lane() {
          print(xs[0])\n\
          return 0\n\
          }\n",
-        "write",
+        "v128.store",
     );
-    assert_eq!(checks(&body), 1, "one check for four lanes:\n{body}");
     assert_eq!(
-        body.matches("store <4 x float>").count(),
+        body.matches("i64.gt_s").count(),
+        1,
+        "one span check for four lanes:\n{body}"
+    );
+    assert_eq!(
+        body.matches("i64.ge_u").count(),
+        0,
+        "a scalar per-lane check would spell itself `i64.ge_u`:\n{body}"
+    );
+    assert_eq!(
+        body.matches("v128.store").count(),
         1,
         "one vector store:\n{body}"
     );
@@ -245,8 +156,8 @@ fn a_vector_store_is_bounds_checked_once_and_not_per_lane() {
 /// other two. Parity would catch that, but only under `--ignored` and only with
 /// a clang; this catches it in the default suite.
 #[test]
-fn min_and_max_lower_to_the_nan_propagating_intrinsic() {
-    let body = body_of(
+fn min_and_max_lower_to_the_nan_propagating_opcode() {
+    let body = wat_func_containing(
         "fn both(a: F32x4, b: F32x4) -> Float32 {\n\
          return F32x4.min(a, b).lane(0) + F32x4.max(a, b).lane(0)\n\
          }\n\
@@ -254,13 +165,14 @@ fn min_and_max_lower_to_the_nan_propagating_intrinsic() {
          print(both(F32x4.splat(1.0), F32x4.splat(2.0)))\n\
          return 0\n\
          }\n",
-        "both",
+        "f32x4.min",
     );
-    assert!(body.contains("@llvm.minimum.v4f32"), "not minnum:\n{body}");
-    assert!(body.contains("@llvm.maximum.v4f32"), "not maxnum:\n{body}");
+    assert_eq!(body.matches("f32x4.min").count(), 1, "not min:\n{body}");
+    assert_eq!(body.matches("f32x4.max").count(), 1, "not max:\n{body}");
     assert!(
-        !body.contains("minnum"),
-        "minNum is the wrong rule:\n{body}"
+        !body.contains("f32x4.pmin") && !body.contains("f32x4.pmax"),
+        "`pmin` and `pmax` answer with the second operand for a NaN, which is \
+         the other rule:\n{body}"
     );
 }
 
@@ -274,7 +186,7 @@ fn min_and_max_lower_to_the_nan_propagating_intrinsic() {
 /// the same function under the only rounding mode Vyrn can produce.
 #[test]
 fn nearest_lowers_to_ties_to_even_and_not_to_ties_away() {
-    let body = body_of(
+    let body = wat_func_containing(
         "fn four(v: F32x4) -> Float32 {\n\
          return F32x4.ceil(v).lane(0) + F32x4.floor(v).lane(1)\n\
          + F32x4.trunc(v).lane(2) + F32x4.nearest(v).lane(3)\n\
@@ -283,18 +195,20 @@ fn nearest_lowers_to_ties_to_even_and_not_to_ties_away() {
          print(four(F32x4.splat(2.5)))\n\
          return 0\n\
          }\n",
-        "four",
+        "f32x4.nearest",
     );
-    assert!(body.contains("@llvm.ceil.v4f32"), "not ceil:\n{body}");
-    assert!(body.contains("@llvm.floor.v4f32"), "not floor:\n{body}");
-    assert!(body.contains("@llvm.trunc.v4f32"), "not trunc:\n{body}");
-    assert!(
-        body.contains("@llvm.rint.v4f32"),
+    assert!(body.contains("f32x4.ceil"), "not ceil:\n{body}");
+    assert!(body.contains("f32x4.floor"), "not floor:\n{body}");
+    assert!(body.contains("f32x4.trunc"), "not trunc:\n{body}");
+    assert_eq!(
+        body.matches("f32x4.nearest").count(),
+        1,
         "not ties-to-even:\n{body}"
     );
-    assert!(
-        !body.contains("llvm.round.v4f32"),
-        "`llvm.round` is ties-AWAY and answers 3 for 2.5:\n{body}"
+    assert_eq!(
+        body.matches("f32x4.extract_lane").count(),
+        4,
+        "one lane read per rounding:\n{body}"
     );
 }
 
@@ -310,8 +224,8 @@ fn nearest_lowers_to_ties_to_even_and_not_to_ties_away() {
 /// in the matter. An `nsw` here would make the same expression UB natively and a
 /// wrap on wasm: a divergence that shows at exactly one input and nowhere else.
 #[test]
-fn integer_lane_compare_is_signed_and_the_add_does_not_promise_no_overflow() {
-    let body = body_of(
+fn integer_lane_compare_is_signed_and_the_add_wraps() {
+    let body = wat_func_containing(
         "fn both(a: I32x4, b: I32x4) -> Int32 {\n\
          if (a < b).anyTrue() { return (a + b).lane(0) }\n\
          return (a - b).lane(0)\n\
@@ -320,23 +234,17 @@ fn integer_lane_compare_is_signed_and_the_add_does_not_promise_no_overflow() {
          print(both(I32x4.splat(1), I32x4.splat(2)))\n\
          return 0\n\
          }\n",
-        "both",
+        "i32x4.lt_s",
     );
     assert!(
-        body.contains("icmp slt <4 x i32>"),
-        "not a signed compare:\n{body}"
+        !body.contains("i32x4.lt_u"),
+        "`lt_u` is the `U32x4` comparison and answers false for \
+         `Int32.min < 1`:\n{body}"
     );
+    assert!(body.contains("i32x4.add"), "no vector add at all:\n{body}");
     assert!(
-        !body.contains("icmp ult <4 x i32>"),
-        "`ult` is the `U32x4` comparison and answers false for `Int32.min < 1`:\n{body}"
-    );
-    assert!(
-        body.contains("add <4 x i32>"),
-        "no vector add at all:\n{body}"
-    );
-    assert!(
-        !body.contains("nsw <4 x i32>") && !body.contains("nuw <4 x i32>"),
-        "integer vector arithmetic WRAPS; a no-overflow flag makes it UB:\n{body}"
+        body.contains("i32x4.sub"),
+        "no vector subtract at all:\n{body}"
     );
 }
 
@@ -354,7 +262,7 @@ fn integer_lane_compare_is_signed_and_the_add_does_not_promise_no_overflow() {
 /// native the only engine printing `1.000000` for `min(NaN, 1.0)`.
 #[test]
 fn the_wide_load_spans_two_elements_and_is_still_checked_once() {
-    let body = body_of(
+    let body = wat_func_containing(
         "fn read(xs: Array<Float64>, i: Int64) -> Float64 {\n\
          let v = F64x2.min(F64x2.load(xs, i), F64x2.splat(1.0))\n\
          return F64x2.max(v, F64x2.sqrt(v)).lane(0) + v.lane(1)\n\
@@ -364,32 +272,33 @@ fn the_wide_load_spans_two_elements_and_is_still_checked_once() {
          print(read(xs, 0))\n\
          return 0\n\
          }\n",
-        "read",
+        "v128.load",
     );
-    assert_eq!(checks(&body), 1, "one check for two lanes:\n{body}");
+    assert_eq!(
+        body.matches("i64.gt_s").count(),
+        1,
+        "one check for two lanes:\n{body}"
+    );
     assert!(
-        body.contains("sub nsw i64 %") && body.contains(", 2\n"),
+        body.contains("i64.const 2"),
         "the limit is `len - 2`; a `len - 4` refuses the last legal index:\n{body}"
     );
     assert!(
-        !body.contains(", 4\n"),
-        "a four-element span is the narrow width's, and here it is wrong \
-         in both directions:\n{body}"
+        !body.contains("i64.const 4"),
+        "a four-element span is the narrow width's, and here it is wrong in \
+         both directions:\n{body}"
     );
-    assert!(body.contains("@llvm.minimum.v2f64"), "not minnum:\n{body}");
-    assert!(body.contains("@llvm.maximum.v2f64"), "not maxnum:\n{body}");
+    assert_eq!(body.matches("f64x2.min").count(), 1, "not min:\n{body}");
+    assert_eq!(body.matches("f64x2.max").count(), 1, "not max:\n{body}");
+    assert!(body.contains("f64x2.sqrt"), "not a vector sqrt:\n{body}");
     assert!(
-        body.contains("@llvm.sqrt.v2f64"),
-        "not a vector sqrt:\n{body}"
-    );
-    assert!(
-        !body.contains("minnum"),
-        "minNum is the wrong rule:\n{body}"
+        !body.contains("f64x2.pmin") && !body.contains("f64x2.pmax"),
+        "`pmin` and `pmax` are the other NaN rule:\n{body}"
     );
     assert_eq!(
-        body.matches("getelementptr double, ptr").count(),
+        body.matches("v128.load").count(),
         1,
-        "one element address, and it steps by 8 because the element type says so:\n{body}"
+        "one sixteen-byte load, not two eight-byte ones:\n{body}"
     );
 }
 
@@ -403,7 +312,7 @@ fn the_wide_load_spans_two_elements_and_is_still_checked_once() {
 /// `--ignored` parity.
 #[test]
 fn the_mask_reductions_are_one_reduce_and_not_four_lane_reads() {
-    let body = body_of(
+    let body = wat_func_containing(
         "fn both(a: F32x4, b: F32x4) -> Bool {\n\
          return (a < b).anyTrue() && (a > b).allTrue()\n\
          }\n\
@@ -411,18 +320,20 @@ fn the_mask_reductions_are_one_reduce_and_not_four_lane_reads() {
          print(both(F32x4.splat(1.0), F32x4.splat(2.0)))\n\
          return 0\n\
          }\n",
-        "both",
+        "v128.any_true",
     );
-    assert!(
-        body.contains("@llvm.vector.reduce.or.v4i1"),
+    assert_eq!(
+        body.matches("v128.any_true").count(),
+        1,
+        "not a reduce:\n{body}"
+    );
+    assert_eq!(
+        body.matches("i32x4.all_true").count(),
+        1,
         "not a reduce:\n{body}"
     );
     assert!(
-        body.contains("@llvm.vector.reduce.and.v4i1"),
-        "not a reduce:\n{body}"
-    );
-    assert!(
-        !body.contains("extractelement"),
+        !body.contains("extract_lane"),
         "a reduction read lanes one at a time:\n{body}"
     );
 }

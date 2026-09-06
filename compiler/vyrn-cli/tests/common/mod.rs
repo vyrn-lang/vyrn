@@ -281,6 +281,55 @@ pub const NATIVE_UNSUPPORTED: &[(&str, &str)] = &[(
     "`listDir` has no native lowering; the wasm target lists over `fd_readdir` (RFC-0125 §3 M5)",
 )];
 
+/// The one function in `src`'s module whose body contains `marker`, printed as
+/// WAT (`vyrn emit-wat`).
+///
+/// A structural count needs a function to count in, and `vyrn emit-ir` was where
+/// these tests found one until the textual route went (RFC-0125 §2.5). The
+/// module carries no name section, so a function is an index here and an index
+/// moves whenever the runtime does — hence by CONTENT. `wasmprinter` indents
+/// every function's opening `(func` by two spaces and closes it with a `)` at
+/// the same column, which is what makes the slice exact, and a marker that names
+/// two functions or none is a failure rather than a vacuous pass.
+pub fn wat_func_containing(dir: &Path, name: &str, src: &str, marker: &str) -> String {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-wat");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let wat = norm(&out.stdout);
+    let bodies: Vec<&str> = wat
+        .split("\n  (func ")
+        .skip(1)
+        .map(|f| &f[..f.find("\n  )").expect("unterminated function")])
+        .filter(|f| f.contains(marker))
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "expected exactly one function containing `{marker}`, found {}",
+        bodies.len()
+    );
+    bodies[0].to_string()
+}
+
+/// The whole module as WAT, for a test whose claim is about the module and not
+/// about one function in it.
+pub fn wat_of(dir: &Path, name: &str, src: &str) -> String {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-wat");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    norm(&out.stdout)
+}
+
 pub fn examples_dir() -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root -> examples/
     Path::new(env!("CARGO_MANIFEST_DIR"))

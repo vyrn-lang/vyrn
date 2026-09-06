@@ -9321,6 +9321,133 @@ Gate: `cargo fmt --all --check`; `cargo build --release -p vyrn-cli`;
 `cargo test -p vyrn-codegen --lib toolchain` (6 passed); `cargo test --release
 -p vyrn-cli --test route -- --ignored --nocapture` (2 passed, 348 s).
 
+#### The flip: one native route (2026-09-06)
+
+`vyrn build` with no flag is the wasm2c route. `--route` is gone, `emit-ir` is
+gone, `vyrn bench` times the route's binary, and the benchmark harness's
+`vyrn-native` leg IS the route. The textual emitter is still in the tree — the
+deletion is the next slice — but nothing in the repo reaches it.
+
+**What the flip fixed on the way.** Three things broke as soon as the route
+became the default, and each was a real defect rather than a test to adjust.
+
+*`blackBox` was the identity, and clang folded the loop it protects.* The
+emitter's comment was right when it was written — "this backend never optimizes
+(RFC-0125 §2.3), so there is nothing to hide the value from" — and stopped being
+right the moment an optimizer sat downstream of it.
+`examples/benching.vyrn`'s "hash to 1000" read **1 ns** against the textual
+route's recorded 1.35 µs. `blackBox(v)` is now a store and a load through
+sixteen bytes of linear memory that nothing else names: a `reserve` rather than
+a `data` (which SHARES identical contents, so two barriers would be one
+address), and a memory round trip rather than a global (which becomes an
+instance field wasm2c's C forwards through in one step). The bench reads
+**2.80 µs**. No recorded wasm byte moves: `blackBox` is refused outside a
+`bench` or `test` block, and both are stripped from a `build`.
+`native_bench_reports_the_expected_shape` now asserts a floor of 50 ns on that
+row — two hundred rounds of a multiply, an add and a modulo cannot take less,
+and a folded loop cannot take more.
+
+*A tool found beside the compiler was not found at all.* Tool discovery walked
+up from the SOURCE file only. clang is on `PATH` and wabt is not, so `vyrn
+build` on a file in a temp directory — which is what seven ignored tests in
+`benching.rs` do — said `could not find wasm2c` with wabt unpacked two
+directories above the binary running. `discovered_tool_from` now takes the
+source's ancestors first and the running compiler's second, which is the order
+`shim_wasm` has used for the sysroot since RFC-0102.
+
+*`listDir` is not native-unsupported any more.* The textual route had no
+lowering and refused by name; the route runs the module, which has one. That is
+one example off `NATIVE_UNSUPPORTED` and onto every gate the rest of the corpus
+is on.
+
+**`emit-ir`'s twelve readers.** Five were using it as "a command that hands a
+program to a backend" and took `emit-wat` unchanged: `benching`, `testing`,
+`contracts`, `limits`, `reproducible`, `warnings`. Seven read the IR's own text,
+and each was re-asked of the module the one emitter writes:
+
+| what it pinned | before | now |
+| --- | --- | --- |
+| `simd.rs`, eight tests | `@llvm.minimum.v4f32`, `icmp slt <4 x i32>`, `@.trap.aoob` counts | `f32x4.min` against `f32x4.pmin`, `i32x4.lt_s`, `i64.ge_u` counts — wasm's own rules, which is what the compiler now decides |
+| `places.rs`, three tests | no allocating `call` in the body | the body calls ONE function and it is the trap its bounds checks branch to |
+| `nullish.rs` | `@__vyrn_free` counted in both spellings | `??` and the `match` it desugars to emit the SAME module, byte for byte |
+| `lazyfield.rs` | the modules equal with `main` cut out | the modules equal outright — the binding the explicit read needs costs nothing here |
+| `json.rs` | one `@__vyrn_str_concat` per writer | a ratio: four times the elements under eight times the time |
+| `fallible.rs` | `try.ok` present, `Fallible__` absent | withdrawn. Its own comment says the claim was measured over the corpus as 106 byte-identical modules, and the wasm manifest is that measurement, running on every commit |
+| `limits.rs`, one assertion | `[N x ptr]` and `icmp uge i64 %sp, N` | withdrawn; the interned wording and the run's wording are the pair that would disagree |
+
+Two of these are stronger than what they replace. `??` and `lazy` were asserted
+to lower "the same way"; the modules are now compared and they are equal.
+
+**What the flip costs, and it is not small.** The exit-residue ratchet
+(`tests/residue.rs`, `rfcs/census/residue-baseline.tsv`) is retired with the
+shim. Its instrument was `VYRN_LEAK_CHECK` and `VYRN_FREE_AUDIT` inside
+`RUNTIME_SHIM_TEMPLATE` — the C allocator counting its own live pointers — and
+the wasm allocator, which is Vyrn in `std/runtime` since PLAN-0125-runtime §6
+step 2, has no such counter. Left in place the suite would have passed having
+measured nothing, which is the failure mode it exists to prevent, so it is
+deleted rather than left green. RFC-0114's 143 clean / 0 leaking / 0 double-free
+stands as a record of a state; nothing watches it now.
+
+What would restore it, stated so the next slice does not have to rediscover it:
+a live-block word in the heap header (`heapBase() + 476` is a gap in the map
+above `drain`), incremented in `malloc` and decremented in `free`, and read by
+`wasi_host.c` at exit. The costs are two: every recorded wasm hash moves, and
+the allocator pays a load, an add and a store per block on a path binary-trees
+is bound by. That is a measurement of its own and belongs in its own slice.
+Four `_natively` tests in `memory.rs` go the same way and for the same reason;
+three of their four rows are steady in the wasm census anyway, and the fourth —
+the operating-system handle a `spawn` takes — is seen by nothing now.
+
+**What CI fetches, and the one row nobody has hashed.** The `parity` job is the
+`route` job: `tests/route.rs --release -- --ignored` over the same corpus, still
+`#[ignore]`d, still failing loudly through `VYRN_REQUIRE_TOOLS=1` when a tool is
+missing. wabt and simde join wasmtime in the pin table (`toolpin::KNOWN_TOOLS`,
+`tool_url`, `tool_platforms`), in `vyrn.json`, and in `vyrn.lock`:
+
+| pin | url | sha256 |
+| --- | --- | --- |
+| `tool:simde@0.8.2/any` | `https://github.com/simd-everywhere/simde/archive/refs/tags/v0.8.2.tar.gz` | `ed2a3268658f2f2a9b5367628a85ccd4cf9516460ed8604eed369653d49b25fb` |
+| `tool:wabt@1.0.41/x86_64-windows` | `https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz` | `37285ec7244384ffd382841f93fd23335aae846c92016a132d765c60f27a2f31` |
+
+Those are the two archives this machine holds, hashed from the bytes on disk.
+wabt's other three platform assets are NOT pinned, and their URLs are not
+written down either: an asset name is a pin only once someone has downloaded it
+and recorded its sha256 (RFC-0102 M1), and a URL whose hash nobody has is the
+exact thing the pin mechanism exists to refuse. `tool_platforms("wabt")` is
+therefore `["x86_64-windows"]` alone and `tool_url` refuses the rest by name.
+**CI's `route` and `bench` jobs run on ubuntu and are red until one
+`vyrn update wabt` on a linux machine with network access writes that row.** No
+other change is needed; both jobs already run `vyrn update --locked` and resolve
+through the pin.
+
+The route also outranks the `tools/` walk now, as every other pinned tool does,
+so a checkout with `tools/wabt-*/` unpacked and nothing in `~/.vyrn/cache`
+refuses with the sha it wants and the three ways to satisfy it. `vyrn vendor`,
+or a copy of the archive dropped into `~/.vyrn/cache/sha256/<sha>`, is what a
+developer does once.
+
+Gate: `cargo fmt --all --check`; `cargo build --release -p vyrn-cli`;
+`cargo test -p vyrn-cli`; the ignored corpus suites `kernel coretables typed
+effects fixtures testsweep`; `cargo test -p vyrn-frontend`;
+`cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml`; `cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1`;
+`cargo test --release -p vyrn-cli --test route -- --ignored`;
+`VYRN_WASM_MANIFEST=check ... --test wasmhash -- --ignored`;
+`--release --test genwasm -- --ignored`; `vyrn doc --verify`; the site export and
+`vyrn test` per site test file.
+
+Numbers from the run: the ignored corpus suites `kernel`, `coretables`, `typed`,
+`effects`, `fixtures` and `testsweep` all green; `cargo test -p vyrn-cli` green;
+`--test route -- --ignored` 175 checked, 33 skipped, 0 failed, plus the extern
+refusal; `--test memory -- --test-threads=1` 6 passed; the wasm manifest checked
+with no byte moved; `--test genwasm -- --ignored` green; `vyrn doc --std --verify`
+green after the two std doc comments that named `emit-ir` and the textual
+backend were rewritten; the site export 29.7 s and 189 site test blocks. Parity
+ran one last time on the flipped route and read 40 of 41 — the one failure was
+`leak_check_is_two_sided`, the residue instrument again, and it is deleted with
+the rest of the shim's readers rather than left red.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

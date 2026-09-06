@@ -18,11 +18,10 @@ Nothing below is proposed. Each row is in the tree today.
 | Piece | Where | What it gives interop |
 |---|---|---|
 | `extern fn` declarations | RFC-0012; `checker.rs` signature domain | A body-less function with a checked scalar/`String` signature. |
-| Native lowering of an extern | `vyrn-codegen/src/lib.rs:959`–`980` | A real `declare` plus a real `call` at each use site. The symbol is `__vyrn_extern_<name>`. |
-| The trap stub | `vyrn-cli/src/main.rs:2654` (`extern_trap_stubs`) | A generated C body per extern that prints the canonical wording and exits. **This is the seam.** A real foreign body attaches exactly here. |
+| Native lowering of an extern | `vyrn-codegen/src/direct.rs` (`extern_abi_sig`) | One `vyrn` namespace import per declaration, at the ABI the declaration says. |
+| The trap stub | `vyrn-codegen/src/toolchain.rs` (`wasi_host_c`) | A generated C body per import that prints the canonical wording and exits, written from the header wasm2c produced. **This is the seam.** A real foreign body attaches exactly here. |
 | A named-symbol allowlist | `vyrn-codegen/src/lib.rs:565` (`host_boundary_extern`) | Three externs (`hostNowMillis`, `hostMonotonicNanos`, `hostRandomSeed`) already resolve to real C symbols instead of a trap. The precedent for "an extern that is a real foreign call" is shipped. |
-| `declare` of arbitrary C | `vyrn-codegen/src/lib.rs:801`–`960` | The IR already declares `printf`, `strcmp`, `fopen`, `free`, `strcat`. Calling C from the native backend is a solved mechanical problem. |
-| The clang link step | `vyrn-cli/src/main.rs:4590` | `clang <out>.ll <out>.shim.c -o <out> -O2 -ffp-contract=off -Wno-override-module -march=… [-pthread -lm]`. Adding an archive to that line is one `cmd.arg`. |
+| The clang link step | `vyrn-cli/src/main.rs` (`build_wasm2c`) | `clang <out>.w2c.c <out>.host.c wasm-rt-impl.c wasm-rt-mem-impl.c -o <out> -O2 -ffp-contract=off -march=… [-pthread -lm]`. Adding an archive to that line is one `cmd.arg`. |
 | `export extern fn` | RFC-0012 M2 | A Vyrn function additionally exported to the host. Today the export is wasm-only (an inline `wasm-export-name` attribute). |
 | `__vyrn_malloc` / `__vyrn_free` | RFC-0077 M6 | A module that takes or returns a `String` across the boundary exports both. The host allocates arguments and frees results. |
 | The `vyrn:exports` custom section | RFC-0012 M3 | The module carries a machine-readable fact about its own exports. A precedent for shipping the interface inside the artifact. |
