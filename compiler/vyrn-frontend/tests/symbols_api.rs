@@ -447,24 +447,23 @@ fn main() -> Int64 {
     assert_eq!(d.end_col, 13);
 }
 
-/// A movecheck rule-2 diagnostic is pinned to the borrowed **identifier** on
-/// the error's line (the movecheck message backtick-quotes the variable name).
+/// A movecheck diagnostic is pinned to the borrowed **identifier** on the
+/// error's line (the movecheck message backtick-quotes the variable name).
 /// Guards that the pinner covers movecheck, not just checker.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06), and a store until rule 2 left too (rows 01, 02, 03, 27 and 34). It
-/// asks the take now, which the kernel refuses in words of its own (row 11), so
-/// `movecheck.rs` keeps it. What the editor shows for a rule the KERNEL states
-/// is a separate question, and the record says the answer is nothing:
-/// `vyrn-lsp` is an adapter over `vyrn_frontend::analyze` and the kernel is in
-/// `vyrn-lower`.
+/// row 06), a store until rule 2 left too (rows 01, 02, 03, 27 and 34), and a
+/// `for .. in consume` of a `read` parameter until rows 10, 11 and 29 left. It
+/// asks row 24 now, a closure that outlives the call capturing a borrow, which
+/// the kernel does not state, so `movecheck.rs` keeps it. What the editor
+/// shows for a rule the KERNEL states is a separate question, and the record
+/// says the answer is nothing: `vyrn-lsp` is an adapter over
+/// `vyrn_frontend::analyze` and the kernel is in `vyrn-lower`.
 #[test]
 fn movecheck_rule_two_pinned_to_ident() {
-    let src = "\
-fn borrow(s: read Array<Int64>) -> Int64 {
-    let mut o = 0;
-    for a in consume s { o = o + a; }
-    return o;
+    let src = "fn hold(s: String) -> fn() -> Int64 {
+    let g: fn() -> Int64 = () -> s.byteLength;
+    return g;
 }
 fn main() -> Int64 { return 0; }
 ";
@@ -472,13 +471,16 @@ fn main() -> Int64 { return 0; }
     let d = a
         .diagnostics
         .iter()
-        .find(|d| d.stage == "movecheck" && d.message.contains("`read` parameter"))
-        .expect("a movecheck rule-2 diagnostic");
-    // Line 3: `    for a in consume s { .. }` — the offending take of `s` is at
-    // col 22.
-    assert_eq!(d.line, 3);
-    assert_eq!(d.col, 22, "pinned to the `s` take, not col 0 (whole line)");
-    assert_eq!(d.end_col, 23);
+        .find(|d| d.stage == "movecheck" && d.message.contains("may not be captured"))
+        .expect("a movecheck row-24 diagnostic");
+    // Line 2: `    let g: fn() -> Int64 = () -> s.byteLength;` — the captured
+    // `s` is at col 33.
+    assert_eq!(d.line, 2);
+    assert_eq!(
+        d.col, 33,
+        "pinned to the captured `s`, not col 0 (whole line)"
+    );
+    assert_eq!(d.end_col, 34);
 }
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is
