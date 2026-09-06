@@ -192,6 +192,11 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     ("has nothing to take", "row 09"),
     ("may not be passed to a `consume` parameter via", "row 12"),
     ("may not be returned from a closure", "row 28"),
+    (
+        "may not be returned — it is",
+        "rows 15, 16 and 18, rule 3 at the return",
+    ),
+    ("may not be returned from an exported function", "row 17"),
     ("is dropped here but was already consumed by", "row 20"),
     ("may not be dropped — it is", "row 21"),
     ("was moved here into", "row 07, rule 1's move"),
