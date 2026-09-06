@@ -3724,14 +3724,38 @@ thread_local! {
 /// program makes its own here rather than reading somebody else's answers off
 /// colliding addresses. That is what this is for: `direct::compile` is reached
 /// from `vyrn build` with the lowering's record already in place and from a
-/// generator host with another program's, and only the key can tell those
-/// apart.
-pub fn decide(program: &Program) {
+/// generator host, a probe or a test with another program's, and only the key
+/// can tell those apart — see [`Decided`] for the half of that the key alone
+/// cannot do.
+#[must_use = "the record is held only while the guard is alive"]
+pub fn decide(program: &Program) -> Decided {
     let key = key_of(program);
     if DECIDED.with(|d| d.borrow().as_ref().is_some_and(|(k, _)| *k == key)) {
-        return;
+        return Decided(None);
     }
-    set_decided(program, &vyrn_frontend::checker::recorded(program));
+    let made = vyrn_frontend::checker::recorded(program);
+    let prev = DECIDED.with(|d| d.borrow_mut().replace((key, made)));
+    Decided(Some(prev))
+}
+
+/// What [`decide`] gives back: the right to read the record, for as long as
+/// the emitter holds it.
+///
+/// A guard and not a `set`, because the key is an ADDRESS and a `Program` is
+/// a local. Two programs built one after another by the same code land at the
+/// same address with the same shape — `vyrn-codegen`'s own tests do it in a
+/// loop — and a record left behind by the first is served to the second as if
+/// it were about the same nodes. So a record this made is put back the way it
+/// was found. A record it only BORROWED (the lowering's, for this same
+/// program) is left alone: the lowering's own reader outlives the emit.
+pub struct Decided(Option<Option<(Key, std::rc::Rc<vyrn_frontend::checker::Recorded>)>>);
+
+impl Drop for Decided {
+    fn drop(&mut self) {
+        if let Some(prev) = self.0.take() {
+            DECIDED.with(|d| *d.borrow_mut() = prev);
+        }
+    }
 }
 
 /// What a held record belongs to: the program, and the two contexts a check of

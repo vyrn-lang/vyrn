@@ -336,9 +336,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // RFC-0125 §3 M5: this emitter reads every expression's type off the
     // checker's record rather than deriving one. `vyrn build` has already
     // asked for it, through the lowering; a host that compiles a program the
-    // lowering never walked — a generator, a probe — asks here, and a program
-    // the core already holds costs the key comparison and nothing else.
-    vyrn_lower::core::decide(program);
+    // lowering never walked — a generator, a probe, a test — asks here, and a
+    // program the core already holds costs the key comparison and nothing
+    // else. The guard lives as long as the emit, so a record made here is not
+    // left behind for whatever `Program` next lands at this address.
+    let _decided = vyrn_lower::core::decide(program);
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.

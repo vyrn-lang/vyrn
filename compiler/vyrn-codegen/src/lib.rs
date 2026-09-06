@@ -1345,7 +1345,7 @@ pub fn emit(program: &Program) -> Result<String, String> {
     set_gen_host(false);
     // RFC-0125 §3 M5: the checker's record, for the same reason the direct
     // backend asks for it — see `direct::compile_inner`.
-    vyrn_lower::core::decide(program);
+    let _decided = vyrn_lower::core::decide(program);
     let mut out = String::new();
     // module preamble: printf/abort + format strings (opaque-pointer style)
     out.push_str("; Vyrn v0.1 — generated LLVM IR (target: LLVM 15+)\n");
