@@ -1571,6 +1571,11 @@ impl<'a> Memo<'a> {
     pub fn open(program: &'a Program) -> Memo<'a> {
         MEMO_FOR.with(|p| p.set(program as *const Program as usize));
         MEMO.with(|m| *m.borrow_mut() = None);
+        // RFC-0125 §3 M3, the one check: what the checker decided about every
+        // node of this program, for the same span and on the same proof. The
+        // lowering reads it (`checker::recorded`) instead of checking the
+        // program a second time.
+        crate::checker::hold_open(program);
         Memo {
             program: std::marker::PhantomData,
         }
@@ -1581,6 +1586,7 @@ impl Drop for Memo<'_> {
     fn drop(&mut self) {
         MEMO_FOR.with(|p| p.set(0));
         MEMO.with(|m| *m.borrow_mut() = None);
+        crate::checker::hold_close();
     }
 }
 
@@ -2182,6 +2188,14 @@ thread_local! {
 /// Install the placer. The first installation wins; a second is ignored.
 pub fn install_placer(f: Placer) {
     let _ = PLACER.set(f);
+}
+
+/// Whether a placer is installed — whether, that is, anything in this process
+/// lowers a program. It is the one reader of what the checker records
+/// (RFC-0125 §3 M3, the one check), so the analysis's check asks this before it
+/// keeps a record nobody would read.
+pub fn placer_installed() -> bool {
+    PLACER.get().is_some()
 }
 
 /// RFC-0125 §3 M3, the deletion slice: round forty's answer read off the
