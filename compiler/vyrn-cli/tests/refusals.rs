@@ -319,14 +319,14 @@ fn census() -> Vec<Row> {
             "a must-use obligation is discharged on every path",
             "RFC-0075",
             "`s` is a `Stream` and is never disposed",
-            Kernel::No,
+            Kernel::Elsewhere,
         ),
         row(
             "r31_stream_disposed_twice.vyrn",
             "a must-use obligation is discharged exactly once",
             "RFC-0075",
             "`s` is a `Stream` and is disposed more than once",
-            Kernel::Other("was already consumed by `close(..)` on line 5"),
+            Kernel::Elsewhere,
         ),
         row(
             "r32_region_store_escapes.vyrn",
@@ -1709,10 +1709,10 @@ fn sections() -> Vec<Section> {
             "whether a stored value mentions the place it is stored into",
         ),
         sec(
-            "mod linear {",
-            Checker,
-            "the must-use obligation: acquired once, disposed exactly once (rows \
-             30, 31)",
+            "pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {",
+            Shared,
+            "what an expression names, and on which of its paths — the tree \
+             questions the must-use judgment asks from the lowering",
         ),
         sec(
             "fn store_path(e: &Expr) -> Option<String> {",
@@ -1855,11 +1855,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("a rule the kernel now gives", 651),
-        ("a rule only the checker gives", 725),
+        ("a rule only the checker gives", 78),
         ("placement rows for the engines", 2250),
         ("a fix menu", 73),
-        ("shared machinery", 3642),
-        ("tests", 1781),
+        ("shared machinery", 3790),
+        ("tests", 1451),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
