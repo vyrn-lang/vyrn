@@ -1962,9 +1962,6 @@ impl<'a> Builder<'a> {
                         let n = self.lookup(name).unwrap();
                         if *consuming {
                             let t = self.temp(ity.clone(), *line);
-                            // The loop is what took it, and the refusal says so
-                            // (RFC-0125 §3 M3, row 07).
-                            self.body.names[t as usize].for_consume = true;
                             out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                             self.keyed(t, sid);
                             t
@@ -1997,6 +1994,15 @@ impl<'a> Builder<'a> {
                         t
                     }
                 };
+                // The loop is what took the container, whichever spelling
+                // brought it here: a bare name binds a temporary above, and
+                // module state or a field reaches `val` and binds one there.
+                // A refusal about the take names the loop the reader wrote,
+                // at the `let` and at the release alike (RFC-0125 §3 M3, row
+                // 07 and rows 10, 11, 29).
+                if *consuming {
+                    self.body.names[it as usize].for_consume = true;
+                }
                 let decls = vyrn_frontend::types::decl_map(self.program);
                 let streaming =
                     matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Stream(_));
