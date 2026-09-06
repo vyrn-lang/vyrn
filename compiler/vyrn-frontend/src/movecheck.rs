@@ -2620,31 +2620,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// A store of `value` into `into` — RFC-0089 rule 1, and rule 2's refusal.
-    ///
-    /// `into` is the destination in words ("the binding `t`", "the field `r.s`").
-    /// Three outcomes:
-    ///
-    /// - the value owns no heap, or is fresh (a call result, a literal, an
-    ///   operator result): nothing happens, because nothing else holds it;
-    /// - the source is a **borrow**: refused here, with its fixes named;
-    /// - the source is an owned place: it MOVES, and a later use of it is the
-    ///   error [`MoveCheck::expr`] reports.
-    ///
-    /// `outlives` is what separates a store from a rebinding. A borrow's
-    /// lifetime is the call, so putting one in a field, a container, module
-    /// state or a return is refused, and giving it a second local name is not:
-    /// `let t = s` cannot outlive `s`, and rule 2's whole point is that a borrow
-    /// needs no lifetime because it never leaves the frame. The new name is a
-    /// borrow too — see [`MoveCheck::borrow_from`].
-    ///
-    /// A type this reading cannot name does NOT move. That is the same
-    /// under-approximation `own.rs` makes and it costs the same thing — a
-    /// diagnostic that is not printed. It is not the unsound direction: 4b
-    /// decides what a program may SAY, and every value it fails to move is one
-    /// today's engines already leak rather than free twice.
-    /// Answers whether the store **took** the source place, which is what
-    /// Phase 4c reads: a place that did not move is still somebody else's.
     /// Whether parameter `i` of the builtin `name` takes its argument for good,
     /// under **rule 1**.
     ///
@@ -2667,6 +2642,22 @@ impl MoveCheck<'_> {
         sinks(self.decl, name, i)
     }
 
+    /// A store of `value` into `into` — RFC-0089 rule 1's move, and nothing else.
+    ///
+    /// `into` is the destination in words ("the binding `t`", "the field `r.s`").
+    /// The answer is whether the store **took** the source place, which is what
+    /// Phase 4c reads: a place that did not move is still somebody else's. A
+    /// fresh value, a scalar, a borrow and a projection all take nothing.
+    ///
+    /// Rule 2's refusal was here — a borrow or a projection put anywhere that
+    /// outlives the call — and it is the kernel's now (RFC-0125 §3 M3, census
+    /// rows 01, 02, 03, 27 and 34). `outlives` stays, because it is what tells
+    /// a store from a rebinding and the retention row is keyed on it.
+    ///
+    /// A type this reading cannot name does NOT move. That is the same
+    /// under-approximation `own.rs` makes and it costs the same thing — a row
+    /// that is not written. It is not the unsound direction: every value it
+    /// fails to move is one today's engines already leak rather than free twice.
     fn store(
         &self,
         value: &Expr,
@@ -2677,39 +2668,22 @@ impl MoveCheck<'_> {
         line: usize,
         outlives: bool,
         consumed: &mut Consumed,
-    ) -> Result<bool, Diagnostic> {
+    ) -> bool {
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
-        //
-        // M1 widens `store` to see it, which M0 left as this milestone's
-        // decision. The reason is the RFC's own thesis: `let t = xs[i]` already
-        // binds a `Borrow::Projection` (see [`MoveCheck::borrow_from`]) and rule
-        // 2 already refuses storing `t`. Leaving the inline form alone would
-        // reproduce, for elements, exactly the two-spellings-two-verdicts defect
-        // this RFC exists to remove. Refused whatever the container is, because a
-        // borrowed container's element is no more storable than an owned one's.
-        if let Some((root, path)) = element_path(value) {
+        if let Some((_, path)) = element_path(value) {
             if self.projections.is_some() && outlives {
                 let ty = self.type_of(value);
                 self.note_projection("elem-store", &path, into(), ty, line);
             }
             if outlives && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
-                let b = self.borrow_of(&root).unwrap_or(Borrow::Projection);
                 self.note_retention(value);
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be stored into {} — it is {}",
-                        into(),
-                        b.what(&path)
-                    ),
-                    self.fixes_here(&b, &root, &path),
-                ));
+                return false;
             }
         }
         let Some((root, path)) = place_path(value) else {
-            return Ok(false);
+            return false;
         };
         // RFC-0092 M0's instrument, kept as M1's regression guard: it records
         // what the branch below now refuses, so a site that reappears is counted.
@@ -2722,53 +2696,25 @@ impl MoveCheck<'_> {
         }
         // A scalar copies. An unnamed type is left alone — see the doc above.
         if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
-            return Ok(false);
+            return false;
         }
-        if let Some(b) = self.borrow_of(&root) {
-            if !outlives {
-                return Ok(false);
+        // A borrow does not move: the caller still owns it. The retention row
+        // says the borrow was put somewhere that outlives the call, which is
+        // what the call graph is closed over.
+        if self.borrow_of(&root).is_some() {
+            if outlives {
+                self.note_retention(value);
             }
-            self.note_retention(value);
-            // Rule 2. A borrow may be observed and passed on; it may not be put
-            // anywhere that outlives the call.
-            return Err(menu(
-                line,
-                format!(
-                    "`{path}` may not be stored into {} — it is {}",
-                    into(),
-                    b.what(&path)
-                ),
-                self.fixes_here(&b, &root, &path),
-            ));
+            return false;
         }
-        // RFC-0092's rule: **a projection is a borrow of its root, whatever the
-        // root is.** Reading a field out of a record does not take the record —
-        // the record still owns the buffer — so putting that buffer anywhere the
-        // frame does not end with gives it two owners. The old bail said the
-        // binding this store makes is "recorded by the caller", which is true of
-        // a `let` and false of `out.push(d.title)`: there is no `let` and no
-        // caller to record anything.
-        //
-        // A rebinding is not a store, and rule 2 does not refuse one either:
-        // `let t = d.title` is fine and [`MoveCheck::borrow_from`] gives `t` the
-        // projection, which rule 2 then enforces on.
+        // A projection does not move either: reading a field out of a record
+        // does not take the record.
         if path != root {
-            if !outlives {
-                return Ok(false);
-            }
-            return Err(menu(
-                line,
-                format!(
-                    "`{path}` may not be stored into {} — it is {}",
-                    into(),
-                    Borrow::Projection.what(&path)
-                ),
-                self.fixes_here(&Borrow::Projection, &root, &path),
-            ));
+            return false;
         }
         self.took(&root, Gone::Moved { line, by: into() });
         consumed.insert(root, Consumption { line, hole: false });
-        Ok(true)
+        true
     }
 
     /// The borrow status a `let` of `value` gives its binding.
@@ -3644,7 +3590,7 @@ impl MoveCheck<'_> {
                     *line,
                     hoisted,
                     consumed,
-                )?;
+                );
                 self.note_wrapped_lend(value);
                 // Phase 4c: the row this binding is reclaimed by. Written BEFORE
                 // the binding enters scope, so `let s = s + "x"` records the new
@@ -3749,7 +3695,7 @@ impl MoveCheck<'_> {
                         format!("`{name}`")
                     }
                 };
-                let _ = self.store(value, &into, *line, global, consumed)?;
+                self.store(value, &into, *line, global, consumed);
                 // An assignment rebinds, exactly as a `let` does, so it must
                 // carry the same answer: `t = d.title` makes `t` a projection of
                 // `d`. Without this, `let t = d.title` was refused at the next
@@ -3799,13 +3745,13 @@ impl MoveCheck<'_> {
             } => {
                 self.site("field", *line, value, None);
                 self.walk_writeback(&format!("{name}.{field}"), value, consumed, scope)?;
-                let _ = self.store(
+                self.store(
                     value,
                     &|| format!("the field `{name}.{field}`"),
                     *line,
                     true,
                     consumed,
-                )?;
+                );
                 // RFC-0093: a write fills the hole a take left. The same
                 // sentence `Stmt::Assign` has carried since Phase 4b, one dot
                 // down — and the reason no drop flag is needed to say it.
@@ -3852,7 +3798,7 @@ impl MoveCheck<'_> {
                 self.expr(index, consumed, scope)?;
                 self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
-                let _ = self.store(value, &|| format!("`{name}`"), *line, true, consumed)?;
+                self.store(value, &|| format!("`{name}`"), *line, true, consumed);
                 // A map takes its KEY. Both backends write the key pointer into
                 // `keys[len]` and copy nothing, so `hs[k] = v` moves `k` — and
                 // no rule said so until RFC-0092 M5 needed it to. `httpHeaders`
@@ -3877,7 +3823,7 @@ impl MoveCheck<'_> {
                 // (`std/http`) is `for k in base.keys() { hs[k] = .. }`, and the
                 // snapshot is a temporary the loop owns (M5), so `k` binds an
                 // OWNED element and the store still records the move.
-                let _ = self.store(index, &|| format!("`{name}`"), *line, true, consumed)?;
+                self.store(index, &|| format!("`{name}`"), *line, true, consumed);
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 self.note_carrying_store(name, value);
                 Ok(false)
@@ -4700,13 +4646,13 @@ impl MoveCheck<'_> {
                 for (f, v) in fields {
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
-                    let _ = self.store(
+                    self.store(
                         v,
                         &|| format!("the field `{name}.{f}`"),
                         *line,
                         true,
                         consumed,
-                    )?;
+                    );
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -4716,7 +4662,7 @@ impl MoveCheck<'_> {
                 for a in args {
                     self.site("literal", *line, a, None);
                     self.expr(a, consumed, scope)?;
-                    let _ = self.store(a, &|| format!("`{name}`"), *line, true, consumed)?;
+                    self.store(a, &|| format!("`{name}`"), *line, true, consumed);
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -5113,13 +5059,13 @@ impl MoveCheck<'_> {
                         // A builtin whose parameter declares `consume`. Rule 1
                         // governs it exactly as it governs `xs = [.., v]`, which
                         // is what it means.
-                        let _ = self.store(
+                        self.store(
                             arg,
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),
                             *line,
                             true,
                             consumed,
-                        )?;
+                        );
                     }
                 }
                 Ok(())
@@ -5131,13 +5077,13 @@ impl MoveCheck<'_> {
                 for e in elems {
                     self.site("literal", *line, e, None);
                     self.expr(e, consumed, scope)?;
-                    let _ = self.store(
+                    self.store(
                         e,
                         &|| "the array literal".to_string(),
                         *line,
                         true,
                         consumed,
-                    )?;
+                    );
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -5148,10 +5094,8 @@ impl MoveCheck<'_> {
                     self.expr(k, consumed, scope)?;
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
-                    let _ =
-                        self.store(k, &|| "the map literal".to_string(), *line, true, consumed)?;
-                    let _ =
-                        self.store(v, &|| "the map literal".to_string(), *line, true, consumed)?;
+                    self.store(k, &|| "the map literal".to_string(), *line, true, consumed);
+                    self.store(v, &|| "the map literal".to_string(), *line, true, consumed);
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -6686,56 +6630,28 @@ mod tests {
         .is_ok());
     }
 
-    /// Phase 6's other half of the menu: inside an `export extern fn` the
-    /// `consume` fix does not exist, so it is not offered.
+    /// The fix an export's store is offered: `arg.copy()`, and it compiles.
     ///
-    /// The three returned spellings this test also carried went with the rule
-    /// (RFC-0125 §3 M3, row 17) and are pinned in `vyrn-cli/tests/refusals.rs`,
-    /// still in one test for the reason they were put in one: the `exported`
-    /// question drifted between the exits that asked it. What is left here is
-    /// the STORE, which is this pass's own refusal.
+    /// The refusal and its menu are the kernel's since RFC-0125 §3 M3, rows 01,
+    /// 02, 03, 27 and 34, and `vyrn-cli/tests/refusals.rs` asks both of the
+    /// whole compiler. What is left here is the way out.
     #[test]
-    fn an_exports_borrow_menu_names_copy_alone() {
-        let src = "let mut kept = \"x\"                    export extern fn set(arg: String) { kept = arg }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("fix: `arg.copy()`"), "{e}");
-        assert!(
-            !e.contains("consume"),
-            "an export may not consume a String: {e}"
-        );
+    fn an_exports_store_takes_a_copy() {
         assert!(run("let mut kept = \"x\"                      export extern fn set(arg: String) { kept = arg.copy() }                      fn main() -> Int64 { return 0 }")
         .is_ok());
     }
 
+    /// The two ways out of rule 2 at a record literal's field, and they compile.
+    ///
+    /// The refusal and its menu are the kernel's since RFC-0125 §3 M3, rows 01,
+    /// 02, 03, 27 and 34; `vyrn-cli/tests/refusals.rs` asks them of the whole
+    /// compiler.
     #[test]
-    fn rule_2_refuses_a_stored_borrow() {
-        let src = "type R = { s: String }                    fn keep(x: String) -> R { return R { s: x } }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("may not be stored into the field `R.s`"), "{e}");
-        assert!(
-            e.contains("fix: declare the parameter `x: consume ..`"),
-            "{e}"
-        );
-        // Both named fixes work.
+    fn a_stored_borrows_two_fixes_both_work() {
         assert!(run("type R = { s: String } fn keep(x: consume String) -> R { return R { s: x } }                      fn main() -> Int64 { return 0 }")
             .is_ok());
         assert!(run("type R = { s: String } fn keep(x: String) -> R { return R { s: x.copy() } }                      fn main() -> Int64 { return 0 }")
             .is_ok());
-    }
-
-    #[test]
-    fn a_stored_loop_variable_names_the_consuming_form() {
-        // The half of rule 2 the corpus is made of, and the fix that is not a
-        // copy: the loop takes the container.
-        let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("fix: `for x in consume xs` if the loop should take"),
-            "{e}"
-        );
-        // Taking the container needs the function to own it, and the diagnostic
-        // says so before it says `copy`.
-        assert!(e.contains("fix: `x.copy()`"), "{e}");
     }
 
     #[test]
@@ -6788,10 +6704,10 @@ mod tests {
         assert!(run("fn make() -> Array<String> { return [\"a\" + \"b\"] }                      fn go() -> Int64 { let mut out: Array<String> = []                      for x in make() { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
             .is_ok());
         // An element read is NOT a temporary: `xs[i]` is a place the container
-        // still owns, so a loop over one still borrows.
-        let src = "fn go(xs: Array<Array<String>>) -> Int64 { let mut out: Array<String> = []                    for x in xs[0] { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("may not be stored"), "{e}");
+        // still owns, so a loop over one still borrows, and storing the element
+        // is refused. The sentence is the kernel's since RFC-0125 §3 M3, rows
+        // 01, 02, 03, 27 and 34, so `tests/refusals.rs` asks it of the whole
+        // compiler.
     }
 
     #[test]
@@ -6857,21 +6773,10 @@ mod tests {
         );
     }
 
-    /// The menu RFC-0092 M1 could only answer with `.copy()` names the take
-    /// first now — and only where `check_take` would accept it.
-    #[test]
-    fn the_projection_menu_offers_the_take_where_it_exists() {
-        const DECLS: &str = "type Bag = { a: String } \
-                             fn make() -> Bag { return Bag { a: \"x\" + \"y\" } } ";
-        let owned = run(&format!("{DECLS} fn go() -> Int64 {{ let d = make() let mut o: Array<String> = [] o.push(d.a) return o.length }} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
-        assert!(
-            owned.contains("fix: `consume d.a` if `d` should give it up"),
-            "{owned}"
-        );
-        // A borrowed root has no take, so the menu must not name one.
-        let borrowed = run(&format!("{DECLS} fn go(d: read Bag) -> Int64 {{ let mut o: Array<String> = [] o.push(d.a) return o.length }} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
-        assert!(!borrowed.contains("`consume d.a`"), "{borrowed}");
-    }
+    // The menu RFC-0092 M1 could only answer with `.copy()` names the take
+    // first where the root's owner is this frame, and never where it is not.
+    // Both halves are the kernel's since RFC-0125 §3 M3, rows 01, 02, 03, 27
+    // and 34, and `tests/refusals.rs` asks them of the whole compiler.
 
     // ---- rule 2 at the third exit: a borrow may not be consumed -----------
 
@@ -6982,24 +6887,13 @@ mod tests {
     fn a_map_key_may_not_be_a_borrow() {
         // `m[k] = v` used to be the one store that did not ask rule 2, while the
         // map LITERAL asked it — one fact, two spellings, two verdicts. Both
-        // spellings of the borrow are here: the element read inline, and the
-        // `for` variable over a borrowed container.
-        let inline = "fn build(ks: Array<String>) -> Map<String, Int64> \
-                      { let mut m: Map<String, Int64> = [:] m[ks[0]] = 1 return m } \
-                      fn main() -> Int64 { return 0 }";
-        let e = run(inline).unwrap_err();
-        assert!(e.contains("`ks[0]` may not be stored into `m`"), "{e}");
-        assert!(e.contains("`ks[0].copy()`"), "{e}");
-
-        let loop_var = "fn build(ks: Array<String>) -> Map<String, Int64> \
-                        { let mut m: Map<String, Int64> = [:] \
-                        for k in ks { m[k] = 1 } return m } \
-                        fn main() -> Int64 { return 0 }";
-        let e = run(loop_var).unwrap_err();
-        assert!(e.contains("`k` may not be stored into `m`"), "{e}");
-
+        // spellings of the borrow — the element read inline, and the `for`
+        // variable over a borrowed container — are the kernel's refusal since
+        // RFC-0125 §3 M3, rows 01, 02, 03, 27 and 34, and `tests/refusals.rs`
+        // asks both of the whole compiler.
+        //
         // A copy is a value of this frame's, and so is a key with no other
-        // owner — neither is refused.
+        // owner — neither is refused, and that is what is left to ask here.
         assert!(run("fn build(ks: Array<String>) -> Map<String, Int64> \
                  { let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m } \
                  fn main() -> Int64 { return 0 }")
@@ -7342,14 +7236,10 @@ mod tests {
         // Reading the name afterwards is row 07's error, in the kernel's words
         // since the row left: `tests/refusals.rs` asks it of the whole compiler.
 
-        // A `read` parameter's buffer may not go into a stream: the caller still
-        // owns it, and the stream's close would free it.
-        let e = run(
-            "fn mk(xs: Array<Int64>) -> Stream<Int64> { return fromArray(xs) } \
-                     fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("may not be stored into `fromArray(..)`"), "{e}");
+        // A `read` parameter's buffer may not go into a stream: the caller
+        // still owns it, and the stream's close would free it. That refusal is
+        // the kernel's since RFC-0125 §3 M3, rows 01, 02, 03, 27 and 34, and
+        // `tests/refusals.rs` asks it of the whole compiler.
     }
 
     /// `boxStream` and `serveStream` — the two the census counted as carrying

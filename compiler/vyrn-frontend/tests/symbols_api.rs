@@ -452,16 +452,19 @@ fn main() -> Int64 {
 /// Guards that the pinner covers movecheck, not just checker.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06). What the editor shows for a rule the KERNEL states is a separate
-/// question, and the record says the answer is nothing: `vyrn-lsp` is an
-/// adapter over `vyrn_frontend::analyze` and the kernel is in `vyrn-lower`.
+/// row 06), and a store until rule 2 left too (rows 01, 02, 03, 27 and 34). It
+/// asks the take now, which the kernel refuses in words of its own (row 11), so
+/// `movecheck.rs` keeps it. What the editor shows for a rule the KERNEL states
+/// is a separate question, and the record says the answer is nothing:
+/// `vyrn-lsp` is an adapter over `vyrn_frontend::analyze` and the kernel is in
+/// `vyrn-lower`.
 #[test]
 fn movecheck_rule_two_pinned_to_ident() {
     let src = "\
-fn borrow(s: read String) -> Int64 {
-    let mut o: Array<String> = [];
-    o.push(s);
-    return o.length;
+fn borrow(s: read Array<Int64>) -> Int64 {
+    let mut o = 0;
+    for a in consume s { o = o + a; }
+    return o;
 }
 fn main() -> Int64 { return 0; }
 ";
@@ -471,10 +474,11 @@ fn main() -> Int64 { return 0; }
         .iter()
         .find(|d| d.stage == "movecheck" && d.message.contains("`read` parameter"))
         .expect("a movecheck rule-2 diagnostic");
-    // Line 3: `    o.push(s);` — the offending use `s` is at col 12.
+    // Line 3: `    for a in consume s { .. }` — the offending take of `s` is at
+    // col 22.
     assert_eq!(d.line, 3);
-    assert_eq!(d.col, 12, "pinned to the `s` use, not col 0 (whole line)");
-    assert_eq!(d.end_col, 13);
+    assert_eq!(d.col, 22, "pinned to the `s` take, not col 0 (whole line)");
+    assert_eq!(d.end_col, 23);
 }
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is
