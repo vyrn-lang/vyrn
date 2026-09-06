@@ -1331,6 +1331,84 @@ fn the_shapes_rows_ten_eleven_and_twenty_nines_unit_tests_pinned_are_still_refus
     );
 }
 
+/// A record literal's part names the FIELD it goes into, at both doors a
+/// literal is bound through (RFC-0125 §3 M3, row 07).
+///
+/// `let r = R { s: x }` and `return R { s: x }` are one literal written twice.
+/// The core wrote the field names on the binding a reader's `let` makes and
+/// not on the temporary an inline literal gets, so the second was told the
+/// value went into "the literal" — a word for the machinery, where the first
+/// was told the field. No program of the corpus spells the second with a
+/// borrow in it, which is why this is a pin and not a fixture: the licence
+/// could not see the difference, and the next reader would meet it.
+///
+/// Both passes are asked, because both state the sentence today.
+#[test]
+fn a_record_literals_part_names_its_field_at_both_doors() {
+    const DECLS: &str = "type R = { s: String } \
+                         fn mk() -> String { return \"a\" + \"b\" } \
+                         fn take(r: consume R) -> Int64 { return r.s.byteLength } ";
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "a borrow into a let's literal",
+            "the field `R.s`",
+            "fn go(x: read String) -> Int64 { let r = R { s: x } return r.s.byteLength } \
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a borrow into an inline literal",
+            "the field `R.s`",
+            "fn go(x: read String) -> R { return R { s: x } } \
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a move into a let's literal",
+            "the field `R.s`",
+            "fn go() -> Int64 { let d = mk() let r = R { s: d } \
+             return r.s.byteLength + d.byteLength } fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a move into an inline literal",
+            "the field `R.s`",
+            "fn go() -> Int64 { let d = mk() let n = take(R { s: d }) \
+             return n + d.byteLength } fn main() -> Int64 { return 0 }",
+        ),
+        // An array has no field names, so neither pass invents one. The two
+        // still spell the literal differently — "the array literal" and "the
+        // literal" — and that is the store rule's wording, not this row's.
+        (
+            "an array literal, which has no field to name",
+            "literal",
+            "fn go(x: read String) -> Int64 { let a: Array<String> = [x] return a.length } \
+             fn main() -> Int64 { return 0 }",
+        ),
+    ];
+    let dir = common::scratch("literal-parts");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, needle, body) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), format!("{DECLS} {body}")).expect("write the program");
+        for kernel_mode in [false, true] {
+            let (ok, text) = refusal_in(dir.to_path_buf(), &name, kernel_mode);
+            let pass = if kernel_mode {
+                "the kernel"
+            } else {
+                "the checker"
+            };
+            if ok {
+                bad.push(format!("{what}: {pass} accepted it"));
+            } else if !text.contains(needle) {
+                bad.push(format!("{what}: {pass} wanted `{needle}`, got {text}"));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a literal's part has lost its field:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// A nullary constructor is a value with no owner, not a name (RFC-0126 §8.8).
 ///
 /// `take(None)` twice hands the callee two values. The checker keyed rule 1 on

@@ -1644,17 +1644,7 @@ impl<'a> Builder<'a> {
                         ));
                 let n = self.name(name, ty, owned, *line);
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
-                // Where each part of a record literal goes, for a refusal
-                // about a part (RFC-0125 §3 M3, row 07).
-                if let Expr::StructLit {
-                    name: t, fields, ..
-                } = value
-                {
-                    self.body.names[n as usize].fields = fields
-                        .iter()
-                        .map(|(f, _)| format!("the field `{t}.{f}`"))
-                        .collect();
-                }
+                self.record_fields(n, value);
                 // `let t = s` on a `read` parameter: `t` is a second name for
                 // it, and the checker says so in the refusal it gives at `t`.
                 if let Rhs::Val(Val::Name(m)) = &rhs {
@@ -2982,6 +2972,28 @@ impl<'a> Builder<'a> {
         out.push(St::Drop(r, Site::None, 0));
     }
 
+    /// Where each part of a record literal goes, on the name the literal is
+    /// bound to: "the field `R.s`", one per field in order.
+    ///
+    /// A literal takes its parts and the checker names the field each part
+    /// went into. `Rhs::Make` is a list of values with no names on it, so the
+    /// fact rides on the binding — and a literal is bound at two doors, a
+    /// reader's `let` and the temporary an inline one gets. It was written at
+    /// the first alone, so `return R { s: x }` was told the part went into
+    /// "the literal" (RFC-0125 §3 M3, row 07). Empty for an array, a map and
+    /// a variant, whose parts the checker does not name either.
+    fn record_fields(&mut self, n: Name, value: &Expr) {
+        if let Expr::StructLit {
+            name: t, fields, ..
+        } = value
+        {
+            self.body.names[n as usize].fields = fields
+                .iter()
+                .map(|(f, _)| format!("the field `{t}.{f}`"))
+                .collect();
+        }
+    }
+
     /// An expression in a TAKE position: a `let`, a `return`, a store, a part
     /// of a literal, a `consume` argument. A name, or a literal.
     fn val(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
@@ -3048,6 +3060,7 @@ impl<'a> Builder<'a> {
                 } else {
                     self.temp(ty, e.line())
                 };
+                self.record_fields(t, e);
                 self.bind(t, rhs, out);
                 if let Expr::Field { .. } = e {
                     self.release_receiver(e, out, false);

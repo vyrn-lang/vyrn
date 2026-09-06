@@ -898,7 +898,19 @@ impl<'b> Kernel<'b> {
     fn may_not(&self, s: &str) -> String {
         let by = &self.by;
         if by == "a literal" {
-            return format!("`{s}` may not be stored into the literal");
+            // A part of a RECORD literal goes into a field, and the checker
+            // names it. "The literal" is what is left where the core has no
+            // field names — an array, a map, a variant (RFC-0125 §3 M3, row
+            // 07). The same list [`Kernel::gone`] reads for a rule-1 move.
+            return match self
+                .part
+                .get()
+                .checked_sub(1)
+                .and_then(|i| self.made.get(i))
+            {
+                Some(field) => format!("`{s}` may not be stored into {field}"),
+                None => format!("`{s}` may not be stored into the literal"),
+            };
         }
         if !by.ends_with("(..)`") {
             return format!("`{s}` may not be stored into {by}");
