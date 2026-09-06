@@ -2257,19 +2257,13 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 
 | kind | lines | share |
 |---|---|---|
-| a rule the kernel now gives | 1,009 | 10 per cent |
-| a rule only the checker gives | 723 | 7 per cent |
-| placement rows for the engines | 2,365 | 23 per cent |
-| a fix menu | 81 | 1 per cent |
-| shared machinery | 3,668 | 36 per cent |
-| tests | 2,187 | 22 per cent |
-| **the file** | **10,055** | |
-| placement rows for the engines | 2,373 | 24 per cent |
-| a fix menu | 81 | 1 per cent |
-| shared machinery | 3,657 | 37 per cent |
-| tests | 2,172 | 22 per cent |
-| **the file** | **10,015** | |
-| **the file** | **10,069** | |
+| a rule the kernel now gives | 916 | 9 per cent |
+| a rule only the checker gives | 725 | 7 per cent |
+| placement rows for the engines | 2,167 | 22 per cent |
+| a fix menu | 73 | 1 per cent |
+| shared machinery | 3,709 | 38 per cent |
+| tests | 2,092 | 22 per cent |
+| **the file** | **9,682** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
@@ -4987,6 +4981,155 @@ above.
 not have this property either, for the reason it is not a judgment: the rule
 is over DECLARATIONS, and a first build that states no argument drop asks the
 kernel nothing.
+
+**The store word, and why the fixpoint was not needed (2026-09-06).**
+
+The record above offers two shapes and asks for a measurement of each. The
+first one wins, and the measurement of the second says why.
+
+**`old` decides a refusal and never a state.** That is the reading the record
+above did not have. At a store the kernel writes `Own::Held` — or `Static`,
+where the value is a literal — into the place whatever `old` says, because a
+place written to holds what was written to it. `Old` is read at exactly two
+lines, and both of them refuse. So a first build that refuses nothing at a
+store leaves the judgment at every LATER statement exactly where a first build
+reading a filled table left it, and the residue the reverted slice lost was
+never the store row: it was the body the store refusal made the placer skip
+whole.
+
+`Old::Pending` is that word. The first build states it at every store it does
+not already answer, the kernel reports the store it finds a held place at
+(`MissingKind::Store`), the placer writes the row, and the second build states
+`Released` there. Over the corpus the derived answer is the analysis's at
+every site but one, and the ratchet, the parity harness, the memory suite and
+the fixtures do not move.
+
+**The fixpoint converges in one round, everywhere.** Measured, on eight
+programs and 2,900 body judgments: a second build-judge-place round after the
+first adds ZERO store rows in every one. It cannot add any, for the reason
+above — the input it would iterate on does not feed the state it would change
+— and the round costs what a build and a judgment cost: `vyrn check
+graphql.vyrn` goes from 0.74 s to 1.04 s, forty per cent, for nothing. The
+fixpoint is the right shape for an input that moves the judgment. This one
+does not.
+
+**The rule, in four lines.** A store releases what its place holds:
+
+  - unless the value HANDS THE PLACE BACK — `xs = xs.push(v)`,
+    `s.dense.push(i)`, `xs[i] = xs[j]` — which the core reads off the
+    statement, with the String concatenation exception both compiled backends
+    already spell `fresh_str`;
+  - unless the place owns no heap, which the core reads off the type;
+  - at a NAME, exactly while the path has not made it `Gone` — a `Static`
+    place holds a literal and the emitters free it, so the first `out = out +
+    x` of every builder owes the release;
+  - at a FIELD, ELEMENT or KEY, over the ALIAS table's root and not the
+    place's, because RFC-0082 reads `t.xs` into a temporary before storing
+    through it: module state, a `modify` parameter, or a root this frame owns
+    and has not made `Gone`.
+
+The first two are the CORE's — they are properties of the statement. The last
+two are the KERNEL's — they are properties of the path.
+
+**One site parts, and the kernel is right there.** `root = kw` in
+`std/graphql`'s `gqlParseQuery`. `let mut root = "query"` binds a literal and
+the store displaces it, which is the shape `std/cli`'s `let mut out = "";
+out = out + x` has and the analysis releases at. The analysis refuses this one
+because `root` is taken between the `let` and the store — on two paths that
+`return`, so the take cannot have run where the store does. The kernel judges
+per path and sees the literal still held; the fold judges per binding and
+cannot. Counted and pinned at one, the way `receiver_malloc`'s direction is,
+so a second site is read rather than absorbed. The ratchet is clean either
+way: `graphql.vyrn` does not run that path.
+
+The corpus pin is two-way, and it is a rule and not a number. A plan row the
+core answers `false` for must be one the core STANDS DOWN at, and the two
+stand-down reasons are the two above; `Facts::stood_down` carries them so the
+test can ask. 41,636 rows over the corpus are stand-downs, twelve are the
+`place at` rewrite's own statements, and none is unexplained.
+
+**The fourth table is the core's, and the folds are gone (2026-09-06).**
+
+`fold_store_owned`, the `place_stores` fold beside it, `store_owned_at` and
+`store_owned` are deleted, and with them `movecheck`'s `global_stores`,
+`place_stores`, `PlaceStore` and `note_place_store` — a producer for a table
+nobody read. Both compiled backends ask `store_fact` and take `false` where it
+answers nothing. `own.rs` loses 413 lines and `movecheck.rs` 111.
+
+**The twelve stopped being twelve.** RFC-0091 M2's `place at` rewrite builds
+the store statements a user container's `c[h] = v` becomes; the checker walked
+those and the core walks the SOURCE statement, so the plan's row and the
+core's answer stood on different nodes and a reader fell back. The kernel
+judges the source statement correctly — it always did — so what was missing
+was the mapping, not the judgment. The emitters already keep one
+(`ReleasePlan::alias_clones`, for `iterate_loop`'s cloned bodies), and the
+expansion is memoized and leaked, so the store inside it is pointed at the
+source node where it is walked. `project::store_node` names that one
+statement: the expansion is a prologue, the move-outs, the store, and the
+write-backs after it, and the store is the first statement that writes a
+place. Without this, `genref` leaked one block — the `strs[s] = tail` its own
+comment says the store releases.
+
+**The bytes moved, and they moved one way.** 124 of the 173 recorded modules
+at the store slice, six more here, none anywhere else. Every one is SMALLER,
+and the reason is one line of the rule: a store whose place OWNS NO HEAP
+stands the release down. The analysis's fold never asked the type, so it held
+a row at every `w = 2` and every `bytes[i] = b`; the emitters then took the
+row, built an empty snapshot, and kept the address they teed for it. The core
+asks the type at the store, the branch is not taken, and the dead local goes
+with it. Nothing observable moved: parity is 41 of 41, the ratchet is clean,
+the memory suite is green. The six here are the six user containers —
+`autorelease`, `container`, `copy`, `genref`, `membench`, `slots` — reading
+the core where they read the plan.
+
+**Four rules moved house with the answer.** `own.rs`'s store tests asked a
+table that is gone, and `vyrn-frontend` cannot ask the core, so they are
+`compiler/vyrn-cli/tests/stores.rs` now, with their wording and the defect
+each names: §26's field store and round forty-six's copying mention, round
+fifty-six's loop-local pairing, round fifty-six's escape screen, round
+fifty-seven's early-exiting take. `coretables` stops diffing the store table
+and counts it, as it does for `arm_frees` and `edge_releases`.
+
+**Where `arg_drops` stops, read at the source (2026-09-06).**
+
+It is the last of the five, and it does not follow. The corpus pin above is
+green, so the reading was taken; what it found moves the blocker rather than
+clearing it.
+
+**The closures are not the blocker.** `arg_verdict` takes four inputs —
+`caps`, `retains`, `lending`, `decl` — and `Facts::lending` and
+`Facts::retains` are already public and already closed by the time the core
+builds. No hoist is owed. `param_escapers` is not `arg_verdict`'s at all: it
+screens `fresh_stores`, which is `store_fresh`, the one plan table the store
+slice above left standing. The record that named three closures named one
+that belongs to a different rule.
+
+**The blocker is `ArgTemp`.** The verdict is a rule over declarations, but it
+is asked ABOUT a record `movecheck` builds while walking: `producer` (the call
+that built the value), `elem_producers` (a heapified literal's), `view_copies`
+(whether a view's element for this argument is a heap-free copy), and `kind`.
+The core can state all four from its own body — an argument is a `Val::Name`
+whose `Rhs` says what produced it — but that is a restatement of four derived
+fields, not a judgment the kernel can be asked for. The other four tables were
+derived because the kernel already answered them; this one has nothing to ask.
+
+**And the flip is not a deletion.** `direct.rs::arg_drop_row` ORs the core's
+answer with the plan's, so today the core states 22,982 names' rows and every
+one of them was MIRRORED off `own.plan.arg_drops` — nothing is derived yet.
+Flipping means dropping the `or`, and `direct.rs::expr` asks at every
+expression node: a node the derived set answers too widely is a DOUBLE FREE,
+where every table before it risked a leak. The corpus pin has to be green on
+the derived answer before the `or` goes, not after.
+
+So the slice is: state the four `ArgTemp` fields in the core, diff the derived
+verdict against `arg_temps` over the corpus at zero differences in BOTH
+directions, and only then drop the `or`. It is not this one.
+
+`store_fresh` is the other row left. The store slice states its own mention
+guard and the `fresh_str` exception, but round eighteen's answer — every
+mention of the place is a read argument to a declared, non-lending,
+non-retaining function — is still `movecheck`'s, and `param_escapers` is the
+closure behind it. Two payers, one reading.
 
 ### M4 — the runtime in Vyrn
 
@@ -8011,6 +8154,9 @@ the same two-region shape, one engine over. It belongs to RFC-0078.
 #### Gates (2026-09-06)
 
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+#### The store slice's gates (2026-09-06)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
 
 | gate | result |
@@ -8177,6 +8323,37 @@ pointed at a shallow scratch directory outside the checkout.
 `compiler/**/*.rs`, excluding `target`, is 194,472 lines to 194,590 — up 118.
 `direct.rs` is up 15, and `primitives.rs` up 104, which is the census's scan and
 the paragraph saying why it reads an emitter rather than a list kept beside one.
+| `cargo test -p vyrn-cli`, no filter | 564 passed, 75 ignored, and the one failure this slice did not cause |
+| `kernel` `--ignored` | 1, 32 s |
+| `coretables` `--ignored` | 1, 33 s |
+| `typed` `--ignored` | 1, 90 s |
+| `effects` `--ignored` | 2, 85 s |
+| `fixtures` `--ignored` | 1, 30 s |
+| `vyrn-frontend` | 1,245, four fewer for the four rules that moved to `tests/stores.rs` |
+| the workspace less `vyrn-cli` | 1,421 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 234 s |
+| the residue ratchet | 211 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, against the manifest this arc rewrote |
+| `genwasm`, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 62 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
+
+Lines per file. `own.rs` 4,958 to 4,545 and `movecheck.rs` 9,794 to 9,683 —
+the two folds, the accessor, the field, `PlaceStore`, `note_place_store` and
+the two sinks. `core.rs` is up 123 and `kernel.rs` 84, which is the word, the
+rule and the two stand-downs. `project.rs` is up 20 for `store_node`;
+`direct.rs` down 3 and `lib.rs` up 3, where each backend lost its own copy of
+`fresh_str` and gained the alias pair. `coretables.rs` is down 22 and
+`tests/stores.rs` is 220 new lines for the four rules that moved.
+
+Over the corpus the core states an answer at 55,874 stores: 2,724 release,
+53,137 stand down at the statement, and thirteen are neither — the twelve the
+`place at` rewrite now reaches through the alias pair, and `root = kw`.
 
 ### M6 — the other two judgments
 

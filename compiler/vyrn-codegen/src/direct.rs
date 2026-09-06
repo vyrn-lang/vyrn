@@ -1347,8 +1347,7 @@ impl<'a> Cx<'a> {
     /// pass walks the source statement. `compiler/vyrn-cli/tests/coretables.rs`
     /// pins that residue at twelve rows over the corpus.
     fn store_row(&self, node: usize) -> bool {
-        self.store_fact(node)
-            .unwrap_or_else(|| self.plan.store_owned_at(node))
+        self.store_fact(node).unwrap_or(false)
     }
 
     /// The core's answer alone, or `None` where it states none — a body this
@@ -2946,7 +2945,7 @@ impl<'p> Fn_<'_, 'p> {
         // nothing is emitted for it — acknowledged, because §26's finish check
         // counts a placed decision the emission never looked at as a leak.
         for st in &stmts[..3] {
-            let _ = self.cx.plan.store_owned_at(st as *const Stmt as usize);
+            self.cx.plan.acknowledge(st as *const Stmt as usize);
         }
         // From here on, code is emitted: the same prefix as `Stmt::IndexSet`.
         let w = match self.walks.get(parent.as_str()).cloned() {
@@ -4256,14 +4255,6 @@ impl<'p> Fn_<'_, 'p> {
                 // old buffer and hands it back, so freeing it would be a double
                 // free.
                 //
-                // A STRING `+` IS THE EXCEPTION, for the reason the textual
-                // backend's copy of this gives: a concat always allocates a fresh
-                // buffer and copies both operands into it, so it cannot hand back
-                // either input. The append spine above hides the common
-                // `s = s + x`; what reaches here is a PREPEND, and that leaked
-                // 9.9 GB over 50,000 calls of a 200-iteration loop.
-                let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
-                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
                 // RFC-0125 §3 M3: the rule above, the row, and round
                 // eighteen's `store_fresh` are ONE answer, and the core
                 // states it at the store's own node (`Cx::store_fact`). What
@@ -4276,12 +4267,7 @@ impl<'p> Fn_<'_, 'p> {
                 let owned_here = self
                     .cx
                     .store_fact(s as *const Stmt as usize)
-                    .unwrap_or_else(|| {
-                        self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                            && (fresh_str
-                                || !vyrn_frontend::movecheck::mentions_place(value, name)
-                                || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
-                    });
+                    .unwrap_or(false);
                 let snap = if owned_here && self.region_depth == 0 {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
@@ -4691,7 +4677,18 @@ impl<'p> Fn_<'_, 'p> {
                 {
                     // The projection's own statements decide the release —
                     // acknowledged for §26's finish check.
-                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                    self.cx.plan.acknowledge(s as *const Stmt as usize);
+                    // RFC-0125 §3 M3, the store slice: the core judged THIS
+                    // statement and this pass walks the expansion, so the
+                    // store inside it is pointed back at the node the answer
+                    // is filed under. The expansion is memoized and leaked,
+                    // so the pair outlives every walk that reads it.
+                    if let Some(st) = vyrn_frontend::project::store_node(blk) {
+                        self.cx.plan.alias_clones(&[(
+                            st as *const Stmt as usize,
+                            s as *const Stmt as usize,
+                        )]);
+                    }
                     return self.block(m, b, blk);
                 }
                 // RFC-0125 M1: a header a `while` hoisted is already in
@@ -4718,7 +4715,7 @@ impl<'p> Fn_<'_, 'p> {
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
                     // The entry's release is `map_set`'s own two questions —
                     // acknowledged for §26's finish check.
-                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                    self.cx.plan.acknowledge(s as *const Stmt as usize);
                     return self
                         .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }

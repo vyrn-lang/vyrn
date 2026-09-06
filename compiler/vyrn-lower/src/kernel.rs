@@ -117,6 +117,11 @@ pub enum MissingKind {
     EdgePlace { edge: u32, path: String },
     /// An arm's payload binder the arm never moved: the plan's arm table.
     ArmBinder { arm: u32 },
+    /// A store whose place is still HELD: the plan's store table. The row is
+    /// keyed by the STORE and by nothing else — the place written into may be
+    /// module state, which is no name of this frame — so `name` carries no
+    /// meaning here and a reader must take `site` alone.
+    Store,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1207,6 +1212,32 @@ impl<'b> Kernel<'b> {
     /// A store into a sub-place fills the hole there, and anything under it.
     /// A store under a hole writes into what left. Every alias of the place
     /// ends.
+    /// Record a store whose place this path still holds — RFC-0125 §3 M3, the
+    /// store slice.
+    ///
+    /// The row is keyed by the store's own node and by nothing else, so a
+    /// store this pass made up — a global's initializer, a desugar's
+    /// temporary, the block RFC-0091 M2's `place at` rewrite builds — states
+    /// no key and no reader could find the row by one.
+    fn owe_store(&mut self, site: &crate::core::Site) {
+        if self.mode != Mode::Place {
+            return;
+        }
+        let crate::core::Site::Node(at) = site else {
+            return;
+        };
+        if std::env::var("VYRN_KERNEL_TRACE").is_ok() {
+            eprintln!("owe-store: {} line {} site {at}", self.body.name, self.here);
+        }
+        self.missing.push(Missing {
+            exit: Exit::Block,
+            site: *at,
+            name: 0,
+            kind: MissingKind::Store,
+            holes: Vec::new(),
+        });
+    }
+
     fn store_place(&self, st: &mut State, p: &Place) -> Result<(), Refusal> {
         self.indices(st, p)?;
         self.wrote(st, p, &self.place_text(p));
@@ -1457,7 +1488,11 @@ impl<'b> Kernel<'b> {
                 }
             }
             St::Store {
-                place, value, old, ..
+                place,
+                value,
+                old,
+                site,
+                ..
             } => {
                 // A borrow's binding rebound to another borrow (`t = d.title`
                 // after `let t = s.name`): the alias travels, as at a `let`.
@@ -1515,14 +1550,36 @@ impl<'b> Kernel<'b> {
                         st.own[*n as usize] = Own::Held;
                     }
                     Place::Name(n) if self.releases(*n) => {
-                        if st.own[*n as usize] == Own::Held
+                        // A store over a name this path still has a value in
+                        // owes the release of that value. `Static` counts:
+                        // `let mut out = ""` binds a literal the emitters
+                        // free like any other, and standing the release down
+                        // there would leave the first `out = out + x` of
+                        // every builder holding it (RFC-0125 §3 M3, the store
+                        // slice). What owes nothing is `Gone`.
+                        if *old == Old::Pending
+                            && self.mode == Mode::Place
+                            && st.own[*n as usize] != Own::Gone
+                        {
+                            self.owe_store(site);
+                        } else if st.own[*n as usize] == Own::Held
                             && *old != Old::Released
                             && *old != Old::Transferred
                         {
-                            return self.refuse(format!(
-                                "{} is overwritten while still held — the old value is never released",
-                                self.info(*n)
-                            ));
+                            // The first build says `Pending` here and the
+                            // answer is this line: a store into a place this
+                            // path still holds releases what it displaces
+                            // (RFC-0125 §3 M3, the store slice). Every other
+                            // word is a decision already made, and a held
+                            // place under one is the leak it always was.
+                            if *old == Old::Pending && self.mode == Mode::Place {
+                                self.owe_store(site);
+                            } else {
+                                return self.refuse(format!(
+                                    "{} is overwritten while still held — the old value is never released",
+                                    self.info(*n)
+                                ));
+                            }
                         }
                         if st.own[*n as usize] == Own::Gone && *old == Old::Released {
                             return self.refuse(format!(
@@ -1544,6 +1601,33 @@ impl<'b> Kernel<'b> {
                                 "a store into a place that owns heap releases nothing (line {})",
                                 self.line_of(value)
                             ));
+                        }
+                        // A sub-place holds no state of its own here — the
+                        // kernel tracks whole names — so the rule is over the
+                        // ROOT (RFC-0125 §3 M3, the store slice). Module
+                        // state owns what it holds for the whole module and
+                        // nothing may consume it, a `modify` parameter is the
+                        // caller's and holds what the caller gave it, and any
+                        // other root owes the release exactly while this path
+                        // still holds it.
+                        if *old == Old::Pending {
+                            // The ALIAS table's root and not the place's:
+                            // RFC-0082 reads `t.xs` into a temporary before
+                            // `t.xs[k] = v` stores through it, so the place
+                            // this statement writes names a borrow and the
+                            // ownership belongs to what the borrow reads.
+                            let owes = match self.src_of(st, other).root {
+                                Root::G(_) => true,
+                                Root::N(n) => {
+                                    matches!(
+                                        self.body.names[n as usize].borrow_kind,
+                                        Some(BorrowKind::Param { cap: "modify", .. })
+                                    ) || (self.owned(n) && st.own[n as usize] != Own::Gone)
+                                }
+                            };
+                            if owes {
+                                self.owe_store(site);
+                            }
                         }
                     }
                 }
