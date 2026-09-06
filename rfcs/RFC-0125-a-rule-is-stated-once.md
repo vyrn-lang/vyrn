@@ -4857,6 +4857,12 @@ which is row 07's decision. RFC-0127's form census moves by two rows —
 `Expr::Match` and `Expr::IfExpr`, one mention each — because the arms
 `check_handover` walked went with it.
 
+The whole-stderr snapshot over the 970 moved TWO programs across the four
+commits. The first is `a1_afterjoin.vyrn`, above. The second is
+`u25b_partial_take_across_iterations.vyrn`, whose sentence and menu are
+identical and whose LINE is one lower, because row 25's own record at the head
+of that file is one line longer than the record it replaced.
+
 **The scrutinee slice (2026-09-05): the core counts its own reads, and round
 twenty-seven's table is gone.**
 
