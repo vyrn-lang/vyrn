@@ -6503,6 +6503,11 @@ its program compiles. It does not:
 `@borrow` may not be returned — it is read out of `xs[..]`, a place that owns it
 ```
 
+When row 17's slice merged beside this one, that sentence became "`x` may not
+be returned — it is a loop variable, and a return is owned": the exit is
+carried into the arm, so the kernel names the loop variable the reader wrote.
+The row records the later sentence.
+
 `pick` returns `if true { x } else { "" }`, an arm that yields a borrow of the
 container the loop does not own. This is row 17's other half, priced in the form
 slice above: the core does not carry the exit through an arm, so the value

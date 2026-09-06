@@ -1888,7 +1888,10 @@ fn the_programs_the_passs_unit_tests_read_as_accepted() {
         ),
         (
             "a lender forwarded through an aggregate",
-            Some("`@borrow` may not be returned"),
+            // Row 17's slice carried the exit into the arm, so the kernel
+            // names the loop variable the reader wrote and not the
+            // temporary the core minted.
+            Some("`x` may not be returned — it is a loop variable, and a return is owned"),
             "type R = { name: String }\n\
              fn pick(xs: Array<String>) -> String\n\
              { for x in xs { return if true { x } else { \"\" } } return \"\" }\n\
