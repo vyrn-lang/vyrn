@@ -2512,12 +2512,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 584),
+        ("a rule the kernel now gives", 421),
         ("a rule only the checker gives", 78),
-        ("placement rows for the engines", 1539),
+        ("placement rows for the engines", 1570),
         ("a fix menu", 73),
-        ("shared machinery", 3623),
-        ("tests", 1207),
+        ("shared machinery", 3644),
+        ("tests", 801),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
