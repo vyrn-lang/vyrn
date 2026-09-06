@@ -29,7 +29,7 @@ use vyrn_frontend::ast::{
     ArmBody, BinOp, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program,
     Stmt, Type,
 };
-use vyrn_frontend::own::{DropKind, Exit, Fate, Leak, Owned, Ownership, Release};
+use vyrn_frontend::own::{DropKind, Exit, Owned, Ownership, Release};
 use vyrn_frontend::prelude;
 
 use crate::kernel::MissingKind;
@@ -1077,6 +1077,8 @@ fn build_seeded(
         stream_loops: Vec::new(),
         seed,
         caps: Default::default(),
+        region_depth: 0,
+        arena: std::collections::HashSet::new(),
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -1178,6 +1180,8 @@ pub fn build_module_state<'a>(
         stream_loops: Vec::new(),
         seed,
         caps: Default::default(),
+        region_depth: 0,
+        arena: std::collections::HashSet::new(),
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1279,6 +1283,8 @@ fn build_outside_seeded<'a>(
         stream_loops: Vec::new(),
         seed,
         caps: Default::default(),
+        region_depth: 0,
+        arena: std::collections::HashSet::new(),
     };
     let mut out = Vec::new();
     b.block(block, &mut out)?;
@@ -1328,6 +1334,12 @@ struct Builder<'a> {
     /// The capability of every declared position, built the once a body needs
     /// it — see [`Builder::arg_released`].
     caps: std::cell::OnceCell<HashMap<String, Vec<Capability>>>,
+    /// How many `region` blocks enclose the statement being built.
+    region_depth: u32,
+    /// The names the ARENA owns: a String bound inside a `region`
+    /// ([`Builder::owned_binding`]'s second screen). An explicit `drop` of
+    /// one is nothing, because the closing brace is the runtime's.
+    arena: std::collections::HashSet<Name>,
 }
 
 impl<'a> Builder<'a> {
@@ -1387,41 +1399,42 @@ impl<'a> Builder<'a> {
             .unwrap_or_default()
     }
 
-    /// What the plan decided a named binding's fate is: whether THIS frame
-    /// owns it. Static data, an alias of a place, a borrow, a capture, a value
-    /// the arena holds and a value a callee took are not this frame's to
-    /// release; a binding with no release rule for its type is, and the
-    /// kernel will say so.
-    fn fate_owned(&self, name: &str, line: usize, ty: &Type) -> Option<bool> {
-        let Some(fate) = self.fate_of(name, line) else {
-            return if self.owns(ty) { None } else { Some(false) };
-        };
-        Some(match fate {
-            // The plan releases, moves or discharges it: it is this frame's.
-            Fate::Reclaimed(..)
-            | Fate::Moved { .. }
-            | Fate::Dropped { .. }
-            | Fate::Discharged(_) => true,
-            // The plan could not type the initializer (`xs.toArray()` on a
-            // SmallArray answers `unknown`), so its note says nothing about
-            // ownership; the checker's type decides, as it does for a
-            // binding with no note at all.
-            Fate::Leaked(Leak::NoRelease { ty: noted, .. }) if noted == "unknown" => {
-                return if self.owns(ty) { None } else { Some(false) };
-            }
-            Fate::Leaked(Leak::NoRelease { owns_heap, .. }) => *owns_heap,
-            Fate::Static | Fate::Leaked(_) => false,
-        })
-    }
-
-    /// The plan's note for a `let` binding, when it wrote one.
-    fn fate_of(&self, name: &str, line: usize) -> Option<&Fate> {
-        self.own
-            .notes
-            .get(&self.func_name)?
-            .iter()
-            .find(|n| n.name == name && n.line == line)
-            .map(|n| &n.fate)
+    /// Whether a `let` binds a value THIS frame owns — RFC-0125 §3 M3, the
+    /// named-binding slice, and the rule `own.rs`'s `Fate` used to state.
+    ///
+    /// It is the argument slice's reading one binding form over: the core
+    /// lowered the initializer, so it has already said what produced the
+    /// value, and a `Rhs` is the whole answer. The type owns heap or carries
+    /// an obligation, and then three things are not this frame's:
+    ///
+    ///   - a literal, which lives in the data segment. It answers only for a
+    ///     binding nothing can reassign: a `mut` slot is released by its
+    ///     FINAL value in all three engines, and `let mut acc: String = ""`
+    ///     is the opening line of every accumulator in this language;
+    ///   - a String allocated inside a `region`, which is the arena's. The
+    ///     two mechanisms partition every allocation, so nothing is freed
+    ///     twice, and both compiling backends emit its release as nothing;
+    ///   - a read of a place, or a second name for a borrow. The place's
+    ///     owner still owns it.
+    ///
+    /// A rebind states the same rule at the store rather than here
+    /// (`Stmt::Assign`): `t = d.title` makes `t` a projection of `d`,
+    /// exactly as `let t = d.title` does.
+    fn owned_binding(&self, rhs: &Rhs, ty: &Type, literal: bool, mutable: bool) -> bool {
+        if !self.owns(ty) {
+            return false;
+        }
+        if literal && !mutable {
+            return false;
+        }
+        if self.region_depth > 0 && self.proto.release_kind(ty) == Some(DropKind::FreeStr) {
+            return false;
+        }
+        match rhs {
+            Rhs::Read(_) => false,
+            Rhs::Val(Val::Name(m)) => !self.body.names[*m as usize].borrow,
+            _ => true,
+        }
     }
 
     /// Whether a call's result points into one of its arguments, so the name
@@ -1539,6 +1552,14 @@ impl<'a> Builder<'a> {
         };
         for r in rows {
             match self.by_binding.get(&r.binding) {
+                // A row for a name this pass does not own is a row the plan
+                // states and the core does not — RFC-0125 §3 M3, the
+                // named-binding slice. The plan reads a payload binder of a
+                // NON-consuming construct as reclaimed (`let Tagged(tag, n)
+                // = local`); the core says the scrutinee is this frame's and
+                // the binder names its payload, so the release is stated
+                // once, at the value that owns it.
+                Some(n) if !self.body.names[*n as usize].releases => {}
                 Some(n) => {
                     // The row's own set (a placer row, or round fifty-two's
                     // whole walk), else the binding's.
@@ -1595,18 +1616,6 @@ impl<'a> Builder<'a> {
                 name, value, line, ..
             } => {
                 let ty = self.ty_of(value)?;
-                // A `consume` took a place the release walk cannot be told
-                // to skip (a declared `release`, an enum path, a filled
-                // hole), so the plan leaks the whole binding on purpose.
-                // Not modelled: the kernel would have to know what the walk
-                // can skip, which is the plan's question and RFC-0093's.
-                if let Some(Fate::Leaked(Leak::Hole { .. })) = self.fate_of(name, *line) {
-                    return gap_d(
-                        "a binding whose hole the release walk cannot skip",
-                        name,
-                        *line,
-                    );
-                }
                 if !matches!(value, Expr::Var { .. }) && is_place_read(value) {
                     let place = self.place(value, out)?;
                     let n = self.name(name, ty, false, *line);
@@ -1622,27 +1631,24 @@ impl<'a> Builder<'a> {
                     Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_)
                 );
                 // A call whose result points into an argument — a lending
-                // prelude row, a projection — binds a borrow whatever the
-                // note says: the plan cannot type a projection it expands
-                // at the site, and its note then says "unknown".
-                let owned = !self.lends(value)
-                    && self
-                        .fate_owned(name, *line, &ty)
-                        .unwrap_or_else(|| self.owns(&ty) && !literal);
-                // Not owned is not the same as borrowed: static data (`let
-                // s = ""`, a literal of literals), a value the plan leaks and
-                // the source of a whole-value alias (`Leak::Aliased`: the
-                // other name reclaims) are nobody's borrow. A lending call, a
-                // borrowed value and a read of a place are (the plan's note
-                // says which).
-                let borrow = !owned
-                    && (self.lends(value)
-                        || matches!(&rhs, Rhs::Val(v) if self.borrows(v))
-                        || matches!(
-                            self.fate_of(name, *line),
-                            Some(Fate::Leaked(Leak::Borrowed(_)))
-                        ));
+                // prelude row, a projection — binds a borrow whatever its
+                // type says, and that screen is the one thing about the
+                // value the `Rhs` does not carry.
+                let mutable = matches!(s, Stmt::Let { mutable: true, .. });
+                let owned = !self.lends(value) && self.owned_binding(&rhs, &ty, literal, mutable);
+                // Not owned is not the same as borrowed: static data (`let s
+                // = ""`, a literal of literals) and a value whose type owns
+                // no heap are nobody's borrow. A lending call and a second
+                // name for a borrow are.
+                let borrow =
+                    !owned && (self.lends(value) || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
+                let arena = self.region_depth > 0
+                    && !owned
+                    && self.proto.release_kind(&ty) == Some(DropKind::FreeStr);
                 let n = self.name(name, ty, owned, *line);
+                if arena {
+                    self.arena.insert(n);
+                }
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
                 self.record_fields(n, value);
                 // `let t = s` on a `read` parameter: `t` is a second name for
@@ -1721,6 +1727,17 @@ impl<'a> Builder<'a> {
                     });
                     return Ok(());
                 };
+                // A rebind carries the same ownership answer a `let` does,
+                // which is the other half of the same sentence: `let t =
+                // d.title` is a projection of `d` and so is `t = d.title`.
+                // RFC-0092's two-spellings-two-verdicts defect, stated once
+                // — a `mut` slot is released by its FINAL value in all three
+                // engines, so a slot ever assigned somebody else's place is
+                // not this frame's to release.
+                if self.borrows(&v) && self.body.names[n as usize].releases {
+                    self.body.names[n as usize].releases = false;
+                    self.body.names[n as usize].borrow = true;
+                }
                 // The hand-back is read off the STATEMENT, so it is stated
                 // before the name's own obligation is: a name that owes no
                 // release still hands its buffer back, and the census reads
@@ -2073,14 +2090,9 @@ impl<'a> Builder<'a> {
                 };
                 // A String bound inside a `region` is the arena's: both
                 // compiling backends emit its release as nothing under
-                // `region_depth`, and the plan notes it `Leak::Region`.
-                let info = &self.body.names[n as usize];
-                if !info.releases
-                    && matches!(
-                        self.fate_of(&info.source, info.line),
-                        Some(Fate::Leaked(Leak::Region))
-                    )
-                {
+                // `region_depth`, and this pass states the same thing where
+                // it binds the name ([`Builder::owned_binding`]).
+                if self.arena.contains(&n) {
                     return Ok(());
                 }
                 out.push(St::Drop(n, Site::None, *line));
@@ -2101,11 +2113,16 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            // The arena owns what is allocated inside it: the plan notes such
-            // a binding `Leak::Region` and it is not this frame's, so the
-            // body is an ordinary block here and the closing brace is the
-            // runtime's.
-            Stmt::Region { body, .. } => self.block(body, out)?,
+            // The arena owns what is allocated inside it, so a String bound
+            // in here is not this frame's ([`Builder::owned_binding`]). The
+            // body is an ordinary block, and the closing brace is the
+            // runtime's; the depth is what the binding rule reads.
+            Stmt::Region { body, .. } => {
+                self.region_depth += 1;
+                let r = self.block(body, out);
+                self.region_depth -= 1;
+                r?
+            }
         }
         Ok(())
     }
@@ -2420,10 +2437,6 @@ impl<'a> Builder<'a> {
                 if !self.seed.contains(&construct) {
                     return Ok((Val::Name(n), false));
                 }
-                self.own_the_scrutinee(n);
-                if !self.body.names[n as usize].releases {
-                    return Ok((Val::Name(n), false));
-                }
                 let t = self.temp(self.body.names[n as usize].ty.clone(), e.line());
                 out.push(St::Let(t, Rhs::Val(Val::Name(n))));
                 self.by_binding.insert(construct, t);
@@ -2466,70 +2479,31 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// RFC-0125 §3 M3, row 14: state a scrutinee's ownership APART from the
-    /// decision it feeds.
+    /// Whether this construct is a CANDIDATE to take its named scrutinee —
+    /// RFC-0125 §3 M3, the named-binding slice.
     ///
-    /// The plan's note for `let o = tag(7)` in `let s = match o { Some(v) =>
-    /// v, .. }` is `Leak::Aliased`, and round twenty-seven's own table is
-    /// what makes it so: the construct hands the payload out, `s` reclaims
-    /// it, and `o` releases nothing. Read as "never owned", the note made
-    /// this pass bind `o` as a borrow, so the construct read its scrutinee
-    /// and the rule that asks whether it TOOK it answered no — resting on
-    /// the decision it feeds. The binding owns its value where it is bound,
-    /// and the take is here; so where a construct the plan calls consuming
-    /// names the binding, the value is this frame's and the take is stated.
+    /// Round twenty-seven's question used to be asked of the plan's note, and
+    /// the note answered it the wrong way round: `let o = tag(7)` in `let s =
+    /// match o { Some(v) => v, .. }` is `Leak::Aliased`, because the
+    /// construct hands the payload out and `s` reclaims it. Read as "never
+    /// owned", that made this pass bind `o` as a borrow, so the rule that
+    /// asks whether the construct TOOK it rested on the decision it feeds.
     ///
-    /// Stated at the take and nowhere else. A binding given away by anything
-    /// but this construct — `let t = s`, an arm handing the loop's
-    /// accumulator back — keeps the note's answer, because nothing in this
-    /// core takes it and an owned name nothing takes is a release the
-    /// placer would add where the plan places none.
-    fn own_the_scrutinee(&mut self, n: Name) {
-        let info = &self.body.names[n as usize];
-        if info.releases || !info.heap || info.borrow {
-            return;
-        }
-        self.body.names[n as usize].releases = true;
-    }
-
-    /// Whether the construct spanning `lines` is the one this binding gave
-    /// its value to — RFC-0125 §3 M3, the third derivation slice.
+    /// The binding owns its value where it is bound
+    /// ([`Builder::owned_binding`]), so the question left here is only which
+    /// construct is its LAST owner, and [`last_owner`] answers that over the
+    /// core the first build made. Every owned named scrutinee is a candidate;
+    /// nothing else has to be said.
     ///
-    /// An arm hands the payload out two ways, and the note spells them
-    /// differently. `Some(v) => v` is an ALIAS, written at the construct's
-    /// own line (`movecheck::note_arm_value`). `Words(ws) => takeWords(ws)`
-    /// is a MOVE: the call takes the binder, a binder read resolves to the
-    /// scrutinee's row, and the note is written at the CALL's line — which is
-    /// a line of one of these arms. So "did THIS construct take it" is the
-    /// note's line against the construct's own, and the core states it with
-    /// no table.
+    /// `lines` is `None` where the construct has no arm that can hand a
+    /// payload out of a named scrutinee — an `if let`, a `?`.
     ///
-    /// The upper bound is what tells a give inside the construct from a move
-    /// after it: `match o { .. }` and then `takeString(o)` is a binding this
-    /// construct did not take, and reading the note without the bound would
-    /// take a value the next statement still wants. An answer too WIDE is a
-    /// refusal and never a double free — the take is stated in the core, so
-    /// the kernel refuses the later read rather than freeing behind it.
-    ///
-    /// A `consume` PARAMETER carries no note, because a note is a `let`'s
-    /// (`own::Walk::stmt`). It needs none: the frame owns it outright and no
-    /// other binding names it, so a construct that reads it is a candidate
-    /// and the count below decides.
+    /// An answer too WIDE is a refusal and never a double free: the take is
+    /// stated in the core, so the kernel refuses a later read rather than
+    /// freeing behind it.
     fn takes_scrutinee(&self, n: Name, lines: Option<(usize, usize)>) -> bool {
-        let Some((first, last)) = lines else {
-            return false;
-        };
         let info = &self.body.names[n as usize];
-        if !info.heap || info.borrow {
-            return false;
-        }
-        let at = match self.fate_of(&info.source, info.line) {
-            Some(Fate::Leaked(Leak::Aliased { line })) => *line,
-            Some(Fate::Moved { line, .. }) => *line,
-            Some(_) => return false,
-            None => return self.body.params.contains(&n),
-        };
-        first <= at && at <= last
+        lines.is_some() && info.releases && info.heap && !info.borrow
     }
 
     /// Whether the construct took the temporary `t` it owns: the payloads
@@ -3321,6 +3295,31 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// A join arm that yields a name bound OUTSIDE the construct hands its
+    /// value on without giving it up — `let rel = if p == "" { st } else { p
+    /// + "/" + st }` is `st` on one edge and a fresh buffer on the other,
+    /// and the frame holds one value under two names afterwards.
+    ///
+    /// This is the analysis's `Gone::Aliased`, stated where the alias is
+    /// made rather than read off a note. The name that goes OUT stops being
+    /// this frame's: one edge handed its value on and the other did not, so
+    /// a release after the join frees a buffer the joined name still holds
+    /// on one path. It is not a borrow either — nothing else owns it, and
+    /// the frame simply stops answering for it, which is the leak RFC-0089
+    /// takes over a double free. The RESULT keeps its own answer: on the
+    /// other edge it holds a buffer of its own.
+    ///
+    /// `mark` is the name count before the arms were lowered, which is how a
+    /// name from outside is told from a payload binder: `match o { Some(v)
+    /// => v }` yields a binder minted inside the arm, and the scrutinee is
+    /// this frame's to take (`takes_scrutinee`).
+    fn alias_out(&mut self, v: &Val, mark: usize) {
+        let Val::Name(m) = v else { return };
+        if (*m as usize) < mark {
+            self.body.names[*m as usize].releases = false;
+        }
+    }
+
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
     /// builtin hands back (`s.dense.push(i)` is `s.dense = @push(s.dense, i)`).
     /// The value leaves into an owned name and the base keeps a hole.
@@ -3463,8 +3462,10 @@ impl<'a> Builder<'a> {
                 let site = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
                 let c = self.read_val(cond, out)?;
+                let mark = self.body.names.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
+                self.alias_out(&tv, mark);
                 let then_borrows = self.borrows(&tv);
                 t.push(St::Store {
                     place: Place::Name(res),
@@ -3479,6 +3480,7 @@ impl<'a> Builder<'a> {
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
+                        self.alias_out(&ev, mark);
                         let else_borrows = self.borrows(&ev);
                         f.push(St::Store {
                             place: Place::Name(res),
@@ -3518,6 +3520,7 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
+                let outer = self.body.names.len();
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
                     let mut body = Vec::new();
@@ -3533,6 +3536,7 @@ impl<'a> Builder<'a> {
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
+                            self.alias_out(&v, outer);
                             // An arm that yields a borrow makes the result
                             // one (`movecheck::names_a_place`).
                             if self.borrows(&v) {
@@ -4356,20 +4360,6 @@ fn placed_edges(join: usize) -> Option<Vec<(String, u32)>> {
 /// emitter reads the plan as it always did.
 pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
-}
-
-/// Round forty's answer for one arm, handed down to the interpreter through
-/// [`vyrn_frontend::own::install_arm_rows`] — the one engine that cannot name
-/// this crate. `None` where this pass states no answer (an `if let`, a `?`),
-/// and the reader falls back to the plan there.
-pub fn arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
-    let f = facts()?;
-    let rows = f.arms.get(&(key, arm))?;
-    Some(
-        rows.iter()
-            .filter_map(|(n, h, k)| k.clone().map(|k| (n.clone(), k, h.clone())))
-            .collect(),
-    )
 }
 
 /// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to

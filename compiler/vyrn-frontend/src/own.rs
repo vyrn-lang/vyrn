@@ -1935,37 +1935,10 @@ pub fn placer_installed() -> bool {
     PLACER.get().is_some()
 }
 
-/// RFC-0125 §3 M3, the deletion slice: round forty's answer read off the
-/// CORE, for the one engine that cannot name `vyrn-lower` — the interpreter.
-///
-/// The two compiled backends call `vyrn_lower::core::facts()` themselves;
-/// this crate sits below that one, so the core hands its answer down through
-/// a slot instead. The slot is not a placement table: it holds no rows, it
-/// answers from the core's own fold, and it goes when [`ReleasePlan`] does.
-/// `None` is "this pass states no answer here" — an `if let` or a `?`, whose
-/// arms the core builds and consults no table for — and a reader falls back
-/// to the plan there, as every other reader of the core does.
-pub type ArmRows = fn(usize, u32) -> Option<Vec<(String, DropKind, Vec<String>)>>;
-
-static ARM_ROWS: std::sync::OnceLock<ArmRows> = std::sync::OnceLock::new();
-
-/// Install the core's arm answer. The first installation wins.
-pub fn install_arm_rows(f: ArmRows) {
-    let _ = ARM_ROWS.set(f);
-}
-
-/// The core's payload releases for one arm, or `None` where nothing is
-/// installed (`VYRN_NO_PLACER=1`, a host that never linked the lowering) or
-/// the core states no answer.
-pub fn core_arm_rows(key: usize, arm: u32) -> Option<Vec<(String, DropKind, Vec<String>)>> {
-    ARM_ROWS.get().and_then(|f| f(key, arm))
-}
-
 /// The hard refusals the kernel made about the program the placer just judged,
 /// drained, as diagnostics — RFC-0125 §3 M3, the accumulation slice.
 ///
-/// The third slot of the same shape as [`Placer`] and [`ArmRows`], and for the
-/// same reason: the kernel lives in `vyrn-lower`, this crate sits below it, and
+/// The second slot of the same shape as [`Placer`], and for the same reason: the kernel lives in `vyrn-lower`, this crate sits below it, and
 /// a refusal has to reach the one list a file's refusals come out in
 /// ([`crate::movecheck::refusals`]). Draining is the point — the loader runs a
 /// generator by loading a whole program of its own, and each such load takes

@@ -6031,6 +6031,118 @@ that stayed.
 #### Gates (2026-09-06, the obligation slice)
 
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+
+**A named binding's ownership is the core's, and `Fate` is only its report
+now (2026-09-06).**
+
+The six readings are closed. `Builder::owned_binding` is what replaced them,
+and it is the argument slice's rule one binding form over: the core lowered
+the initializer, so it has already said what produced the value, and the
+`Rhs` is the whole answer. A type that owns heap or carries an obligation,
+and then three screens, each of which the plan used to state as a `Fate`:
+
+  - a literal is static data, and it answers only for a binding nothing can
+    reassign. A `mut` slot is released by its FINAL value in all three
+    engines, so `let mut acc: String = ""` is owned — the plan's own `mut`
+    clause, read off the statement instead of off the note;
+  - a String bound inside a `region` is the arena's. The core counts region
+    depth itself, which is the same number both compiling backends already
+    keep, and `Leak::Region` was the plan's word for it;
+  - a read of a place, or a second name for a borrow, belongs to whoever owns
+    the place.
+
+Two more rules state at the STATEMENT what the plan folded over the whole
+body, and both were `Fate` readings:
+
+  - a rebind carries the same answer a `let` does. `let t = d.title` is a
+    projection of `d` and so is `t = d.title` — RFC-0092's
+    two-spellings-two-verdicts defect, stated once. The store is where the
+    core says it, because that is where the value arrives;
+  - a join arm that yields a name bound OUTSIDE the construct hands the value
+    on for one edge and not the other. `Builder::alias_out` is that rule, and
+    it is `Gone::Aliased` stated where the alias is made. The name that goes
+    out stops being this frame's; the result keeps its own answer, because on
+    the other edge it holds a buffer of its own.
+
+`Builder::takes_scrutinee` loses its reading and nearly its whole body. The
+note answered round twenty-seven's question the wrong way round: `let o =
+tag(7)` in `let s = match o { Some(v) => v, .. }` is `Leak::Aliased`, so
+reading it as "never owned" bound `o` as a borrow, and the rule that asks
+whether the construct TOOK it rested on the decision it feeds. The binding
+owns its value where it is bound, so what is left is which construct is its
+LAST owner, and `last_owner` has answered that over the first build since the
+third derivation slice. Every owned named scrutinee is a candidate.
+`own_the_scrutinee` — the patch that put the ownership back at the take — is
+deleted with the question it answered.
+
+**The corpus pin, in both directions.** A transitional pin recorded the
+plan's own `(owned, borrow)` at every named `let` and diffed it against the
+core's after the build: **6,954** named bindings over the 169 loadable
+programs, **30 rows** disagreeing at **22 sites** (eight std functions are
+counted twice, once with their module recorded and once without). Twenty-one
+of the 22 are the core owning what the plan leaks. All of them were read at
+the source.
+
+  - **Twelve are the alias the core states and the plan pushes onto another
+    name**: `match o { Some(v) => v }` and `let Tagged(tag, n) = local`. The
+    plan leaks the box and reclaims the payload under the second name; the
+    core owns the scrutinee and the binder names its payload. Both free the
+    payload exactly once, and the core also frees the box.
+  - **Two are the plan failing to type a `.copy()`.** `d.copy()` in `match
+    s.doc { Some(d) => d.copy() }` and `p.name.copy()` over a loop binder:
+    the declared reading has no type for a pattern binder or a loop binder's
+    field, so `movecheck::names_a_place` reads the copy as a copied HANDLE
+    and stands the binding's release down. The core types the value it
+    lowered and owns it.
+  - **One is the payload binder above, from the other end** (`tag` in
+    `refutablelet.vyrn`): the plan reclaims the binder, the core reclaims the
+    scrutinee. It is the only site where the core owns LESS.
+  - The rest are the same two classes in `std/graphql`, `std/rpc`, `std/vyx`,
+    `std/ui` and `std/html`.
+
+**The plan still places rows, and a row it places for a name the core does
+not own is now skipped.** `drops_at` was where the disagreement surfaced:
+the plan reclaims `tag` in `let Tagged(tag, n) = local`, the core says `tag`
+names the scrutinee's payload, and emitting the row refused the program. A
+row for a name this pass does not own is a row the plan states and the core
+does not, so it is dropped where it is read. That is the same one-way door
+every derived table went through.
+
+**The instrument's leaky side stopped leaking, and the reason is the second
+finding above.** `leak_check_is_two_sided` (RFC-0114 SS25) pinned the
+loop-store conservatism — `s = p.name.copy()` inside a `for` never released
+the displaced copy — as its 135-exit side. It exits 0 now, because the
+binding is owned and the store releases. The whole-value ALIAS is the leaky
+side instead: `let rel = if p == "" { st } else { p + "/" + st }` leaks `st`'s
+buffer on the edge that did not hand it on, which is what RFC-0089 takes over
+a double free. The instrument stays two-sided, which is what makes its
+silence mean something.
+
+**What no reading closed, and why it is not a reading.** `Leak::Hole`'s gap —
+a `consume` that took a place the release walk cannot be told to skip — is
+gone with the rest, and no corpus program has such a note. Of the 277,624
+`Leak` notes the corpus builds read, 277,175 are `NoRelease`, 208 are
+`Borrowed`, 197 `Aliased` and 44 `Region`; `Hole`, `Escaped` and `Captured`
+are all ZERO, so `fate_owned`'s capture and escape arms were dead too. So
+the guard was screening a shape the corpus does not have, and the ratchet and
+the memory suite are what would find one.
+
+Lines: `core.rs` 4,931 to 4,937, `own.rs` 4,213 unchanged, `movecheck.rs`
+8,089 unchanged. The core is up six because two rules moved in where one
+reading moved out. `own.rs` does not shrink here at all, and that is the
+slice's own answer to the milestone's question: the report is not what held
+the file up.
+
+**The form census (RFC-0127 §3.1) moves by one row.** `Stmt::Let` in `lower`
+is 7, not 6, and the row sums to 46: the `let` reads its own `mut` flag now,
+which is the one thing about the statement the `Rhs` does not carry. The
+total is 1,576, and §3.1.1's excess over the floor is 18. The structural
+census (`refusals.rs`) and the coercion census (`lowered.rs`) do not move —
+this slice deletes no checker rule and adds no coercion.
+
+#### The named-binding slice's gates (2026-09-06)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
 
 | gate | result |
@@ -6217,6 +6329,115 @@ pointed at a shallow scratch directory outside the checkout.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+| `cargo fmt --all --check`, and the two excluded manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 571 passed, 75 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 168 s |
+| `coretables` `--ignored` | 1, 149 s, over 169 programs, every pinned count unmoved |
+| `typed` `--ignored` | 1, 334 s |
+| `effects` `--ignored` | 2, 396 s |
+| `fixtures` `--ignored` | 1, 87 s |
+| `vyrn-frontend` | 1,207 |
+| the workspace less `vyrn-cli` | 1,383 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 214 s |
+| the residue ratchet | 273 s, clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 175, no byte moved |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 173 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks |
+
+Not one generator byte moves, which is the answer to the obvious worry about
+widening ownership: the 22 sites are all in bodies the generators do not
+compile, and the manifest is 175 of 175.
+
+**What `own.rs` is, with a reader against every part (2026-09-06).**
+
+`Fate` is out of the core, so the file can be said. 4,186 lines, 2,983 of
+code and 1,203 of tests, in ten parts. Every part below has a named reader; one
+part did not, and it is deleted here.
+
+| part | lines | who reads it |
+|---|---|---|
+| the vocabulary — `Exit`, `Release`, `DropKind`, `Linear` | 196 | every pass. The emitters key a row by `Exit`, the kernel and the core name a `DropKind`, `movecheck` and `declared` name a `Linear` |
+| the type table — `Owned`, `self_referring`, the free `owns_heap` | 609 | the checker, `declared`, `movecheck`, `types`, the core (`Builder::owns` is three of its rows), both emitters, `render`. Not a placement row at all |
+| the report — `Leak`, `Fate`, `BindingNote` | 246 | `vyrn why --memory` in `main.rs`, and the LSP's inlay hints in `symbols.rs`. Nothing else, since this slice |
+| the plan the emitters read — `ReleasePlan` | 191 | both compiled emitters, through `key_of`, `acknowledge`, `discarded_result`, `receiver_free`, `receiver_holes_at`, `receiver_malloc_at`, `malloc_scrutinee`, `unconsumed` and the alias map. The CORE writes `receiver_frees`, `receiver_holes` and `owners` into it |
+| `Ownership` and `Memo` | 126 | every command, and the one analysis per build |
+| the fold — `analyze`, `analyze_now` | 486 | it builds everything above and runs the placer |
+| the channels — `for_var_key`, `Placer`, `Refusals` | 64 | `vyrn-lower` installs both slots, `symbols` asks `placer_installed`, `movecheck` drains `kernel_refusals` |
+| `fold_revived` and `placed` | 117 | the note walk, and both emitters |
+| the placement walk — `Live`, `Place`, `place_body` | 328 | `Ownership::releases`, read by the CORE (`Builder::placed`, `drops_at`) and by both emitters |
+| the note walk — `Emit`, `emit_body`, `fate` | 565 | it writes `notes` for the report, and `droppable`, `early`, `holes` and the plan's four sets for the emitters |
+
+**The one part with no reader is the arm slot, and the interpreter took its
+reader with it.** `ArmRows`, `install_arm_rows` and `core_arm_rows` handed
+round forty's answer DOWN from `vyrn-lower` to `vyrn-frontend`, for the one
+engine that could not name the lowering crate. The tree-walker is deleted, so
+nothing calls `core_arm_rows`: the two compiled backends ask
+`vyrn_lower::core::facts()` themselves. The slot, its `OnceLock`, its
+installation in `vyrn-lower`'s `install`, and `core::arm_rows` behind it all
+go. It is the shape of every deletion this milestone has made, one level up:
+a channel outlives the reader that needed it, and it looks alive because
+something still fills it.
+
+**What the core still reads out of `own.rs`, which is the next track's
+list.** Five things, and none of them is `Fate`:
+
+  - `proto`, the type table. It is a declaration and it stays;
+  - `releases`, the placement walk's rows, through `Builder::placed`. The
+    core adds the rows the analysis owes and did not place, so the two halves
+    are still one answer written twice;
+  - `holes`, RFC-0093 M2's skippable set;
+  - `droppable`, at two sites;
+  - `lending`, `retains`, `escapers` and `fnval_clear` — the four answers only
+    a pass that has read every body can give, handed on rather than tabled.
+
+**And what the text-IR backend's retirement takes with it.** Every
+`ReleasePlan` reading in the table above is made TWICE, once in
+`vyrn-codegen/src/lib.rs` and once in `direct.rs`; `malloc_scrutinee` is read
+by the text emitter alone, so it goes whole. What would be left of the plan
+after that track is the direct emitter's readings and the core's own
+`releases`, which is the pair the placement walk exists to serve.
+
+#### The census slice's gates (2026-09-06)
+
+The full list again, on the tree with the arm slot deleted, in §1.4's order
+and one at a time in the foreground.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the two excluded manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 571 passed, 75 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 121 s |
+| `coretables` `--ignored` | 1, 108 s |
+| `typed` `--ignored` | 1, 269 s |
+| `effects` `--ignored` | 2, 288 s |
+| `fixtures` `--ignored` | 1, 91 s |
+| `vyrn-frontend` | 1,207 |
+| the workspace less `vyrn-cli` | 1,383 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 232 s |
+| the residue ratchet | 224 s, clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 175 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 101 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks |
+
+Lines per file at the end of the two slices: `own.rs` 4,186 against 4,213 at
+the branch point, `core.rs` 4,921 against 4,931, `movecheck.rs` 8,089
+unchanged — this track deletes no checker rule, which is what keeps it out of
+the way of the one that does.
 
 ### M4 — the runtime in Vyrn
 
