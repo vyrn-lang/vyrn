@@ -5900,6 +5900,167 @@ pointed at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 28 files |
 
+**The form slice (2026-09-06): the loop says it took the container, and a
+literal's part says which field it went into.** The residue record left five
+reasons for what stays in `movecheck.rs`. Two were closed by the slices above.
+This slice takes the fourth and the fifth, and prices the third with the
+sentences a reader would get.
+
+**Rows 10, 11 and 29: the judgement first.** The record said the kernel refuses
+a DIFFERENT binding at a different line for two of the seven programs — the
+element at the `push`, not the container at the loop. That is no longer true.
+The core line carried the container's take, so both passes now refuse the same
+binding at the same line, and what was left was a WORD. The rule for deciding
+it is §1's own: a rule is stated once, and the kernel speaks where the checker
+is silent. So the two sentences, written out:
+
+| program | the checker | the kernel |
+|---|---|---|
+| `take(consume names)`, module state | module state `names` may not be consumed by a take | module state `names` may not be passed to a `consume` parameter via `take(..)` |
+| `take(consume ys)`, a `read` parameter | `ys` may not be consumed — it is a `read` parameter | `ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` parameter |
+| `o.push(consume g)`, module state | module state `g` may not be consumed by a take | module state `g` may not be passed to a `consume` parameter via `push(..)` |
+| `o.push(consume d.a)`, a `read` parameter | `d` may not be consumed — it is a `read` parameter | the same sentence |
+| `for x in consume xs`, a `read` parameter | `xs` may not be consumed — it is a `read` parameter | `xs` may not be stored into the `for .. in consume` loop — it is a `read` parameter |
+| `for x in consume r.xs`, a `read` parameter | `r` may not be consumed — it is a `read` parameter | `r.xs` may not be dropped — it is a `read` parameter |
+| `for x in consume names`, module state | module state `names` may not be consumed by a `for` loop | module state `names` may not be consumed by a `drop` |
+
+Five of the seven read the same or better: the checker names the FORM the
+`consume` was written as, and the kernel names the TAKER the value reaches,
+which is the more exact of the two because it says WHICH taker. The last two
+read worse, and both for one reason: they say "a `drop`", and no program of the
+reader's contains one.
+
+**Why they said it, and the line that stopped them.** A `for x in consume xs`
+binds the container to a temporary, and the take lands where that temporary is
+released. `NameInfo::for_consume` is the fact that names the form, and the core
+wrote it on the BARE-NAME spelling alone — module state and a field reach the
+generic `val` door and got no flag. So the two spellings that needed it most
+were the two without it. The core sets the flag for every spelling now, one
+line after the match that binds the container, and `Kernel::drop` reads it: a
+release that carries a consuming loop's take is worded as the loop and not as a
+`drop`. The last two rows then read ``r.xs`` may not be stored into the
+`for .. in consume` loop, and module state ``names`` may not be consumed by the
+`for .. in consume` loop, with their menus unchanged. Seven of seven are the
+kernel's, so the checker's copy goes: `check_take`, `TakeForm` and the two call
+sites, 129 lines with the tests.
+
+**What the pin found that the licence could not.** The two unit tests moved to
+`tests/refusals.rs`, where a pin asks the WHOLE compiler. One of them asserted
+that `for x in consume r.xs` on a record this frame owns COMPILES. It does not.
+The test asked `vyrn_frontend::check`, which is the checker alone, and the
+compiler has refused that program since the kernel came in — with "`r.xs` may
+not be dropped", which is why nobody read it as this program. The pin records
+the refusal the compiler gives. This is the same reason the store slice and the
+obligation slice moved their pins out, met a third time.
+
+**A record literal's part, the fifth reason.** `NameInfo::fields` holds "the
+field `R.s`", one per part, and the core wrote it on the name a reader's `let`
+binds. An INLINE literal is bound too — `return R { s: x }`, `take(R { s: d })`
+— through the temporary `val` mints, and that door wrote nothing. So one
+literal written two ways got two sentences: the field at the `let`, "the
+literal" inline. The core writes the fact at both doors now, through one
+`record_fields`, and `Kernel::may_not` reads the list `Kernel::gone` already
+read. Nothing in the corpus moved, in either run: no program of the 872 spells
+an inline literal with a borrow or a moved value in it. The pin is what the
+licence could not see.
+
+**Row 17 stays, and here is what it would cost.** An `export extern fn` owns
+its result. `check_return` refuses a returned borrow from three places — a
+place named at the `return`, a projection, and a borrow an arm yields — and
+`refuse_return` gives the export's own sentence at all three. The kernel gives
+it at ONE. The four spellings, measured:
+
+| the export returns | the checker | the kernel |
+|---|---|---|
+| `return q`, a `read` parameter | `q` may not be returned from an exported function — it is a `read` parameter, and the JS caller releases what it is handed | the same sentence, and the same menu |
+| `return match tag { Word(s) => s, .. }` | `s` may not be returned from an exported function — it is read out of a place that owns it | `@borrow` may not be returned — it is read out of `@t1`, a place that owns it |
+| `return d.s` | `d.s` may not be returned from an exported function — it is read out of a place that owns it | `d` is written here while `d.s` still reads out of it — and, beside it, `d` is released here after it was released |
+| `return if p == "" { q } else { p }` | `q` may not be returned from an exported function — it is a `read` parameter | `q` may not be stored into a store; `p` may not be stored into a store; `@borrow` may not be returned — it is read out of `@t1` |
+
+Three of the four are worse, and each is worse in a way §3 M3 has already named
+a defect. Two quote `@borrow` and `@t1`, which are names no program contains.
+One says "a store", which names nothing a reader can look at. One is a sentence
+about machinery — a release after a release. The fourth gives three diagnostics
+where the reader has one thing to fix. The reason is the one the residue record
+gave, and the measurement sharpens it: an arm's value is STORED into the result
+temporary, and the core does not say that the store is the `return`. What
+closes it is the exit. The core carries `Exit::Return` for a statement `return`
+and nothing for the temporary an arm fills, so a `return` whose operand is an
+`if` or a `match` reaches the kernel as N stores and one return of a name the
+reader never wrote. `return d.s` is a second and separate defect behind it, and
+it is not about the export at all.
+
+**The licence, before and after.** Measured over the 375 programs on disk —
+every `.vyrn` under `examples/`, `site/` and `compiler/vyrn-cli/tests/` — and
+over the 872 the sweep's lift adds to them, with `vyrn check` twice per
+program, once plain and once under `VYRN_NO_MOVECHECK=1`.
+
+| answer | on disk, before | on disk, after | with the lift, before | with the lift, after |
+|---|---|---|---|---|
+| identical | 67 | 70 | 183 | 186 |
+| menu | 0 | 0 | 0 | 0 |
+| text | 10 | 7 | 10 | 7 |
+| accepted | 298 | 298 | 459 | 459 |
+
+**Three programs move, and they are the three the rule is about.**
+`r10_consume_module_state`, `r11_consume_a_read_parameter` and
+`r29_for_in_consume_module_state` each read the kernel's sentence now, and
+their fixtures and census rows are re-recorded with `Kernel::Same`. Every other
+program's whole standard error is byte-identical, plain and under the knob.
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/movecheck.rs` | 8,127 | 7,998 |
+| `compiler/vyrn-lower/src/kernel.rs` | 2,334 | 2,358 |
+| `compiler/vyrn-lower/src/core.rs` | 4,911 | 4,930 |
+
+**The structural census.** 584 / 78 / 2,139 / 73 / 3,730 / 1,394 over 7,998
+lines, against 651 / 78 / 2,139 / 73 / 3,735 / 1,451 over 8,127. The kernel
+kind falls 67 for `check_take` and `TakeForm`, the tests kind 57 for the two
+that moved, and the shared kind 5 for the call sites and their comments.
+RFC-0127's form census does not move: the deleted lines name no form, so every
+row's count and column are what they were.
+
+**What is left of the five, and why each is still here.**
+
+1. Row 26 and `fix-33` — closed by the driver slice.
+2. The must-use walk, rows 30 and 31 — closed by the obligation slice.
+3. An exported function owns its result, row 17 (4 spellings). Priced above:
+   the core does not carry the exit through an arm, so three of the four
+   spellings reach the kernel as stores. It is a lowering change, with a second
+   defect behind it.
+4. The prefix `consume` form, rows 10, 11 and 29 — **closed** here.
+5. A record literal's field, inline — **closed** here.
+
+#### Gates (2026-09-06, the form slice)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --check`, all three manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 588 passed, 75 ignored — up 2 for the two pins the moved rules left |
+| `kernel` `--ignored` | 1, 145 s |
+| `coretables` `--ignored` | 1, 128 s |
+| `typed` `--ignored` | 1, 339 s |
+| `effects` `--ignored` | 2, 346 s |
+| `fixtures` `--ignored` | 1, 119 s |
+| `vyrn-frontend` | 1,194 — down 2, which is `movecheck.rs`'s own take tests leaving the file |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,370 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own manifest | 3 |
+| `memory` `--test-threads=1` | 10, 20 s |
+| `parity` `--ignored`, release | 41 of 41, 252 s |
+| the residue ratchet | 1, 240 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 106 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
