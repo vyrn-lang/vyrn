@@ -4664,6 +4664,199 @@ blocks) and `site/app` (154).
 No blessed snapshot moved, and the structural census moves by one row: shared
 machinery 3,768 to 3,983, which is the cache and its fingerprint inside
 `movecheck.rs`.
+
+**The residue-of-the-licence slice (2026-09-06): what the accumulation record
+left was four rules, and three of them were a wording.** The accumulation
+slice made the two passes one list and named what was still in the way: row
+07, whose fifth wording is the CHECKER's own accident; row 19, which could not
+leave because a site of the same pass shadowed it; rows 25 and 26, each priced
+as more than a sentence; and 44 programs the two passes still word
+differently. Rules 07, 19, 25, 13 and 14 leave here, 645 lines of
+`movecheck.rs` with them, and the differing programs fall from 44 to 24. Row
+26 stays, and its price is stated below in the kernel's own terms.
+
+**The licence, before and after.** The same instrument, and the corpus is
+rebuilt the way the corpus slice built it: every program under `examples/` and
+`site/`, every program `movecheck.rs`'s own tests write, every program a test
+in `tests/*.rs` writes, and the census rows with the pinned counterexamples.
+It holds 970 programs where the accumulation slice's held 1,023, and the
+difference is this track's own doing: a rule that leaves takes its unit tests
+to `tests/refusals.rs`, so its programs move from the dump to the lift, and
+the two corpora are collected at different moments. Every number below is
+measured on ONE frozen corpus, at the branch point and at each commit, so the
+columns are comparable to each other and not to the last record's.
+
+| answer | before | after |
+|---|---|---|
+| identical | 445 | 465 |
+| menu | 0 | 0 |
+| text | 44 | 24 |
+| accepted | 27 | 27 |
+
+**Row 07 — the decision, and it is the checker's word that goes.**
+`take(consume s)` and `take(s)` hand the same value to the same declared
+parameter. The checker gives the first the move's two lines and the second
+rule 1's sentence, because a prefix records a consumption with a `.copy()`
+menu and a bare name records one without. The keyword changes nothing about
+the program, so there is nothing for the core to reproduce: the split is an
+accident of how the checker recorded it, and the kernel's sentence is the one
+that stays. `check_use` is gone, and with it the last rule reading the
+consumption map's `by` and `fixes` fields.
+
+One program moves in the whole corpus and it is the one the accumulation
+record named. `examples/a1_afterjoin.vyrn` reads
+
+```
+`s.byteLength` is used here but was already consumed by `take(..)` on line 12
+  (a `consume` parameter takes ownership; the value can't be used afterward)
+```
+
+where it read "`s` was moved here into `consume`". The verdict is the same
+verdict, which is what the proof appendix needs from it (§45's A1, requoted).
+
+**Row 19 — a rule with two sites in one pass cannot leave one at a time.**
+The row's own site is the constructor position, and the checker states the
+same rule again at a `return` that wraps one: "may not be put into the value
+this function returns". Cut the first and the program is refused by the
+second, in different words, and the licence — which stands the WHOLE checker
+aside — cannot see it. Both are gone. The wrapper reading stays, because it
+records the lend, which is the half of the hole that has no diagnostic. The
+whole-stderr snapshot moves NOTHING: the kernel already said, at the
+constructor, what the checker said at both.
+
+**Row 25 — the price was wrong, and the reason is worth keeping.** The
+containment slice priced it as a `State` field every join and every widen
+must merge: a hole at a loop's back edge must carry the line and the taker
+that made it. It needs neither.
+
+- The LINE is already a `State` field. `taken_at` records every take's path
+  and line and is merged by every join, because rule 4's own refusal reads it.
+- The TAKER is a constant. A hole is what a prefix `consume` makes, and it is
+  the only thing that makes one, so there is no fact to carry.
+
+So the back edge names the path the take emptied, in the checker's sentence
+with the checker's menu, and `check_loop_reuse` goes with its four readings of
+a loop body — a `while` body, a `while` condition, a body that ends in
+`continue`, and a take of a projection whose key is a path no scope frame
+holds. A price is a measurement too, and this one was a guess.
+
+**Row 26 — priced, and it does not fit.** `r26_rebuild_a_borrowed_receiver`
+earns TWO diagnostics from the checker: the receiver read at line 6, and rule
+2 at the store that follows at line 8. The kernel refuses at the first and
+stops, because a `Refusal` is one message and the judgment is a `Result`. The
+row cannot leave, and the reason is now exact:
+
+- Delete the row and the file keeps ONE sentence, not two. The kernel's line-6
+  refusal is about `mt`, and the driver's rule 2 drops a kernel refusal about a
+  binding the checker already refused — which it does, at line 8. So the
+  deletion REMOVES a diagnostic rather than moving one.
+- Loosening rule 2 to "the same binding at a different line" puts back the six
+  duplications the accumulation slice measured, `r31`'s among them.
+- Making the kernel say both needs the judgment to continue past a refusal,
+  which is a `Result` today and a list tomorrow. That is a change to what a
+  judgment IS, and it is the same change `fix-33` wants — two identical
+  `push`es of one borrow, which the checker reports twice and the kernel once.
+
+Two programs of the corpus, one shape, one price. It is the next deletion
+slice's, and it is not a wording.
+
+**The differing programs: sixteen turned on one fact.** The kernel said a
+place read is read out of a place that owns it. The checker says what the
+ROOT of that place IS — a `read` parameter, a `modify` one, a loop variable,
+module state — and both are true. The checker's is the one with a way out on
+it, because the way out is written on the DECLARATION and not on the read, and
+the menu follows from it. The core already carried the fact; the kernel did
+not read it. It reads the nearest name on the alias chain now, which is the
+name a reader can go and change: a loop variable under a `read` parameter is a
+loop variable, and `p.name` inside `for p in ps` says so.
+
+Four smaller wordings close beside it, each the same shape — a fact the core
+holds and the sentence did not say:
+
+- **What a store stores into.** "A store" was what was left when the place was
+  neither a bare name nor a field, and it names nothing a reader can look at.
+  An element or a key store names the CONTAINER, module state names itself.
+- **A temporary the reader never wrote is named by the place it reads**, where
+  that place is a spelling the reader can see. `sink(if c { d.title } else {
+  "" })` is about `d.title`, which is what the checker's walk into the arms
+  found; the ways out land on it too.
+- **A name the reader DID write is quoted without the place.** It said "`t` may
+  not be passed … it is read out of `d.xs`, a place that owns it" where the
+  checker says what the name is and leaves the place to the menu.
+- **The two-line receiver form belongs to the receiver a call rebuilds.** It
+  was given to every name a call took, which is how `mt` and an ordinary
+  argument got one sentence between them.
+
+**Rows 13 and 14 leave on that.** Rule 2 at the third exit — a borrow handed
+to a declared `consume` parameter — is the kernel's, for all eight spellings
+the checker asked separately: a whole parameter, a `read` receiver, a field of
+one, an element, a name bound to an element, a pattern binder, a loop
+variable, an `if` arm. The kernel asks the question of the VALUE, so a
+spelling is not a case. `check_handover`, `refuse_projected_arg` and
+`arm_binder` are gone, and the eight spellings are pinned in
+`tests/refusals.rs` with their menus, because a menu is what a reader acts on.
+
+**What is left, and why each one is left.** The 24, by the rule that gives the
+checker's sentence:
+
+| the rule | programs | why it stays |
+|---|---|---|
+| the must-use walk (rows 30, 31) | 10 | the kernel has no must-use judgment. It is a rule about a TYPE's obligation and not about ownership, and nothing in the core states it |
+| the prefix `consume` form (rows 10, 11, 29) | 7 | the checker names the FORM the reader wrote (a take, a `for` loop) and the kernel names the taker the value reaches. For two of the seven the kernel refuses a different binding at a different line — the element at the `push`, not the container at the loop — so this is not a wording to decide |
+| an exported function owns its result (row 17) | 4 | an export's `return` reaches the kernel as a store, so it is worded as one. The core has the fact (`Body::export`) and the lowering does not carry the exit |
+| the second diagnostic (row 26) | 1 | priced above |
+| a record literal's field, inline | 1 | `NameInfo::fields` is written where a `let` binds a literal. `return R { s: x }` binds a temporary through another door, so the part's field name is not there |
+| two refusals at one line (`fix-33`) | 1 | the same shape as row 26: two `push`es of one borrow, reported twice by the checker and once by the kernel |
+
+**The structural census.** 651 / 725 / 2,250 / 73 / 3,669 / 1,781 over 9,149
+lines, against 916 / 725 / 2,250 / 73 / 3,738 / 2,092 over 9,794 at the branch
+point. Per rule, and the unit is a LINE because the census's own unit is a
+top-level item and three of these four rules are one:
+
+| the rule | kernel | shared | tests | lines |
+|---|---|---|---|---|
+| row 07, rule 1's move | −46 | −4 | −51 | −101 |
+| row 19, a borrow into a constructor | −16 | −11 | −17 | −44 |
+| row 25, rule 1 across a back edge | −47 | −44 | −46 | −137 |
+| rows 13 and 14, rule 2 at the third exit | −156 | −10 | −197 | −363 |
+
+The `tests` column falls because a rule's pins go with it: they ask
+`vyrn_frontend::check`, which no longer states the rule, so they are asked of
+the whole compiler in `tests/refusals.rs` — which is also where the corpus
+picks them up again, through the lift `testsweep` already does.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` and
+`TEMP` pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 564 passed, no failure |
+| `kernel` `--ignored` | 1, 116 s |
+| `coretables` `--ignored` | 1, 147 s |
+| `typed` `--ignored` | 1, 207 s |
+| `effects` `--ignored` | 2, 188 s |
+| `fixtures` `--ignored` | 1, 72 s, with `a1_afterjoin.stderr` re-recorded |
+| `vyrn-frontend` | 1,215 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,391 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 20 s |
+| `parity` `--ignored`, release | 41 of 41, 259 s |
+| the residue ratchet | 1, 225 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, no byte moved |
+| `genwasm` release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 116 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes and 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 blocks and 154 over 25 files |
+
+One blessed output moved and it is `examples/expected/a1_afterjoin.stderr`,
+which is row 07's decision. RFC-0127's form census moves by two rows —
+`Expr::Match` and `Expr::IfExpr`, one mention each — because the arms
+`check_handover` walked went with it.
+
 **The scrutinee slice (2026-09-05): the core counts its own reads, and round
 twenty-seven's table is gone.**
 
