@@ -333,6 +333,14 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
 }
 
 fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
+    // RFC-0125 §3 M5: this emitter reads every expression's type off the
+    // checker's record rather than deriving one. `vyrn build` has already
+    // asked for it, through the lowering; a host that compiles a program the
+    // lowering never walked — a generator, a probe, a test — asks here, and a
+    // program the core already holds costs the key comparison and nothing
+    // else. The guard lives as long as the emit, so a record made here is not
+    // left behind for whatever `Program` next lands at this address.
+    let _decided = vyrn_lower::core::decide(program);
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -1982,6 +1990,33 @@ struct Fn_<'a, 'p> {
     rel_slots: HashMap<usize, RelSlot>,
     /// Registrations so far, which is what a [`RelSlot::seq`] counts.
     rel_seq: u32,
+    /// The rows that still name a frame slot, each with the frame top it was
+    /// registered at — the floor below which no statement may give a slot back.
+    ///
+    /// [`Frame::alloc`]'s rule reads "a slot is a statement's unless the
+    /// statement bound a name", and the body walker tested exactly that: the
+    /// scope's length. A NAME is not the only thing that outlives a statement.
+    /// A `for` over an unnamed iterable, an `if let` over a temporary and a
+    /// `match` over one each copy that value into a slot and register a release
+    /// row for it, and WHERE that row runs is the core's answer, not this
+    /// emitter's: for a `for` over an array literal the core says the
+    /// function's exit, because `declared::type_of` names no array literal's
+    /// type and `own` therefore places nothing at the loop's own end. The
+    /// statement bound no name, so the walker gave the slot back, the next
+    /// statement built its own temporary over it, and the two rows at the exit
+    /// released the second statement's value twice — a trap at address -16 in
+    /// `free`, on two `for` loops in one body.
+    ///
+    /// A row leaves this list when it is released on a FALL-THROUGH exit — a
+    /// block's or a construct's own — because the path that carries on is the
+    /// path that no longer holds it. A release at a `return`, a `?`, a `break`
+    /// or a `continue` is on a branch, and the fall-through still holds the
+    /// value, so such a row keeps its floor. Clearing on every release instead
+    /// would give the slot back on a path that still names it; keeping every
+    /// row to the end of the body instead summed a statement's temporaries
+    /// again, and 250 `print(match parseFloat64(..) { .. })` statements in one
+    /// `main` then wanted 10,048 bytes of a frame limited to 8,192.
+    rel_pending: Vec<(usize, u32)>,
     /// RFC-0101 M4: the release steps placed at every exit of this body, keyed
     /// by the node the exit is AT. Read, never derived.
     placed: HashMap<(ExitKind, usize), Vec<(usize, Option<Vec<String>>)>>,
@@ -2076,6 +2111,7 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         rel_seq: 0,
+        rel_pending: Vec::new(),
         placed: HashMap::new(),
         cursors: Vec::new(),
         region_depth: 0,
@@ -2204,6 +2240,7 @@ fn lower_body(
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         rel_seq: 0,
+        rel_pending: Vec::new(),
         // RFC-0101 M4: the order this body releases in, decided once in
         // `own::place_body` and read here.
         placed: cx
@@ -2299,7 +2336,7 @@ fn lower_body(
             let key = p as *const vyrn_frontend::ast::Param as usize;
             if cx_fn.drops.contains_key(&key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
-                    cx_fn.register_rel(key, place, r);
+                    cx_fn.register_rel(&b, key, place, r);
                 }
             }
         }
@@ -2840,15 +2877,19 @@ impl<'p> Fn_<'_, 'p> {
             // on `Frame::alloc`); one that did — a `let`, a refutable `let` —
             // keeps everything it took, binding and temporaries alike, because
             // the cheap test is the scope's length and not which slot is which.
+            //
+            // A NAME is not the only thing that outlives a statement:
+            // [`Fn_::rel_pending`] is the floor the release rows that still
+            // name a slot raise, and the reset stops there.
             let (frame, scope) = (b.mark(), self.scope.len());
             if let Some(n) = self.elem_field_store(m, b, &blk.stmts[k..])? {
                 k += n;
-                b.reset(frame);
+                b.reset(frame.max(self.rel_floor()));
                 continue;
             }
             self.stmt(m, b, &blk.stmts[k])?;
             if self.scope.len() == scope {
-                b.reset(frame);
+                b.reset(frame.max(self.rel_floor()));
             }
             k += 1;
         }
@@ -3074,6 +3115,14 @@ impl<'p> Fn_<'_, 'p> {
             ExitKind::Return | ExitKind::Try => self.cursors.clone(),
             _ => Vec::new(),
         };
+        // A FALL-THROUGH exit ends what the row holds on the path that carries
+        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
+        // A `return`, a `?`, a `break` or a `continue` releases on a BRANCH and
+        // leaves the fall-through holding the value, so the floor stands.
+        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
+            self.rel_pending
+                .retain(|(k, _)| !steps.iter().any(|(step, _)| step == k));
+        }
         let mut run: Vec<(Place, Rel)> = Vec::new();
         for (step, holes) in steps {
             let Some(r) = self.rel_slots.get(&step) else {
@@ -3105,11 +3154,29 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
+    /// The floor the rows that still name a frame slot hold — see
+    /// [`Fn_::rel_pending`].
+    fn rel_floor(&self) -> u32 {
+        self.rel_pending
+            .iter()
+            .map(|(_, at)| *at)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Say what one owned binding is released WITH. The placement already said
     /// where and in what order.
-    fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {
+    fn register_rel(&mut self, b: &Frame, key: usize, place: Place, rel: Rel) {
         let seq = self.rel_seq;
         self.rel_seq += 1;
+        // The row names this slot until the exit the core placed it at, which
+        // may be past the statement that made it. So the statement cannot give
+        // the slot back: [`Fn_::rel_pending`] states the floor once, here, for
+        // every construct that registers one.
+        if matches!(place, Place::Slot(_)) {
+            self.rel_pending.retain(|(k, _)| *k != key);
+            self.rel_pending.push((key, b.mark()));
+        }
         self.rel_slots.insert(key, RelSlot { place, rel, seq });
     }
 
@@ -4121,7 +4188,7 @@ impl<'p> Fn_<'_, 'p> {
                                 .filter(|r| matches!(r, Rel::Buffers(_))),
                         };
                         if let Some(r) = r {
-                            self.register_rel(s as *const Stmt as usize, place, r);
+                            self.register_rel(b, s as *const Stmt as usize, place, r);
                         }
                     }
                 }
@@ -4136,7 +4203,7 @@ impl<'p> Fn_<'_, 'p> {
                         {
                             *holes = h.clone();
                         }
-                        self.register_rel(s as *const Stmt as usize, place, r);
+                        self.register_rel(b, s as *const Stmt as usize, place, r);
                     }
                 }
             }
@@ -4571,7 +4638,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => return unsupported("a `for` over a Unit value", *line),
                         }
-                        self.register_rel(key, place, r);
+                        self.register_rel(b, key, place, r);
                         b.ins(&Instruction::LocalGet(src));
                     }
                 }
@@ -4625,7 +4692,7 @@ impl<'p> Fn_<'_, 'p> {
                         if let (Rel::Deep(_, holes), Some(h)) = (&mut r, self.cx.holes.get(&vkey)) {
                             *holes = h.clone();
                         }
-                        self.register_rel(vkey, place, r);
+                        self.register_rel(b, vkey, place, r);
                     }
                 }
 
@@ -6002,70 +6069,6 @@ impl<'p> Fn_<'_, 'p> {
         )))
     }
 
-    /// Whether `t` is an instantiation with every type argument fixed, under this
-    /// body's substitution. [`crate::ty_is_concrete_app`] is the rule.
-    fn concrete_app(&self, t: &Type) -> bool {
-        crate::ty_is_concrete_app(t, &|a| self.cx.resolve(a))
-    }
-
-    /// The type a `match`'s arms agree on, without emitting anything.
-    ///
-    /// The FIRST arm answers, as it does for an `if`: [`Fn_::expr_as`] re-checks
-    /// every other arm against the answer, so a wrong guess is a compile error
-    /// rather than a miscompile. The one thing a later arm can add is a type
-    /// ARGUMENT — see [`crate::ty_is_concrete_app`] — so a non-applied answer is
-    /// upgraded by the first arm that has one, and the answer stops depending on
-    /// arm ORDER. `genericpayload.vyrn` puts the concrete arm first and the
-    /// param-free one last precisely so a first-arm-wins rule looks correct.
-    ///
-    /// A later arm `peek` cannot see forfeits the upgrade and nothing else: its own
-    /// `expr_as` refuses it later if it truly cannot be lowered. So the scan never
-    /// narrows what this backend reaches.
-    fn match_ty(&mut self, sum: &Sum, arms: &[ArmRef], line: usize) -> Result<Type, String> {
-        // Any block arm (RFC-0118) makes this a statement match: the arms
-        // yield nothing, whatever the expression arms compute is discarded,
-        // and the join carries no value.
-        if arms.iter().any(ArmRef::is_block) {
-            return Ok(Type::Unit);
-        }
-        let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
-        let ty = self.peek_arm(first, sum, line)?;
-        if self.concrete_app(&ty) {
-            return Ok(ty);
-        }
-        // A `panic` arm (RFC-0079) is `Never` and answers nothing, so a later arm
-        // answers instead — the same fall-through the type-argument upgrade uses,
-        // which is why "the first arm answers" survives a `?? panic(..)` in one.
-        let mut ty = ty;
-        for arm in &arms[1..] {
-            if let Ok(t) = self.peek_arm(arm, sum, line) {
-                if self.concrete_app(&t) {
-                    return Ok(t);
-                }
-                if matches!(ty, Type::Never) && !matches!(t, Type::Never) {
-                    ty = t;
-                }
-            }
-        }
-        Ok(ty)
-    }
-
-    /// One arm's type, with its bindings in scope. The place is a dummy: `peek`
-    /// reads types and never emits, so a scope frame it cannot mutate is enough.
-    fn peek_arm(&mut self, arm: &ArmRef, sum: &Sum, line: usize) -> Result<Type, String> {
-        let mark = self.scope.len();
-        for (n, t) in self.pattern_binds(sum, arm.pattern, line)? {
-            self.scope.push((n, Place::Local(u32::MAX), t));
-        }
-        let got = match &arm.body {
-            BodyRef::Expr(e) => self.peek(e, line),
-            // A block arm (RFC-0118) yields nothing.
-            BodyRef::Block(_) => Ok(Type::Unit),
-        };
-        self.scope.truncate(mark);
-        got
-    }
-
     /// Two arms meeting at one value — M0's destination-first rule.
     ///
     /// A scalar join is a `block (result T)` and needs nothing special. An
@@ -6083,12 +6086,7 @@ impl<'p> Fn_<'_, 'p> {
         else_e: &Expr,
         line: usize,
     ) -> Result<Type, String> {
-        // A `panic` then-branch (RFC-0079) names no type, so the else answers.
-        let want = match self.peek(then_e, line)? {
-            Type::Never => self.peek(else_e, line)?,
-            t => t,
-        };
-        let want = self.join_ty(key, want);
+        let want = self.join_ty(key, line)?;
         let r = self.cx.repr(&want, line)?;
         // RFC-0114 Rule N at an `if`-expression join. The releases are
         // stack-neutral, so in the scalar case they sit under the branch value
@@ -6167,16 +6165,17 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// The type a join carries — the checker's, where the core carries it.
+    /// The type a join carries — the checker's, at the node, once.
     ///
     /// RFC-0125 §3 M5: a merge holds ONE value and the checker states which
-    /// type it has, at the node, once. What [`Fn_::peek`] and
-    /// [`Fn_::match_ty`] answer is the type an ARM produced, which is the same
-    /// type in whichever shape that arm happened to build it — and the
-    /// textual backend fed its `phi` the other shape for exactly that reason.
-    /// `guess` is still asked, because it is what answers where no lowering
-    /// ran (`VYRN_NO_PLACER=1`), and because `peek` refusing is this
-    /// backend's gap report.
+    /// type it has. This backend used to reconcile one from the ARMS, and an
+    /// arm can only report the type it happens to have PRODUCED: the same
+    /// type in whichever shape that arm built it. The textual backend fed its
+    /// `phi` the other shape for exactly that reason.
+    ///
+    /// A join whose type the record does not carry is a gap, not a guess:
+    /// `compile` asks `vyrn_lower::core::decide` for the record before it
+    /// emits a byte, so every program this reaches has one.
     ///
     /// A REFINED type decays to its base here, and only here, because a join is
     /// not a value boundary. The checker unifies `Some(a) => a` (an `Age`) with
@@ -6185,37 +6184,52 @@ impl<'p> Fn_<'_, 'p> {
     /// arm through M2d's seam and validate it against a refinement the language
     /// never required, which is `error: validation failed for `Age`` here and
     /// `-1` on the other two engines. The checker's own answer is already the
-    /// base, so the decay is the guess's — kept because the guess is.
+    /// base, so this only holds the base where a substitution reintroduces a
+    /// refined alias.
     ///
     /// Found by `validate.vyrn` becoming compilable in M2k, but the hole is
     /// M2b's: a plain `match` on an `Option<Age>` had it all along, and no
     /// example held one. The boundary the value really crosses — the `let`, the
     /// `return`, the field — still validates, because that coercion is a
     /// separate one outside the join.
-    fn join_ty(&self, key: usize, guess: Type) -> Type {
-        let t = match vyrn_lower::core::join_ty(key) {
-            // A `Never` recorded for a join every arm diverges out of is the
-            // answer; a guess that says `Never` where the record does not is
-            // the arm that answered nothing, and the record is right there too.
-            Some(t) => self.cx.sub(&t),
-            None => guess,
+    fn join_ty(&self, key: usize, line: usize) -> Result<Type, String> {
+        let Some(t) = vyrn_lower::core::join_ty(key) else {
+            return unsupported("a join the checker did not type", line);
         };
-        match &t {
+        let t = self.cx.sub(&t);
+        Ok(match &t {
             Type::Named(n) if self.cx.types.get(n).is_some_and(|d| d.predicate.is_some()) => {
                 self.cx.resolve(&t)
             }
             _ => t,
-        }
+        })
     }
 
-    /// The type an expression WILL have, without emitting anything.
+    /// The type an expression has — the checker's, read by node.
     ///
-    /// Needed only at a join, where the destination has to exist before either
-    /// arm runs. Deliberately shallow: anything it cannot see is a gap rather
-    /// than a guess, and [`Fn_::expr_as`] re-checks the answer against what the
-    /// arm actually produced, so a wrong prediction is loud rather than silent.
+    /// Needed at a join, where the destination has to exist before either arm
+    /// runs, and at every emit site that has to know an operand's type before
+    /// it emits one. It used to DERIVE the answer from the operands, in
+    /// twenty arms covering every expression kind, which is the second copy
+    /// of the checker's rule that RFC-0125 §3 M5 exists to delete.
+    ///
+    /// [`Fn_::peek_inner`] is what is left, and it answers only for the AST
+    /// this backend builds itself.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        let t = self.peek_inner(e, line)?;
+        // Through the plan's own clone→original alias, for the trees this
+        // backend copies to specialize a higher-order call or to name an
+        // impl's method: a clone's node has no record of its own, and the
+        // node it copies has the answer. RFC-0114 §26 built that map so a
+        // release row would survive the copy; a type survives it the same way,
+        // and reading one map rather than two is why the alias is registered
+        // where the clone is made and not here.
+        let at = e as *const Expr as usize;
+        let t = match vyrn_lower::core::node_ty(at)
+            .or_else(|| vyrn_lower::core::node_ty(self.cx.plan.key_of(at)))
+        {
+            Some(t) => self.cx.sub(&t),
+            None => self.peek_inner(e, line)?,
+        };
         if crate::observe::on() {
             crate::observe::record(
                 crate::observe::Site::Peek,
@@ -6228,56 +6242,32 @@ impl<'p> Fn_<'_, 'p> {
         Ok(t)
     }
 
+    /// The stand-down: a type for AST the CHECKER never saw.
+    ///
+    /// This was twenty arms and every expression kind, which is what made it
+    /// the whole of the class RFC-0125 §3 M5 deletes — a second statement of
+    /// the rule that decides a node's type, in an emitter, able to disagree
+    /// with the first. [`Fn_::peek`] reads the checker's answer now, and what
+    /// is left here answers only for the trees this backend BUILDS at an emit
+    /// site: the `@rel` receiver of an implicit release, the index of a
+    /// desugared element read, a dispatched call it writes to reach an impl.
+    /// The checker never typed those, so nothing it says can be disagreed
+    /// with, and RFC-0101 §2.3 already assigns the class to the backend.
+    ///
+    /// Measured over `vyrn-cli`'s whole suite: 360 answers, all of them one
+    /// of a local this backend named, a field read of one, an element read it
+    /// desugared, a call it wrote, and a literal beside them. A kind that is
+    /// not one of those is a gap rather than a guess, which is the property
+    /// the twenty arms had and the reason a catch-all is safe to write now.
     fn peek_inner(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
         Ok(match e {
-            Expr::Consume { place, .. } => self.peek(place, line)?,
+            // A literal the emitter minted — a length, an index, a tag.
             Expr::Int(_) | Expr::Byte(_) => Type::Int,
             Expr::Float(_) => Type::Float,
             Expr::Bool(_) => Type::Bool,
             Expr::Str(_) => Type::Str,
-            // A `fn`-typed parameter or a bare function name used as a VALUE
-            // (RFC-0023 × RFC-0037): its type is the target's signature, which is
-            // also what a generic record field solves its parameters from —
-            // `Deferred { run: run }` fixes `P` and `T` from exactly this.
-            Expr::Var { name, .. } if self.fn_binds.contains_key(name) => {
-                let t = &self.fn_binds[name].target;
-                Type::Fn(
-                    t.sig.params[t.ncaps..].to_vec(),
-                    Box::new(t.sig.ret_ty.clone()),
-                )
-            }
-            // A nullary constructor (`None`, or an enum's `Empty`) parses as a bare
-            // name, so it is only distinguishable from a local by failing to be one
-            // — the same test, in the same order, that the emitting path makes.
-            // Without this a `match` whose FIRST arm is a param-free variant could
-            // not be typed at all, which is the arm order the checker demands an
-            // annotation for.
-            Expr::Var { name, .. }
-                if self.lookup(name, line).is_err()
-                    && (name == "None" || self.cx.variants.contains_key(name)) =>
-            {
-                match (name.as_str(), self.expected_sum()) {
-                    ("None", Some(t)) => t,
-                    ("None", None) => {
-                        return unsupported("a branch yielding `None` with no expected type", line)
-                    }
-                    _ => match self.applied_variant(name, &[], line)? {
-                        Some(t) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a branch yielding the ambiguous variant `{name}`"),
-                                line,
-                            )
-                        }
-                    },
-                }
-            }
-            Expr::Var { name, .. }
-                if self.lookup(name, line).is_err() && self.cx.sigs.contains_key(name) =>
-            {
-                let sig = &self.cx.sigs[name];
-                Type::Fn(sig.params.clone(), Box::new(sig.ret_ty.clone()))
-            }
+            // A local it just created and named. The scope is the only source
+            // there could be: the name is one this backend chose.
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
                 let base = self.peek(expr, line)?;
@@ -6288,172 +6278,7 @@ impl<'p> Fn_<'_, 'p> {
                     None => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
                 }
             }
-            Expr::StructLit { name, fields, .. } => self.applied_record(name, fields, line)?,
-            // A map literal in a branch: the position decides its value type, the
-            // same rule the emitting path uses, and an empty one has nothing else
-            // to be typed by at all.
-            Expr::MapLit { entries, .. } => match self.expect.last().map(|t| self.cx.resolve(t)) {
-                Some(t @ Type::Map(..)) => t,
-                _ => match entries.first() {
-                    Some((ke, ve)) => Type::Map(
-                        Box::new(self.peek(ke, line)?),
-                        Box::new(self.peek(ve, line)?),
-                    ),
-                    None => Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
-                },
-            },
-            // A `panic` then-branch names no type, so the else answers — the rule
-            // [`Fn_::join`] emits under.
-            Expr::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => match (self.peek(then_branch, line)?, else_branch) {
-                (Type::Never, Some(e)) => self.peek(e, line)?,
-                (t, _) => t,
-            },
-            // A `match` is typed by its arms — see [`Fn_::match_ty`], which is the
-            // same rule the emitting path uses.
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                let st = self.peek(scrutinee, line)?;
-                let sum = self
-                    .sum_of(&st)
-                    .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
-                self.match_ty(&sum, &ArmRef::of(arms), line)?
-            }
-            Expr::Unary { expr, .. } => self.peek(expr, line)?,
-            Expr::Binary { op, lhs, .. } => match op {
-                BinOp::Eq
-                | BinOp::NotEq
-                | BinOp::Lt
-                | BinOp::LtEq
-                | BinOp::Gt
-                | BinOp::GtEq
-                | BinOp::And
-                | BinOp::Or
-                | BinOp::Match => {
-                    // Comparing two vectors yields a mask, not a `Bool` (RFC-0083
-                    // M2) — the one place in this table where the operator alone
-                    // does not settle the answer.
-                    match self.peek(lhs, line)? {
-                        Type::F32x4 | Type::I32x4 => Type::Mask32x4,
-                        Type::F64x2 => Type::Mask64x2,
-                        _ => Type::Bool,
-                    }
-                }
-                _ => self.peek(lhs, line)?,
-            },
-            // A literal in a branch is the fixed shape; the join's conversion
-            // heapifies it if the other arm made it an `Array<T>`. An EMPTY one
-            // has no element to be typed by, so it can only be what the position
-            // expects — the same rule the emitting path uses.
-            Expr::ArrayLit { elems, .. } if !elems.is_empty() => {
-                Type::ArrayN(Box::new(self.peek(&elems[0], line)?), elems.len())
-            }
-            Expr::ArrayLit { .. } => match self.expect.last().map(|t| self.cx.resolve(t)) {
-                Some(t @ Type::Array(_)) => t,
-                _ => return unsupported("a branch yielding an empty array literal", line),
-            },
             Expr::Call { name, args, .. } => match name.as_str() {
-                // RFC-0076 M7's generator-only builtins in a BRANCH's value rather
-                // than a statement's — `std/vyx` and `std/ui` both have arms
-                // yielding a `Code`, and `std/rpc` has one yielding a `listDir`.
-                // Every row reads the same thing the emitting path does: the entry's
-                // own signature, `gen_list_dir_ty`, or the `Code` handle.
-                n if self.gen_peek(n, args).is_some() => {
-                    self.gen_peek(n, args).expect("guarded above")
-                }
-                "panic" | vyrn_frontend::ast::PANIC_AT | "serveStream" => Type::Never,
-                "@str" | "@concat" | "jsonSchema" | "toJson" => Type::Str,
-                "floatBits" => Type::IntN {
-                    bits: 64,
-                    signed: false,
-                },
-                "floatFromBits" => Type::Float,
-                "stringFromBytes" => Type::result(Type::Str, Type::Str),
-                // RFC-0014/RFC-0044's I/O as a BRANCH's value rather than a
-                // statement's — `std/storage`'s `Ok(done) => renameFile(tmp, path)`
-                // is the shape, and nothing in the corpus had put one in an arm
-                // before, which is why M2o read `storage.vyrn` as blocked on the
-                // syscall alone. Same function the emitting path reads.
-                n if io_builtin_ty(n, args.len()).is_some() => {
-                    io_builtin_ty(n, args.len()).expect("guarded above")
-                }
-                "bytes" => Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                })),
-                // `Some`/`Ok`/`Err`/`None` in a branch, typed by the position the
-                // same way `sum_ctor` types them when it emits: an arm yielding
-                // `Ok(v)` cannot name the error half, so the expectation has to.
-                // Without this the arm falls through to `sigs`, which has no entry
-                // for a constructor, and reads as "a branch yielding `Ok`".
-                "Some" | "Ok" | "Err" if args.len() == 1 => {
-                    match self.sum_ctor_types(name, &args[0], line)? {
-                        Some((t, _)) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a branch yielding `{name}` with no expected type"),
-                                line,
-                            )
-                        }
-                    }
-                }
-                "None" | "Some" | "Ok" | "Err" => match self.expected_sum() {
-                    Some(t) => t,
-                    None => {
-                        return unsupported(
-                            &format!("a branch yielding `{name}` with no expected type"),
-                            line,
-                        )
-                    }
-                },
-                // The two builtins whose result type is a declared one: `Schema` is
-                // the record `schema_struct_lit` names, and `Value`'s name comes off
-                // the variant table rather than being spelled here twice.
-                "schemaOf" => Type::Named("Schema".into()),
-                "value" if args.len() == 1 => {
-                    let v = self.value_variant(&args[0], line)?;
-                    match self.cx.variants.get(v).and_then(|c| c.first()) {
-                        Some((e, _, _)) => Type::Named(e.clone()),
-                        None => return unsupported("the built-in `Value` enum", line),
-                    }
-                }
-                // An arm that only prints — or only logs: the join carries nothing,
-                // which the `match` lowering already handles, it just has to be
-                // told. Suppressed or not, a log call is `Unit` (RFC-0008), so the
-                // threshold cannot change a type.
-                "print" | "trace" | "debug" | "info" | "warn" | "error" => Type::Unit,
-                // RFC-0015's two test-only builtins, for the same reason. Both
-                // hand `Type::Unit` back where they emit, so an arm that only
-                // asserts carries nothing across the join. Found by RFC-0125 §3
-                // M5's eleventh slice: without these rows `std/bench.vyrn` is
-                // refused ("a branch yielding `assertEq`") and `std/regex.vyrn`
-                // traps at run time, where a peek further down had guessed.
-                "assert" if args.len() == 1 => Type::Unit,
-                "assertEq" if args.len() == 2 => Type::Unit,
-                "logger" => Type::Logger,
-                // RFC-0083: the vector builtins, whose result type is fixed.
-                "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
-                | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor" | "@f32x4Trunc" | "@f32x4Nearest" => {
-                    Type::F32x4
-                }
-                "I32x4" | "@i32x4Splat" | "@i32x4Load" => Type::I32x4,
-                "F64x2" | "@f64x2Splat" | "@f64x2Load" | "@f64x2Min" | "@f64x2Max"
-                | "@f64x2Sqrt" => Type::F64x2,
-                // `replaceLane` is the one that reads its receiver: it is a value
-                // method, so the width is the receiver's rather than the name's.
-                "@replaceLane" => self.peek(&args[0], line)?,
-                "@f32x4Store" | "@i32x4Store" | "@f64x2Store" => Type::Unit,
-                "@lane" => match self.peek(&args[0], line)? {
-                    Type::Mask32x4 | Type::Mask64x2 => Type::Bool,
-                    Type::I32x4 => INT32,
-                    Type::F64x2 => Type::Float,
-                    _ => Type::Float32,
-                },
-                "@anyTrue" | "@allTrue" => Type::Bool,
                 // `@at` is `vyrn_frontend::project::AT` and `@slot` is
                 // `vyrn_frontend::project::ELEM`, both spelled out because a
                 // match pattern cannot name them through the path.
@@ -6480,257 +6305,10 @@ impl<'p> Fn_<'_, 'p> {
                         },
                     }
                 }
-                // RFC-0075. `Stream<T>` is `Array<T>`'s three words here as
-                // everywhere, so producing one is a retype and nothing more.
-                "fromArray" if args.len() == 1 => {
-                    match self.cx.resolve(&self.peek(&args[0], line)?) {
-                        Type::Array(i) => Type::Stream(i),
-                        other => return unsupported(&format!("`fromArray` of `{other}`"), line),
-                    }
-                }
-                // The element type is the step's, not the cursor's — the cursor
-                // is always two `Int64`s (RFC-0075 M2b).
-                "fromStep" if args.len() == 3 => {
-                    match self.cx.resolve(&self.peek(&args[2], line)?) {
-                        Type::Fn(_, r) => {
-                            let rr = self.cx.resolve(&r);
-                            match ftypes::option_payload(&rr) {
-                                Some(i) => Type::Stream(Box::new(i.clone())),
-                                None => {
-                                    return unsupported(&format!("a step returning `{rr}`"), line)
-                                }
-                            }
-                        }
-                        other => return unsupported(&format!("`fromStep` of `{other}`"), line),
-                    }
-                }
-                // RFC-0090 M3. A boxed stream is an address, so `boxStream`
-                // answers an `Int64` and its two readers answer the annotation.
-                "boxStream" if args.len() == 1 => Type::Int,
-                "unboxStream" if args.len() == 1 => match self
-                    .expect
-                    .last()
-                    .map(|t| self.cx.resolve(t))
-                {
-                    Some(t @ Type::Stream(_)) => t,
-                    _ => return unsupported("an `unboxStream` with no expected Stream type", line),
-                },
-                "pullAt" if args.len() == 1 => {
-                    match self.expect.last().map(|t| self.cx.resolve(t)) {
-                        Some(ref t) if ftypes::option_payload(t).is_some() => {
-                            self.expect.last().cloned().unwrap_or(Type::Unit)
-                        }
-                        _ => return unsupported("a `pullAt` with no expected Option type", line),
-                    }
-                }
-                "close" => Type::Unit,
-                "@has" | "@remove" => Type::Bool,
-                "@keys" => Type::Array(Box::new(Type::Str)),
-                // `t.join()` (RFC-0025) reads the task's box, so its type is the
-                // task's payload — the same answer `call`'s `@join` arm hands
-                // back, including its defensive identity on a receiver the
-                // checker could not have admitted.
-                "@join" if args.len() == 1 => {
-                    let t = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&t) {
-                        Type::Task(inner) => *inner,
-                        _ => t,
-                    }
-                }
-                // RFC-0115: `reserve`/`append` hand back the receiver's own
-                // type — capacity is not part of it.
-                "@reserve" | "@clear" | "@append" | "@copyFrom" | "@tally" | "@tallyBytes"
-                    if !args.is_empty() =>
-                {
-                    self.peek(&args[0], line)?
-                }
-                "@push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
-                    t => match self.cx.resolve(&t) {
-                        // A `SmallArray` push yields a `SmallArray`, inline state
-                        // or spilled — it never becomes a growable Array.
-                        Type::SmallArray(..) => self.cx.resolve(&t),
-                        Type::ArrayN(i, _) => Type::Array(i),
-                        _ => t,
-                    },
-                },
-                "@pop" if args.len() == 1 => {
-                    let a = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&a) {
-                        Type::Array(i) | Type::SmallArray(i, _) => Type::option(*i),
-                        other => return unsupported(&format!("a branch popping `{other}`"), line),
-                    }
-                }
-                "@toArray" if args.len() == 1 => {
-                    let a = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&a) {
-                        Type::SmallArray(i, _) | Type::Array(i) => Type::Array(i),
-                        other => return unsupported(&format!("a branch copying `{other}`"), line),
-                    }
-                }
-                // `x.copy()` (RFC-0089 M1b) has its receiver's type — or, where
-                // the type declared its own (RFC-0091 M1), whatever that says.
-                "@copy" if args.len() == 1 => {
-                    let t = self.peek(&args[0], line)?;
-                    match ftypes::copy_impl(&self.cx.impls, &t)
-                        .and_then(|f| self.cx.sigs.get(&f).map(|s| s.ret_ty.clone()))
-                    {
-                        Some(r) => r,
-                        None => t,
-                    }
-                }
-                "parse" if args.len() == 1 => Type::option(Type::Int),
-                // `blackBox(v)` (RFC-0055) is `v`, which is exactly how `call`
-                // lowers it, so a branch that yields one has its argument's type.
-                // Found by RFC-0125 §3 M5's census: without this row
-                // `examples/langbench.vyrn` is the one bench program the compiled
-                // route refuses and the interpreter runs.
-                "blackBox" if args.len() == 1 => self.peek(&args[0], line)?,
-                // M2l's rule: a builtin `call` types as it emits owes this a row,
-                // and these two are `call`'s newest. Both are 1-based positions, so
-                // `Int` — the checker's own answer, and the only one it could be.
-                "lineAt" | "colAt" if args.len() == 2 => Type::Int,
-                // The two builtins `call` lowers by REWRITING: peek the rewrite
-                // rather than naming its type here, so there is no second answer
-                // to keep in step with the one the emitting path will produce.
-                // `fromJson`'s rewrite bottoms out in a generated decoder whose
-                // signature `cx.sigs` already holds, so this needs no new case.
-                "fromJson" if args.len() == 2 => {
-                    let Expr::Var { name: tn, .. } = &args[0] else {
-                        return unsupported("`fromJson` without a type name", line);
-                    };
-                    let target = vyrn_frontend::ast::Type::Named(tn.clone());
-                    let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
-                    self.peek(&e, line)?
-                }
-                _ if self
-                    .cx
-                    .types
-                    .get(name)
-                    .is_some_and(|d| d.predicate.is_some()) =>
-                {
-                    Type::Named(name.clone())
-                }
-                // A numeric conversion (`Int32(n)`, `Float32(x)`) in a branch.
-                // `ftypes::numeric_conv_target` is the frontend's own table, and
-                // reading it here is why `call` reads it too: the target IS the
-                // answer, and a second list of the widths could disagree.
-                _ if args.len() == 1 && ftypes::numeric_conv_target(name).is_some() => {
-                    ftypes::numeric_conv_target(name).expect("guarded above")
-                }
-                // A protocol method (RFC-0084 M2). The receiver's own type picks
-                // the impl, so this peeks the REWRITE — the mangled call `call`
-                // will emit — rather than answering for it here. Reached by a
-                // fluent chain, where every receiver after the first is one of
-                // these, and by any `match` arm that ends in a method call.
-                _ if self.cx.protocol_methods.contains_key(name) && !args.is_empty() => {
-                    let proto = self.cx.protocol_methods[name].clone();
-                    let rty = self.cx.sub(&self.peek(&args[0], line)?);
-                    let key = ftypes::type_key(&rty)
-                        .ok_or_else(|| gap(&format!("`{name}` dispatched on `{rty}`"), line))?;
-                    let e = Expr::Call {
-                        name: ftypes::impl_method_name(&proto, &key, name),
-                        args: args.clone(),
-                        line,
-                    };
-                    self.peek(&e, line)?
-                }
-                // An `extern fn` (RFC-0012) in a branch. Its declared return type,
-                // which is the same thing `call` hands back — the declaration is
-                // the only source there is.
-                _ if self.cx.externs.contains_key(name) => self.cx.externs[name].ret.clone(),
-                // A branch yielding a call through a `fn`-typed parameter
-                // (RFC-0023). Exact rather than predicted: the target's signature
-                // is already resolved, so this asks it rather than answering for
-                // it — the property M2l's `peek` work was about.
-                _ if self.fn_binds.contains_key(name) => {
-                    self.fn_binds[name].target.sig.ret_ty.clone()
-                }
-                // A branch yielding a call through a STORED function value
-                // (RFC-0037). `runChain`'s `match m(x) { .. }` peeks its scrutinee,
-                // so this is reached by the shape the feature exists for.
-                _ if matches!(
-                    self.lookup(name, line)
-                        .ok()
-                        .map(|(_, t)| crate::normalize_fn_sig(&self.cx.sub(&t), &self.cx.types)),
-                    Some(Type::Fn(..))
-                ) =>
-                {
-                    let (_, t) = self.lookup(name, line)?;
-                    match crate::normalize_fn_sig(&self.cx.sub(&t), &self.cx.types) {
-                        Type::Fn(_, ret) => *ret,
-                        _ => unreachable!("guarded above"),
-                    }
-                }
-                // A branch yielding a call to a function with `fn`-typed parameters
-                // (RFC-0023): the same three solving passes the emitting path runs,
-                // minus the lifting and the index.
-                _ if self.cx.higher_order.contains_key(name) => {
-                    let f = self.cx.higher_order[name];
-                    self.peek_ho(f, args, line)?
-                }
-                // A generic call in a branch: the same solve the emitting path
-                // does, so the join's destination is sized for the type the arm
-                // will actually produce.
-                _ if self.cx.generics.contains_key(name) => {
-                    let f = self.cx.generics[name];
-                    let declared: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
-                    let actual = self.arg_types(&declared, args, line)?;
-                    let (subst, _) = crate::solve_type_args(&f.type_params, &declared, &actual);
-                    ftypes::substitute(&f.ret, &subst)
-                }
-                // A user enum's variant constructor in a branch (`One(a)`). The
-                // fully APPLIED type, from the same shared rule `sum_ctor` uses
-                // when it emits — the bare enum name left a generic variant's
-                // payload a `Type::Param`, and a `match` on the result then bound
-                // it. An ambiguous name — two enums with one variant spelling — is
-                // a gap rather than a guess, exactly as `sum_ctor` treats it.
-                _ if self.cx.variants.contains_key(name) => {
-                    match self.applied_variant(name, args, line)? {
-                        Some(t) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a branch yielding the ambiguous variant `{name}`"),
-                                line,
-                            )
-                        }
-                    }
-                }
-                // RFC-0123 M3: a projection call as a receiver or in a branch
-                // answers its member's RAW declared result when that result
-                // keys concretely — the chain rule the checker's `chain_ty`
-                // promised every engine keeps. A generic result has no key
-                // without a substitution, and the checker refused it upstream.
-                _ if !args.is_empty()
-                    && !self.cx.sigs.contains_key(name)
-                    && self
-                        .cx
-                        .impls
-                        .iter()
-                        .any(|i| i.places.iter().any(|p| p.name == *name)) =>
-                {
-                    let inner = self.peek(&args[0], line)?;
-                    match vyrn_frontend::project::lookup_in(&self.cx.impls, &inner, name)
-                        .or_else(|| {
-                            vyrn_frontend::project::lookup_in(
-                                &self.cx.impls,
-                                &self.cx.resolve(&inner),
-                                name,
-                            )
-                        })
-                        .and_then(|f| ftypes::type_key(&f.ret).map(|_| f.ret.clone()))
-                    {
-                        Some(t) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a chain through the projection `{name}` on `{inner}`"),
-                                line,
-                            )
-                        }
-                    }
-                }
-                // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function
-                // is typed by that function's signature, exactly as `call` lowers
-                // it by routing to the same name.
+                // A call this backend WROTE: an implicitly dispatched method
+                // (RFC-0084), or a builtin whose implementation is a Vyrn
+                // function (RFC-0078 M4c). Both are answered by the callee's
+                // own signature, which is what `call` routes to when it emits.
                 _ => match vyrn_frontend::loader::routed_builtin(name)
                     .and_then(|rt| self.cx.sigs.get(rt))
                     .or_else(|| self.cx.sigs.get(name))
@@ -6739,43 +6317,12 @@ impl<'p> Fn_<'_, 'p> {
                     None => return unsupported(&format!("a branch yielding `{name}`"), line),
                 },
             },
-            // A lambda is whatever signature the position names; there is nothing
-            // else it could be typed by (RFC-0037).
-            Expr::Lambda { line, .. } => match self.expected_fn_sig() {
-                Some(t) => t,
-                None => return unsupported("a lambda with no expected function type", *line),
-            },
-            // `e?` in a branch (RFC-0005). The success half of the sum, which is
-            // what `try_` hands back. A `Fallible` receiver (RFC-0080 M3) is
-            // still a gap here: its success type is an ASSOCIATED type, and
-            // reading it needs the impl the emitting path resolves.
-            Expr::Try { expr, line } => {
-                let st = self.peek(expr, *line)?;
-                match self.sum_of(&st).as_deref() {
-                    Some(vs @ [_, one]) if ftypes::is_builtin_sum(vs) && one.payload.len() == 1 => {
-                        one.payload[0].clone()
-                    }
-                    _ => return unsupported(&format!("a branch yielding `?` on `{st}`"), *line),
-                }
+            other => {
+                return unsupported(
+                    &format!("a synthesized {}", crate::observe::kind_of(other)),
+                    line,
+                )
             }
-            // `Age?(n)` in a branch (RFC-0003) — an `Option` of the named type,
-            // the one type `try_construct` can produce.
-            Expr::TryConstruct { name, .. } => Type::option(Type::Named(name.clone())),
-            // `spawn f(a)` in a branch (RFC-0025) is `f(a)`'s type in a `Task`.
-            // Peeked through the call rather than off `sigs`, so a generic or
-            // higher-order callee is solved by the rows that already solve it.
-            Expr::Spawn { name, args, line } => Type::Task(Box::new(self.peek(
-                &Expr::Call {
-                    name: name.clone(),
-                    args: args.clone(),
-                    line: *line,
-                },
-                *line,
-            )?)),
-            // No catch-all, for the reason [`Fn_::expr`] has none: the arms above
-            // now cover `Expr`, so the `other => unsupported(..)` that used to
-            // sit here is dead. It was the audit's own measure — every variant
-            // it still caught was a legal program refused only in a branch.
         })
     }
 
@@ -7198,7 +6745,17 @@ impl<'p> Fn_<'_, 'p> {
         // one for `/`, `>>` and every comparison. `peek` is allowed to fail here:
         // "not obviously sized" is the answer the left operand already gave.
         let mut opty = lt.clone();
-        if n == Num::PLAIN {
+        // A LITERAL is not the sibling this rule means, and saying so is
+        // RFC-0125 §3 M5's one-reader slice: `peek` used to answer `Int` for
+        // every literal, which hid the distinction, and it answers the
+        // checker's own type now. `0 - eight` takes its width from `eight`, a
+        // sized VALUE. `c - 'a'` must not take one from `'a'`: a byte literal
+        // adapts to the position it is in, the checker types the whole
+        // expression `Int64`, and computing it at eight bits makes
+        // `'A' - 'a'` 224 where the other two engines say -32. The same is
+        // true of `b >= 'a'`, which is a signed 64-bit comparison in all three
+        // engines and would become an unsigned byte one here.
+        if n == Num::PLAIN && !matches!(rhs, Expr::Int(_) | Expr::Byte(_)) {
             if let Ok(rt) = self.peek(rhs, line) {
                 let rt = self.cx.resolve(&rt);
                 if let Some(rn) = Num::of(&rt).filter(|rn| *rn != Num::PLAIN) {
@@ -7341,34 +6898,6 @@ impl<'p> Fn_<'_, 'p> {
             _ => return None,
         };
         self.cx.sigs.contains_key(&e).then_some(e)
-    }
-
-    /// What one of RFC-0076 M7's generator-only builtins yields, or `None` if
-    /// `name` is not one of them (or there is no generator host at all).
-    ///
-    /// [`Fn_::gen_builtin`]'s type column, read by `peek` when one of these is a
-    /// BRANCH's value — M2l's rule that a builtin `call` lowers owes `peek` a row,
-    /// because an arm's value is typed by `peek` and the join's destination is sized
-    /// from it. The three structured builtins answer with their ENTRY's signature
-    /// rather than a type spelled twice.
-    fn gen_peek(&self, name: &str, args: &[Expr]) -> Option<Type> {
-        self.cx.gen?;
-        if let Some(e) = self.gen_entry(name, args) {
-            return Some(self.cx.sigs[&e].ret_ty.clone());
-        }
-        let code = || Type::Named("Code".to_string());
-        Some(match (name, args.len()) {
-            ("@codeSplice", 2) => code(),
-            ("@codeText", 1) => code(),
-            ("raw", 1) | ("rawAt", 4) if !self.user_claims(name) => code(),
-            ("render", 1) if !self.user_claims(name) => Type::Str,
-            (crate::GEN_REFLECT, 2) => Type::Unit,
-            (crate::GEN_NEXT_INT, 0) => Type::Int,
-            (crate::GEN_NEXT_STR, 0) => Type::Str,
-            ("listDir", 1) => gen_list_dir_ty(),
-            ("listDirKinds", 1) => gen_list_dir_ty(),
-            _ => return None,
-        })
     }
 
     /// The builtins that exist only while a generator runs (RFC-0076 M7), or `None`
@@ -9940,95 +9469,6 @@ impl<'p> Fn_<'_, 'p> {
             (Type::Param(_), LambdaBody::Block(_)) => Type::Unit,
             (t, _) => t.clone(),
         })
-    }
-
-    /// The return type of a call to a function with `fn`-typed parameters, WITHOUT
-    /// resolving its targets — which is what makes it usable from [`Fn_::peek`],
-    /// where nothing may be emitted and no index may be handed out.
-    ///
-    /// It runs the same three solving passes [`Fn_::ho_call`] does, in the same
-    /// order, and reads a target's return from the same two places
-    /// ([`Fn_::fn_arg_ret`]); what it skips is lifting and enqueueing. A wrong
-    /// answer here is a compile error rather than a miscompile, because `expr_as`
-    /// re-checks what the arm actually produced (M2b).
-    fn peek_ho(&mut self, f: &Function, args: &[Expr], line: usize) -> Result<Type, String> {
-        if f.params.len() != args.len() {
-            return unsupported(&format!("the call `{}` at this arity", f.name), line);
-        }
-        let generic = !f.type_params.is_empty();
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        for (i, p) in f.params.iter().enumerate() {
-            if matches!(p.ty, Type::Fn(..)) {
-                continue;
-            }
-            self.expect.push(p.ty.clone());
-            let t = self.peek(&args[i], line);
-            self.expect.pop();
-            let aty = self.cx.sub(&t?);
-            if generic {
-                crate::solve_param(&p.ty, &aty, &mut subst);
-            }
-        }
-        if generic {
-            for (i, p) in f.params.iter().enumerate() {
-                let Type::Fn(dptys, _) = &p.ty else { continue };
-                if let Some(tptys) = self.fn_arg_param_types(&args[i], line) {
-                    for (d, t) in dptys.iter().zip(&tptys) {
-                        crate::solve_param(d, t, &mut subst);
-                    }
-                }
-            }
-            for (i, p) in f.params.iter().enumerate() {
-                let Type::Fn(dptys, dret) = &p.ty else {
-                    continue;
-                };
-                let ptys: Vec<Type> = dptys
-                    .iter()
-                    .map(|t| ftypes::substitute(t, &subst))
-                    .collect();
-                let want = ftypes::substitute(dret, &subst);
-                let got = self.fn_arg_ret(&args[i], &ptys, &want, line)?;
-                crate::solve_param(dret, &got, &mut subst);
-            }
-        }
-        Ok(ftypes::substitute(&f.ret, &subst))
-    }
-
-    /// What a `fn`-typed argument's target returns, read rather than resolved.
-    fn fn_arg_ret(
-        &mut self,
-        arg: &Expr,
-        ptys: &[Type],
-        expected_ret: &Type,
-        line: usize,
-    ) -> Result<Type, String> {
-        match arg {
-            Expr::Lambda { params, body, line } => {
-                self.lambda_ret(params, body, ptys, expected_ret, *line)
-            }
-            Expr::Var { name, .. } => {
-                if let Some(bnd) = self.fn_binds.get(name) {
-                    return Ok(bnd.target.sig.ret_ty.clone());
-                }
-                if let Ok((_, ty)) = self.lookup(name, line) {
-                    return match crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types) {
-                        Type::Fn(_, ret) => Ok(*ret),
-                        _ => unsupported(&format!("`{name}` as a function value"), line),
-                    };
-                }
-                match self.cx.sigs.get(name) {
-                    Some(sig) => Ok(sig.ret_ty.clone()),
-                    None => unsupported(&format!("`{name}` as a function value"), line),
-                }
-            }
-            other => match self.fn_expr_sig(other, line)? {
-                Type::Fn(_, ret) => Ok(*ret),
-                _ => unsupported(
-                    &format!("a `fn`-typed argument that is {}", expr_name(other)),
-                    Expr::line(other),
-                ),
-            },
-        }
     }
 
     /// The DECLARED parameter types of a `fn`-typed argument's target, when the
@@ -13234,21 +12674,19 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
-                self.register_rel(key, Place::Slot(own), r);
+                self.register_rel(b, key, Place::Slot(own), r);
             }
         }
-        // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a
-        // `match` in a branch. `expr_as` re-checks every arm against it, so a wrong
-        // guess here is a compile error rather than a miscompile.
-        let want = self.match_ty(&sum, arms, line)?;
         // A block arm (RFC-0118) makes this a STATEMENT match: the merge
         // carries nothing, whatever the expression arms beside it compute is
         // dropped, and the checker's answer for the node is about a value the
-        // construct does not hand out.
+        // construct does not hand out. Every other match is one value, and the
+        // checker said which type it has — `expr_as` then coerces each arm's
+        // own shape into it.
         let want = if arms.iter().any(ArmRef::is_block) {
-            want
+            Type::Unit
         } else {
-            self.join_ty(key, want)
+            self.join_ty(key, line)?
         };
         let r = self.cx.repr(&want, line)?;
 

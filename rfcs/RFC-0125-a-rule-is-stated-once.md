@@ -9281,6 +9281,289 @@ Over the corpus the core states an answer at 55,874 stores: 2,724 release,
 53,137 stand down at the statement, and thirteen are neither — the twelve the
 `place at` rewrite now reaches through the alias pair, and `root = kw`.
 
+#### The one-reader slice (2026-09-06): an emitter reads a type, it does not derive one
+
+The eighth slice fixed the joins and left a census of every other place an
+emitter names a type from its operands. The largest row was `Fn_::peek`, the
+direct backend's second expression typer: twenty arms, every expression kind,
+and the note "M5's route deletes it wholesale". This is that deletion.
+
+**The accessor.** `vyrn_lower::core::node_ty(node)` is the checker's type for
+the expression at `node`, served the way `join_ty` already served a join's.
+The record behind both is one `Rc<checker::Recorded>` held in the core under
+`(the program's address, generator host, test host)` — the key the checker
+holds its own record under, for the checker's reasons. `core::decide(program)`
+is the ask: it stands down when the record held is already that program's, and
+makes one when it is not. The lowering calls `core::set_decided` with the
+record its own check made, unconditionally, because a program EXTENDED since
+the last lowering is the same address with different nodes in it and only the
+caller that re-checked it knows that.
+
+**Both emitters ask before they emit a byte.** `direct::compile` and `emit`
+call `decide`. Until this slice they read the core's joins and hoped a lowering
+had run over the same program: `vyrn build` had, and a generator host and the
+`serve` probe had not, so those two read another program's answers off
+colliding addresses. Nothing in the corpus showed it, and nothing had to — an
+emitter that asks is one line shorter than an emitter that hopes.
+
+**What `peek` is now.** Two lookups and a substitution:
+
+```rust
+let at = e as *const Expr as usize;
+match core::node_ty(at).or_else(|| core::node_ty(self.cx.plan.key_of(at))) {
+    Some(t) => self.cx.sub(&t),
+    None => self.peek_inner(e, line)?,
+}
+```
+
+The second lookup is the plan's own clone→original alias (RFC-0114 §26). This
+backend copies an argument list to specialize a higher-order call and copies a
+receiver to name an impl's method, and a copy's nodes have no record of their
+own. That map was built so a RELEASE row would survive the copy; a type
+survives it the same way, and the alias is registered where the clone is made,
+so there is one map and not two. Without it `streamunfold.vyrn`'s
+`map(take(unfold(0, naturals), 4), double)` refused to compile.
+
+**What is left of it.** `peek_inner` answers only for AST this backend BUILDS
+at an emit site: a local it named (`@rel`), a field read of one, an element
+read it desugared, a call it wrote to reach an impl, and a literal beside them.
+The checker never saw those nodes, so nothing it says can be disagreed with,
+and RFC-0101 §2.3 already assigns the class to the backend. Measured over
+`vyrn-cli`'s whole suite: 360 answers, all of them one of those five. A kind
+that is not one of them is a gap rather than a guess, and a guess is what the
+twenty arms made.
+
+**A `test` block was not being typed, and that is why the gap was found.**
+`vyrn test` and `vyrn bench` lift each body out into an ordinary `Function` and
+compile the lifted program. An ordinary function may not call `assert`,
+`assertEq` or `blackBox`, so this checker refused every one of them and
+recorded nothing for the nodes UNDER the refused call — the arguments included,
+which is where `assertEq(match hexDecode("4869") { .. }, "Hi")` keeps its
+`match`. Eight tests across eight suites failed on it, all with one wording:
+"no lowering for a join the checker did not type". The fix is the one GEN_HOST
+already is:
+`checker::set_test_host` states the context once, for the whole program, at the
+caller that did the lifting, and it only ever ENABLES a test-only name. The
+lifted program was never checked at all before this slice, so the refusal cost
+nothing until a reader wanted the record.
+
+**A record is put back where it was found.** The key is an ADDRESS and a
+`Program` is a local, so two built one after another by the same code land at
+the same address with the same shape — `vyrn-codegen`'s own tests do it in a
+loop, and `vyrn_frontend`'s generator-cache tests do it once per case. The
+first program's record was served to the second as if it were about the same
+nodes. `decide` gives back a guard: a record it MADE is put back the way it
+was found when the emit ends, and a record it only BORROWED — the lowering's,
+for this same program — is left alone, because the lowering's own reader
+outlives the emit.
+
+**The finding: a byte literal was fixing the width of the operation it was
+in.** Eighteen of the 174 recorded modules changed bytes, all of them one
+rule. This backend's operand width comes from EITHER operand — `0 - eight`
+computes in 32 bits because `eight` is an `Int32`, and taking the width from
+the left alone would answer differently for `/`, `>>` and every comparison.
+`peek` used to answer plain `Int` for every literal, so a byte literal never
+reached that rule. It answers the checker's own type now, and a byte literal's
+is `UInt8`.
+
+So `'A' - 'a'` was computed at eight bits and came out 224, where the
+interpreter and the textual backend both say -32 and the checker types the
+whole expression `Int64` — a three-way parity break on nine lines. `b >= 'a'`
+became an unsigned byte comparison where all three engines have a signed
+64-bit one; that one is the same ANSWER for every byte a `String` can hold,
+which is why the corpus never printed a difference and only the bytes moved.
+
+**Which was right.** The checker, about the literal: `'a'` IS a `UInt8`, and
+`let x: UInt8 = 'a'` and `let x: Int64 = 'a'` both check, because a literal
+adapts to the position it is in. The emitter's rule was wrong about what it
+meant by a sibling: the operand that fixes a width is a sized VALUE, not a
+literal, and a literal that adapts cannot be the thing another operand adapts
+TO. The rule says so now, and it is one `matches!` — the second copy of
+`binop_type` is still a second copy, and the census below still carries it.
+
+The pin is a `test` block in `examples/numbytes.vyrn`, which asserts `'A' -
+'a'` is -32 and `'A' >= 'a'` is false. It is green under both engines and it
+is red on the build that found it.
+
+**Zero bytes.** `VYRN_WASM_MANIFEST=check` is green on all 176 recorded
+modules and parity is 41 of 41. Nothing moved once the rule was corrected, which is the claim: the
+checker and this emitter agree about every type in the corpus, and the twenty
+arms were 715 lines of agreeing.
+
+**The second finding, and it is red: a `for` over an unnamed array literal.**
+`vyrn test site/app/docshell.vyrn` refuses on this branch, where it passes on
+the line this merged. The shape is two statements in one body:
+
+```vyrn
+fn mk(t: String) -> Array<String> { return [t.copy(), t.copy()] }
+fn main() -> Int64 {
+    for a in [mk("a"), mk("b")] { for s in a { print(s) } }
+    for a in [mk("c"), mk("d")] { for s in a { print(s) } }
+    return 0
+}
+```
+
+The loop's iterable is a TEMPORARY, so the statement owns it and releases it
+deep, and the deep walk frees an element's strings that the body's own walk
+already freed: the second statement traps `out of bounds memory access` at
+address -16, which is `free(0)` reading a header below a null buffer. It is
+the direct backend alone — the same program built natively prints `a a b b`.
+
+Neither half is this slice's. On the line this merged the FIRST statement
+alone already printed `a b b` — a silent wrong answer, one string short — and
+this slice makes that case right, because `peek` no longer guesses the
+temporary's element type. The two-statement case traps on that line too, in an
+ordinary `main`, so the defect is older than the slice. What the slice changed
+is who reaches it: a `test` body is checked now and lowers like ordinary code,
+and `docshell.vyrn` has two `for tree in [docsTree(..), guideTree(..)]` loops
+in one body. Before, an unchecked test body took a different route and missed
+it.
+
+So the row is open and it is named here rather than worked around: the release
+of a `for` statement's temporary must walk around the elements the body took,
+the way `DropKind::FreeArr` already makes it, and the emitter's downgrade
+(`direct.rs`, `Stmt::ForIn`) reads only that one kind. Every other gate in the
+table is green, including parity, the manifest and the residue ratchet, which
+is why this is a finding and not a revert: the corpus has no program of this
+shape.
+
+#### The class census after the slice (2026-09-06)
+
+Every site in either emitter that names a TYPE from operands, arms or branches
+rather than reading a recorded one. Line numbers are this commit's, after the
+core line merged in.
+
+| site | what it derives from | verdict |
+|---|---|---|
+| `direct.rs:6166` `peek` | nothing; reads the record, and the plan's alias for a clone | the rule, read once |
+| `direct.rs:6143` `join_ty` | nothing; reads the record, and refuses where it is silent | the rule, read once |
+| `direct.rs:6210` `peek_inner` | a local, a field, an element, a call, a literal | AST the checker never saw; it has no answer to disagree with |
+| `lib.rs:5026` `join_ty` | nothing; reads the record | the rule, read once |
+| `lib.rs:7344`, `lib.rs:7412` the arm fallback, `lib.rs:15162` `join_never` | the arms, where the record is silent | unreachable since `emit` asks; a deletion, not a disagreement |
+| `lib.rs:6903` `Expr::ArrayLit`, `direct.rs:11009` `array_lit` | the expectation, else `elems[0]` | the rule, and it cannot disagree |
+| `lib.rs:7011` `Expr::MapLit`, `direct.rs:13334` `map_lit` | the expectation, else the first value | the rule, and it cannot disagree |
+| `lib.rs:8036` `gen_try`, `direct.rs:12801` `try_` | the operand's own sum | one operand, so no merge |
+| `lib.rs:8181` `gen_binary_inner`, `direct.rs:6427` `binary_inner` | the operands | a second copy of `binop_type`; open |
+| `lib.rs:7134` `gen_struct_lit`, `direct.rs:5930` `applied_record` | the field values, for what the expectation leaves open | a second copy of the checker's solve; open |
+| `lib.rs:4962` `static_ty` | a binding, a field, an element, a call | the emitter's own; open |
+
+Two of the eighth slice's thirteen rows are gone — `peek`'s twenty arms and
+`match_ty` — and with them `peek_arm` and four helpers that existed only to
+feed those two (`concrete_app`, `gen_peek`, `peek_ho`, `fn_arg_ret`). Two rows
+read the record where they used to guess. Three cannot disagree, and the eighth
+slice's record says why an array literal is not a merge. Four are open, and
+they are the ones this slice did not take: the two second copies of a rule the
+frontend already states (`binop_type`, the record solve), the native emitter's
+own `static_ty`, and the arm fallback that is now unreachable rather than
+deleted.
+
+**Where the rest stops, and what would price it.** `static_ty` is the next one
+and it is not free: it is a `&self` PROBE that eight callers use to pick an
+impl, and `None` is its answer where it cannot see, so replacing its table with
+the record changes which impl a dispatch selects wherever the two disagree. The
+measurement is the one this slice used — a trace on the miss path, over
+`cargo test -p vyrn-cli`, which named `peek`'s residue in four shapes and cost
+one run. `binop_type` and the record solve are a different kind of move: the
+frontend states each rule once already, so the emitters should CALL it rather
+than restate it, and neither is reachable through a node type.
+
+**Lines.** `direct.rs` 715 removed, 94 added. `lib.rs` 3 added, none removed —
+the textual emitter reads the record at its joins already, and its own four
+rows are the ones above.
+
+**The two pinned censuses moved, and only in one column.** RFC-0126 §3's
+`wasm` column falls from 525 to 441 across 22 of the 33 constructors, and
+`checker` and `native` do not move at all. RFC-0127 §3.1's `wasm` column falls
+by 19: fourteen forms lose 21 mentions and two gain one each. Both are the same
+deletion counted twice — `peek` named a constructor and matched a form for
+every kind it answered for, and it answers for none of them now. The two gains
+are `Expr::Int` and `Expr::Byte`, which is the width rule above: a literal
+operand does not fix the width, and the rule has to name the two literal forms
+to say so. The structural census (`tests/refusals.rs`) and the coercion census
+(`tests/lowered.rs`) are unchanged, because neither counts an emitter's own
+typing.
+
+#### The `for` over an unnamed temporary: whose slot it is (2026-09-06)
+
+The red row above is closed, and the cause is not the one it named. The
+downgrade to `Rel::Buffers(vec![0])` is right, and so is `handed_over`: the
+loop variable of `for a in [mk("a"), mk("b")]` takes no element out, so the
+walk must release the elements and it does. Nothing frees an element twice.
+What the second statement released twice was the FIRST statement's SLOT.
+
+**The rule that was wrong.** M1 gave a statement its temporaries back. The body
+walker takes `Frame::mark` before each statement and `Frame::reset`s to it after
+one that left the scope as it found it. `Frame::alloc`'s own words are "a slot
+is a statement's unless the statement bound a name", and the walker tested
+exactly that: the scope's length. A NAME is not the only thing that outlives a
+statement. A `for` over an unnamed iterable, an `if let` over a temporary and a
+`match` over one each copy that value into a slot and register a release row for
+it, and WHERE that row runs is the core's answer. For the shape above the core
+says the function's exit. The statement bound no name, so the walker gave the
+slot back; the next `for` built its own array over it; and the two rows at the
+exit walked one slot. The second array's strings went back twice — the trap at
+address -16, which is `free` reading a header below a null buffer — and the
+first array's leaked. On the one-statement form the two rows are one and the
+program is right, which is why that form only ever printed a wrong answer.
+
+**Why the row sits at the function's exit, which is the finding under the
+finding.** `own` writes no row for this temporary at all. `movecheck` notes it,
+and notes it with the type `declared::type_of` answers, and that reading REFUSES
+an array literal on purpose: `[1, 2, 3]` is an `ArrayN` held inline, `[]`
+annotated `Array<T>` is three words around a buffer, and annotated
+`SmallArray<T, N>` is a header whose buffer is null until it spills. Three
+layouts, one syntax, and answering `Array` for all of them once freed a fixed
+array's stack storage. So the row carries no type, `fate` reads
+`Leak::NoRelease`, and `place_body` places nothing at the loop's own end. The
+kernel then finds the value still held at the function's exit and the placer
+files the row there. A `for` over a CALL — `for a in two("a", "b")` — is typed,
+takes `own`'s row at `Exit::Scrutinee`, and releases at the loop's own
+fall-through, which is why the corpus never showed this. It is this RFC's own
+class, one pass further down: a second copy of the typing rule, weaker than the
+checker's, deciding where a release goes. The core's answer is not WRONG — a
+release at the function's exit is late, not absent — so nothing here waits on
+it, and the row stays open beside `static_ty` and `binop_type` above.
+
+**The rule as stated now.** A registration raises a floor, once, in
+`register_rel`, and the walker resets to `mark.max(floor)`. A row leaves the
+list when it is released on a FALL-THROUGH exit — a block's, or a construct's
+own — because the path that carries on is the path that no longer holds the
+value. A release at a `return`, a `?`, a `break` or a `continue` is on a BRANCH:
+the fall-through still holds the value, so the floor stands. Both simpler
+readings were written and both are wrong. Clearing on every release gives a slot
+back on a path that still names it, which is this defect again with a `return`
+inside the loop. Keeping every row to the end of the body sums a statement's
+temporaries again, which is the thing M1 deleted: 250
+`print(match parseFloat64(..) { .. })` statements in one `main` then wanted
+10,048 bytes of a frame limited to 8,192, and `tests/numbers.rs` refused it.
+
+**The other forms take the same rule and needed no case of their own.** A
+`while` owns no temporary. An `if let` and a `match` own one, register it the
+same way, and read the same floor: they are covered because the floor is stated
+where every construct registers and not at any construct. Neither can reach the
+untyped shape today, because a scrutinee is a sum and an array literal is not
+one. The textual emitter never had the defect and takes no change — it gives
+each temporary a C variable of its own, so no statement can build over another's
+— and its release site is the one the core placed, unchanged.
+
+**What moved.** No recorded wasm byte. The manifest takes one new row,
+`looptemp.vyrn`, and no changed one: the corpus had no program of this shape,
+which is the sentence the red record ended on, read the other way.
+`tests/coretables.rs` moves one count from 552 to 554 — the new example's two
+`print(a[0])` calls are argument temporaries the declared reading cannot name,
+because the loop variable's type is the element type of an array literal, and
+the core states the rows the analysis does not. The surface census (RFC-0126
+§3), the form census (RFC-0127 §3.1), the structural census and the coercion
+census do not move: none of them counts a frame.
+
+**What pins it, and what cannot.** `examples/looptemp.vyrn` holds both shapes
+and prints `a a b b c d e f`. Three gates read it: the recorded fixture, parity
+on both routes, and the manifest. The wasm memory census cannot, and a row was
+written there and then taken out again — the leaked first array and the
+twice-freed second one cancel in `memory.buffer.byteLength`, so the row read
+steady with the defect in place. A measurement that measures nothing is what the
+census's own canary is there to catch, so it is not left in.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

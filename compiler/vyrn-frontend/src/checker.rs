@@ -145,9 +145,41 @@ pub fn set_gen_host(on: bool) {
 }
 
 /// Whether this thread is checking a generator host. Part of [`recorded`]'s
-/// key, because it is part of what a check decides.
-fn gen_host() -> bool {
+/// key, because it is part of what a check decides — and part of the key the
+/// lowering holds its own copy of the record under (`vyrn_lower::core::decide`).
+pub fn gen_host() -> bool {
     GEN_HOST.with(|g| g.get())
+}
+
+thread_local! {
+    /// Whether this thread is checking a TEST HOST — the program `vyrn test`
+    /// and `vyrn bench` compile, whose functions are the `test` and `bench`
+    /// bodies lifted out and given names (RFC-0125 §3 M5, the one-reader
+    /// slice).
+    ///
+    /// The same shape as [`gen_host`] and for the same reason. A lifted body
+    /// is an ordinary `Function`, so this checker read `assert`, `assertEq`
+    /// and `blackBox` in it as ordinary code and refused them — "only
+    /// available inside a `test` block" — and every node UNDER the refused
+    /// call went unrecorded, the arguments included. The emitter has its own
+    /// lowering for all three and emitted a correct module anyway; what the
+    /// refusal cost was the record.
+    ///
+    /// So the context is stated once, for the whole program, by the caller
+    /// that did the lifting. It only ever ENABLES a test-only name.
+    static TEST_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark this thread as checking a test host, or stop. Set by the `vyrn test`
+/// and `vyrn bench` routes around the compile of the program they lift.
+pub fn set_test_host(on: bool) {
+    TEST_HOST.with(|t| t.set(on));
+}
+
+/// Whether this thread is checking a test host. Part of [`recorded`]'s key,
+/// with [`gen_host`], for that key's reason.
+pub fn test_host() -> bool {
+    TEST_HOST.with(|t| t.get())
 }
 
 /// Whether a body is checked as generation code: its own `gen fn` marker, or a
@@ -1955,11 +1987,13 @@ thread_local! {
     /// whole proof that the address is a sound key, and it is written down at
     /// [`crate::own::Memo::open`].
     static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// `(program address, generator host, the record)`. The second field is
-    /// part of the key because it is part of the answer: the same module
-    /// checked as a generator host types `lex`, `Code` and `Token`, and checked
-    /// as ordinary code records `<type error>` where they stand.
-    static HELD: RefCell<Option<(usize, bool, std::rc::Rc<Recorded>)>> =
+    /// `(program address, generator host, test host, the record)`. The two
+    /// flags are part of the key because they are part of the answer: the same
+    /// module checked as a generator host types `lex`, `Code` and `Token`, and
+    /// checked as ordinary code records `<type error>` where they stand — and
+    /// the same is true of `assert` under the test host.
+    #[allow(clippy::type_complexity)]
+    static HELD: RefCell<Option<(usize, bool, bool, std::rc::Rc<Recorded>)>> =
         const { RefCell::new(None) };
 }
 
@@ -1979,7 +2013,7 @@ pub(crate) fn hold_close() {
 fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
     let key = program as *const Program as usize;
     if HOLDING.with(|h| h.get()) == key {
-        HELD.with(|h| *h.borrow_mut() = Some((key, gen_host(), made)));
+        HELD.with(|h| *h.borrow_mut() = Some((key, gen_host(), test_host(), made)));
     }
 }
 
@@ -1999,8 +2033,8 @@ pub fn recorded(program: &Program) -> std::rc::Rc<Recorded> {
     let held = HELD.with(|h| {
         h.borrow()
             .as_ref()
-            .filter(|(k, g, _)| *k == key && *g == gen_host())
-            .map(|(_, _, r)| r.clone())
+            .filter(|(k, g, t, _)| *k == key && *g == gen_host() && *t == test_host())
+            .map(|(_, _, _, r)| r.clone())
     });
     if let Some(r) = held {
         return r;
@@ -6850,7 +6884,7 @@ impl<'a> Checker<'a> {
         // `test` body. In ordinary code they are a checker error steering the
         // programmer to the production tools (validated types / `Result`).
         if name == "assert" || name == "assertEq" {
-            if !*self.in_test.borrow() {
+            if !*self.in_test.borrow() && !test_host() {
                 return Err(cerr!(
                     line,
                     "`{name}` is only available inside a `test` block — in ordinary \
@@ -6912,7 +6946,7 @@ impl<'a> Checker<'a> {
         // and its result can't be constant-folded. Legal ONLY inside a `bench` or a
         // `test` body (same steering rule/wording style as `assert`).
         if name == "blackBox" {
-            if !*self.in_test.borrow() && !*self.in_bench.borrow() {
+            if !*self.in_test.borrow() && !*self.in_bench.borrow() && !test_host() {
                 return Err(cerr!(
                     line,
                     "`blackBox` is only available inside a `bench` or `test` block — \

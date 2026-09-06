@@ -4085,38 +4085,124 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
     static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
-    /// [`checker::Recorded::joins`] for the program last lowered on this
-    /// thread — see [`join_ty`].
-    static JOINS: std::cell::RefCell<std::collections::HashMap<usize, Type>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    /// What the checker decided about a program, under `(its address, whether
+    /// it was checked as a generator host, whether as a test host)` — the key
+    /// [`vyrn_frontend::checker::recorded`] uses, for its reasons. Held as the
+    /// `Rc` the checker made, so serving it costs a refcount rather than a copy
+    /// of a map with a row per node.
+    #[allow(clippy::type_complexity)]
+    static DECIDED: std::cell::RefCell<
+        Option<(Key, std::rc::Rc<vyrn_frontend::checker::Recorded>)>,
+    > = const { std::cell::RefCell::new(None) };
 }
 
-/// Hand the emitters the checker's type for every join — RFC-0125 §3 M5.
+/// What the checker decided about `program`, held for the emitters to read by
+/// node — RFC-0125 §3 M5.
 ///
-/// Called by [`crate::lower_with`] with what the checker just recorded, so
-/// the map is the program's and not an instance's: the types are the ones
-/// the checker WROTE, with a generic body's parameters still spelled as
-/// parameters. A reader inside a monomorphized body substitutes its own
-/// instantiation in, exactly as it does for every other type it is handed.
-pub fn set_joins(joins: &std::collections::HashMap<usize, Type>) {
-    JOINS.with(|j| j.borrow_mut().clone_from(joins));
+/// Every route that reaches an emitter calls this first, and the lowering
+/// calls it in place of asking the checker itself, so one record serves the
+/// lowering and both backends. The types in it are the ones the checker
+/// WROTE, with a generic body's parameters still spelled as parameters; a
+/// reader inside a monomorphized body substitutes its own instantiation in,
+/// exactly as it does for every other type it is handed.
+///
+/// The held record is the last program's, so an emitter that walks a DIFFERENT
+/// program makes its own here rather than reading somebody else's answers off
+/// colliding addresses. That is what this is for: `direct::compile` is reached
+/// from `vyrn build` with the lowering's record already in place and from a
+/// generator host, a probe or a test with another program's, and only the key
+/// can tell those apart — see [`Decided`] for the half of that the key alone
+/// cannot do.
+#[must_use = "the record is held only while the guard is alive"]
+pub fn decide(program: &Program) -> Decided {
+    let key = key_of(program);
+    if DECIDED.with(|d| d.borrow().as_ref().is_some_and(|(k, _)| *k == key)) {
+        return Decided(None);
+    }
+    let made = vyrn_frontend::checker::recorded(program);
+    let prev = DECIDED.with(|d| d.borrow_mut().replace((key, made)));
+    Decided(Some(prev))
+}
+
+/// What [`decide`] gives back: the right to read the record, for as long as
+/// the emitter holds it.
+///
+/// A guard and not a `set`, because the key is an ADDRESS and a `Program` is
+/// a local. Two programs built one after another by the same code land at the
+/// same address with the same shape — `vyrn-codegen`'s own tests do it in a
+/// loop — and a record left behind by the first is served to the second as if
+/// it were about the same nodes. So a record this made is put back the way it
+/// was found. A record it only BORROWED (the lowering's, for this same
+/// program) is left alone: the lowering's own reader outlives the emit.
+pub struct Decided(Option<Option<(Key, std::rc::Rc<vyrn_frontend::checker::Recorded>)>>);
+
+impl Drop for Decided {
+    fn drop(&mut self) {
+        if let Some(prev) = self.0.take() {
+            DECIDED.with(|d| *d.borrow_mut() = prev);
+        }
+    }
+}
+
+/// What a held record belongs to: the program, and the two contexts a check of
+/// it depends on (`vyrn_frontend::checker::gen_host` and `test_host`).
+type Key = (usize, bool, bool);
+
+fn key_of(program: &Program) -> Key {
+    (
+        program as *const Program as usize,
+        vyrn_frontend::checker::gen_host(),
+        vyrn_frontend::checker::test_host(),
+    )
+}
+
+/// Hold `made` as the record for `program`.
+///
+/// [`crate::lower_with`] calls this with the record its own check just made,
+/// unconditionally: a program the caller EXTENDED since the last lowering is
+/// the same address with different nodes in it, and only the caller that
+/// checked it again knows that. [`decide`] is the other direction — an
+/// emitter reached with no lowering behind it — and it stands down when the
+/// record held is already this program's.
+pub fn set_decided(program: &Program, made: &std::rc::Rc<vyrn_frontend::checker::Recorded>) {
+    let key = key_of(program);
+    DECIDED.with(|d| *d.borrow_mut() = Some((key, made.clone())));
+}
+
+/// The checker's type for the expression at `node`.
+///
+/// The two compiled backends each derived this themselves — the textual one
+/// from the operands at every kind of node, the direct one in `Fn_::peek`'s
+/// twenty arms — which is a second statement of the rule the checker states
+/// when it types the node. The two can disagree, and did: an arm can only
+/// report the type it happens to have PRODUCED, so `Array<String>` in one
+/// arm and `["z"]` in the other are the same type in two shapes, and an
+/// emitter that reads one of them feeds its merge the other.
+///
+/// `None` for a node the checker never typed. Two things are that: a node of
+/// a program no lowering ran over on this thread (`VYRN_NO_PLACER=1`, or a
+/// host that never linked this crate), and an expression an EMITTER built at
+/// an emit site, which the checker never saw and cannot have an opinion
+/// about. A reader stands down to what it did before in both cases.
+pub fn node_ty(node: usize) -> Option<Type> {
+    DECIDED.with(|d| {
+        d.borrow()
+            .as_ref()
+            .and_then(|(_, r)| r.node_types.get(&node).cloned())
+    })
 }
 
 /// The checker's type for the `match` or `if` expression at `node`.
 ///
-/// The two compiled backends used to derive a join's type from its ARMS —
-/// the last arm that answered, or the first — which is a second statement
-/// of a rule the checker states. It is the rule that decides which value a
-/// merge holds, and an arm can only report the type it happens to have
-/// produced: `Array<String>` in one arm and `["z"]` in the other are the
-/// same type in two shapes, and an emitter that reads one of them feeds its
-/// merge the other.
-///
-/// `None` when no lowering has run on this thread — `VYRN_NO_PLACER=1`, or
-/// a host that never linked this crate — and a reader falls back to what it
-/// did before, as every other reader of the core does.
+/// The join subset of [`node_ty`], separated by the checker because a join is
+/// where the disagreement above became a miscompile: a merge holds ONE value
+/// and the arms are two producers of it.
 pub fn join_ty(node: usize) -> Option<Type> {
-    JOINS.with(|j| j.borrow().get(&node).cloned())
+    DECIDED.with(|d| {
+        d.borrow()
+            .as_ref()
+            .and_then(|(_, r)| r.joins.get(&node).cloned())
+    })
 }
 
 /// RFC-0125 §3 M3, the deletion-preparation slice: what an emitter reads off
