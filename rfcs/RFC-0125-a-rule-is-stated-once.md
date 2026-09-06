@@ -5051,9 +5051,38 @@ refuses, and `blackBox` is refused outside a `bench` or a `test` block. Both
 were unit tests of a closure rather than of an emitted program, and both
 closures keep their own witnesses where they are computed.
 
-`own.rs` now states one table: `arg_drops`, and only as the fallback for the
-one node above. Everything else in it is `Fate`, `Leak` and the report behind
-`vyrn why --memory`.
+**What `own.rs` is now, and why `why --memory` stays in it (2026-09-06).**
+
+4,545 lines at the store slice, 4,451 here; 3,169 of code and 1,282 of tests.
+One table is left, and it is the fallback above. What holds the rest up is
+three things, and none of them is a table:
+
+  - `Owned` — the TYPE table. `owns_heap`, `release_kind`, `must_use`,
+    `linear_kind`, `self_referring`. Every pass asks it, the core included
+    (`Builder::owns` is three of its rows). Roughly 1,000 lines, and it is not
+    a placement row at all.
+  - `Emit` and `Place` — the walk that writes a `BindingNote` per `let` and the
+    walk that orders the releases the plan still places. Roughly 1,000 lines.
+  - `Fate`, `Leak` and `BindingNote` — the report behind `vyrn why --memory`.
+
+**The decision, once: `why --memory` cannot move to the kernel's refusals and
+the placer's rows, and the reason is not the report.** `Fate` is an INPUT to
+the core. `Builder::fate_owned` reads it to decide whether a NAMED binding is
+this frame's — `Reclaimed`, `Moved`, `Dropped` and `Discharged` say yes,
+`Static` and every other `Leaked` say no, and `NoRelease { ty: "unknown" }`
+says "ask the type". `Builder::takes_scrutinee` reads the LINE off
+`Leak::Aliased` and `Fate::Moved` to tell a give inside a construct from a move
+after it. Three more sites read `Leak::Hole`, `Leak::Borrowed` and
+`Leak::Region`. Six readings in the core, none of them a report.
+
+So the question the milestone asked — should the kernel's refusals plus the
+placer's rows answer `why --memory` — has the answer NO, and it is the wrong
+question. The kernel refuses where a value is not reclaimed, which is the SITE;
+the report prints the REASON, and the reason is what the core reads to decide
+ownership in the first place. Porting the report would leave `Fate` behind for
+the core anyway. What would close it is the core stating a named binding's
+ownership from its own body, the way it now states an argument's — and that is
+the same reading the argument slice took, one binding form over.
 
 ### M4 — the runtime in Vyrn
 
