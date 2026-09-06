@@ -6061,6 +6061,157 @@ pointed at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
 
+**The safety slice (2026-09-06): a test that asks one pass whether a program
+is accepted.** The form slice above found a unit test that pinned
+`for x in consume r.xs` as COMPILING. It does not, and it has not since the
+kernel came in. That was the third time a single-pass pin stated something the
+compiler does not do, and the first two — the store slice's and the obligation
+slice's — were found the same way, by moving the pins. Moving a pin is not a
+method. This slice makes the wrong pin impossible to write.
+
+**Why the pin could be wrong at all.** `vyrn-frontend` has no dependencies, on
+purpose. The kernel lives one crate above it and reaches it through four
+`OnceLock` slots that `vyrn_lower::install` fills. Nothing in the front end's
+own tests calls `install`, so inside that crate `movecheck::refusals` runs the
+checker and asks an empty slot. Its silence is the CHECKER's silence. Seven
+ownership rules are the kernel's alone, so silence and acceptance are two
+different answers, and every assertion that read the first as the second stated
+a second, weaker rule.
+
+**The census.** Every test in `vyrn-frontend` (unit tests in `src/*.rs` and
+`tests/*.rs`) and in `vyrn-lsp` that reads a verdict, by the door it reads it
+through. 1,294 tests in all; 1,093 read no verdict at all.
+
+| door | what it can answer | tests | class | what happens to it |
+|---|---|---|---|---|
+| `movecheck::check`, read as ACCEPTED | nothing: the pass is silent | 26 (36 assertions) | b | moved |
+| `movecheck::check`, read as REFUSED | the sentence the reader gets | 16 | a | stays |
+| `movecheck::ownership`, `owning_sites` | placement rows and facts | 65 | c | stays, and asserts no verdict |
+| `checker::check_accum`, `parser::parse`, `lexer::lex` | a type rule, a syntax rule | 39 | a | stays |
+| `diagnostics`, `analyze`, `check`, read as ACCEPTED | the checker's silence | 43 | a subject, b reading | stays, and is swept |
+| `diagnostics`, `analyze`, `check`, read as REFUSED | the sentence the reader gets | 37 | a | stays |
+| `vyrn-lsp`'s unit tests | — | 0 | — | none reads a verdict |
+| `vyrn-lsp`'s `lsp_e2e.rs` | the whole compiler | 3 | — | it spawns the binary, which installs the kernel |
+
+**Why a REFUSAL through one pass is not the same defect.** `movecheck::refusals`
+merges the two passes by one rule: where the checker spoke, its sentence stands,
+at its line, in its words. So a checker refusal is always in the list a reader
+gets, and a test that pins one pins what the compiler says. The kernel can add a
+sentence at another line; it cannot take this one away. Acceptance has no such
+guarantee, and that is the whole asymmetry.
+
+**The 36 acceptance assertions, asked of the whole compiler.**
+`refusals.rs`'s `the_programs_the_passs_unit_tests_read_as_accepted` holds one
+row per program and runs `vyrn check` on each. Thirteen of the 26 tests were
+acceptance and nothing else, so they left `movecheck.rs`; the other thirteen
+kept their refusal half and lost the "and the fix compiles" line under it.
+
+**One claim changed, and it is the fourth of its kind.**
+`a_lender_forwarded_through_an_aggregate_is_still_marked_lending` asserted that
+its program compiles. It does not:
+
+```
+`@borrow` may not be returned — it is read out of `xs[..]`, a place that owns it
+```
+
+`pick` returns `if true { x } else { "" }`, an arm that yields a borrow of the
+container the loop does not own. This is row 17's other half, priced in the form
+slice above: the core does not carry the exit through an arm, so the value
+reaches the kernel as a store into a temporary the reader never wrote. The row
+records the sentence the compiler gives. The test's OTHER half stays in
+`movecheck.rs`, because it asks the plan — `calls_in` must see a lender
+through an aggregate — and the plan is built for any program that type-checks.
+
+**The first two, checked.** The store slice moved four rules' pins to
+`compiler/vyrn-cli/tests/stores.rs` and the obligation slice moved fifteen to
+`compiler/vyrn-cli/tests/mustuse.rs`. Both suites are green (15 and 6 tests):
+every program they pin still earns the sentence they record.
+
+**The guard: the door has no acceptance answer in it.** `movecheck::check`
+returned `Result<(), String>`, and `Ok(())` is what every wrong pin was written
+against. It has no caller outside this file's own tests — the pipeline uses
+`check_accum` — so the answer could simply stop existing. `movecheck::refusal`
+returns the refusal as a `String` and PANICS where the pass is silent, naming
+the rule and where acceptance belongs. A test that wants "this program compiles"
+now gets a failure at the assertion that wants it, with the reason, and cannot
+be written another way. `movecheck.rs`'s own
+`this_pass_has_no_acceptance_answer` pins the guard.
+
+**Why that mechanism and not the other two.**
+
+- **Not a flag on a partial answer.** `movecheck::refusals` could mark its
+  answer partial when no kernel is installed. It would also mark it partial for
+  `VYRN_NO_PLACER=1` and for the play crate, which are hosts that ASK for the
+  checker alone, and a `cfg(test)` guard around it reaches unit tests in
+  `src/*.rs` and not the integration tests in `tests/*.rs`. The condition is
+  right and the place is wrong.
+- **Not a grep.** A census pin over the front end's test sources fails on a new
+  caller, not on a wrong claim, and it needs an allow-list that grows with every
+  legitimate use. Deleting the value costs eleven lines and needs no list.
+- **Not "make the front end's tests link the kernel".** It is the biggest change
+  and the one the crate is built to refuse: `vyrn-frontend` reads no one, which
+  is why every other crate can read it.
+
+**The other three doors, and what closes them instead.** `diagnostics`,
+`analyze` and `check` also answer inside `vyrn-frontend`, and 43 tests read a
+clean answer from one of them on the way to a symbol, a schema, a hover or a
+type. None of those subjects is ownership, and the value they read is a program
+they need rather than a verdict they pin, so the assertion may stay. What could
+not stay is the blind spot: no reader in the checkout ran those programs with
+the kernel. `testsweep` already lifts Vyrn programs out of Rust literals and
+checks each one twice, with the kernel and without it, and it read one
+directory. It reads five now — `vyrn-cli/tests`, `vyrn-frontend/tests`,
+`vyrn-frontend/src`, `vyrn-lsp/tests` and `vyrn-lsp/src` — which is **465
+programs from 127 sources, against 169 from 71.** One program disagrees, and it
+is the one the row above names. The needle for it is `@borrow`: the core mints
+that name and no program contains it, so a refusal that quotes it is the
+kernel's alone.
+
+**The lines.**
+
+| file | before | after |
+|---|---|---|
+| `compiler/vyrn-frontend/src/movecheck.rs` | 7,998 | 7,762 |
+| `compiler/vyrn-cli/tests/refusals.rs` | 2,110 | 2,426 |
+| `compiler/vyrn-cli/tests/testsweep.rs` | 294 | 344 |
+
+**The structural census.** 584 / 78 / 2,139 / 73 / 3,751 / 1,137 over 7,762
+lines, against 584 / 78 / 2,139 / 73 / 3,730 / 1,394 over 7,998. Only two kinds
+move: the tests kind falls 257 for the thirteen tests and the thirty-six
+assertions that left, and the shared kind rises 21, which is the door's new doc
+comment saying why it has no acceptance answer. No rule moved, so the kernel,
+checker, rows and menu kinds are what they were, and RFC-0127's form census does
+not move either.
+
+#### Gates (2026-09-06, the safety slice)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --check`, all three manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 589 passed, 75 ignored — up 1 for the moved pins' one row-per-program test |
+| `kernel` `--ignored` | 1, 45 s |
+| `coretables` `--ignored` | 1, 36 s |
+| `typed` `--ignored` | 1, 97 s |
+| `effects` `--ignored` | 2, 103 s |
+| `fixtures` `--ignored` | 1, 41 s |
+| `vyrn-frontend` | 1,182 — down 12: thirteen acceptance-only tests left, and the guard's own pin arrived |
+| the workspace less `vyrn-cli` | 1,358 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own manifest | 3 |
+| `memory` `--test-threads=1` | 10, 13 s |
+| `parity` `--ignored`, release | 41 of 41, 227 s |
+| the residue ratchet | 1, 187 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 141 s, 465 programs from 127 sources |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
