@@ -1,0 +1,80 @@
+// The two counting probes (RFC-0116): `tally` on a key, `tallyBytes` on the
+// bytes of one.
+//
+// `m.tally(k, n)` is insert-or-add in ONE probe — a miss stores the key and
+// starts the count at `n`, a hit adds through the slot the probe found.
+// `m.tallyBytes(w, n)` is the same map and the same probe for a key that is
+// still a window of bytes: the compare happens where the window lies, so a
+// hit builds no String, validates nothing and allocates nothing, and only a
+// miss pays for the key.
+//
+// The buffer is rewritten between calls, which is how a counting loop uses
+// one, and the last call hands it bytes that are not a String.
+//
+//   $ vyrn run examples/tallybytes.vyrn
+
+fn main() -> Int64 {
+    // `tally` on a String key: two misses, then a hit through the same slot.
+    let mut words: Map<String, Int64> = [:]
+    words.tally("ash", 2)
+    words.tally("elm", 5)
+    words.tally("ash", 3)
+    let ash = match words["ash"] {
+        Some(v) => v,
+        None => 0,
+    }
+    print("tally \{words.length} ash \{ash}")
+
+    // `tallyBytes` over every two-byte window of "ababcab", through ONE
+    // buffer: ab three times, ba, bc and ca once each.
+    let text = bytes("ababcab")
+    let mut pairs: Map<String, Int64> = [:]
+    let mut w: Array<UInt8> = [0, 0]
+    let mut i = 0
+    while i + 2 <= text.length {
+        w[0] = text[i]
+        w[1] = text[i + 1]
+        pairs.tallyBytes(w, 1)
+        i = i + 1
+    }
+    print("pairs \{pairs.length}")
+    for k in pairs.keys() {
+        let n = match pairs[k] {
+            Some(v) => v,
+            None => 0,
+        }
+        print("\{k} \{n}")
+    }
+
+    // A key that is not one byte per character: the miss builds and validates
+    // it, the hit compares the window against the stored bytes.
+    let mut runes: Map<String, Int64> = [:]
+    let rune = bytes("é")
+    runes.tallyBytes(rune, 1)
+    runes.tallyBytes(rune, 40)
+    let e = match runes["é"] {
+        Some(v) => v,
+        None => 0,
+    }
+    print("runes \{runes.length} e \{e}")
+
+    // The two agree: `tallyBytes` of a String's bytes counts into the slot
+    // `tally` of that String made.
+    let mut both: Map<String, Int64> = [:]
+    both.tally("ash", 1)
+    let ashBytes = bytes("ash")
+    both.tallyBytes(ashBytes, 6)
+    let sum = match both["ash"] {
+        Some(v) => v,
+        None => 0,
+    }
+    print("both \{both.length} ash \{sum}")
+
+    // The miss path's one failure, and it traps: a key must be a String, and
+    // the caller who wants the reason calls `stringFromBytes` and reads the
+    // `Err`.
+    let bad: Array<UInt8> = [255, 254]
+    both.tallyBytes(bad, 1)
+    print("unreachable")
+    return 0
+}

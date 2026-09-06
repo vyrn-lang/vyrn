@@ -410,7 +410,11 @@ pub fn lower_with<'a>(
     ownership: &vyrn_frontend::own::Ownership,
 ) -> Lowered<'a> {
     let rec_span = vyrn_frontend::prof::phase("lower: checker::record");
-    let recorded = checker::record(program);
+    // RFC-0125 §3 M3, the one check: what the checker decided about every node,
+    // from the analysis's own check where it made one. This used to check the
+    // whole linked program a second time, after the analysis had just checked
+    // it — one program, two checks, in one analysis.
+    let recorded = checker::recorded(program);
     drop(rec_span);
     // RFC-0125 §3 M5: the emitters read a join's type here instead of
     // reconciling one from the arms.

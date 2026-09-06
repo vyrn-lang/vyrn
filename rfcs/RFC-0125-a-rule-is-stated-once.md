@@ -2257,65 +2257,55 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 
 | kind | lines | share |
 |---|---|---|
-| a rule the kernel now gives | 1,009 | 10 per cent |
-| a rule only the checker gives | 723 | 7 per cent |
-| placement rows for the engines | 2,365 | 23 per cent |
-| a fix menu | 81 | 1 per cent |
-| shared machinery | 3,668 | 36 per cent |
-| tests | 2,187 | 22 per cent |
-| **the file** | **10,055** | |
-| placement rows for the engines | 2,373 | 24 per cent |
-| a fix menu | 81 | 1 per cent |
-| shared machinery | 3,657 | 37 per cent |
-| tests | 2,172 | 22 per cent |
-| **the file** | **10,015** | |
-| **the file** | **10,069** | |
+| a rule the kernel now gives | 916 | 9 per cent |
+| a rule only the checker gives | 725 | 7 per cent |
+| placement rows for the engines | 2,139 | 22 per cent |
+| a fix menu | 73 | 1 per cent |
+| shared machinery | 3,671 | 38 per cent |
+| tests | 2,092 | 22 per cent |
+| **the file** | **9,616** | |
 
 | section | lines | kind | what it is |
 |---|---|---|---|
 | `pub struct OwningSite` | 129 | shared machinery | the module's own statement of the rules, and the two recorded measurements (RFC-0089 rule 1's sites, RFC-0092's projections) |
 | `pub enum Gone` | 134 | placement rows for the engines | why a binding does not hold its value at its block's end, and the row `own.rs` reads it from |
 | `pub enum ArgVerdict` | 24 | placement rows for the engines | what a callee does with the temporary at a call-argument position |
-| `pub struct ExitEv` | 218 | placement rows for the engines | the event records: exits, reads, consuming matches, arm payloads, stores, Rule N edges, place stores |
-| `pub fn facts(program: &Program) -> Facts` | 139 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
-| `enum Want` | 35 | shared machinery | what a run is for, and one run's outputs |
-| `fn arg_verdict` | 94 | placement rows for the engines | the verdict for one argument temporary, read at a position instead of at a binding |
+| `pub struct ExitEv` | 116 | placement rows for the engines | the event records: exits, reads, consuming matches, stores, Rule N edges, place stores |
+| `pub fn facts(program: &Program) -> Facts` | 104 | placement rows for the engines | the two facts out of one walk, and the lender and retention post-passes over them |
+| `enum Want` | 28 | shared machinery | what a run is for, and one run's outputs |
+| `pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>>` | 163 | placement rows for the engines | the capability of a position, the producer screens, and the verdict for one argument temporary — read at a position instead of at a binding, by this pass and by the core alike |
 | `fn let_id(s: &Stmt) -> usize` | 52 | placement rows for the engines | the key of a `let`, the lending builtins, and the projection names |
-| `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 27 | shared machinery | the entry points a caller uses |
-| `fn run(program: &Program, want: Want) -> Run` | 348 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
+| `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 388 | shared machinery | the entry points a caller uses |
+| `fn run(program: &Program, want: Want) -> Run` | 312 | shared machinery | the one walk: the capability tables, every body, the drains and the stamps |
 | `pub fn check(program: &Program) -> Result<(), String>` | 10 | shared machinery | the historical string shim |
-| `struct MoveCheck<'a>` | 158 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
+| `struct MoveCheck<'a>` | 147 | shared machinery | the pass's state: the scope stacks, the sinks, the recorded rows |
 | `enum Borrow` | 48 | a rule the kernel now gives | what a borrow is, in words — `core::BorrowKind::what` is this sentence |
 | `fn fixes(&self, root: &str, path: &str) -> Vec<String>` | 24 | a fix menu | the named ways out of a borrow error |
-| `enum TakeForm` | 18 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
-| `fn nothing_to_take(self) -> String` | 13 | a rule the kernel now gives | `consume` with nothing to take (row 09) |
-| `fn drop_it(self) -> String` | 8 | a fix menu | the `drop` a take's menu offers |
-| `fn root_of(path: &str) -> &str` | 211 | shared machinery | the path algebra and the consumed table: overlap, reach, revival |
+| `enum TakeForm` | 19 | a rule the kernel now gives | which form wrote the `consume`, and how a refusal names it |
+| `fn root_of(path: &str) -> &str` | 194 | shared machinery | the path algebra and the consumed table: overlap, reach, revival |
 | `impl MoveCheck<'_>` | 89 | shared machinery | one body, with its parameters and its return type |
 | `fn enter(&self)` | 35 | shared machinery | the three scope stacks, read as one environment |
-| `fn wrote_place(&self, path: &str, line: usize, consumed: &mut Consumed)` | 37 | a rule the kernel now gives | a write to a place ends every alias that reads out of it (row 05) |
 | `fn place_key(&self, e: &Expr) -> usize` | 20 | placement rows for the engines | the key a row is written under |
-| `fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize` | 492 | placement rows for the engines | the recording: temporaries, store events, branches, reads, exits, takes, holes, place stores, hand-overs at a `return` |
+| `fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize` | 431 | placement rows for the engines | the recording: temporaries, store events, branches, reads, exits, takes, holes, place stores, hand-overs at a `return` |
 | `fn is_bound_name(&self, e: &Expr) -> bool` | 18 | placement rows for the engines | whether a `let` names storage somebody else owns, for reclamation |
 | `fn names_a_place(&self, value: &Expr) -> Option<&'static str>` | 76 | a rule the kernel now gives | whether a value reads a place that owns it — the kernel's alias table |
 | `fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String>` | 36 | a fix menu | the ways out that exist in THIS function |
-| `fn is_module_state(&self, name: &str) -> bool` | 72 | shared machinery | module state, the borrow table, and the type reading |
+| `fn is_module_state(&self, name: &str) -> bool` | 88 | shared machinery | module state, the borrow table, and the type reading |
 | `fn sinks(&self, name: &str, i: usize) -> bool` | 47 | a rule the kernel now gives | a rebuilding builtin takes its receiver, and the write-back statement excepted (row 26) |
-| `fn store` | 113 | a rule the kernel now gives | rule 1's move and rule 2's refusal at a store (rows 01, 02, 03, 27, 34) |
+| `fn store` | 112 | a rule the kernel now gives | rule 1's move and rule 2's refusal at a store (rows 01, 02, 03, 27, 34) |
 | `fn borrow_from(&self, value: &Expr) -> Option<Borrow>` | 68 | a rule the kernel now gives | the borrow status a `let` of a value gives its binding |
-| `fn payload_binding` | 60 | shared machinery | what a pattern's binders name, and whether an iterable is a place |
-| `fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic>` | 79 | a rule the kernel now gives | rule 1 asked of a path: is the storage still all there (rows 04, 06, 07) |
-| `fn check_take` | 57 | a rule the kernel now gives | a take's refusals: an element, and nothing to take — `core::take_prefix` states both (rows 08, 09) |
+| `fn payload_binding` | 73 | shared machinery | what a pattern's binders name, and whether an iterable is a place |
+| `fn check_use(&self, path: &str, line: usize, consumed: &Consumed) -> Result<(), Diagnostic>` | 45 | a rule the kernel now gives | rule 1 asked of a path: is the storage still all there (rows 04, 06, 07) |
+| `fn check_take` | 48 | a rule the kernel now gives | a take's refusals: an element, and nothing to take — `core::take_prefix` states both (rows 08, 09) |
 | `fn check_handover(&self, arg: &Expr, callee: &str, line: usize) -> Result<(), Diagnostic>` | 123 | a rule the kernel now gives | rule 2 at the third exit: a borrow may not be consumed (rows 11, 12, 13, 14) |
 | `fn refuse_projected_arg` | 34 | a rule the kernel now gives | the refusal a projected argument to a `consume` parameter gets |
 | `fn arm_binder(&self, name: &str) -> bool` | 24 | shared machinery | an arm's binders, and whether a callee keeps a `fn` value |
 | `fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic>` | 132 | a rule the kernel now gives | rule 3: a return is owned (rows 15, 16, 18, 19, 28) |
 | `fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic` | 47 | a rule the kernel now gives | the one exit every returned borrow leaves by, the exported function's own sentence with it (row 17) |
 | `fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize)` | 27 | placement rows for the engines | the retention and hand-over records the call graph is closed over |
-| `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 527 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
+| `fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize)` | 525 | placement rows for the engines | the argument-temporary row: its producer, its type and its release kind |
 | `fn ctor_valued(&self, e: &Expr) -> bool` | 57 | placement rows for the engines | what an expression builds: a variant, a String, a concatenation |
-| `fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String])` | 84 | placement rows for the engines | an arm that yields a place, and what naming one costs |
-| `fn value_cannot_alias(&self, e: &Expr, root: &str) -> bool` | 119 | placement rows for the engines | Rule N's edge guard, the mention guard, and what a call may forward |
+| `fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String])` | 111 | placement rows for the engines | an arm that yields a place, and what naming one costs |
 | `fn carries_param_storage(&self, e: &Expr) -> bool` | 171 | placement rows for the engines | the escape screen: storage flow rather than mention |
 | `fn lends(&self)` | 34 | placement rows for the engines | the lending record, and the lend a wrapper hides |
 | `fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 54 | a rule the kernel now gives | the first borrow a returned expression yields |
@@ -2323,22 +2313,21 @@ the same rows (`cargo test -p vyrn-cli --test refusals -- --ignored
 | `fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)>` | 77 | placement rows for the engines | the same question through a constructor, to record a lend and never to refuse one |
 | `fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>)` | 40 | shared machinery | RFC-0089 rule 1's instrument |
 | `fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool` | 32 | shared machinery | a block, and whether it diverges |
-| `fn stmt` | 890 | shared machinery | the walk over statements: it calls the refusal helpers and writes the plan's rows in the same arm |
+| `fn stmt` | 786 | shared machinery | the walk over statements: it calls the refusal helpers and writes the plan's rows in the same arm |
 | `fn capture_site(&self, name: &str, line: usize)` | 75 | placement rows for the engines | a lambda's captures, recorded for the enclosing block |
 | `fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), Diagnostic>` | 35 | a rule only the checker gives | a `modify` borrow is exclusive (row 23) |
 | `fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 43 | a rule only the checker gives | a closure that outlives the call may not capture a borrow (row 24) |
 | `fn check_loop_reuse` | 39 | a rule the kernel now gives | rule 1 across a back edge (row 25) |
-| `fn expr` | 1,039 | shared machinery | the walk over expressions: the same traversal does both jobs |
-| `fn reject_consume_global` | 36 | a rule the kernel now gives | module state may not be taken (rows 10, 12, 15, 29) |
+| `fn expr` | 835 | shared machinery | the walk over expressions: the same traversal does both jobs |
 | `pub fn mentions_place(e: &Expr, base: &str) -> bool` | 95 | shared machinery | whether a stored value mentions the place it is stored into |
-| `mod linear` | 645 | a rule only the checker gives | the must-use obligation: acquired once, disposed exactly once (rows 30, 31) |
+| `mod linear` | 647 | a rule only the checker gives | the must-use obligation: acquired once, disposed exactly once (rows 30, 31) |
 | `fn store_path(e: &Expr) -> Option<String>` | 27 | shared machinery | the place an expression names, as the store arms spell it |
 | `fn sinks(decl: &Declared, name: &str, i: usize) -> bool` | 24 | a rule the kernel now gives | whether a builtin's parameter takes its argument for good |
 | `fn reads(e: &Expr) -> Vec<String>` | 141 | shared machinery | the names an expression reads, and the calls in it |
 | `pub fn element_path(e: &Expr) -> Option<(String, String)>` | 84 | shared machinery | the place spellings every rule above compares |
 | `fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic` | 13 | a fix menu | one diagnostic with its menu of fixes |
-| `fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>)` | 56 | shared machinery | the names a block declares, and a pattern's binders |
-| `mod tests` | 2,169 | tests | the pass's own unit tests |
+| `fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>)` | 55 | shared machinery | the names a block declares, and a pattern's binders |
+| `mod tests` | 2092 | tests | the pass's own unit tests |
 
 Four things the structural census says, and the third is the finding.
 
@@ -4665,6 +4654,130 @@ No blessed snapshot moved, and the structural census moves by one row: shared
 machinery 3,768 to 3,983, which is the cache and its fingerprint inside
 `movecheck.rs`.
 
+**The residue slice (2026-09-06): a keystroke paid for a generation it already
+had, and what is left after that is the placer.**
+The memo slice left four numbers above the editor before the kernel, and named
+what was left as the two generator programs a load runs on the way to the one
+the editor holds. It asked the next slice to find out why a keystroke re-runs
+two generators. The answer is that the MEASUREMENT re-ran them. The editor does
+not.
+
+**The instrument first, because the last two findings here were both about the
+instrument.** `VYRN_BUILD_PROFILE=1` armed `prof`'s phase table in every crate
+the editor calls, and nothing printed it: the printer runs at the end of a
+command, and an editor's session is one command. The server prints the table at
+the end of ONE analysis now, which is the unit a keystroke is, and the test
+lets the server's stderr through when the flag is set. `VYRN_NO_MEMO=1` joins
+`VYRN_NO_PLACER=1`, so the three columns of the table below are one build and
+one sitting rather than two commits.
+
+**Re-measured on the memo slice's own instrument.** The same test, the same
+four files, medians of three, all three columns in one sitting:
+
+| file | before the kernel | with the kernel | with the memo | what the memo slice read |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 151 ms | 1,106 ms | 359 ms | 128 / 990 / 305 |
+| site/app/docs.vyrn | 364 ms | 1,125 ms | 535 ms | 323 / 1,045 / 476 |
+| site/app/guide.vyrn | 115 ms | 353 ms | 182 ms | 96 / 285 / 158 |
+| site/app/bench.vyrn | 28 ms | 121 ms | 69 ms | 27 / 97 / 57 |
+
+The shape holds. This machine is a little slower and was shared with other
+gates, which is why the tables below say medians of five.
+
+**The first residue was the instrument, and it was the largest item in the
+measurement.** `docs.vyrn`'s load spent 261 ms over its three loads. Eight of
+those milliseconds read and parsed; the rest RAN `apiDocs` over the whole of
+`std`, once per keystroke. Every client in `lsp_e2e` spawns the server with
+`VYRN_NO_GEN_CACHE=1`, and for a correctness reason: the RFC-0033 fixtures are
+written and rewritten under the same paths, so a synthesized module another run
+left in the shared cache would answer for the one this run wrote. A measurement
+is the one client that must not. An editor's cache is ON — participating in it
+is why the server has `gen_cache_get` at all — so the keystroke measurement now
+has a cache of its OWN, in a directory under the system temp rather than the
+user's `~/.vyrn/cache/gen`.
+
+**What a cache hit decides is more than the generation.** `run_generator`
+defers the generator's re-read and its check to the MISS path, so on a hit the
+loader never loads the generator as a program. The `check`, `synthesize`,
+`movecheck` and `floor` rows a keystroke showed twice leave the phase table
+entirely. The kernel never judged those two programs in the first place:
+`refusals` returns a comptime program's diagnostics before it runs the placer,
+and has since the accumulation slice. A generator a tool holds is judged when
+it is compiled, not when its importer is edited.
+
+`docs.vyrn` falls from 535 ms to 363 and `guide.vyrn` from 182 to 151. The
+column each is read against falls with it, so this closes no gap. It stops the
+measurement reporting a cost that only the measurement pays.
+
+**What a keystroke costs now**, medians of five alternating runs, with the
+cache an editor has:
+
+| file | before the kernel | with the kernel | with the memo | above the first column |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 125 ms | 993 ms | 376 ms | 251 ms |
+| site/app/docs.vyrn | 126 ms | 767 ms | 363 ms | 237 ms |
+| site/app/guide.vyrn | 65 ms | 404 ms | 151 ms | 86 ms |
+| site/app/bench.vyrn | 27 ms | 148 ms | 75 ms | 48 ms |
+
+**Where the rest of it is, phase by phase.** One analysis — the last of the
+ten the test sends — under `VYRN_BUILD_PROFILE=1`. The keystroke column is
+higher than the table above because the server writes a table per analysis:
+
+| file | keystroke | load | `lower_with` | `core::build` | `build_outside` | the placer |
+|---|---|---|---|---|---|---|
+| chart.vyrn | 499 ms | 50 ms | 64 ms | 139 ms, 122 bodies | 35 ms | 253 ms |
+| docs.vyrn | 313 ms | 42 ms | 43 ms | 99 ms, 69 bodies | 14 ms | 169 ms |
+| guide.vyrn | 200 ms | 48 ms | 42 ms | 41 ms, 60 bodies | 15 ms | 107 ms |
+| bench.vyrn | 99 ms | 12 ms | 12 ms | 19 ms, 102 bodies | 13 ms | 47 ms |
+
+The residue is the placer, and inside it the core it builds. There is no memo
+of a pure function left to take: `lower_with` is `checker::record` and the
+lowering, and both answer about the program the keystroke just changed.
+
+**Which bodies the placer still builds, and this is the finding.** A body is
+built when the memo cannot key it or may not serve it. Timed one at a time and
+split by where the body is declared:
+
+| file | the root's bodies | their cost | an imported module's | theirs |
+|---|---|---|---|---|
+| bench.vyrn | 99 | 12.2 ms | 3 | 1.0 ms |
+| guide.vyrn | 39 | 7.4 ms | 21 | 15.8 ms |
+| chart.vyrn | 70 | 20.0 ms | 52 | 114.7 ms |
+| docs.vyrn | 18 | 4.5 ms | 51 | 91.8 ms |
+
+The ROOT's bodies have no key — the root module is the one a keystroke edits —
+and they are CHEAP: 20 ms of chart's 139 and 4.5 ms of docs's 99. Keying them
+by their own text would buy about a tenth of the gap.
+
+The expensive ones are the imported bodies condition 2 forbids: the placer
+wrote a row for them, so serving them would silently drop that row. On
+`chart.vyrn` that is 52 bodies and 115 ms, twenty-eight of them in
+`std/vyx.vyrn`.
+
+**And condition 2 cannot be lifted by recording the row.** A placement is
+addressed by NODE. `Node::id()` is the address of the `Expr` or the `Stmt`, and
+every table `place_frames` writes is keyed by one — `own.plan.arg_drops`, its
+`owners`, `receiver_frees`, `receiver_holes`, the `Placed` edge and arm rows,
+and the release rows themselves. A keystroke re-parses the root and clones
+every other module out of the parse cache, so last keystroke's addresses name
+nothing this keystroke owns. The memo records "every field of the kernel's own
+refusal and nothing an address could reach" for exactly that reason, and the
+same reason stops an entry growing to hold the rows. What would serve those
+bodies is not a bigger memo. It is a program whose nodes survive an edit, and
+that is a different thing to build.
+
+**So the target is not reached, and this is by how much and where.** The target
+was the editor before the kernel. `bench.vyrn` stands 48 ms above it,
+`guide.vyrn` 86 ms, `docs.vyrn` 237 ms and `chart.vyrn` 251 ms. Of `chart`'s
+253 ms of placer, 115 ms is the imported bodies above, 20 ms is the root's, 64
+ms is the lowering the placer needs before it can name an instance, and 35 ms
+is `build_outside`. A slice that wants the first column has to make a body
+cheaper to build or a node stable across an edit; it has no third door.
+
+**The two pins held.** `VYRN_WASM_MANIFEST=check` is green on `wasmhash`, so
+no emitted byte moved — this slice touches the editor and its measurement and
+nothing an engine reads. `a_rule_that_left_the_checker_is_still_shown_in_the_editor`
+passes, which is where the editor is pinned against what `vyrn check` prints.
 **The residue-of-the-licence slice (2026-09-06): what the accumulation record
 left was four rules, and three of them were a wording.** The accumulation
 slice made the two passes one list and named what was still in the way: row
@@ -4832,6 +4945,272 @@ picks them up again, through the lift `testsweep` already does.
 |---|---|
 | `cargo fmt --all --check`, and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests | clean |
 | `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 561 passed, 75 ignored |
+| `kernel` `--ignored` | 1, 99 s |
+| `coretables` `--ignored` | 1, 88 s |
+| `typed` `--ignored` | 1, 208 s |
+| `effects` `--ignored` | 2, 314 s |
+| `fixtures` `--ignored` | 1, 81 s |
+| `vyrn-frontend` | 1,249 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,425 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored — where `lsp_e2e` runs |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 20 s |
+| `parity` `--ignored`, release | 41 of 41, 302 s |
+| the residue ratchet | 1, 235 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 98 s, no byte moved |
+| `genwasm` release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 130 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files, 18 s |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 blocks and 154 over 25 files |
+
+No blessed snapshot moved and no census row moved: the change is 21 lines in
+`vyrn-lsp`, which is not shared machinery and is counted by nothing.
+
+**The rows slice (2026-09-06): the rows a served body skips have no reader
+here, which is the rule the facts already stand on.**
+The residue slice left the placer over IMPORTED bodies as the whole of what is
+above the target, and named the door: the memo may not serve a body the placer
+wrote a row for, because serving it drops the row, and the row cannot be
+recorded because it is addressed by the AST node's ADDRESS and a keystroke
+re-parses. It said the answer is a program whose nodes survive an edit.
+
+**It is not, and the reason is beside the answer that slice already used.** A
+served body contributes no frame to the core's facts, and `augment` skips the
+second build for it — because the readers of the facts are the two compiled
+backends and the interpreter's arm rows, and a host that armed the memo runs
+none of them. The ROWS are the same shape of thing. Every table `place_frames`
+writes is keyed by a node — `own.plan.arg_drops` and its `owners`,
+`receiver_frees`, `receiver_holes`, the `Placed` edge and arm tables, and the
+release rows — and each of those is read by the emitters, plus, inside one
+analysis, by a later `core::build` of the SAME function. That last one is the
+only coupling, and the key closes it: a node belongs to one function, so the
+bodies a served body's missing rows could reach are its own other instances,
+which carry the same module and the same content hash and are therefore served
+or built together. Nothing else in an armed host reads them. `memory_notes`
+reads the walk's own notes, which the placer does not write, and the placer
+runs LAST in `own::analyze`, so no rule after it sees a row.
+
+So one rule covers the facts and the rows, and it is stated once, in
+`movecheck::reuse_judgments`, which is where the host contract already was: an
+armed host gets refusals and nothing else. `inert` is deleted, and every body
+with a key is recorded.
+
+**Bodies the placer builds per keystroke.** The count is the claim, and it
+lands exactly on the residue slice's split: what is left is the ROOT's own
+bodies, which have no key because the root is the module a keystroke edits.
+
+| file | before | after | the root's own |
+|---|---|---|---|
+| site/app/chart.vyrn | 122 | 70 | 70 |
+| site/app/docs.vyrn | 69 | 18 | 18 |
+| site/app/guide.vyrn | 60 | 39 | 39 |
+| site/app/bench.vyrn | 102 | 99 | 99 |
+
+`a_placed_row_does_not_stop_a_body_being_served` pins it on a program small
+enough to read. A string interpolation injects `std/text` (RFC-0078 M2b), whose
+`decodeUtf8` holds an array at its `return` and whose `test` block leaves a
+payload binder unmoved: two imported bodies the placer writes a row for. The
+root is then edited twice. Each edit re-judged those two; it re-judges none,
+and serves all 86 the cold run judged.
+
+**What a keystroke costs now**, the same test and the same four files, medians
+of five alternating runs, all three columns in one sitting. This machine reads
+the first column lower than the residue slice's did and the third about the
+same, so the columns are read against each other and not across records:
+
+| file | before the kernel | with the kernel | with the memo | above the first column |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 113 ms | 1,041 ms | 211 ms | 98 ms — was 251 |
+| site/app/docs.vyrn | 113 ms | 820 ms | 172 ms | 58 ms — was 237 |
+| site/app/guide.vyrn | 58 ms | 300 ms | 101 ms | 42 ms — was 86 |
+| site/app/bench.vyrn | 25 ms | 123 ms | 61 ms | 36 ms — was 48 |
+
+**The target is not reached, and this is what is left.** One analysis — the
+last of the ten the test sends — under `VYRN_BUILD_PROFILE=1`, beside the same
+table the residue slice took:
+
+| file | `lower_with` | `core::build` | `build_outside` | `kernel::placement` | the placer |
+|---|---|---|---|---|---|
+| chart.vyrn | 43 ms — was 64 | 22 ms, 70 bodies — was 143, 122 | 10 ms — was 35 | 0.8 ms | 79 ms — was 253 |
+| docs.vyrn | 40 ms | 5 ms, 18 bodies | 3 ms | 0.2 ms | 51 ms |
+| guide.vyrn | 33 ms | 15 ms, 39 bodies | 7 ms | 1.3 ms | 59 ms |
+| bench.vyrn | 15 ms | 22 ms, 99 bodies | 17 ms | 3.0 ms | 59 ms |
+
+The largest item is no longer the core. It is `placer: lower_with`, and inside
+it `checker::record`, which is `check_accum_full` over the LINKED program — a
+whole-program type check the keystroke runs a SECOND time, the first being the
+memoized `check_accum_reusing` the analysis already ran. It is a pure function
+of the program and the program moved, so no memo keyed by its input serves it.
+Serving it per MODULE is what would, and that is the identity question again:
+`Recorded` is keyed by node, so the half that is reused has to be the same
+allocation.
+
+**Why the identity door was not opened, and where it is.** It was the door for
+keeping the rows, and the rows turned out to need nobody. It is also not a
+memo. The parse cache in `loader.rs`'s `visit` hands out `parsed.clone()`
+because `Module.program` is owned, `link` MOVES every module's declarations
+into one `Program`, and `resolve_aliases` then REWRITES the bodies of each
+module against the whole module set — the flat namespace's name counts include
+the root's declarations. Lending one allocation to two roots carries one root's
+renames into the other's program, which is a wrong program in the editor rather
+than a slow one. Sharing without that hazard means `Rc<Function>` — or a
+parse-time node id — through `Program`, which every crate reads. That is the
+price of the remaining `checker::record`, and it is the price RFC-0125's own
+core already names: a program whose nodes survive an edit.
+
+**The two pins held.** `VYRN_WASM_MANIFEST=check` is green on `wasmhash`, so no
+emitted byte moved — the deleted condition is read by no engine, which is the
+whole argument.
+`a_rule_that_left_the_checker_is_still_shown_in_the_editor` passes, which is
+where the editor is pinned against what `vyrn check` prints.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` and
+`TEMP` pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 562 passed, 75 ignored |
+| `kernel` `--ignored` | 1, 53 s |
+| `coretables` `--ignored` | 1, 56 s |
+| `typed` `--ignored` | 1, 94 s |
+| `effects` `--ignored` | 2, 119 s |
+| `fixtures` `--ignored` | 1, 46 s |
+| `vyrn-frontend` | 1,249 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,425 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored — where `lsp_e2e` runs |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 30 s |
+| `parity` `--ignored`, release | 41 of 41, 334 s |
+| the residue ratchet | 1, 226 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 36 s, no byte moved |
+| `genwasm` release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 38 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 blocks and 154 over 25 files |
+
+No blessed snapshot moved, and the structural census moves by one row: shared
+machinery 3,738 to 3,750, which is the rule's own statement in `movecheck.rs`.
+
+**The one-check slice (2026-09-06): the analysis checks the program, and the
+lowering reads what that check decided.**
+The rows slice left one item above the target and named it: `checker::record`,
+which is `check_accum_full` over the LINKED program, run inside the lowering the
+placer runs — a SECOND whole-program type check, after the analysis's own
+`check_accum_reusing`. One program, one analysis, two checks.
+
+**The two are halves of one pass.** The checker decides a node's type while it
+checks the node; `record` turns a sink on and asks for the same pass again to
+watch it. So the pass is asked once and both halves are kept.
+`recording_check` is that pass. `check_accum_recording` is the analysis's own
+entry to it — the diagnostics and the inferred-`let` table as before, with the
+record held beside them — and `checker::recorded` serves the record to
+`lower_with`. The key is the program's address and the generator-host flag, held
+for the span `own::Memo` already borrows the program over, which is the memo's
+own proof that an address is a sound key, reused word for word.
+
+**Reuse and recording are alternatives, not companions.** A reused body is one
+the pass does not walk, so it records nothing for it, and a record with holes in
+it is not a record. There is no third option while a keystroke re-parses: the
+record is keyed by node address, and an address does not survive an edit. So the
+caller picks, and it picks on whether the record has a reader —
+`own::placer_installed`. A host with no placer lowers nothing, keeps the memo,
+and is the column this is measured against.
+
+**The command line keeps one ask of its own, for a stated reason.**
+`check_and_synthesize` checks and then EXTENDS the program with the JSON codecs
+and the `where` constructors it synthesizes, so a record from its check would be
+missing exactly the bodies it added. There the placer's `lower_with` pays and
+the engine's is served: `vyrn check` runs two whole-program records where it ran
+three. `vyrn build` runs two and hits none, because the native emitter reads the
+core's facts rather than calling `lower` — it never had a second reader to
+serve.
+
+**What a keystroke costs**, the same test and the same four files, medians of
+five alternating runs, all three columns in one sitting:
+
+| file | before the kernel | with the kernel | with the memo | above the first column |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 106 ms | 919 ms | 207 ms | 101 ms — was 98 |
+| site/app/docs.vyrn | 113 ms | 734 ms | 147 ms | 34 ms — was 58 |
+| site/app/guide.vyrn | 61 ms | 263 ms | 88 ms | 27 ms — was 42 |
+| site/app/bench.vyrn | 24 ms | 121 ms | 58 ms | 34 ms — was 36 |
+
+**Two later sittings were discarded, and the control is why.** The first column
+runs the same server on the same files with the kernel stood aside, so it
+measures the machine and nothing else. It read 106, 113, 61 and 24 ms in the
+sitting above; in the two sittings after it, it read 133, 128, 111 and 36, and
+then 165, 132, 106 and 46. A control that moves by half is a machine under other
+load, and a table read off it says nothing about this change. The phase table
+below is the evidence that does not depend on the machine being quiet, because
+it is a split of one analysis rather than a difference between two.
+
+**The phase table**, one analysis under `VYRN_BUILD_PROFILE=1`, before this
+slice and after it:
+
+| file | `check: the analysis's own` | `lower: checker::record` | `placer: lower_with` | the placer |
+|---|---|---|---|---|
+| chart.vyrn | 14.6 → 28.4 ms | 25.3 → 0.0 ms | 34.3 → 10.4 ms | 61.6 → 38.6 ms |
+| docs.vyrn | 11.5 → 24.2 ms | 23.7 → 0.0 ms | 32.4 → 11.1 ms | 42.1 → 23.7 ms |
+| guide.vyrn | 5.7 → 12.0 ms | 10.3 → 0.0 ms | 13.7 → 6.5 ms | 25.8 → 20.2 ms |
+| bench.vyrn | 2.7 → 4.2 ms | 4.4 → 0.0 ms | 6.2 → 2.1 ms | 27.4 → 22.9 ms |
+
+The second check is gone: `lower: checker::record` is a lookup. The check and
+the placer together fall from 76 to 67 ms on `chart.vyrn`, from 54 to 48 on
+`docs.vyrn` and from 30 to 27 on `bench.vyrn`, and hold at 32 on `guide.vyrn`.
+
+**What the one check costs, which is the next door and the same door.** The
+analysis's check RISES — 14.6 to 28.4 ms on `chart.vyrn` — and the rise is
+exactly the reuse it gave up: a full check walks the imported bodies the memo
+served, and it records them. That difference, 13.8, 12.7, 6.3 and 1.5 ms, is the
+price of a record that has to be complete, and it is the identity question the
+rows slice already wrote down: a record that survives an edit for an unchanged
+module needs node keys that survive an edit. Nothing else buys it back.
+
+**What else is left.** `lower: build` is 9.8, 10.6, 6.2 and 2.0 ms, and it
+builds a row for EVERY instance of the linked program — the ones the placer then
+serves included. The rows slice made the placer skip a served body; the lowering
+that hands it the instance list does not skip it, so those rows are built and
+dropped. That is a nearer door than the identity one, and it needs the serve
+decision to be readable before the walk rather than after it. After that the
+placer is `core::build` and `build_outside` over the ROOT's own bodies, which is
+what the residue slice said it would be.
+
+**The pin.** `the_analysiss_own_check_records_what_the_lowering_reads` holds the
+two halves together: what the analysis's check holds is what a check of its own
+would make, and a record is held for ONE program — a second program borrowed at
+the same time, and the same program with no analysis open, each make their own.
+`VYRN_WASM_MANIFEST=check` is green on `wasmhash`, so no emitted byte moved, and
+`a_rule_that_left_the_checker_is_still_shown_in_the_editor` passes, which is
+where the editor is pinned against what `vyrn check` prints.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` and
+`TEMP` pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 562 passed, 75 ignored |
+| `kernel` `--ignored` | 1, 29 s |
+| `coretables` `--ignored` | 1, 30 s |
+| `typed` `--ignored` | 1, 104 s |
+| `effects` `--ignored` | 2, 101 s |
+| `fixtures` `--ignored` | 1, 27 s |
+| `vyrn-frontend` | 1,250 — the pin is the new row |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,426 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored — where `lsp_e2e` runs |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 16 s |
+| `parity` `--ignored`, release | 41 of 41, 260 s |
+| the residue ratchet | 1, 294 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 40 s, no byte moved |
+| `genwasm` release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 44 s |
 | `cargo test -p vyrn-cli`, no filter | 564 passed, no failure |
 | `kernel` `--ignored` | 1, 116 s |
 | `coretables` `--ignored` | 1, 147 s |
@@ -4852,6 +5231,9 @@ picks them up again, through the lift `testsweep` already does.
 | the site export | 82 routes and 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 blocks and 154 over 25 files |
 
+No blessed snapshot moved and no census row moved: the change is 174 lines
+across `checker.rs`, `own.rs`, `symbols.rs` and `vyrn-lower`'s `lib.rs`, none of
+which the structural census counts.
 One blessed output moved and it is `examples/expected/a1_afterjoin.stderr`,
 which is row 07's decision. RFC-0127's form census moves by two rows —
 `Expr::Match` and `Expr::IfExpr`, one mention each — because the arms
@@ -5120,6 +5502,269 @@ above.
 not have this property either, for the reason it is not a judgment: the rule
 is over DECLARATIONS, and a first build that states no argument drop asks the
 kernel nothing.
+
+**The store word, and why the fixpoint was not needed (2026-09-06).**
+
+The record above offers two shapes and asks for a measurement of each. The
+first one wins, and the measurement of the second says why.
+
+**`old` decides a refusal and never a state.** That is the reading the record
+above did not have. At a store the kernel writes `Own::Held` — or `Static`,
+where the value is a literal — into the place whatever `old` says, because a
+place written to holds what was written to it. `Old` is read at exactly two
+lines, and both of them refuse. So a first build that refuses nothing at a
+store leaves the judgment at every LATER statement exactly where a first build
+reading a filled table left it, and the residue the reverted slice lost was
+never the store row: it was the body the store refusal made the placer skip
+whole.
+
+`Old::Pending` is that word. The first build states it at every store it does
+not already answer, the kernel reports the store it finds a held place at
+(`MissingKind::Store`), the placer writes the row, and the second build states
+`Released` there. Over the corpus the derived answer is the analysis's at
+every site but one, and the ratchet, the parity harness, the memory suite and
+the fixtures do not move.
+
+**The fixpoint converges in one round, everywhere.** Measured, on eight
+programs and 2,900 body judgments: a second build-judge-place round after the
+first adds ZERO store rows in every one. It cannot add any, for the reason
+above — the input it would iterate on does not feed the state it would change
+— and the round costs what a build and a judgment cost: `vyrn check
+graphql.vyrn` goes from 0.74 s to 1.04 s, forty per cent, for nothing. The
+fixpoint is the right shape for an input that moves the judgment. This one
+does not.
+
+**The rule, in four lines.** A store releases what its place holds:
+
+  - unless the value HANDS THE PLACE BACK — `xs = xs.push(v)`,
+    `s.dense.push(i)`, `xs[i] = xs[j]` — which the core reads off the
+    statement, with the String concatenation exception both compiled backends
+    already spell `fresh_str`;
+  - unless the place owns no heap, which the core reads off the type;
+  - at a NAME, exactly while the path has not made it `Gone` — a `Static`
+    place holds a literal and the emitters free it, so the first `out = out +
+    x` of every builder owes the release;
+  - at a FIELD, ELEMENT or KEY, over the ALIAS table's root and not the
+    place's, because RFC-0082 reads `t.xs` into a temporary before storing
+    through it: module state, a `modify` parameter, or a root this frame owns
+    and has not made `Gone`.
+
+The first two are the CORE's — they are properties of the statement. The last
+two are the KERNEL's — they are properties of the path.
+
+**One site parts, and the kernel is right there.** `root = kw` in
+`std/graphql`'s `gqlParseQuery`. `let mut root = "query"` binds a literal and
+the store displaces it, which is the shape `std/cli`'s `let mut out = "";
+out = out + x` has and the analysis releases at. The analysis refuses this one
+because `root` is taken between the `let` and the store — on two paths that
+`return`, so the take cannot have run where the store does. The kernel judges
+per path and sees the literal still held; the fold judges per binding and
+cannot. Counted and pinned at one, the way `receiver_malloc`'s direction is,
+so a second site is read rather than absorbed. The ratchet is clean either
+way: `graphql.vyrn` does not run that path.
+
+The corpus pin is two-way, and it is a rule and not a number. A plan row the
+core answers `false` for must be one the core STANDS DOWN at, and the two
+stand-down reasons are the two above; `Facts::stood_down` carries them so the
+test can ask. 41,636 rows over the corpus are stand-downs, twelve are the
+`place at` rewrite's own statements, and none is unexplained.
+
+**The fourth table is the core's, and the folds are gone (2026-09-06).**
+
+`fold_store_owned`, the `place_stores` fold beside it, `store_owned_at` and
+`store_owned` are deleted, and with them `movecheck`'s `global_stores`,
+`place_stores`, `PlaceStore` and `note_place_store` — a producer for a table
+nobody read. Both compiled backends ask `store_fact` and take `false` where it
+answers nothing. `own.rs` loses 413 lines and `movecheck.rs` 111.
+
+**The twelve stopped being twelve.** RFC-0091 M2's `place at` rewrite builds
+the store statements a user container's `c[h] = v` becomes; the checker walked
+those and the core walks the SOURCE statement, so the plan's row and the
+core's answer stood on different nodes and a reader fell back. The kernel
+judges the source statement correctly — it always did — so what was missing
+was the mapping, not the judgment. The emitters already keep one
+(`ReleasePlan::alias_clones`, for `iterate_loop`'s cloned bodies), and the
+expansion is memoized and leaked, so the store inside it is pointed at the
+source node where it is walked. `project::store_node` names that one
+statement: the expansion is a prologue, the move-outs, the store, and the
+write-backs after it, and the store is the first statement that writes a
+place. Without this, `genref` leaked one block — the `strs[s] = tail` its own
+comment says the store releases.
+
+**The bytes moved, and they moved one way.** 124 of the 173 recorded modules
+at the store slice, six more here, none anywhere else. Every one is SMALLER,
+and the reason is one line of the rule: a store whose place OWNS NO HEAP
+stands the release down. The analysis's fold never asked the type, so it held
+a row at every `w = 2` and every `bytes[i] = b`; the emitters then took the
+row, built an empty snapshot, and kept the address they teed for it. The core
+asks the type at the store, the branch is not taken, and the dead local goes
+with it. Nothing observable moved: parity is 41 of 41, the ratchet is clean,
+the memory suite is green. The six here are the six user containers —
+`autorelease`, `container`, `copy`, `genref`, `membench`, `slots` — reading
+the core where they read the plan.
+
+**Four rules moved house with the answer.** `own.rs`'s store tests asked a
+table that is gone, and `vyrn-frontend` cannot ask the core, so they are
+`compiler/vyrn-cli/tests/stores.rs` now, with their wording and the defect
+each names: §26's field store and round forty-six's copying mention, round
+fifty-six's loop-local pairing, round fifty-six's escape screen, round
+fifty-seven's early-exiting take. `coretables` stops diffing the store table
+and counts it, as it does for `arm_frees` and `edge_releases`.
+
+**Where `arg_drops` stops, read at the source (2026-09-06).**
+
+It is the last of the five, and it does not follow. The corpus pin above is
+green, so the reading was taken; what it found moves the blocker rather than
+clearing it.
+
+**The closures are not the blocker.** `arg_verdict` takes four inputs —
+`caps`, `retains`, `lending`, `decl` — and `Facts::lending` and
+`Facts::retains` are already public and already closed by the time the core
+builds. No hoist is owed. `param_escapers` is not `arg_verdict`'s at all: it
+screens `fresh_stores`, which is `store_fresh`, the one plan table the store
+slice above left standing. The record that named three closures named one
+that belongs to a different rule.
+
+**The blocker is `ArgTemp`.** The verdict is a rule over declarations, but it
+is asked ABOUT a record `movecheck` builds while walking: `producer` (the call
+that built the value), `elem_producers` (a heapified literal's), `view_copies`
+(whether a view's element for this argument is a heap-free copy), and `kind`.
+The core can state all four from its own body — an argument is a `Val::Name`
+whose `Rhs` says what produced it — but that is a restatement of four derived
+fields, not a judgment the kernel can be asked for. The other four tables were
+derived because the kernel already answered them; this one has nothing to ask.
+
+**And the flip is not a deletion.** `direct.rs::arg_drop_row` ORs the core's
+answer with the plan's, so today the core states 22,982 names' rows and every
+one of them was MIRRORED off `own.plan.arg_drops` — nothing is derived yet.
+Flipping means dropping the `or`, and `direct.rs::expr` asks at every
+expression node: a node the derived set answers too widely is a DOUBLE FREE,
+where every table before it risked a leak. The corpus pin has to be green on
+the derived answer before the `or` goes, not after.
+
+So the slice is: state the four `ArgTemp` fields in the core, diff the derived
+verdict against `arg_temps` over the corpus at zero differences in BOTH
+directions, and only then drop the `or`. It is not this one.
+
+`store_fresh` is the other row left. The store slice states its own mention
+guard and the `fresh_str` exception, but round eighteen's answer — every
+mention of the place is a read argument to a declared, non-lending,
+non-retaining function — is still `movecheck`'s, and `param_escapers` is the
+closure behind it. Two payers, one reading.
+
+**The core states `arg_drops`, and one name stops it leaving (2026-09-06).**
+
+The four fields are stated. `arg_verdict` is public now and takes what it
+reads: `constructs` and the position's `cap`, instead of a `Declared` and a
+capability map. `movecheck` answers both from its own tables; the core answers
+them from the program at the call it is lowering. `arg_caps`, `arg_cap` and
+`hands_back` are the shared readings, so neither pass keeps a second copy.
+`Ownership` carries `lending` and `retains` on to the core, which is a hand-on
+and not a table: neither is anything a body states, and both are empty over
+the corpus.
+
+**The recording rule is the core's own, and it is not the walk's.** `movecheck`
+recognises an allocating argument by its SHAPE — sixteen of them, each read off
+the source, because it has no lowering. The core lowered the argument, so it
+has already answered: a name it minted whose type owns heap, which no place was
+read into and no lending producer handed back, IS the census's shape A and
+shape B. `NameInfo::releases` is that answer. One line replaces the sixteen
+shapes, and it does not agree with them.
+
+**The core frees 548 sites the analysis does not.** Three classes carry nearly
+all of them, and all three are the DECLARED reading failing to name a type: an
+operand of a `+` over module state (`prettyOut = prettyOut + spaces(..)` in
+`std/json`, whose declared reading types no global); an array literal handed
+to a SEEDED row, whose parameter the declared table does not hold
+(`stringFromBytes(['h', 'i'])`); and a `match` whose arms hand a payload out
+without spelling the unwrap (`Ok(s) => "ok", Err(e) => e`). Each is a value
+the caller built and nobody freed.
+
+**The ratchet read the verdict.** `assoctype` was the corpus's last leaking row
+— one block, recorded with the reading that the analysis says `T` owns no heap
+in a generic body. The core states the row off the name it minted rather than
+off the declared type, and the row is `clean`. Nothing else moved: parity is 41
+of 41, the memory suite is green, and six of the 173 recorded wasm modules
+change — `assoctype`, `contractquery`, `ifexpr`, `pagesdemo`, `rest`,
+`strings`, each one free longer.
+
+**One site goes the other way, and it is the blocker.** `render(raw(..))` in
+`examples/lib/gen_surface.vyrn`. `raw` hands back a `Code`; `Code` is a name no
+declaration answers, so `owns_heap` says it holds nothing and the core mints no
+temporary for it. The emitters keep the plan's answer for a node the core
+states nothing for — the `or` that `valuecount.vyrn` already needs — so the
+free stands and no byte moves there. But that `or` is the plan's table, so the
+table cannot go: dropping it leaks one generation-time `Code` per generator
+call, silently, where no ratchet looks.
+
+So `arg_drops` is STATED by the core and still READ from both. What closes it
+is `Code` owning its buffer, which is a question about a type's declaration and
+not about this table. Until then the plan's fold is the fallback for one site,
+and the corpus pin counts both directions with both counts pinned exactly
+(`coretables`), so a second such site is read at the source.
+
+**The fifth table is the core's, and the fold is gone (2026-09-06).**
+
+`store_fresh` follows, and it follows exactly. Round eighteen's rule splits the
+same way every derived table has: a SHAPE read off the statement, and closures
+over the call graph that only a pass which has read every body can give.
+`Builder::store_is_fresh` is the shape — every mention of the stored place is a
+read the value cannot hand back, walked through calls, operators, struct
+literals and array literals — and the three closures are handed on beside the
+plan (`Ownership::lending`, `retains`, `escapers`). `movecheck::call_may_forward`
+is public now, the same reading both passes use.
+
+**It agrees at every store.** 3,036 stores over the corpus mention the place
+they write into. The core clears 35 and stands 3,001 down, and so does the
+analysis: no site disagrees, in either direction. That is the pin round
+eighteen's rule needed, and unlike the argument table it is green.
+
+So `ReleasePlan::store_fresh`, `store_fresh_at`, `Facts::fresh_stores`,
+`Run::mention_stores` and `MoveCheck::read_only_mentions` are all deleted.
+`own.rs` loses 94 lines and `movecheck.rs` 106. Not one wasm byte moves: the
+manifest is 173 of 173, parity is 41 of 41, the ratchet is clean.
+
+**Two of the moved tests could not move.** The store slice's precedent puts a
+rule where its answer is, and `stores.rs` loads a real program. Round
+eighteen's mention test and round twenty-two's struct-literal test move
+straight over. The lender screen's witness and round nineteen's launderer do
+not: `pick` returns an ELEMENT, which the checker allows and the KERNEL
+refuses, and `blackBox` is refused outside a `bench` or a `test` block. Both
+were unit tests of a closure rather than of an emitted program, and both
+closures keep their own witnesses where they are computed.
+
+**What `own.rs` is now, and why `why --memory` stays in it (2026-09-06).**
+
+4,545 lines at the store slice, 4,451 here; 3,169 of code and 1,282 of tests.
+One table is left, and it is the fallback above. What holds the rest up is
+three things, and none of them is a table:
+
+  - `Owned` — the TYPE table. `owns_heap`, `release_kind`, `must_use`,
+    `linear_kind`, `self_referring`. Every pass asks it, the core included
+    (`Builder::owns` is three of its rows). Roughly 1,000 lines, and it is not
+    a placement row at all.
+  - `Emit` and `Place` — the walk that writes a `BindingNote` per `let` and the
+    walk that orders the releases the plan still places. Roughly 1,000 lines.
+  - `Fate`, `Leak` and `BindingNote` — the report behind `vyrn why --memory`.
+
+**The decision, once: `why --memory` cannot move to the kernel's refusals and
+the placer's rows, and the reason is not the report.** `Fate` is an INPUT to
+the core. `Builder::fate_owned` reads it to decide whether a NAMED binding is
+this frame's — `Reclaimed`, `Moved`, `Dropped` and `Discharged` say yes,
+`Static` and every other `Leaked` say no, and `NoRelease { ty: "unknown" }`
+says "ask the type". `Builder::takes_scrutinee` reads the LINE off
+`Leak::Aliased` and `Fate::Moved` to tell a give inside a construct from a move
+after it. Three more sites read `Leak::Hole`, `Leak::Borrowed` and
+`Leak::Region`. Six readings in the core, none of them a report.
+
+So the question the milestone asked — should the kernel's refusals plus the
+placer's rows answer `why --memory` — has the answer NO, and it is the wrong
+question. The kernel refuses where a value is not reclaimed, which is the SITE;
+the report prints the REASON, and the reason is what the core reads to decide
+ownership in the first place. Porting the report would leave `Fate` behind for
+the core anyway. What would close it is the core stating a named binding's
+ownership from its own body, the way it now states an argument's — and that is
+the same reading the argument slice took, one binding form over.
 
 ### M4 — the runtime in Vyrn
 
@@ -8144,6 +8789,9 @@ the same two-region shape, one engine over. It belongs to RFC-0078.
 #### Gates (2026-09-06)
 
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+#### The store slice's gates (2026-09-06)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
 
 | gate | result |
@@ -8195,6 +8843,152 @@ the three, and each was one engine asking itself for a second opinion.
 `vyrn-cli/main.rs` is down 207, `lowered.rs` 252, `primitives.rs` 227,
 `prof.rs` 234, `genwasm.rs` 50, `own.rs` 155. The workspace was 204,318 at the
 start of this milestone's last two slices and is 194,452 at the end of them.
+
+#### The eighteenth slice (2026-09-06): the two the deletion left
+
+The seventeenth slice found two things and fixed neither. Both are this one.
+
+**`m.tallyBytes(w, n)` miscompiled because a call's argument list was stated
+twice.**
+
+`std/runtime`'s `strFromBytes` takes six operands: the destination, the data
+pointer, the count, the check's answer, and the two interned messages
+(PLAN-0125-runtime §6 step 4). M6's fifth slice replaced its DFA-table argument
+with the answer of `std/text`'s `stringFault`, and made that answer the CALLER's
+to push. `Fn_::str_from_bytes_tail` pushed the last two operands; whoever called
+it pushed the first four. The call has two callers, and the slice gave the new
+argument to ONE of them.
+
+| caller, at `64573847` | what it pushed |
+|---|---|
+| the `stringFromBytes` arm, `direct.rs:8252` | dest, data, len, fault — four |
+| `Fn_::map_tally_bytes`, `direct.rs:14074` | dest, data, len — three |
+
+So the miss path of `tallyBytes` emitted a `call` five operands deep into a
+six-operand signature. It sits inside an `if` block, whose operand stack starts
+empty, and wasmtime named the sixth:
+
+    type mismatch: expected i32 but nothing on stack
+
+**The fix is the whole call in one function.** `str_from_bytes_tail` is
+`Fn_::str_from_bytes` now. It takes the destination slot and the local holding
+the `Array<UInt8>` header, it calls `stringFault` itself, and it emits all six
+operands. Neither caller can be short of an argument it no longer spells. The
+instructions come out in the order they came out before, so `stringFromBytes`
+moves no bytes — the manifest agrees, and that is the check.
+
+**The hole under the defect is the corpus, not the emitter.** Nothing in `std/`
+or `examples/` called `tallyBytes`. Parity compared nothing, the fixtures
+recorded nothing, and the manifest held no row, so the only engine that ever ran
+the builtin was the one being deleted. `examples/tallybytes.vyrn` is the row.
+It counts a String key with `tally` — a miss, a miss, then a hit through the same
+slot — every two-byte window of `ababcab` with `tallyBytes` through ONE reused
+buffer, a key that is two bytes for one character, and the two builtins counting
+into the same slot. Then it hands `tallyBytes` the bytes `255 254`, which is the
+miss path's one failure: it traps, in RFC-0116's wording, which no fixture had
+ever read.
+
+One program, four gates. `fixtures` records its three streams, `parity` compares
+the native route against the wasm one, `wasmhash` pins the module, and the
+residue ratchet carries an `other` row for it, because a trap exits before the
+leak check speaks. `wasm-sha256.tsv` gained exactly one row and no other row
+moved: 173 to 174.
+
+**RFC-0078's census reads the emitters both ways again.**
+
+The seventeenth slice kept the direction that proves every censused name is
+lowered, and lost the ANTI-ROT one — a builtin added to `direct.rs` with no
+census row. `the_backends_dispatch_on_nothing_the_census_omits` is that
+direction. It reads four regions, each located by content, so an emitter that is
+reorganised fails the test rather than scanning nothing and passing.
+
+| region | what it holds |
+|---|---|
+| `direct.rs`, `fn call_inner` down to its `_ => {}` | the guards, and the table under them |
+| `direct.rs`, `fn gen_builtin` | the builtins that exist only while a generator runs |
+| `direct.rs`, `fn gen_entry` | the three whose lowering is a synthesized Vyrn entry |
+| `lib.rs`, `fn gen_call_inner` | the textual backend's own chain |
+
+A builtin IS a name an emitter branches on, and the two emitters spell that four
+ways: `name == "x"`, `matches!(name, "x" | "y")`, an arm of `match name`, and an
+arm of `match (name, args.len())`. `dispatched` reads those four and nothing
+else, which is why it carries no exemption list — 97 names, and every one of them
+is censused today. One name it cannot see, and the forward direction already
+aliases it: `@panicAt` is spelled `ast::PANIC_AT`.
+
+The restored scan is WIDER than the one that was lost. `interp.rs` was one
+engine. This is two, and the textual backend had never been censused in either
+direction.
+
+The two tests answer different questions, and the check is that each one fails
+alone. Delete `@tallyBytes`'s census row and
+`the_backends_dispatch_on_nothing_the_census_omits` names it while
+`the_direct_backend_carries_the_census_too` stays green.
+
+#### Gates (2026-09-06)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 550 passed, 74 ignored — the seventeenth slice's counts |
+| `kernel` `--ignored` | 1, 87 s |
+| `coretables` `--ignored` | 1, 63 s |
+| `typed` `--ignored` | 1, 120 s |
+| `effects` `--ignored` | 2, 135 s |
+| `fixtures` `--ignored` | 206 compared, 43 s — 205 before, and the one is the new example |
+| `vyrn-frontend` | 1,227 and 7 ignored — 1,225 and 8 before: the census's new test, and `tallyBytes` leaving the ignore list |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,403 |
+| `vyrn-lsp`'s own tests | 99 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `vyrn-play` for `wasm32-unknown-unknown` | builds; 3,491,229 bytes |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 227 s — 172 checked, 34 skipped, 0 failed; 171 were checked before |
+| the residue ratchet | 257 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 174 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 71 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154 |
+
+`compiler/**/*.rs`, excluding `target`, is 194,472 lines to 194,590 — up 118.
+`direct.rs` is up 15, and `primitives.rs` up 104, which is the census's scan and
+the paragraph saying why it reads an emitter rather than a list kept beside one.
+| `cargo test -p vyrn-cli`, no filter | 564 passed, 75 ignored, and the one failure this slice did not cause |
+| `kernel` `--ignored` | 1, 32 s |
+| `coretables` `--ignored` | 1, 33 s |
+| `typed` `--ignored` | 1, 90 s |
+| `effects` `--ignored` | 2, 85 s |
+| `fixtures` `--ignored` | 1, 30 s |
+| `vyrn-frontend` | 1,245, four fewer for the four rules that moved to `tests/stores.rs` |
+| the workspace less `vyrn-cli` | 1,421 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10 |
+| `parity` `--ignored`, release | 41 of 41, 234 s |
+| the residue ratchet | 211 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 173, against the manifest this arc rewrote |
+| `genwasm`, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 62 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
+
+Lines per file. `own.rs` 4,958 to 4,545 and `movecheck.rs` 9,794 to 9,683 —
+the two folds, the accessor, the field, `PlaceStore`, `note_place_store` and
+the two sinks. `core.rs` is up 123 and `kernel.rs` 84, which is the word, the
+rule and the two stand-downs. `project.rs` is up 20 for `store_node`;
+`direct.rs` down 3 and `lib.rs` up 3, where each backend lost its own copy of
+`fresh_str` and gained the alias pair. `coretables.rs` is down 22 and
+`tests/stores.rs` is 220 new lines for the four rules that moved.
+
+Over the corpus the core states an answer at 55,874 stores: 2,724 release,
+53,137 stand down at the statement, and thirteen are neither — the twelve the
+`place at` rewrite now reaches through the alias pair, and `root = kw`.
 
 ### M6 — the other two judgments
 

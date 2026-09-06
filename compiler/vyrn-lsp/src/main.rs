@@ -108,6 +108,13 @@ fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Ana
             },
         );
     }
+    // RFC-0125 §3 M3. `VYRN_BUILD_PROFILE=1` reports the phases of ONE
+    // analysis, which is what a keystroke costs. The CLI prints the same table
+    // at the end of a command; here it is per-analysis, because the question is
+    // what the second one costs and not what the session did.
+    if vyrn_frontend::prof::phases_on() {
+        eprint!("{}", vyrn_frontend::prof::phase_table());
+    }
     analysis
 }
 
@@ -346,7 +353,13 @@ fn main() {
             // thread-local, like every other table a keystroke reuses (the
             // parse cache, the checker's, the loader's module hashes), and
             // this thread is the one that analyses.
-            vyrn_frontend::movecheck::reuse_judgments();
+            //
+            // `VYRN_NO_MEMO=1` stands it aside, the way `VYRN_NO_PLACER=1`
+            // stands the kernel aside: the middle column of the measurement,
+            // the editor with the kernel and without the memory.
+            if std::env::var("VYRN_NO_MEMO").is_err() {
+                vyrn_frontend::movecheck::reuse_judgments();
+            }
             let mut server = Server {
                 docs: HashMap::new(),
                 analyses: HashMap::new(),

@@ -442,11 +442,22 @@ fn analyze_inner(
             // gate uses the full check), which is why the reusing entry does not
             // return them.
             let hashes = crate::loader::last_module_hashes();
-            let (check_diags, let_types) = if hashes.is_empty() {
+            let cs = crate::prof::phase("check: the analysis's own");
+            // RFC-0125 §3 M3, the one check: where a placer is installed, the
+            // lowering it runs needs the type of every node, and this is the
+            // pass that decides them — so this pass records, and the lowering
+            // reads what it recorded. The reuse above is the alternative and not
+            // a companion: a reused body is one this pass does not walk, so it
+            // records nothing for it. A host with no placer has no reader for a
+            // record and keeps the memo.
+            let (check_diags, let_types) = if crate::own::placer_installed() {
+                checker::check_accum_recording(prog)
+            } else if hashes.is_empty() {
                 checker::check_accum_with_let_types(prog)
             } else {
                 checker::check_accum_reusing(prog, &hashes)
             };
+            drop(cs);
             let mut checked_diags = check_diags;
             // RFC-0125 §3 M3, the accumulation slice: the editor asks the same
             // driver `vyrn check` asks, so a rule that has left `movecheck.rs`
