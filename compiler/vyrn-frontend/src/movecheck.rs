@@ -306,8 +306,6 @@ pub struct ExitEv {
 pub struct Facts {
     /// What every `let` owns at the end of its block — see [`ownership`].
     pub lets: HashMap<usize, LetOwnership>,
-    /// Every call-argument temporary, with the callee's verdict on it.
-    pub arg_temps: Vec<ArgTemp>,
     /// The per-binding write/take event stream, in walk order (RFC-0114 M2).
     /// `own::analyze` folds it into the store-ownedness set; nothing else
     /// reads it.
@@ -357,6 +355,19 @@ pub struct Facts {
     /// borrowed parameter's storage. Screened beside the other two in
     /// `core::Builder::store_is_fresh`, and handed on to the core with them.
     pub escapers: HashSet<String>,
+    /// Round forty-six's meet, as a set of signature keys: the fn-value
+    /// signatures whose whole target set READS the position, retains nothing
+    /// there and lends nothing.
+    ///
+    /// A call through a `fn`-typed parameter, field or binding names no
+    /// function, so no capability row answers for its positions and every
+    /// argument temporary there would stand aside. Any runtime value of
+    /// `Fn(ps) -> r` is either a program function of exactly that signature or
+    /// a lambda; lambdas carry no capability and no retention rows, so a
+    /// signature any lambda could inhabit is not in this set. What is in it is
+    /// a signature the meet cleared, and the core reads it at the position
+    /// ([`fn_sig_key`]) the way it reads `lending` and `retains`.
+    pub fnval_clear: HashSet<String>,
 }
 
 /// One ownership-relevant event on one binding (RFC-0114 M2).
@@ -401,10 +412,9 @@ pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
     facts(program).lets
 }
 
-/// [`ownership`] and the call-argument rows, out of one walk.
+/// [`ownership`] and the rows the plan still folds, out of one walk.
 pub fn facts(program: &Program) -> Facts {
     let r = run(program, Want::Lets);
-    let arg_temps = r.arg_temps;
     let mut lets = r.lets;
     // A call to a lender hands back storage the callee does not own, so the
     // binding that names it may not be released. Applied here rather than at the
@@ -476,7 +486,6 @@ pub fn facts(program: &Program) -> Facts {
     }
     Facts {
         lets,
-        arg_temps,
         store_events: r.store_events,
         // A lender's result names storage inside its argument; freeing it
         // would free the argument. Filtered here because the lender set is
@@ -502,7 +511,16 @@ pub fn facts(program: &Program) -> Facts {
         lending: r.lending,
         retains: r.retains,
         escapers: r.param_escapers,
+        fnval_clear: r.fnval_clear,
     }
+}
+
+/// The key a fn-value signature meets under — resolved parameter types and a
+/// resolved result, spelled once so the pass that closes the call graph and the
+/// core that reads the answer cannot spell it differently.
+pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) -> String {
+    let rps: Vec<Type> = ps.iter().map(|t| crate::types::resolve(t, decls)).collect();
+    format!("{rps:?}->{:?}", crate::types::resolve(ret, decls))
 }
 
 /// What a run of the pass is for. The check is the hot path — a keystroke pays
@@ -523,7 +541,6 @@ struct Run {
     lets: HashMap<usize, LetOwnership>,
     lending: HashSet<String>,
     retains: HashSet<(String, usize)>,
-    arg_temps: Vec<ArgTemp>,
     projections: Vec<ProjectionSite>,
     store_events: Vec<StoreEv>,
     receiver_temps: Vec<(usize, String, String)>,
@@ -531,6 +548,7 @@ struct Run {
     param_escapers: HashSet<String>,
     exit_sites: Vec<ExitEv>,
     discarded: Vec<(usize, String)>,
+    fnval_clear: HashSet<String>,
 }
 
 /// The capability map [`arg_verdict`] answers a position under: a declared
@@ -1214,14 +1232,12 @@ fn run(program: &Program, want: Want) -> Run {
         retains: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         handed_on: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         param_ix: RefCell::new(HashMap::new()),
-        arg_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         carrying_locals: RefCell::new(HashSet::new()),
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        fnval_sigs: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
@@ -1247,24 +1263,10 @@ fn run(program: &Program, want: Want) -> Run {
             }
         }
     };
-    // An argument temporary is stamped the same way, and for the same reason: a
-    // linked program is most of somebody else's, and the row has to say whose.
-    // It stays in place rather than draining, because the verdict below wants
-    // every row of the whole program at once.
-    let stamp = |mc: &MoveCheck, module: &Option<String>| {
-        if let Some(sink) = &mc.arg_temps {
-            for s in sink.borrow_mut().iter_mut() {
-                if s.module.is_none() {
-                    s.module.clone_from(module);
-                }
-            }
-        }
-    };
     for f in &program.functions {
         mc.errors.borrow_mut().clear();
         mc.function(f);
         drain(&mut projections, &mc, &f.module);
-        stamp(&mc, &f.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = s;
             d.file = f.module.clone();
@@ -1282,7 +1284,6 @@ fn run(program: &Program, want: Want) -> Run {
         *mc.cur_fn.borrow_mut() = format!("test@{i}");
         mc.body(&[], &Type::Unit, &t.body);
         drain(&mut projections, &mc, &t.module);
-        stamp(&mc, &t.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = s;
             d.file = t.module.clone();
@@ -1295,7 +1296,6 @@ fn run(program: &Program, want: Want) -> Run {
         *mc.cur_fn.borrow_mut() = format!("bench@{i}");
         mc.body(&[], &Type::Unit, &b.body);
         drain(&mut projections, &mc, &b.module);
-        stamp(&mc, &b.module);
         for s in mc.errors.borrow_mut().drain(..) {
             let mut d = s;
             d.file = b.module.clone();
@@ -1348,93 +1348,55 @@ fn run(program: &Program, want: Want) -> Run {
         eprintln!("lending closed: {lending:?}");
         eprintln!("retains closed: {retains:?}");
     }
-    // The verdict per call-argument temporary. It waits for both closures above:
-    // whether a position keeps what it is given is only settled once every body
-    // has been read, which is why the walk records the site and decides nothing.
-    let arg_temps = mc.arg_temps.map(RefCell::into_inner).unwrap_or_default();
-    // Round forty-six: the capability meet over a fn-value call's closed
-    // target set. Any runtime value of `Fn(ps) -> r` is either a program
-    // function of exactly that signature or a lambda; lambdas carry no
-    // capability or retention rows, so a signature any lambda could inhabit
-    // (by arity — the declared reading does not type lambdas) stands down.
-    // A signature whose EVERY function reads the position, retains nothing
-    // there and lends nothing lets the ordinary Released machinery run.
-    let fnval_sigs = mc
-        .fnval_sigs
-        .as_ref()
-        .map(|s| s.borrow().clone())
-        .unwrap_or_default();
+    // Round forty-six's meet, over the closed target set of every fn-value
+    // signature the program declares. It waits for both closures above, for
+    // the reason they exist: whether a position keeps what it is given is only
+    // settled once every body has been read.
+    //
+    // The core asks this by signature at the call it lowers, because a call
+    // through a fn value names no function and no capability row answers for
+    // its positions (RFC-0125 §3 M3, the last table's slice — the plan asked
+    // it per argument row until then).
     let lambda_arities = mc
         .lambda_arities
-        .as_ref()
-        .map(|s| s.borrow().clone())
+        .map(RefCell::into_inner)
         .unwrap_or_default();
-    let lambda_sigs = mc
-        .lambda_sigs
-        .as_ref()
-        .map(|s| s.borrow().clone())
-        .unwrap_or_default();
-    let mut sig_groups: HashMap<String, Vec<String>> = HashMap::new();
+    let lambda_sigs = mc.lambda_sigs.map(RefCell::into_inner).unwrap_or_default();
+    let mut sig_groups: HashMap<String, (usize, Vec<String>)> = HashMap::new();
     for f in &program.functions {
-        let ps: Vec<Type> = f
-            .params
-            .iter()
-            .map(|p| crate::types::resolve(&p.ty, decl.decls()))
-            .collect();
-        let key = format!("{ps:?}->{:?}", crate::types::resolve(&f.ret, decl.decls()));
-        sig_groups.entry(key).or_default().push(f.name.clone());
+        let ps: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
+        let key = fn_sig_key(&ps, &f.ret, decl.decls());
+        sig_groups
+            .entry(key)
+            .or_insert_with(|| (ps.len(), Vec::new()))
+            .1
+            .push(f.name.clone());
     }
-    let mut arg_temps = arg_temps;
-    for s in &mut arg_temps {
-        s.verdict = arg_verdict(
-            s,
-            decl.constructs(&s.callee),
-            arg_cap(&caps, &s.callee, s.ix),
-            &retains,
-            &lending,
-        );
-        if s.verdict != ArgVerdict::Unknown {
+    let mut fnval_clear: HashSet<String> = HashSet::new();
+    for (key, (arity, members)) in &sig_groups {
+        if lambda_arities.contains(arity) || lambda_sigs.contains(key) {
             continue;
         }
-        let Some((ps, r)) = fnval_sigs.get(&s.id) else {
-            continue;
-        };
-        let rps: Vec<Type> = ps
-            .iter()
-            .map(|t| crate::types::resolve(t, decl.decls()))
-            .collect();
-        let key = format!("{rps:?}->{:?}", crate::types::resolve(r, decl.decls()));
-        if lambda_arities.contains(&ps.len()) || lambda_sigs.contains(&key) {
-            if std::env::var("VYRN_MEET_DUMP").is_ok() {
-                eprintln!(
-                    "meet: fn={} callee={} ix={} REFUSED lambda arity {} or sig",
-                    s.owner,
-                    s.callee,
-                    s.ix,
-                    ps.len()
-                );
-            }
-            continue;
-        }
-        let Some(members) = sig_groups.get(&key) else {
-            continue;
-        };
         let all_clear = !members.is_empty()
             && members.iter().all(|m| {
-                caps.get(m)
-                    .and_then(|c| c.get(s.ix))
-                    .is_some_and(|c| *c == Capability::Read)
-                    && !retains.contains(&(m.clone(), s.ix))
-                    && !lending.contains(m)
+                // The meet is per POSITION in the plan's reading, and the
+                // position it was asked about is the one the temporary sits
+                // in. A signature every one of whose members reads EVERY
+                // position, retains nothing anywhere and lends nothing is
+                // clear at every position, which is the answer a key can
+                // carry.
+                !lending.contains(m)
+                    && caps.get(m).is_some_and(|cs| {
+                        cs.iter().enumerate().all(|(ix, c)| {
+                            *c == Capability::Read && !retains.contains(&(m.clone(), ix))
+                        })
+                    })
             });
         if std::env::var("VYRN_MEET_DUMP").is_ok() {
-            eprintln!(
-                "meet: fn={} callee={} ix={} members={members:?} clear={all_clear}",
-                s.owner, s.callee, s.ix
-            );
+            eprintln!("meet: key={key} members={members:?} clear={all_clear}");
         }
         if all_clear {
-            s.verdict = ArgVerdict::Released;
+            fnval_clear.insert(key.clone());
         }
     }
     Run {
@@ -1443,7 +1405,6 @@ fn run(program: &Program, want: Want) -> Run {
         lets: mc.lets.map(RefCell::into_inner).unwrap_or_default(),
         lending,
         retains,
-        arg_temps,
         projections,
         store_events: mc.store_events.map(RefCell::into_inner).unwrap_or_default(),
         receiver_temps: mc
@@ -1457,6 +1418,7 @@ fn run(program: &Program, want: Want) -> Run {
             .unwrap_or_default(),
         exit_sites: mc.exit_sites.map(RefCell::into_inner).unwrap_or_default(),
         discarded: mc.discarded.map(RefCell::into_inner).unwrap_or_default(),
+        fnval_clear,
     }
 }
 
@@ -1567,9 +1529,6 @@ struct MoveCheck<'a> {
     handed_on: Option<RefCell<HashMap<(String, usize), Vec<(String, usize)>>>>,
     /// The index of each parameter of the function under check.
     param_ix: RefCell<HashMap<String, usize>>,
-    /// Where the call-argument temporaries go — see [`MoveCheck::note_arg_temp`].
-    /// `None` on the check path, with `lets`.
-    arg_temps: Option<RefCell<Vec<ArgTemp>>>,
     /// RFC-0114 M2: the write/take event stream (see [`StoreEv`]), and the
     /// assigns to module state, which are owned unconditionally.
     store_events: Option<RefCell<Vec<StoreEv>>>,
@@ -1582,15 +1541,10 @@ struct MoveCheck<'a> {
     carrying_locals: RefCell<HashSet<String>>,
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
     discarded: Option<RefCell<Vec<(usize, String)>>>,
-    /// Round forty-six: for an argument of a call THROUGH A FN VALUE (a
-    /// `fn`-typed parameter, field or binding), the callee's declared
-    /// signature, keyed by the argument node — what lets the verdict meet
-    /// capabilities over the closed set of same-signature functions.
-    fnval_sigs: Option<RefCell<HashMap<usize, (Vec<Type>, Type)>>>,
     /// Round forty-six: the arity of every lambda the walk met. A lambda has
     /// no capability rows and no retention rows, so a signature any lambda
     /// could inhabit (matched by arity — the declared reading does not type
-    /// lambdas) stands down from the meet.
+    /// lambdas) stands down from the fn-value meet below.
     lambda_arities: Option<RefCell<std::collections::HashSet<usize>>>,
     /// Round fifty-five: lambdas whose type IS known — they sit in an
     /// argument position whose declared parameter is a fn type. They poison
@@ -3212,588 +3166,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Record an argument whose own expression BUILT the value it hands over —
-    /// the census's shape A and shape B (`rfcs/census-call-arguments.md` §1).
-    ///
-    /// The verdict is not taken here. What is taken here is the TYPE, because
-    /// the scope stack that answers it only exists during the walk. The reading
-    /// is [`Declared::type_of`] and not this pass's widened
-    /// [`MoveCheck::type_of`], for the reason that method's own comment gives: a
-    /// type answered there that was not answered before changes what a program
-    /// FREES, and this decides a free.
-    fn note_arg_temp(&self, arg: &Expr, callee: &str, ix: usize, line: usize) {
-        let Some(sink) = &self.arg_temps else { return };
-        // Round forty-six: a call through a `fn`-typed binding or parameter
-        // has no capability row under its spelled name — record the DECLARED
-        // signature beside the argument, and the verdict meets over every
-        // function that signature could name.
-        if let Some(sigs) = &self.fnval_sigs {
-            if let Some(t) = self.vars.borrow().get(callee).cloned().flatten() {
-                if let Type::Fn(ps, r) = crate::types::resolve(&t, self.decl.decls()) {
-                    sigs.borrow_mut()
-                        .insert(arg as *const Expr as usize, (ps, *r));
-                }
-            }
-        }
-        let producer = match arg {
-            // A lending builtin hands back a place inside its receiver — it
-            // BUILT nothing the caller may release.
-            Expr::Call { name, .. } if views(name) => return,
-            // A seeded row that HANDS ITS ARGUMENT BACK is `blackBox`: its
-            // result IS the argument, so the caller may not free it. Round
-            // fifty-eight: round fifty-seven's param-typing fallback started
-            // minting rows for `copyString(n, blackBox(s))`, and the drain
-            // freed `s` through the alias — every bench body that passes a
-            // binding through `blackBox` heap-faulted (0xC0000374) before
-            // its report line.
-            Expr::Call { name, .. } if hands_back(name) => return,
-            // The tagged-template desugar (RFC-0007) wraps both built arrays
-            // in `@list`, so the array-literal arm below never sees them and
-            // both heapified triples leaked per call (exit-residue round
-            // thirty-five: `tag"…"` in a loop). `@list` is held back from the
-            // return table on purpose — its type is its element's — so the
-            // row is minted from the two exact shapes the desugar builds and
-            // nothing else. The PARTS list is string literals, whose static
-            // pointers the lowering stores as they are: the row frees the
-            // buffer alone. The VALUES list is `value(..)` boxes, each a
-            // fresh allocation the callee only reads and copies out of: the
-            // row releases deep, and the walk's encoding rules decide what
-            // each variant's payload owes.
-            Expr::Call { name, args: la, .. } if name == "@list" => {
-                let Some(Expr::ArrayLit { elems, .. }) = la.first() else {
-                    return;
-                };
-                if elems.is_empty() {
-                    return;
-                }
-                let kind = if elems.iter().all(|e| matches!(e, Expr::Str(_))) {
-                    DropKind::FreeArr
-                } else if elems
-                    .iter()
-                    .all(|e| matches!(e, Expr::Call { name, .. } if name == "value"))
-                {
-                    let vt = Type::Array(Box::new(Type::Named("Value".to_string())));
-                    let Some(k) = self.decl.release_kind(&vt) else {
-                        return;
-                    };
-                    k
-                } else {
-                    return;
-                };
-                sink.borrow_mut().push(ArgTemp {
-                    id: arg as *const Expr as usize,
-                    callee: callee.to_string(),
-                    ix,
-                    line,
-                    module: None,
-                    producer: Some("@list".to_string()),
-                    kind,
-                    verdict: ArgVerdict::Unknown,
-                    owner: self.cur_fn.borrow().clone(),
-                    view_copies: false,
-                    elem_producers: Vec::new(),
-                });
-                return;
-            }
-            // A CONSTRUCTOR-built argument (`emit(JObj(..))`) is a temporary
-            // the caller owns, exactly like any other producer — admitted in
-            // exit-residue round ten, the same round the constructor position
-            // stopped accepting borrows (which is what makes a deep free of
-            // the constructed value sound: everything inside was moved,
-            // taken, or copied in). The row's type comes from the variant
-            // table, so a built-in sum (`Some(x)`) still answers nothing and
-            // stands aside as before.
-            Expr::Call { name, .. } => Some(name.clone()),
-            // The one allocating operator. `+` is also integer addition, so the
-            // TYPE is what tells them apart — the check `own::str_temporary`'s
-            // doc comment demands of every caller.
-            Expr::Binary { op: BinOp::Add, .. } => None,
-            // A MATCH in argument position that yields no place — `slice(..)
-            // ?? panic(..)` desugars to one — hands its payload to the call
-            // with no owner behind it: the temp scrutinee's row goes Moved
-            // and releases nothing, the box free keeps only the box, and the
-            // payload string was nobody's (round thirty-four: contractquery's
-            // whole table). Recorded like any producer; an arm that yields a
-            // PLACE stands down through `names_a_place` exactly as a `let`
-            // does.
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                if self.names_a_place(arg).is_some() {
-                    return;
-                }
-                // Exactly the `??` desugar: the first arm's body IS its own
-                // success binder, so the match's value IS the payload. A
-                // general match's value is whatever its arms build, and
-                // typing it from the scrutinee freed an `Int` as a `String`
-                // (validate_sum's wasm run, caught by parity before this
-                // shipped).
-                // Which payload sides the arms can hand out decides which
-                // sides the type screen below must pass. The `??` desugar's
-                // failure arm yields its own right-hand side, never the err
-                // payload, so `Success` screens the ok side alone (round
-                // thirty-four); a SPELLED `Ok(s) => s` may sit beside an
-                // `Err(e) => e`, so the spelled Result unwraps screen both
-                // (round thirty-seven, which first screened both for
-                // `Success` too and un-fixed contractquery).
-                let arm_unwraps = |a: &MatchArm, names: &[&str]| {
-                    let Pattern::Variant(v, binds) = &a.pattern else {
-                        return false;
-                    };
-                    let ArmBody::Expr(Expr::Var { name, .. }) = &a.body else {
-                        return false;
-                    };
-                    names.contains(&v.as_str()) && binds.first().is_some_and(|b| b == name)
-                };
-                let both_sides = arms.first().is_some_and(|a| arm_unwraps(a, &["Ok", "Err"]));
-                let unwraps = both_sides
-                    || arms.first().is_some_and(|a| {
-                        arm_unwraps(a, &["Some"])
-                            || matches!(
-                                (&a.pattern, &a.body),
-                                (Pattern::Success(b), ArmBody::Expr(Expr::Var { name, .. }))
-                                    if b == name
-                            )
-                    });
-                if !unwraps {
-                    // Round thirty-nine, the other safe shape: EVERY arm
-                    // builds a `String` of its own — a literal (static, whose
-                    // free is a no-op by the cap guard), an allocating `+`,
-                    // an interpolation's `@str`/`@concat`, or an owned
-                    // producer call (rule 3). `print(match back[7] {
-                    // Some(v) => "\{v}", None => "?" })` printed the
-                    // rendered arm value and nothing ever freed it. No arm
-                    // yields a place or a binder here — those shapes keep
-                    // their own rules above and below.
-                    let fresh_str = arms.iter().all(|a| match &a.body {
-                        ArmBody::Expr(b) => match b {
-                            Expr::Str(_) => true,
-                            Expr::Binary { op: BinOp::Add, .. } => self.concatenates(b),
-                            Expr::Call { name, .. } => {
-                                name == "@str"
-                                    || name == "@concat"
-                                    || (self.decl.is_function(name)
-                                        && !name.starts_with('@')
-                                        && crate::prelude::signature(name).is_none()
-                                        && !self.decl.constructs(name)
-                                        && self.decl.type_of(&self.vars.borrow(), b).is_some_and(
-                                            |t| {
-                                                matches!(
-                                                    crate::types::resolve(&t, self.decl.decls()),
-                                                    Type::Str
-                                                )
-                                            },
-                                        ))
-                            }
-                            _ => false,
-                        },
-                        ArmBody::Block(_) => false,
-                    });
-                    if fresh_str {
-                        sink.borrow_mut().push(ArgTemp {
-                            id: arg as *const Expr as usize,
-                            callee: callee.to_string(),
-                            ix,
-                            line,
-                            module: None,
-                            producer: Some("@match".to_string()),
-                            kind: DropKind::FreeStr,
-                            verdict: ArgVerdict::Unknown,
-                            owner: self.cur_fn.borrow().clone(),
-                            view_copies: false,
-                            elem_producers: Vec::new(),
-                        });
-                        return;
-                    }
-                    // Round forty-seven, the third safe shape: EVERY arm
-                    // BUILDS a variant — a constructor call (whose borrow
-                    // door round ten closed, so the built value owns its
-                    // payload) or a bare nullary variant. The `load`
-                    // desugar's whole LoadResult was this match, passed
-                    // straight into `describe`, and no row named it. Typed
-                    // from the CALLEE's declared parameter, exactly as the
-                    // heapify row is — the match's own arms deliberately
-                    // answer no single type — and screened silent through
-                    // `reaches_declared`, as every deep row is.
-                    let all_ctors = arms.iter().all(|a| match &a.body {
-                        ArmBody::Expr(b) => self.ctor_valued(b),
-                        ArmBody::Block(_) => false,
-                    });
-                    if !all_ctors {
-                        return;
-                    }
-                    if self.caps.get(callee).and_then(|c| c.get(ix)) == Some(&Capability::Consume)
-                        || self.sinks(callee, ix)
-                    {
-                        return;
-                    }
-                    let Some(pty) = self.decl.param_ty(callee, ix) else {
-                        return;
-                    };
-                    let Some(kind) = self.decl.release_kind(pty) else {
-                        return;
-                    };
-                    let silent = matches!(
-                        kind,
-                        DropKind::FreeStr
-                            | DropKind::FreeArr
-                            | DropKind::FreeSmallArr
-                            | DropKind::FreeMap
-                    ) || matches!(&kind, DropKind::Deep(dt)
-                        if !self.decl.reaches_declared(dt));
-                    if !silent {
-                        return;
-                    }
-                    sink.borrow_mut().push(ArgTemp {
-                        id: arg as *const Expr as usize,
-                        callee: callee.to_string(),
-                        ix,
-                        line,
-                        module: None,
-                        producer: Some("@match".to_string()),
-                        kind,
-                        verdict: ArgVerdict::Unknown,
-                        owner: self.cur_fn.borrow().clone(),
-                        view_copies: false,
-                        elem_producers: Vec::new(),
-                    });
-                    return;
-                }
-                // The value's type is the payload's, because `type_of`
-                // cannot answer for a match whose binders are not yet bound.
-                let Some(sty) = self.type_of(scrutinee) else {
-                    return;
-                };
-                let r = crate::types::resolve(&sty, self.decl.decls());
-                let sides = match crate::types::result_payloads(&r) {
-                    Some((ok, err)) if both_sides => vec![ok.clone(), err.clone()],
-                    Some((ok, _)) => vec![ok.clone()],
-                    None => match crate::types::option_payload(&r) {
-                        Some(t) => vec![t.clone()],
-                        None => return,
-                    },
-                };
-                // `String` payloads only: the one shape the corpus leaks,
-                // and the one whose free is a single pointer on every
-                // backend (an aggregate payload's drain teed differently on
-                // the direct backend and validate_sum diverged). A static
-                // arm value stays safe under the same free: its header
-                // carries `cap == 0` and the free stands down.
-                if !sides
-                    .iter()
-                    .all(|t| matches!(crate::types::resolve(t, self.decl.decls()), Type::Str))
-                {
-                    return;
-                }
-                let Some(kind) = self.decl.release_kind(&Type::Str) else {
-                    return;
-                };
-                sink.borrow_mut().push(ArgTemp {
-                    id: arg as *const Expr as usize,
-                    callee: callee.to_string(),
-                    ix,
-                    line,
-                    module: None,
-                    producer: Some("@match".to_string()),
-                    kind,
-                    verdict: ArgVerdict::Unknown,
-                    owner: self.cur_fn.borrow().clone(),
-                    view_copies: false,
-                    elem_producers: Vec::new(),
-                });
-                return;
-            }
-            // An ARRAY LITERAL argument coerced at the call boundary
-            // (RFC-0114 §25's exit-residue census, round three): the literal
-            // itself is a fixed value and owns nothing, but a callee whose
-            // declared parameter is a growable `Array<T>` receives a
-            // HEAPIFIED copy the coercion allocates — a temporary the caller
-            // owns and nothing recorded. Typed from the DECLARATION, because
-            // the literal's own type deliberately answers nothing (see
-            // `Declared::type_of`'s array-literal note).
-            // A STRUCT-LITERAL argument (`toJson(Esc { s: ctl(b) })`) is a
-            // temporary the caller owns, admitted in exit-residue round
-            // fourteen on round ten's terms: the literal's fields take the
-            // store discipline (moves, takes, or refused borrows), so the
-            // constructed record owns everything in it and a deep free is
-            // sound. `jsonbytes` leaked one field buffer per `ctlJson` call
-            // — thirty-two identical blocks — with no row to free them.
-            Expr::StructLit { name, .. } => {
-                if self.caps.get(callee).and_then(|c| c.get(ix)) == Some(&Capability::Consume)
-                    || self.sinks(callee, ix)
-                {
-                    return;
-                }
-                let ty = Type::Named(name.clone());
-                let Some(kind) = self.decl.release_kind(&ty) else {
-                    return;
-                };
-                sink.borrow_mut().push(ArgTemp {
-                    id: arg as *const Expr as usize,
-                    callee: callee.to_string(),
-                    ix,
-                    line,
-                    module: None,
-                    producer: Some("@record".to_string()),
-                    kind,
-                    verdict: ArgVerdict::Unknown,
-                    owner: self.cur_fn.borrow().clone(),
-                    view_copies: false,
-                    elem_producers: Vec::new(),
-                });
-                return;
-            }
-            Expr::ArrayLit { .. } => {
-                // A `consume` position stands the record down, exactly as the
-                // call walk stands down for every other temporary: the callee
-                // owns the coerced triple and frees it, and a caller-side row
-                // here is a second free (the shape `vyxBuildModule(consume
-                // Array<VyxComp>)` trapped the wasm generator host on).
-                if self.caps.get(callee).and_then(|c| c.get(ix)) == Some(&Capability::Consume)
-                    || self.sinks(callee, ix)
-                {
-                    return;
-                }
-                let Some(pty) = self.decl.param_ty(callee, ix) else {
-                    return;
-                };
-                let Type::Array(elem) = crate::types::resolve(pty, self.decl.decls()) else {
-                    return;
-                };
-                let mut elem_producers: Vec<String> = Vec::new();
-                // An element type that owns no heap is always safe: the
-                // coerced triple's BUFFER is freshly the caller's, and word
-                // elements carry nothing. A HEAP-OWNING element type is safe
-                // only when every element expression is an OWNED producer — a
-                // call to a declared function, whose result rule 3 makes the
-                // literal's own (round twenty-five: `mount(req,
-                // [usersHttp.routes()], ..)` rebuilt the whole route table
-                // per request and leaked all of it). A bare name or a
-                // projection stands the row down, exactly as round three
-                // recorded: `[root]` where `root`'s type stands down from
-                // `owns_heap` (a self-referring `VyxNode`) still owns its
-                // heap, and a deep free here trapped the wasm generator host.
-                if self.decl.owns_heap(&elem) {
-                    let Expr::ArrayLit { elems, .. } = arg else {
-                        return;
-                    };
-                    let all_owned = !elems.is_empty()
-                        && elems
-                            .iter()
-                            .all(|e| self.owned_literal_elem(e, &mut elem_producers));
-                    if !all_owned {
-                        return;
-                    }
-                }
-                let Some(kind) = self.decl.release_kind(pty) else {
-                    return;
-                };
-                sink.borrow_mut().push(ArgTemp {
-                    id: arg as *const Expr as usize,
-                    callee: callee.to_string(),
-                    ix,
-                    line,
-                    module: None,
-                    producer: Some("@heapify".to_string()),
-                    kind,
-                    verdict: ArgVerdict::Unknown,
-                    owner: self.cur_fn.borrow().clone(),
-                    view_copies: false,
-                    elem_producers,
-                });
-                return;
-            }
-            // A FORCED `lazy` field in argument position (RFC-0085 M4a):
-            // the read IS a call — nothing is cached, every read is a fresh
-            // owned value — and no row named it, so `print("\{b.body}")`
-            // leaked one forced String per read (exit-residue round
-            // forty-one). Typed from the record's declaration; the thunk's
-            // result is owned by rule 3 (a lambda returning a captured heap
-            // value raw is refused).
-            Expr::Field {
-                expr: base, field, ..
-            } => {
-                let Some(bt) = self.decl.type_of(&self.vars.borrow(), base) else {
-                    return;
-                };
-                let Type::Record(fields) = crate::types::resolve(&bt, self.decl.decls()) else {
-                    return;
-                };
-                let Some(f) = fields.iter().find(|f| &f.name == field) else {
-                    return;
-                };
-                let Some(inner) = crate::types::deferred(&f.ty) else {
-                    return;
-                };
-                if !self.decl.owns_heap(inner) {
-                    return;
-                }
-                let Some(kind) = self.decl.release_kind(inner) else {
-                    return;
-                };
-                sink.borrow_mut().push(ArgTemp {
-                    id: arg as *const Expr as usize,
-                    callee: callee.to_string(),
-                    ix,
-                    line,
-                    module: None,
-                    producer: Some("@lazy".to_string()),
-                    kind,
-                    verdict: ArgVerdict::Unknown,
-                    owner: self.cur_fn.borrow().clone(),
-                    view_copies: false,
-                    elem_producers: Vec::new(),
-                });
-                return;
-            }
-            _ => return,
-        };
-        let ty = match self.decl.type_of(&self.vars.borrow(), arg) {
-            Some(t) => t,
-            // Round fifty-five: a constructor-built argument of a call
-            // through a FN VALUE (`cb(Done(getItem(req)))` in the generated
-            // in-process stubs) answers no type of its own — a generic
-            // variant's bare name is an incomplete type — but the callee's
-            // declared parameter names it exactly, the same way the heapify
-            // and ctor-match rows are typed.
-            None => {
-                let sig = self.vars.borrow().get(callee).cloned().flatten();
-                let from_sig = match sig.map(|t| crate::types::resolve(&t, self.decl.decls())) {
-                    Some(Type::Fn(ps, _)) => ps.get(ix).cloned(),
-                    _ => None,
-                };
-                // Round fifty-six: the same reading for an ORDINARY callee —
-                // `showResult(Ok(User { .. }))` answers no type of its own
-                // (a generic variant's bare name is incomplete), and the row
-                // bailed here, so the payload box leaked once per call
-                // (fnvalstore's registry section). The declared parameter
-                // names the instantiation; a generic parameter answers no
-                // release kind below and stands aside as before.
-                match from_sig
-                    .or_else(|| self.decl.param_ty(callee, ix).cloned())
-                    // Round fifty-seven: a `+` chain over ELEMENT reads
-                    // answers no declared type — `print(xs[0] + "|" +
-                    // xs[1])` leaked its rendered line — but a String `+`
-                    // is fresh by construction (`own::str_temporary`'s own
-                    // doctrine), and one provably-String operand settles a
-                    // homogeneous chain.
-                    .or_else(|| {
-                        (matches!(arg, Expr::Binary { op: BinOp::Add, .. })
-                            && self.adds_strings(arg))
-                        .then_some(Type::Str)
-                    }) {
-                    Some(t) => t,
-                    None => return,
-                }
-            }
-        };
-        if producer.is_none() && !matches!(crate::types::resolve(&ty, self.decl.decls()), Type::Str)
-        {
-            return;
-        }
-        // Round fifty-six: a generic variant's bare owner name is an
-        // incomplete type — `Ok(User { .. })` answers `Result`, whose rows
-        // mention parameters, so no release kind answers and the temporary
-        // stood aside (`showResult(Ok(User { .. }))` leaked one payload box
-        // per call, fnvalstore's whole registry section). The callee's
-        // declared parameter names the instantiation exactly — the checker
-        // has already made the two agree — and a callee whose own parameter
-        // is generic answers no kind either, so nothing widens.
-        let ty = if self.decl.release_kind(&ty).is_none() {
-            match self.decl.param_ty(callee, ix) {
-                Some(pt) if self.decl.release_kind(pt).is_some() => pt.clone(),
-                _ => ty,
-            }
-        } else {
-            ty
-        };
-        if std::env::var_os("VYRN_ARG_TY_DUMP").is_some() {
-            eprintln!(
-                "arg-temp: fn={} callee={callee} ix={ix} ty={ty:?} kind={:?}",
-                self.cur_fn.borrow(),
-                self.decl.release_kind(&ty)
-            );
-        }
-        let Some(kind) = self.decl.release_kind(&ty) else {
-            return;
-        };
-        sink.borrow_mut().push(ArgTemp {
-            id: arg as *const Expr as usize,
-            callee: callee.to_string(),
-            ix,
-            line,
-            module: None,
-            producer,
-            kind,
-            // Overwritten in `run` once the retention set is closed.
-            verdict: ArgVerdict::Unknown,
-            owner: self.cur_fn.borrow().clone(),
-            view_copies: views(callee)
-                && self
-                    .decl
-                    .elem_of(&ty)
-                    .is_some_and(|et| !self.decl.owns_heap(&et)),
-            elem_producers: Vec::new(),
-        });
-    }
-
-    /// Whether every value this expression can yield is a freshly BUILT
-    /// variant — a constructor call (round ten closed its borrow door, so the
-    /// value owns its payload) or a bare nullary variant, through however
-    /// many nested matches and if-expressions the desugars stack (the `load`
-    /// desugar is a match inside a match). Round forty-seven's screen.
-    fn ctor_valued(&self, e: &Expr) -> bool {
-        match e {
-            Expr::Call { name, .. } | Expr::Var { name, .. } => self.decl.constructs(name),
-            Expr::Match { arms, .. } => arms.iter().all(|a| match &a.body {
-                ArmBody::Expr(b) => self.ctor_valued(b),
-                ArmBody::Block(_) => false,
-            }),
-            Expr::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.ctor_valued(then_branch)
-                    && else_branch.as_ref().is_some_and(|b| self.ctor_valued(b))
-            }
-            _ => false,
-        }
-    }
-
-    /// Whether this `+` builds a **String** — the one shape of the operator that
-    /// allocates, and so the one whose operands are `@concat`'s arguments.
-    ///
-    /// `+` is also integer addition and `Code` concatenation, and the type is
-    /// what tells the three apart — the check [`crate::own::str_temporary`]'s
-    /// doc comment demands of every caller. The reading is
-    /// [`Declared::type_of`], which answers a `+` with its left operand's type.
-    fn concatenates(&self, e: &Expr) -> bool {
-        self.decl
-            .type_of(&self.vars.borrow(), e)
-            .is_some_and(|t| matches!(crate::types::resolve(&t, self.decl.decls()), Type::Str))
-    }
-
-    /// Round fifty-seven: whether this `+` chain builds a STRING, read
-    /// structurally where the declared reading cannot type it — a chain over
-    /// ELEMENT reads (`xs[0] + "|" + xs[1]`) answers no declared type, but
-    /// the checker has already made a `+` homogeneous, so one operand that is
-    /// provably a String settles the whole chain. No evidence answers false,
-    /// which stands the row aside as before.
-    fn adds_strings(&self, e: &Expr) -> bool {
-        match e {
-            Expr::Str(_) => true,
-            Expr::Call { name, .. } if name == "@concat" || name == "@str" => true,
-            Expr::Binary {
-                op: BinOp::Add,
-                lhs,
-                rhs,
-                ..
-            } => self.adds_strings(lhs) || self.adds_strings(rhs),
-            _ => self.concatenates(e),
-        }
-    }
-
     /// An arm of an if-expression or a `match` can yield a PLACE, and the value
     /// then has two names: the arm's and whatever the expression is bound to,
     /// stored into or returned as.
@@ -4014,42 +3386,6 @@ impl MoveCheck<'_> {
             }
         } else {
             self.carrying_locals.borrow_mut().insert(root.to_string());
-        }
-    }
-
-    /// Round twenty-five's element test, recursively: an array-literal
-    /// element is OWNED when it is a call to a declared function (rule 3
-    /// makes the result the literal's own) or a nested literal whose elements
-    /// all are — `mount(req, [[surface(..)], routes()], ..)` nests one deep.
-    /// The producers are collected for `arg_verdict`'s lender screen.
-    fn owned_literal_elem(&self, e: &Expr, producers: &mut Vec<String>) -> bool {
-        match e {
-            Expr::Call { name, .. } => {
-                if self.decl.is_function(name)
-                    && !name.starts_with('@')
-                    && crate::prelude::signature(name).is_none()
-                    && !self.decl.constructs(name)
-                {
-                    producers.push(name.clone());
-                    true
-                } else {
-                    false
-                }
-            }
-            Expr::ArrayLit { elems, .. } => {
-                !elems.is_empty() && elems.iter().all(|x| self.owned_literal_elem(x, producers))
-            }
-            // A string LITERAL element lives in the data segment: the deep
-            // free's `str_free` reads its cap of 0 and refuses, so the row
-            // frees the coerced buffer and the element frees are no-ops
-            // (exit-residue round fifty-six: `httpInput(ps, body, ["id"])`
-            // in every generated REST adapter leaked one buffer per request).
-            // A SCALAR literal owns nothing at all, and refusing it stood the
-            // whole nested literal down — `sumFirst([[10, 11], [12]])` leaked
-            // both inner buffers and the outer one (round fifty-seven,
-            // fieldmut's fn-arg row).
-            Expr::Str(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => true,
-            _ => false,
         }
     }
 
@@ -5317,49 +4653,14 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Expr::Unary { expr, .. } => self.expr(expr, consumed, scope),
-            Expr::Binary { op, lhs, rhs, line } => {
+            Expr::Binary { lhs, rhs, .. } => {
                 self.expr(lhs, consumed, scope)?;
-                let r = self.expr(rhs, consumed, scope);
-                // A String `+` is `@concat` written as an operator, so its
-                // operands are call arguments and take the argument rule
-                // (`rfcs/census-call-arguments.md` §9, finding 3). `"n" + label(i)`
-                // reaches the operator lowering rather than a call, so it sat in
-                // neither the census's 1505 nor RFC-0096 M3's operand class, and
-                // leaked the same 48 bytes a turn.
-                //
-                // The name is `@concat` and not a spelling of its own, so
-                // [`arg_verdict`]'s partition holds: an operand that ALLOCATED
-                // its own value is M3's to free and answers `AlreadyFreed` here,
-                // and a call result answers what its callee's signature says.
-                if *op == BinOp::Add && self.concatenates(e) {
-                    self.note_arg_temp(lhs, "@concat", 0, *line);
-                    self.note_arg_temp(rhs, "@concat", 1, *line);
-                }
-                // A String COMPARISON's operands take the same argument rule
-                // (exit-residue round twelve): `schema(ty, "") == ""` inside
-                // `gqlCheckSel` dropped a fresh String on every executed
-                // GraphQL selection, because a comparison position was in
-                // nobody's operand class — the lowering copies nothing and
-                // frees nothing, and no row named the temporary. The callee
-                // spelling stays `@concat` so `arg_verdict`'s partition
-                // holds: an operand that allocated its own value is the
-                // OPERATOR's to free (both lowerings run `free_str_temp`
-                // now), and a call result is the drain's.
-                if matches!(
-                    op,
-                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
-                ) {
-                    self.note_arg_temp(lhs, "@concat", 0, *line);
-                    self.note_arg_temp(rhs, "@concat", 1, *line);
-                }
-                // `=~` reads its left operand and its pattern is a literal —
-                // an ALLOCATED left operand is the operator's to free, same
-                // partition as a comparison's (round thirty: one block per
-                // route-refinement check across the REST corpus).
-                if *op == BinOp::Match {
-                    self.note_arg_temp(lhs, "@concat", 0, *line);
-                }
-                r
+                // An operand of a String `+`, of a String comparison and of
+                // `=~` is a call argument — `@concat`'s — and the core states
+                // its release row from the lowered operator (RFC-0125 §3 M3,
+                // the last table's slice). This pass recorded the same three
+                // shapes until then.
+                self.expr(rhs, consumed, scope)
             }
             // A place chain asks ONE consumption question, of the whole path.
             // Walking into the root instead would ask it of `er` and refuse
@@ -5771,16 +5072,9 @@ impl MoveCheck<'_> {
                                 if let Type::Fn(ps, r) =
                                     crate::types::resolve(pt, self.decl.decls())
                                 {
-                                    let rps: Vec<Type> = ps
-                                        .iter()
-                                        .map(|t| crate::types::resolve(t, self.decl.decls()))
-                                        .collect();
-                                    let key = format!(
-                                        "{rps:?}->{:?}",
-                                        crate::types::resolve(&r, self.decl.decls())
-                                    );
                                     tl.borrow_mut().insert(arg as *const Expr as usize);
-                                    ls.borrow_mut().insert(key);
+                                    ls.borrow_mut()
+                                        .insert(fn_sig_key(&ps, &r, self.decl.decls()));
                                 }
                             }
                         }
@@ -5791,7 +5085,6 @@ impl MoveCheck<'_> {
                     self.call_keeps.set(None);
                     r?;
                     self.note_handover(arg, name, i, *line);
-                    self.note_arg_temp(arg, name, i, *line);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         // A NULLARY constructor is a value with no owner, not a
                         // name (RFC-0126 §8.8): `take(None)` twice hands the
@@ -8546,193 +7839,6 @@ mod tests {
         println!("per file (file: total, place, unknown)");
         for (f, t, p, u) in &per_file {
             println!("  {t:>5} {p:>5} {u:>5}  {f}");
-        }
-    }
-
-    /// `rfcs/census-call-arguments.md` §3, re-derived from the compiler.
-    ///
-    /// The census took its table with a harness it wrote into this test module
-    /// and then removed. This is that table, taken from the rule itself: every
-    /// call-argument temporary the corpus holds, bucketed by what the callee
-    /// does with it. Each file is parsed ALONE — no loader, no linking — which
-    /// is the convention every corpus measurement here uses, and which makes a
-    /// cross-module callee's signature invisible. The linked reading is larger.
-    ///
-    /// Ignored by default: it reads the repository. Run it with
-    /// `cargo test -p vyrn-frontend --lib census_call_arguments -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn census_call_arguments_over_the_corpus() {
-        let mut files = Vec::new();
-        crate::own::tests::sources("examples", &mut files);
-        crate::own::tests::sources("std", &mut files);
-        files.sort();
-
-        let mut by_verdict: BTreeMap<String, usize> = BTreeMap::new();
-        let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
-        let mut unknown_callees: BTreeMap<String, usize> = BTreeMap::new();
-        let (mut total, mut parsed, mut released, mut freed) = (0, 0, 0, 0);
-        for path in &files {
-            let Ok(src) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let Ok(tokens) = crate::lexer::lex(&src) else {
-                continue;
-            };
-            let (program, errs) = crate::parser::parse_accum(tokens);
-            if !errs.is_empty() {
-                continue;
-            }
-            parsed += 1;
-            for s in facts(&program).arg_temps {
-                total += 1;
-                *by_verdict.entry(format!("{:?}", s.verdict)).or_default() += 1;
-                if s.verdict == ArgVerdict::Released {
-                    released += 1;
-                    *by_kind.entry(format!("{:?}", s.kind)).or_default() += 1;
-                    if s.kind == DropKind::FreeStr {
-                        freed += 1;
-                    }
-                }
-                if s.verdict == ArgVerdict::Unknown {
-                    *unknown_callees.entry(s.callee.clone()).or_default() += 1;
-                }
-            }
-        }
-        println!("corpus: {} files ({parsed} parsed)", files.len());
-        println!("call-argument temporaries: {total}");
-        for (v, c) in &by_verdict {
-            println!("  {v:>13}: {c:>5}");
-        }
-        println!("released, by release kind ({released} sites, {freed} emitted today)");
-        for (k, c) in &by_kind {
-            println!("  {k:>13}: {c:>5}");
-        }
-        let mut un: Vec<_> = unknown_callees.into_iter().collect();
-        un.sort_by(|a, b| b.1.cmp(&a.1));
-        println!("unknown, by callee");
-        for (n, c) in un.iter().take(20) {
-            println!("  {c:>5}  {n}");
-        }
-    }
-
-    /// The same census, over the LINKED corpus — the reading the backends get.
-    ///
-    /// A file parsed alone cannot see an imported function's signature, so every
-    /// cross-module callee reads `Unknown` above: `trim` alone is 43 sites. The
-    /// linker puts both bodies in one program before either backend runs, which
-    /// is the census's own §5 row 4 — a release crosses a module boundary today.
-    /// Each row is counted once, keyed by module, line and position, because a
-    /// `std/` body is linked into many roots.
-    ///
-    /// Ignored by default: it reads the repository and links it. Run it with
-    /// `cargo test -p vyrn-frontend --lib census_call_arguments_linked -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn census_call_arguments_linked() {
-        std::thread::Builder::new()
-            .stack_size(256 * 1024 * 1024)
-            .spawn(census_linked_count)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn census_linked_count() {
-        struct Disk;
-        impl crate::loader::ModuleResolver for Disk {
-            fn read(&self, resolved: &str) -> Result<String, String> {
-                std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-            }
-            fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-                let mut names: Vec<String> = std::fs::read_dir(resolved)
-                    .map_err(|e| e.to_string())?
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect();
-                names.sort();
-                Ok(names)
-            }
-            fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-                let mut names: Vec<String> = std::fs::read_dir(resolved)
-                    .map_err(|e| e.to_string())?
-                    .filter_map(|e| e.ok())
-                    .map(|e| {
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        if e.file_type().is_ok_and(|t| t.is_dir()) {
-                            format!("{name}/")
-                        } else {
-                            name
-                        }
-                    })
-                    .collect();
-                names.sort();
-                Ok(names)
-            }
-        }
-        let slashed = |p: &std::path::Path| {
-            p.canonicalize()
-                .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
-                .to_string_lossy()
-                .replace('\\', "/")
-                .replace("//?/", "")
-        };
-        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let std_root = slashed(&repo.join("std"));
-
-        let mut files = Vec::new();
-        crate::own::tests::sources("examples", &mut files);
-        crate::own::tests::sources("std", &mut files);
-        files.sort();
-
-        let mut seen: HashSet<(String, usize, String, usize)> = HashSet::new();
-        let mut by_verdict: BTreeMap<String, usize> = BTreeMap::new();
-        let mut unknown_callees: BTreeMap<String, usize> = BTreeMap::new();
-        let (mut total, mut linked, mut freed) = (0, 0, 0);
-        for path in &files {
-            let Ok(src) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let root_key = slashed(path);
-            let opts = crate::loader::LoadOptions {
-                std_root: Some(std_root.clone()),
-                ..Default::default()
-            };
-            let Ok(program) = crate::loader::load(&src, &root_key, &opts, &Disk) else {
-                continue;
-            };
-            linked += 1;
-            for s in facts(&program).arg_temps {
-                let key = (
-                    s.module.clone().unwrap_or_else(|| root_key.clone()),
-                    s.line,
-                    s.callee.clone(),
-                    s.ix,
-                );
-                if !seen.insert(key) {
-                    continue;
-                }
-                total += 1;
-                *by_verdict.entry(format!("{:?}", s.verdict)).or_default() += 1;
-                if s.verdict == ArgVerdict::Released && s.kind == DropKind::FreeStr {
-                    freed += 1;
-                }
-                if s.verdict == ArgVerdict::Unknown {
-                    *unknown_callees.entry(s.callee.clone()).or_default() += 1;
-                }
-            }
-        }
-        println!("corpus: {} files, {linked} linked", files.len());
-        println!("call-argument temporaries: {total}");
-        for (v, c) in &by_verdict {
-            println!("  {v:>13}: {c:>5}");
-        }
-        println!("released AND emitted (a String): {freed}");
-        let mut un: Vec<_> = unknown_callees.into_iter().collect();
-        un.sort_by(|a, b| b.1.cmp(&a.1));
-        println!("unknown, by callee");
-        for (n, c) in un.iter().take(20) {
-            println!("  {c:>5}  {n}");
         }
     }
 

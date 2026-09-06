@@ -2861,8 +2861,37 @@ impl<'a> Builder<'a> {
             callee,
             ix,
         );
-        mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
+        if mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
             == mc::ArgVerdict::Released
+        {
+            return true;
+        }
+        // Round forty-six: a call THROUGH A FN VALUE names no function, so no
+        // capability row answered above and the verdict fell to `Unknown`.
+        // The answer is the meet over the signature's closed target set, which
+        // the pass that reads every body states by key
+        // ([`vyrn_frontend::movecheck::Facts::fnval_clear`]). `usersById(req,
+        // onGetUser)` in `examples/rpc.vyrn` is the shape: the generated
+        // dispatcher calls `cb(Done(..))`, and the built reply is the caller's
+        // to free.
+        self.fnval_released(callee)
+    }
+
+    /// Whether `callee` names a fn value whose signature the meet cleared.
+    fn fnval_released(&self, callee: &str) -> bool {
+        use vyrn_frontend::movecheck as mc;
+        let Some(n) = self.lookup(callee) else {
+            return false;
+        };
+        let decls = vyrn_frontend::types::decl_map(self.program);
+        let Type::Fn(ps, r) =
+            vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, &decls)
+        else {
+            return false;
+        };
+        self.own
+            .fnval_clear
+            .contains(&mc::fn_sig_key(&ps, &r, &decls))
     }
 
     /// The type a forced `lazy` field read yields, or `None` where the read is
@@ -2950,7 +2979,7 @@ impl<'a> Builder<'a> {
         let node = e as *const Expr as usize;
         let took = self.ty_of(e).is_ok_and(|t| self.owns(&t));
         if borrowed && took {
-            if self.own.plan.arg_drop(producer) {
+            if placed_producer(producer) {
                 if !self.after.contains(&r) {
                     self.body.names[r as usize].arg_drop = Some(producer);
                     self.after.push(r);
@@ -4185,6 +4214,13 @@ pub(crate) struct Placed {
     /// displace. Keyed by the store's own node, which is how both compiled
     /// backends key it.
     stores: std::collections::HashSet<usize>,
+    /// The nodes that PRODUCED a borrowed receiver the kernel found still
+    /// held — the receiver frees that ride as an argument-temporary drop
+    /// (RFC-0125 M3, third slice). The channel went through the plan's own
+    /// `arg_drops` set until the last table left, and it was never that
+    /// table's answer: the placer wrote the row and the second build read
+    /// it straight back.
+    producers: std::collections::HashSet<usize>,
 }
 
 /// Whether the kernel found this store's place still holding — read by the
@@ -4197,6 +4233,12 @@ fn placed_store(site: usize) -> bool {
 /// it found none — read by the second build, empty on the first.
 fn placed_arm(site: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
     PLACED.with(|p| p.borrow().arms.get(&(site, arm)).cloned())
+}
+
+/// Whether the placer wrote an argument-temporary drop for the receiver this
+/// node produced — read by the second build, empty on the first.
+fn placed_producer(node: usize) -> bool {
+    PLACED.with(|p| p.borrow().producers.contains(&node))
 }
 
 /// Rule N's rows for one join, as the kernel equalized its edges.
@@ -4751,7 +4793,8 @@ fn place_frames(
             // the receiver, which both backends tee and free after the
             // consumer's drain (RFC-0125 M3, third slice).
             if let Some(producer) = info.producer {
-                if own.plan.arg_drops.insert(producer) {
+                let fresh = PLACED.with(|p| p.borrow_mut().producers.insert(producer));
+                if fresh {
                     own.plan.owners.insert(producer, owner.to_string());
                     touched.insert(owner.to_string());
                 }
