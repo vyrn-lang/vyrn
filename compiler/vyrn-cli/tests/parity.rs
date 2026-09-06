@@ -4622,11 +4622,22 @@ fn main() -> Int64 {
 
 /// RFC-0114 SS25's completeness instrument, pinned from both sides: under
 /// `VYRN_LEAK_CHECK=1` a clean program (heap locals, heap module state — the
-/// teardown's job) exits 0 with an empty audit table, and a program holding
-/// the fold's recorded loop-store conservatism (`s = p.name.copy()` inside a
-/// `for` never releases the displaced copy) exits 135 naming the leak. The
-/// instrument being two-sided is what makes its silence on a program MEAN
-/// something.
+/// teardown's job) exits 0 with an empty audit table, and a program holding a
+/// recorded conservatism exits 135 naming the leak. The instrument being
+/// two-sided is what makes its silence on a program MEAN something.
+///
+/// **The leaky side was the loop STORE — `s = p.name.copy()` inside a `for`,
+/// which never released the displaced copy — until RFC-0125 §3 M3's type
+/// slice.** That leak was the declared reading having no type for a loop
+/// binder's field: `names_a_place` read the copy as a copy of a HANDLE, which
+/// shares what it points at, so the binding got no release row at all. The
+/// checker's record names the field, and the program exits 0 now.
+///
+/// What still leaks is one position over: a call result DISCARDED inside a
+/// loop, where the value the container holds was copied out of a place. The
+/// element the discard drops has no row, and `k`'s two turns leak two blocks.
+/// A literal in the same position is clean, which is what says the row is
+/// about provenance and not about the discard.
 #[test]
 #[ignore]
 fn leak_check_is_two_sided() {
@@ -4675,6 +4686,39 @@ fn main() -> Int64 {
         r#"type P = { name: String }
 
 fn main() -> Int64 {
+    let mut acc: Array<String> = []
+    let people = [P { name: "a name long enough to allocate" }]
+    let mut i = 0
+    while i < 2 {
+        acc.push(people[0].name.copy())
+        acc.swapRemove(0)
+        i = i + 1
+    }
+    print(acc.length)
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        leaky.status.code(),
+        Some(135),
+        "a recorded conservatism must be VISIBLE to the instrument:
+{}",
+        norm(&leaky.stderr)
+    );
+    assert!(
+        norm(&leaky.stderr).contains("never freed"),
+        "{}",
+        norm(&leaky.stderr)
+    );
+    // The leak the type slice closed, pinned CLEAN so it cannot come back:
+    // `s = p.name.copy()` inside a `for`, which was this instrument's leaky
+    // side until the plan read the checker's record for a loop binder's field.
+    let closed = build_and_run(
+        "leakclosed",
+        r#"type P = { name: String }
+
+fn main() -> Int64 {
     let people = [P { name: "a name long enough to allocate" }]
     let mut s = ""
     let mut i = 0
@@ -4690,15 +4734,10 @@ fn main() -> Int64 {
 "#,
     );
     assert_eq!(
-        leaky.status.code(),
-        Some(135),
-        "the recorded loop-store conservatism must be VISIBLE to the instrument:
+        closed.status.code(),
+        Some(0),
+        "the loop store releases the copy it displaces (RFC-0125 SS3 M3, the type slice):
 {}",
-        norm(&leaky.stderr)
-    );
-    assert!(
-        norm(&leaky.stderr).contains("never freed"),
-        "{}",
-        norm(&leaky.stderr)
+        norm(&closed.stderr)
     );
 }

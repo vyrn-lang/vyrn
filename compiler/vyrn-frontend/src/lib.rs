@@ -202,6 +202,11 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
     // build a body for it — and `VYRN_NO_MOVECHECK=1` lives inside the driver
     // with the two passes it chooses between.
     drop(synth_span);
+    // RFC-0125 §3 M3, the type slice: ONE record of the program the synthesis
+    // has just finished, for the three readers below it. The synthesis is over,
+    // so no node moves under the record's keys, and the guard closes before the
+    // caller can extend the program again.
+    let _held = checker::Held::open(program);
     if diags.is_empty() {
         let _p = prof::phase("movecheck");
         diags.extend(movecheck::refusals(program));

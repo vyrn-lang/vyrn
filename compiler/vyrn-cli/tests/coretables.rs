@@ -278,13 +278,15 @@ fn run() {
         // the verdict: `assoctype` was the corpus's last leaking row and it
         // is clean now.
         //
-        // The core states LESS at one site, and one only: `render(raw(..))`
-        // in `examples/lib/gen_surface.vyrn`. `raw` hands back a `Code`, and
-        // `Code` is a name no declaration answers, so `owns_heap` says it
-        // holds nothing and this pass mints no temporary. The emitters keep
-        // the plan's answer for a node the core states nothing for, so the
-        // free stands; the row cannot leave `own.rs` until `Code` owns its
-        // buffer.
+        // The core states LESS at NO site since the type slice. It used to
+        // state less at one: `render(raw(..))` in
+        // `examples/lib/gen_surface.vyrn`, where the plan minted a String
+        // free the core did not. The plan was wrong. Its reading resolved
+        // `raw` by NAME, across the module boundary, to
+        // `examples/shadowbuiltin.vyrn`'s own `fn raw(s: String) -> String`
+        // — the very program written to catch that resolution — and typed
+        // the argument `Str`. The checker's record is keyed by the node, so
+        // it cannot reach another module's declaration, and it says `Code`.
         for at in &facts.arg_drops {
             *counted.entry("arg_drops").or_default() += 1;
             if !own.plan.arg_drops.contains(at) {
@@ -459,13 +461,13 @@ fn run() {
     // reading beside them above.
     assert_eq!(
         counted.get("arg_drops: core only").copied().unwrap_or(0),
-        552,
-        "the values the declared reading could not name, which nobody freed          (548 at the argument slice, plus four in `tallybytes.vyrn` and          `falliblegeneric.vyrn`, which joined the corpus beside it)"
+        432,
+        "the values the declared reading could not name, which nobody freed          (552 before the type slice made the plan read the checker's record;          120 of them are named now, and the plan states the drop the core          already stated)"
     );
     assert_eq!(
         counted.get("arg_drops: plan only").copied().unwrap_or(0),
-        1,
-        "`render(raw(..))` in `gen_surface`, and nothing else"
+        0,
+        "nothing: `render(raw(..))` in `gen_surface` was the last one, and the          type slice closed it — the declared reading resolved `raw` by NAME and          found `examples/shadowbuiltin.vyrn`'s own `fn raw(String) -> String`,          so the plan froze a String the call never made; the checker's record          is keyed by node and says `Code`"
     );
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
     // slice): every `Rhs` in the corpus names the type its node produces.

@@ -1976,6 +1976,39 @@ pub(crate) fn hold_close() {
     HELD.with(|h| *h.borrow_mut() = None);
 }
 
+/// The record slot held by a caller that is not an analysis —
+/// `crate::check_and_synthesize`, for the span between the synthesis and the
+/// last judgment (RFC-0125 §3 M3, the type slice).
+///
+/// Three readers want one record of the post-synthesis program inside that
+/// span: the move check, the kernel's own move check, and the lowering the
+/// placer runs for both. Without the slot each makes its own, because
+/// [`hold`] writes nothing where nothing is holding. It is the same rule
+/// [`crate::own::Memo`] states, for the one program a load ends on, and the
+/// guard borrows that program for exactly the same reason.
+///
+/// It stands aside where an analysis already holds the slot, so it can never
+/// close another holder's.
+pub(crate) struct Held(bool);
+
+impl Held {
+    pub(crate) fn open(program: &Program) -> Held {
+        if HOLDING.with(|h| h.get()) != 0 {
+            return Held(false);
+        }
+        hold_open(program);
+        Held(true)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.0 {
+            hold_close();
+        }
+    }
+}
+
 fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
     let key = program as *const Program as usize;
     if HOLDING.with(|h| h.get()) == key {
