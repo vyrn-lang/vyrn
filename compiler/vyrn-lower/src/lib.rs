@@ -412,9 +412,9 @@ pub fn lower_with<'a>(
     // it — one program, two checks, in one analysis.
     let recorded = checker::recorded(program);
     drop(rec_span);
-    // RFC-0125 §3 M5: the emitters read a join's type here instead of
-    // reconciling one from the arms.
-    core::set_joins(&recorded.joins);
+    // RFC-0125 §3 M5: the emitters read an expression's type off this same
+    // record, by node, instead of deriving one from its operands.
+    core::set_decided(program, &recorded);
     let build_span = vyrn_frontend::prof::phase("lower: build");
     let mut lowered = build(program, &recorded, ownership);
     drop(build_span);

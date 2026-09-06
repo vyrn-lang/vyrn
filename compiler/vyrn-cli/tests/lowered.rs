@@ -342,7 +342,12 @@ struct Tally {
     /// of a release receiver, of a dispatched call the emitter builds at an emit
     /// site, and of the operands built beside them), so it has a FLOOR as well
     /// as a ceiling: 299 while the lambda and predicate clones were live, 109
-    /// once both were measured, 110 once both were deleted.
+    /// once both were measured, 110 once both were deleted, and 72 once `peek`
+    /// stopped deriving a type at all (RFC-0125 §3 M5, the ninth slice). The
+    /// last move is the class SHRINKING to what §2.3 describes rather than the
+    /// class changing: `peek` reads the checker's record for every node the
+    /// program holds now, so the only questions left are about AST the backend
+    /// built itself, which is the definition §2.3 gives.
     peek_off: usize,
     /// Instantiations one backend emitted that the lowering's worklist does not
     /// have. This is M2's gate and it is zero.
@@ -1323,14 +1328,17 @@ fn gate() {
     // share of the residue is the class RFC-0101 §2.3 assigns to the backend on
     // purpose: the type of a release receiver or of a dispatched call the
     // emitter builds at an emit site, which is a fact about a wasm local rather
-    // than about a program. It was 299 while two clones were live and 109 once
-    // both were measured away; it is not waiting for a mechanism, and a
-    // milestone that drives it toward zero is moving a decision INTO the form
-    // that §2.3 puts in the backend. Both bounds fail loudly rather than one:
-    // a rise means a new engine-built tree, a fall means §2.3 moved.
+    // than about a program. It was 299 while two clones were live, 109 once
+    // both were measured away, and 72 once `peek` stopped deriving types and
+    // started reading the checker's record — which did not move §2.3, it
+    // emptied everything that was not §2.3 out of the class. It is not waiting
+    // for a mechanism, and a milestone that drives it to zero is moving a
+    // decision INTO the form that §2.3 puts in the backend. Both bounds fail
+    // loudly rather than one: a rise means a new engine-built tree, a fall
+    // means §2.3 moved.
     assert!(
-        (90..=150).contains(&t.peek_off),
-        "`peek` answered {} questions about AST no instantiation holds. RFC-0101 M6          measured this class at 109-110 and §2.3 owns every one of them; outside          90..150 the class has changed and the RFC's §2.3 leaves need re-reading",
+        (50..=100).contains(&t.peek_off),
+        "`peek` answered {} questions about AST no instantiation holds. RFC-0125 §3 M5          measured this class at 72 and §2.3 owns every one of them; outside          50..100 the class has changed and the RFC's §2.3 leaves need re-reading",
         t.peek_off
     );
 

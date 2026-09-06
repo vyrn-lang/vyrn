@@ -6591,6 +6591,12 @@ fn bodies_wasm(
     // same emitter RFC-0076's engine uses to run a generator anywhere else. A
     // file whose doors reach no generator is untouched, which is why an ordinary
     // `test` file pays for none of the `vyrn_gen` imports.
+    // RFC-0125 §3 M5, the one-reader slice: the doors above ARE the `test` and
+    // `bench` bodies, so the checker is told that before it types them. Without
+    // it every `assert`, `assertEq` and `blackBox` in a lifted body is refused
+    // as ordinary code and the record loses the arguments under it — which is
+    // where the emitters read a join's type from.
+    vyrn_frontend::checker::set_test_host(true);
     let reach = vyrn_codegen::direct::gen_reach(&prog);
     let generation = (0..bodies.len()).any(|k| reach.contains(&format!("__vyrn_body_{k}")));
     let compiled = if generation {
@@ -6600,6 +6606,7 @@ fn bodies_wasm(
     } else {
         vyrn_codegen::direct::compile(&prog)
     };
+    vyrn_frontend::checker::set_test_host(false);
     let bytes = match compiled {
         Ok(b) => b,
         Err(e) => {
