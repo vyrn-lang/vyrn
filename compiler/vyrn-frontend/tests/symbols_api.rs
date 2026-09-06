@@ -338,14 +338,10 @@ fn main() -> Int64 {
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "s");
     assert_eq!(r.target_line, 2);
-    // RFC-0087 U1: a binding whose type owns heap carries its memory answer on
-    // hover. A String literal is a data-segment pointer, so this one is static —
-    // and saying so is the point, because the next line up could be a concat and
-    // nothing in the source would say which.
-    assert_eq!(
-        r.hover,
-        "let s: String\n\nmemory: static data — nothing reclaims it, and nothing needs to"
-    );
+    // RFC-0125 §3 M3, the report slice: the memory line is the CORE's, and
+    // this crate installs no placer, so the hover here carries the type alone.
+    // `vyrn-lsp`'s own suite pins the memory line through a server that does.
+    assert_eq!(r.hover, "let s: String");
 }
 
 /// A local shadows a same-named top-level symbol: the `area` *call* on line 19
