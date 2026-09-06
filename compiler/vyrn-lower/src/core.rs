@@ -196,6 +196,16 @@ pub enum BorrowKind {
     /// the container's ROOT, which is what the way out names
     /// (`movecheck::Borrow::Element`). RFC-0125 §3 M3, row 19.
     LoopVar { of: String },
+    /// A payload binder of a `match` that did not take its scrutinee, where
+    /// the scrutinee is itself a read of a place: the place owns the payload
+    /// and the binder only names it (`movecheck::Borrow::Projection`).
+    ///
+    /// The alias beside it says WHICH place, for the rules about writing
+    /// around a live read. This says what the binder IS, which is the half a
+    /// refusal quotes — and it is the reader's own name that gets quoted,
+    /// where following the alias to its root quotes the place instead
+    /// (RFC-0125 §3 M3, row 17).
+    Place,
 }
 
 impl BorrowKind {
@@ -216,6 +226,7 @@ impl BorrowKind {
             }
             BorrowKind::Capture => "a captured binding".to_string(),
             BorrowKind::LoopVar { .. } => "a loop variable".to_string(),
+            BorrowKind::Place => "read out of a place that owns it".to_string(),
         }
     }
 
@@ -246,6 +257,7 @@ impl BorrowKind {
             BorrowKind::LoopVar { .. } => {
                 vec![format!("`{path}.copy()` if both sides need a value")]
             }
+            BorrowKind::Place => vec![format!("`{path}.copy()` if both sides need a value")],
         }
     }
 }
@@ -2771,6 +2783,9 @@ impl<'a> Builder<'a> {
                     // `vyxProcessElem` hands one to a `consume` parameter on
                     // the arm that does not return the value whole.
                     if self.body.names[m as usize].borrow {
+                        if self.body.names[n as usize].borrow_kind.is_none() {
+                            self.body.names[n as usize].borrow_kind = Some(BorrowKind::Place);
+                        }
                         out.push(St::Let(n, Rhs::Read(Place::Name(m))));
                     }
                 }
