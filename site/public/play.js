@@ -7,9 +7,10 @@
 // forever, because neither runs the program. `run` goes to a worker, because it
 // can, and the page terminates it when it does.
 //
-// Nothing here decides anything about the language. Every colour, every
-// diagnostic and every byte of output comes back from `play.wasm`, which is the
-// compiler's own front end.
+// Nothing here decides anything about the language. Every colour and every
+// diagnostic comes back from `play.wasm`, which is the compiler; every byte of
+// output comes from the program's OWN module, which the compiler emitted and the
+// worker ran (`play-worker.js`).
 import { loadPlay } from "./play-wasm.js";
 
 /// How long a program may run before the page stops it.
@@ -348,7 +349,10 @@ export function mountPlay(root, opts = {}) {
         return;
       }
       showRun(r);
-      showDiagnostics(r.diagnostics);
+      // A run does not decide what the checker says. The worker answers what the
+      // program WROTE; any warning about it is the checker's, and asking it here
+      // is the same call the editor makes after every edit.
+      recheck();
       finish("Ran");
     };
     worker.onerror = () => {
@@ -365,7 +369,7 @@ export function mountPlay(root, opts = {}) {
       finish("Stopped");
     }, RUN_LIMIT_MS);
 
-    worker.postMessage({ src: srcHost().value, stdin: stdin ? stdin.value : "", now: Date.now() });
+    worker.postMessage({ src: srcHost().value, stdin: stdin ? stdin.value : "" });
   }
 
   // -----------------------------------------------------------------------

@@ -84,9 +84,9 @@ use crate::ast::TypeDecl;
 /// 10,000 fitted in release and died in debug, where CI runs the tests. A limit
 /// only one profile honors is not a limit.
 ///
-/// Measured on the debug build against [`INTERP_STACK_BYTES`], with this counter
-/// lifted: depth 2,600 runs and 2,800 overflows, so 1,000 keeps 2.6x margin in
-/// the profile that has the least. The native binary and `wasmtime` run past
+/// Measured on the debug build against [`DEEP_STACK_BYTES`], with this counter
+/// lifted: depth 2,600 ran and 2,800 overflowed, so 1,000 kept 2.6x margin in
+/// the profile that had the least. The native binary and `wasmtime` run past
 /// 20,000 frames of an ordinary function in either profile. 1,000 is also where
 /// CPython settles, and it is past what a recursive descent over real data
 /// reaches: `.vyx` markup, a GraphQL selection set and a JSON document all nest
@@ -154,13 +154,18 @@ pub const ARRAY_LIT_LIMIT: usize = FRAME_LIMIT as usize / 16;
 /// everything that has an opinion about it.
 pub const REGION_MAX: u32 = 64;
 
-/// The Rust stack every thread that runs the interpreter reserves.
+/// The Rust stack a thread running the compiler reserves.
 ///
-/// Reserving is cheap — the pages are virtual until a frame touches them — and
-/// what is touched is [`CALL_DEPTH_LIMIT`] frames deep at worst: ~8.5 MB in a
-/// release build, ~190 MB in a debug one. Both sit well inside this, which is
-/// what gives the limit above room to be the same number in either profile.
-pub const INTERP_STACK_BYTES: usize = 512 * 1024 * 1024;
+/// This was the tree-walker's, sized so [`CALL_DEPTH_LIMIT`] frames of it fitted
+/// in either build profile. RFC-0125 §3 M5 deleted the tree-walker and the
+/// number stayed, because what needs the room now is the COMPILER: the loader,
+/// the checker and the backends all recurse over the syntax of a file, and a
+/// deeply nested program is what reaches the bottom of a stack.
+///
+/// Reserving is cheap — the pages are virtual until a frame touches them — so
+/// the number is generous on purpose. Windows gives a thread ~1 MB by default,
+/// which a realistic program's check has overflowed.
+pub const DEEP_STACK_BYTES: usize = 512 * 1024 * 1024;
 
 /// The trap for calling an `extern` (RFC-0012) on a target that provides no
 /// host for it. Parity compares these bytes byte-for-byte

@@ -1200,18 +1200,16 @@ pub const GEN_ENTRY_CONTRACT_OF: &str = "__vyrnGenContractOf_";
 /// run` (`list_dir_is_not_generation_only`) — so the one backend without a
 /// lowering refuses it itself, in a user's sentence rather than an emitter's
 /// note about its own gaps (RFC-0096 M3's addendum). The direct wasm backend
-/// lowers it over `fd_readdir` (RFC-0125 §3 M5).
+/// lowers it over `fd_readdir` (RFC-0125 §3 M5), which is what `vyrn run` runs.
 pub const LIST_DIR_NO_LOWERING: &str =
-    "`listDir` runs in the interpreter, at generation time and on the wasm target (RFC-0021, \
-     RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with \
-     `--target wasm`";
+    "`listDir` runs at generation time and on the wasm target (RFC-0021, RFC-0125); it has no \
+     native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with `--target wasm`";
 
 /// `listDirKinds`' copy of the sentence (RFC-0119) — same reasoning, its own
 /// name, so the diagnostic names the call the user wrote.
 pub const LIST_DIR_KINDS_NO_LOWERING: &str =
-    "`listDirKinds` runs in the interpreter, at generation time and on the wasm target \
-     (RFC-0119, RFC-0125); it has no native lowering in v1 — use it in a `gen fn`, under `vyrn \
-     run` or with `--target wasm`";
+    "`listDirKinds` runs at generation time and on the wasm target (RFC-0119, RFC-0125); it has \
+     no native lowering in v1 — use it in a `gen fn`, under `vyrn run` or with `--target wasm`";
 
 /// The atom-stream primitives the synthesized decoders are written against.
 ///
@@ -3145,6 +3143,15 @@ impl<'a> Gen<'a> {
             [zero, one] => Some((zero.payload.first().cloned(), one.payload.first().cloned())),
             _ => None,
         }
+    }
+
+    /// Whether `ty` is one of the two BUILT-IN sums, under this emitter's
+    /// substitution — [`vyrn_frontend::types::is_builtin_sum`] asked of a type.
+    /// A release walks any two-variant sum alike ([`Gen::two_variant_sum`]); `?`
+    /// does not, and this is the question it asks.
+    fn builtin_sum(&self, ty: &Type) -> bool {
+        self.sum_vs(ty)
+            .is_some_and(|vs| vyrn_frontend::types::is_builtin_sum(&vs))
     }
 
     /// The payload slot count of the sum `ty` — the shape's members less the tag.
@@ -8020,7 +8027,7 @@ impl<'a> Gen<'a> {
     /// function's result; otherwise continue with the unwrapped i64 payload.
     fn gen_try(&mut self, expr: &Expr, at: usize) -> Result<(String, Type), String> {
         let (agg, aty) = self.gen_expr(expr)?;
-        if self.two_variant_sum(&aty).is_none() {
+        if !self.builtin_sum(&aty) {
             let place = vyrn_frontend::movecheck::place_path(expr).is_some()
                 || vyrn_frontend::movecheck::element_path(expr).is_some();
             return self.gen_try_fallible(&agg, &aty, at, place);

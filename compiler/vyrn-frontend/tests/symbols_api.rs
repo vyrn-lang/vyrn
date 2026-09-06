@@ -458,9 +458,10 @@ fn main() -> Int64 {
 #[test]
 fn movecheck_rule_two_pinned_to_ident() {
     let src = "\
-fn take(t: consume String) -> Int64 { return t.byteLength }
 fn borrow(s: read String) -> Int64 {
-    return take(s);
+    let mut o: Array<String> = [];
+    o.push(s);
+    return o.length;
 }
 fn main() -> Int64 { return 0; }
 ";
@@ -470,10 +471,10 @@ fn main() -> Int64 { return 0; }
         .iter()
         .find(|d| d.stage == "movecheck" && d.message.contains("`read` parameter"))
         .expect("a movecheck rule-2 diagnostic");
-    // Line 3: `    return take(s);` — the offending use `s` is at col 17.
+    // Line 3: `    o.push(s);` — the offending use `s` is at col 12.
     assert_eq!(d.line, 3);
-    assert_eq!(d.col, 17, "pinned to the `s` use, not col 0 (whole line)");
-    assert_eq!(d.end_col, 18);
+    assert_eq!(d.col, 12, "pinned to the `s` use, not col 0 (whole line)");
+    assert_eq!(d.end_col, 13);
 }
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is

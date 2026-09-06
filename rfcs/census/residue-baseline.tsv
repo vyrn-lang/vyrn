@@ -192,6 +192,7 @@ stringops	clean
 strings	other
 strpredbytes	clean
 tagged	clean
+tallybytes	other
 task_abandoned	skip
 templates	clean
 testing	clean

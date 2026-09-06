@@ -555,6 +555,16 @@ impl Declared {
     /// spells it concretely. Without this a `let body = fetch(code)?` typed
     /// as unknown and the copied-out payload carried no release row
     /// (exit-residue round forty-one).
+    ///
+    /// **A GENERIC impl's row spells its own variable, not a type.** The
+    /// sentence above is true of `impl Fallible for Http` and false of
+    /// `impl<T> Fallible for Slot<T>`, whose `success` returns `T`. So the
+    /// impl's parameters are solved from the OPERAND — the same
+    /// [`crate::types::solve_param`] every other reader of a generic row uses —
+    /// and a row that still mentions a variable stands down, as the protocol
+    /// arm of [`Declared::type_of`] does. `let v = s.copy()?` on a
+    /// `Slot<String>` read as `T`, which owns no heap, and the copied-out
+    /// String leaked (RFC-0126 §8.16).
     fn success_payload(&self, vars: &Scopes<Option<Type>>, operand: &Expr) -> Option<Type> {
         let ot = self.type_of(vars, operand)?;
         let r = crate::types::resolve(&ot, &self.decls);
@@ -562,15 +572,17 @@ impl Declared {
             .or_else(|| crate::types::result_payloads(&r).map(|(t, _)| t))
         {
             Some(t) => Some(t.clone()),
-            None => crate::types::type_key(&ot).and_then(|k| {
-                self.rets
-                    .get(&crate::types::impl_method_name(
-                        crate::types::FALLIBLE,
-                        &k,
-                        "success",
-                    ))
-                    .cloned()
-            }),
+            None => {
+                let k = crate::types::type_key(&ot)?;
+                let m = crate::types::impl_method_name(crate::types::FALLIBLE, &k, "success");
+                let ret = self.rets.get(&m)?;
+                let mut subst = HashMap::new();
+                if let Some(p) = self.params.get(&m).and_then(|ps| ps.first()) {
+                    crate::types::solve_param(p, &ot, &mut subst);
+                }
+                let ret = crate::types::substitute(ret, &subst);
+                (!crate::types::mentions_param(&ret)).then_some(ret)
+            }
         }
     }
 }

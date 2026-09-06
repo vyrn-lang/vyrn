@@ -203,6 +203,12 @@ impl BorrowKind {
     /// sentence is about: a second name for a parameter says so, which is
     /// how `movecheck::Borrow::what` words it.
     pub fn what(&self, at: &str) -> String {
+        // A PATH under the parameter is the parameter: `h.meta[0]` is read out
+        // of a `read` parameter and the reader is told so, where a name bound
+        // to one (`let t = r.s`) is a second name for it. The two are
+        // comparable at the root alone, which is `movecheck::Borrow::what`'s
+        // own test (RFC-0125 §3 M3).
+        let at = vyrn_frontend::movecheck::root_of(at);
         match self {
             BorrowKind::Param { cap, of } if at == of => format!("a `{cap}` parameter"),
             BorrowKind::Param { cap, of } => {
@@ -230,12 +236,16 @@ impl BorrowKind {
             BorrowKind::Capture => Vec::new(),
             // A loop variable has a second way out, and it comes first: let the
             // loop take the elements. It only works when the WHOLE element is
-            // handed on, which is the only shape this reaches — a field of one
-            // is read into a name of its own.
-            BorrowKind::LoopVar { of } => vec![
+            // handed on — a stored FIELD of one is a partial move — so a path
+            // under the variable is left with the copy alone
+            // (`movecheck::Borrow::fixes`).
+            BorrowKind::LoopVar { of } if vyrn_frontend::movecheck::root_of(path) == path => vec![
                 format!("`for {path} in consume {of}` if the loop should take the elements"),
                 format!("`{path}.copy()` if both sides need a value"),
             ],
+            BorrowKind::LoopVar { .. } => {
+                vec![format!("`{path}.copy()` if both sides need a value")]
+            }
         }
     }
 }
@@ -4481,10 +4491,9 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // The judgment memo, when the host armed one — RFC-0125 §3 M3, the memo
     // slice. A body whose key is unchanged is served its own refusals and is
     // neither built nor judged. The key and the cache are the driver's
-    // (`movecheck::Judgments`); what this loop knows and the driver does not
-    // is whether a body was INERT, which is the condition an entry is written
-    // under: a body the placer wrote no row for leaves nothing behind but its
-    // refusals, so serving those is serving the whole answer.
+    // (`movecheck::Judgments`), and so is the rule about what a served body
+    // leaves behind: an armed host reads refusals, and neither the facts nor
+    // the rows below have a reader in it.
     let js = vyrn_frontend::prof::phase("placer: judgments");
     let memo = vyrn_frontend::movecheck::Judgments::open(program);
     drop(js);
@@ -4497,7 +4506,6 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             continue;
         }
         let refused_before = REFUSALS.with(|v| v.borrow().len());
-        let added_before = added.len();
         let bs = vyrn_frontend::prof::phase("placer: core::build");
         let made = build(program, inst, own);
         drop(bs);
@@ -4538,11 +4546,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             // third slice).
             place_frames(top, &inst.func.name, own, &mut added, &mut touched, trace);
         }
-        // Inert: no row placed, by this instance or by an earlier one of the
-        // same generic body — every table `place_frames` writes marks its
-        // owner `touched`, and the rows it defers are the tail of `added`.
-        let inert = added.len() == added_before && !touched.contains(&inst.func.name);
-        remember(memo.as_ref(), key, refused_before, inert);
+        remember(memo.as_ref(), key, refused_before);
         built.push(top);
     }
     // A `test` (RFC-0015) or `bench` (RFC-0055) body is a body, and the
@@ -4565,7 +4569,6 @@ pub fn augment(program: &Program, own: &mut Ownership) {
             continue;
         }
         let refused_before = REFUSALS.with(|v| v.borrow().len());
-        let added_before = added.len();
         match build_outside(
             program,
             own,
@@ -4599,8 +4602,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
                 outside.push(None);
             }
         }
-        let inert = added.len() == added_before && !touched.contains(&ob.name);
-        remember(memo.as_ref(), key, refused_before, inert);
+        remember(memo.as_ref(), key, refused_before);
     }
     drop(os);
     for (f, row, kind) in added {
@@ -4706,21 +4708,18 @@ fn serve(
 /// Record what one body earned: every refusal from `from` to the end of the
 /// list.
 ///
-/// Only an INERT body — one the placer wrote no row for — is recorded, because
-/// serving a body skips its placement as well as its judgment, and a body that
-/// owed a row would have that row silently dropped the next time round.
+/// Every body with a key, whether the placer wrote a row for it or not. Serving
+/// a body skips its placement as well as its judgment, and the rows it skips
+/// have no reader in a host that armed the memo — the rule is
+/// [`movecheck::reuse_judgments`]'s and is stated there.
 fn remember(
     memo: Option<&vyrn_frontend::movecheck::Judgments>,
     key: Option<vyrn_frontend::movecheck::JudgmentKey>,
     from: usize,
-    inert: bool,
 ) {
     let (Some(memo), Some(key)) = (memo, key) else {
         return;
     };
-    if !inert {
-        return;
-    }
     memo.put(
         key,
         REFUSALS.with(|v| {

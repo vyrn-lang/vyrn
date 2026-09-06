@@ -152,18 +152,6 @@ fn wait_for_port(acc: &Arc<Mutex<String>>, timeout: Duration) -> u16 {
     }
 }
 
-/// The compiled route is the default (RFC-0125 §3 M5, the eleventh slice), so
-/// this adds nothing unless `VYRN_SERVE_ENGINE=interp` asks for the tree-walker
-/// — one set of assertions either way, because a served program must answer the
-/// same on both engines. `--workers` (RFC-0025) is included: the compiled route
-/// serves a pool as N resident instances since the fifteenth slice.
-fn engine_args(_extra: &[&str]) -> Vec<String> {
-    match std::env::var("VYRN_SERVE_ENGINE").as_deref() {
-        Ok("interp") => vec!["--engine".to_string(), "interp".to_string()],
-        _ => Vec::new(),
-    }
-}
-
 /// Spawn `vyrn serve <tmp> --port 0 [extra args]` on `src` and wait for the
 /// startup line — which names the port the OS gave it — before returning.
 fn start_server_on(src: &str, extra: &[&str]) -> Serve {
@@ -172,7 +160,6 @@ fn start_server_on(src: &str, extra: &[&str]) -> Serve {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
-        .args(engine_args(extra))
         .arg(&path)
         .arg("--port")
         .arg("0")
@@ -427,7 +414,6 @@ fn handle(req: Request) -> Response {
 
     let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("serve")
-        .args(engine_args(&[]))
         .arg(&file.path)
         .arg("--port")
         .arg("0")
@@ -952,8 +938,12 @@ fn read_frame(s: &mut TcpStream) -> Option<Frame> {
 
 /// Read frames until a close arrives, and answer with its code. Bounded, so a
 /// server that never closes fails the test rather than hanging the suite.
+/// The pump learns of a client's close at the next frame boundary, and the
+/// producer behind these tests is endless, so a fast runner can push hundreds of
+/// frames before the boundary is reached (the arm runner did, twice). The claim
+/// is that the close is answered, not that it is answered within 64 frames.
 fn read_until_close(s: &mut TcpStream) -> Option<u16> {
-    for _ in 0..64 {
+    for _ in 0..8192 {
         let f = read_frame(s)?;
         if f.opcode == 8 {
             return Some(u16::from_be_bytes([f.payload[0], f.payload[1]]));

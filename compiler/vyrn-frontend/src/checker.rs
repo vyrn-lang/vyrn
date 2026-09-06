@@ -144,6 +144,12 @@ pub fn set_gen_host(on: bool) {
     GEN_HOST.with(|g| g.set(on));
 }
 
+/// Whether this thread is checking a generator host. Part of [`recorded`]'s
+/// key, because it is part of what a check decides.
+fn gen_host() -> bool {
+    GEN_HOST.with(|g| g.get())
+}
+
 /// Whether a body is checked as generation code: its own `gen fn` marker, or a
 /// whole-program generator host.
 fn in_gen_of(f: &Function) -> bool {
@@ -1899,17 +1905,109 @@ impl Recorded {
     }
 }
 
+/// One check that both reports and records: the diagnostics, the inferred-`let`
+/// table and what the checker decided about every node, from a single pass.
+fn recording_check(
+    program: &Program,
+) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>, Recorded) {
+    RECORD.with(|r| *r.borrow_mut() = Recorded::new());
+    PENDING_SUBST.with(|p| *p.borrow_mut() = None);
+    RECORDING.with(|c| c.set(true));
+    let (diags, let_types, _, _, _) = check_accum_full(program);
+    RECORDING.with(|c| c.set(false));
+    let made = RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()));
+    (diags, let_types, made)
+}
+
 /// Type-check `program` and return what the checker decided about every node.
 ///
 /// Diagnostics are dropped: a caller that wants them calls [`check_accum`],
 /// and a caller of this one has already established that the program checks.
 pub fn record(program: &Program) -> Recorded {
-    RECORD.with(|r| *r.borrow_mut() = Recorded::new());
-    PENDING_SUBST.with(|p| *p.borrow_mut() = None);
-    RECORDING.with(|c| c.set(true));
-    let _ = check_accum_full(program);
-    RECORDING.with(|c| c.set(false));
-    RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()))
+    recording_check(program).2
+}
+
+/// **The analysis's own check, recording as it goes** — RFC-0125 §3 M3, the one
+/// check.
+///
+/// [`check_accum_with_let_types`] and [`record`] are the same pass over the same
+/// program asked for two different halves of one answer, and an editor ran both:
+/// the analysis checked, and the lowering the placer runs then checked again to
+/// learn the type of every node. This is that pass, asked once, with both halves
+/// kept — [`recorded`] serves the second half to the lowering.
+///
+/// It is the FULL check, not [`check_accum_reusing`], and that is not a choice
+/// but the rule: a reused body is one this pass does not walk, so it records
+/// nothing for it, and a record with holes in it is not a record. Reuse and
+/// recording are alternatives, and the caller picks by whether the record has a
+/// reader — see `symbols.rs`, where a host with no placer keeps the memo.
+pub fn check_accum_recording(
+    program: &Program,
+) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
+    let (diags, let_types, made) = recording_check(program);
+    hold(program, std::rc::Rc::new(made));
+    (diags, let_types)
+}
+
+thread_local! {
+    /// The program a record may be held for, as an address, or 0. Set by
+    /// [`crate::own::Memo`], whose guard borrows that program — which is the
+    /// whole proof that the address is a sound key, and it is written down at
+    /// [`crate::own::Memo::open`].
+    static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `(program address, generator host, the record)`. The second field is
+    /// part of the key because it is part of the answer: the same module
+    /// checked as a generator host types `lex`, `Code` and `Token`, and checked
+    /// as ordinary code records `<type error>` where they stand.
+    static HELD: RefCell<Option<(usize, bool, std::rc::Rc<Recorded>)>> =
+        const { RefCell::new(None) };
+}
+
+/// Open the record slot for `program`. Called by [`crate::own::Memo::open`],
+/// so a record lives exactly as long as the analysis it belongs to.
+pub(crate) fn hold_open(program: &Program) {
+    HOLDING.with(|h| h.set(program as *const Program as usize));
+    HELD.with(|h| *h.borrow_mut() = None);
+}
+
+/// Close it. Called by [`crate::own::Memo`]'s `Drop`.
+pub(crate) fn hold_close() {
+    HOLDING.with(|h| h.set(0));
+    HELD.with(|h| *h.borrow_mut() = None);
+}
+
+fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
+    let key = program as *const Program as usize;
+    if HOLDING.with(|h| h.get()) == key {
+        HELD.with(|h| *h.borrow_mut() = Some((key, gen_host(), made)));
+    }
+}
+
+/// What the checker decided about every node of `program`, from the analysis's
+/// own check where it made one and from a check of its own where it did not.
+///
+/// The lowering asks this rather than [`record`]. Two readers want the same
+/// answer inside one command — the placer, and the `lower` an engine runs after
+/// it — and the command line adds a third asker before either: `check_and_
+/// synthesize` checks, and then EXTENDS the program with the JSON codecs and
+/// the `where` constructors it synthesizes, so the record its check could make
+/// would be missing exactly the bodies it added. There the first ask pays and
+/// the second is served; in the editor nothing is synthesized, the analysis's
+/// own check records, and both asks are served.
+pub fn recorded(program: &Program) -> std::rc::Rc<Recorded> {
+    let key = program as *const Program as usize;
+    let held = HELD.with(|h| {
+        h.borrow()
+            .as_ref()
+            .filter(|(k, g, _)| *k == key && *g == gen_host())
+            .map(|(_, _, r)| r.clone())
+    });
+    if let Some(r) = held {
+        return r;
+    }
+    let made = std::rc::Rc::new(record(program));
+    hold(program, made.clone());
+    made
 }
 
 fn recording() -> bool {
@@ -11629,6 +11727,53 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "id");
         assert_eq!(calls[0].1, vec![("T".to_string(), Type::Int)]);
+    }
+
+    /// **One check per analysis** — RFC-0125 §3 M3, the one check.
+    ///
+    /// The analysis checks, and the lowering the placer runs used to check the
+    /// same program again to learn the type of every node. Now the analysis's
+    /// check records and the lowering reads what it recorded, so the pin is
+    /// that the two answers are the SAME answer: what
+    /// [`check_accum_recording`] holds is what [`record`] would have made.
+    ///
+    /// The second half is the key. A record is held for ONE program, and the
+    /// address of a program is only a key while something borrows it — so a
+    /// second program, and the same program with no [`crate::own::Memo`] open,
+    /// each get a record of their own.
+    #[test]
+    fn the_analysiss_own_check_records_what_the_lowering_reads() {
+        let src = "fn id<T>(x: T) -> T {\n    return x\n}\n\n\
+                   fn main() -> Int64 {\n    let n: Int64 = id(1)\n    return n\n}\n";
+        let p = parse(lex(src).unwrap()).unwrap();
+        let want = record(&p);
+
+        // With the analysis open, the check makes the record and the lowering
+        // is served it — one check, two readers.
+        {
+            let _memo = crate::own::Memo::open(&p);
+            let (diags, _) = check_accum_recording(&p);
+            assert!(diags.is_empty(), "{diags:?}");
+            let got = recorded(&p);
+            assert_eq!(got.node_types, want.node_types);
+            assert_eq!(got.joins, want.joins);
+            assert_eq!(got.node_substs.len(), want.node_substs.len());
+            // A DIFFERENT program borrowed at the same time is not this one,
+            // and asking for it makes a record of its own.
+            let q = parse(lex(src).unwrap()).unwrap();
+            let other = recorded(&q);
+            assert!(
+                other
+                    .node_types
+                    .keys()
+                    .all(|k| !got.node_types.contains_key(k)),
+                "a record served for the wrong program"
+            );
+        }
+
+        // Nothing borrows the program now, so nothing is held for it.
+        let after = recorded(&p);
+        assert_eq!(after.node_types, want.node_types);
     }
 
     // ---- RFC-0091 M2: place projections ------------------------------------

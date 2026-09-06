@@ -193,6 +193,10 @@ mod tests {
     }
 
     fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
+        // Every process that runs a `gen fn` installs the engine itself: under
+        // nextest a test is its own process, and the sibling that used to
+        // install it is not there.
+        vyrn_genwasm::install();
         let files: Vec<(&str, &str)> = files
             .iter()
             .copied()
@@ -218,6 +222,7 @@ mod tests {
     }
 
     fn load_err(root: &str, files: &[(&str, &str)]) -> String {
+        vyrn_genwasm::install();
         match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds
@@ -1240,6 +1245,7 @@ mod remote_tests {
     use super::*;
 
     fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
+        vyrn_genwasm::install();
         match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(_) => panic!("expected a load error"),
             Err(ds) => ds
@@ -1408,7 +1414,16 @@ mod gen_tests {
         }
     }
 
+    /// Install the generation engine, which is the DRIVER's and not this crate's
+    /// (RFC-0125 §3 M5). `gen::generate` asks whatever is installed and refuses
+    /// when nothing is; a tree-walker used to answer for free, and every test in
+    /// this module that runs a `gen fn` depended on that. Idempotent.
+    fn engine() {
+        vyrn_genwasm::install();
+    }
+
     fn run_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
+        engine();
         let program = load(root, "main.vyrn", &opts(), r)
             .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
         let diags = vyrn_frontend::checker::check_accum(&program);
@@ -1430,7 +1445,10 @@ mod gen_tests {
     fn run(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
         run_with(root, &map(files))
     }
+    /// The message a load+check produced. `engine()` because a `gen fn` needs
+    /// one and this crate does not have it.
     fn gen_err(root: &str, files: &[(&str, &str)]) -> String {
+        engine();
         match load(root, "main.vyrn", &opts(), &map(files)) {
             Ok(p) => match vyrn_frontend::checker::check_accum(&p).first() {
                 Some(d) => d.message.clone(),
@@ -2101,6 +2119,73 @@ fn main() -> Int64 { return shape().byteLength }"#;
         // Warm cache from `a`'s generation must not leak into `b`'s: 1*10 + 2 = 12
         // (a pre-fix collision served `b` the value `1`, giving 11).
         assert_eq!(run_with(root, &r).unwrap(), 12);
+    }
+
+    /// Editor analysis over a generator-call import (RFC-0021): the generator
+    /// runs, its module links, and the imported name is indexed for hover and
+    /// go-to-def.
+    ///
+    /// A unit test in `src/symbols.rs` once, and here for the reason this whole
+    /// module is here — the engine is the driver's (RFC-0125 §3 M5), and the
+    /// generated module links `std/runtime` like any other, which is what
+    /// `map()` supplies.
+    #[test]
+    fn analyze_linked_runs_a_generator_import() {
+        let gen = "export gen fn mk(d: String) -> String {                        return \"export fn magic() -> Int64 { return 7 }\" }";
+        let root = "import { mk } from \"./gen\"
+                    import { magic } from mk(\"./data\")
+                    fn main() -> Int64 { return magic() }";
+        engine();
+        let a = vyrn_frontend::symbols::analyze_linked(
+            root,
+            "main.vyrn",
+            &opts(),
+            &map(&[("gen.vyrn", gen)]),
+        );
+        assert!(
+            a.diagnostics.is_empty(),
+            "diags: {:?}",
+            a.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            a.symbols.iter().any(|s| s.name == "magic"),
+            "generated `magic` is indexed"
+        );
+    }
+
+    #[test]
+    fn generator_over_step_budget_fails_loudly() {
+        set_gen_budgets_for_test(Some(500), None);
+        let gen = "export gen fn spin(n: Int64) -> String { \
+                       let mut i = 0 \
+                       while i < 1000000000 { i = i + 1 } \
+                       return \"\" }";
+        let root = "import { spin } from \"./gen\" \
+                    import { z } from spin(1) \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        set_gen_budgets_for_test(None, None);
+        assert!(e.contains("exceeded its step budget"), "{e}");
+    }
+
+    #[test]
+    fn generator_over_output_cap_fails_loudly() {
+        set_gen_budgets_for_test(None, Some(5));
+        let gen = "export gen fn big(d: String) -> String { \
+                       return \"this is far more than five bytes\" }";
+        let root = "import { big } from \"./gen\" \
+                    import { z } from big(\"./d\") \
+                    fn main() -> Int64 { return 0 }";
+        let e = gen_err(root, &[("gen.vyrn", gen)]);
+        set_gen_budgets_for_test(None, None);
+        // The engine's own wording. The tree-walker said "over the N byte cap"
+        // where this says "exceeds the N byte cap", and nothing compared them:
+        // this test only ever ran the tree-walker, so the second wording was
+        // never asserted anywhere (RFC-0125 §3 M5).
+        assert!(e.contains("exceeds the 5 byte cap"), "{e}");
     }
 
     #[test]

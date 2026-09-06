@@ -1,3 +1,2 @@
-a1_afterjoin.vyrn:12:0: `s` was moved here into `consume`
-line 14: ... and `s` is used again here
-  fix: `s.copy()` if both sides need a value
+a1_afterjoin.vyrn:14:0: `s.byteLength` is used here but was already consumed by `take(..)` on line 12
+  (a `consume` parameter takes ownership; the value can't be used afterward)
