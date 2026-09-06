@@ -6575,6 +6575,141 @@ not move either.
 #### Gates (2026-09-06, the safety slice)
 
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+
+**Row 17 leaves, and both of the things that stopped it were the core's
+(2026-09-06).** The last rule of the five is "an exported function owns its
+result", and the containment slice measured it at five programs: two menu,
+three text. The wordings were not the kernel's to fix. A `return` reached the
+rule in four shapes and the kernel could say only the first one well, because
+the core told it something else about the other three.
+
+| the export returns | the checker says | the kernel said | the kernel says now |
+|---|---|---|---|
+| `return q` | "`q` may not be returned from an exported function — it is a `read` parameter, and the JS caller releases what it is handed" | the same sentence, the same menu | unchanged |
+| `return match d.tag { Word(s) => s, .. }` | "`s` may not be returned from an exported function — it is read out of a place that owns it, …" | "`@borrow` may not be returned — it is read out of `@t1`, a place that owns it" | the checker's, word for word, menu included |
+| `return d.s` | "`d.s` may not be returned from an exported function — it is read out of a place that owns it, …" | "`d` is written here while `d.s` still reads out of it" | the checker's, word for word, menu included |
+| `return if p == "" { q } else { p }` | "`q` may not be returned from an exported function — it is a `read` parameter, …" | "`q` may not be stored into a store — it is a `read` parameter" | the checker's, word for word, menu included |
+
+**The first defect: a `return` of an `if` or a `match` was not a return.** It
+lowered to one store per arm into a minted result and a `return` of that
+result, so an arm's value reached the kernel as a STORE — and the kernel said
+"may not be stored into a store", about a store no reader wrote, once per arm,
+where the checker says one thing once. `Builder::return_through` states it
+once instead: each arm's value IS the return, so the arm ends with the return,
+`MissingKind::Exit` and the export's own rule apply at the arm, and the
+sentence names the binding the reader wrote. It reaches through a nested `if`
+or `match`. A `match` with a block arm (RFC-0118) keeps its own lowering,
+because a block carries its exits already, and an `if let` is a statement whose
+blocks hold `return` statements of their own.
+
+**An exit inside an arm is ONE arm's exit, and that is the half the first
+defect hid.** An exit row is keyed by the exit, so a row read off one arm is
+emitted on the arm beside it: `std/html.vyrn`'s `keyed` takes `k` on the arm
+that rebuilds the element and holds it on the other three, and the corpus
+refused it five times over. Both of the tables that ARE keyed by the arm state
+it once — the binder's own row ([`Kernel::binders_end`]) for a binder,
+RFC-0114 Rule N's edge for a name the frame bound outside — and `St::Switch`
+carries a flag saying its arms carry the exit, so no other construct changes
+key. Without the flag a `?` and a block arm re-keyed too, and neither reads
+those tables back: that was ten more refusals over the corpus, and it is the
+whole argument for the flag.
+
+**The second defect: the frame released the place the return handed out.**
+`return d.s` lowered to a read of `d.s`, then the exit's release of `d`, then a
+return of the read. The kernel refused the RELEASE — truly, and in row 05's
+words about a write around a live alias — where the reader is owed the rule
+about the return. `Builder::return_exit` leaves that one binding held: the
+frame cannot give back what it hands out, and there is one rule about a return
+for the kernel to state at the return. Nothing else stops being released,
+because the exception is exactly the binding the returned value reads out of.
+
+**Two wordings closed beside them, and both are the accident row 17 was named
+for.** The export's sentence was on the kernel's parameter path and not on its
+place-read path, so `return d.s` out of an export got the general sentence; and
+the place-read path did not say "and a return is owned" where the parameter
+path did. One program spelled two ways got two menus, which is what
+`movecheck::refuse_return` existed to stop, one pass over.
+
+**A payload binder of a match over a BORROW reads that borrow, and the core did
+not say so.** With the exit carried through, `return match tag { Word(s) => s,
+.. }` handed the kernel the binder itself, and the binder had neither an alias
+nor a kind: the kernel accepted a program the checker refuses. The core states
+both now — the alias says WHICH place, for the rules about writing around a
+live read, and `BorrowKind::Place` says what the binder IS, which is the half a
+refusal quotes. Following the alias to its root quotes the place instead: over
+module state the kernel refused `tag` by RFC-0013 and offered `tag.copy()`,
+which does not fix the program. A scrutinee the frame OWNS gets neither, and
+`std/vyx.vyrn`'s `vyxProcessElem` is why — its payloads are the frame's to give
+on the arm that does not hand the node back whole.
+
+**The licence, measured the way the containment slice measures it.** For every
+program of the corpus the checker refuses: `vyrn check` and
+`VYRN_NO_MOVECHECK=1 vyrn check`, and the two standard error streams compared
+WHOLE. The corpus is 97 programs — the 54 the checker's own suite refuses
+(`VYRN_DUMP_MOVECHECK=<dir> cargo test -p vyrn-frontend movecheck`), the 34
+census rows, and the 7 counterexamples. It is smaller than the containment
+slice's 134 because a rule's own pins leave with it.
+
+| answer | before the two core slices | after them |
+|---|---|---|
+| identical | 56 | 58 |
+| menu | 0 | 0 |
+| text | 18 | 16 |
+| accepted | 23 | 23 |
+
+**Sixteen programs reach the return rules and sixteen are identical**, menus
+included: census rows 15, 16, 17, 18 and 28, and beside them a loop variable
+returned, a second name for a field, module state, a field of it, a record of
+it, a binder yielded by an arm, and the export's own four shapes. So the rule
+leaves. `check_return`'s three refusal exits and `refuse_return` under them are
+deleted, and rows 15, 16 and 18 leave with row 17 because they were always one
+site.
+
+**One finding, and it goes the kernel's way.** `export extern fn text(w:
+String) -> String { let t = Word(w.copy()) return match t { Word(s) => s, Empty
+=> "" } }` was refused by the checker and is accepted now. The match CONSUMES
+`t` — it is the value's last use — so the binder owns the payload and the
+return hands out a value of its own. The checker read an arm as a projection
+whatever the scrutinee's fate; the kernel asks the fate. The program is one of
+the licence's 23 acceptances and the only one this slice adds.
+
+**What `note_return` is.** A record, and not a rule: RFC-0092's projection
+instrument, and the lend the call graph is closed over — half of which, the
+lend a wrapper hides, was never a refusal at all. `movecheck.rs` is 7,813 lines
+against 8,089, and the structural census is 488 / 725 / 1,570 / 73 / 3,507 /
+1,450 against 651 / 725 / 1,539 / 73 / 3,507 / 1,594. The rule's own column
+loses 163 lines and the tests lose 144: six unit tests asked
+`vyrn_frontend::check` alone, and each named a SHAPE rather than the rule, so
+they are asked of the whole compiler in `tests/refusals.rs` — in one test that
+also asserts the licence per program, which is what a census row cannot say
+about a shape that has none. What stayed in `movecheck.rs` is what this pass
+still decides: every acceptance among them, and the STORE half of the export's
+menu.
+
+**The form census (RFC-0127 §3.1) moves by two rows.** `Expr::Match` and
+`Expr::IfExpr` in `lower` are each one higher — 8 and 7 — and the two rows sum
+to 55 and 41. The total is 1,578. `testsweep`'s `LEFT_THE_CHECKER` takes the
+two sentences the rule left with. The coercion census (`lowered.rs`) does not
+move: this slice adds no coercion.
+
+**Twelve of the 175 recorded modules move by one instruction, and it is one row
+in every one of them.** `std/jsondec`'s `readDoc` is `return match
+parseJson(src) { Ok(j) => out.push(j), Err(e) => pushParse(iss, e) }`. One edge
+handed `out` on and the other did not, so Rule N owed the second edge a release
+— of an empty `Array<Json>` literal that never took a buffer, which the kernel
+calls `Static` and owes nothing for. With the exit carried into the arms there
+is no join, so the row is not owed at all. Twelve of the thirteen modules that
+emit `readDoc` are here; `jsonplace.vyrn` imports `elemAt` and `fieldAt` alone,
+so the lowering builds `readDoc` and the emitter does not emit it.
+
+Lines: `core.rs` 5,129 against 4,921, `kernel.rs` 2,310 against 2,252,
+`movecheck.rs` 7,813 against 8,089, `own.rs` 4,186 unchanged. The core is up
+208 because it states three things it used to leave to a store, a join and an
+absent alias.
+
+#### Row 17's gates (2026-09-06)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
 
 | gate | result |
@@ -6600,6 +6735,28 @@ pointed at a shallow scratch directory outside the checkout.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+| `cargo fmt --all --check`, and the two excluded manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 572 passed, 75 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 53 s, 166 programs, 23,016 instances accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored` | 1, 50 s, every pinned count unmoved |
+| `typed` `--ignored` | 1, 143 s |
+| `effects` `--ignored` | 2, 164 s |
+| `fixtures` `--ignored` | 1, 40 s |
+| `vyrn-frontend` | 1,205 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,381 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 16 s |
+| `parity` `--ignored`, release | 41 of 41, 254 s |
+| the residue ratchet | 1, 215 s, clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green on all 175, after `write` moved the twelve rows above |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 54 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks |
 
 ### M4 — the runtime in Vyrn
 

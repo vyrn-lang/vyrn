@@ -196,6 +196,16 @@ pub enum BorrowKind {
     /// the container's ROOT, which is what the way out names
     /// (`movecheck::Borrow::Element`). RFC-0125 §3 M3, row 19.
     LoopVar { of: String },
+    /// A payload binder of a `match` that did not take its scrutinee, where
+    /// the scrutinee is itself a read of a place: the place owns the payload
+    /// and the binder only names it (`movecheck::Borrow::Projection`).
+    ///
+    /// The alias beside it says WHICH place, for the rules about writing
+    /// around a live read. This says what the binder IS, which is the half a
+    /// refusal quotes — and it is the reader's own name that gets quoted,
+    /// where following the alias to its root quotes the place instead
+    /// (RFC-0125 §3 M3, row 17).
+    Place,
 }
 
 impl BorrowKind {
@@ -216,6 +226,7 @@ impl BorrowKind {
             }
             BorrowKind::Capture => "a captured binding".to_string(),
             BorrowKind::LoopVar { .. } => "a loop variable".to_string(),
+            BorrowKind::Place => "read out of a place that owns it".to_string(),
         }
     }
 
@@ -246,6 +257,7 @@ impl BorrowKind {
             BorrowKind::LoopVar { .. } => {
                 vec![format!("`{path}.copy()` if both sides need a value")]
             }
+            BorrowKind::Place => vec![format!("`{path}.copy()` if both sides need a value")],
         }
     }
 }
@@ -496,6 +508,13 @@ pub enum St {
         /// The construct took the value: its payloads moved into the arms'
         /// binders, so nothing releases the scrutinee itself afterwards.
         consuming: bool,
+        /// Every arm carries the enclosing exit: it ends with the `return`
+        /// this `match` was the operand of ([`Builder::return_through`]), and
+        /// the switch has no join at all. What is still held there is one
+        /// ARM's, so the kernel keys the row by the arm rather than by the
+        /// exit — the two tables the core reads back per arm are the binders'
+        /// and RFC-0114 Rule N's edges (RFC-0125 §3 M3, row 17).
+        carries: bool,
         line: usize,
     },
     /// An expression for its effect, on its line.
@@ -1547,6 +1566,18 @@ impl<'a> Builder<'a> {
 
     /// The releases the plan placed at one exit, as drops, in the plan's order.
     fn drops_at(&self, exit: Exit, site: usize, out: &mut Vec<St>) -> Result<(), Gap> {
+        self.drops_at_but(exit, site, None, out)
+    }
+
+    /// The same, with one binding left held: the place a `return` hands a
+    /// read of ([`Builder::return_exit`]).
+    fn drops_at_but(
+        &self,
+        exit: Exit,
+        site: usize,
+        keep: Option<Name>,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
         let Some(rows) = self.placed.get(&(exit, site)) else {
             return Ok(());
         };
@@ -1568,6 +1599,7 @@ impl<'a> Builder<'a> {
                 Some(n)
                     if !self.body.names[*n as usize].releases
                         && !self.body.names[*n as usize].for_consume => {}
+                Some(n) if keep == Some(*n) => {}
                 Some(n) => {
                     // The row's own set (a placer row, or round fifty-two's
                     // whole walk), else the binding's.
@@ -1595,6 +1627,163 @@ impl<'a> Builder<'a> {
             }
         }
         Ok(())
+    }
+
+    /// The exit a `return` IS: the streams closed, the exit's releases, and
+    /// the return of the value.
+    ///
+    /// The releases skip the binding the returned value reads out of. `return
+    /// d.s` hands the caller a read of `d`, so a release of `d` here frees the
+    /// buffer that leaves — and the core stated it in that order, which made
+    /// the kernel word the refusal as a write around a live alias where the
+    /// checker words it as a return. There is one rule about a return and the
+    /// kernel states it at the return, so the release that would speak first
+    /// is not stated at all: the frame cannot give back what it hands out
+    /// (RFC-0125 §3 M3, row 17).
+    fn return_exit(
+        &self,
+        v: Option<Val>,
+        sid: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        self.close_streams(out);
+        self.drops_at_but(Exit::Return, sid, self.reads_out_of(&v), out)?;
+        out.push(St::Return {
+            value: v,
+            site: sid,
+            is_try: false,
+            line,
+        });
+        Ok(())
+    }
+
+    /// The binding of this frame a returned value reads out of, if it is a
+    /// read of a place at all.
+    fn reads_out_of(&self, v: &Option<Val>) -> Option<Name> {
+        let Some(Val::Name(n)) = v else { return None };
+        let info = &self.body.names[*n as usize];
+        if !info.borrow {
+            return None;
+        }
+        let path = info.path.as_deref()?;
+        let end = path.find(['.', '[']).unwrap_or(path.len());
+        self.lookup(&path[..end])
+    }
+
+    /// RFC-0125 §3 M3, row 17: a `return` of an `if` or of a `match` carries
+    /// the exit INTO the arms.
+    ///
+    /// `return match t { Word(s) => s, .. }` lowered to one store per arm into
+    /// a minted result and a `return` of that result, so an arm's value
+    /// reached the kernel as a STORE. The kernel then said "`q` may not be
+    /// stored into a store" — once per arm, and about a store no reader wrote
+    /// — where the checker says "`q` may not be returned from an exported
+    /// function" once, about the binding the reader did write. Each arm's
+    /// value IS the return, so the core says so: the arm ends with the return,
+    /// [`crate::kernel::MissingKind::Exit`] and the export's own rule apply
+    /// there, and a reader gets one sentence.
+    ///
+    /// `Ok(false)` for every other shape, which keeps its own lowering. A
+    /// block arm (RFC-0118) is a statement and carries its exits already, so a
+    /// `match` with one is left whole; an `if let` is a statement too, and its
+    /// blocks hold `return` statements of their own.
+    fn return_through(
+        &mut self,
+        e: &'a Expr,
+        sid: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<bool, Gap> {
+        match e {
+            Expr::IfExpr {
+                cond,
+                then_branch,
+                else_branch: Some(else_branch),
+                ..
+            } => {
+                let site = e as *const Expr as usize;
+                let c = self.read_val(cond, out)?;
+                let mut t = Vec::new();
+                self.arm_returns(then_branch, sid, line, &mut t)?;
+                let mut f = Vec::new();
+                self.arm_returns(else_branch, sid, line, &mut f)?;
+                out.push(St::If {
+                    cond: c,
+                    then: t,
+                    els: f,
+                    site,
+                });
+                Ok(true)
+            }
+            Expr::Match {
+                scrutinee,
+                arms,
+                line: mline,
+            } if arms.iter().all(|a| matches!(a.body, ArmBody::Expr(_))) => {
+                let sty = self.ty_of(scrutinee)?;
+                let mid = e as *const Expr as usize;
+                let (sv, consuming) =
+                    self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
+                let mut core_arms = Vec::new();
+                for (i, arm) in arms.iter().enumerate() {
+                    let mut body = Vec::new();
+                    let mark = self.scope.len();
+                    let binds = self.bind_pattern(
+                        &arm.pattern,
+                        &sty,
+                        consuming,
+                        *mline,
+                        borrow_root(&sv, consuming),
+                        &mut body,
+                    )?;
+                    let ArmBody::Expr(ae) = &arm.body else {
+                        return gap("a block arm under a returned match", *mline);
+                    };
+                    let v = self.val(ae, &mut body)?;
+                    let frees = self.arm_frees(mid, i as u32, &binds, &mut body);
+                    self.edge_drops(mid, i as u32, &mut body)?;
+                    // The scrutinee's own release, on the path that leaves:
+                    // every arm returns, so the statement after the switch is
+                    // reached by nothing.
+                    self.drops_at(Exit::Scrutinee, mid, &mut body)?;
+                    self.return_exit(Some(v), sid, line, &mut body)?;
+                    self.scope.truncate(mark);
+                    core_arms.push(Arm {
+                        binds,
+                        frees: Some(frees),
+                        body,
+                        site: mid,
+                        index: i as u32,
+                    });
+                }
+                out.push(St::Switch {
+                    on: sv,
+                    arms: core_arms,
+                    consuming,
+                    carries: true,
+                    line: *mline,
+                });
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// One arm of a returned `if` or `match`: its value, and the return that
+    /// carries it out. A nested `if`/`match` carries the exit on down.
+    fn arm_returns(
+        &mut self,
+        e: &'a Expr,
+        sid: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<(), Gap> {
+        if self.return_through(e, sid, line, out)? {
+            return Ok(());
+        }
+        let v = self.val(e, out)?;
+        self.return_exit(Some(v), sid, line, out)
     }
 
     fn block(&mut self, blk: &'a Block, out: &mut Vec<St>) -> Result<(), Gap> {
@@ -1851,18 +2040,16 @@ impl<'a> Builder<'a> {
                 });
             }
             Stmt::Return { value, line } => {
+                if let Some(e) = value {
+                    if self.return_through(e, sid, *line, out)? {
+                        return Ok(());
+                    }
+                }
                 let v = match value {
                     Some(e) => Some(self.val(e, out)?),
                     None => None,
                 };
-                self.close_streams(out);
-                self.drops_at(Exit::Return, sid, out)?;
-                out.push(St::Return {
-                    value: v,
-                    site: sid,
-                    is_try: false,
-                    line: *line,
-                });
+                self.return_exit(v, sid, *line, out)?;
             }
             Stmt::Break { .. } => {
                 self.drops_at(Exit::Break, sid, out)?;
@@ -1935,6 +2122,7 @@ impl<'a> Builder<'a> {
                         },
                     ],
                     consuming,
+                    carries: false,
                     line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
@@ -2586,6 +2774,24 @@ impl<'a> Builder<'a> {
                         self.body.names[n as usize].must_use_param =
                             self.body.names[m as usize].must_use_param;
                     }
+                    // And where the scrutinee is itself a BORROW, the binder
+                    // reads it: that is the other half of the same sentence.
+                    // A `read` parameter's kind travels above; a read of a
+                    // place — module state, a field, an element — has no kind
+                    // to travel, and the read is what says the payload is not
+                    // the binder's (RFC-0125 §3 M3, row 17: `return match
+                    // d.tag { Word(s) => s, .. }`).
+                    //
+                    // A scrutinee this frame OWNS is not one: its payloads are
+                    // the frame's to give, and `std/vyx.vyrn`'s
+                    // `vyxProcessElem` hands one to a `consume` parameter on
+                    // the arm that does not return the value whole.
+                    if self.body.names[m as usize].borrow {
+                        if self.body.names[n as usize].borrow_kind.is_none() {
+                            self.body.names[n as usize].borrow_kind = Some(BorrowKind::Place);
+                        }
+                        out.push(St::Let(n, Rhs::Read(Place::Name(m))));
+                    }
                 }
             }
             // `_` names nothing a body can read, so it never enters the
@@ -2599,7 +2805,6 @@ impl<'a> Builder<'a> {
             }
             binds.push(n);
         }
-        let _ = out;
         Ok(binds)
     }
 
@@ -3577,6 +3782,7 @@ impl<'a> Builder<'a> {
                     on: sv,
                     arms: core_arms,
                     consuming,
+                    carries: false,
                     line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, mid, out)?;
@@ -3660,6 +3866,7 @@ impl<'a> Builder<'a> {
                         },
                     ],
                     consuming,
+                    carries: false,
                     line: *line,
                 });
                 Ok(Rhs::Val(Val::Name(res)))
@@ -3743,6 +3950,7 @@ impl<'a> Builder<'a> {
                 },
             ],
             consuming: false,
+            carries: false,
             line,
         });
         Ok(Rhs::Val(Val::Name(res)))

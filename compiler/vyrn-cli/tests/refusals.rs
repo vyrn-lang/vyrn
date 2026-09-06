@@ -949,6 +949,155 @@ fn a_borrow_put_into_a_constructor_is_refused_at_the_constructor() {
     );
 }
 
+/// The shapes rule 3's own unit tests pinned, still refused after the rule left
+/// `movecheck.rs` (RFC-0125 §3 M3, row 17).
+///
+/// A return is owned. The checker refused one at three exits and worded the
+/// export's own no under all three; the kernel states it at one exit now,
+/// because the core carries the exit into an `if`'s and a `match`'s arms and
+/// does not release the place a returned projection reads out of. The unit
+/// tests that pinned the rule asked `vyrn_frontend::check` alone, and each
+/// named a SHAPE rather than the rule: a whole `read` parameter, a loop
+/// variable, a local name bound to a field, module state and a field of it, a
+/// binder yielded by a `match` arm, and the three spellings an export refuses.
+/// They are asked of the whole compiler here.
+///
+/// The needle is the whole sentence, because the wording is what the deletion
+/// spends: every one of these is byte-identical with the checker standing
+/// aside.
+#[test]
+fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
+    const TAG: &str = "type Tag = | Word(String) | Num(Int64) \
+                       let mut tag = Word(\"w\") ";
+    const END: &str = " fn main() -> Int64 { return 0 }";
+    let cases: &[(&str, &str, String)] = &[
+        (
+            "a whole read parameter",
+            "`s` may not be returned — it is a `read` parameter, and a return is owned",
+            format!("fn id(s: String) -> String {{ return s }}{END}"),
+        ),
+        (
+            "a loop variable",
+            "`x` may not be returned — it is a loop variable, and a return is owned",
+            format!(
+                "fn first(xs: Array<String>) -> String \
+                 {{ for x in xs {{ return x }} return \"\" }}{END}"
+            ),
+        ),
+        (
+            "a name bound to a field",
+            "`t` may not be returned — it is a second name for the `read` parameter `r`, \
+             and a return is owned",
+            format!(
+                "type R = {{ s: String }} \
+                 fn get(r: R) -> String {{ let t = r.s return t }}{END}"
+            ),
+        ),
+        (
+            "module state",
+            "`title` may not be returned — it is module state, which nothing may take, \
+             and a return is owned",
+            format!("let mut title = \"x\" fn get() -> String {{ return title }}{END}"),
+        ),
+        (
+            "a field of module state",
+            "`r.s` may not be returned — it is module state, which nothing may take, \
+             and a return is owned",
+            format!(
+                "type R = {{ s: String }} let mut r = R {{ s: \"x\" }} \
+                 fn get() -> String {{ return r.s }}{END}"
+            ),
+        ),
+        (
+            "a record of module state",
+            "`r` may not be returned — it is module state, which nothing may take, \
+             and a return is owned",
+            format!(
+                "type R = {{ s: String }} let mut r = R {{ s: \"x\" }} \
+                 fn get() -> R {{ return r }}{END}"
+            ),
+        ),
+        (
+            "an arm binder",
+            "`s` may not be returned — it is read out of a place that owns it, \
+             and a return is owned",
+            format!(
+                "{TAG} fn text() -> String \
+                 {{ return match tag {{ Word(s) => s, Num(n) => \"num\", }} }}{END}"
+            ),
+        ),
+        // The three spellings an export refuses, kept in one test for the
+        // reason they were put in one: the `exported` question was asked at one
+        // exit, then at two, and `return q` — the plainest spelling there is —
+        // kept offering ``declare the parameter `q: consume ..` ``, which the
+        // same compiler then refuses at the signature (RFC-0089 M3b).
+        (
+            "an export returns a read parameter",
+            "`q` may not be returned from an exported function — it is a `read` parameter, \
+             and the JS caller releases what it is handed",
+            format!("export extern fn plain(q: String) -> String {{ return q }}{END}"),
+        ),
+        (
+            "an export returns a projection",
+            "`d.s` may not be returned from an exported function — it is read out of a place \
+             that owns it, and the JS caller releases what it is handed",
+            format!(
+                "type D = {{ s: String }} \
+                 export extern fn field(q: String) -> String \
+                 {{ let d = D {{ s: q.copy() }} return d.s }}{END}"
+            ),
+        ),
+        (
+            "an export returns an if arm",
+            "`q` may not be returned from an exported function — it is a `read` parameter, \
+             and the JS caller releases what it is handed",
+            format!(
+                "export extern fn pick(p: String, q: String) -> String \
+                 {{ return if p == \"\" {{ q }} else {{ p }} }}{END}"
+            ),
+        ),
+        (
+            "an export returns a match arm",
+            "`s` may not be returned from an exported function — it is read out of a place \
+             that owns it, and the JS caller releases what it is handed",
+            format!(
+                "{TAG} export extern fn text() -> String \
+                 {{ return match tag {{ Word(s) => s, Num(n) => \"num\", }} }}{END}"
+            ),
+        ),
+    ];
+    let dir = common::scratch("rule-three-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+            continue;
+        }
+        let (_, msg) = split_head(&text);
+        let first = msg.lines().next().unwrap_or_default();
+        if first != *says {
+            bad.push(format!("{what}: said `{first}`"));
+            continue;
+        }
+        // The licence, per program: the whole refusal survives the deletion.
+        let (kok, ktext) = refusal_in(dir.to_path_buf(), &name, true);
+        if kok || ktext != text {
+            bad.push(format!(
+                "{what}: the kernel said `{}`",
+                if kok { "nothing".to_string() } else { ktext }
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "rule 3 no longer refuses:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// The shapes row 25's own unit tests pinned, still refused after the rule
 /// left `movecheck.rs` (RFC-0125 §3 M3, row 25).
 ///
@@ -2135,16 +2284,9 @@ fn sections() -> Vec<Section> {
             "whether a callee keeps a `fn` value",
         ),
         sec(
-            "    fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic> {",
-            Kernel,
-            "rule 3: a return is owned (rows 15, 16, 18, 28)",
-        ),
-        sec(
-            "    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) \
-             -> Diagnostic {",
-            Kernel,
-            "the one exit every returned borrow leaves by, the exported \
-             function's own sentence with it (row 17)",
+            "    fn note_return(&self, e: &Expr, line: usize) {",
+            Rows,
+            "what a `return` still records once rule 3 is the kernel's: the              projection instrument, and the lend the call graph is closed over              (rows 15, 16, 17, 18)",
         ),
         sec(
             "    fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize) {",

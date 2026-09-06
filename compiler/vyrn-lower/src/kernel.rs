@@ -282,6 +282,16 @@ struct Kernel<'b> {
     /// `break`s, and the names bound inside it (which its back edge must find
     /// consumed).
     loops: Vec<LoopCtx>,
+    /// The `match` arms open around the statement being judged, innermost
+    /// last: the arm's site, its index, and the binders it bound.
+    ///
+    /// A binder still held where the arm ENDS is the arm's own row
+    /// ([`Kernel::binders_end`]). Since a `return` inside the arm carries the
+    /// exit (RFC-0125 §3 M3, row 17), a binder is as often still held at an
+    /// exit INSIDE the arm — and it is the same row: the table the emitters
+    /// read is keyed by the arm, and an arm binder is no binding of the frame
+    /// that an exit row could name.
+    arms: Vec<(usize, u32, Vec<Name>)>,
 }
 
 /// Which taker a right-hand side is.
@@ -348,6 +358,7 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refus
         refusals: Vec::new(),
         recover,
         loops: Vec::new(),
+        arms: Vec::new(),
         here: 0,
         by: String::new(),
         made: Vec::new(),
@@ -809,12 +820,35 @@ impl<'b> Kernel<'b> {
                 )
                 .unwrap_err();
         }
-        let msg = if by == "a `return`" {
-            format!("`{s}` may not be returned — {what}")
+        // The export's own sentence, as [`Kernel::param_take`] gives it one
+        // borrow over: the caller across this boundary is JS and `wasi-min.js`
+        // frees every String an export hands back (RFC-0012 M2, RFC-0089 M3b),
+        // so an export owns its result whatever the borrow is — a parameter
+        // there, a read of a place here — and the copy is the one way out. It
+        // was on one of the two paths and not the other, which is the same
+        // accident `movecheck::refuse_return` exists to stop (RFC-0125 §3 M3,
+        // row 17).
+        let msg = if by == "a `return`" && self.body.export {
+            format!(
+                "`{s}` may not be returned from an exported function — {what}, and the JS \
+                 caller releases what it is handed"
+            )
+        } else if by == "a `return`" {
+            // The same clause the parameter's own return sentence carries
+            // ([`Kernel::param_take`]) and the checker's: what makes the read
+            // wrong here is the exit, not the read.
+            format!("`{s}` may not be returned — {what}, and a return is owned")
         } else {
             format!("{} — {what}", self.may_not(s))
         };
-        self.refuse_at::<()>(self.here, menu(msg, self.place_fixes(st, n)))
+        let fixes = if by == "a `return`" && self.body.export {
+            vec![format!(
+                "`{s}.copy()` — an `export extern fn` owns its result"
+            )]
+        } else {
+            self.place_fixes(st, n)
+        };
+        self.refuse_at::<()>(self.here, menu(msg, fixes))
             .unwrap_err()
     }
 
@@ -1039,11 +1073,27 @@ impl<'b> Kernel<'b> {
                 // set on another path.
                 if self.mode == Mode::Place {
                     let holes = self.holes_owned(st, *n);
+                    // An exit INSIDE an arm is one arm's exit, and an exit row
+                    // is keyed by the exit alone — so a row read off one arm
+                    // would be emitted on the arm beside it, which took the
+                    // name (`std/html.vyrn`'s `keyed`). Both tables that are
+                    // keyed by the ARM say it once: the binder's own row for a
+                    // binder, and RFC-0114 Rule N's edge for a name the frame
+                    // bound outside (RFC-0125 §3 M3, row 17).
+                    let (exit, site, kind) = match self.arms.last() {
+                        Some((s, arm, binds)) if *s != 0 && binds.contains(n) => {
+                            (Exit::Block, *s, MissingKind::ArmBinder { arm: *arm })
+                        }
+                        Some((s, arm, _)) if *s != 0 => {
+                            (exit, *s, MissingKind::Edge { edge: *arm })
+                        }
+                        _ => (exit, site, MissingKind::Exit),
+                    };
                     self.missing.push(Missing {
                         exit,
                         site,
                         name: *n,
-                        kind: MissingKind::Exit,
+                        kind,
                         holes,
                     });
                     self.gone(st, *n);
@@ -1870,6 +1920,7 @@ impl<'b> Kernel<'b> {
                 on,
                 arms,
                 consuming,
+                carries,
                 ..
             } => {
                 if *consuming {
@@ -1895,7 +1946,14 @@ impl<'b> Kernel<'b> {
                     // The binders' scope is the arm; they must be consumed
                     // within it, which `stmts` checks for what it binds and
                     // this checks for the binders.
-                    self.stmts(body, &mut a)?;
+                    if *carries {
+                        self.arms.push((*site, *index, binds.clone()));
+                    }
+                    let walked = self.stmts(body, &mut a);
+                    if *carries {
+                        self.arms.pop();
+                    }
+                    walked?;
                     if !a.ended {
                         self.binders_end(&mut a, binds, *site, *index)?;
                     }
