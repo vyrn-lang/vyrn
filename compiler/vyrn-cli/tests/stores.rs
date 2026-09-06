@@ -184,10 +184,6 @@ fn a_lender_read_consumed_by_a_copy_does_not_stand_the_store_down() {
         releases(&o, assigns[0]),
         "a lender read consumed by a copy does not stand the store down"
     );
-    assert!(
-        o.plan.store_fresh_at(assigns[0]),
-        "the mention screen clears `out = tail(out)`"
-    );
 }
 
 /// Round fifty-seven: an early `return` of the binding does not block a later
@@ -216,3 +212,85 @@ fn an_early_exiting_take_does_not_block_a_later_field_store() {
         "the early exiting take does not block the later field store"
     );
 }
+
+/// Round eighteen, moved with the answer (RFC-0125 §3 M3, the fresh-store
+/// slice): `dec = halve2(dec)` in a loop — the value mentions the place, but
+/// only as a read argument to a declared non-lender, so the store releases
+/// what it replaces. The bare mention (`x = x + ..` aside), a builtin (`a =
+/// @push(a, i)` hands its own buffer back), and a lender callee all stand the
+/// store down.
+#[test]
+fn a_read_call_mention_lets_the_store_release_what_it_replaces() {
+    let src = "type D = { d: Array<Int64> }\n\
+               fn halve2(x: D) -> D {\n\
+                   let mut o: Array<Int64> = []\n\
+                   let mut i = 0\n\
+                   while i < x.d.length { o.push(x.d[i] / 2) i = i + 1 }\n\
+                   return D { d: o }\n\
+               }\n\
+               fn go() -> Int64 {\n\
+                   let mut dec = D { d: [8, 4] }\n\
+                   let mut k = 0\n\
+                   while k < 3 { dec = halve2(dec) k = k + 1 }\n\
+                   return dec.d.length\n\
+               }\n\
+               fn main() -> Int64 { return go() }";
+    let (p, o) = analyze(src);
+    let assigns = stores_in(
+        &p.functions[1].body,
+        |s| matches!(s, Stmt::Assign { name, .. } if name == "dec"),
+    );
+    assert_eq!(assigns.len(), 1);
+    assert!(
+        releases(&o, assigns[0]),
+        "exactly the `dec = halve2(dec)` store"
+    );
+}
+
+/// Round twenty-two, moved with the answer: the mention reading walks STRUCT
+/// LITERALS and scalar projections — `f = Frag { start: f.start, holes: [h] }`
+/// reads one heap-free scalar out of the value it replaces, and `holes:
+/// joinH(f.holes, ..)` reads a projection through a screened callee. Both
+/// stores release the old record's buffers (std/regex's frag merges leaked one
+/// holes-buffer per merge).
+#[test]
+fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
+    let src = "type Frag = { start: Int64, holes: Array<Int64> }\n\
+               fn joinH(a: Array<Int64>, b: Array<Int64>) -> Array<Int64> {\n\
+                   let mut o: Array<Int64> = []\n\
+                   for x in a { o.push(x) }\n\
+                   for x in b { o.push(x) }\n\
+                   return o\n\
+               }\n\
+               fn go() -> Int64 {\n\
+                   let mut f = Frag { start: 0, holes: [1, 2] }\n\
+                   let mut i = 0\n\
+                   while i < 3 {\n\
+                       f = Frag { start: f.start, holes: [i] }\n\
+                       f = Frag { start: 9, holes: joinH(f.holes, [7]) }\n\
+                       i = i + 1\n\
+                   }\n\
+                   return f.holes.length\n\
+               }\n\
+               fn main() -> Int64 { return go() }";
+    let (p, o) = analyze(src);
+    let assigns = stores_in(
+        &p.functions[1].body,
+        |s| matches!(s, Stmt::Assign { name, .. } if name == "f"),
+    );
+    assert_eq!(assigns.len(), 2);
+    assert!(
+        assigns.iter().all(|at| releases(&o, *at)),
+        "both frag stores release what they replace"
+    );
+}
+
+// The other two screens `store_is_fresh` reads keep their witnesses where the
+// closures are computed (`movecheck`'s
+// `a_lender_forwarded_through_an_aggregate_is_still_marked_lending` and
+// `a_lambda_at_a_consume_parameter_escapes`). Neither has a store-side witness
+// that reaches this file: a lender's own program is one the KERNEL refuses (a
+// returned element), and `blackBox` — the launderer round nineteen was written
+// for — is refused outside a `bench` or a `test` block. Both were unit tests of
+// the closure, not of an emitted program, and the closure is still the
+// checker's.

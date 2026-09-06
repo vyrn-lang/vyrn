@@ -1093,15 +1093,11 @@ pub struct ReleasePlan {
     /// RFC-0114 M1: the call-argument expressions whose value the CALLER
     /// releases after the call — the `ArgVerdict::Released` rows, by the
     /// argument's node address.
+    ///
+    /// The core states this row from its own body since RFC-0125 §3 M3's
+    /// argument slice, and the emitters read the core first. What is left
+    /// here is the fallback for a node the core states nothing for.
     pub arg_drops: std::collections::HashSet<usize>,
-    /// Exit-residue round eighteen: the `Stmt::Assign` nodes whose stored
-    /// VALUE provably cannot hand the old value back — every mention of the
-    /// place is a read argument to a declared, non-lending, non-retaining
-    /// function (`movecheck::Facts::fresh_stores`). The backends consult this
-    /// only where their `mentions_place` guard would otherwise stand the
-    /// snapshot down, so it is exempt from the finish check: a row here that
-    /// no emission asks about is a store some other rule already handled.
-    pub store_fresh: std::collections::HashSet<usize>,
     /// Round twenty-seven: droppable scrutinee rows minted INSIDE a region
     /// because their value is a callee's (malloc-side) allocation — the
     /// textual emission frees these with its region guard stood down; the
@@ -1222,15 +1218,6 @@ impl ReleasePlan {
             self.taken.borrow_mut().insert(at);
         }
         hit
-    }
-
-    /// Round eighteen: can this store's VALUE not hand the old one back?
-    /// Asked by the backends' one store answer (`core::St::Store`'s
-    /// `releases`) where `mentions_place` says the value reads the place, to
-    /// tell a rebuild apart from a hand-back.
-    pub fn store_fresh_at(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        self.store_fresh.contains(&at)
     }
 
     /// Round twenty-seven: may this match free the boxes its arms extract,
@@ -1355,6 +1342,18 @@ pub struct Ownership {
     /// the one order that used to be asserted separately by `Gen::drop_stack`,
     /// `Fn_::releases` and the interpreter's per-block `Vec`.
     pub releases: HashMap<String, Vec<Release>>,
+    /// The two closures over the call graph, handed on so the CORE can ask
+    /// [`crate::movecheck::arg_verdict`] the same question at the same
+    /// position (RFC-0125 §3 M3, the argument slice).
+    ///
+    /// Not a table: neither says anything a body states. `lending` names the
+    /// functions whose result the caller must not release and `retains` the
+    /// positions that KEEP a borrowed parameter, and both are answers only a
+    /// pass that has read every body can give. See
+    /// [`crate::movecheck::Facts::lending`] for why they still exist.
+    pub lending: std::collections::HashSet<String>,
+    pub retains: std::collections::HashSet<(String, usize)>,
+    pub escapers: std::collections::HashSet<String>,
 }
 
 /// One analysis per build — RFC-0125 §3 M3, the repetition slice.
@@ -1445,7 +1444,6 @@ fn analyze_now(program: &Program) -> Ownership {
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let mut facts = crate::movecheck::facts(program);
     let revived = fold_revived(&facts);
-    let store_fresh = facts.fresh_stores;
     let exit_sites = std::mem::take(&mut facts.exit_sites);
     let lets = facts.lets;
 
@@ -1885,7 +1883,6 @@ fn analyze_now(program: &Program) -> Ownership {
             .filter(|s| s.verdict == crate::movecheck::ArgVerdict::Released)
             .map(|s| s.id)
             .collect(),
-        store_fresh,
         malloc_scrutinees,
         discarded_results,
         receiver_frees,
@@ -1905,6 +1902,9 @@ fn analyze_now(program: &Program) -> Ownership {
         notes,
         proto,
         releases,
+        lending: facts.lending.clone(),
+        retains: facts.retains.clone(),
+        escapers: facts.escapers.clone(),
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
     // this analysis owes and did not place. It runs the lowering, which runs
@@ -3079,34 +3079,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[test]
-    fn a_laundered_forward_still_blocks_the_mention_store() {
-        let src = "fn launder(s: String) -> String {\n\
-                       let r = blackBox(s)\n\
-                       return r\n\
-                   }\n\
-                   fn go() -> Int64 {\n\
-                       let mut acc = \"x\" + \"y\"\n\
-                       acc = launder(acc)\n\
-                       return acc.byteLength\n\
-                   }\n\
-                   fn main() -> Int64 { return 0 }";
-        let (o, p) = analyze_src(src);
-        let mut assigns = Vec::new();
-        for s in &p.functions[1].body.stmts {
-            if let crate::ast::Stmt::Assign { name, .. } = s {
-                if name == "acc" {
-                    assigns.push(s as *const crate::ast::Stmt as usize);
-                }
-            }
-        }
-        assert_eq!(assigns.len(), 1);
-        assert!(
-            !o.plan.store_fresh_at(assigns[0]),
-            "`launder` hands its argument's buffer back through a local"
-        );
-    }
-
     /// Round fifty-six: a constructor-built argument of a plain call answers
     /// no type of its own (`Ok(User { .. })` names only `Result`), so the row
     /// is typed from the callee's declared parameter — and the temporary
@@ -3776,72 +3748,6 @@ pub(crate) mod tests {
         ];
         want.sort();
         assert_eq!(got, want, "out's deep release, and the drained buffer");
-    }
-
-    /// Round eighteen: `dec = halve2(dec)` in a loop — the value mentions the
-    /// place, but only as a read argument to a declared non-lender, so the
-    /// store releases what it replaces. The bare mention (`x = x + ..` aside),
-    /// a builtin (`a = @push(a, i)` hands its own buffer back), and a lender
-    /// callee all stay out of the set.
-    #[test]
-    fn a_read_call_mention_lets_the_store_release_what_it_replaces() {
-        let src = "type D = { d: Array<Int64> } \
-                   fn halve2(x: D) -> D { let mut o: Array<Int64> = [] \
-                   let mut i = 0 \
-                   while i < x.d.length { o.push(x.d[i] / 2) i = i + 1 } \
-                   return D { d: o } } \
-                   fn main() -> Int64 { let mut dec = D { d: [8, 4] } \
-                   let mut k = 0 \
-                   while k < 3 { dec = halve2(dec) k = k + 1 } \
-                   return dec.d.length }";
-        let (o, _) = analyze_src(src);
-        assert_eq!(
-            o.plan.store_fresh.len(),
-            1,
-            "exactly the `dec = halve2(dec)` store"
-        );
-        // The lender screen: `h` forwards a lent element through an aggregate,
-        // so a store through it may NOT release — the result names storage
-        // inside the argument.
-        let src = "fn pick(xs: Array<String>) -> String \
-                   { for x in xs { return if true { x } else { \"\" } } return \"\" } \
-                   fn h(a: Array<String>) -> Array<String> { return [pick(a)] } \
-                   fn main() -> Int64 { let mut arr: Array<String> = [\"a\" + \"b\"] \
-                   arr = h(arr) \
-                   return arr.length }";
-        let (o, _) = analyze_src(src);
-        assert!(
-            o.plan.store_fresh.is_empty(),
-            "a lender's result may alias its argument"
-        );
-    }
-
-    /// Round twenty-two: the mention analysis reads STRUCT LITERALS and
-    /// scalar projections — `f = Frag { start: f.start, holes: [h] }` reads
-    /// one heap-free scalar out of the value it replaces, and `holes:
-    /// joinH(f.holes, ..)` reads a projection through a screened callee.
-    /// Both stores release the old record's buffers (std/regex's frag
-    /// merges leaked one holes-buffer per merge).
-    #[test]
-    fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
-        let src = "type Frag = { start: Int64, holes: Array<Int64> } \
-                   fn joinH(a: Array<Int64>, b: Array<Int64>) -> Array<Int64> { \
-                   let mut o: Array<Int64> = [] \
-                   for x in a { o.push(x) } for x in b { o.push(x) } return o } \
-                   fn main() -> Int64 { \
-                   let mut f = Frag { start: 0, holes: [1, 2] } \
-                   let mut i = 0 \
-                   while i < 3 { \
-                   f = Frag { start: f.start, holes: [i] } \
-                   f = Frag { start: 9, holes: joinH(f.holes, [7]) } \
-                   i = i + 1 } \
-                   return f.holes.length }";
-        let (o, _) = analyze_src(src);
-        assert_eq!(
-            o.plan.store_fresh.len(),
-            2,
-            "both frag stores release what they replace"
-        );
     }
 
     /// Round sixteen's other half: the `elem_only` attribution is exactly what

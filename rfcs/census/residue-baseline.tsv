@@ -16,8 +16,11 @@ argsdemo	clean
 arrays	clean
 # assoctype: the generic `valueOr` returns `Output` and now copies (RFC-0089
 # rule 2 refused the borrow it returned); the analysis reads the generic body,
-# says "the return type T owns no heap", and the caller releases nothing.
-assoctype	leak	1
+# says "the return type T owns no heap", and the caller releases nothing. The
+# CORE states the row instead since RFC-0125 §3 M3's argument slice, off the
+# name it minted rather than off the declared type, so the block is freed and
+# this row is clean — the last leaking row in the corpus.
+assoctype	clean
 assoctype_unbound	skip
 autorelease	clean
 autovalidate	clean

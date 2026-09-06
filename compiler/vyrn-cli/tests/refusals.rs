@@ -1116,10 +1116,11 @@ fn sections() -> Vec<Section> {
             "what a run is for, and one run's outputs",
         ),
         sec(
-            "fn arg_verdict(",
+            "pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>> {",
             Rows,
-            "the verdict for one argument temporary, read at a position instead \
-             of at a binding",
+            "the capability of a position, the producer screens, and the \
+             verdict for one argument temporary — read at a position instead \
+             of at a binding, by this pass and by the core alike",
         ),
         sec(
             "fn let_id(s: &Stmt) -> usize {",
@@ -1294,11 +1295,6 @@ fn sections() -> Vec<Section> {
             "    fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String]) {",
             Rows,
             "an arm that yields a place, and what naming one costs",
-        ),
-        sec(
-            "    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {",
-            Rows,
-            "the mention guard, and what a call may forward",
         ),
         sec(
             "    fn carries_param_storage(&self, e: &Expr) -> bool {",
@@ -1521,7 +1517,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 916),
         ("a rule only the checker gives", 725),
-        ("placement rows for the engines", 2167),
+        ("placement rows for the engines", 2139),
         ("a fix menu", 73),
         ("shared machinery", 3721),
         ("tests", 2092),
