@@ -4820,6 +4820,134 @@ passes, which is where the editor is pinned against what `vyrn check` prints.
 No blessed snapshot moved and no census row moved: the change is 21 lines in
 `vyrn-lsp`, which is not shared machinery and is counted by nothing.
 
+**The rows slice (2026-09-06): the rows a served body skips have no reader
+here, which is the rule the facts already stand on.**
+The residue slice left the placer over IMPORTED bodies as the whole of what is
+above the target, and named the door: the memo may not serve a body the placer
+wrote a row for, because serving it drops the row, and the row cannot be
+recorded because it is addressed by the AST node's ADDRESS and a keystroke
+re-parses. It said the answer is a program whose nodes survive an edit.
+
+**It is not, and the reason is beside the answer that slice already used.** A
+served body contributes no frame to the core's facts, and `augment` skips the
+second build for it — because the readers of the facts are the two compiled
+backends and the interpreter's arm rows, and a host that armed the memo runs
+none of them. The ROWS are the same shape of thing. Every table `place_frames`
+writes is keyed by a node — `own.plan.arg_drops` and its `owners`,
+`receiver_frees`, `receiver_holes`, the `Placed` edge and arm tables, and the
+release rows — and each of those is read by the emitters, plus, inside one
+analysis, by a later `core::build` of the SAME function. That last one is the
+only coupling, and the key closes it: a node belongs to one function, so the
+bodies a served body's missing rows could reach are its own other instances,
+which carry the same module and the same content hash and are therefore served
+or built together. Nothing else in an armed host reads them. `memory_notes`
+reads the walk's own notes, which the placer does not write, and the placer
+runs LAST in `own::analyze`, so no rule after it sees a row.
+
+So one rule covers the facts and the rows, and it is stated once, in
+`movecheck::reuse_judgments`, which is where the host contract already was: an
+armed host gets refusals and nothing else. `inert` is deleted, and every body
+with a key is recorded.
+
+**Bodies the placer builds per keystroke.** The count is the claim, and it
+lands exactly on the residue slice's split: what is left is the ROOT's own
+bodies, which have no key because the root is the module a keystroke edits.
+
+| file | before | after | the root's own |
+|---|---|---|---|
+| site/app/chart.vyrn | 122 | 70 | 70 |
+| site/app/docs.vyrn | 69 | 18 | 18 |
+| site/app/guide.vyrn | 60 | 39 | 39 |
+| site/app/bench.vyrn | 102 | 99 | 99 |
+
+`a_placed_row_does_not_stop_a_body_being_served` pins it on a program small
+enough to read. A string interpolation injects `std/text` (RFC-0078 M2b), whose
+`decodeUtf8` holds an array at its `return` and whose `test` block leaves a
+payload binder unmoved: two imported bodies the placer writes a row for. The
+root is then edited twice. Each edit re-judged those two; it re-judges none,
+and serves all 86 the cold run judged.
+
+**What a keystroke costs now**, the same test and the same four files, medians
+of five alternating runs, all three columns in one sitting. This machine reads
+the first column lower than the residue slice's did and the third about the
+same, so the columns are read against each other and not across records:
+
+| file | before the kernel | with the kernel | with the memo | above the first column |
+|---|---|---|---|---|
+| site/app/chart.vyrn | 113 ms | 1,041 ms | 211 ms | 98 ms — was 251 |
+| site/app/docs.vyrn | 113 ms | 820 ms | 172 ms | 58 ms — was 237 |
+| site/app/guide.vyrn | 58 ms | 300 ms | 101 ms | 42 ms — was 86 |
+| site/app/bench.vyrn | 25 ms | 123 ms | 61 ms | 36 ms — was 48 |
+
+**The target is not reached, and this is what is left.** One analysis — the
+last of the ten the test sends — under `VYRN_BUILD_PROFILE=1`, beside the same
+table the residue slice took:
+
+| file | `lower_with` | `core::build` | `build_outside` | `kernel::placement` | the placer |
+|---|---|---|---|---|---|
+| chart.vyrn | 43 ms — was 64 | 22 ms, 70 bodies — was 143, 122 | 10 ms — was 35 | 0.8 ms | 79 ms — was 253 |
+| docs.vyrn | 40 ms | 5 ms, 18 bodies | 3 ms | 0.2 ms | 51 ms |
+| guide.vyrn | 33 ms | 15 ms, 39 bodies | 7 ms | 1.3 ms | 59 ms |
+| bench.vyrn | 15 ms | 22 ms, 99 bodies | 17 ms | 3.0 ms | 59 ms |
+
+The largest item is no longer the core. It is `placer: lower_with`, and inside
+it `checker::record`, which is `check_accum_full` over the LINKED program — a
+whole-program type check the keystroke runs a SECOND time, the first being the
+memoized `check_accum_reusing` the analysis already ran. It is a pure function
+of the program and the program moved, so no memo keyed by its input serves it.
+Serving it per MODULE is what would, and that is the identity question again:
+`Recorded` is keyed by node, so the half that is reused has to be the same
+allocation.
+
+**Why the identity door was not opened, and where it is.** It was the door for
+keeping the rows, and the rows turned out to need nobody. It is also not a
+memo. The parse cache in `loader.rs`'s `visit` hands out `parsed.clone()`
+because `Module.program` is owned, `link` MOVES every module's declarations
+into one `Program`, and `resolve_aliases` then REWRITES the bodies of each
+module against the whole module set — the flat namespace's name counts include
+the root's declarations. Lending one allocation to two roots carries one root's
+renames into the other's program, which is a wrong program in the editor rather
+than a slow one. Sharing without that hazard means `Rc<Function>` — or a
+parse-time node id — through `Program`, which every crate reads. That is the
+price of the remaining `checker::record`, and it is the price RFC-0125's own
+core already names: a program whose nodes survive an edit.
+
+**The two pins held.** `VYRN_WASM_MANIFEST=check` is green on `wasmhash`, so no
+emitted byte moved — the deleted condition is read by no engine, which is the
+whole argument.
+`a_rule_that_left_the_checker_is_still_shown_in_the_editor` passes, which is
+where the editor is pinned against what `vyrn check` prints.
+
+**Gates.** In §1.4's order, one at a time, in the foreground, with `TMP` and
+`TEMP` pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the same on `vyrn-lsp`'s and `vyrn-genwasm`'s manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 562 passed, 75 ignored |
+| `kernel` `--ignored` | 1, 53 s |
+| `coretables` `--ignored` | 1, 56 s |
+| `typed` `--ignored` | 1, 94 s |
+| `effects` `--ignored` | 2, 119 s |
+| `fixtures` `--ignored` | 1, 46 s |
+| `vyrn-frontend` | 1,249 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,425 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored — where `lsp_e2e` runs |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 30 s |
+| `parity` `--ignored`, release | 41 of 41, 334 s |
+| the residue ratchet | 1, 226 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 36 s, no byte moved |
+| `genwasm` release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 38 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets, 241 files |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 blocks and 154 over 25 files |
+
+No blessed snapshot moved, and the structural census moves by one row: shared
+machinery 3,738 to 3,750, which is the rule's own statement in `movecheck.rs`.
+
 **The scrutinee slice (2026-09-05): the core counts its own reads, and round
 twenty-seven's table is gone.**
 
