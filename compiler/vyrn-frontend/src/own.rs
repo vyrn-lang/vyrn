@@ -125,6 +125,19 @@ pub struct Release {
     /// nothing at: the hole set at that exit is the kernel's state there,
     /// which may differ from the binding's set on another path.
     pub holes: Option<Vec<String>>,
+    /// The row is placed BECAUSE the take is later: an exit that provably runs
+    /// before every write and every take of a binding the analysis otherwise
+    /// reads as moved (the "(taken later)" rows above).
+    ///
+    /// The core screens a placed row against its own answer for the binding,
+    /// and its answer here is "moved" — which is the truth at the take and
+    /// wrong at this exit, because on this path the take has not run. Nothing
+    /// else in the core computes early-exit liveness, so the screen would
+    /// swallow exactly the rows nothing else states: `for x in consume val {
+    /// .. }` under a `return` above it leaked the container on every early
+    /// path (the generated JSON decoder's `Invalid` return, three corpus
+    /// rows).
+    pub early: bool,
 }
 
 /// How a droppable binding is reclaimed at block exit.
@@ -1552,6 +1565,7 @@ fn analyze_now(program: &Program) -> Ownership {
                         line: 0,
                         full: false,
                         holes: None,
+                        early: true,
                     },
                 ));
                 early
@@ -2075,6 +2089,7 @@ impl Place<'_> {
                 line: l.line,
                 full: false,
                 holes: None,
+                early: false,
             })
             .collect();
         self.out.extend(steps);

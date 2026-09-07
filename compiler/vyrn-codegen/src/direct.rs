@@ -4329,14 +4329,23 @@ impl<'p> Fn_<'_, 'p> {
                 // binding whose take runs later than some early exit gets a
                 // registered place so the placed rows can free it there — no
                 // Block row exists for it, so nothing runs at fall-through.
+                //
+                // The walk is the one the TYPE asks for, deep included. It was
+                // narrowed to a buffer free (`Rel::Buffers`), which answered
+                // for an `Array<Int64>` and left every container of heap
+                // behind: the generated JSON decoder's `let mut val:
+                // Array<T> = []` is taken by `for x in consume val` under two
+                // early `Invalid` returns, and each one abandoned the buffer
+                // (`jsondecbytes`, `mapdemo`, `wirekey`). The placer has
+                // already proved the take is later and that neither the take
+                // nor the exit is inside a loop, so the value at this exit is
+                // whole and the deep walk is what gives it back.
                 if !owns {
                     if let Some(kind) = self.early.get(&(s as *const Stmt as usize)) {
                         let r = match kind {
                             vyrn_frontend::own::DropKind::FreeStr => Some(Rel::Str),
                             vyrn_frontend::own::DropKind::FreeArr => Some(Rel::Buffers(vec![0])),
-                            _ => self
-                                .rel_for(&bound, *line)?
-                                .filter(|r| matches!(r, Rel::Buffers(_))),
+                            _ => self.rel_for(&bound, *line)?,
                         };
                         if let Some(r) = r {
                             self.register_rel(b, s as *const Stmt as usize, place, r);

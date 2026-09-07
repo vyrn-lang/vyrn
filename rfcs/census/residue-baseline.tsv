@@ -40,7 +40,7 @@ bytesrange	clean
 capturefn	leak	2
 clearkeep	clean
 clidemo	clean
-clifail	leak	2
+clifail	other
 clock	clean
 closures2	other
 codecbytes	clean
@@ -90,7 +90,7 @@ intkeys	clean
 jchain	clean
 jsonbytes	clean
 jsoncodec	other
-jsondecbytes	leak	2
+jsondecbytes	clean
 jsondepth	clean
 jsonplace	clean
 jsonschema	clean
@@ -104,7 +104,7 @@ logging	clean
 looptemp	clean
 mandelbrot	clean
 map	clean
-mapdemo	leak	5
+mapdemo	clean
 mapkey	clean
 mapkeyowned	clean
 matchown	clean
@@ -196,4 +196,4 @@ validation	other
 vlog	clean
 vondemo	clean
 vyxdemo	clean
-wirekey	leak	1
+wirekey	clean

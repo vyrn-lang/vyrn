@@ -1714,8 +1714,13 @@ impl<'a> Builder<'a> {
                 // container is a `read` parameter's field or module state
                 // (rows 10, 11, 29). A borrow with no row is a take nobody
                 // judged.
+                // The screen is the core's answer for the BINDING, and a
+                // `Release::early` row is placed for an exit that runs before
+                // the take the answer is about. Nothing in this pass computes
+                // that, so the screen has nothing to say about such a row.
                 Some(n)
-                    if !self.body.names[*n as usize].releases
+                    if !r.early
+                        && !self.body.names[*n as usize].releases
                         && !self.body.names[*n as usize].for_consume => {}
                 Some(n) if keep == Some(*n) => {}
                 Some(n) => {
@@ -5628,6 +5633,7 @@ fn place_frames(
                     line: info.line as u32,
                     full: false,
                     holes: if holes.is_empty() { None } else { Some(holes) },
+                    early: false,
                 },
                 kind,
             ));
