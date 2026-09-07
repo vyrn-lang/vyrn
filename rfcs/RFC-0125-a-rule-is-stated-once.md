@@ -15036,6 +15036,105 @@ The three censuses are re-pinned in the same commit: the structural census
 RFC-0126 §3, 1,496 mentions to 1,471), and the forms census (`tests/forms.rs`
 and RFC-0127 §3, unmoved — the slice touches no form).
 
+#### The ten migration hints become ten rows (2026-09-07)
+
+The census puts ten refusals in class (c) as "ten migration hints keyed on a
+name with no declaration at all", 57 lines, and ranks them fifth: `MOVED_TO_STD`
+is already the same shape for eleven other names, and these ten could join it —
+a table, not a block.
+
+They have joined it. `str`, `concat`, `len`, `list`, `join`, `toString`, `push`,
+`at`, `alen` and `array` each had a `match` arm in `Checker::call` holding one
+sentence. Each is a row of `MOVED_TO_STD` now, and the block is one lookup.
+
+**What the table had to grow.** The eleven RFC-0094 M2 rows say a MODULE and the
+sentence is built from it — "add `import { contains } from "std/strpred"`". The
+ten say what to WRITE instead, and no module is involved. One column cannot hold
+both, so the column is an enum:
+
+    pub enum Gone {
+        Module(&'static str),   // the import line the program needs
+        Removed(&'static str),  // what to write instead
+    }
+
+`Gone::hint(name)` is the sentence, and it is the only place either kind is
+worded.
+
+**The two invariants are opposite, and both are now stated.** A `Gone::Module`
+name may NOT be in `RESERVED`: a reader sent to an import the language forbids
+declaring has been sent nowhere. A `Gone::Removed` name MUST be in `RESERVED`,
+which is the same rule read from the other side — a program that could declare
+`fn push` would shadow the hint with its own function and the reader would never
+see it. `every_moved_name_is_gone_from_reserved` asserted the first for eleven
+names and now asserts both for twenty-one. `a_moved_name_is_declarable_again`
+is the positive half, unchanged: `fn contains(..)` still compiles.
+
+**Where the lookup stands, and why not at the fall-through.** `MOVED_TO_STD` was
+read at exactly one place, the unknown-name fall-through. The removed spellings
+cannot be read there. `at` is also the name a user writes in `place at`
+(RFC-0091), so a program with `impl Index for Ring` types `at(r, 0)` as a
+projection before any fall-through runs, and the reader would be told the call
+is fine rather than that the verb form is gone.
+`a_projection_answers_the_method_form_too` is the test that says so. The guard
+therefore keeps the position the block had — first, before every dispatch — and
+asks only the `Gone::Removed` half. The table is read at two places now, and
+each place says which half it asks.
+
+**The licence.** The corpus, again whole.
+
+| the corpus | count |
+|---|---|
+| programs | 2,313 |
+| accepted, both | 1,105 |
+| refused, both | 1,208 |
+| byte-identical stderr | 2,313 |
+| differing text | 0 |
+
+Every hint's sentence was witnessed under both binaries, and all ten are
+byte-identical, including the position.
+
+| the program | the sentence, before and after |
+|---|---|
+| `str(1)` | "`str(x)` was removed; render a value with `x.toString()`" |
+| `concat("a", "b")` | "`concat(a, b)` was removed; concatenate Strings with `a + b`" |
+| `len(s)` | "`len(s)` was removed; a String's byte length is `s.byteLength`" |
+| `list([1, 2])` | "`list([..])` was removed; write the array literal `[..]` directly where an `Array<T>` is expected" |
+| `join(n)` | "`join(t)` was removed; await a task's result with `t.join()`" |
+| `toString(1)` | "`toString` is a method; write `x.toString()`" |
+| `push(xs, 1)` | "`push(xs, v)` was removed; push with `xs.push(v)`" |
+| `at(xs, 0)` | "`at(xs, i)` was removed; index with `xs[i]`" |
+| `alen(xs)` | "`alen(xs)` was removed; a collection's length is `xs.length`" |
+| `array()` | "`array()` was removed; write the array literal `[]`" |
+
+Three more programs hold the boundaries: `at(r, 0)` on a `Ring` with
+`impl Index` still gets the hint and not a projection; `contains("a", "a")`
+still gets the import line; `nosuch(1)` still gets "call to unknown function".
+
+**The numbers, and the one that goes the wrong way.**
+
+| measure | after the `consume` slice | after this one |
+|---|---|---|
+| `checker.rs` | 15,924 | 15,975 |
+| `Checker::call` | 2,009 lines, 141 refusals | 1,951, 132 |
+| guarded blocks naming a builtin | 35 | 25 |
+| refusals in `checker.rs` | 439 | 430 |
+| the census's `Surface` kind | 3,829 lines, 199 refusals | 3,854, 190 |
+| the census's `Tests` kind | 4,695 | 4,721 |
+| RFC-0126 §3's six-file mentions | 1,471 | 1,471 |
+
+`checker.rs` GREW by 51 lines. Ten `match` arms cost 57 lines; ten table rows
+cost 82, because a row is a tuple of a name and a variant holding a sentence and
+`rustfmt` gives each row three or four lines where an arm's `return Err(cerr!(..))`
+took five or six for two of them and three for the rest. The rest is two new
+unit tests.
+
+That is the trade this milestone keeps making and it is worth naming again: a
+table costs lines where a block costs CASES. What left `Checker::call` is 58
+lines and nine of its refusals — nine, not ten, because ten sentences are now
+one `cerr!` reading one table. The largest thing in the file is smaller, one
+statement answers "where did this name go", and the two invariants that keep it
+honest are asserted rather than remembered.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

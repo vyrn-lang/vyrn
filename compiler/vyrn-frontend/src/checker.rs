@@ -392,40 +392,123 @@ pub const RESERVED: &[&str] = &[
     "atSet",
 ];
 
-/// The names RFC-0094 M2 took out of [`RESERVED`], and the `std/` module each
-/// one lives in now.
+/// Where a name a program may still write has gone.
 ///
-/// A reader who writes `contains(s, "x")` has written a call that was legal in
-/// every earlier version of the language. "call to unknown function" is true and
-/// useless; this table is what turns it into the import line the program needs.
-/// It is a MIGRATION table, in the shape the six `was removed` hints already
-/// have, and it is read at exactly one place — the unknown-name fallthrough of
-/// [`Checker::call`] — so a name that resolves never consults it.
+/// Two things happened to a builtin spelling, and a reader needs a different
+/// sentence for each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gone {
+    /// RFC-0094 M2 took the name out of [`RESERVED`] and it is an ordinary
+    /// exported function of this `std/` module now. The sentence is the import
+    /// line the program needs.
+    Module(&'static str),
+    /// The free-function spelling was REMOVED, because the surface says the
+    /// same thing another way. The sentence is what to write instead.
+    Removed(&'static str),
+}
+
+impl Gone {
+    /// The sentence a reader who wrote `name` gets.
+    pub fn hint(&self, name: &str) -> String {
+        match self {
+            Gone::Module(m) => {
+                format!("`{name}` is `{m}`'s — add `import {{ {name} }} from \"{m}\"`")
+            }
+            Gone::Removed(s) => (*s).to_string(),
+        }
+    }
+}
+
+/// The names a program may write that no longer resolve, and what to write
+/// instead.
 ///
-/// `every_moved_name_is_gone_from_reserved` is what keeps it honest in the one
-/// direction that can rot: a name here that came BACK into `RESERVED` would send
-/// a reader to an import that cannot be written.
-pub const MOVED_TO_STD: &[(&str, &str)] = &[
-    ("contains", "std/strpred"),
-    ("startsWith", "std/strpred"),
-    ("endsWith", "std/strpred"),
-    ("slice", "std/strpred"),
-    ("chars", "std/text"),
-    ("hexEncode", "std/codecs"),
-    ("hexDecode", "std/codecs"),
-    ("base64Encode", "std/codecs"),
-    ("base64Decode", "std/codecs"),
-    ("urlEncode", "std/codecs"),
-    ("urlDecode", "std/codecs"),
+/// A reader who writes `contains(s, "x")` or `str(x)` has written a call that
+/// was legal in an earlier version of the language. "call to unknown function"
+/// is true and useless; this table is what turns it into the line the program
+/// needs. It is the MIGRATION table, and it is read at exactly two places in
+/// [`Checker::call`] — the removed-spelling guard for a name `RESERVED` still
+/// holds, and the unknown-name fall-through for one it does not — so a name
+/// that resolves never consults it.
+///
+/// The ten [`Gone::Removed`] rows were ten hand-written blocks in
+/// `Checker::call` until RFC-0125 §3 M6, 57 lines stating ten sentences one
+/// `match` arm each. A sentence is a row, not a block.
+///
+/// `every_moved_name_is_gone_from_reserved` keeps the [`Gone::Module`] half
+/// honest in the one direction that can rot: a name there that came BACK into
+/// `RESERVED` would send a reader to an import that cannot be written. A
+/// [`Gone::Removed`] row is the opposite and MUST stay reserved — a program
+/// that could declare `fn push` would shadow the hint with its own function.
+pub const MOVED_TO_STD: &[(&str, Gone)] = &[
+    ("contains", Gone::Module("std/strpred")),
+    ("startsWith", Gone::Module("std/strpred")),
+    ("endsWith", Gone::Module("std/strpred")),
+    ("slice", Gone::Module("std/strpred")),
+    ("chars", Gone::Module("std/text")),
+    ("hexEncode", Gone::Module("std/codecs")),
+    ("hexDecode", Gone::Module("std/codecs")),
+    ("base64Encode", Gone::Module("std/codecs")),
+    ("base64Decode", Gone::Module("std/codecs")),
+    ("urlEncode", Gone::Module("std/codecs")),
+    ("urlDecode", Gone::Module("std/codecs")),
+    // The removed free-function spellings. Each fires for the BARE
+    // user-written name only: the desugaring and the method forms carry the
+    // unspellable `@`-prefixed internal names (`@str`, `@concat`, `@list`,
+    // `@join`, `@push`, `@at`), which no source can lex.
+    (
+        "str",
+        Gone::Removed("`str(x)` was removed; render a value with `x.toString()`"),
+    ),
+    (
+        "concat",
+        Gone::Removed("`concat(a, b)` was removed; concatenate Strings with `a + b`"),
+    ),
+    (
+        "len",
+        Gone::Removed("`len(s)` was removed; a String's byte length is `s.byteLength`"),
+    ),
+    (
+        "list",
+        Gone::Removed(
+            "`list([..])` was removed; write the array literal `[..]` \
+             directly where an `Array<T>` is expected",
+        ),
+    ),
+    (
+        "join",
+        Gone::Removed("`join(t)` was removed; await a task's result with `t.join()`"),
+    ),
+    (
+        "toString",
+        Gone::Removed("`toString` is a method; write `x.toString()`"),
+    ),
+    // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]` are the
+    // whole surface; the verb forms were the second spelling of each, which is
+    // what this repo removed.
+    (
+        "push",
+        Gone::Removed("`push(xs, v)` was removed; push with `xs.push(v)`"),
+    ),
+    (
+        "at",
+        Gone::Removed("`at(xs, i)` was removed; index with `xs[i]`"),
+    ),
+    (
+        "alen",
+        Gone::Removed("`alen(xs)` was removed; a collection's length is `xs.length`"),
+    ),
+    (
+        "array",
+        Gone::Removed("`array()` was removed; write the array literal `[]`"),
+    ),
 ];
 
-/// The module a moved builtin lives in now, or `None` for a name that never was
-/// one.
-pub fn moved_to_std(name: &str) -> Option<&'static str> {
+/// Where a name went, or `None` for one that was never a builtin.
+pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
     MOVED_TO_STD
         .iter()
         .find(|(n, _)| *n == name)
-        .map(|(_, m)| *m)
+        .map(|(_, g)| g)
 }
 
 use crate::types::INT32;
@@ -6841,67 +6924,13 @@ impl<'a> Checker<'a> {
                 return Ok((*ret).clone());
             }
         }
-        // Removed free-function builtins → their method/operator replacements.
-        // These fire only for the *bare* user-written spelling; the desugaring
-        // and method forms use the unspellable `@`-prefixed internal names
-        // (`@str`/`@concat`/`@list`/`@join`/`@push`/`@at`), which flow past this
-        // guard.
-        match name {
-            "str" => {
-                return Err(cerr!(
-                    line,
-                    "`str(x)` was removed; render a value with `x.toString()`"
-                ))
-            }
-            "concat" => {
-                return Err(cerr!(
-                    line,
-                    "`concat(a, b)` was removed; concatenate Strings with `a + b`"
-                ))
-            }
-            "len" => {
-                return Err(cerr!(
-                    line,
-                    "`len(s)` was removed; a String's byte length is `s.byteLength`"
-                ))
-            }
-            "list" => {
-                return Err(cerr!(
-                    line,
-                    "`list([..])` was removed; write the array literal `[..]` \
-                     directly where an `Array<T>` is expected"
-                ))
-            }
-            "join" => {
-                return Err(cerr!(
-                    line,
-                    "`join(t)` was removed; await a task's result with `t.join()`"
-                ))
-            }
-            "toString" => return Err(cerr!(line, "`toString` is a method; write `x.toString()`")),
-            // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]`
-            // are the whole surface; the verb forms were the second spelling of
-            // each, which is what this repo removes.
-            "push" => {
-                return Err(cerr!(
-                    line,
-                    "`push(xs, v)` was removed; push with `xs.push(v)`"
-                ))
-            }
-            "at" => return Err(cerr!(line, "`at(xs, i)` was removed; index with `xs[i]`")),
-            "alen" => {
-                return Err(cerr!(
-                    line,
-                    "`alen(xs)` was removed; a collection's length is `xs.length`"
-                ))
-            }
-            "array" => {
-                return Err(cerr!(
-                    line,
-                    "`array()` was removed; write the array literal `[]`"
-                ))
-            }
-            _ => {}
+        // A removed free-function spelling ([`MOVED_TO_STD`]'s [`Gone::Removed`]
+        // half). This must be asked HERE rather than at the unknown-name
+        // fall-through: `at` is also the name of a user's `place at`, so a
+        // program with `impl Index for Ring` would type `at(r, 0)` as a
+        // projection rather than being told the verb form is gone.
+        if let Some(g @ Gone::Removed(_)) = moved_to_std(name) {
+            return Err(cerr!(line, "{}", g.hint(name)));
         }
         // Test builtins (RFC-0015): `assert`/`assertEq` are legal ONLY inside a
         // `test` body. In ordinary code they are a checker error steering the
@@ -8601,11 +8630,7 @@ impl<'a> Checker<'a> {
             (None, Some(sig)) => sig,
             (None, None) => {
                 return Err(match moved_to_std(name) {
-                    Some(module) => cerr!(
-                        line,
-                        "`{name}` is `{module}`'s — add \
-                 `import {{ {name} }} from \"{module}\"`"
-                    ),
+                    Some(g) => cerr!(line, "{}", g.hint(name)),
                     None => cerr!(line, "call to unknown function `{name}`"),
                 })
             }
@@ -12499,16 +12524,42 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
-    /// No name may sit in both tables: a reader sent to an import that
-    /// `RESERVED` forbids declaring has been sent nowhere.
+    /// A `Gone::Module` name may not be reserved: a reader sent to an import
+    /// that `RESERVED` forbids declaring has been sent nowhere. A
+    /// `Gone::Removed` name must be reserved, which is the same rule read the
+    /// other way — a program that could declare `fn push` would shadow the hint
+    /// with its own function, and the reader would never see it.
     #[test]
     fn every_moved_name_is_gone_from_reserved() {
-        for (n, _) in MOVED_TO_STD {
-            assert!(
-                !RESERVED.contains(n),
-                "`{n}` is both reserved and said to live in a std module"
-            );
+        for (n, g) in MOVED_TO_STD {
+            match g {
+                Gone::Module(_) => assert!(
+                    !RESERVED.contains(n),
+                    "`{n}` is both reserved and said to live in a std module"
+                ),
+                Gone::Removed(_) => assert!(
+                    RESERVED.contains(n),
+                    "`{n}` is said to be removed but a program may declare it, \
+                     which would shadow the hint"
+                ),
+            }
         }
+    }
+
+    /// The ten removed spellings were ten `match` arms in `Checker::call` until
+    /// RFC-0125 §3 M6. Each is a row of [`MOVED_TO_STD`] now, and this is the
+    /// sentence each row still gives.
+    #[test]
+    fn removed_spellings_are_rows_of_one_table() {
+        let removed: Vec<&str> = MOVED_TO_STD
+            .iter()
+            .filter(|(_, g)| matches!(g, Gone::Removed(_)))
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            removed,
+            vec!["str", "concat", "len", "list", "join", "toString", "push", "at", "alen", "array"]
+        );
     }
 
     #[test]
