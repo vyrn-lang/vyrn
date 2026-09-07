@@ -11867,6 +11867,199 @@ leaking, 0 double-free, 0 failed on each engine**, 402 s);
 `vyrn test` per site file (**189 test blocks**). `parity` is not in the list
 because the suite does not exist.
 
+#### The first residue triage: the box a payload travels in (2026-09-07)
+
+The previous record left 26 leaking rows and called each of them a defect for a
+later slice. This is that slice. Two rules answer 14 of the 26 outright and
+shrink 4 more, and both of them are one sentence: **a payload the emitter put in
+a box is heap, and the construct that reads it out gives the box back.** The
+sentence was already written — `own::owns_heap` has asked
+`types::payload_boxed` at the SUM since RFC-0126 §8.11 — and three emission
+sites did not ask it of the payload.
+
+**How each row was found.** One instrument, thrown away after: `auditExit`
+walks the bump region from `heapBase() + 8768` reading the marks and prints
+each live block's offset, and `auditBirth` traps on a chosen one. `VYRN_WASM_NAMES=1`
+then makes wasmtime's backtrace name the function that allocated it. Every row
+below is a backtrace, not a guess; the twelve rows left carry theirs at the end.
+
+**Rule 1: `?` never asked.** `Fn_::try_` passed `free_box: false` to
+`bind_payload`. A `?` IS a switch — the core lowers it as one, with a `St::Switch`
+at the `Expr::Try` node and two arms — so the box question is `match`'s and is
+now asked in `match`'s words, `self.frees_boxes(e, at)`, over the same key the
+core states `consuming` at. The failing path never reaches the bind: it copies
+the whole aggregate into `dest` and branches out, box pointer and all.
+
+The witness is twelve lines and it is the JSON reader:
+
+```
+type Bag = | Empty | Ints(Array<Int64>)
+fn main() -> Int64 {
+    match fromJson(Bag, "{\"Ints\":[8,9]}") { Valid(v) => 0, Invalid(_) => 0 }
+    return 0
+}
+```
+
+One block of 16 bytes, per successful decode, whatever the type. It is not the
+enum's and not the decoder's: `parseJson` ends `let v = parseValue(p, 0)?`, and
+`parseValue` returns `Result<Json, String>` whose `Ok` payload is boxed. A
+document that FAILS to parse is clean, because the failing path propagates the
+box rather than reading past it. That is why every row with a `fromJson` in it
+was on the list and `toJson` was on none.
+
+**Rule 2: the release walk and the store did not ask either.** `Fn_::rel_at`'s
+sum arm guarded each variant and each payload on `owns_heap(payload)` alone, so
+`Option<Handle<Node>>` — three `Int64` fields behind one pointer — walked past
+its box. `own.rs` wrote this sentence about the textual `release_enum` at the
+line that made `owns_heap` answer a recursive name `true`, and the direct
+emitter carried the same defect unstated. `rel_word`'s `Word::Boxed` arm already
+frees exactly the box, so the guard is the whole fix.
+
+A STORE is the same rule at a site that cannot use the same shape.
+`store_bufs` answers with flat offsets, and which slot holds a sum's box depends
+on the tag, so for a sum it answered nothing at all. `Fn_::store_boxes` names the
+sums a value holds — recursing through record fields, stopping where
+`store_bufs` stops, at a declared `release` and at every container — and
+`snap_at` reads each one's box under a tag test into a local. **The local is
+zeroed first**, and that is the one line the shape needs: a store inside a loop
+is emitted once and runs every turn, so a local left from a turn whose tag
+matched would be freed again on a turn whose tag does not. `free` refuses a
+null, which is what a variant with no box leaves.
+
+`examples/freelist.vyrn` is the measurement. It inserts 100,000 nodes into a
+`Slots<Node>` five at a time and frees each list; the leak was 100,000 blocks of
+24 bytes, one per `head = Some(insert(..))`. Rule 2 at the release walk takes
+20,000 of them (the value each turn's block exit holds) and rule 2 at the store
+takes the other 80,000.
+
+**What moved.**
+
+| row | blocks before | after | rule |
+| --- | --- | --- | --- |
+| `freelist` | 100,000 | **0** | 2, both sites |
+| `matchown` | 200 | 200 | neither — see below |
+| `jsondecbytes` | 27 | **2** | 1, then 2 |
+| `rest` | 26 | **0** | 1 |
+| `graphql` | 21 | **0** | 1, then 2 |
+| `enumcodec` | 19 | **0** | 1, then 2 |
+| `vlog` | 7 | **0** | 1 |
+| `mapdemo` | 7 | **5** | 1 |
+| `nestedsum` | 6 | **2** | 2 |
+| `linkedlist` | 5 | **0** | 2 |
+| `tree` | 4 | **0** | 2 |
+| `wirekey` | 3 | **1** | 1 |
+| `pagesdemo` | 3 | **0** | 1 |
+| `simdmem2` | 2 | 2 | neither — a map lookup's box |
+| `jsondepth` | 2 | **0** | 1 |
+| `jsoncodec` | 2 | **0** | 1 |
+| `clifail` | 2 | 2 | neither |
+| `capturefn` | 2 | 2 | neither |
+| `storage` | 1 | **0** | 1 |
+| `regionescape` | 1 | 1 | neither |
+| `namespace` | 1 | **0** | 1 |
+| `langbench` | 1 | **0** | 1 |
+| `fnvalstore` | 1 | 1 | neither |
+| `fieldmut` | 1 | 1 | neither |
+| `falliblegeneric` | 1 | 1 | neither |
+| `enumarray` | 1 | **0** | 1 |
+
+Fourteen rows cleared, four shrank, eight stand. 100,477 blocks became 220.
+
+| | clean | leaking | double-free | failed |
+| --- | --- | --- | --- | --- |
+| the engine (`vyrn run`) | 163 | 12 | 0 | 0 |
+| the route (wasm2c and clang) | 163 | 12 | 0 | 0 |
+
+The two engines still agree row for row, which is what one instrument inside
+one module produces.
+
+**One ratchet rule needed its own wording fixed.** `freelist`, `linkedlist`,
+`tree` and `jsoncodec` exit 15, 15, 10 and 4 by design. A `leak` row lets any
+exit code through; a `clean` row does not, since the previous record made "a
+clean row exits 0" the witness a trap leaves. So a leak row that stops leaking
+is not always a `clean` row — four of these fourteen are `other` rows — and the
+nudge that says "move its row to `clean`" now says "or to `other` if it exits N
+by design". The first pass of this triage moved all fourteen to `clean` and the
+ratchet failed on exactly those four, which is the rule working.
+
+**The twelve that stand, each with the backtrace that found it.** None is a
+guess and none is this slice's to fix.
+
+- `matchown` **200**, and it is one shape at 50 turns of a loop:
+  `runtime$strConcat` inside `mkDoc`, called from inside a `region`. The
+  partition `own.rs` states — "a dynamic string inside a region is the arena's,
+  and the two mechanisms partition every allocation" — is not exact.
+  `Fn_::arena_route` routes LEXICALLY, at the emitter's own allocation sites,
+  so a `String` a USER CALLEE mints inside a region comes from `malloc`; the
+  binding's `Fate::Leaked(Leak::Region)` then releases nothing and the arena
+  never had it. Either the routing follows the call or the region rule stops
+  claiming a callee's blocks. It is a region question and it wants its own
+  slice.
+- `regionescape` **1**: `runtime$mapReserve` in `main`, a `Map` declared inside
+  a `region`. The same hole as `matchown`, at the other container.
+- `capturefn` **2**: `runtime$malloc` in `applyAll`, reached from `viaOnward`
+  — the capture block of a lambda written in ARGUMENT position. A lambda bound
+  to a name is released (`Type::Fn(..)` answers `Deep`, census §16); a lambda
+  literal handed straight to a `fn` parameter is a temporary with no row.
+- `fnvalstore` **1**: `runtime$strNew` under `onUserTagged`, the same class one
+  step on — a stored closure's capture.
+- `simdmem2` **2**: `Option<F32x4>` out of `m["two"]`. This one is already
+  written down: `Fn_::frees_boxes`'s own comment keeps every `@at` scrutinee out
+  of the free, because telling a map lookup from an element read needs the
+  receiver's type and a `peek` there is not free of effect in this backend.
+- `nestedsum` **2** and `falliblegeneric` **1**: `runtime$intStr` through
+  `runtime$strFromBytes`, a `String` a call produced in argument position.
+- `jsondecbytes` **2**, `mapdemo` **5**, `wirekey` **1**: `runtime$arrPush`
+  inside the generated decoder and inside `parseString` — an `Array` a decoder
+  builds on a path that does not consume it.
+- `clifail` **2** and `fieldmut` **1**: `runtime$malloc` straight in `main`.
+
+**Two things this slice deliberately did not do.** It did not restore
+`VYRN_LEAK_CHECK=2`; the heap walk above is a dozen lines whenever a triage
+wants them, and it was thrown away again. And it added no rule to `core.rs`:
+both fixes are the emitter answering for a box the emitter chose, and the core
+already states everything they read — `consuming` at the `?` node,
+`payload_boxed` at the sum.
+
+**Files.** `direct.rs` +108 −8 (16,423 lines to 16,523), `tests/residue.rs`
++4 −1, `rfcs/census/residue-baseline.tsv` 19 rows rewritten,
+`rfcs/census/wasm-sha256.tsv` **22 rows** of 173.
+
+**Every manifest row, and why.** Eighteen are the rows whose residue changed —
+`enumarray`, `enumcodec`, `freelist`, `graphql`, `jsoncodec`, `jsondecbytes`,
+`jsondepth`, `langbench`, `linkedlist`, `mapdemo`, `namespace`, `nestedsum`,
+`pagesdemo`, `rest`, `storage`, `tree`, `vlog`, `wirekey`. Four more gain
+instructions that free nothing at run time and so move bytes without moving a
+row: `clidemo`, `clifail`, `refutablelet` and `regionescape` each hold a `?` or
+a store over a sum whose live variant carries no box. **No census moved.** The
+surface census was the near miss: `store_boxes` was written with `Type::Enum(_)`
+and `Type::Record(_)` arms and `the_surface_census_is_what_the_rfc_records`
+reported both up by one in the wasm column, so it asks `sum_vs` and
+`types::record_fields` instead — which is the better question anyway, since
+`Option` and `Result` reach it through resolution. The coercion, form,
+declaration and builtin censuses are untouched: this slice states no rung, adds
+no form and dispatches on no builtin name.
+
+Gate, in the brief's order: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (77 suites, all
+green); the ignored corpus suites `kernel` (166 s), `coretables` (122 s),
+`typed` (247 s), `effects` (352 s), `fixtures` (160 s) and `testsweep` (200 s);
+`cargo test -p vyrn-frontend` (194 + 34 passed);
+`cargo test --workspace --exclude vyrn-cli` (17 suites);
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (6 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**175 checked, 33
+skipped, 0 failed**, 425 s);
+`cargo test --release -p vyrn-cli --test residue -- --ignored` (**163 clean, 12
+leaking, 0 double-free, 0 failed on each engine**, 410 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (34 s, green after
+the 22 rows were written); `--release --test genwasm -- --ignored`;
+`vyrn doc --std -o ../docs/api --verify` (41 files, up to date); the site export
+(33 s, 82 routes and 14 assets) and `vyrn test` per site file (**191 test
+blocks**, 27 files, 0 failed). The list ran ONCE, over both commits together:
+the manifest is one artifact and the first commit alone cannot be green on it.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

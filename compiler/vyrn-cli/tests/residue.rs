@@ -156,7 +156,10 @@ fn judge(
             match expect {
                 Expect::Leak(_) => {
                     *nudges += 1;
-                    eprintln!("ratchet: {name} ({engine}) is CLEAN now — move its row to `clean`");
+                    eprintln!(
+                        "ratchet: {name} ({engine}) is CLEAN now — move its row to `clean`, or \
+                         to `other` if it exits {code} by design"
+                    );
                 }
                 Expect::Clean => failures.push(format!(
                     "{name} ({engine}): exited {code}, and its row says clean — a clean row \
