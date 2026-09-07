@@ -15546,6 +15546,393 @@ priced: a row costs lines where a block cost cases, and the census counts cases.
 ##### Gates (2026-09-07, the second slice)
 
 The same list, one at a time, in the foreground.
+#### The census's third candidate: one walk for `test` and `bench` (2026-09-07)
+
+The checker census ranked six things to take. This is the third of them, and
+the smallest honest deletion in the file: `check_benches` is `check_tests`
+written a second time, eight sections lower, and its own doc comment says so —
+"Structurally identical to [`check_tests`]".
+
+**The two were the same walk.** `program.tests` and `program.benches` are both
+`Vec<NamedBlock>`; the same struct, not two that resemble each other. Each walk
+built the same `HashMap<(Option<String>, String), usize>` keyed by module and
+name, refused a repeat with the same sentence, raised a flag, checked every
+body as a synthetic Unit-returning `Function` under an unspellable name, drained
+the same error sink into the same output list, and lowered the flag. They differ
+in three places: the slice, the noun the refusal quotes, and which flag is
+raised. `check_named_blocks(checker, blocks, noun, host, out)` takes the three
+as arguments and the driver calls it twice.
+
+**The licence.** The checker cannot be stood aside, so the licence is per rule
+and it is the corpus stderr whole. `vyrn check` was run over every `.vyrn` file
+under `examples/`, `site/`, `compiler/vyrn-cli/tests/` and `std/` — 419
+programs, 78 of them refused — before the change and after it, and the two
+streams were compared byte for byte including the exit code.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419 | 419 |
+| refused | 78 | 78 |
+| stderr differing | — | 0 refusals; 2 programs differ by a generator-cache warning |
+| `checker.rs` | 16,339 | 16,307 |
+| the two walks, doc comments included | 111 lines | 68 lines |
+| refusals in `checker.rs` | 487 | 486 |
+
+The two differing programs are `site/app/docs.vyrn` and `site/app/feed.vyrn`,
+and the line that moved is `warning: ignoring generator cache entry ...: this
+compiler did not write it`. That warning names the compiler binary's identity,
+not the program's. The first run was the first with a newly linked `vyrn.exe`
+and the cache entry was another build's; the second run read the entry this
+build had just written. No refusal moved.
+
+The corpus holds no duplicate `bench` name, so the corpus alone does not prove
+the noun survived. `checker::tests::duplicate_bench_names_are_rejected` proves
+it: two `bench "dup"` blocks in one module, and the refusal still says
+`duplicate bench name`. Its sibling `duplicate_test_names_are_rejected` was
+already there and still passes, which is the other half.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | a rule the checker states | 1,525 lines, 58 refusals | 1,482 lines, 57 refusals | the second walk is gone with its second `cerr!` |
+| | shared machinery | 2,233 | 2,236 | the driver's call site is now two calls and a longer comment |
+| | tests | 4,650 | 4,658 | the `bench` half of the duplicate-name rule gets its own unit test |
+| RFC-0127 §3, declarations | `tests` | checker 3, row 17 | checker 2, row 16 | one walk names the field once |
+| | `benches` | checker 3, row 18 | checker 2, row 17 | the same |
+| RFC-0127 §3, contextual words | `test` | checker 0, row 3 | checker 1, row 4 | the noun is an argument now, so the checker spells the word |
+| | `bench` | checker 0, row 3 | checker 1, row 4 | the same |
+| RFC-0126 §3 | `Type::Unit` | checker 34, row 78 | checker 33, row 77 | one synthetic `ret: Type::Unit` instead of two |
+
+**Three census rows were already red at the branch point, and this slice
+re-pins them too.** `the_form_census_is_what_the_rfc_records` and
+`the_surface_census_is_what_the_rfc_records` both failed at `d90b594c` before
+any edit of this track, on rows nothing here touches: `Expr::Binary` in
+`movecheck` (9 to 8), `Expr::Call` in `movecheck` (29 to 25) and in `own` (4 to
+3), `Expr::Match` in `own` (4 to 3), `Type::Map` in the checker (26 to 25),
+`Type::Stream` (18 to 19) and `Type::Task` (10 to 8). They are the residue of
+the merges that made the core line, where two tracks' deletions landed together
+and the tables were pinned against one of them. The numbers above are the tree's
+own, so both gates are green again and a later regression is visible; the rows
+belong to `movecheck.rs` and `own.rs`, which other tracks are editing now, and
+they will move again when those land.
+
+**Commit.** `one walk checks a test and a bench, and the noun is an argument`,
+`compiler/vyrn-frontend/src/checker.rs` (-32),
+`compiler/vyrn-cli/tests/checker_census.rs`, RFC-0126 §3, RFC-0127 §3.
+
+#### The census's fourth candidate: the parser keeps the fact it knew (2026-09-07)
+
+The census's fourth-ranked item was `arm_block`'s pointer address. A block arm
+is legal in one place, statement position (RFC-0118), and that is a fact about
+the text. The parser has it. It threw it away, and the checker got it back like
+this: `Checker::stmt`'s `Stmt::Expr` arm wrote `arms.as_ptr() as usize` into a
+`Cell`, and `check_match` compared the address of the arms slice it was looking
+at against the address the walk had left. Equal meant statement position.
+
+**The fact is now on the node.** `Expr::Match` carries `stmt_pos: bool`. The
+parser sets it in one place — where it builds `Stmt::Expr(e)`, which is the only
+place a `match` stands directly in statement position — and every synthesized
+`match` leaves it false, which is right for all seven of them (`?`, `??`,
+refutable `let`, and the four codec and storage expansions) because each has
+single-expression arms by construction. `Checker::expr` reads the field and
+passes it down the path that already threaded a `bool`. The `Cell`, its five
+lines of doc comment, its initializer, the setter in `Stmt::Expr` and the
+address comparison are gone.
+
+The new field is stronger than the `Cell` was, in one way worth naming. The
+`Cell` was set by the CHECKER's statement walk and consumed by the first
+`check_match` that ran after it, so the same `match` node checked through a
+path that did not pass `Stmt::Expr` — a re-check, a synthesized re-type — saw a
+cleared flag and its block arm was refused. The field travels with the node
+through every clone, so the answer no longer depends on how the node was
+reached.
+
+**The licence.** The same method as the slice above: `vyrn check` over 419
+programs, whole stderr including the exit code, before and after.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419 | 419 |
+| refused | 78 | 78 |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,307 | 16,296 |
+
+The rule is in the corpus, so the licence is not vacuous:
+`examples/blockvalarm.vyrn` is the fixture `tests/common/mod.rs` holds for
+RFC-0118, and its stderr is the same byte for byte — `blockvalarm.vyrn:5:0: a
+`match` used as a value has single-expression arms; a block arm needs statement
+position (RFC-0118)`. Two probes hold the other direction: the same `match` with
+block arms compiles as a statement and is refused at the same line as the
+initializer of a `let`.
+
+**The cost, which is an AST field.** `Expr::Match` gained a field, so every
+exhaustive pattern over it names the field or ignores it. Eight sites: three
+constructions in `parser.rs` and four more in its codec and storage desugars,
+one in `vyrn-genwasm`, and `..` in six patterns — two in `loader.rs`, one in
+`movecheck.rs`, two in `core.rs` and one in `direct.rs`. That is the price of
+moving a fact from an address comparison to a declaration, and it is paid once.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | the typing judgment | 3,159 lines | 3,152 | `check_match` loses the address comparison and its comment |
+| | the checker's part in a rewrite stated elsewhere | 451 | 454 | `arm_block`'s doc comment says where the fact now comes from |
+| | shared machinery | 2,236 | 2,229 | the `Cell` field, its doc, its initializer and the setter |
+| RFC-0127 §3 | `Expr::Match` | parser 7, checker 10, row 50 | parser 8, checker 9, row 50 | the form moved one mention from the checker to the parser, which is the whole slice in one number |
+| `tests/refusals.rs` | shared machinery | 3,670 | 3,671 | `movecheck.rs` gained the one `..` |
+
+The `Expr::Match` row is the honest measure of this slice. The line count fell
+by eleven, which is small; the census row that matters says the checker names
+the form once less and the parser once more, and the total is unchanged. RFC-0127
+§3's own thesis is that a form costs one arm in every walk — this slice does not
+remove an arm, it moves a fact to the walk that already had it.
+
+**Commit.** `the parser writes down that a match is a statement, and the checker
+stops guessing from an address`, `compiler/vyrn-frontend/src/ast.rs`,
+`parser.rs`, `checker.rs` (-11), `loader.rs`, `movecheck.rs`,
+`compiler/vyrn-lower/src/core.rs`, `compiler/vyrn-codegen/src/direct.rs`,
+`compiler/vyrn-genwasm/src/lib.rs`, the four censuses.
+
+#### The census's sixth candidate: the knob or the rule (2026-09-07)
+
+The census's last-ranked item was `gen_refused`, 23 lines. Its verdict was
+already `vyrn_frontend::effects::gen_refusal`'s, since M6's fifth slice; what
+stood in the checker was a wrapper whose whole content was the `VYRN_NO_JUDGE=1`
+bisect knob. The census said "it goes when the bisect is retired" and left the
+choice open. This slice makes it: the knob's FLOOR half stays, its FENCE half
+goes, and `gen_refused` goes with it.
+
+**What the knob's fence half was worth, measured.** The fifth slice's record
+says the knob restores two cells of the fence: `print` is allowed in a `gen fn`
+again, and the three host-boundary names (`hostNowMillis` and its two
+neighbours) are externs again. Both were probed against the branch-point binary
+under `VYRN_NO_JUDGE=1`.
+
+| probe | before, plain | before, under the knob |
+|---|---|---|
+| a `gen fn` calling `print` | refused: `it calls \`print\`` | **`ok`, exit 0** |
+| a `gen fn` calling a declared `extern fn hostNowMillis` | refused: `it reads the clock` | refused: `it reads the clock` |
+
+The second cell could not change an answer, and the reason is the order inside
+`check_comptime_purity`: for each callee the fence asks `gen_refused` first and
+the `extern_fns` set second. Under the knob `gen_refused` fell through to the
+row for a host-boundary name — the `if` guard requires
+`host_boundary_extern(name).is_none()` — so the row's own words won before the
+extern set was ever consulted. The knob's second fence cell has been unreachable
+since the slice that wrote it. That is one cell of dead behaviour and one live
+cell, and neither has a test: nothing in the tree ran `VYRN_NO_JUDGE=1` over a
+`gen fn`, in `tests/floor.rs` or anywhere else. The three tests that do use the
+knob — `a_moved_row_refuses_in_the_words_the_pass_used`,
+`an_unreached_host_import_is_no_capability`,
+`the_log_sink_is_a_declaration_the_judgment_does_not_clear` — are all the FLOOR
+half.
+
+**The decision: the fence half goes.** A bisect knob earns its lines while the
+bisect is live. M6's fourth, fifth and sixth slices are recorded and merged, the
+floor half is what the three tests bisect, and the fence half was one cell that
+made a refused program compile. Keeping it means the checker states the `gen`
+column twice — once as the table, once as "except `print`, when a debug variable
+is set" — which is the sentence this RFC exists to delete. So `gen_refused` is
+gone and its one caller reads `crate::effects::gen_refusal` directly; the
+`extern_fns` filter in `check_comptime_purity` loses its `no_judge()` disjunct;
+and `floor::no_judge`'s doc comment now says the knob restores one thing.
+
+**The licence.** `vyrn check` over 419 programs, whole stderr with the exit
+code, before and after — and the same run again with `VYRN_NO_JUDGE=1` set,
+because this slice changes what the knob does and the knob's own corpus is the
+other half of the measurement.
+
+| measure | before | after |
+|---|---|---|
+| programs checked, plain | 419, 78 refused | 419, 78 refused |
+| stderr differing, plain | — | 0 |
+| programs checked, `VYRN_NO_JUDGE=1` | 419, 78 refused | 419, 78 refused |
+| stderr differing under the knob | — | 0 |
+| `checker.rs` | 16,296 | 16,269 |
+
+The corpus is silent in both modes, because no corpus program is a `gen fn`
+that calls `print`. The two probes are the measurement, and they are pinned now:
+`floor::the_generation_fence_is_the_same_under_the_bisect_knob` runs both, plain
+and under the knob, and asserts the two texts are one text. That test is the
+check this slice leaves behind — it fails the moment either cell comes back.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | a rule the checker states | 1,455 lines, 57 refusals | 1,455, 57 — down 27 lines from 1,482 | the section is gone; it held no `cerr!`, so the refusal count does not move |
+| RFC-0126 §3, RFC-0127 §3 | — | unmoved | the slice names no type constructor and no form |
+
+**Commit.** `the bisect knob keeps the floor and gives up the fence`,
+`compiler/vyrn-frontend/src/checker.rs` (-27), `floor.rs`,
+`compiler/vyrn-cli/tests/floor.rs`, `tests/checker_census.rs`.
+
+#### The spawn rule is not one rule, and this is the count (2026-09-07)
+
+The census ranked the spawn-isolation fixpoint second: 207 lines —
+`SPAWN_FORBIDDEN` (35), `stored_unsafe_sigs` (43), `extend_spawn_safe` (58),
+the pre-check fixpoint inside `check_accum_inner` (71) and the refusal in
+`Checker::expr` — against `vyrn_lower::effects::judge`, whose module head names
+the same rule and whose corpus test already holds the two equal. The blocker it
+recorded was the core at check time: "a `vyrn check` must refuse before a core
+exists for every instance, and `VYRN_EFFECTS_GAPS` names the instances that have
+none". That blocker was measured, and it is empty. A different one is not.
+
+**The recorded blocker, counted.** The effect suite prints its own gap tally,
+and `cargo test -p vyrn-cli --test effects -- --ignored --nocapture` on this
+tree gives `184 programs ... 30197 functions judged, 10484 pure, 0 unlowered`.
+**Zero.** Every instance the lowering produces has a core, so
+`VYRN_EFFECTS_GAPS` names nothing over this corpus. The second half of the same
+blocker — the fifth slice's "a hook with no answer would drop the fence out of
+the LSP, which installs no judge" — is stale too: `vyrn-lsp/src/main.rs` has
+called `vyrn_lower::install()` since M3's accumulation slice, so the editor gets
+the same judgment the CLI does.
+
+**What has no core is a function no instance covers, and that was counted
+too.** A scratch pass over the same 184 programs, loading each as the effect
+suite loads it and comparing `program.functions` against
+`lower(program).instances`:
+
+| | count |
+|---|---|
+| functions declared | 37,046 |
+| covered by at least one instance | 30,137 |
+| covered by none | 6,909 |
+| ...of which a `gen fn` | **0** |
+| ...of which generic (`type_params` non-empty) | 260 |
+| ...of which plain, and simply unreached | 6,649 |
+| bodies holding a `spawn` | 4 |
+| ...of which covered by no instance | **0** |
+
+The 6,649 are the runtime's own intrinsics — `mem$load32`, `mem$fdWrite`,
+`runtime$malloc` and their neighbours, 184 of each because every program links
+the same `std/runtime.vyrn` — and the tail of every module a program imports
+one name from. The class cv's census named, a `gen fn` no lowering
+instantiates, is empty: a `gen fn` is instantiated like any other function, which
+is why the effect tally has a `GenBody` kind with 216 members in it.
+
+**The blocker that is real: the checker's rule is the effect rule plus three
+things that are not effects.** `Checker`'s `spawn_safe` set is built by
+`check_accum_inner` from five conditions, and only two of them are the lattice:
+
+| the condition | is it an effect? |
+|---|---|
+| the callee is `extern` | yes — `Effect::Extern` |
+| a callee name is in `SPAWN_FORBIDDEN` | for 17 of its 21 names |
+| a parameter has the `modify` capability | **no** — an aliasing rule |
+| the body holds a `drop` | **no** — an ownership rule |
+| the body reads or writes module state | **no** — no row of the lattice holds it |
+
+Four of the 21 names in `SPAWN_FORBIDDEN` are in no row of `effects::ATOMS`:
+`close`, `stringFromBytes`, `lineAt` and `colAt`. `close` has a reason in its
+own comment and it is not an effect either — it frees a stream's buffer the
+caller may still hold across the task boundary, which is ownership again. The
+other three have no comment.
+
+Three probes, run against this tree's `vyrn check`, show each non-effect
+condition refusing on its own. Each callee's effect set is `alloc, trap` — the
+join of the atoms in its body, and none of these is an atom — so
+`judged.spawns[..].outside()` is empty for all three and the judgment accepts
+what the checker refuses:
+
+| probe | the checker |
+|---|---|
+| `fn work(xs: modify Array<Int64>)`, spawned | refused: "does I/O or touches shared mutable state" |
+| a callee whose body holds `drop s` | refused, same sentence |
+| a callee calling `stringFromBytes(b)` | refused, same sentence |
+
+**`tests/effects.rs` proves one direction, and it is not the direction a
+deletion needs.** Its assertion is `spawn_outside.is_empty()`: of the 12 spawn
+sites the corpus holds, every one the checker ACCEPTED has a callee whose judged
+set is inside `alloc, trap`. That says the judgment is no weaker than the
+checker on programs that compile. A deletion needs the other direction — that
+the judgment refuses everything the checker refuses — and the three probes are
+counterexamples to it.
+
+**So the 207 lines stay, and what would move them is a decision, not work.**
+Two orders, either of which closes it:
+
+1. **Give the lattice the three rules.** Module state, an aliasing capability
+   and an ownership operation are not effects of a call, so this means widening
+   what "effect" means, or adding a second judgment beside it. RFC-0004 §Q4's
+   rule is "isolated", and isolation is more than the effects a body performs.
+2. **Split the rule.** Let the judgment state the effect half and leave the
+   three non-effect conditions in the checker. This saves nothing: the pre-check
+   fixpoint, `extend_spawn_safe` and `stored_unsafe_sigs` all still have to run
+   for the half that stays, and the file would then state a fragment of a rule
+   whose other fragment is elsewhere — which is worse than stating one rule
+   once.
+
+Beside them stands a third question that only matters once one of those is
+answered: the rule would become REACHABILITY-dependent, because a function no
+instance covers has no core. Over this corpus nothing moves — all four
+spawn-holding bodies are covered — but a `spawn` inside an uninstantiated
+generic would stop being refused. That is the same trade the floor made
+deliberately in the sixth slice (finding 7, `an_unreached_host_import_is_no_-
+capability`), so there is a precedent for taking it; it is a decision and this
+record does not take it.
+
+Four of the `SPAWN_FORBIDDEN` names being in no row is the cheapest thread to
+pull, and it is a question for whoever wrote them: `stringFromBytes`, `lineAt`
+and `colAt` are pure conversions by their signatures, and if they are on the
+list for a reason nobody wrote down, the list is three names shorter and the gap
+between the two statements is three names narrower.
+
+#### `check_comptime_purity` has one non-effect condition, and it is the same one (2026-09-07)
+
+The census's fifth candidate, 138 lines, was to be taken after the spawn rule.
+The spawn rule did not move, and the same measurement answers this one, so the
+count is here rather than deferred.
+
+Its recorded blocker — "a `gen fn` that no lowering instantiates has no core to
+judge, and RFC-0021 enforces the fence on EVERY `gen fn`" — is the class the
+table above counts at **0** over 184 programs. Every `gen fn` in the corpus is
+instantiated. That is not a proof that one cannot fail to be, but it is the
+measurement, and it is the same number the spawn rule's blocker gave.
+
+Its conditions against the lattice, the way the spawn rule's were:
+
+| the condition | is it an effect? |
+|---|---|
+| a callee is refused by the `gen` column | yes — that IS the lattice, and it is stated once already since M6's fifth slice |
+| the body holds a `spawn` | yes — `Effect::Spawn`, whose `gen` cell is `no` |
+| the body calls an `extern` | yes — `Effect::Extern`, with finding 7's difference: the checker asks the DECLARATION, the judgment asks the call |
+| the body reads or writes module state | **no** — no row of the lattice holds it |
+
+One condition out of four, against the spawn rule's three. This is the closer
+of the two, and it closes on the same question: module state is not an effect of
+a call, and until the lattice or a judgment beside it can say "this body reads a
+global", both rules keep a copy of the walk that answers it. `touches_globals`
+is 40 lines and `global_ref_block` is 129, and they are the shared machinery
+both of these rules read — so the module-state question is worth about 380
+lines of `checker.rs` across the three sections that ask it, and it is one
+question.
+
+**Ranked, what to take next**, replacing the census's list where this record
+moved it:
+
+1. **The surface, unchanged from the census.** 4,321 lines and 248 refusals;
+   `Checker::call` alone is 2,501 and 190. Nothing else in the file is this
+   size, and RFC-0126 §8 and RFC-0094 are the strands that reach it.
+2. **Module state as a judged fact.** It is the one non-effect condition
+   `check_comptime_purity` has left and one of the three the spawn rule has,
+   and answering it is what lets either of them go. Roughly 380 lines depend
+   on it.
+3. **The four unrowed `SPAWN_FORBIDDEN` names.** `close`, `stringFromBytes`,
+   `lineAt`, `colAt`: classify them or drop them. Cheap, and it narrows the
+   spawn rule's gap to two conditions.
+4. **`check_comptime_purity`, 138 lines**, once 2 lands.
+5. **The spawn fixpoint, 207 lines**, once 2 and 3 land and the reachability
+   trade is decided the way finding 7 decided it for the floor.
+
+#### Gates for the three deletions (2026-09-07)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at `C:\wtcdtmp` — a shallow scratch directory outside the checkout,
+because other worktrees gate at the same time and the suites scratch under fixed
+names.
 
 | gate | result |
 |---|---|
@@ -15575,6 +15962,43 @@ The three censuses are re-pinned in the same commit: the structural census
 (`Surface` 4,066 lines and 221 refusals to 3,981 and 214, `Tests` 4,677 to
 4,680, and the `fn call` section's reader), the surface census (RFC-0126 §3,
 1,512 mentions to 1,496), and the forms census (RFC-0127 §3, unmoved again).
+| `cargo build --release` | ok, and no new warning — the nine that stand are the branch point's |
+| `cargo test -p vyrn-cli`, no filter | 586 passed, 36 ignored, no failure |
+| `kernel` `--ignored` | 1, 66 s |
+| `coretables` `--ignored` | 1, 56 s |
+| `typed` `--ignored` | 1, 98 s |
+| `effects` `--ignored` | 2, 97 s |
+| `fixtures` `--ignored` | 1, 37 s |
+| `testsweep` `--ignored` | 1, 118 s |
+| `cargo test -p vyrn-frontend` | 1,166, 5 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,212, 12 ignored |
+| `vyrn-lsp`'s own tests | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 290 s |
+| the residue ratchet | 1, 365 s — **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed**, which is the branch point's row exactly |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — a checker-only change moves no byte, and the slice that touched `direct.rs` touched one pattern |
+| `genwasm`, release, `--ignored`, fresh `VYRN_GEN_CACHE_DIR` | 1, 11 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 26 files |
+
+`checker.rs` across the three slices: **16,339 to 16,269**, seventy lines. By
+census kind, from `tests/checker_census.rs`:
+
+| kind | at `d90b594c` | now | moved by |
+|---|---|---|---|
+| the typing judgment | 3,159 / 135 | 3,152 / 135 | the address comparison in `check_match` |
+| a rule the checker states | 1,525 / 58 | 1,455 / 57 | `check_benches` (-43, -1 refusal) and `gen_refused` (-27) |
+| the checker's part in a rewrite stated elsewhere | 451 / 16 | 454 / 16 | `arm_block`'s doc comment |
+| one arm per form, type constructor or builtin | 4,321 / 248 | 4,321 / 248 | unmoved |
+| shared machinery | 2,233 / 30 | 2,229 / 30 | the `Cell` out, the driver's two calls in |
+| tests | 4,650 / 0 | 4,658 / 0 | the `bench` half of the duplicate-name rule |
+
+Two of the three deletions come out of one kind, and that is the census's own
+finding standing up: the rule-stating sections are 9.3 per cent of the file, and
+taking two of the six candidates off them moves 70 lines. The surface is
+unmoved, which is where the size is.
 
 ### The surface collapse — RFC-0126 §8, one line per step
 

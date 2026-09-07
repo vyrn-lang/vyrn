@@ -3550,6 +3550,7 @@ impl NsResolver<'_> {
                 scrutinee,
                 arms,
                 line,
+                ..
             } => {
                 let l = *line;
                 self.walk_expr(scrutinee, locals);
@@ -4445,6 +4446,7 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
             scrutinee,
             arms,
             line,
+            ..
         } => {
             scope_expr(scrutinee, *line, locals, out);
             for arm in arms {

@@ -514,6 +514,7 @@ fn at_type(e: Expr, ty: &Type) -> Expr {
         return e;
     }
     Expr::Match {
+        stmt_pos: false,
         scrutinee: Box::new(call("parse", vec![e])),
         arms: vec![
             MatchArm {

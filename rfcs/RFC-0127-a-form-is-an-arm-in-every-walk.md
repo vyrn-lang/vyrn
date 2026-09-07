@@ -149,7 +149,7 @@ the_form_census_as_a_table` and checked against the code by
 | `Expr::Unary` | 4 | 8 | 6 | 2 | 7 | 3 | 2 | 2 | 34 |
 | `Expr::Binary` | 3 | 7 | 8 | 3 | 8 | 4 | 2 | 1 | 36 |
 | `Expr::Call` | 22 | 13 | 25 | 3 | 26 | 4 | 12 | 1 | 106 |
-| `Expr::Match` | 7 | 10 | 13 | 3 | 9 | 3 | 4 | 1 | 50 |
+| `Expr::Match` | 8 | 9 | 13 | 3 | 9 | 3 | 4 | 1 | 50 |
 | `Expr::IfExpr` | 1 | 8 | 12 | 2 | 8 | 3 | 2 | 1 | 37 |
 | `Expr::Try` | 1 | 7 | 6 | 2 | 6 | 3 | 4 | 1 | 30 |
 | `Expr::StructLit` | 2 | 8 | 8 | 2 | 9 | 3 | 3 | 1 | 36 |
@@ -210,7 +210,7 @@ one's.
 
 ### 3.2 The 9 declarations
 
-289 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
+287 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
 `ast.rs` by the test, so a tenth declaration form fails the census until it has
 a row.
 
@@ -223,8 +223,8 @@ a row.
 | `contracts` | 0 | 11 | 4 | 0 | 0 | 0 | 0 | 15 |
 | `impls` | 1 | 7 | 15 | 3 | 0 | 6 | 0 | 32 |
 | `globals` | 1 | 12 | 14 | 1 | 2 | 2 | 0 | 32 |
-| `tests` | 0 | 6 | 3 | 1 | 1 | 1 | 5 | 17 |
-| `benches` | 0 | 6 | 3 | 1 | 1 | 1 | 6 | 18 |
+| `tests` | 0 | 6 | 2 | 1 | 1 | 1 | 5 | 16 |
+| `benches` | 0 | 6 | 2 | 1 | 1 | 1 | 6 | 17 |
 
 `imports` is the only row with a zero in the checker, and that is RFC-0010
 working: the loader consumes an import and the checker never sees one.
@@ -303,7 +303,7 @@ variant, the `keyword_or_ident` arm and the `token_name_and_text` row that
 not drifted. **A keyword is nearly free. The FORM behind it is what costs**, and
 §3.1 is where the language's weight is.
 
-45 mentions in four files for the contextual words — the words the lexer hands
+47 mentions in four files for the contextual words — the words the lexer hands
 back as identifiers and the parser reads by position.
 
 | word | lexer | parser | checker | fmt | all four |
@@ -313,8 +313,8 @@ back as identifiers and the parser reads by position.
 | `consume` | 0 | 5 | 0 | 0 | 5 |
 | `share` | 0 | 1 | 0 | 0 | 1 |
 | `gen` | 0 | 3 | 0 | 0 | 3 |
-| `test` | 0 | 3 | 0 | 0 | 3 |
-| `bench` | 0 | 3 | 0 | 0 | 3 |
+| `test` | 0 | 3 | 1 | 0 | 4 |
+| `bench` | 0 | 3 | 1 | 0 | 4 |
 | `panic` | 0 | 1 | 2 | 0 | 3 |
 | `from` | 0 | 2 | 0 | 0 | 2 |
 | `as` | 0 | 2 | 0 | 0 | 2 |

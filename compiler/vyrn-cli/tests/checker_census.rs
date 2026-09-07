@@ -163,16 +163,11 @@ fn sections() -> Vec<Section> {
             "how many `yield`s a projection body has, counting every branch",
         ),
         sec(
-            "fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {",
+            "fn check_named_blocks(",
             Refusal,
-            "every `test` body is checked as a synthetic Unit function with \
-             `in_test` set, and a name may not repeat inside one module",
-        ),
-        sec(
-            "fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {",
-            Refusal,
-            "the same sentence for `bench` (RFC-0055), written out a second \
-             time — its own doc comment says \"structurally identical\"",
+            "every `test` body (RFC-0015) and every `bench` body (RFC-0055) is \
+             checked as a synthetic Unit function with its host flag set, and a \
+             name may not repeat inside one module — one walk, run twice",
         ),
         sec(
             "pub fn check_accum(program: &Program) -> Vec<Diagnostic> {",
@@ -413,8 +408,7 @@ fn sections() -> Vec<Section> {
             "fn arm_block(",
             Desugar,
             "a block arm (RFC-0118) is legal in statement position — a fact \
-             about the text, reconstructed here by comparing the arms slice's \
-             ADDRESS with a `Cell` the statement walk set",
+             about the text, which the parser writes on the node and this reads",
         ),
         sec(
             "fn check_match_enum(",
@@ -545,12 +539,6 @@ fn sections() -> Vec<Section> {
             Surface,
             "two whole-tree searches, one arm per form each: does this body \
              `drop`, does it `spawn`",
-        ),
-        sec(
-            "fn gen_refused(name: &str) -> Option<String> {",
-            Refusal,
-            "the `gen` column of the effect lattice, as RFC-0021's fence asks \
-             it — the table itself is `effects.rs`",
         ),
         sec(
             "fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {",
@@ -748,12 +736,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3159, 135),
-        ("a rule the checker states", 1525, 58),
-        ("the checker's part in a rewrite stated elsewhere", 451, 16),
+        ("the typing judgment", 3152, 135),
+        ("a rule the checker states", 1455, 57),
+        ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 3981, 214),
-        ("shared machinery", 2233, 30),
-        ("tests", 4680, 0),
+        ("shared machinery", 2229, 30),
+        ("tests", 4688, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

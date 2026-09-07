@@ -3728,6 +3728,7 @@ impl Parser {
                 })
                 .collect();
             let m = Expr::Match {
+                stmt_pos: false,
                 scrutinee: Box::new(scrut.clone()),
                 arms: vec![
                     MatchArm {
@@ -4209,6 +4210,15 @@ impl Parser {
                         }
                     }
                 }
+                // Statement position (RFC-0118). A `match` written HERE may have
+                // block arms; one nested anywhere inside an expression may not.
+                // The parser is where that fact exists, so it is written on the
+                // node here and read by the checker — it used to be recovered
+                // later by comparing the arms slice's ADDRESS.
+                let mut e = e;
+                if let Expr::Match { stmt_pos, .. } = &mut e {
+                    *stmt_pos = true;
+                }
                 Ok(Stmt::Expr(e))
             }
         }
@@ -4332,6 +4342,7 @@ impl Parser {
     /// reads one.
     fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {
         Expr::Match {
+            stmt_pos: false,
             scrutinee: Box::new(lhs),
             arms: vec![
                 MatchArm {
@@ -5280,6 +5291,7 @@ impl Parser {
         Ok(Expr::Match {
             scrutinee: Box::new(scrutinee),
             arms,
+            stmt_pos: false,
             line,
         })
     }
@@ -5323,6 +5335,7 @@ impl Parser {
             )),
             ("load", 2) => {
                 let decoded = Expr::Match {
+                    stmt_pos: false,
                     scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
                     arms: vec![
                         MatchArm {
@@ -5340,6 +5353,7 @@ impl Parser {
                     line,
                 };
                 Some(Expr::Match {
+                    stmt_pos: false,
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
@@ -5357,6 +5371,7 @@ impl Parser {
             ("loadOr", 3) => {
                 let default = args[2].clone();
                 let decoded = Expr::Match {
+                    stmt_pos: false,
                     scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
                     arms: vec![
                         MatchArm {
@@ -5374,6 +5389,7 @@ impl Parser {
                     line,
                 };
                 Some(Expr::Match {
+                    stmt_pos: false,
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {

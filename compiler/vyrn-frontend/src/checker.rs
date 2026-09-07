@@ -1169,7 +1169,6 @@ fn check_accum_inner(
         impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
-        stmt_match: std::cell::Cell::new(0),
         in_loop: RefCell::new(false),
         let_types: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
@@ -1390,20 +1389,22 @@ fn check_accum_inner(
         }
     }
 
-    // 6. Check test bodies (RFC-0015). Each is checked as a Unit-returning
-    //    function body under a synthetic unspellable name (`test@<index>`), so
-    //    every existing analysis (movecheck runs separately; ownership, spawn
-    //    purity, region) applies unchanged. Tests are NOT registered in `sigs`,
-    //    so user code can never call one. Duplicate names within a single file
-    //    are rejected here (a better message than a parse error).
+    // 6. Check test bodies (RFC-0015) and bench bodies (RFC-0055) — one walk,
+    //    twice. Each is checked as a Unit-returning function body under a
+    //    synthetic unspellable name (`test@<index>`, `bench@<index>`), so every
+    //    existing analysis (movecheck runs separately; ownership, spawn purity,
+    //    region) applies unchanged. Neither is registered in `sigs`, so user
+    //    code can never call one. Duplicate names within a single file are
+    //    rejected here (a better message than a parse error).
     check_places(&checker, program, &mut out);
-    check_tests(&checker, program, &mut out);
-
-    // 6b. Check bench bodies (RFC-0055). Identical treatment to tests: each is a
-    //     Unit-returning function body under a synthetic `bench@<index>` name, with
-    //     `in_bench` set so `blackBox` is legal. Benches are never registered in
-    //     `sigs`, so user code cannot call one; duplicate names per file are caught.
-    check_benches(&checker, program, &mut out);
+    check_named_blocks(&checker, &program.tests, "test", &checker.in_test, &mut out);
+    check_named_blocks(
+        &checker,
+        &program.benches,
+        "bench",
+        &checker.in_bench,
+        &mut out,
+    );
 
     // 7. Comptime-purity (RFC-0021): every `gen fn` and its transitive callees
     //    must be pure enough to run in the compiler's interpreter at generation
@@ -1742,18 +1743,28 @@ fn count_yields(b: &crate::ast::Block) -> usize {
         .sum()
 }
 
-/// Check every `test` body (RFC-0015). Duplicate names per module are reported;
-/// each body is checked with `in_test` set so `assert`/`assertEq` are legal.
-fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    // Duplicate test names are per-file (per-module): group by module so the same
+/// Check every `test` body (RFC-0015) or every `bench` body (RFC-0055). The two
+/// are one sentence: a name may not repeat inside one module, and each body is
+/// checked as a Unit-returning function under a synthetic `<noun>@<index>` name
+/// with the host flag set, so `assert`/`assertEq` are legal in a `test` and
+/// `blackBox` is legal in a `bench`. They differ in the keyword, in the noun the
+/// duplicate refusal quotes, and in which flag is raised; `host` is the flag.
+fn check_named_blocks(
+    checker: &Checker,
+    blocks: &[NamedBlock],
+    noun: &str,
+    host: &RefCell<bool>,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Duplicate names are per-file (per-module): group by module so the same
     // name in two different files is fine, but twice in one file is an error.
     let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
-    for t in &program.tests {
+    for t in blocks {
         let key = (t.module.clone(), t.name.clone());
         if let Some(prev) = seen.get(&key) {
             let mut d = cerr!(
                 t.line,
-                "duplicate test name {:?} (already declared on line {prev})",
+                "duplicate {noun} name {:?} (already declared on line {prev})",
                 t.name
             );
             d.file = t.module.clone();
@@ -1762,15 +1773,15 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             seen.insert(key, t.line);
         }
     }
-    *checker.in_test.borrow_mut() = true;
-    for (i, t) in program.tests.iter().enumerate() {
+    *host.borrow_mut() = true;
+    for (i, t) in blocks.iter().enumerate() {
         // A synthetic Unit-returning function with an unspellable name. The
         // head is synthetic; the BODY handed to the checker is the real node
         // (`function_body`), so the answers the checker records land on the
         // nodes `own`, the lowering and the interpreter walk — RFC-0125 §3 M6,
         // seventh slice. A clone left them untyped and a test body had no core.
         let synthetic = Function {
-            name: format!("test@{i}"),
+            name: format!("{noun}@{i}"),
             exported: false,
             module: t.module.clone(),
             doc: None,
@@ -1797,60 +1808,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             out.push(d);
         }
     }
-    *checker.in_test.borrow_mut() = false;
-}
-
-/// Check every `bench` body (RFC-0055). Structurally identical to [`check_tests`]:
-/// duplicate names per module are reported; each body is checked as a Unit-
-/// returning function under a synthetic `bench@<index>` name with `in_bench` set so
-/// `blackBox` is legal.
-fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
-    for b in &program.benches {
-        let key = (b.module.clone(), b.name.clone());
-        if let Some(prev) = seen.get(&key) {
-            let mut d = cerr!(
-                b.line,
-                "duplicate bench name {:?} (already declared on line {prev})",
-                b.name
-            );
-            d.file = b.module.clone();
-            out.push(d);
-        } else {
-            seen.insert(key, b.line);
-        }
-    }
-    *checker.in_bench.borrow_mut() = true;
-    for (i, b) in program.benches.iter().enumerate() {
-        let synthetic = Function {
-            name: format!("bench@{i}"),
-            exported: false,
-            module: b.module.clone(),
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params: Vec::new(),
-            ret: Type::Unit,
-            body: Block { stmts: Vec::new() },
-            line: b.line,
-            col: 0,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        };
-        if let Err(s) = checker.function_body(&synthetic, &b.body) {
-            let mut d = s;
-            d.file = b.module.clone();
-            out.push(d);
-        }
-        for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = b.module.clone();
-            out.push(d);
-        }
-    }
-    *checker.in_bench.borrow_mut() = false;
+    *host.borrow_mut() = false;
 }
 
 /// Type-check the program, returning **all** problems found across functions
@@ -2134,12 +2092,6 @@ struct Checker<'a> {
     /// which a binding is "outer" — a heap value must not be assigned there, or
     /// it would dangle when the region frees at block exit.
     region_floor: RefCell<Vec<usize>>,
-    /// The arms of a `match` sitting DIRECTLY in statement position
-    /// (RFC-0118), by the arms slice's address; 0 = none. Set by `Stmt::Expr`
-    /// and consumed by `check_match`, so block arms are legal exactly there
-    /// and a nested match — expression position by construction — never
-    /// inherits it.
-    stmt_match: std::cell::Cell<usize>,
     /// Inferred (or declared) type of each `let` binding and each `for`-in loop
     /// variable that checked cleanly, keyed by `(line, name)`. Populated as a
     /// side effect of checking so the symbol-query layer can show `let x: Int`
@@ -2168,7 +2120,8 @@ struct Checker<'a> {
     in_test: RefCell<bool>,
     /// True while checking a `bench` body (RFC-0055). `blackBox` is legal only
     /// inside a `test` or `bench` body (`in_test || in_bench`); `assert`/`assertEq`
-    /// stay `test`-only. Set for the duration of [`check_benches`].
+    /// stay `test`-only. It is the host flag [`check_named_blocks`] raises over
+    /// `program.benches`, as `in_test` is the one it raises over `program.tests`.
     in_bench: RefCell<bool>,
     /// True while checking a `gen fn` body (RFC-0021/0054). The `Code` type and the
     /// code-quote builtins (`vyrn"…"`, `render`, `rawAt`, `raw`, `lex`) are legal
@@ -4596,12 +4549,6 @@ impl<'a> Checker<'a> {
                 ))
             }
             Stmt::Expr(e) => {
-                // A `match` directly here is in STATEMENT position (RFC-0118):
-                // its arms may be blocks. The flag is the arms' address, so a
-                // match nested anywhere inside stays expression-position.
-                if let Expr::Match { arms, .. } = e {
-                    self.stmt_match.set(arms.as_ptr() as usize);
-                }
                 // A `panic` statement is `Never`-typed, so it satisfies the
                 // return-path check the way a `return` does (RFC-0079): the
                 // statements after it are unreachable and a function whose body
@@ -5134,8 +5081,9 @@ impl<'a> Checker<'a> {
             Expr::Match {
                 scrutinee,
                 arms,
+                stmt_pos,
                 line,
-            } => self.check_match(scrutinee, arms, *line, scope, expected, fn_ret),
+            } => self.check_match(scrutinee, arms, *stmt_pos, *line, scope, expected, fn_ret),
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -5735,19 +5683,17 @@ impl<'a> Checker<'a> {
 
     /// Check a `match` over an `Option` or `Result`: both variants covered
     /// exactly once with the right patterns, all arm bodies a common type.
+    #[allow(clippy::too_many_arguments)]
     fn check_match(
         &self,
         scrutinee: &Expr,
         arms: &[MatchArm],
+        stmt_pos: bool,
         line: usize,
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        // Statement position (RFC-0118), consumed HERE so a nested match —
-        // expression position by construction — sees the flag cleared. The
-        // enum path receives it as a plain bool.
-        let stmt_pos = self.stmt_match.replace(0) == arms.as_ptr() as usize;
         let raw_sty = self.expr(scrutinee, scope, None, fn_ret)?;
         // Resolve a transparent alias so `match` over `type X = Result<..>` (or an
         // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
@@ -5776,7 +5722,10 @@ impl<'a> Checker<'a> {
     }
 
     /// Check one block arm (RFC-0118): legal only in statement position, and
-    /// then checked exactly as the block it is.
+    /// then checked exactly as the block it is. `stmt_pos` is the node's own
+    /// field, which the parser set — this used to be recovered here by
+    /// comparing the arms slice's address with a `Cell` the statement walk had
+    /// written.
     fn arm_block(
         &self,
         b: &Block,
@@ -10337,34 +10286,12 @@ fn contains_spawn(b: &Block) -> bool {
     b.stmts.iter().any(stmt)
 }
 
-/// The `gen` column of the lattice table, as RFC-0021's fence asks it — the
-/// reason the sandbox may not run `name`, or `None`.
-///
-/// The list this replaced (`COMPTIME_FORBIDDEN`, deleted) was the column
-/// written a second time, and the two had drifted: `print` was allowed where
-/// `writeStdout` was refused, which is one effect with two verdicts (RFC-0125
-/// §3 M6 finding 4), and the clock was reported as an extern although
-/// RFC-0103 M2 says it is not one (finding 13). The column is stated once now,
-/// in [`crate::effects`], derived from the table in RFC-0125 §3 M6.
-///
-/// `VYRN_NO_JUDGE=1` is the fourth slice's bisect knob and stands this
-/// milestone's judgments aside — here, the two cells this slice changed — so a
-/// refusal that is new can be told from one that is not.
-fn gen_refused(name: &str) -> Option<String> {
-    if crate::floor::no_judge() && crate::trap::host_boundary_extern(name).is_none() {
-        // The list's own answer: `print` was not on it.
-        return (name != "print")
-            .then(|| crate::effects::gen_refusal(name))
-            .flatten();
-    }
-    crate::effects::gen_refusal(name)
-}
-
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
 /// `gen fn` — and everything it transitively calls — must be pure enough to run
 /// deterministically in the compiler's interpreter at generation time: no
 /// `extern`, `spawn`, module state, or an atom the lattice's `gen` column
-/// refuses ([`gen_refused`]). Because a `gen fn` may be *used* as an import target anywhere it is
+/// refuses ([`crate::effects::gen_refusal`]). Because a `gen fn` may be *used* as an
+/// import target anywhere it is
 /// visible, the restriction is enforced on EVERY `gen fn` unconditionally (v1:
 /// simpler and sound than a whole-program "reached as a generation target"
 /// analysis; a `gen fn` called only at runtime pays the same discipline, which
@@ -10384,16 +10311,11 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
     // are not host imports — the runtime shim implements them on every target —
     // so the fence must not call them "the extern" (RFC-0125 §3 M6 finding 13).
     // They are atoms of the `clock` and `random` rows and the table refuses them
-    // there, in the row's own words. Under the bisect knob they are externs
-    // again, which is what the list did.
+    // there, in the row's own words.
     let extern_fns: std::collections::HashSet<&str> = program
         .functions
         .iter()
-        .filter(|f| {
-            f.is_extern
-                && (crate::floor::no_judge()
-                    || crate::trap::host_boundary_extern(&f.name).is_none())
-        })
+        .filter(|f| f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none())
         .map(|f| f.name.as_str())
         .collect();
     let global_names: std::collections::HashSet<String> =
@@ -10430,7 +10352,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             return Some("reads or writes module state".to_string());
         }
         for c in expand(fn_calls(&f.body)) {
-            if let Some(why) = gen_refused(&c) {
+            if let Some(why) = crate::effects::gen_refusal(&c) {
                 return Some(why);
             }
             if extern_fns.contains(c.as_str()) {
@@ -12843,6 +12765,14 @@ mod tests {
         let e =
             check_src("test \"dup\" { assert(true) } test \"dup\" { assert(true) }").unwrap_err();
         assert!(e.contains("duplicate test name"), "{e}");
+    }
+
+    #[test]
+    fn duplicate_bench_names_are_rejected() {
+        // The same walk as above, over `program.benches` with the other noun
+        // (RFC-0125 §3 M6): the refusal must still say `bench`.
+        let e = check_src("bench \"dup\" { let a = 1 } bench \"dup\" { let a = 1 }").unwrap_err();
+        assert!(e.contains("duplicate bench name"), "{e}");
     }
 
     #[test]

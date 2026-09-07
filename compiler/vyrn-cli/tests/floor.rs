@@ -554,3 +554,44 @@ fn the_log_sink_is_a_declaration_the_judgment_does_not_clear() {
     assert!(!out.status.success(), "{pass}");
     assert_eq!(judged, pass, "the judgment touched a declaration");
 }
+
+/// RFC-0125 M6: the knob's SECOND half is retired, and this is what that means.
+///
+/// `VYRN_NO_JUDGE=1` used to restore the generation fence's own two cells as
+/// well as the floor's presence rule — `print` was allowed in a `gen fn` again
+/// and the three host-boundary names were externs again. The fence reads the
+/// `gen` column of `effects.rs` and nothing else now, so both refusals are the
+/// same with the knob and without it. The floor half is unchanged and the three
+/// rows above pin it.
+#[test]
+fn the_generation_fence_is_the_same_under_the_bisect_knob() {
+    const PRINTS: &str = "gen fn g() -> String {\n    print(\"hi\")\n    return \"x\"\n}\n\n\
+         fn main() -> Int64 {\n    return 0\n}\n";
+    const CLOCK: &str = "extern fn hostNowMillis() -> Int64\n\n\
+         gen fn g() -> String {\n    let t = hostNowMillis()\n    return t.toString()\n}\n\n\
+         fn main() -> Int64 {\n    return 0\n}\n";
+    for (name, body, needle) in [
+        ("genprint", PRINTS, "it calls `print`"),
+        ("genclock", CLOCK, "it reads the clock"),
+    ] {
+        let dir = scratch(name);
+        write(&dir, "main.vyrn", body);
+        let entry = dir.join("main.vyrn");
+        let (ok, judged) = check(&entry);
+        assert!(!ok, "{name}: the fence must refuse this:\n{judged}");
+        assert!(judged.contains(needle), "{name}: {judged}");
+        let out = vyrn()
+            .env("VYRN_NO_JUDGE", "1")
+            .arg("check")
+            .arg(&entry)
+            .output()
+            .expect("run check");
+        let pass = String::from_utf8_lossy(&out.stderr).to_string()
+            + &String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !out.status.success(),
+            "{name}: the knob restored a cell:\n{pass}"
+        );
+        assert_eq!(judged, pass, "{name}: the knob changed the refusal");
+    }
+}
