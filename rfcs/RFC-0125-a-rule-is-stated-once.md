@@ -7149,6 +7149,42 @@ than the last record's because other worktrees were gating on the same machine.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
 
+**`MoveCheck::type_of`'s four widening arms are measured, and all four stay
+(2026-09-07).** `type_of` asks `Declared` first and then widens in four arms of
+its own: a record FIELD's type off the declaration, a `consume`'s type off the
+place it takes, a projection call's element type off the container, and a
+`match`'s type off its first arm under the payload binders. Track-cj's record
+says the four now fire only on record holes, which would make them deletable.
+On the core line at `e39d799f` they do not.
+
+The measurement is cj's: build each variant, run `vyrn why --memory` over all
+209 top-level examples, and compare byte for byte against the whole tree's
+answer. A deletion that moves no byte goes; one that moves a byte is refused and
+the byte says why. No variant reached the wasm manifest, parity or the residue
+ratchet, because the first measure refused each one first.
+
+| arm | lines | example reports that moved | what moved |
+|---|---|---|---|
+| `Expr::Field` | 9 | 2 of 209 | `nbody.vyrn` 169-170 and `vlog.vyrn` 367-368: `the type Float64` and `the type Millis` become `the type unknown` |
+| `Expr::Consume` | 5 | 7 of 209 | the VERDICT, not only the words: `container.vyrn` 59 goes from `reclaimed by `drop` at line 60` to `NOT reclaimed`, and `mustuse.vyrn` moves two bindings out of the `dropped` column |
+| the projection call | 11 | 16 of 209 | an element read's type: `arrays.vyrn` 64-65 go from `the type Point` to `the type unknown` |
+| `Expr::Match` | 19 | 20 of 209 | a `match` bound by a `let`: `ifexpr.vyrn` 54 and `jsoncodec.vyrn` 50, 59 and 65 go from `the type Int64` to `the type unknown` |
+
+**What the measurement says.** These are not record holes. They are the report's
+own naming of a type nothing else in this pass resolves, and one of them —
+`Expr::Consume` — is load-bearing for a verdict and not only for a word: without
+it a `let` of a `consume` has no type, so the walk does not see the `drop` that
+reclaims it. Deleting the four would put `the type unknown` in front of a reader
+44 times over the corpus and lose two `drop` rows. All four stay.
+
+**Why `819f8d47` was not merged.** The brief allows merging track-cj's branch if
+this slice needs it. It does not: the measurement is decisive on this line,
+where the arms fire on ordinary field, element and `match` reads. Whether
+cj's tree narrows them to record holes is a question about cj's tree, and the
+answer to it belongs where that work lands. Bringing another track's unmerged
+branch onto this one to re-ask it would import risk for at most 44 lines of a
+pass the milestone is emptying anyway.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
