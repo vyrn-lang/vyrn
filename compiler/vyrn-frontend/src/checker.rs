@@ -1390,20 +1390,22 @@ fn check_accum_inner(
         }
     }
 
-    // 6. Check test bodies (RFC-0015). Each is checked as a Unit-returning
-    //    function body under a synthetic unspellable name (`test@<index>`), so
-    //    every existing analysis (movecheck runs separately; ownership, spawn
-    //    purity, region) applies unchanged. Tests are NOT registered in `sigs`,
-    //    so user code can never call one. Duplicate names within a single file
-    //    are rejected here (a better message than a parse error).
+    // 6. Check test bodies (RFC-0015) and bench bodies (RFC-0055) — one walk,
+    //    twice. Each is checked as a Unit-returning function body under a
+    //    synthetic unspellable name (`test@<index>`, `bench@<index>`), so every
+    //    existing analysis (movecheck runs separately; ownership, spawn purity,
+    //    region) applies unchanged. Neither is registered in `sigs`, so user
+    //    code can never call one. Duplicate names within a single file are
+    //    rejected here (a better message than a parse error).
     check_places(&checker, program, &mut out);
-    check_tests(&checker, program, &mut out);
-
-    // 6b. Check bench bodies (RFC-0055). Identical treatment to tests: each is a
-    //     Unit-returning function body under a synthetic `bench@<index>` name, with
-    //     `in_bench` set so `blackBox` is legal. Benches are never registered in
-    //     `sigs`, so user code cannot call one; duplicate names per file are caught.
-    check_benches(&checker, program, &mut out);
+    check_named_blocks(&checker, &program.tests, "test", &checker.in_test, &mut out);
+    check_named_blocks(
+        &checker,
+        &program.benches,
+        "bench",
+        &checker.in_bench,
+        &mut out,
+    );
 
     // 7. Comptime-purity (RFC-0021): every `gen fn` and its transitive callees
     //    must be pure enough to run in the compiler's interpreter at generation
@@ -1742,18 +1744,28 @@ fn count_yields(b: &crate::ast::Block) -> usize {
         .sum()
 }
 
-/// Check every `test` body (RFC-0015). Duplicate names per module are reported;
-/// each body is checked with `in_test` set so `assert`/`assertEq` are legal.
-fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    // Duplicate test names are per-file (per-module): group by module so the same
+/// Check every `test` body (RFC-0015) or every `bench` body (RFC-0055). The two
+/// are one sentence: a name may not repeat inside one module, and each body is
+/// checked as a Unit-returning function under a synthetic `<noun>@<index>` name
+/// with the host flag set, so `assert`/`assertEq` are legal in a `test` and
+/// `blackBox` is legal in a `bench`. They differ in the keyword, in the noun the
+/// duplicate refusal quotes, and in which flag is raised; `host` is the flag.
+fn check_named_blocks(
+    checker: &Checker,
+    blocks: &[NamedBlock],
+    noun: &str,
+    host: &RefCell<bool>,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Duplicate names are per-file (per-module): group by module so the same
     // name in two different files is fine, but twice in one file is an error.
     let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
-    for t in &program.tests {
+    for t in blocks {
         let key = (t.module.clone(), t.name.clone());
         if let Some(prev) = seen.get(&key) {
             let mut d = cerr!(
                 t.line,
-                "duplicate test name {:?} (already declared on line {prev})",
+                "duplicate {noun} name {:?} (already declared on line {prev})",
                 t.name
             );
             d.file = t.module.clone();
@@ -1762,15 +1774,15 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             seen.insert(key, t.line);
         }
     }
-    *checker.in_test.borrow_mut() = true;
-    for (i, t) in program.tests.iter().enumerate() {
+    *host.borrow_mut() = true;
+    for (i, t) in blocks.iter().enumerate() {
         // A synthetic Unit-returning function with an unspellable name. The
         // head is synthetic; the BODY handed to the checker is the real node
         // (`function_body`), so the answers the checker records land on the
         // nodes `own`, the lowering and the interpreter walk — RFC-0125 §3 M6,
         // seventh slice. A clone left them untyped and a test body had no core.
         let synthetic = Function {
-            name: format!("test@{i}"),
+            name: format!("{noun}@{i}"),
             exported: false,
             module: t.module.clone(),
             doc: None,
@@ -1797,60 +1809,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             out.push(d);
         }
     }
-    *checker.in_test.borrow_mut() = false;
-}
-
-/// Check every `bench` body (RFC-0055). Structurally identical to [`check_tests`]:
-/// duplicate names per module are reported; each body is checked as a Unit-
-/// returning function under a synthetic `bench@<index>` name with `in_bench` set so
-/// `blackBox` is legal.
-fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
-    for b in &program.benches {
-        let key = (b.module.clone(), b.name.clone());
-        if let Some(prev) = seen.get(&key) {
-            let mut d = cerr!(
-                b.line,
-                "duplicate bench name {:?} (already declared on line {prev})",
-                b.name
-            );
-            d.file = b.module.clone();
-            out.push(d);
-        } else {
-            seen.insert(key, b.line);
-        }
-    }
-    *checker.in_bench.borrow_mut() = true;
-    for (i, b) in program.benches.iter().enumerate() {
-        let synthetic = Function {
-            name: format!("bench@{i}"),
-            exported: false,
-            module: b.module.clone(),
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params: Vec::new(),
-            ret: Type::Unit,
-            body: Block { stmts: Vec::new() },
-            line: b.line,
-            col: 0,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        };
-        if let Err(s) = checker.function_body(&synthetic, &b.body) {
-            let mut d = s;
-            d.file = b.module.clone();
-            out.push(d);
-        }
-        for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = b.module.clone();
-            out.push(d);
-        }
-    }
-    *checker.in_bench.borrow_mut() = false;
+    *host.borrow_mut() = false;
 }
 
 /// Type-check the program, returning **all** problems found across functions
@@ -2168,7 +2127,8 @@ struct Checker<'a> {
     in_test: RefCell<bool>,
     /// True while checking a `bench` body (RFC-0055). `blackBox` is legal only
     /// inside a `test` or `bench` body (`in_test || in_bench`); `assert`/`assertEq`
-    /// stay `test`-only. Set for the duration of [`check_benches`].
+    /// stay `test`-only. It is the host flag [`check_named_blocks`] raises over
+    /// `program.benches`, as `in_test` is the one it raises over `program.tests`.
     in_bench: RefCell<bool>,
     /// True while checking a `gen fn` body (RFC-0021/0054). The `Code` type and the
     /// code-quote builtins (`vyrn"…"`, `render`, `rawAt`, `raw`, `lex`) are legal
@@ -13156,6 +13116,14 @@ mod tests {
         let e =
             check_src("test \"dup\" { assert(true) } test \"dup\" { assert(true) }").unwrap_err();
         assert!(e.contains("duplicate test name"), "{e}");
+    }
+
+    #[test]
+    fn duplicate_bench_names_are_rejected() {
+        // The same walk as above, over `program.benches` with the other noun
+        // (RFC-0125 §3 M6): the refusal must still say `bench`.
+        let e = check_src("bench \"dup\" { let a = 1 } bench \"dup\" { let a = 1 }").unwrap_err();
+        assert!(e.contains("duplicate bench name"), "{e}");
     }
 
     #[test]

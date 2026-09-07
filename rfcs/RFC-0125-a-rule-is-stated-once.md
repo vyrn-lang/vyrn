@@ -14981,6 +14981,81 @@ the forms census (`tests/forms.rs` and RFC-0127 §3, unmoved — the slice touch
 no form), and the new structural census
 (`tests/checker_census.rs`, which is what this record's table is).
 
+#### The census's third candidate: one walk for `test` and `bench` (2026-09-07)
+
+The checker census ranked six things to take. This is the third of them, and
+the smallest honest deletion in the file: `check_benches` is `check_tests`
+written a second time, eight sections lower, and its own doc comment says so —
+"Structurally identical to [`check_tests`]".
+
+**The two were the same walk.** `program.tests` and `program.benches` are both
+`Vec<NamedBlock>`; the same struct, not two that resemble each other. Each walk
+built the same `HashMap<(Option<String>, String), usize>` keyed by module and
+name, refused a repeat with the same sentence, raised a flag, checked every
+body as a synthetic Unit-returning `Function` under an unspellable name, drained
+the same error sink into the same output list, and lowered the flag. They differ
+in three places: the slice, the noun the refusal quotes, and which flag is
+raised. `check_named_blocks(checker, blocks, noun, host, out)` takes the three
+as arguments and the driver calls it twice.
+
+**The licence.** The checker cannot be stood aside, so the licence is per rule
+and it is the corpus stderr whole. `vyrn check` was run over every `.vyrn` file
+under `examples/`, `site/`, `compiler/vyrn-cli/tests/` and `std/` — 419
+programs, 78 of them refused — before the change and after it, and the two
+streams were compared byte for byte including the exit code.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419 | 419 |
+| refused | 78 | 78 |
+| stderr differing | — | 0 refusals; 2 programs differ by a generator-cache warning |
+| `checker.rs` | 16,339 | 16,307 |
+| the two walks, doc comments included | 111 lines | 68 lines |
+| refusals in `checker.rs` | 487 | 486 |
+
+The two differing programs are `site/app/docs.vyrn` and `site/app/feed.vyrn`,
+and the line that moved is `warning: ignoring generator cache entry ...: this
+compiler did not write it`. That warning names the compiler binary's identity,
+not the program's. The first run was the first with a newly linked `vyrn.exe`
+and the cache entry was another build's; the second run read the entry this
+build had just written. No refusal moved.
+
+The corpus holds no duplicate `bench` name, so the corpus alone does not prove
+the noun survived. `checker::tests::duplicate_bench_names_are_rejected` proves
+it: two `bench "dup"` blocks in one module, and the refusal still says
+`duplicate bench name`. Its sibling `duplicate_test_names_are_rejected` was
+already there and still passes, which is the other half.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | a rule the checker states | 1,525 lines, 58 refusals | 1,482 lines, 57 refusals | the second walk is gone with its second `cerr!` |
+| | shared machinery | 2,233 | 2,236 | the driver's call site is now two calls and a longer comment |
+| | tests | 4,650 | 4,658 | the `bench` half of the duplicate-name rule gets its own unit test |
+| RFC-0127 §3, declarations | `tests` | checker 3, row 17 | checker 2, row 16 | one walk names the field once |
+| | `benches` | checker 3, row 18 | checker 2, row 17 | the same |
+| RFC-0127 §3, contextual words | `test` | checker 0, row 3 | checker 1, row 4 | the noun is an argument now, so the checker spells the word |
+| | `bench` | checker 0, row 3 | checker 1, row 4 | the same |
+| RFC-0126 §3 | `Type::Unit` | checker 34, row 78 | checker 33, row 77 | one synthetic `ret: Type::Unit` instead of two |
+
+**Three census rows were already red at the branch point, and this slice
+re-pins them too.** `the_form_census_is_what_the_rfc_records` and
+`the_surface_census_is_what_the_rfc_records` both failed at `d90b594c` before
+any edit of this track, on rows nothing here touches: `Expr::Binary` in
+`movecheck` (9 to 8), `Expr::Call` in `movecheck` (29 to 25) and in `own` (4 to
+3), `Expr::Match` in `own` (4 to 3), `Type::Map` in the checker (26 to 25),
+`Type::Stream` (18 to 19) and `Type::Task` (10 to 8). They are the residue of
+the merges that made the core line, where two tracks' deletions landed together
+and the tables were pinned against one of them. The numbers above are the tree's
+own, so both gates are green again and a later regression is visible; the rows
+belong to `movecheck.rs` and `own.rs`, which other tracks are editing now, and
+they will move again when those land.
+
+**Commit.** `one walk checks a test and a bench, and the noun is an argument`,
+`compiler/vyrn-frontend/src/checker.rs` (-32),
+`compiler/vyrn-cli/tests/checker_census.rs`, RFC-0126 §3, RFC-0127 §3.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

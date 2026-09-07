@@ -160,16 +160,11 @@ fn sections() -> Vec<Section> {
             "how many `yield`s a projection body has, counting every branch",
         ),
         sec(
-            "fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {",
+            "fn check_named_blocks(",
             Refusal,
-            "every `test` body is checked as a synthetic Unit function with \
-             `in_test` set, and a name may not repeat inside one module",
-        ),
-        sec(
-            "fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {",
-            Refusal,
-            "the same sentence for `bench` (RFC-0055), written out a second \
-             time — its own doc comment says \"structurally identical\"",
+            "every `test` body (RFC-0015) and every `bench` body (RFC-0055) is \
+             checked as a synthetic Unit function with its host flag set, and a \
+             name may not repeat inside one module — one walk, run twice",
         ),
         sec(
             "pub fn check_accum(program: &Program) -> Vec<Diagnostic> {",
@@ -745,11 +740,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("the typing judgment", 3159, 135),
-        ("a rule the checker states", 1525, 58),
+        ("a rule the checker states", 1482, 57),
         ("the checker's part in a rewrite stated elsewhere", 451, 16),
         ("one arm per form, type constructor or builtin", 4321, 248),
-        ("shared machinery", 2233, 30),
-        ("tests", 4650, 0),
+        ("shared machinery", 2236, 30),
+        ("tests", 4658, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
