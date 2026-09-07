@@ -6306,6 +6306,143 @@ row's count and column are what they were.
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
 
+**The placer's cost, measured and halved twice (2026-09-07, `track-cq`).** The
+last measurement of a build (`track-at`, above) left the placer as the larger
+half and gave it to whoever owns `core.rs`. `track-cl` then read 5.71 s over
+2,172 frames on `vyrn check site/app/chart.vyrn`. This slice measures where that
+time goes and takes the two structural payers. **Nothing in it changes a
+judgment's answer**: `vyrn why --memory` is byte-identical over all 208
+examples, `VYRN_WASM_MANIFEST=check` is green and the manifest file is
+untouched, the corpus pins are unmoved, and the structural census is unmoved.
+
+**The instrument first.** `VYRN_BUILD_PROFILE=1` said `placer` and one number.
+The rows under it now split the analysis into what it does — `own: Owned::new`,
+`own: movecheck::facts`, `own: the fold`, `placer` — and the placer's per-body
+work into the first build, the seeded second build and the kernel judgment. One
+row, `types::decl_map`, counts a table a pass rebuilds, because a COUNT is what
+tells a rebuilt table from a shared one. `placer: build: seeded` reads zero on
+every program measured: `last_owner` is empty on all of them, so `build` runs
+`build_seeded` once. `movecheck::arg_caps` carries no row, and the reason is
+worth the line: `movecheck.rs` is the file the structural census counts, so an
+instrument in it moves a number this RFC records.
+
+**The kernel judgment is not the cost. The core BUILD is.** `vyrn check
+site/app/chart.vyrn`, release, before this slice:
+
+| row | count | total |
+|---|---|---|
+| `placer: core::build` | 1,764 | 1.884 s |
+| `placer: facts: rebuilt` | 284 | 855.54 ms |
+| `placer: build_outside` | 2 | 464.28 ms |
+| `placer: lower_with` | 2 | 95.65 ms |
+| `placer: kernel::placement` | 2,172 | 42.80 ms |
+| `placer` | 2 | 3.413 s |
+
+The judgment this RFC is about is **1.3%** of the pass that runs it. Every other
+row builds a core body.
+
+**`types::decl_map` was called at every node, and it clones the program.**
+`vyrn_frontend::types::decl_map(program)` clones every `TypeDecl` of the linked
+program into a fresh `HashMap`. `core.rs` called it at FIFTEEN sites inside the
+`Builder`, each on a per-node path — a field read, an element read, a pattern, a
+call, a variant test. One profiled run of `chart.vyrn` counted **54,829 calls
+and 2.587 s**, which is 60% of the placer.
+
+`Owned` already holds that map. It is built once per program, every ownership
+rule resolves through it, and the `Builder` already holds an `&Owned`. So the
+table is read off the one that exists: `Owned::types()`, fifteen sites, no new
+state and no cache. `types::decl_map` falls to 15 calls and 1.15 ms.
+
+**`movecheck::arg_caps` was rebuilt per body.** It reads the capability of every
+parameter of every declared function and protocol method. That is a read of the
+DECLARATIONS and says nothing about a body, so it is the same table for each of
+them; the core built it in a `OnceCell` on the `Builder`, which is per body.
+`chart.vyrn` built it **1,045 times for 61 ms** of a 302 ms placer, and a
+program with more functions pays more per body. It moves to `Ownership`, beside
+`lending`, `retains` and `fnval_clear` — the other whole-program answers the
+core asks at the same position, in `arg_verdict`. One build per analysis: 5
+calls and 1 ms.
+
+**What the two are worth.** `vyrn check`, release, minimum of five runs on a
+machine other tracks were also building on:
+
+| program | before | after | |
+|---|---|---|---|
+| `site/app/chart.vyrn` | 3.050 s | 0.453 s | 6.7x |
+| `site/app/docs.vyrn` | 2.439 s | 0.425 s | 5.7x |
+| `examples/nbody.vyrn` | 0.109 s | 0.054 s | 2.0x |
+| `site/export.vyrn` | 13.592 s | 1.571 s | 8.7x |
+
+And the placer alone, from the phase table of the fastest of five profiled runs
+(a check runs the placer twice; see item 1 below):
+
+| program | before | after | |
+|---|---|---|---|
+| `site/app/chart.vyrn` | 3.413 s | 233.63 ms | 14.6x |
+| `site/app/docs.vyrn` | 2.641 s | 226.65 ms | 11.7x |
+| `examples/nbody.vyrn` | 80.54 ms | 22.07 ms | 3.6x |
+| `site/export.vyrn` | 18.483 s | 728.25 ms | 25.4x |
+
+**The time is many small bodies, and no body is large.** A probe over each
+`build` of one placer run of `chart.vyrn` reports 882 bodies and 34 ms. The
+LARGEST single body is 0.7 ms, which is 2% of the total; the top tenth of the
+bodies carry 47%; the median body is 20 µs and the mean 38 µs. There is no head
+to attack. The first sample of this probe showed two bodies at 40 ms and 35 ms —
+55% of the run between them — and they did not repeat: on a machine at 64% load
+a cold body reads a scheduler stall, and a distribution taken once is not a
+distribution.
+
+**The stopping condition is met: the per-body cost is flat across programs.**
+Mean core build, after: `examples/nbody.vyrn` 38 µs over 105 bodies (5 modules),
+`chart.vyrn` 38.5 µs over 882 (29 modules), `site/export.vyrn`'s root 40 µs over
+554 and its largest generated program 55 µs over 2,100 (192 modules). A cost
+that was 44, 72 and 141 µs over the same three sizes is now 38, 38.5 and 55. The
+residual spread is body size, not program size.
+
+**The editor does not regress.** `keystroke_cost_on_the_sites_own_modules`,
+median of three alternating runs of one test binary against two servers, which
+is the method the memo record uses:
+
+| file | before | after |
+|---|---|---|
+| `site/app/bench.vyrn` | 79.7 ms | 42.5 ms |
+| `site/app/guide.vyrn` | 110.0 ms | 115.4 ms |
+| `site/app/chart.vyrn` | 223.9 ms | 144.9 ms |
+| `site/app/docs.vyrn` | 192.7 ms | 177.8 ms |
+
+`guide.vyrn` is inside its own spread — its three readings were 84.9, 115.4 and
+162.1 ms — and the memo already serves most of a keystroke there.
+
+**What is left, and why each is still here.**
+
+1. **Every `vyrn check` runs the analysis TWICE, and each runs the whole
+   placer.** `movecheck::check` asks for one inside the load, and
+   `vyrn_lower::lower` asks for another after it. `own::Memo` cannot serve the
+   first to the second, and `Memo::open`'s own doc records why: a projection is
+   inlined with a per-inline tag, so the load's analysis names a binding
+   `@p26.h` where the lowering names it `@p31.h`, a plan keyed by those names
+   places nothing, and `examples/genref.vyrn` leaked a block the residue ratchet
+   had recorded clean. Sharing needs the project inline memo to span the load
+   AND the command. That is a decision about the memo's scope, not a cost fix,
+   and this slice does not take it. It is worth the other half of every number
+   above.
+2. **`placer: lower_with` is now the largest row** — 85.56 ms of `chart.vyrn`'s
+   233.63 ms. It is `checker::recorded` plus the instance walk, once per placer
+   run, and it is proportional to the program. It is not a rebuilt table.
+3. **`own: movecheck::facts`** is 55.42 ms of the 307.15 ms analysis. One walk
+   of every body, proportional.
+4. **The instance sort is NOT a payer, and it was measured rather than
+   assumed.** `lower_with` sorts by `(module, name, spelling())`, and `spelling`
+   formats a `String` on both sides of every comparison. A `sort_by_cached_key`
+   was written and measured: the whole sort is 0.66 ms. The change was reverted,
+   because a diff that moves nothing is a diff.
+
+#### Gates (2026-09-07, the placer's cost)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. This line carries
+no `parity` and no `residue` suite; `route` `--ignored` replaced parity.
+
 | gate | result |
 |---|---|
 | `cargo fmt --check`, all three manifests | clean |
@@ -7379,6 +7516,247 @@ RFC-0127 §3) and the surface census (`surface.rs` and RFC-0126 §3) all hold:
 no mention moved. The forms census counts an AST form's mentions per file, and
 the note walk lost no form — `Emit::kept` reads the same `Expr::Str` and the
 same `Stmt` kinds `Emit::fate` did.
+
+**A join arm hands a name out of a loop, and the back edge frees it twice
+(2026-09-07).** Two rules the core states separately meet at a back edge, and
+the program between them exits 134. `Builder::alias_out` says a join arm that
+yields a name bound OUTSIDE the construct stands that name down, because the
+join's result is what releases the value now. `Builder::owned_binding` says a
+`let` owns what the core lowered into it. Put a `let` of a join inside a loop
+body and both are applied: the outer name releases nothing, and the result
+releases once per turn. The first turn frees the buffer the outer name holds,
+and the second turn reads it and frees it again.
+
+```vyrn
+let names: Array<String> = ["a", "b"]
+while i < 3 {
+    let picked = if i > 0 { names } else { ["z"] }
+    n = n + picked.length
+    i = i + 1
+}
+```
+
+`examples/loopalias.vyrn` is that program. Before this slice `vyrn check` said
+`ok`, `vyrn run` printed `5`, the native build printed `5`, and the native build
+under `VYRN_LEAK_CHECK=1` said `free audit: double or foreign free rva=0x1a2e`
+and exited 134. The wasm engine lowers through the same core and printed `5`
+without complaint, because its allocator audits nothing — the defect is in the
+core and only one engine can see it. `vyrn why --memory` said the whole thing in
+two lines and did not know it:
+
+```
+line 2     names            NOT reclaimed — another binding aliases it at line 6
+line 6     picked           reclaimed at block exit — releasing what the Array<String> holds
+```
+
+The block is the loop body.
+
+**Who owns `picked` on each arm.** On the `["z"]` arm `picked` owns a fresh
+buffer, and releasing it at the block's exit is right. On the `names` arm
+`picked` is a second name for a buffer the frame already holds under `names`,
+and releasing it at the block's exit is right ONCE — that is the transfer
+`alias_out` states, and in straight-line code the block's exit comes after every
+read of `names` and happens once. The back edge is the whole defect: it makes
+the block's exit happen again, with `names` still bound and still read. Neither
+arm is wrong. The COUNT is.
+
+**What the kernel should have refused, and did not.** RFC-0089's stance is that
+a leak is preferable to a double free, and `alias_out`'s own doc comment claims
+the leak. It does not get one here, because the standing-down and the ownership
+are stated at two different nodes and neither can see the loop. A value that one
+arm owns and another only hands on is exactly the shape the RFC takes over a
+double free, and both passes accepted it silently: `VYRN_NO_KERNEL=1 vyrn check`
+accepts the program today, so the move check has nothing to say about this shape
+either. That silence was the second defect, and it is the one this slice closes.
+
+**The kernel's sentence.**
+
+```
+`names` may not be handed out of an arm inside a loop — the result is released on every turn, and `names` is bound outside the loop
+  fix: `names.copy()` if the arm should hand out a value of its own
+```
+
+It names the reader's binding, names the real defect, stands at the line the
+reader wrote, is one diagnostic, and its menu names a fix that compiles: the
+`.copy()` form prints `5` on both engines and is leak-clean natively.
+
+**Stated once, at the two doors that own a join's result.** The refusal is one
+function, `Builder::loop_alias`, and it asks one question of a `Rhs`: is this
+the result of a join whose arm handed out a name from outside the enclosing
+loop? `alias_out` decides nothing new. It reports the name it stood down when a
+loop mark stands between that name and the join, and the join records the report
+against its result. Two callers ask:
+
+| door | the program | why it owns the result |
+|---|---|---|
+| `Stmt::Let`, where `owned` is true | `let picked = if .. { names } else { [..] }` | `owned_binding` said the frame owns it |
+| `val`'s temporary, where the type owns heap | `size(if .. { names } else { [..] })` | an argument position binds an unnamed temporary, and `temp` owns what the type owns |
+
+`loop_marks` is the mechanism: one `Vec<usize>` holding the name count when each
+enclosing loop's body was opened. Names are minted in lowering order, so a name
+below the innermost mark is bound outside that loop. A `for` pushes its mark IN
+FRONT of the loop variable, which is the one placement that matters — each turn
+binds its own element, so handing the VARIABLE out frees once per turn and is
+not this defect, while handing the CONTAINER out is.
+
+**Three shapes that are not the defect, and stay lowered as they were.**
+
+- **A rebind.** `found = match a { Key(k) => Some(k.copy()), Cls(v) => found, .. }`
+  is `std/html.vyrn`'s `attrKey`. A first form of this rule stated the refusal at
+  the JOIN rather than at the owner, and it refused 30 of the corpus's sources —
+  `std/html.vyrn`, `std/vyx.vyrn`, `site/export.vyrn` and everything that
+  imports them. A store into a name hands the value on, and the slot is released
+  by its FINAL value in every engine, so the temporary the value passes through
+  owns nothing and the back edge repeats no release. The flag answers for THAT
+  expression and no expression inside it: `n = n + size(if c { names } else {
+  [..] })` is a rebind of an `Int64` and the join inside it still binds an owning
+  temporary, which is the `argument` row of the pin.
+- **A loop variable.** `for s in names { let p = if .. { s } else { "z" } }`.
+- **An arm that yields a borrow.** Already answered, and before this slice: the
+  result becomes a borrow and releases nothing, which is the `if c { parts[0] }
+  else { "Bool" }` row `names_a_place` gave.
+
+**The other two forms, asked and answered.** A `match` in value position is the
+SAME defect through the same door — `rhs_inner`'s `Expr::Match` binds a result
+and calls `alias_out` per arm — and one refusal covers both. A `return` is not.
+`return_through` gives every arm its own exit and binds no result, so nothing is
+released twice; it LEAKS instead. `return if i > 0 { names } else { ["z"] }`
+over a local `names` exits 135 with `free audit: 1 block(s), 16 bytes, never
+freed`, because the arm that does not leave allocated and nothing releases it.
+That is RFC-0089's preference, taken by a construct that has no choice about it,
+and it is recorded rather than acted on.
+
+**One shape found and not closed.** A join inside a plain inner BLOCK, whose
+aliased name outlives the block, is a read-after-free rather than a double free:
+
+```vyrn
+if names.length > 1 {
+    let picked = if names.length > 1 { names } else { ["z"] }
+    n = n + picked.length
+}
+n = n + names.length
+```
+
+`picked` frees at the inner block's exit and `names` is read after it. The leak
+check is quiet — one free, one read — and the program prints the right answer.
+The loop's rule cannot state this one, because the question is not how many
+times the result is released but whether the aliased name is READ after the
+release, which is a liveness question the core does not carry. It is a real
+defect and this record is where it is written down.
+
+**The licence.** The rule is the kernel's alone, so nothing in `movecheck.rs`
+moves: `VYRN_NO_KERNEL=1 vyrn check` accepts the program and
+`VYRN_NO_MOVECHECK=1 vyrn check` refuses it. Over the whole corpus — every
+`.vyrn` under `examples/`, `std/`, `site/`, `bench/`, `rfcs/bench-0104/` and
+`vyrn-cli/tests/{refusals,unlicensed,boundaries}` — exactly one program is
+refused that was not, and it is `examples/loopalias.vyrn`, which this slice
+adds. No census row moves. `VYRN_WASM_MANIFEST=check` is green with the manifest
+file untouched: not one emitted byte.
+
+**What the slice writes.** `compiler/vyrn-lower/src/core.rs` is 5,365 lines
+against 5,265 — 110 added and 10 replaced, all of it three fields, the report,
+the refusal and its two calls. `examples/loopalias.vyrn` is the program, with
+its recorded refusal in `examples/expected/loopalias.{stdout,stderr,exit}` and
+its row in `EXPECTED_CHECK_FAILURE`, which is where the corpus records an
+example that is meant not to build. `rfcs/census/residue-baseline.tsv` takes
+`loopalias skip`, which is what a refused example is to the ratchet.
+`compiler/vyrn-cli/tests/memory.rs` grows by 148 for two pins: the four refused
+shapes — `if`, `match`, `for` and the argument temporary — each with the whole
+sentence and the whole menu, and the two accepted ones, the `.copy()` the menu
+offers and the rebind.
+
+**A failure this slice did not cause, and does not fix.** `vyrn-frontend`'s
+`movecheck_rule_two_pinned_to_ident` fails on the tree at `e39d799f`, with and
+without this slice's diff: the captured `s` is pinned at column 34 where the
+test asks 33. It is the pin `e39d799f` moved to row 24, and it is that line's to
+answer.
+
+#### The loop-alias slice's gates (2026-09-07)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. The wall times are longer
+than the last record's because other worktrees were gating on the same machine.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the two excluded manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 593 passed, 75 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 182 s |
+| `coretables` `--ignored` | 1, 152 s, every pinned count unmoved |
+| `typed` `--ignored` | 1, 365 s |
+| `effects` `--ignored` | 2, 332 s |
+| `fixtures` `--ignored` | 1, 123 s, after `write` recorded the new example's three files |
+| `vyrn-frontend` | 1,166, and the one failure above, which `e39d799f` fails without this diff |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,342 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 12, 20 s — up 2 for this slice's pins |
+| `parity` `--ignored`, release | 41 of 41, 243 s |
+| the residue ratchet | 1, 233 s, clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 134 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
+
+**`MoveCheck::type_of`'s four widening arms are measured, and all four stay
+(2026-09-07).** `type_of` asks `Declared` first and then widens in four arms of
+its own: a record FIELD's type off the declaration, a `consume`'s type off the
+place it takes, a projection call's element type off the container, and a
+`match`'s type off its first arm under the payload binders. Track-cj's record
+says the four now fire only on record holes, which would make them deletable.
+On the core line at `e39d799f` they do not.
+
+The measurement is cj's: build each variant, run `vyrn why --memory` over all
+209 top-level examples, and compare byte for byte against the whole tree's
+answer. A deletion that moves no byte goes; one that moves a byte is refused and
+the byte says why. No variant reached the wasm manifest, parity or the residue
+ratchet, because the first measure refused each one first.
+
+| arm | lines | example reports that moved | what moved |
+|---|---|---|---|
+| `Expr::Field` | 9 | 2 of 209 | `nbody.vyrn` 169-170 and `vlog.vyrn` 367-368: `the type Float64` and `the type Millis` become `the type unknown` |
+| `Expr::Consume` | 5 | 7 of 209 | the VERDICT, not only the words: `container.vyrn` 59 goes from `reclaimed by `drop` at line 60` to `NOT reclaimed`, and `mustuse.vyrn` moves two bindings out of the `dropped` column |
+| the projection call | 11 | 16 of 209 | an element read's type: `arrays.vyrn` 64-65 go from `the type Point` to `the type unknown` |
+| `Expr::Match` | 19 | 20 of 209 | a `match` bound by a `let`: `ifexpr.vyrn` 54 and `jsoncodec.vyrn` 50, 59 and 65 go from `the type Int64` to `the type unknown` |
+
+**What the measurement says.** These are not record holes. They are the report's
+own naming of a type nothing else in this pass resolves, and one of them —
+`Expr::Consume` — is load-bearing for a verdict and not only for a word: without
+it a `let` of a `consume` has no type, so the walk does not see the `drop` that
+reclaims it. Deleting the four would put `the type unknown` in front of a reader
+44 times over the corpus and lose two `drop` rows. All four stay.
+
+**Why `819f8d47` was not merged.** The brief allows merging track-cj's branch if
+this slice needs it. It does not: the measurement is decisive on this line,
+where the arms fire on ordinary field, element and `match` reads. Whether
+cj's tree narrows them to record holes is a question about cj's tree, and the
+answer to it belongs where that work lands. Bringing another track's unmerged
+branch onto this one to re-ask it would import risk for at most 44 lines of a
+pass the milestone is emptying anyway.
+
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 576 passed, 34 ignored |
+| `kernel` `--ignored`, release | 1, 18 s |
+| `coretables` `--ignored`, release | 1, 16 s |
+| `typed` `--ignored`, release | 1, 26 s |
+| `effects` `--ignored`, release | 2, 31 s |
+| `fixtures` `--ignored`, release | 1, 26 s |
+| `vyrn-frontend` | 1,192 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,238 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 6 |
+| `route` `--ignored`, release | 2, 408 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 23 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+| `vyrn why --memory` over `examples/*.vyrn` | byte-identical, 208 programs |
 
 ### M4 — the runtime in Vyrn
 
@@ -11336,6 +11714,159 @@ previous slice and the merge changes neither the corpus nor the route);
 (41 files, up to date); the site export (29 s, 82 routes and 14 assets) and
 `vyrn test` per site file (189 test blocks).
 
+#### The exit-residue ratchet comes back, in the allocator (2026-09-07)
+
+RFC-0114 §25's instrument is in `std/runtime`'s allocator now, which is the one
+place every engine shares. The previous record left a design — a live-block
+word in the heap header, incremented in `malloc` and decremented in `free`,
+read by the host at exit — and this slice took two of its three parts and
+changed the third, because the third would have cost every recorded wasm hash.
+
+**Where the state lives, and why it is free.** Classes 0, 1 and 2 cannot
+compute: `malloc` floors a request at eight bytes and the smallest class that
+comes out of `shift * 4 + sub` is 3. So the first three free-list heads at
+`heapBase() + 0`, `+ 4` and `+ 8` are dead memory in every build, and the
+instrument keeps its block's address in the first of them. Zero there means
+"not armed", which is what an unaudited build and the window before
+`auditInit` both read. The liveness MARK is the block header's second word,
+the one §4.2 decision 3 left unwritten when it kept only the class: 1 live, 0
+free. So a free of a block that is not live — a double free, or a free of an
+address inside a block already on a list — is one load and one compare, at the
+site, before the push that would corrupt the list. `heapBase() + 476` was not
+the gap the previous record thought: it is the arena's routing flag.
+
+**The switch is a BUILD flag and it moves no byte.** `VYRN_LEAK_CHECK` in the
+COMPILER's environment, read in one place (`loader::audit_build`) so the
+emitter and the lowering cannot disagree about what a build is. `Fn_::call`
+drops a call to any `runtime$audit*` name when the flag is off — the arguments
+at all four sites are locals and constants, so dropping the statement drops
+nothing else — the four bodies then reach no export, `Module::sweep` takes them
+with the data they interned, and `VYRN_WASM_MANIFEST=check` is green with no
+row rewritten. That is the assertion that the instrument is not in the language
+when nobody asked for it. A runtime switch would have put a branch in `malloc`
+that all 173 hashes paid for.
+
+**The module reports, and the host is where it lands.** The previous record's
+design had the host read the counters at `proc_exit`; this writes the report in
+Vyrn instead, and the reason is the same one that put the counter in the
+allocator: there are two hosts (`wasmrun.rs` and `wasi_host.c`) and one
+allocator. `auditExit` writes `free audit: N block(s), M bytes, never freed` on
+descriptor 2 and calls `procExit(135)`; `auditFail` writes one line and
+`procExit(134)`. Both wordings are interned by the emitter and handed over, the
+way `boolStr` and `strFromBytes` are handed theirs, and the digits go through
+`digitsAt` into the fixed cell at 8736 — so the report allocates nothing it
+would then have to count. The line and the two exit codes are the old C
+instrument's, which is what the suites read.
+
+**Two things had to come back with it.**
+
+- The MODULE-STATE TEARDOWN. Module state outlives `main` by design
+  (RFC-0013), so without it the ratchet measures that rule rather than a
+  defect: a five-line program whose only global is a concatenated `String`
+  reported one block. `lower_globals_teardown` releases every top-level `let`
+  at its fixed address in reverse declaration order, emitted only in an audited
+  build, before `auditExit` and after the flush.
+- `vyrn-lower`'s `<teardown>` ROOT, under the same flag, because a global of a
+  DECLARED generic release reaches the teardown and no other emission. Gated
+  rather than restored outright: unconditional it queues bodies nothing emits
+  and `lowered.rs` reports each as a difference with no rule, which is what
+  took it out with the text-IR route.
+
+**A generator is never audited.** A generator module (RFC-0076 M7) runs inside
+the compiler and its exit code is a protocol between the host and the module,
+so an audited one turned a residue report into a failed generator and took
+eight examples off the corpus. `emit` reads `gen.is_none()` beside the flag.
+
+**What the corpus says, on both engines.** `tests/residue.rs` is back over
+`route.rs`'s corpus and its three exclusion lists — a program that does not
+build is not a residue verdict, and the `skip` column the old baseline carried
+is therefore gone. One audited build per program, run twice: `vyrn run` and the
+route's own executable.
+
+| | clean | leaking | double-free | failed |
+| --- | --- | --- | --- | --- |
+| the engine (`vyrn run`) | 149 | 26 | 0 | 0 |
+| the route (wasm2c and clang) | 149 | 26 | 0 | 0 |
+
+The two engines agree row for row, which is what one instrument inside one
+module should produce. 175 programs: 128 `clean` rows, 21 `other` rows (they
+exit nonzero by design and the audit stays quiet), 26 `leak` rows.
+
+**The leak column is not empty, and that is the finding.** RFC-0114 closed at
+143 clean / 0 leaking / 0 double-free — on the TEXT-IR route, whose emitter no
+longer exists. Nothing ever held the direct wasm emitter to that number: parity
+compared OUTPUT, and a leak is invisible in output. The 26 rows are the wasm
+route's first measurement. One of them reproduces in a dozen lines: a
+`fromJson` into a two-variant enum whose payload is an `Array<Int64>`, matched
+and printed, leaks 1 block of 16 bytes — the box the decoder built. The same
+enum constructed and matched WITHOUT the codec is clean, and so are the
+`Result` and `Option` payload shapes, so the row is the decoder's and not the
+enum's. Each of the 26 is a defect for a later slice; the ratchet's job here is
+that none of them may grow and no clean row may join them.
+
+**One rule is new, and the revert experiment is why.** Reverting `403131c9`'s
+release-row floor in `direct.rs` — the slot a `for` over an unnamed iterable
+keeps — makes `examples/looptemp.vyrn` free a slot twice through a pointer at
+address -16. `free` reads that header out of bounds and TRAPS, before
+`auditDeath` can say anything, so the old ratchet's rules (which let any exit
+code through, because parity ran beside it) would have stayed green on exactly
+the defect the experiment was aimed at. A `clean` row exits 0 now, and a clean
+row that stops exiting 0 fails. With the floor reverted the ratchet reported
+`looptemp (engine): exited 1, and its row says clean` and the same for the
+route — `residue: engine 148 clean, 26 leaking; route 148 clean, 26 leaking; 2
+failed` — and NOTHING ELSE in the corpus moved, on either engine. The floor was
+restored and the ratchet is green again.
+
+**CI.** The `residue` step is back, in the `route` job, which is the job that
+has clang, wabt and simde. The route leg SKIPS where they are missing and the
+engine leg still measures the same module, so the ratchet is not hostage to a
+platform nobody has pinned wabt for. It roughly doubles that job, and the head
+comment's timing table says so.
+
+**Files.** `std/runtime.vyrn` +148 −2 (the instrument, the two call sites in
+`malloc`, the one in `free`, the `auditForget` in `envGet`), `direct.rs` +99,
+`vyrn-lower/src/lib.rs` +43 −8, `loader.rs` +15, `tests/residue.rs` **279**
+(new), `rfcs/census/residue-baseline.tsv` **194** (new),
+`.github/workflows/ci.yml` +26 −5.
+
+**One census row moved.** The surface census (`tests/surface.rs`, RFC-0126 §3):
+`Type::Unit` in the wasm column 29 → **30**, its row 77 → **78**, the total
+1,611 → **1,612 mentions in six files**. It is the `Ok(Type::Unit)` the dropped
+audit call returns. The coercion, form, declaration and builtin censuses are
+unchanged — this slice states no coercion rung, adds no form and dispatches on
+no builtin name — and the wasm manifest is unchanged on all 173, which is the
+point of the switch.
+
+**What is left, named rather than implied.**
+
+- The 26 leaking rows. Each is a defect and the baseline is a ledger of them,
+  not a licence.
+- `auditForget` has one caller, `envGet`'s environment blob, which the runtime
+  holds for the life of the process. A second such block would need a second
+  call; there is no rule that finds them.
+- The verbose form the old instrument had (`VYRN_LEAK_CHECK=2`, one line per
+  leaked block with its size) is not restored. It would be a walk of the heap
+  from `heapBase() + 8768` reading the marks, which is a dozen lines whenever a
+  triage wants them.
+
+Gate, in the brief's order: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (77 suites, all
+green); the ignored corpus suites `kernel` (56 s), `coretables` (54 s),
+`typed` (125 s), `effects` (122 s), `fixtures` (40 s) and `testsweep` (43 s);
+`cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (6 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**175 checked, 33
+skipped, 0 failed**, 397 s);
+`cargo test --release -p vyrn-cli --test residue -- --ignored` (**149 clean, 26
+leaking, 0 double-free, 0 failed on each engine**, 402 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (60 s, no byte moved);
+`--release --test genwasm -- --ignored`; `vyrn doc --std -o ../docs/api --verify`
+(41 files, up to date); the site export (20 s, 82 routes and 14 assets) and
+`vyrn test` per site file (**189 test blocks**). `parity` is not in the list
+because the suite does not exist.
+
 #### The census of every reader, and the emitter reads the core alone (2026-09-07)
 
 `own.rs` is 4,013 lines and states two kinds of thing: per-NODE release
@@ -11531,14 +12062,55 @@ green); the ignored corpus suites `kernel` (62 s), `coretables` (103 s),
 moved**); `--release --test genwasm -- --ignored` with a fresh
 `VYRN_GEN_CACHE_DIR`; `vyrn doc --std -o ../docs/api --verify` (41 files, up to
 date); the site export (82 routes and 14 assets) and `vyrn test` per site file
-(**189 test blocks**). `residue -- --ignored` is not in the list, because the
-suite is not on this tree yet.
+(**189 test blocks**). `residue -- --ignored` was not in that run, because the
+ratchet was not on this tree yet; the merge below adds it.
 
 **One failure this slice did not cause and did not fix.** `cargo test
 -p vyrn-frontend --test primitives` failed once, on a stale `include_str!` of
 `direct.rs`: the scan could not find the region it locates by content. A
 rebuild made it pass on the same source. It is cargo's dependency tracking of
 an `include_str!` across crates, and nothing in the tree.
+
+**The core line comes in beside it (2026-09-07).** `track-cs` merges
+`rfc-0125-core` at `014545aa` — fifteen commits, of which the ones that meet
+this slice are the exit-residue ratchet (the record above), `track-cq`'s cost
+fixes and `track-cm`'s. Two files conflicted.
+
+- `own.rs`. `track-cq` wrapped `analyze_now`'s fold in a `prof` phase, and its
+  closing `drop(fold)` sits at the end of the block this slice deleted. The
+  resolution is this slice's deletion plus that one line: the phase still ends
+  where the fold ends, and there is no table left between them.
+- RFC-0125 §3 M3. Both branches appended a record after the same paragraph.
+  Both are kept, the core line's first.
+
+Nothing else met. The core line states no per-node table and this one deletes
+no allocator row.
+
+**What the merged tree measures.** The corpus counts move by the placer's
+cost fixes, not by this slice: `store_owned` 56,749 → **57,259** and the
+stand-downs 53,992 → **54,502**, the same 510 stores, because `track-cm`'s
+shared declaration table lets the core lower bodies it used to give up on.
+Every other row is unchanged. The structural census is unchanged at 1,755
+placement rows and 3,670 shared, and so are the form and surface censuses.
+
+Gate, again in full on the merged tree: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (77 suites);
+the ignored corpus suites `kernel` (16 s), `coretables` (15 s), `typed`
+(27 s), `effects` (28 s), `fixtures` (20 s), `testsweep` (51 s);
+`cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (8 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**175 checked,
+34 skipped, 0 failed**, 441 s);
+`cargo test --release -p vyrn-cli --test residue -- --ignored` (**149 clean,
+26 leaking, 0 double-free on each engine**, exactly the baseline the ratchet
+arrived with, 357 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (18 s, **no byte
+moved**); `--release --test genwasm -- --ignored` with a fresh
+`VYRN_GEN_CACHE_DIR`; `vyrn doc --std -o ../docs/api --verify` (41 files, up
+to date); the site export (82 routes and 14 assets) and `vyrn test` per site
+file (**189 test blocks**).
 
 ### M6 — the other two judgments
 

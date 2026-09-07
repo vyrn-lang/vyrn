@@ -1,0 +1,199 @@
+# Exit-residue ratchet baseline (RFC-0114 §25; restored on the wasm route by
+# RFC-0125 §3 M4). One row per example the route builds:
+#
+#   name<TAB>clean | leak<TAB><max blocks> | other
+#
+# clean: exits its own code with zero residue under an audited build.
+# leak N: at most N blocks of residue. other: exits nonzero by design and the
+# audit stays quiet. An example with no row must come out clean; shrinking a
+# leak row is the ratchet turning, and it only turns one way.
+#
+# A program that does not build is not a row: `route.rs`'s three lists
+# (KNOWN_DIVERGENT, EXPECTED_CHECK_FAILURE, WASM_ONLY) own that question, and
+# `residue.rs` takes the corpus they leave.
+#
+# The leak column was EMPTY when RFC-0114 closed at 143 clean / 0 leaking / 0
+# double-free — on the text-IR route, whose emitter no longer exists. These
+# rows are the wasm route's first measurement, and each is a defect rather
+# than a licence: `fromJson` into an enum with an `Array` payload leaks the
+# box it decoded (twelve lines reproduce it), and that one row is 1 of the 26.
+aliascontext	clean
+appendreserve	clean
+args	clean
+argsdemo	clean
+arrays	clean
+assoctype	clean
+autorelease	clean
+autovalidate	clean
+benching	clean
+binarytrees	clean
+# nestedsum read 6 when this file was written and 7 once RFC-0125 §3 M3's type
+# slice merged beside it: that slice's manifest note says the program trades
+# one free for a memory.copy, and the block that free reclaimed is the one
+# that now stays. Grown by hand, with this reason, for the leak triage to
+# read at the source (2026-09-07).
+bits	other
+blockarms	clean
+branchtypes	clean
+bytecount	clean
+bytesrange	clean
+capturefn	leak	2
+clearkeep	clean
+clidemo	clean
+clifail	leak	2
+clock	clean
+closures2	other
+codecbytes	clean
+concurrency	clean
+consume	other
+consume_handover	clean
+consumeloop	clean
+container	clean
+contractquery	clean
+controlflow	clean
+copy	clean
+domdemo	clean
+ecs	clean
+encoding	clean
+enum	other
+enumarray	leak	1
+enumcodec	leak	19
+eventloop	clean
+externdemo2	clean
+fallible	clean
+falliblegeneric	leak	1
+fannkuch	clean
+fasta	clean
+fib	other
+fieldmut	leak	1
+files	clean
+finitekeys	clean
+floats	other
+fnvalarg	clean
+fnvalstore	leak	1
+foreach	other
+freelist	leak	100000
+gendemo	clean
+genericpayload	clean
+generics	clean
+genref	clean
+gentable	clean
+graphql	leak	21
+herofield	clean
+htmlrefuse	other
+htmltree	clean
+i18ndemo	clean
+ifexpr	clean
+inlinewhere	clean
+input	clean
+intkeys	clean
+jchain	clean
+jsonbytes	clean
+jsoncodec	leak	2
+jsondecbytes	leak	27
+jsondepth	leak	2
+jsonplace	clean
+jsonschema	clean
+knucleotide	clean
+lambdas	clean
+langbench	leak	1
+lazyfield	clean
+linkedlist	leak	5
+listdir	clean
+logging	clean
+looptemp	clean
+mandelbrot	clean
+map	clean
+mapdemo	leak	7
+mapkey	clean
+mapkeyowned	clean
+matchown	leak	200
+membench	clean
+modify	other
+modifyself	clean
+modules	clean
+mustuse	clean
+namedplace	clean
+namespace	leak	1
+nbody	clean
+nestedsum	leak	7
+numbytes	clean
+numparse	clean
+option	clean
+ownedcontainer	clean
+ownership	other
+pagesdemo	leak	3
+parallel	clean
+patchdemo	clean
+pidigits	clean
+placeorder	clean
+projection	clean
+protocol	clean
+protoplace	clean
+protorec	clean
+recdepth	other
+record	clean
+reflection	clean
+refutablelet	clean
+regex	clean
+regexredux	clean
+region	other
+regionarena	clean
+regionescape	leak	1
+releaseacrossexit	clean
+releaseacrosstry	clean
+rest	leak	26
+revcomp	clean
+rpc	clean
+rpcsplit	clean
+scan	clean
+schemaimport	clean
+server	clean
+sha1	clean
+shadowbuiltin	clean
+shadowing	clean
+show	clean
+simd	clean
+simdbench	clean
+simdint	clean
+simdmem	clean
+simdmem2	leak	2
+simdoob	other
+simdoobstore	other
+simdround	clean
+simdwide	clean
+sizedints	clean
+slots	other
+slottable	clean
+smallarray	clean
+spectralnorm	clean
+statemod	clean
+storage	leak	1
+stream	clean
+streamlazy	clean
+streammove	clean
+streamops	clean
+streamunfold	clean
+stringops	clean
+strings	other
+strpredbytes	clean
+tagged	clean
+tallybytes	other
+templates	clean
+testing	clean
+textbytes	clean
+threeengines	clean
+tree	leak	4
+tryplace	clean
+twdemo	clean
+utility	clean
+validate	clean
+validate_fail	other
+validate_store	other
+validate_sum	other
+validatestr	clean
+validation	other
+vlog	leak	7
+vondemo	clean
+vyxdemo	clean
+wirekey	leak	3

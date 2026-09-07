@@ -160,6 +160,22 @@ jobs:
         # per design record, and the registry one per package.
         run: mkdir -p out/docs/std out/guide out/web out/tooling out/backstage/rfcs out/explore
 
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (RFC-0102: a project that never pinned behaves as it
+        # always did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          compiler/target/release/vyrn update --locked wabt >/dev/null
+          compiler/target/release/vyrn update --locked simde >/dev/null
+          wasm2c=$(compiler/target/release/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/release/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
       - name: A minute with Vyrn, recorded
         # AFTER the CLI build, because it runs the binary that step just made,
         # and BEFORE the export, which refuses to publish without this file —

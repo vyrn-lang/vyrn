@@ -596,14 +596,49 @@ fn build<'a>(
         &mut queue,
         &mut unresolved,
     );
-    // A `<teardown>` root stood here: RFC-0114 §25's leak check dropped every
-    // module-state binding after `main`, and a GENERIC declared release it
-    // reached was an instantiation like any placed one. No engine emits that
-    // teardown now — it was the text-IR route's, and the route went with
-    // RFC-0125 §3 M4's fourth slice — so the root queued bodies nothing could
-    // ever emit and `lowered.rs` reported each as a difference with no rule.
-    // RFC-0114 §25's restoration design says the root comes back with the
-    // teardown, not before it.
+    // RFC-0114 §25: the leak-check teardown drops every module-state binding
+    // after `main`, and a GENERIC declared release it reaches is an
+    // instantiation like any placed one — modeled here so "the lowering is the
+    // worklist" covers the teardown's emission too. Solved from the DECLARED
+    // type, which is the type the teardown drops by; an unannotated global of
+    // a declared-release type would surface at the gate as a missing
+    // instantiation — loud, the failure this file prefers.
+    //
+    // The root stands only in an AUDITED build, because that is the only build
+    // that emits the teardown. Unconditional, it queues bodies nothing could
+    // ever emit and `lowered.rs` reports each as a difference with no rule,
+    // which is what took the root out with the text-IR route.
+    if vyrn_frontend::loader::audit_build() {
+        let mut teardown_calls: Vec<(&str, HashMap<String, Type>)> = Vec::new();
+        for g in &program.globals {
+            let Some(gty) = &g.ty else { continue };
+            let Some(vyrn_frontend::own::DropKind::Release(f, _)) =
+                ownership.proto.release_kind(gty)
+            else {
+                continue;
+            };
+            let Some(target) = by_name.get(f.as_str()) else {
+                continue;
+            };
+            if target.type_params.is_empty() {
+                continue;
+            }
+            let mut solved: HashMap<String, Type> = HashMap::new();
+            if let Some(p) = target.params.first() {
+                vyrn_frontend::types::solve_param(&p.ty, gty, &mut solved);
+            }
+            teardown_calls.push((target.name.as_str(), solved));
+        }
+        follow(
+            "<teardown>",
+            teardown_calls,
+            &by_name,
+            &decls,
+            &mut seen,
+            &mut queue,
+            &mut unresolved,
+        );
+    }
 
     while let Some((func, type_args)) = queue.pop_front() {
         let subst: BTreeMap<String, Type> = func

@@ -1074,11 +1074,14 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
 /// once (RFC-0125 §3 M3, the third derivation slice).
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
+    let b1 = vyrn_frontend::prof::phase("placer: build: first");
     let first = build_seeded(program, inst, own, &none)?;
+    drop(b1);
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
+    let _b2 = vyrn_frontend::prof::phase("placer: build: seeded");
     build_seeded(program, inst, own, &seed)
 }
 
@@ -1133,8 +1136,10 @@ fn build_seeded(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        caps: Default::default(),
         region_depth: 0,
+        loop_marks: Vec::new(),
+        loop_aliased: HashMap::new(),
+        rebinding: false,
         arena: std::collections::HashSet::new(),
     };
     let f: &Function = inst.func;
@@ -1236,8 +1241,10 @@ pub fn build_module_state<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        caps: Default::default(),
         region_depth: 0,
+        loop_marks: Vec::new(),
+        loop_aliased: HashMap::new(),
+        rebinding: false,
         arena: std::collections::HashSet::new(),
     };
     let mut out = Vec::new();
@@ -1339,8 +1346,10 @@ fn build_outside_seeded<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        caps: Default::default(),
         region_depth: 0,
+        loop_marks: Vec::new(),
+        loop_aliased: HashMap::new(),
+        rebinding: false,
         arena: std::collections::HashSet::new(),
     };
     let mut out = Vec::new();
@@ -1388,11 +1397,23 @@ struct Builder<'a> {
     /// [`last_owner`] decided over the build before it. Empty on the first
     /// build, which is where the candidates come from.
     seed: &'a std::collections::HashSet<usize>,
-    /// The capability of every declared position, built the once a body needs
-    /// it — see [`Builder::arg_released`].
-    caps: std::cell::OnceCell<HashMap<String, Vec<Capability>>>,
     /// How many `region` blocks enclose the statement being built.
     region_depth: u32,
+    /// One entry per LOOP enclosing the statement being built: the name count
+    /// when the loop's body was opened ([`Builder::alias_out`]). A name below
+    /// the innermost entry is bound outside that loop, and the loop's back
+    /// edge is what makes handing it out of a join arm a double free.
+    loop_marks: Vec<usize>,
+    /// A join's result, and the name an arm handed out of it from OUTSIDE the
+    /// enclosing loop ([`Builder::alias_out`]). Nothing is wrong until
+    /// something OWNS the result and releases it once per turn, which is what
+    /// [`Builder::loop_alias`] refuses at the two doors that do.
+    loop_aliased: HashMap<Name, String>,
+    /// Whether the value being lowered is a REBIND's. A store into a name
+    /// hands the value on — the slot is released by its final value — so the
+    /// temporary the value passes through owns nothing, and the loop's back
+    /// edge repeats no release. `std/html.vyrn`'s `attrKey` is the shape.
+    rebinding: bool,
     /// The names the ARENA owns: a String bound inside a `region`
     /// ([`Builder::owned_binding`]'s second screen). An explicit `drop` of
     /// one is nothing, because the closing brace is the runtime's.
@@ -1463,6 +1484,29 @@ impl<'a> Builder<'a> {
             .and_then(|m| m.get(&binding))
             .map(|hs| hs.iter().map(|h| format!(".{h}")).collect())
             .unwrap_or_default()
+    }
+
+    /// A join whose arm handed out a name bound outside the enclosing loop,
+    /// bound HERE by something that owns the result and releases it on every
+    /// turn ([`Builder::alias_out`]). The two doors are a `let` and the
+    /// unnamed temporary an argument position binds, and they get one
+    /// sentence: the name that goes out is the reader's, and it is the name
+    /// the second turn frees again.
+    fn loop_alias(&self, rhs: &Rhs, line: usize) -> Result<(), Gap> {
+        let Rhs::Val(Val::Name(m)) = rhs else {
+            return Ok(());
+        };
+        let Some(a) = self.loop_aliased.get(m) else {
+            return Ok(());
+        };
+        refuse(
+            format!(
+                "`{a}` may not be handed out of an arm inside a loop — the result is \
+                 released on every turn, and `{a}` is bound outside the loop\n  \
+                 fix: `{a}.copy()` if the arm should hand out a value of its own"
+            ),
+            line,
+        )
     }
 
     /// Whether a `let` binds a value THIS frame owns — RFC-0125 §3 M3, the
@@ -1935,6 +1979,12 @@ impl<'a> Builder<'a> {
                 let lends = self.lends(value);
                 let owned = !lends && self.owned_binding(&rhs, &ty, literal, mutable);
                 let reason = self.report_reason(&rhs, &ty, literal, mutable, lends);
+                // A join inside a loop, one of whose arms handed out a name
+                // bound outside it, and a binding that owns the result: the
+                // release the back edge repeats ([`Builder::loop_alias`]).
+                if owned {
+                    self.loop_alias(&rhs, *line)?;
+                }
                 // Not owned is not the same as borrowed: static data (`let s
                 // = ""`, a literal of literals) and a value whose type owns
                 // no heap are nobody's borrow. A lending call and a second
@@ -1976,7 +2026,10 @@ impl<'a> Builder<'a> {
                 self.keyed_let(n, sid);
             }
             Stmt::Assign { name, value, line } => {
-                let v = self.val(value, out)?;
+                self.rebinding = true;
+                let v = self.val(value, out);
+                self.rebinding = false;
+                let v = v?;
                 let n = self.lookup(name);
                 let ty = match n {
                     Some(n) => self.body.names[n as usize].ty.clone(),
@@ -2239,7 +2292,10 @@ impl<'a> Builder<'a> {
                     els: vec![St::Break { site: 0 }],
                     site: 0,
                 });
-                self.block(body, &mut l)?;
+                self.loop_marks.push(self.body.names.len());
+                let r = self.block(body, &mut l);
+                self.loop_marks.pop();
+                r?;
                 out.push(St::Loop(l));
             }
             Stmt::ForIn {
@@ -2343,6 +2399,10 @@ impl<'a> Builder<'a> {
                     site: 0,
                 });
                 let owned = handed_over && self.owns(&ety);
+                // In front of the variable: each turn binds its own element,
+                // so handing THAT out of a join arm frees once per turn. The
+                // container is below the mark and handing it out is refused.
+                self.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
                 // What the variable IS, for a refusal about it: the container
                 // outlives the loop, so the loop only names the element. The
@@ -2364,7 +2424,9 @@ impl<'a> Builder<'a> {
                 )];
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), x));
-                self.block_with(body, head, &mut l)?;
+                let r = self.block_with(body, head, &mut l);
+                self.loop_marks.pop();
+                r?;
                 self.scope.truncate(mark);
                 out.push(St::Loop(l));
                 if streaming {
@@ -2487,7 +2549,7 @@ impl<'a> Builder<'a> {
     /// the one answer they read is this one.
     fn fresh_str(&self, ty: &Type, value: &Expr) -> bool {
         matches!(
-            vyrn_frontend::types::resolve(ty, &vyrn_frontend::types::decl_map(self.program)),
+            vyrn_frontend::types::resolve(ty, self.proto.types()),
             Type::Str
         ) && matches!(
             value,
@@ -2666,12 +2728,12 @@ impl<'a> Builder<'a> {
     }
 
     fn is_map(&self, ty: &Type) -> bool {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         matches!(vyrn_frontend::types::resolve(ty, &decls), Type::Map(..))
     }
 
     fn field_ty(&self, ty: &Type, field: &str, line: usize) -> Result<Type, Gap> {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let rt = vyrn_frontend::types::resolve(ty, &decls);
         match rt {
             Type::Record(fields) => fields
@@ -2689,7 +2751,7 @@ impl<'a> Builder<'a> {
     }
 
     fn elem_ty(&self, ty: &Type, line: usize) -> Result<Type, Gap> {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         match vyrn_frontend::types::resolve(ty, &decls) {
             Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Stream(e) => {
                 Ok(*e)
@@ -2830,7 +2892,7 @@ impl<'a> Builder<'a> {
         from: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let rt = vyrn_frontend::types::resolve(sty, &decls);
         let payloads: Vec<(String, Type)> = match p {
             Pattern::Other => Vec::new(),
@@ -3118,7 +3180,7 @@ impl<'a> Builder<'a> {
             _ => Vec::new(),
         };
         // A view LENDS, unless the element it hands out is a heap-free copy.
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let view_copies = mc::lends_result(callee)
             && matches!(
                 vyrn_frontend::types::resolve(&ty, &decls),
@@ -3142,11 +3204,7 @@ impl<'a> Builder<'a> {
         };
         let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
             || self.is_variant(callee);
-        let cap = mc::arg_cap(
-            self.caps.get_or_init(|| mc::arg_caps(self.program)),
-            callee,
-            ix,
-        );
+        let cap = mc::arg_cap(&self.own.arg_caps, callee, ix);
         if mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
             == mc::ArgVerdict::Released
         {
@@ -3169,7 +3227,7 @@ impl<'a> Builder<'a> {
         let Some(n) = self.lookup(callee) else {
             return false;
         };
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let Type::Fn(ps, r) =
             vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, &decls)
         else {
@@ -3189,7 +3247,7 @@ impl<'a> Builder<'a> {
         else {
             return None;
         };
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let bt = self.ty_of(base).ok()?;
         let Type::Record(fields) = vyrn_frontend::types::resolve(&bt, &decls) else {
             return None;
@@ -3316,6 +3374,10 @@ impl<'a> Builder<'a> {
     /// An expression in a TAKE position: a `let`, a `return`, a store, a part
     /// of a literal, a `consume` argument. A name, or a literal.
     fn val(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        // The rebind's flag answers for THIS expression and no expression
+        // inside it: `n = n + size(if c { names } else { .. })` stores an
+        // Int64 and the join still binds an owning temporary.
+        let rebinding = std::mem::take(&mut self.rebinding);
         match e {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
                 Ok(Val::Lit)
@@ -3330,7 +3392,7 @@ impl<'a> Builder<'a> {
                 // it is not module state anything reads out of.
                 None if self.program.functions.iter().any(|f| &f.name == name)
                     || self.program.contracts.iter().any(|c| &c.name == name)
-                    || vyrn_frontend::types::decl_map(self.program).contains_key(name)
+                    || self.proto.types().contains_key(name)
                     || name == "None"
                     || self.is_variant(name) =>
                 {
@@ -3377,6 +3439,12 @@ impl<'a> Builder<'a> {
                 let t = if self.lends(e) || borrows {
                     self.borrow_name(e, ty, e.line())
                 } else {
+                    // The other door: `size(if c { names } else { [..] })`
+                    // binds no name a reader wrote, and the temporary owns
+                    // and releases the result just the same.
+                    if !rebinding && self.owns(&ty) {
+                        self.loop_alias(&rhs, e.line())?;
+                    }
                     self.temp(ty, e.line())
                 };
                 self.record_fields(t, e);
@@ -3419,7 +3487,7 @@ impl<'a> Builder<'a> {
         let Expr::Lambda { params, body, line } = e else {
             return Ok(());
         };
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let ptys: Vec<Type> = match self.ty_of(e).ok() {
             // A `lazy T` field's initializer is a nullary closure (RFC-0085).
             Some(t) if vyrn_frontend::types::deferred(&t).is_some() => Vec::new(),
@@ -3629,12 +3697,32 @@ impl<'a> Builder<'a> {
     /// name from outside is told from a payload binder: `match o { Some(v)
     /// => v }` yields a binder minted inside the arm, and the scrutinee is
     /// this frame's to take (`takes_scrutinee`).
-    fn alias_out(&mut self, v: &Val, mark: usize, line: usize) {
-        let Val::Name(m) = v else { return };
-        if (*m as usize) < mark {
-            self.body.names[*m as usize].releases = false;
-            self.body.names[*m as usize].not_owned = Some(NotOwned::Aliased(line));
+    ///
+    /// The handover is stated ONCE, and it says the result is released where
+    /// the name it was handed would have been. A LOOP breaks that: a `let`
+    /// inside the body is released on every turn, while a name bound outside
+    /// the loop is handed out again on the next one. The first turn frees the
+    /// buffer, the second reads it and frees it again — the double free
+    /// `VYRN_LEAK_CHECK=1` reports as exit 134. So the name the handover
+    /// stood down is reported here, and the `let` that OWNS the result
+    /// refuses ([`Builder::loop_aliased`]). A rebind (`found = match a { ..
+    /// => found }`) binds nothing and releases once, and stays lowered as it
+    /// was.
+    fn alias_out(&mut self, v: &Val, mark: usize, line: usize) -> Option<String> {
+        let Val::Name(m) = v else { return None };
+        let m = *m as usize;
+        if m >= mark {
+            return None;
         }
+        // Only a name that still OWNS can be freed twice. A borrow, a literal
+        // and a name a previous arm already stood down all release nothing,
+        // and a loop VARIABLE is minted above the mark, so each turn's element
+        // is its own.
+        let repeated =
+            self.body.names[m].releases && self.loop_marks.last().is_some_and(|lm| m < *lm);
+        self.body.names[m].releases = false;
+        self.body.names[m].not_owned = Some(NotOwned::Aliased(line));
+        repeated.then(|| self.body.names[m].source.clone())
     }
 
     /// A move out of a sub-place: `consume x.f`, or the receiver a rebuilding
@@ -3684,10 +3772,7 @@ impl<'a> Builder<'a> {
                 let concat = matches!(op, BinOp::Add)
                     && self.ty_of(e).is_ok_and(|t| {
                         matches!(
-                            vyrn_frontend::types::resolve(
-                                &t,
-                                &vyrn_frontend::types::decl_map(self.program)
-                            ),
+                            vyrn_frontend::types::resolve(&t, self.proto.types()),
                             Type::Str
                         )
                     });
@@ -3782,7 +3867,7 @@ impl<'a> Builder<'a> {
                 let mark = self.body.names.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
-                self.alias_out(&tv, mark, *line);
+                let mut aliased = self.alias_out(&tv, mark, *line);
                 let then_borrows = self.borrows(&tv);
                 t.push(St::Store {
                     place: Place::Name(res),
@@ -3797,7 +3882,7 @@ impl<'a> Builder<'a> {
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
-                        self.alias_out(&ev, mark, *line);
+                        aliased = aliased.or(self.alias_out(&ev, mark, *line));
                         let else_borrows = self.borrows(&ev);
                         f.push(St::Store {
                             place: Place::Name(res),
@@ -3814,6 +3899,9 @@ impl<'a> Builder<'a> {
                         if then_borrows || else_borrows {
                             self.body.names[res as usize].releases = false;
                             self.body.names[res as usize].borrow = true;
+                        }
+                        if let Some(a) = aliased {
+                            self.loop_aliased.insert(res, a);
                         }
                     }
                     None => return gap("an `if` expression without `else`", *line),
@@ -3853,7 +3941,9 @@ impl<'a> Builder<'a> {
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
-                            self.alias_out(&v, outer, *line);
+                            if let Some(a) = self.alias_out(&v, outer, *line) {
+                                self.loop_aliased.insert(res, a);
+                            }
                             // An arm that yields a borrow makes the result
                             // one (`movecheck::names_a_place`).
                             if self.borrows(&v) {
@@ -3898,7 +3988,7 @@ impl<'a> Builder<'a> {
                 let tid = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
-                let decls = vyrn_frontend::types::decl_map(self.program);
+                let decls = self.proto.types();
                 // A DECLARED `Fallible` enum (RFC-0080 M3) asks its impl; the two
                 // built-in sums have tags, and since RFC-0126 §8.11's M4b they
                 // resolve to variant lists too — so the test is which list it is,
@@ -4127,7 +4217,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         // The capability of each argument position, by who the callee is.
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let scalar = matches!(
             name,
             "Int64"
@@ -4286,7 +4376,7 @@ impl<'a> Builder<'a> {
     }
 
     fn is_variant(&self, name: &str) -> bool {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         decls.values().any(|d| {
             vyrn_frontend::types::declared_variants(&d.base)
                 .is_some_and(|vs| vs.iter().any(|v| v.name == name))
