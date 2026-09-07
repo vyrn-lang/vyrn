@@ -392,40 +392,123 @@ pub const RESERVED: &[&str] = &[
     "atSet",
 ];
 
-/// The names RFC-0094 M2 took out of [`RESERVED`], and the `std/` module each
-/// one lives in now.
+/// Where a name a program may still write has gone.
 ///
-/// A reader who writes `contains(s, "x")` has written a call that was legal in
-/// every earlier version of the language. "call to unknown function" is true and
-/// useless; this table is what turns it into the import line the program needs.
-/// It is a MIGRATION table, in the shape the six `was removed` hints already
-/// have, and it is read at exactly one place — the unknown-name fallthrough of
-/// [`Checker::call`] — so a name that resolves never consults it.
+/// Two things happened to a builtin spelling, and a reader needs a different
+/// sentence for each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gone {
+    /// RFC-0094 M2 took the name out of [`RESERVED`] and it is an ordinary
+    /// exported function of this `std/` module now. The sentence is the import
+    /// line the program needs.
+    Module(&'static str),
+    /// The free-function spelling was REMOVED, because the surface says the
+    /// same thing another way. The sentence is what to write instead.
+    Removed(&'static str),
+}
+
+impl Gone {
+    /// The sentence a reader who wrote `name` gets.
+    pub fn hint(&self, name: &str) -> String {
+        match self {
+            Gone::Module(m) => {
+                format!("`{name}` is `{m}`'s — add `import {{ {name} }} from \"{m}\"`")
+            }
+            Gone::Removed(s) => (*s).to_string(),
+        }
+    }
+}
+
+/// The names a program may write that no longer resolve, and what to write
+/// instead.
 ///
-/// `every_moved_name_is_gone_from_reserved` is what keeps it honest in the one
-/// direction that can rot: a name here that came BACK into `RESERVED` would send
-/// a reader to an import that cannot be written.
-pub const MOVED_TO_STD: &[(&str, &str)] = &[
-    ("contains", "std/strpred"),
-    ("startsWith", "std/strpred"),
-    ("endsWith", "std/strpred"),
-    ("slice", "std/strpred"),
-    ("chars", "std/text"),
-    ("hexEncode", "std/codecs"),
-    ("hexDecode", "std/codecs"),
-    ("base64Encode", "std/codecs"),
-    ("base64Decode", "std/codecs"),
-    ("urlEncode", "std/codecs"),
-    ("urlDecode", "std/codecs"),
+/// A reader who writes `contains(s, "x")` or `str(x)` has written a call that
+/// was legal in an earlier version of the language. "call to unknown function"
+/// is true and useless; this table is what turns it into the line the program
+/// needs. It is the MIGRATION table, and it is read at exactly two places in
+/// [`Checker::call`] — the removed-spelling guard for a name `RESERVED` still
+/// holds, and the unknown-name fall-through for one it does not — so a name
+/// that resolves never consults it.
+///
+/// The ten [`Gone::Removed`] rows were ten hand-written blocks in
+/// `Checker::call` until RFC-0125 §3 M6, 57 lines stating ten sentences one
+/// `match` arm each. A sentence is a row, not a block.
+///
+/// `every_moved_name_is_gone_from_reserved` keeps the [`Gone::Module`] half
+/// honest in the one direction that can rot: a name there that came BACK into
+/// `RESERVED` would send a reader to an import that cannot be written. A
+/// [`Gone::Removed`] row is the opposite and MUST stay reserved — a program
+/// that could declare `fn push` would shadow the hint with its own function.
+pub const MOVED_TO_STD: &[(&str, Gone)] = &[
+    ("contains", Gone::Module("std/strpred")),
+    ("startsWith", Gone::Module("std/strpred")),
+    ("endsWith", Gone::Module("std/strpred")),
+    ("slice", Gone::Module("std/strpred")),
+    ("chars", Gone::Module("std/text")),
+    ("hexEncode", Gone::Module("std/codecs")),
+    ("hexDecode", Gone::Module("std/codecs")),
+    ("base64Encode", Gone::Module("std/codecs")),
+    ("base64Decode", Gone::Module("std/codecs")),
+    ("urlEncode", Gone::Module("std/codecs")),
+    ("urlDecode", Gone::Module("std/codecs")),
+    // The removed free-function spellings. Each fires for the BARE
+    // user-written name only: the desugaring and the method forms carry the
+    // unspellable `@`-prefixed internal names (`@str`, `@concat`, `@list`,
+    // `@join`, `@push`, `@at`), which no source can lex.
+    (
+        "str",
+        Gone::Removed("`str(x)` was removed; render a value with `x.toString()`"),
+    ),
+    (
+        "concat",
+        Gone::Removed("`concat(a, b)` was removed; concatenate Strings with `a + b`"),
+    ),
+    (
+        "len",
+        Gone::Removed("`len(s)` was removed; a String's byte length is `s.byteLength`"),
+    ),
+    (
+        "list",
+        Gone::Removed(
+            "`list([..])` was removed; write the array literal `[..]` \
+             directly where an `Array<T>` is expected",
+        ),
+    ),
+    (
+        "join",
+        Gone::Removed("`join(t)` was removed; await a task's result with `t.join()`"),
+    ),
+    (
+        "toString",
+        Gone::Removed("`toString` is a method; write `x.toString()`"),
+    ),
+    // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]` are the
+    // whole surface; the verb forms were the second spelling of each, which is
+    // what this repo removed.
+    (
+        "push",
+        Gone::Removed("`push(xs, v)` was removed; push with `xs.push(v)`"),
+    ),
+    (
+        "at",
+        Gone::Removed("`at(xs, i)` was removed; index with `xs[i]`"),
+    ),
+    (
+        "alen",
+        Gone::Removed("`alen(xs)` was removed; a collection's length is `xs.length`"),
+    ),
+    (
+        "array",
+        Gone::Removed("`array()` was removed; write the array literal `[]`"),
+    ),
 ];
 
-/// The module a moved builtin lives in now, or `None` for a name that never was
-/// one.
-pub fn moved_to_std(name: &str) -> Option<&'static str> {
+/// Where a name went, or `None` for one that was never a builtin.
+pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
     MOVED_TO_STD
         .iter()
         .find(|(n, _)| *n == name)
-        .map(|(_, m)| *m)
+        .map(|(_, g)| g)
 }
 
 use crate::types::INT32;
@@ -6790,67 +6873,13 @@ impl<'a> Checker<'a> {
                 return Ok((*ret).clone());
             }
         }
-        // Removed free-function builtins → their method/operator replacements.
-        // These fire only for the *bare* user-written spelling; the desugaring
-        // and method forms use the unspellable `@`-prefixed internal names
-        // (`@str`/`@concat`/`@list`/`@join`/`@push`/`@at`), which flow past this
-        // guard.
-        match name {
-            "str" => {
-                return Err(cerr!(
-                    line,
-                    "`str(x)` was removed; render a value with `x.toString()`"
-                ))
-            }
-            "concat" => {
-                return Err(cerr!(
-                    line,
-                    "`concat(a, b)` was removed; concatenate Strings with `a + b`"
-                ))
-            }
-            "len" => {
-                return Err(cerr!(
-                    line,
-                    "`len(s)` was removed; a String's byte length is `s.byteLength`"
-                ))
-            }
-            "list" => {
-                return Err(cerr!(
-                    line,
-                    "`list([..])` was removed; write the array literal `[..]` \
-                     directly where an `Array<T>` is expected"
-                ))
-            }
-            "join" => {
-                return Err(cerr!(
-                    line,
-                    "`join(t)` was removed; await a task's result with `t.join()`"
-                ))
-            }
-            "toString" => return Err(cerr!(line, "`toString` is a method; write `x.toString()`")),
-            // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]`
-            // are the whole surface; the verb forms were the second spelling of
-            // each, which is what this repo removes.
-            "push" => {
-                return Err(cerr!(
-                    line,
-                    "`push(xs, v)` was removed; push with `xs.push(v)`"
-                ))
-            }
-            "at" => return Err(cerr!(line, "`at(xs, i)` was removed; index with `xs[i]`")),
-            "alen" => {
-                return Err(cerr!(
-                    line,
-                    "`alen(xs)` was removed; a collection's length is `xs.length`"
-                ))
-            }
-            "array" => {
-                return Err(cerr!(
-                    line,
-                    "`array()` was removed; write the array literal `[]`"
-                ))
-            }
-            _ => {}
+        // A removed free-function spelling ([`MOVED_TO_STD`]'s [`Gone::Removed`]
+        // half). This must be asked HERE rather than at the unknown-name
+        // fall-through: `at` is also the name of a user's `place at`, so a
+        // program with `impl Index for Ring` would type `at(r, 0)` as a
+        // projection rather than being told the verb form is gone.
+        if let Some(g @ Gone::Removed(_)) = moved_to_std(name) {
+            return Err(cerr!(line, "{}", g.hint(name)));
         }
         // Test builtins (RFC-0015): `assert`/`assertEq` are legal ONLY inside a
         // `test` body. In ordinary code they are a checker error steering the
@@ -7265,18 +7294,6 @@ impl<'a> Checker<'a> {
             })));
         }
 
-        // `@join` — the internal spelling of `t.join()`: await a spawned task.
-        if name == "@join" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`join` takes no arguments"));
-            }
-            match self.base(&self.expr(&args[0], scope, None, fn_ret)?) {
-                Type::Task(inner) => return Ok((*inner).clone()),
-                Type::Err => return Ok(Type::Err),
-                other => return Err(cerr!(line, "`.join()` needs a Task, found {other}")),
-            }
-        }
-
         // `@str` — the internal spelling of `x.toString()` and of interpolation
         // holes: render a scalar to a fresh String. `parse` (below) is the
         // fallible inverse.
@@ -7306,14 +7323,13 @@ impl<'a> Checker<'a> {
             return Ok(Type::Str);
         }
 
-        // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
-        // a `SmallArray`'s capacity is part of its type and a fixed array has
-        // none to grow. `append` is a byte copy of the source's elements in
-        // the compiled backends, so an element type that owns heap is refused
-        // — copying such an element by bytes would give two arrays one buffer.
-        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. The
-        // elements are FORGOTTEN, not released, so an element type that owns
-        // heap is refused the way `append` refuses it.
+        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. A
+        // growable `Array` only — a `SmallArray`'s capacity is part of its type
+        // and a fixed array has none to keep — which the row says. What the row
+        // cannot say is the rule below: the elements are FORGOTTEN rather than
+        // released, so an element type that owns heap is refused, the way
+        // `append` refuses it. That is a refusal about the ELEMENT type, which
+        // is why this block stands where `reserve`'s no longer does.
         if name == "@clear" {
             if args.len() != 1 {
                 return Err(cerr!(
@@ -7338,69 +7354,6 @@ impl<'a> Checker<'a> {
                     line,
                     "`clear` forgets its elements without releasing them, and `{elem}` owns heap — pop each element in a loop instead"
                 ));
-            }
-            return Ok(at);
-        }
-        if name == "@reserve" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`reserve` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&at) {
-                Type::Array(_) => {}
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`reserve` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            }
-            let n = self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`reserve` count is {n}, not an Int64"));
-            }
-            return Ok(at);
-        }
-        // `m.tally(k, n)` (RFC-0116): one probe where a read-then-store made
-        // two. `Int64` values only — the add is the operation, and the
-        // signature can spell it for no other value type.
-        if name == "@tally" {
-            if args.len() != 3 {
-                return Err(cerr!(line, "`tally` takes 3 arguments, got {}", args.len()));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let key_ty = match self.base(&at) {
-                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => (*k).clone(),
-                Type::Err => return Ok(Type::Err),
-                Type::Map(_, v) => {
-                    return Err(cerr!(
-                        line,
-                        "`tally` counts Int64 values, and this map holds {v}"
-                    ))
-                }
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`tally` needs a Map<K, Int64> as its receiver, found {other}"
-                    ))
-                }
-            };
-            let k = self.expr(&args[1], scope, Some(&key_ty), fn_ret)?;
-            if !self.coercible(&self.base(&k), &self.base(&key_ty)) {
-                return Err(cerr!(
-                    line,
-                    "the map is keyed by {key_ty}, but the `tally` key is {k}"
-                ));
-            }
-            self.prove_coercion(&args[1], &key_ty, line)?;
-            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`tally` count is {n}, not an Int64"));
             }
             return Ok(at);
         }
@@ -7654,85 +7607,6 @@ impl<'a> Checker<'a> {
             }
             return Ok(elem);
         }
-        // RFC-0075. `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
-        // `fromStep(seed, f)` (M2b) hands over a producer instead; `close(s)` is
-        // the explicit release for either. All three are builtins because none
-        // can be written in Vyrn — there is no other way to make or unmake a
-        // `Stream`.
-        if name == "fromArray" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`fromArray` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Err);
-            }
-            let Type::Array(inner) = at else {
-                return Err(cerr!(line, "`fromArray` needs an `Array<T>`, found {at}"));
-            };
-            return Ok(Type::Stream(inner));
-        }
-        // RFC-0075 M2b, re-hosted by RFC-0090 M3. `fromStep(slot, gen, step)` is
-        // the pull producer: the stream carries the two words of a cursor its
-        // CALLER minted, and every `next` hands them back to `step`, which reads
-        // the cursor, writes the next one, and answers `Some(v)` or `None`.
-        //
-        // The cursor used to be a `Ref<Int64>` — a Path B cell, allocated here.
-        // It is two plain `Int64`s now, and the slab they index lives in
-        // `std/stream` over `std/slots`. What did not change is the property the
-        // `Ref` was pinned at `Int64` for: the dispatcher a stream calls is keyed
-        // by the step's SIGNATURE, so that signature must be a function of the
-        // element type alone.
-        //
-        // The third parameter is how a release reaches the slab. A close is
-        // type-erased in the runtime and the slab is not, so `close` asks the
-        // step to release itself: `closing` is true exactly once per stream, and
-        // the step answers `None` after giving its slot back. That is also what
-        // makes a wrapper's walk ordinary Vyrn — it closes its own source, and
-        // `movecheck` checks that release like any other.
-        if name == "fromStep" {
-            if args.len() != 3 {
-                return Err(cerr!(
-                    line,
-                    "`fromStep` takes 3 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for (i, what) in ["slot", "generation"].iter().enumerate() {
-                let st = self.expr(&args[i], scope, Some(&Type::Int), fn_ret)?;
-                let st = self.base(&st);
-                if matches!(st, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if st != Type::Int {
-                    return Err(cerr!(
-                        line,
-                        "`fromStep` needs an `Int64` cursor {what}, found {st}"
-                    ));
-                }
-            }
-            let ft = self.expr(&args[2], scope, None, fn_ret)?;
-            let want = "fn(Int64, Int64, Bool) -> Option<T>";
-            let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            };
-            if ps.len() != 3
-                || self.base(&ps[0]) != Type::Int
-                || self.base(&ps[1]) != Type::Int
-                || self.base(&ps[2]) != Type::Bool
-            {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            }
-            let Some(inner) = crate::types::option_payload(&self.base(&ret)).cloned() else {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            };
-            return Ok(Type::Stream(Box::new(inner)));
-        }
         // RFC-0075 M2c, re-hosted by RFC-0090 M3. `boxStream(s)` moves a
         // stream into one heap box and hands back its address, `unboxStream(a)` takes
         // it back out, and `pullAt(a)` asks the stream at `a` for one element.
@@ -7747,24 +7621,6 @@ impl<'a> Checker<'a> {
         // `unboxStream` are the two halves of ONE move — `movecheck` sees the first as
         // a disposal and the second as an acquisition, so a chain that fails to
         // close its source does not compile.
-        if name == "boxStream" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`boxStream` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let st = self.expr(&args[0], scope, None, fn_ret)?;
-            let st = self.base(&st);
-            if matches!(st, Type::Err) {
-                return Ok(Type::Int);
-            }
-            if !matches!(st, Type::Stream(_)) {
-                return Err(cerr!(line, "`boxStream` needs a `Stream<T>`, found {st}"));
-            }
-            return Ok(Type::Int);
-        }
         if name == "unboxStream" || name == "pullAt" {
             if args.len() != 1 {
                 return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
@@ -7796,59 +7652,6 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, "`{name}` answers a `{want}`, not {exp}"));
             }
             return Ok(exp.clone());
-        }
-        if name == "close" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`close` takes 1 argument, got {}", args.len()));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            if !matches!(at, Type::Stream(_)) {
-                return Err(cerr!(line, "`close` needs a `Stream<T>`, found {at}"));
-            }
-            return Ok(Type::Unit);
-        }
-        // RFC-0074 M3a. `serveStream(s)` hands a producer to the HOST: the
-        // request that opened it returns an ordinary `Response` carrying only the
-        // header block, and the host then pulls one element at a time, writes it,
-        // and `close`s the stream the first time a write fails. That is the whole
-        // disconnect mechanism — the socket rather than a host event — and it is
-        // why this is a builtin rather than a library function: a stream must
-        // escape the call that made it, which is the one thing M1's linearity
-        // otherwise forbids, and `close` on the far side is what discharges it.
-        //
-        // `Stream<String>` and not `Stream<Event>`: the element is one already
-        // encoded frame, so every byte of SSE's syntax stays in `std/http` where
-        // the vocabulary belongs, and the host learns nothing about the protocol
-        // beyond "write this, flush, ask again". `ws` (M3b) is the same handoff
-        // with a different encoder.
-        if name == "serveStream" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`serveStream` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            let ok = match &at {
-                Type::Stream(inner) => self.base(inner) == Type::Str,
-                _ => false,
-            };
-            if !ok {
-                return Err(cerr!(
-                    line,
-                    "`serveStream` needs a `Stream<String>` of encoded frames, found {at}"
-                ));
-            }
-            return Ok(Type::Unit);
         }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Method-only (`@pop`); the receiver must be a `mut`
@@ -8712,11 +8515,7 @@ impl<'a> Checker<'a> {
             (None, Some(sig)) => sig,
             (None, None) => {
                 return Err(match moved_to_std(name) {
-                    Some(module) => cerr!(
-                        line,
-                        "`{name}` is `{module}`'s — add \
-                 `import {{ {name} }} from \"{module}\"`"
-                    ),
+                    Some(g) => cerr!(line, "{}", g.hint(name)),
                     None => cerr!(line, "call to unknown function `{name}`"),
                 })
             }
@@ -8827,6 +8626,16 @@ impl<'a> Checker<'a> {
             }
             for tp in type_params {
                 if !subst.contains_key(tp) {
+                    // An argument that failed to type is `Type::Err`, and the
+                    // parameter it should have bound stays open. Every block a
+                    // seeded row replaced answered `Ok(Type::Err)` there rather
+                    // than a second sentence about the same mistake, and so
+                    // does this: `close(s.copy())` on a `Stream` said "cannot
+                    // infer type parameter `T` of `close`" under a `copy` that
+                    // had already been refused (RFC-0125 §3 M6).
+                    if atys.iter().any(|t| matches!(t, Type::Err)) {
+                        return Ok(Type::Err);
+                    }
                     return Err(cerr!(
                         line,
                         "cannot infer type parameter `{tp}` of `{shown}`"
@@ -9029,6 +8838,19 @@ impl<'a> Checker<'a> {
             // A bare name: either a pass-through `fn`-typed parameter, or a named
             // top-level function used as a function value.
             Expr::Var { name: vn, .. } => {
+                // Type the argument as an expression first, so its node is
+                // RECORDED (RFC-0101 M1) the way every other argument's is.
+                // Nothing here needs the answer — the arms below read the
+                // binding themselves — but the core does: `vyrn_lower`'s walk
+                // reads `node_types` for each row, and a call argument with no
+                // row type is one the ownership rules cannot see. It showed as
+                // a double release the first time a `consume` parameter was
+                // `fn`-typed: `fromStep(c.slot, c.gen, run)` moved `run` into
+                // the step slot AND released it at its binding (RFC-0125 §3
+                // M6, the `consume` slice). The error is discarded because a
+                // top-level function name is not a binding, and the named-fn
+                // arm below is what answers for it.
+                let _ = self.expr(arg, scope, None, fn_ret);
                 // Base-resolve so a stored value under a named fn-type alias
                 // (RFC-0037, e.g. `Transform`) passes through too.
                 if let Some(Type::Fn(vptys, vret)) =
@@ -9117,8 +8939,17 @@ impl<'a> Checker<'a> {
             other => {
                 let aty = self.expr(other, scope, None, fn_ret)?;
                 let Type::Fn(vptys, vret) = self.base(&aty) else {
+                    // A literal carries no line of its own — `Expr::line`
+                    // answers 0 for the five of them — so `fromStep(0, 0, 5)`
+                    // printed this refusal at `0:0` the moment a row rather
+                    // than a block typed the call. The call's own line is the
+                    // one the reader wrote (RFC-0125 §3 M6).
+                    let at = match other.line() {
+                        0 => line,
+                        l => l,
+                    };
                     return Err(cerr!(
-                        other.line(),
+                        at,
                         "`{callee}` argument {} must be a lambda `|..| ..`, a \
                          function name, or an expression of `fn` type (RFC-0023); \
                          found {aty}",
@@ -9765,6 +9596,16 @@ impl<'a> Checker<'a> {
             // so `type Feed = Stream<Paste>` unifies like the stream it is.
             Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
                 Type::Stream(a) => self.unify(inner, &a, subst, line),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
+            },
+            // A generic `Task<T>` binds `T` the way `Stream<T>` does, and for
+            // the same reason: `@join`'s row is `(self: consume Task<T>) -> T`,
+            // so without this arm every `t.join()` reported "argument expects
+            // Task<T>, found Task<Int64>". The arm was missing because no rule
+            // had ever unified against a `Task` — `@join` was hand-written and
+            // read the payload out of the type itself (RFC-0125 §3 M6).
+            Type::Task(inner) => match crate::types::resolve(aty, self.types) {
+                Type::Task(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic `SmallArray<T, N>` binds `T` from the element type; `N`
@@ -12541,16 +12382,65 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
-    /// No name may sit in both tables: a reader sent to an import that
-    /// `RESERVED` forbids declaring has been sent nowhere.
+    /// The census held `@reserve` and `@tally` back because their blocks
+    /// answered `Ok(at)` — the receiver's OWN type — where the rows answer
+    /// `Array<T>` and `Map<K, Int64>`, so a `type Buf = Array<Int64>` receiver
+    /// was said to stop being a `Buf`. It does not. An `Array` is covariant in
+    /// its element and a `Named` decays to its base, so the rebuilt value goes
+    /// back into the binding through the same coercion every other assignment
+    /// takes. This is the program the census's reason said would break
+    /// (RFC-0125 §3 M6).
+    #[test]
+    fn a_rebuilt_receiver_keeps_its_alias() {
+        let src = "type Buf = Array<Int64> \
+                   type Counts = Map<String, Int64> \
+                   type Box = { b: Buf, c: Counts } \
+                   fn fill(b: Buf) -> Int64 { return b.length } \
+                   fn main() -> Int64 { \
+                       let mut x = Box { b: [], c: [:] } \
+                       x.b.reserve(8) \
+                       x.b.push(3) \
+                       x.c.tally(\"k\", 5) \
+                       return fill(x.b) + x.c.keys().length }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// A `Gone::Module` name may not be reserved: a reader sent to an import
+    /// that `RESERVED` forbids declaring has been sent nowhere. A
+    /// `Gone::Removed` name must be reserved, which is the same rule read the
+    /// other way — a program that could declare `fn push` would shadow the hint
+    /// with its own function, and the reader would never see it.
     #[test]
     fn every_moved_name_is_gone_from_reserved() {
-        for (n, _) in MOVED_TO_STD {
-            assert!(
-                !RESERVED.contains(n),
-                "`{n}` is both reserved and said to live in a std module"
-            );
+        for (n, g) in MOVED_TO_STD {
+            match g {
+                Gone::Module(_) => assert!(
+                    !RESERVED.contains(n),
+                    "`{n}` is both reserved and said to live in a std module"
+                ),
+                Gone::Removed(_) => assert!(
+                    RESERVED.contains(n),
+                    "`{n}` is said to be removed but a program may declare it, \
+                     which would shadow the hint"
+                ),
+            }
         }
+    }
+
+    /// The ten removed spellings were ten `match` arms in `Checker::call` until
+    /// RFC-0125 §3 M6. Each is a row of [`MOVED_TO_STD`] now, and this is the
+    /// sentence each row still gives.
+    #[test]
+    fn removed_spellings_are_rows_of_one_table() {
+        let removed: Vec<&str> = MOVED_TO_STD
+            .iter()
+            .filter(|(_, g)| matches!(g, Gone::Removed(_)))
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            removed,
+            vec!["str", "concat", "len", "list", "join", "toString", "push", "at", "alen", "array"]
+        );
     }
 
     #[test]
@@ -12705,10 +12595,25 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
+    /// `unify` had no `Task` arm until RFC-0125 §3 M6, because no rule had ever
+    /// unified against one — `@join` was hand-written and read the payload out
+    /// of the type itself. Its row is the first signature that names a `Task`,
+    /// and without the arm every `t.join()` reported "argument expects
+    /// `Task<T>`, found `Task<Int64>`".
+    #[test]
+    fn a_task_binds_its_payload_through_a_signature() {
+        let src = "fn work() -> Int64 { return 7 } \
+                   fn main() -> Int64 { let t = spawn work() return t.join() }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// `@join`'s row is `(self: consume Task<T>) -> T`, so the receiver is
+    /// refused by the unify against `Task<T>` — the sentence the row gives, in
+    /// place of the block's "`.join()` needs a Task" (RFC-0125 §3 M6).
     #[test]
     fn rejects_join_of_non_task() {
         let e = check_src("fn main() -> Int64 { let x = 5; return x.join(); }").unwrap_err();
-        assert!(e.contains("`.join()` needs a Task"), "{e}");
+        assert!(e.contains("expected Task<T>, found Int64"), "{e}");
     }
 
     // ---- extern (RFC-0012 M1) --------------------------------------------

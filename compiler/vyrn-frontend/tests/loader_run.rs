@@ -117,12 +117,12 @@ mod tests {
         // import does the same work and costs the compiler nothing. Eleven rows
         // left this table; `@charCount` is what remains, because a method-only
         // name has no spelling an import can bring into scope.
-        for gone in vyrn_frontend::checker::MOVED_TO_STD {
+        for (name, gone) in vyrn_frontend::checker::MOVED_TO_STD {
             assert!(
-                routed_builtin(gone.0).is_none(),
-                "`{}` moved to `{}`; a route for it would shadow the import",
-                gone.0,
-                gone.1
+                routed_builtin(name).is_none(),
+                "{}; a route for it would shadow what the hint sends the \
+                 reader to",
+                gone.hint(name)
             );
         }
         let routes: Vec<&str> = RT_MODULES

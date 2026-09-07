@@ -16000,6 +16000,444 @@ finding standing up: the rule-stating sections are 9.3 per cent of the file, and
 taking two of the six candidates off them moves 70 lines. The surface is
 unmoved, which is where the size is.
 
+#### The `consume` slice: six rows the block did not check (2026-09-07)
+
+The block census puts six blocks in class (a\*) — `fromArray`, `fromStep`,
+`close`, `boxStream`, `serveStream` and `@join`, 123 lines and 15 refusals. Each
+is class (a) except for one thing: its row carries `Capability::Consume`, and
+the fall-through reads a capability, so deleting the block runs
+`region_consume_guard` where the block did not. That is a refusal ADDED, and the
+record above held the deletion back until a corpus pass priced it.
+
+The pass is below. The added guard costs nothing on this corpus, and the
+deletion found four defects that the six blocks were hiding.
+
+**What went.** Six blocks, 123 statement lines, 15 refusals, and the comment
+paragraphs that explain them. The rows were already written — RFC-0094 M1 wrote
+all six — so `prelude::rows` gains no row in this slice, only the prose.
+`fromStep`'s cursor paragraphs and `serveStream`'s SSE paragraphs moved verbatim
+to the rows, because the row is now where the rule is.
+
+| the block | lines | refusals |
+|---|---|---|
+| `fromArray` | 18 | 2 |
+| `fromStep` | 38 | 5 |
+| `boxStream` | 18 | 2 |
+| `close` | 14 | 2 |
+| `serveStream` | 25 | 2 |
+| `@join` | 10 | 2 |
+| **all** | **123** | **15** |
+
+**The four defects the deletion found.** These six rows are the first GENERIC
+rows to reach the fall-through — the twenty names already typed by a row alone
+carry no type parameter — so the generic solve, the recorded substitution and
+the monomorphization worklist each met a seeded row for the first time. Every
+defect below stood in the tree before this slice and reached nothing.
+
+1. **`unify` had no `Task` arm.** `@join`'s row is
+   `(self: consume Task<T>) -> T`, and `Task<T>` against `Task<Int64>` fell
+   through to the assignability default, so every `t.join()` reported "argument
+   expects `Task<T>`, found `Task<Int64>`". The `Stream` arm beside it records
+   the same defect being fixed for streams. The `Task` arm was missing because
+   no rule had ever unified against a `Task`: `@join` was hand-written and read
+   the payload straight out of the type.
+2. **A `fn`-typed argument's node was never typed.** `check_fn_arg`'s
+   `Expr::Var` arm reads the binding itself and never calls `Checker::expr`, so
+   the node had no entry in the recorded table. `vyrn_lower`'s walk reads
+   `node_types` for every row, and a call argument with no row type is one the
+   ownership rules cannot see. It showed the moment a `consume` parameter was
+   `fn`-typed: `fromStep(c.slot, c.gen, run)` in `std/stream` moved `run` into
+   the step slot AND released it at its binding, and the kernel refused eight
+   corpus programs with "`run` was moved here into `fromStep(..)`". The arm
+   types the argument first now and discards the answer, because a top-level
+   function name is not a binding and the named-function arm below answers for
+   it.
+3. **A refusal at line 0.** `fromStep(0, 0, 5)` printed "`fromStep` argument 3
+   must be a lambda" at `0:0`. A literal carries no line of its own —
+   `Expr::line` answers 0 for the five of them — and the arm printed the
+   argument's. It prints the call's line now.
+4. **The worklist chased a builtin.** A generic row's solved substitution is
+   recorded against the call node like any other call's, and `follow` then
+   looked the name up among the program's functions and stopped with "the callee
+   is not a function of this program". A row is a signature, not a body, so
+   `follow` skips a seeded name. `lowered.rs`'s
+   `every_backend_type_equals_the_recorded_one` is the gate that said so.
+
+One more difference was a cascade rather than a defect. Three corpus programs
+write `close(s.copy())` on a `Stream`, and `copy` refuses first. The block
+answered `Ok(Type::Err)` after a failed argument; the generic solve added
+"cannot infer type parameter `T` of `close`", a second sentence about the same
+mistake. The solve answers `Type::Err` now when an argument is `Type::Err`,
+which is the convention the rest of the file already keeps.
+
+**The licence.** The same measurement as the two slices above, on a corpus one
+testsweep lift larger again. `vyrn check` over `examples/`, `site/`,
+`compiler/vyrn-cli/tests/` and testsweep's 1,936-program lift, at `ebb27e01` and
+with the six blocks gone, and the two streams compared WHOLE.
+
+| the corpus | count |
+|---|---|
+| programs | 2,313 |
+| accepted, both | 1,105 |
+| refused, both | 1,208 |
+| byte-identical stderr | 2,313 |
+| differing text | 0 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+
+The added `region_consume_guard` fires on no corpus program. `std/stream` is
+where these calls live and a `region` around one is plausible, which is why the
+record above demanded the pass; the answer is that nobody writes one today. The
+guard is stated once now, on the rows, and it holds these six names the way it
+holds every user `consume` parameter.
+
+The fifteen refusals were witnessed one at a time, under both binaries. All
+fifteen still refuse, on the same line, in the fall-through's words.
+
+| the refusal | before | after |
+|---|---|---|
+| `fromArray(xs, 1)` | "`fromArray` takes 1 argument, got 2" | "`fromArray` expects 1 argument(s), got 2" |
+| `fromArray(7)` | "`fromArray` needs an `Array<T>`, found Int64" | "expected `Array<T>`, found Int64" |
+| `fromStep(0, step)` | "takes 3 arguments, got 2" | "expects 3 argument(s), got 2" |
+| `fromStep("x", 0, step)` | "needs an `Int64` cursor slot, found String" | "argument expects Int64, found String" |
+| `fromStep(0, "x", step)` | "needs an `Int64` cursor generation, found String" | "argument expects Int64, found String" |
+| `fromStep(0, 0, 5)` | "needs a `fn(Int64, Int64, Bool) -> Option<T>` step, found Int64" | "argument 3 must be a lambda, a function name, or an expression of `fn` type (RFC-0023); found Int64" |
+| a two-parameter step | the same sentence | "`step` takes 2 argument(s), but `fromStep` argument 3 expects a 3-argument function" |
+| a step answering `Int64` | the same sentence | "expected Option, found Int64" |
+| `boxStream(s, 1)` | "takes 1 argument, got 2" | "expects 1 argument(s), got 2" |
+| `boxStream(5)` | "needs a `Stream<T>`, found Int64" | "expected `Stream<T>`, found Int64" |
+| `close(s, 1)` | "takes 1 argument, got 2" | "expects 1 argument(s), got 2" |
+| `close(5)` | "needs a `Stream<T>`, found Int64" | "expected `Stream<T>`, found Int64" |
+| `serveStream(s, 1)` | "takes 1 argument, got 2" | "expects 1 argument(s), got 2" |
+| `serveStream(s)` on a `Stream<Int64>` | "needs a `Stream<String>` of encoded frames, found `Stream<Int64>`" | "`serveStream` argument 1 expects `Stream<String>`, found `Stream<Int64>`" |
+| `t.join(1)` | "`join` takes no arguments" | "`join` expects 1 argument(s), got 2" |
+| `5.join()` | "`.join()` needs a Task, found Int64" | "expected `Task<T>`, found Int64" |
+
+One program uses all five stream names and `join` correctly, and it compiles
+under both binaries.
+
+`t.join(1)` counts the receiver, which is the gap the seed extension above
+records for `@charCount`: the checker holds `@join(t, 1)` by the time it types
+the call, and subtracting one for a receiver would be a hand-written exception
+of exactly the kind this milestone deletes. `fromStep`'s three "needs a step"
+refusals become three DIFFERENT sentences, one per way a step can be wrong,
+because the fall-through names what it found instead of restating what it
+wanted.
+
+**The numbers.**
+
+| measure | at `a77838e8` | after the first slice | after the seed extension | after this one |
+|---|---|---|---|---|
+| `checker.rs` | 16,339 | 16,111 | 16,029 | 15,924 |
+| `Checker::call` | 2,501 lines, 190 refusals | 2,246, 163 | 2,161, 156 | 2,009, 141 |
+| guarded blocks naming a builtin | 58 | 44 | 41 | 35 |
+| builtin names typed by a row alone | 0 | 16 | 20 | 26 |
+| refusals in `checker.rs` | 487 | 460 | 453 | 439 |
+| the census's `Surface` kind | 4,321 lines, 248 refusals | 4,066, 221 | 3,981, 214 | 3,829, 199 |
+| RFC-0126 §3's six-file mentions | 1,612 | 1,512 | 1,496 | 1,471 |
+| `prelude.rs` | 872 | 915 | 972 | 1,013 |
+
+`checker.rs` falls 105 lines where the section falls 152: the `Task` arm, the
+four defects' comments and two new unit tests are the difference. The census's
+`Judgment` kind rises from 3,159 lines and 135 refusals to 3,191 and 136 for
+exactly that, and its `Tests` kind from 4,680 to 4,695.
+
+The three censuses are re-pinned in the same commit: the structural census
+(`tests/checker_census.rs` — `Surface` 3,981 lines and 214 refusals to 3,829 and
+199, `Judgment` 3,159 and 135 to 3,191 and 136, `Tests` 4,680 to 4,695, and the
+`fn call` section's reader), the surface census (`tests/surface.rs` and
+RFC-0126 §3, 1,496 mentions to 1,471), and the forms census (`tests/forms.rs`
+and RFC-0127 §3, unmoved — the slice touches no form).
+
+#### The ten migration hints become ten rows (2026-09-07)
+
+The census puts ten refusals in class (c) as "ten migration hints keyed on a
+name with no declaration at all", 57 lines, and ranks them fifth: `MOVED_TO_STD`
+is already the same shape for eleven other names, and these ten could join it —
+a table, not a block.
+
+They have joined it. `str`, `concat`, `len`, `list`, `join`, `toString`, `push`,
+`at`, `alen` and `array` each had a `match` arm in `Checker::call` holding one
+sentence. Each is a row of `MOVED_TO_STD` now, and the block is one lookup.
+
+**What the table had to grow.** The eleven RFC-0094 M2 rows say a MODULE and the
+sentence is built from it — "add `import { contains } from "std/strpred"`". The
+ten say what to WRITE instead, and no module is involved. One column cannot hold
+both, so the column is an enum:
+
+    pub enum Gone {
+        Module(&'static str),   // the import line the program needs
+        Removed(&'static str),  // what to write instead
+    }
+
+`Gone::hint(name)` is the sentence, and it is the only place either kind is
+worded.
+
+**The two invariants are opposite, and both are now stated.** A `Gone::Module`
+name may NOT be in `RESERVED`: a reader sent to an import the language forbids
+declaring has been sent nowhere. A `Gone::Removed` name MUST be in `RESERVED`,
+which is the same rule read from the other side — a program that could declare
+`fn push` would shadow the hint with its own function and the reader would never
+see it. `every_moved_name_is_gone_from_reserved` asserted the first for eleven
+names and now asserts both for twenty-one. `a_moved_name_is_declarable_again`
+is the positive half, unchanged: `fn contains(..)` still compiles.
+
+**Where the lookup stands, and why not at the fall-through.** `MOVED_TO_STD` was
+read at exactly one place, the unknown-name fall-through. The removed spellings
+cannot be read there. `at` is also the name a user writes in `place at`
+(RFC-0091), so a program with `impl Index for Ring` types `at(r, 0)` as a
+projection before any fall-through runs, and the reader would be told the call
+is fine rather than that the verb form is gone.
+`a_projection_answers_the_method_form_too` is the test that says so. The guard
+therefore keeps the position the block had — first, before every dispatch — and
+asks only the `Gone::Removed` half. The table is read at two places now, and
+each place says which half it asks.
+
+**The licence.** The corpus, again whole.
+
+| the corpus | count |
+|---|---|
+| programs | 2,313 |
+| accepted, both | 1,105 |
+| refused, both | 1,208 |
+| byte-identical stderr | 2,313 |
+| differing text | 0 |
+
+Every hint's sentence was witnessed under both binaries, and all ten are
+byte-identical, including the position.
+
+| the program | the sentence, before and after |
+|---|---|
+| `str(1)` | "`str(x)` was removed; render a value with `x.toString()`" |
+| `concat("a", "b")` | "`concat(a, b)` was removed; concatenate Strings with `a + b`" |
+| `len(s)` | "`len(s)` was removed; a String's byte length is `s.byteLength`" |
+| `list([1, 2])` | "`list([..])` was removed; write the array literal `[..]` directly where an `Array<T>` is expected" |
+| `join(n)` | "`join(t)` was removed; await a task's result with `t.join()`" |
+| `toString(1)` | "`toString` is a method; write `x.toString()`" |
+| `push(xs, 1)` | "`push(xs, v)` was removed; push with `xs.push(v)`" |
+| `at(xs, 0)` | "`at(xs, i)` was removed; index with `xs[i]`" |
+| `alen(xs)` | "`alen(xs)` was removed; a collection's length is `xs.length`" |
+| `array()` | "`array()` was removed; write the array literal `[]`" |
+
+Three more programs hold the boundaries: `at(r, 0)` on a `Ring` with
+`impl Index` still gets the hint and not a projection; `contains("a", "a")`
+still gets the import line; `nosuch(1)` still gets "call to unknown function".
+
+**The numbers, and the one that goes the wrong way.**
+
+| measure | after the `consume` slice | after this one |
+|---|---|---|
+| `checker.rs` | 15,924 | 15,975 |
+| `Checker::call` | 2,009 lines, 141 refusals | 1,951, 132 |
+| guarded blocks naming a builtin | 35 | 25 |
+| refusals in `checker.rs` | 439 | 430 |
+| the census's `Surface` kind | 3,829 lines, 199 refusals | 3,854, 190 |
+| the census's `Tests` kind | 4,695 | 4,721 |
+| RFC-0126 §3's six-file mentions | 1,471 | 1,471 |
+
+`checker.rs` GREW by 51 lines. Ten `match` arms cost 57 lines; ten table rows
+cost 82, because a row is a tuple of a name and a variant holding a sentence and
+`rustfmt` gives each row three or four lines where an arm's `return Err(cerr!(..))`
+took five or six for two of them and three for the rest. The rest is two new
+unit tests.
+
+That is the trade this milestone keeps making and it is worth naming again: a
+table costs lines where a block costs CASES. What left `Checker::call` is 58
+lines and nine of its refusals — nine, not ten, because ten sentences are now
+one `cerr!` reading one table. The largest thing in the file is smaller, one
+statement answers "where did this name go", and the two invariants that keep it
+honest are asserted rather than remembered.
+
+#### `@reserve` and `@tally`: the census was wrong about the alias (2026-09-07)
+
+The block census puts `@reserve` and `@tally` in class (b) — a row would answer
+them, but it cannot say one thing it must — with this reason:
+
+> the row says `Array<T>`; the block answers the RECEIVER'S OWN type, so
+> `type Buf = Array<Int64>` stays a `Buf`
+
+and it ranks the pair as "a language question wearing a signature's clothes —
+`-> Self` on a builtin row", not a slice on its own. That reading is right about
+the code and wrong about the consequence.
+
+**What the blocks did.** Both end `return Ok(at)`, where `at` is the receiver's
+type BEFORE `self.base` strips a name. The rows answer `Array<T>` and
+`Map<K, Int64>`. So a `Buf` receiver does give a plain `Array<Int64>` through
+the row, and the census's sentence is a true statement about two lines of Rust.
+
+**Why it costs nothing.** `xs.reserve(n)` is a statement form: it lowers to
+`xs = @reserve(xs, n)`, and the store back into `xs` takes the same coercion
+every assignment takes. `assignable` decays a `Named` to its base and an `Array`
+is covariant in its element, so `Array<Int64>` goes into a `Buf` binding, a
+`Buf` field and a `Buf` parameter. The alias is the BINDING's, and nothing about
+the call changes it. The program the census's reason says would break is this
+one, and it compiles under both binaries:
+
+    type Buf = Array<Int64>
+    type Counts = Map<String, Int64>
+    type Box = { b: Buf, c: Counts }
+    fn fill(b: Buf) -> Int64 { return b.length }
+    fn main() -> Int64 {
+        let mut x = Box { b: [], c: [:] }
+        x.b.reserve(8)
+        x.b.push(3)
+        x.c.tally("k", 5)
+        return fill(x.b) + x.c.keys().length
+    }
+
+`a_rebuilt_receiver_keeps_its_alias` is that program as an assertion. This is
+the third census verdict in this milestone to be recomputed and withdrawn, and
+the lesson is the one already recorded: a census cites the code exactly and
+still gets the consequence wrong, because the consequence is a fact about
+another rule.
+
+**What went.** Two blocks, 60 statement lines, 8 refusals.
+
+| the block | lines | refusals |
+|---|---|---|
+| `@reserve` | 25 | 3 |
+| `@tally` | 35 | 5 |
+| **all** | **60** | **8** |
+
+`@clear`'s comment kept the two sentences that were about `reserve`, and it
+says now why `@clear` stands where `@reserve` no longer does: its refusal is
+about the ELEMENT type, which no row can carry.
+
+**The licence.** The corpus, whole, one more time.
+
+| the corpus | count |
+|---|---|
+| programs | 2,313 |
+| accepted, both | 1,105 |
+| refused, both | 1,208 |
+| byte-identical stderr | 2,313 |
+| differing text | 0 |
+
+The corpus reaches none of these eight refusals and no aliased receiver, which
+is exactly why both had to be constructed. The eight were witnessed one at a
+time under both binaries, and all eight still refuse on the same line.
+
+| the refusal | before | after |
+|---|---|---|
+| `xs.reserve()` | "`reserve` takes 2 arguments, got 1" | "`reserve` expects 2 argument(s), got 1" |
+| `s.reserve(4)` on a String | "`reserve` needs a growable Array as its receiver, found String" | "expected `Array<T>`, found String" |
+| `xs.reserve("x")` | "`reserve` count is String, not an Int64" | "argument expects Int64, found String" |
+| `m.tally("a")` | "`tally` takes 3 arguments, got 2" | "`tally` expects 3 argument(s), got 2" |
+| `tally` on a `Map<String, String>` | "`tally` counts Int64 values, and this map holds String" | "argument expects Int64, found String" |
+| `xs.tally("a", 1)` on an Array | "`tally` needs a `Map<K, Int64>` as its receiver, found `Array<Int64>`" | "expected `Map<K, Int64>`, found `Array<Int64>`" |
+| `m.tally(5, 1)` on a String-keyed map | "the map is keyed by String, but the `tally` key is Int64" | "type parameter `K` is both String and Int64" |
+| `m.tally("a", "b")` | "`tally` count is String, not an Int64" | "argument expects Int64, found String" |
+
+Two of the eight lose a sentence a reader would rather have. "this map holds
+String" said which of the two type arguments was wrong; the row's refusal names
+the type and not the position, because the receiver is one argument and its
+value type is inside it. "the map is keyed by String, but the `tally` key is
+Int64" becomes the generic solve's own words about `K`. Both are true, both
+name the line, and neither is worth a hand-written block — which is the same
+judgment M1 made the other way, and the same price this milestone has now paid
+three times.
+
+**The numbers.**
+
+| measure | after the hints | after this one |
+|---|---|---|
+| `checker.rs` | 15,975 | 15,934 |
+| `Checker::call` | 1,951 lines, 132 refusals | 1,887, 124 |
+| guarded blocks naming a builtin | 25 | 23 |
+| builtin names typed by a row alone | 26 | 28 |
+| refusals in `checker.rs` | 430 | 422 |
+| the census's `Surface` kind | 3,854 lines, 190 refusals | 3,790, 182 |
+| RFC-0126 §3's six-file mentions | 1,471 | 1,459 |
+| `prelude.rs` | 1,013 | 1,029 |
+
+**Where `Checker::call` stands after the three slices.** It was 2,501 lines and
+190 refusals when the block census was written. It is 1,887 and 124 now — 614
+lines and 66 refusals gone, and 28 builtin names typed by their seeded row
+alone. What remains is class (c) and class (d): a rule a row cannot carry, or a
+desugar. The ranked list the block census left is now:
+
+1. **The three type-name arguments — `schemaOf`, `jsonSchema`, `fromJson`, 77
+   lines and 11 refusals.** A signature that can say "the type my caller wrote"
+   is a language feature, not a row.
+2. **The protocol dispatcher, 235 lines and 10 refusals.** The single largest
+   block, and not a builtin at all. It belongs with RFC-0084's dispatch work.
+3. **The four log levels, 28 lines and 3 refusals.** `(l: read Logger, m: read
+   String) -> Unit` says all of it, but `trace`/`debug`/`info`/`warn`/`error`
+   are not in `RESERVED`, so a row keyed by one could be captured by a user
+   declaration. Reserving five common words is a language decision.
+4. **The three union parameters — `print`, `@str`, `toJson`, 70 lines and 6
+   refusals.** One union written three times, which the language cannot spell.
+5. **The element-type refusals — `@clear`, `@append`, `@copyFrom`,
+   `@tallyBytes`, 153 lines and 17 refusals.** Each refuses on a property of the
+   ELEMENT type (it owns heap, or it is a byte), which is a fact about the type
+   argument rather than about the signature.
+
+#### The sentinel that was waiting for the `Task` arm (2026-09-07)
+
+The gate over the three slices found one red, and it is a test that exists to
+go red exactly once.
+
+`vyrn-codegen`'s `the_checker_refuses_every_shape_the_fall_through_used_to_swallow`
+holds four programs — a structural record parameter, an enum payload naming the
+parameter, a `lazy` field, and a `Task<T>` parameter — and asserts the CHECKER
+refuses all four. RFC-0086 deferred `solve_param`'s arms for those four shapes,
+and the reason the deferral cost nothing was that `Checker::unify` had the same
+gap: no arm, so the fall-through was a diagnostic rather than a substitution.
+The test's own words say what it is for: "if any of these ever starts checking,
+this test fails and says so, and the arms it unblocks are already written and
+already tested."
+
+The `consume` slice gave `Checker::unify` its `Task` arm, because `@join`'s
+seeded row is the first signature in the compiler that names a `Task`. So
+
+    fn slow(n: Int64) -> Int64 { return n * 2 }
+    fn awaitOne<T>(t: Task<T>) -> T { return t.join() }
+    fn main() -> Int64 { let t = spawn slow(21) return awaitOne(t) }
+
+checks now. `solve_param`'s `Task` arm binds `T` from the argument, which
+`the_filled_arms_bind_a_parameter_the_fall_through_walked_past` had already
+asserted, and the program answers 42 on the native route and on the wasm route.
+Nothing was written to make that work; the arm had been waiting since RFC-0086.
+
+`Task` leaves the list, `a_generic_task_parameter_solves` takes its place, and
+the doc comment says which promise was kept. Three shapes remain deferred:
+`Record`, `Enum` and `Lazy`, each still refused by the checker.
+
+##### Gates (2026-09-07, the three slices)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Run over the three slices
+together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 585 passed, no failure |
+| `kernel` `--ignored` | 1, 17 s |
+| `coretables` `--ignored` | 1, 18 s |
+| `typed` `--ignored` | 1, 27 s |
+| `effects` `--ignored` | 2, 35 s |
+| `fixtures` `--ignored` | 1, 16 s |
+| `testsweep` `--ignored` | 1, 66 s |
+| `vyrn-frontend` | 1,170 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,217 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 341 s |
+| the residue ratchet | 1, 277 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — three checker slices move no byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 11 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 215 over 26 files |
+
+The one red in the first pass was the sentinel above. It and
+`vyrn_lower::follow`'s one-line skip are the only changes these three slices
+made outside `checker.rs`, `prelude.rs` and the censuses. The list was run
+again whole after the sentinel was answered, and it is the table above.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

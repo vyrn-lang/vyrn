@@ -580,7 +580,13 @@ fn the_refusals_keep_their_reasons() {
     // RFC-0094 M2: a name that left `RESERVED` for a `std/` module may not have a
     // Rust arm either. Same failure as a routed name with a census row — an
     // engine holding a second opinion — reached by the other door.
-    for (name, module) in vyrn_frontend::checker::MOVED_TO_STD {
+    for (name, gone) in vyrn_frontend::checker::MOVED_TO_STD {
+        let vyrn_frontend::checker::Gone::Module(module) = gone else {
+            // A REMOVED spelling is the table's other half and this rule is not
+            // about it: `push` and `at` still have a Rust arm, under the
+            // internal `@` name the sugar produces.
+            continue;
+        };
         assert!(
             !by_name.contains_key(name),
             "`{name}` is `{module}`'s declaration now; a census row for it is a \
