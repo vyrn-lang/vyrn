@@ -7380,6 +7380,226 @@ no mention moved. The forms census counts an AST form's mentions per file, and
 the note walk lost no form — `Emit::kept` reads the same `Expr::Str` and the
 same `Stmt` kinds `Emit::fate` did.
 
+**A join arm hands a name out of a loop, and the back edge frees it twice
+(2026-09-07).** Two rules the core states separately meet at a back edge, and
+the program between them exits 134. `Builder::alias_out` says a join arm that
+yields a name bound OUTSIDE the construct stands that name down, because the
+join's result is what releases the value now. `Builder::owned_binding` says a
+`let` owns what the core lowered into it. Put a `let` of a join inside a loop
+body and both are applied: the outer name releases nothing, and the result
+releases once per turn. The first turn frees the buffer the outer name holds,
+and the second turn reads it and frees it again.
+
+```vyrn
+let names: Array<String> = ["a", "b"]
+while i < 3 {
+    let picked = if i > 0 { names } else { ["z"] }
+    n = n + picked.length
+    i = i + 1
+}
+```
+
+`examples/loopalias.vyrn` is that program. Before this slice `vyrn check` said
+`ok`, `vyrn run` printed `5`, the native build printed `5`, and the native build
+under `VYRN_LEAK_CHECK=1` said `free audit: double or foreign free rva=0x1a2e`
+and exited 134. The wasm engine lowers through the same core and printed `5`
+without complaint, because its allocator audits nothing — the defect is in the
+core and only one engine can see it. `vyrn why --memory` said the whole thing in
+two lines and did not know it:
+
+```
+line 2     names            NOT reclaimed — another binding aliases it at line 6
+line 6     picked           reclaimed at block exit — releasing what the Array<String> holds
+```
+
+The block is the loop body.
+
+**Who owns `picked` on each arm.** On the `["z"]` arm `picked` owns a fresh
+buffer, and releasing it at the block's exit is right. On the `names` arm
+`picked` is a second name for a buffer the frame already holds under `names`,
+and releasing it at the block's exit is right ONCE — that is the transfer
+`alias_out` states, and in straight-line code the block's exit comes after every
+read of `names` and happens once. The back edge is the whole defect: it makes
+the block's exit happen again, with `names` still bound and still read. Neither
+arm is wrong. The COUNT is.
+
+**What the kernel should have refused, and did not.** RFC-0089's stance is that
+a leak is preferable to a double free, and `alias_out`'s own doc comment claims
+the leak. It does not get one here, because the standing-down and the ownership
+are stated at two different nodes and neither can see the loop. A value that one
+arm owns and another only hands on is exactly the shape the RFC takes over a
+double free, and both passes accepted it silently: `VYRN_NO_KERNEL=1 vyrn check`
+accepts the program today, so the move check has nothing to say about this shape
+either. That silence was the second defect, and it is the one this slice closes.
+
+**The kernel's sentence.**
+
+```
+`names` may not be handed out of an arm inside a loop — the result is released on every turn, and `names` is bound outside the loop
+  fix: `names.copy()` if the arm should hand out a value of its own
+```
+
+It names the reader's binding, names the real defect, stands at the line the
+reader wrote, is one diagnostic, and its menu names a fix that compiles: the
+`.copy()` form prints `5` on both engines and is leak-clean natively.
+
+**Stated once, at the two doors that own a join's result.** The refusal is one
+function, `Builder::loop_alias`, and it asks one question of a `Rhs`: is this
+the result of a join whose arm handed out a name from outside the enclosing
+loop? `alias_out` decides nothing new. It reports the name it stood down when a
+loop mark stands between that name and the join, and the join records the report
+against its result. Two callers ask:
+
+| door | the program | why it owns the result |
+|---|---|---|
+| `Stmt::Let`, where `owned` is true | `let picked = if .. { names } else { [..] }` | `owned_binding` said the frame owns it |
+| `val`'s temporary, where the type owns heap | `size(if .. { names } else { [..] })` | an argument position binds an unnamed temporary, and `temp` owns what the type owns |
+
+`loop_marks` is the mechanism: one `Vec<usize>` holding the name count when each
+enclosing loop's body was opened. Names are minted in lowering order, so a name
+below the innermost mark is bound outside that loop. A `for` pushes its mark IN
+FRONT of the loop variable, which is the one placement that matters — each turn
+binds its own element, so handing the VARIABLE out frees once per turn and is
+not this defect, while handing the CONTAINER out is.
+
+**Three shapes that are not the defect, and stay lowered as they were.**
+
+- **A rebind.** `found = match a { Key(k) => Some(k.copy()), Cls(v) => found, .. }`
+  is `std/html.vyrn`'s `attrKey`. A first form of this rule stated the refusal at
+  the JOIN rather than at the owner, and it refused 30 of the corpus's sources —
+  `std/html.vyrn`, `std/vyx.vyrn`, `site/export.vyrn` and everything that
+  imports them. A store into a name hands the value on, and the slot is released
+  by its FINAL value in every engine, so the temporary the value passes through
+  owns nothing and the back edge repeats no release. The flag answers for THAT
+  expression and no expression inside it: `n = n + size(if c { names } else {
+  [..] })` is a rebind of an `Int64` and the join inside it still binds an owning
+  temporary, which is the `argument` row of the pin.
+- **A loop variable.** `for s in names { let p = if .. { s } else { "z" } }`.
+- **An arm that yields a borrow.** Already answered, and before this slice: the
+  result becomes a borrow and releases nothing, which is the `if c { parts[0] }
+  else { "Bool" }` row `names_a_place` gave.
+
+**The other two forms, asked and answered.** A `match` in value position is the
+SAME defect through the same door — `rhs_inner`'s `Expr::Match` binds a result
+and calls `alias_out` per arm — and one refusal covers both. A `return` is not.
+`return_through` gives every arm its own exit and binds no result, so nothing is
+released twice; it LEAKS instead. `return if i > 0 { names } else { ["z"] }`
+over a local `names` exits 135 with `free audit: 1 block(s), 16 bytes, never
+freed`, because the arm that does not leave allocated and nothing releases it.
+That is RFC-0089's preference, taken by a construct that has no choice about it,
+and it is recorded rather than acted on.
+
+**One shape found and not closed.** A join inside a plain inner BLOCK, whose
+aliased name outlives the block, is a read-after-free rather than a double free:
+
+```vyrn
+if names.length > 1 {
+    let picked = if names.length > 1 { names } else { ["z"] }
+    n = n + picked.length
+}
+n = n + names.length
+```
+
+`picked` frees at the inner block's exit and `names` is read after it. The leak
+check is quiet — one free, one read — and the program prints the right answer.
+The loop's rule cannot state this one, because the question is not how many
+times the result is released but whether the aliased name is READ after the
+release, which is a liveness question the core does not carry. It is a real
+defect and this record is where it is written down.
+
+**The licence.** The rule is the kernel's alone, so nothing in `movecheck.rs`
+moves: `VYRN_NO_KERNEL=1 vyrn check` accepts the program and
+`VYRN_NO_MOVECHECK=1 vyrn check` refuses it. Over the whole corpus — every
+`.vyrn` under `examples/`, `std/`, `site/`, `bench/`, `rfcs/bench-0104/` and
+`vyrn-cli/tests/{refusals,unlicensed,boundaries}` — exactly one program is
+refused that was not, and it is `examples/loopalias.vyrn`, which this slice
+adds. No census row moves. `VYRN_WASM_MANIFEST=check` is green with the manifest
+file untouched: not one emitted byte.
+
+**What the slice writes.** `compiler/vyrn-lower/src/core.rs` is 5,365 lines
+against 5,265 — 110 added and 10 replaced, all of it three fields, the report,
+the refusal and its two calls. `examples/loopalias.vyrn` is the program, with
+its recorded refusal in `examples/expected/loopalias.{stdout,stderr,exit}` and
+its row in `EXPECTED_CHECK_FAILURE`, which is where the corpus records an
+example that is meant not to build. `rfcs/census/residue-baseline.tsv` takes
+`loopalias skip`, which is what a refused example is to the ratchet.
+`compiler/vyrn-cli/tests/memory.rs` grows by 148 for two pins: the four refused
+shapes — `if`, `match`, `for` and the argument temporary — each with the whole
+sentence and the whole menu, and the two accepted ones, the `.copy()` the menu
+offers and the rebind.
+
+**A failure this slice did not cause, and does not fix.** `vyrn-frontend`'s
+`movecheck_rule_two_pinned_to_ident` fails on the tree at `e39d799f`, with and
+without this slice's diff: the captured `s` is pinned at column 34 where the
+test asks 33. It is the pin `e39d799f` moved to row 24, and it is that line's to
+answer.
+
+#### The loop-alias slice's gates (2026-09-07)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. The wall times are longer
+than the last record's because other worktrees were gating on the same machine.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and the two excluded manifests | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 593 passed, 75 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 182 s |
+| `coretables` `--ignored` | 1, 152 s, every pinned count unmoved |
+| `typed` `--ignored` | 1, 365 s |
+| `effects` `--ignored` | 2, 332 s |
+| `fixtures` `--ignored` | 1, 123 s, after `write` recorded the new example's three files |
+| `vyrn-frontend` | 1,166, and the one failure above, which `e39d799f` fails without this diff |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,342 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 12, 20 s — up 2 for this slice's pins |
+| `parity` `--ignored`, release | 41 of 41, 243 s |
+| the residue ratchet | 1, 233 s, clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 134 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks over 28 files |
+
+**`MoveCheck::type_of`'s four widening arms are measured, and all four stay
+(2026-09-07).** `type_of` asks `Declared` first and then widens in four arms of
+its own: a record FIELD's type off the declaration, a `consume`'s type off the
+place it takes, a projection call's element type off the container, and a
+`match`'s type off its first arm under the payload binders. Track-cj's record
+says the four now fire only on record holes, which would make them deletable.
+On the core line at `e39d799f` they do not.
+
+The measurement is cj's: build each variant, run `vyrn why --memory` over all
+209 top-level examples, and compare byte for byte against the whole tree's
+answer. A deletion that moves no byte goes; one that moves a byte is refused and
+the byte says why. No variant reached the wasm manifest, parity or the residue
+ratchet, because the first measure refused each one first.
+
+| arm | lines | example reports that moved | what moved |
+|---|---|---|---|
+| `Expr::Field` | 9 | 2 of 209 | `nbody.vyrn` 169-170 and `vlog.vyrn` 367-368: `the type Float64` and `the type Millis` become `the type unknown` |
+| `Expr::Consume` | 5 | 7 of 209 | the VERDICT, not only the words: `container.vyrn` 59 goes from `reclaimed by `drop` at line 60` to `NOT reclaimed`, and `mustuse.vyrn` moves two bindings out of the `dropped` column |
+| the projection call | 11 | 16 of 209 | an element read's type: `arrays.vyrn` 64-65 go from `the type Point` to `the type unknown` |
+| `Expr::Match` | 19 | 20 of 209 | a `match` bound by a `let`: `ifexpr.vyrn` 54 and `jsoncodec.vyrn` 50, 59 and 65 go from `the type Int64` to `the type unknown` |
+
+**What the measurement says.** These are not record holes. They are the report's
+own naming of a type nothing else in this pass resolves, and one of them —
+`Expr::Consume` — is load-bearing for a verdict and not only for a word: without
+it a `let` of a `consume` has no type, so the walk does not see the `drop` that
+reclaims it. Deleting the four would put `the type unknown` in front of a reader
+44 times over the corpus and lose two `drop` rows. All four stay.
+
+**Why `819f8d47` was not merged.** The brief allows merging track-cj's branch if
+this slice needs it. It does not: the measurement is decisive on this line,
+where the arms fire on ordinary field, element and `match` reads. Whether
+cj's tree narrows them to record holes is a question about cj's tree, and the
+answer to it belongs where that work lands. Bringing another track's unmerged
+branch onto this one to re-ask it would import risk for at most 44 lines of a
+pass the milestone is emptying anyway.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

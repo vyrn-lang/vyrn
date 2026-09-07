@@ -1,0 +1,27 @@
+/// A join inside a loop, with one arm that hands out a name bound outside it.
+/// Two rules meet here and neither is wrong on its own: an arm that yields an
+/// outer name stands that name down, because the join's result is what
+/// releases the value now; and a `let` owns what the core lowered into it, so
+/// `picked` is released at the end of the block. The block is the loop body.
+///
+/// The first turn frees the array `names` holds. The second turn reads it and
+/// frees it again. Both engines lowered it through the same core; the native
+/// binary said `free audit: double or foreign free` and exited 134 under
+/// `VYRN_LEAK_CHECK=1`, and the wasm engine, whose allocator audits nothing,
+/// printed `5` and said nothing. The kernel refuses it now, and the menu says
+/// `.copy()`.
+///
+/// The same shape at a `match` arm is the same refusal. A REBIND is not: `xs =
+/// if c { xs } else { .. }` binds nothing, so nothing is released per turn.
+fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        let picked = if i > 0 { names } else { ["z"] }
+        n = n + picked.length
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
