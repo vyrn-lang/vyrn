@@ -92,7 +92,7 @@ order.
 
 ## 3. The census: what each constructor costs
 
-1,471 mentions in six files for 33 constructors — it was 2,517 in seven, and
+1,459 mentions in six files for 33 constructors — it was 2,517 in seven, and
 the seventh was `interp.rs` (RFC-0125 §3 M5); the sixth column was the text-IR
 emitter and is now the shared lowering alone, which is where the other 499 went
 (RFC-0125 §3 M4). It was 1,612 until RFC-0125 §3 M6's size slices. The first
@@ -110,7 +110,7 @@ the_surface_census_as_a_table` and checked against the code by
 
 | constructor | checker | shared | wasm | types | prelude | editor | all six |
 |---|---|---|---|---|---|---|---|
-| `Type::Int` | 57 | 3 | 47 | 10 | 0 | 2 | 119 |
+| `Type::Int` | 52 | 3 | 47 | 10 | 0 | 2 | 114 |
 | `Type::IntN` | 26 | 4 | 13 | 21 | 3 | 2 | 69 |
 | `Type::Float` | 20 | 3 | 20 | 5 | 0 | 2 | 50 |
 | `Type::Float32` | 23 | 3 | 17 | 5 | 0 | 1 | 49 |
@@ -131,18 +131,18 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Enum` | 12 | 5 | 9 | 12 | 0 | 3 | 41 |
 | `Type::Param` | 18 | 2 | 9 | 4 | 8 | 1 | 42 |
 | `Type::App` | 14 | 3 | 1 | 11 | 0 | 0 | 29 |
-| `Type::Array` | 39 | 4 | 41 | 7 | 2 | 5 | 98 |
+| `Type::Array` | 38 | 4 | 41 | 7 | 2 | 5 | 97 |
 | `Type::ArrayN` | 16 | 7 | 18 | 9 | 0 | 4 | 54 |
 | `Type::SmallArray` | 22 | 2 | 21 | 7 | 1 | 4 | 57 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 25 | 3 | 18 | 7 | 6 | 4 | 63 |
+| `Type::Map` | 23 | 3 | 18 | 7 | 6 | 4 | 61 |
 | `Type::Stream` | 14 | 1 | 9 | 7 | 1 | 1 | 33 |
 | `Type::Task` | 9 | 1 | 4 | 7 | 1 | 1 | 23 |
 | `Type::Logger` | 1 | 1 | 2 | 1 | 1 | 1 | 7 |
 | `Type::Fn` | 27 | 5 | 24 | 10 | 1 | 0 | 67 |
 | `Type::Lazy` | 7 | 1 | 1 | 9 | 0 | 0 | 18 |
 | `Type::Never` | 4 | 2 | 4 | 2 | 0 | 0 | 12 |
-| `Type::Err` | 99 | 1 | 0 | 1 | 0 | 0 | 101 |
+| `Type::Err` | 95 | 1 | 0 | 1 | 0 | 0 | 97 |
 
 The counts are this branch's tip. §8.7 took them 16 below the
 census's first reading — `has_nested_wrap` and its two callers, one function

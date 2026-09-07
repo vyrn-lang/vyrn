@@ -15135,6 +15135,130 @@ one `cerr!` reading one table. The largest thing in the file is smaller, one
 statement answers "where did this name go", and the two invariants that keep it
 honest are asserted rather than remembered.
 
+#### `@reserve` and `@tally`: the census was wrong about the alias (2026-09-07)
+
+The block census puts `@reserve` and `@tally` in class (b) — a row would answer
+them, but it cannot say one thing it must — with this reason:
+
+> the row says `Array<T>`; the block answers the RECEIVER'S OWN type, so
+> `type Buf = Array<Int64>` stays a `Buf`
+
+and it ranks the pair as "a language question wearing a signature's clothes —
+`-> Self` on a builtin row", not a slice on its own. That reading is right about
+the code and wrong about the consequence.
+
+**What the blocks did.** Both end `return Ok(at)`, where `at` is the receiver's
+type BEFORE `self.base` strips a name. The rows answer `Array<T>` and
+`Map<K, Int64>`. So a `Buf` receiver does give a plain `Array<Int64>` through
+the row, and the census's sentence is a true statement about two lines of Rust.
+
+**Why it costs nothing.** `xs.reserve(n)` is a statement form: it lowers to
+`xs = @reserve(xs, n)`, and the store back into `xs` takes the same coercion
+every assignment takes. `assignable` decays a `Named` to its base and an `Array`
+is covariant in its element, so `Array<Int64>` goes into a `Buf` binding, a
+`Buf` field and a `Buf` parameter. The alias is the BINDING's, and nothing about
+the call changes it. The program the census's reason says would break is this
+one, and it compiles under both binaries:
+
+    type Buf = Array<Int64>
+    type Counts = Map<String, Int64>
+    type Box = { b: Buf, c: Counts }
+    fn fill(b: Buf) -> Int64 { return b.length }
+    fn main() -> Int64 {
+        let mut x = Box { b: [], c: [:] }
+        x.b.reserve(8)
+        x.b.push(3)
+        x.c.tally("k", 5)
+        return fill(x.b) + x.c.keys().length
+    }
+
+`a_rebuilt_receiver_keeps_its_alias` is that program as an assertion. This is
+the third census verdict in this milestone to be recomputed and withdrawn, and
+the lesson is the one already recorded: a census cites the code exactly and
+still gets the consequence wrong, because the consequence is a fact about
+another rule.
+
+**What went.** Two blocks, 60 statement lines, 8 refusals.
+
+| the block | lines | refusals |
+|---|---|---|
+| `@reserve` | 25 | 3 |
+| `@tally` | 35 | 5 |
+| **all** | **60** | **8** |
+
+`@clear`'s comment kept the two sentences that were about `reserve`, and it
+says now why `@clear` stands where `@reserve` no longer does: its refusal is
+about the ELEMENT type, which no row can carry.
+
+**The licence.** The corpus, whole, one more time.
+
+| the corpus | count |
+|---|---|
+| programs | 2,313 |
+| accepted, both | 1,105 |
+| refused, both | 1,208 |
+| byte-identical stderr | 2,313 |
+| differing text | 0 |
+
+The corpus reaches none of these eight refusals and no aliased receiver, which
+is exactly why both had to be constructed. The eight were witnessed one at a
+time under both binaries, and all eight still refuse on the same line.
+
+| the refusal | before | after |
+|---|---|---|
+| `xs.reserve()` | "`reserve` takes 2 arguments, got 1" | "`reserve` expects 2 argument(s), got 1" |
+| `s.reserve(4)` on a String | "`reserve` needs a growable Array as its receiver, found String" | "expected `Array<T>`, found String" |
+| `xs.reserve("x")` | "`reserve` count is String, not an Int64" | "argument expects Int64, found String" |
+| `m.tally("a")` | "`tally` takes 3 arguments, got 2" | "`tally` expects 3 argument(s), got 2" |
+| `tally` on a `Map<String, String>` | "`tally` counts Int64 values, and this map holds String" | "argument expects Int64, found String" |
+| `xs.tally("a", 1)` on an Array | "`tally` needs a `Map<K, Int64>` as its receiver, found `Array<Int64>`" | "expected `Map<K, Int64>`, found `Array<Int64>`" |
+| `m.tally(5, 1)` on a String-keyed map | "the map is keyed by String, but the `tally` key is Int64" | "type parameter `K` is both String and Int64" |
+| `m.tally("a", "b")` | "`tally` count is String, not an Int64" | "argument expects Int64, found String" |
+
+Two of the eight lose a sentence a reader would rather have. "this map holds
+String" said which of the two type arguments was wrong; the row's refusal names
+the type and not the position, because the receiver is one argument and its
+value type is inside it. "the map is keyed by String, but the `tally` key is
+Int64" becomes the generic solve's own words about `K`. Both are true, both
+name the line, and neither is worth a hand-written block — which is the same
+judgment M1 made the other way, and the same price this milestone has now paid
+three times.
+
+**The numbers.**
+
+| measure | after the hints | after this one |
+|---|---|---|
+| `checker.rs` | 15,975 | 15,934 |
+| `Checker::call` | 1,951 lines, 132 refusals | 1,887, 124 |
+| guarded blocks naming a builtin | 25 | 23 |
+| builtin names typed by a row alone | 26 | 28 |
+| refusals in `checker.rs` | 430 | 422 |
+| the census's `Surface` kind | 3,854 lines, 190 refusals | 3,790, 182 |
+| RFC-0126 §3's six-file mentions | 1,471 | 1,459 |
+| `prelude.rs` | 1,013 | 1,029 |
+
+**Where `Checker::call` stands after the three slices.** It was 2,501 lines and
+190 refusals when the block census was written. It is 1,887 and 124 now — 614
+lines and 66 refusals gone, and 28 builtin names typed by their seeded row
+alone. What remains is class (c) and class (d): a rule a row cannot carry, or a
+desugar. The ranked list the block census left is now:
+
+1. **The three type-name arguments — `schemaOf`, `jsonSchema`, `fromJson`, 77
+   lines and 11 refusals.** A signature that can say "the type my caller wrote"
+   is a language feature, not a row.
+2. **The protocol dispatcher, 235 lines and 10 refusals.** The single largest
+   block, and not a builtin at all. It belongs with RFC-0084's dispatch work.
+3. **The four log levels, 28 lines and 3 refusals.** `(l: read Logger, m: read
+   String) -> Unit` says all of it, but `trace`/`debug`/`info`/`warn`/`error`
+   are not in `RESERVED`, so a row keyed by one could be captured by a user
+   declaration. Reserving five common words is a language decision.
+4. **The three union parameters — `print`, `@str`, `toJson`, 70 lines and 6
+   refusals.** One union written three times, which the language cannot spell.
+5. **The element-type refusals — `@clear`, `@append`, `@copyFrom`,
+   `@tallyBytes`, 153 lines and 17 refusals.** Each refuses on a property of the
+   ELEMENT type (it owns heap, or it is a byte), which is a fact about the type
+   argument rather than about the signature.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

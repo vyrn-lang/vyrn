@@ -7374,14 +7374,13 @@ impl<'a> Checker<'a> {
             return Ok(Type::Str);
         }
 
-        // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
-        // a `SmallArray`'s capacity is part of its type and a fixed array has
-        // none to grow. `append` is a byte copy of the source's elements in
-        // the compiled backends, so an element type that owns heap is refused
-        // — copying such an element by bytes would give two arrays one buffer.
-        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. The
-        // elements are FORGOTTEN, not released, so an element type that owns
-        // heap is refused the way `append` refuses it.
+        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. A
+        // growable `Array` only — a `SmallArray`'s capacity is part of its type
+        // and a fixed array has none to keep — which the row says. What the row
+        // cannot say is the rule below: the elements are FORGOTTEN rather than
+        // released, so an element type that owns heap is refused, the way
+        // `append` refuses it. That is a refusal about the ELEMENT type, which
+        // is why this block stands where `reserve`'s no longer does.
         if name == "@clear" {
             if args.len() != 1 {
                 return Err(cerr!(
@@ -7406,69 +7405,6 @@ impl<'a> Checker<'a> {
                     line,
                     "`clear` forgets its elements without releasing them, and `{elem}` owns heap — pop each element in a loop instead"
                 ));
-            }
-            return Ok(at);
-        }
-        if name == "@reserve" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`reserve` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&at) {
-                Type::Array(_) => {}
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`reserve` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            }
-            let n = self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`reserve` count is {n}, not an Int64"));
-            }
-            return Ok(at);
-        }
-        // `m.tally(k, n)` (RFC-0116): one probe where a read-then-store made
-        // two. `Int64` values only — the add is the operation, and the
-        // signature can spell it for no other value type.
-        if name == "@tally" {
-            if args.len() != 3 {
-                return Err(cerr!(line, "`tally` takes 3 arguments, got {}", args.len()));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let key_ty = match self.base(&at) {
-                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => (*k).clone(),
-                Type::Err => return Ok(Type::Err),
-                Type::Map(_, v) => {
-                    return Err(cerr!(
-                        line,
-                        "`tally` counts Int64 values, and this map holds {v}"
-                    ))
-                }
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`tally` needs a Map<K, Int64> as its receiver, found {other}"
-                    ))
-                }
-            };
-            let k = self.expr(&args[1], scope, Some(&key_ty), fn_ret)?;
-            if !self.coercible(&self.base(&k), &self.base(&key_ty)) {
-                return Err(cerr!(
-                    line,
-                    "the map is keyed by {key_ty}, but the `tally` key is {k}"
-                ));
-            }
-            self.prove_coercion(&args[1], &key_ty, line)?;
-            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`tally` count is {n}, not an Int64"));
             }
             return Ok(at);
         }
@@ -12521,6 +12457,29 @@ mod tests {
     fn a_moved_name_is_declarable_again() {
         let src = "fn contains(s: String, n: String) -> Bool { return s == n } \
                    fn main() -> Int64 { if contains(\"a\", \"a\") { return 1 } return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// The census held `@reserve` and `@tally` back because their blocks
+    /// answered `Ok(at)` — the receiver's OWN type — where the rows answer
+    /// `Array<T>` and `Map<K, Int64>`, so a `type Buf = Array<Int64>` receiver
+    /// was said to stop being a `Buf`. It does not. An `Array` is covariant in
+    /// its element and a `Named` decays to its base, so the rebuilt value goes
+    /// back into the binding through the same coercion every other assignment
+    /// takes. This is the program the census's reason said would break
+    /// (RFC-0125 §3 M6).
+    #[test]
+    fn a_rebuilt_receiver_keeps_its_alias() {
+        let src = "type Buf = Array<Int64> \
+                   type Counts = Map<String, Int64> \
+                   type Box = { b: Buf, c: Counts } \
+                   fn fill(b: Buf) -> Int64 { return b.length } \
+                   fn main() -> Int64 { \
+                       let mut x = Box { b: [], c: [:] } \
+                       x.b.reserve(8) \
+                       x.b.push(3) \
+                       x.c.tally(\"k\", 5) \
+                       return fill(x.b) + x.c.keys().length }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 

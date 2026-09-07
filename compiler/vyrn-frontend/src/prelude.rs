@@ -60,7 +60,9 @@
 //! followed (`fromArray`, `fromStep`, `close`, `boxStream`, `serveStream`,
 //! `@join`, 123 lines and 15 refusals): their blocks did not check the
 //! `consume` their rows carry, so the deletion ADDS `region_consume_guard` to
-//! those calls, which a corpus pass priced at nothing.
+//! those calls, which a corpus pass priced at nothing. `@reserve` and `@tally`
+//! followed (60 lines and 8 refusals): the census held them back over a claim
+//! about an alias that no program can make true.
 //!
 //! The deletion also found the drift a second statement always risks:
 //! `floatBits` said `UInt64` in its block and `Int64` on its row, and
@@ -371,6 +373,14 @@ fn rows() -> Vec<Function> {
         // reallocated) buffer, and the statement form writes it back.
         // `append` reads its source: the elements are copied, and the checker
         // holds the element type to ones a byte copy is correct for.
+        //
+        // `@reserve` types its whole call here since RFC-0125 §3 M6. The block
+        // it replaced answered the receiver's OWN type rather than `Array<T>`,
+        // and the census held the deletion back for that: `type Buf =
+        // Array<Int64>` was said to stop being a `Buf`. It does not. An `Array`
+        // is covariant in its element and a `Named` decays to its base, so the
+        // rebuilt value goes back into the binding through the coercion every
+        // other assignment takes.
         row(
             "@reserve",
             &["T"],
@@ -547,7 +557,9 @@ fn rows() -> Vec<Function> {
             &[],
         ),
         // `m.tally(k, n)` (RFC-0116): insert-or-add on a count map, one probe.
-        // The key is READ — a hit keeps the key the map already has, a miss
+        // This row types the whole call since RFC-0125 §3 M6, for the reason on
+        // `@reserve` above. The key is READ — a hit keeps the key the map
+        // already has, a miss
         // copies this one in — and the value type is pinned to `Int64`, which
         // is what makes the add spellable in a signature. The key type is any
         // legal one (RFC-0117).
