@@ -13065,6 +13065,13 @@ impl<'p> Fn_<'_, 'p> {
         // Reusing `bind_payload` costs one local or slot that nothing else reads,
         // and buys the four payload shapes (direct, extended, inline pair, boxed)
         // already being right here because they are right in `match`.
+        //
+        // The box question is `match`'s, so it is asked in `match`'s words: a
+        // `?` IS a switch, the core lowers it as one, and the success arm reads
+        // the payload out of the box exactly as an arm binder does. Passing
+        // `false` here was the whole of the `?` residue — every successful
+        // `parseJson` left the box its `Ok` payload came in.
+        let free_box = self.frees_boxes(e, at);
         let place = self.bind_payload(
             b,
             addr,
@@ -13073,7 +13080,7 @@ impl<'p> Fn_<'_, 'p> {
             0,
             &ok_ty,
             line,
-            false,
+            free_box,
         )?;
         match place {
             Place::Local(l) => {
