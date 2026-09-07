@@ -244,10 +244,6 @@ pub struct ArgTemp {
     /// What the callee does with it, decided after the walk: the retention set
     /// is only closed over the call graph when every body has been read.
     pub verdict: ArgVerdict,
-    /// The function (or `test@i`/`bench@i` body) the site lives in — what lets
-    /// `plan.unconsumed` skip rows whose owner an emission never reached
-    /// (RFC-0114 §26's finish check).
-    pub owner: String,
     /// Round twenty: the callee is a VIEW whose result for this argument is a
     /// copy — the element type owns no heap, so the scalar the view hands out
     /// cannot alias the temporary. `bytes(l)[0]` in a line loop was one
@@ -374,8 +370,6 @@ pub struct StoreEv {
     /// untake fold needs: a CONDITIONAL revive must not qualify.
     pub branch: Vec<u32>,
     pub kind: EvKind,
-    /// The enclosing function — see [`ArgTemp::owner`].
-    pub owner: String,
 }
 
 pub enum EvKind {
@@ -2013,7 +2007,6 @@ impl MoveCheck<'_> {
             loops: self.loop_ids.borrow().clone(),
             branch: self.branch_ids.borrow().clone(),
             kind,
-            owner: self.cur_fn.borrow().clone(),
         });
     }
 

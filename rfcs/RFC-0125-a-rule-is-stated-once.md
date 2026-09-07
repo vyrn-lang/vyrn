@@ -12112,6 +12112,13 @@ moved**); `--release --test genwasm -- --ignored` with a fresh
 to date); the site export (82 routes and 14 assets) and `vyrn test` per site
 file (**189 test blocks**).
 
+**The row stops naming its function.** The finish check was the only reader of
+`ArgTemp::owner` and `StoreEv::owner` — the enclosing function name, which let
+`plan.unconsumed` skip rows whose owner no emission reached. With the check
+deleted, the two fields and the two writes that filled them go: 7 lines from
+`movecheck.rs` and 1 from `core.rs`. The structural census falls **1,755 →
+1,748** placement rows, and no other kind moves.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

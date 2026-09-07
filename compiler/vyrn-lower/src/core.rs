@@ -3198,7 +3198,6 @@ impl<'a> Builder<'a> {
             producer,
             kind,
             verdict: mc::ArgVerdict::Unknown,
-            owner: self.func_name.clone(),
             view_copies,
             elem_producers,
         };
