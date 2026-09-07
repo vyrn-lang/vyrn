@@ -355,9 +355,9 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     has("branch           reclaimed at block exit — freeing the String buffer");
     has("given            reclaimed at block exit — freeing the String buffer");
     has("alias            reclaimed at block exit — freeing the String buffer");
-    // A `region` is no longer one of the reasons. `own` answered
-    // `Leak::Region` for a dynamic String bound inside one, which claimed for
-    // the arena every block the frame minted at that depth, a callee's
+    // A `region` is no longer one of the reasons. The core answered "the arena
+    // owns it" for a dynamic String bound inside one, which claimed for the
+    // arena every block the frame minted at that depth, a callee's
     // included; the ownership test is the block header and `free` states it
     // once, so the walk asks for this binding like any other and the arena
     // refuses the ones that are its (RFC-0125 §3 M4, the region triage).
@@ -861,9 +861,10 @@ const ROWS: &[Row] = &[
               and the in-place append each free an operand the expression itself \
               allocated. Safe because all four COPY out of their operands, and because \
               `@str` and `@concat` cannot be shadowed — the lexer produces no leading \
-              `@`, which is the argument `ban_append_expr` already stands on. Inside a \
-              `region` the buffer is the arena's and this stands aside, the way the \
-              block-exit release does. En route it settled a DIVERGENCE: `@str` of a \
+              `@`, which is the argument `ban_append_expr` already stands on. It stood \
+              aside inside a `region` until the region triage; the arena refuses its own \
+              blocks at `free`, so the operand is handed back at every depth. En route it \
+              settled a DIVERGENCE: `@str` of a \
               String was the identity on the direct backend and a strdup on the textual \
               one, so a lone hole — `let t = \"\\{s}\"`, no literal piece and therefore \
               no `@concat` above it — released one buffer twice on wasm and copied on \
@@ -922,20 +923,22 @@ const ROWS: &[Row] = &[
         export: "regionArena",
         census: "RFC-0004 §4",
         today: Shape::Steady,
-        why: "the arena. `own` answers `Leak::Region` for every dynamic String bound inside a \
-              `region`, on every backend, because the arena is supposed to own it — and this \
-              backend had no arena. `region_exit` bumped a counter and reclaimed nothing, on \
+        why: "the arena. Every dynamic String bound inside a `region` is the arena's to \
+              reclaim, and this backend had no arena. `region_exit` bumped a counter and reclaimed nothing, on \
               the recorded argument that `malloc` here never freed either, which stopped \
               being true at M6. So the one construct built for bounded memory was the one \
               construct that made this target unbounded: an audit measured 13.4 MB native \
               against 3,664.5 MB and `out of memory` under wasmtime, for 20,000 turns of a \
               concatenation loop inside a region — and after the arena, 27.7 MB and a clean \
-              exit. `region_keep` records what a lexically-inside-a-region expression \
-              allocated, `rt.region_free` hands the frame's blocks back at the closing brace, \
+              exit. `arena_route` routes what a lexically-inside-a-region allocation asks \
+              for, `rt.region_free` hands the frame's blocks back at the closing brace, \
               and `rt.region_pop` leaves them alone on the one edge that carries one out. \
               Lexical routing, like the textual backend's: routing on the RUNTIME depth would \
               put a callee's String in a caller's arena, where the escape guard never looked. \
-              Take `region_keep` out and this row leaks",
+              The release side asks nothing about the depth since RFC-0125 §3 M4's region \
+              triage — `free` refuses an arena block by the class word in its header — so \
+              this row measures the arena and nothing else. Take `arena_route` out and this \
+              row leaks",
     },
     Row {
         export: "regionCopy",
@@ -947,12 +950,12 @@ const ROWS: &[Row] = &[
               this one routed at the EXPRESSION, keeping the value of a node `own::str_temporary` \
               said yes to. A `copy` is not one of those nodes and its buffer is not the node's \
               value, it is one level down, so `let t = s.copy()` inside a region was the arena's \
-              natively and nobody's here: `own` answers `Leak::Region` for `t`, so the walk \
-              stands off, and nothing recorded it. 400,000 turns read 17.5 MB against native's \
-              3.6 MB. The routing is at the allocation on both backends now (`Fn_::str_owned`, \
-              at the sites `Gen::str_alloc` is called from), and the same key partitions the \
-              release side (`Fn_::rel_at`'s `Str` arm), so a block under a container is the \
-              arena's at every depth rather than the arena's and the walk's at once",
+              natively and nobody's here: the walk stood off inside a region and nothing \
+              recorded it. 400,000 turns read 17.5 MB against native's 3.6 MB. The routing is \
+              at the allocation on both backends now (`Fn_::arena_route`, at the sites \
+              `Gen::str_alloc` is called from), and the walk asks for every block it holds — \
+              so a block under a container has one owner, and it is the one the block header \
+              names",
     },
     Row {
         export: "regionRebind",
@@ -997,9 +1000,10 @@ const ROWS: &[Row] = &[
               scrutinee the arms did not keep, and releasing it is what closes the row. \
               `match makeResult(i) { Ok(s) => s.byteLength, .. }` leaked one `Option`'s heap \
               per turn on both compiling backends and the identical `if let` did not — \
-              measured native at 3,000,000 turns, 141.7 MB before and 3.6 MB after. Inside a \
-              `region` the row is not written at all: the arena owns what the region \
-              allocated and the exit hands it back",
+              measured native at 3,000,000 turns, 141.7 MB before and 3.6 MB after. The row \
+              was not written at all inside a `region` until the region triage; the match \
+              releases its temporary at every depth now, and `free` refuses the block if the \
+              arena minted it",
     },
     Row {
         export: "keptForever",
@@ -1332,10 +1336,10 @@ export extern fn consumingLoop() {{
 }}
 
 /// RFC-0004 §4. Three ~900-byte Strings a call, all of them the arena's: the
-/// binding's own row says `Leak::Region`, so the closing brace is the only thing
-/// that can free them. It did not, on this backend, until `region_keep` and
-/// `rt.region_free` — and the numbers that measured the difference are on the
-/// `regionArena` row above.
+/// closing brace is what reclaims them, and the release walk that asks for them
+/// too is refused by the class word in their headers. The brace reclaimed
+/// nothing on this backend until `arena_route` and `rt.region_free` — and the
+/// numbers that measured the difference are on the `regionArena` row above.
 export extern fn regionArena() {{
     region {{
         let a = tag() + "a"
@@ -1346,10 +1350,9 @@ export extern fn regionArena() {{
 }}
 
 /// The same arena, asked about the block a `copy` makes rather than the one a
-/// `+` makes. `own` answers `Leak::Region` for both bindings, so the walk frees
-/// neither and the arena is the only owner either can have — which means a
-/// routing rule that misses the copy is a leak, not a second owner. It missed
-/// it: the expression-level rule read the NODE, and a copy allocates one level
+/// `+` makes. A routing rule that misses the copy leaks it: the block is the
+/// frame's then, and the frame's walk is where it comes back. The rule did miss
+/// it — the expression-level rule read the NODE, and a copy allocates one level
 /// under its node.
 export extern fn regionCopy() {{
     region {{
@@ -1359,15 +1362,13 @@ export extern fn regionCopy() {{
     }}
 }}
 
-/// The price of the same routing, paid in the other direction. Inside a region
-/// `Fn_::place_owns` and `Gen::slot_owns` refuse the store snapshot outright,
-/// because a `String` block is the arena's and the snapshot would free it twice.
-/// The refusal is blunt: an `Array` buffer is NEVER the arena's
-/// (`Gen::array_n_to_heap`), so reassigning a container inside a region hands
-/// its old buffer to nobody. Both backends leak it, which is why this row is a
-/// parity citizen rather than a divergence — and it is measured here so that the
-/// day someone makes the refusal exact, by filtering `Fn_::store_bufs`'s `String`
-/// entry instead of dropping the whole snapshot, this row flips and says so.
+/// The price of the same routing, paid in the other direction. The store
+/// snapshot inside a region was refused outright, because a `String` block was
+/// read as the arena's and the snapshot would free it twice. The refusal was
+/// blunt: an `Array` buffer is NEVER the arena's (`Gen::array_n_to_heap`), so
+/// reassigning a container inside a region handed its old buffer to nobody. The
+/// snapshot asks for every buffer now and `free` refuses the arena's, which is
+/// what this row measures.
 export extern fn regionRebind() {{
     region {{
         let mut xs: Array<Int64> = []

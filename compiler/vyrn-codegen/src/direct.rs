@@ -2849,7 +2849,7 @@ impl<'p> Fn_<'_, 'p> {
     /// scratch doc says so itself — "a nested expression evaluates to completion
     /// before the outer one touches scratch" is exactly what is false here.
     fn tee_str_temp(&mut self, b: &mut Frame, e: &Expr) -> Option<u32> {
-        if self.region_depth > 0 || !vyrn_frontend::own::str_temporary(e) {
+        if !vyrn_frontend::own::str_temporary(e) {
             return None;
         }
         let l = b.local(ValType::I32);
@@ -3857,9 +3857,10 @@ impl<'p> Fn_<'_, 'p> {
     // (`store_owned_at`), folded once in `own::analyze` from module-state
     // rule 4 and the droppable rows — the same two ways to own it tested,
     // read from one artifact instead of two per-binding registries. The
-    // region caveat its doc carried (a String reassigned in module state
-    // inside a `region` must not free arena memory) is the emission-side
-    // `region_depth` gate, unchanged.
+    // region caveat its doc carried — a String reassigned in module state
+    // inside a `region` must not free arena memory — is gone with the rest of
+    // the lexical region rule: `free` refuses an arena block by the class word
+    // in its header, so the store snapshots and releases at every depth.
 
     /// The address of `p` plus `off`, in a fresh local. A wasm local holding an
     /// aggregate holds its ADDRESS, which is the one case [`Place::addr`] cannot
@@ -4383,6 +4384,13 @@ impl<'p> Fn_<'_, 'p> {
                     Place::Static(_) => self.cx.gappend.get(name).copied().map(Place::Static),
                     Place::Slot(_) => None,
                 };
+                // The ONE thing a `region` is still asked, and it is not a
+                // question about ownership: the arena is a bump with no
+                // `realloc`, so a `String` it handed out cannot GROW in place.
+                // The take-ownership append stays refused inside a region on
+                // both backends, which is what `Fn_::arena_route`'s site table
+                // records for `Gen::emit_str_append`, and the general store
+                // below copies instead.
                 if self.region_depth == 0 {
                     if let Some(own) = shadow {
                         if let Some(parts) = crate::self_append_spine(name, value) {
@@ -6551,7 +6559,9 @@ impl<'p> Fn_<'_, 'p> {
     /// consumed, on the edge where they are still this frame's. A declared
     /// `impl Owned` release is skipped — its body is user code whose timing
     /// all three engines must agree on, and the RFC refuses to put it on an
-    /// edge. Inside a `region` the memory is the arena's, as everywhere else.
+    /// edge. A `region` is not asked: the arena refuses its own blocks at
+    /// `free`, and an `Array` or a `Map` bound inside one was never the
+    /// arena's — this edge used to hand both to nobody.
     fn emit_edge_releases(
         &mut self,
         m: &mut Module,
@@ -6560,9 +6570,6 @@ impl<'p> Fn_<'_, 'p> {
         edge: u32,
         line: usize,
     ) -> Result<(), String> {
-        if self.region_depth != 0 {
-            return Ok(());
-        }
         for (name, t) in ers {
             if *t != edge {
                 continue;
@@ -14302,10 +14309,11 @@ impl<'p> Fn_<'_, 'p> {
                 .ok_or_else(|| gap("`remove` on a non-map binding", line))?;
             b.ins(&Instruction::LocalSet(hdr));
             // An entry a `remove` drops is unreachable afterwards whoever owns
-            // the map, and nothing aliases it (RFC-0092 M2 made `keys()` copy),
-            // so only the arena is asked: inside a `region` it owns the block.
-            let owns = self.region_depth == 0;
-            (hdr, ty, owns)
+            // the map, and nothing aliases it (RFC-0092 M2 made `keys()` copy).
+            // A `region` is not asked here either: a `String` key routed into
+            // the arena comes back refused, and a `Map<String, Array<Int>>`
+            // built inside one holds buffers the arena never had.
+            (hdr, ty, true)
         } else {
             let ty = self.expr(m, b, &args[0])?;
             let hdr = b.local(ValType::I32);
