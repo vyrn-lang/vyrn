@@ -376,6 +376,17 @@ impl Owned {
         self.linear_kind(ty).is_some()
     }
 
+    /// The program's nominal declarations, read once when this table was built.
+    ///
+    /// [`crate::types::decl_map`] CLONES every declaration of the program, and a
+    /// pass that calls it per node pays the whole program's type table at every
+    /// node. This table already holds that map — every rule above resolves
+    /// through it — so a pass that has an `Owned` has the declarations too, and
+    /// has them once (RFC-0125 §3 M3, the placer's cost).
+    pub fn types(&self) -> &HashMap<String, TypeDecl> {
+        &self.types
+    }
+
     /// Whether `ty` transitively owns heap, against this program's declarations.
     ///
     /// Not the same question as [`Owned::release_kind`] answering `Some`, and

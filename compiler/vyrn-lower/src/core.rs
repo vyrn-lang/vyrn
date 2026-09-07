@@ -2000,7 +2000,7 @@ impl<'a> Builder<'a> {
                         t
                     }
                 };
-                let decls = vyrn_frontend::types::decl_map(self.program);
+                let decls = self.proto.types();
                 let streaming =
                     matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Stream(_));
                 if streaming {
@@ -2178,7 +2178,7 @@ impl<'a> Builder<'a> {
     /// the one answer they read is this one.
     fn fresh_str(&self, ty: &Type, value: &Expr) -> bool {
         matches!(
-            vyrn_frontend::types::resolve(ty, &vyrn_frontend::types::decl_map(self.program)),
+            vyrn_frontend::types::resolve(ty, self.proto.types()),
             Type::Str
         ) && matches!(
             value,
@@ -2357,12 +2357,12 @@ impl<'a> Builder<'a> {
     }
 
     fn is_map(&self, ty: &Type) -> bool {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         matches!(vyrn_frontend::types::resolve(ty, &decls), Type::Map(..))
     }
 
     fn field_ty(&self, ty: &Type, field: &str, line: usize) -> Result<Type, Gap> {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let rt = vyrn_frontend::types::resolve(ty, &decls);
         match rt {
             Type::Record(fields) => fields
@@ -2380,7 +2380,7 @@ impl<'a> Builder<'a> {
     }
 
     fn elem_ty(&self, ty: &Type, line: usize) -> Result<Type, Gap> {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         match vyrn_frontend::types::resolve(ty, &decls) {
             Type::Array(e) | Type::ArrayN(e, _) | Type::SmallArray(e, _) | Type::Stream(e) => {
                 Ok(*e)
@@ -2564,7 +2564,7 @@ impl<'a> Builder<'a> {
         from: Option<Name>,
         out: &mut Vec<St>,
     ) -> Result<Vec<Name>, Gap> {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let rt = vyrn_frontend::types::resolve(sty, &decls);
         let payloads: Vec<(String, Type)> = match p {
             Pattern::Other => Vec::new(),
@@ -2835,7 +2835,7 @@ impl<'a> Builder<'a> {
             _ => Vec::new(),
         };
         // A view LENDS, unless the element it hands out is a heap-free copy.
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let view_copies = mc::lends_result(callee)
             && matches!(
                 vyrn_frontend::types::resolve(&ty, &decls),
@@ -2886,7 +2886,7 @@ impl<'a> Builder<'a> {
         let Some(n) = self.lookup(callee) else {
             return false;
         };
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let Type::Fn(ps, r) =
             vyrn_frontend::types::resolve(&self.body.names[n as usize].ty, &decls)
         else {
@@ -2906,7 +2906,7 @@ impl<'a> Builder<'a> {
         else {
             return None;
         };
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let bt = self.ty_of(base).ok()?;
         let Type::Record(fields) = vyrn_frontend::types::resolve(&bt, &decls) else {
             return None;
@@ -3025,7 +3025,7 @@ impl<'a> Builder<'a> {
                 // it is not module state anything reads out of.
                 None if self.program.functions.iter().any(|f| &f.name == name)
                     || self.program.contracts.iter().any(|c| &c.name == name)
-                    || vyrn_frontend::types::decl_map(self.program).contains_key(name)
+                    || self.proto.types().contains_key(name)
                     || name == "None"
                     || self.is_variant(name) =>
                 {
@@ -3113,7 +3113,7 @@ impl<'a> Builder<'a> {
         let Expr::Lambda { params, body, line } = e else {
             return Ok(());
         };
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let ptys: Vec<Type> = match self.ty_of(e).ok() {
             // A `lazy T` field's initializer is a nullary closure (RFC-0085).
             Some(t) if vyrn_frontend::types::deferred(&t).is_some() => Vec::new(),
@@ -3352,10 +3352,7 @@ impl<'a> Builder<'a> {
                 let concat = matches!(op, BinOp::Add)
                     && self.ty_of(e).is_ok_and(|t| {
                         matches!(
-                            vyrn_frontend::types::resolve(
-                                &t,
-                                &vyrn_frontend::types::decl_map(self.program)
-                            ),
+                            vyrn_frontend::types::resolve(&t, self.proto.types()),
                             Type::Str
                         )
                     });
@@ -3560,7 +3557,7 @@ impl<'a> Builder<'a> {
                 let tid = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
-                let decls = vyrn_frontend::types::decl_map(self.program);
+                let decls = self.proto.types();
                 // A DECLARED `Fallible` enum (RFC-0080 M3) asks its impl; the two
                 // built-in sums have tags, and since RFC-0126 §8.11's M4b they
                 // resolve to variant lists too — so the test is which list it is,
@@ -3787,7 +3784,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<St>,
     ) -> Result<Rhs, Gap> {
         // The capability of each argument position, by who the callee is.
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         let scalar = matches!(
             name,
             "Int64"
@@ -3946,7 +3943,7 @@ impl<'a> Builder<'a> {
     }
 
     fn is_variant(&self, name: &str) -> bool {
-        let decls = vyrn_frontend::types::decl_map(self.program);
+        let decls = self.proto.types();
         decls.values().any(|d| {
             vyrn_frontend::types::declared_variants(&d.base)
                 .is_some_and(|vs| vs.iter().any(|v| v.name == name))
