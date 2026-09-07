@@ -531,10 +531,9 @@ fn sections() -> Vec<Section> {
             "which type constructors may appear in an `extern` signature",
         ),
         sec(
-            "fn contains_drop(b: &Block) -> bool {",
+            "fn expr_contains_spawn(e: &Expr) -> bool {",
             Surface,
-            "two whole-tree searches, one arm per form each: does this body \
-             `drop`, does it `spawn`",
+            "a whole-tree search, one arm per form: does this body `spawn`",
         ),
         sec(
             "fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {",
@@ -732,12 +731,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3152, 135),
+        ("the typing judgment", 3151, 135),
         ("a rule the checker states", 1455, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 4321, 248),
-        ("shared machinery", 2228, 30),
-        ("tests", 4675, 0),
+        ("one arm per form, type constructor or builtin", 4304, 248),
+        ("shared machinery", 2231, 30),
+        ("tests", 4681, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

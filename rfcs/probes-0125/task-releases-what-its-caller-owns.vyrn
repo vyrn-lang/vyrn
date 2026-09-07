@@ -1,0 +1,23 @@
+/// RFC-0125 §3 M6, the release slice: the hazard, refused by the rule that
+/// owns it.
+///
+/// The task releases a buffer its caller still names. RFC-0089 rule 2 refuses
+/// it in its own words — `xs` (line 1) is released although the body does not
+/// own it — and it refuses the same body with the `spawn` taken off, which is
+/// the whole reason the spawn rule needed no copy of it.
+fn work(xs: Array<Int64>) -> Int64 {
+  drop xs
+  return 1
+}
+
+fn size(xs: Array<Int64>) -> Int64 {
+  return xs.length
+}
+
+fn main() -> Int64 {
+  let mut xs: Array<Int64> = []
+  xs.push(1)
+  let t = spawn work(xs)
+  let n = size(xs)
+  return t.join() + n
+}

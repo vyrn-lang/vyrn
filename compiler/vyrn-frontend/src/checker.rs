@@ -715,10 +715,13 @@ fn check_accum_inner(
             // An `extern` (RFC-0012) is a host effect (I/O by definition), so it is
             // never spawn-safe — and any function that calls one becomes unsafe
             // transitively through the fixpoint below.
+            //
+            // A `drop` in the body was a fifth condition until RFC-0125 §3 M6's
+            // release slice: it refused only bodies the ownership judgment
+            // already refuses, and it refused correct ones beside them.
             !f.is_extern
                 && no_modify
                 && !calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
-                && !contains_drop(&f.body)
                 && !touches_globals(f, &global_names)
         })
         .map(|f| f.name.clone())
@@ -9609,8 +9612,7 @@ impl<'a> Checker<'a> {
                 }
             })
             .cloned();
-        let forbidden = calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
-            || matches!(body, LambdaBody::Block(b) if contains_drop(b));
+        let forbidden = calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()));
         self.stored_sources.borrow_mut().push(StoredSource {
             sig: sig.clone(),
             named: None,
@@ -10526,23 +10528,6 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
         Type::Unit => allow_unit,
         _ => false,
     }
-}
-
-/// Whether a block contains a `drop` statement anywhere (including nested blocks).
-/// Used by spawn-safety: `drop` can release a shared `Ref`, so a task must not.
-fn contains_drop(b: &Block) -> bool {
-    b.stmts.iter().any(|s| match s {
-        Stmt::Drop { .. } => true,
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => contains_drop(then_block) || else_block.as_ref().is_some_and(contains_drop),
-        Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
-            contains_drop(body)
-        }
-        _ => false,
-    })
 }
 
 /// Whether an expression tree uses `spawn` anywhere.
@@ -13288,17 +13273,23 @@ mod tests {
         assert!(e.contains("isolated (pure)"), "{e}");
     }
 
+    /// A task may release what it owns — RFC-0125 §3 M6, the release slice.
+    ///
+    /// The spawn rule refused this for the reason its comment gave: "`drop`
+    /// reclaims storage the spawning frame may still name". It does not. `a` is
+    /// born in this body, no caller ever named it, and the release is the
+    /// body's own. The hazard the comment described is a release of something
+    /// the frame does NOT own, and RFC-0089 rule 2 refuses that in its own
+    /// words — `xs` (line 1) is released although the body does not own it —
+    /// with or without a `spawn` anywhere near it.
     #[test]
-    fn rejects_spawn_of_function_that_drops() {
-        // `drop` reclaims storage the spawning frame may still name, so a task
-        // must not contain it — even though `drop` is a statement, not a call.
-        let e = check_src(
+    fn a_task_may_release_what_it_owns() {
+        assert!(check_src(
             "fn work(n: Int64) -> Int64 { let mut a: Array<Int64> = [] \
              a.push(n) let v = a[0] drop a return v } \
              fn main() -> Int64 { let t = spawn work(1); return t.join(); }",
         )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
+        .is_ok());
     }
 
     // ---- modify capability ----------------------------------------------

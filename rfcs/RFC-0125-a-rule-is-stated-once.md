@@ -15609,6 +15609,90 @@ checks the rest`, `compiler/vyrn-frontend/src/checker.rs` (+16),
 `compiler/vyrn-cli/tests/checker_census.rs`, three probes under
 `rfcs/probes-0125/`, and this record.
 
+#### A task may release what it owns (2026-09-07)
+
+The ranked list's fifth item names two non-effect conditions the spawn rule
+keeps: a `modify` parameter and a `drop` in the body. This slice takes the
+second, and it does not move it anywhere — it deletes it, because the rule was
+already stated and stated better.
+
+**What the condition said.** `contains_drop` searched a body for `Stmt::Drop`
+and its comment gave the reason: "`drop` can release a shared `Ref`, so a task
+must not". Path B is gone — RFC-0004 §Q4's own text says the `cell`/`set`/
+`release` refusals went with it and §5.4 says there is no slab — so the shared
+`Ref` the sentence names does not exist. The test beside it gave a second
+reason: "`drop` reclaims storage the spawning frame may still name".
+
+**That second reason is a real hazard, and it is RFC-0089 rule 2's.** The probe
+is three lines: a callee that releases a parameter, and a caller that reads the
+buffer afterwards.
+
+| probe | what refuses it |
+|---|---|
+| `probes-0125/task-releases-what-its-caller-owns.vyrn` — the task releases a buffer its caller still names | the ownership judgment: **`xs` (line 1) is released although the body does not own it** |
+| the same body with the `spawn` taken off — an ordinary call | the same refusal, the same words, the same line |
+| a `read` parameter released instead | the same refusal |
+| `probes-0125/task-releases-what-it-owns.vyrn` — the task builds an array and releases it | the spawn rule, and nothing else. **This is a correct program** |
+
+The last row is the whole slice. Every body the `drop` search refused divides
+in two: those that release something the frame does not own, which RFC-0089
+rule 2 refuses with or without a `spawn` anywhere near them, and those that
+release what they own, which nobody else refuses because there is nothing to
+refuse. The search bought no refusal and cost one.
+
+**Why the ownership rule is enough, and not a coincidence.** A spawn argument is
+not moved — `spawn work(xs)` followed by `size(xs)` in the caller checks, which
+this slice measured before it deleted anything — so the caller does keep
+naming what it hands a task. That is exactly the case rule 2 governs: the callee
+holds a borrow, and a release of a borrow is refused at the callee, by name and
+by line. The spawn rule was asking a question whose answer it did not need,
+because the answer is the same for every caller.
+
+**`close` was the same argument, one slice earlier.** The four-names slice took
+`close` off `SPAWN_FORBIDDEN` because the must-use judgment refuses the double
+disposal and the list refused the single correct one. This is that argument for
+the statement rather than the builtin, and the two are the same rule: **who owns
+the value is the ownership judgment's question, and the isolation rule has no
+second answer to it.**
+
+**The licence.** The whole-stderr corpus diff over the same 419 programs, and
+the four probes, because the corpus does not reach this rule either — no corpus
+program spawns a callee holding a `drop`.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,285 | 16,276 |
+
+**What this leaves the spawn rule.** The previous record counted three
+conditions that are not effects. Module state became a row of the lattice, and
+`drop` is gone. **One is left: a `modify` parameter**, and the next record says
+what it costs.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | one arm per form, type constructor or builtin | 4,321 lines | 4,304 | `contains_drop` is gone; the section is `expr_contains_spawn`'s alone now, one search instead of two |
+| | the typing judgment | 3,152 | 3,151 | the lambda source's `forbidden` flag loses its `drop` half |
+| | shared machinery | 2,228 | 2,231 | the seed says where the fifth condition went |
+| | tests | 4,675 | 4,681 | `rejects_spawn_of_function_that_drops` is `a_task_may_release_what_it_owns`, and it carries the reason |
+| RFC-0127 §3 | `Stmt::Drop` | checker 7, row 26 | checker 6, row **25** | the form is at the statement floor now: every one of its 25 mentions is a walk that recurses, and no pass decides anything about it but `own` |
+| | `Stmt::If`, `Stmt::While`, `Stmt::ForIn`, `Stmt::Region` | checker 9, 9, 10, 9 | 8, 8, 9, 8 | the deleted search had an arm for each |
+| | the total | 1,391 mentions | 1,386 | |
+| RFC-0126 §3 | — | unmoved | the slice names no type constructor |
+
+`Stmt::Drop` reaching the floor is the honest measure of this slice, and it is
+RFC-0127 §3's own thesis read backwards: a form costs one arm in every walk, so
+a walk deleted is one arm off every form it visited. Five forms got cheaper
+because one rule stopped existing.
+
+**Commit.** `a task may release what it owns, and the ownership judgment says
+who does`, `compiler/vyrn-frontend/src/checker.rs` (-9),
+`compiler/vyrn-cli/tests/checker_census.rs`, RFC-0127 §3, two probes under
+`rfcs/probes-0125/`, and this record.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
