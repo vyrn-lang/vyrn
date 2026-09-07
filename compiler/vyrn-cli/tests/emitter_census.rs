@@ -247,7 +247,10 @@ fn sections() -> Vec<Section> {
             Decision,
             "THE OPTIMIZER. A loop whose header proves an array's base and count \
              invariant has its walk hoisted out of the body and cached. §2.3: \
-             \"The emitter carries no optimizer, ever\"",
+             \"The emitter carries no optimizer, ever\" — and M1 measured this \
+             one and kept it (nbody under V8, 2.97 s to 2.16 s). It is filed \
+             here because the sentence is the sentence; what moves it is the \
+             core making a loop-invariant header a named place, not a deletion",
         ),
         sec(
             "fn emit_releases(",

@@ -7983,11 +7983,18 @@ expected.**
    sites.** Two recursive type walks of about 430 lines each — one deciding what
    RELEASING a type means, one deciding what COPYING it means — then the
    coercion ladder, the `?`/`??`/`if let` rewrite, and an optimizer.
-4. **The emitter carries an optimizer.** §2.3 says "The emitter carries no
-   optimizer, ever". `Fn_::hoist_walks` hoists a loop's array walk out of the
-   body when `header_invariant` proves the header's base and count invariant,
-   and `each_expr`/`each_stmt` are the walks that proof needs. 311 lines of
-   loop-invariant code motion, in the file that says it does none.
+4. **The emitter carries an optimizer, and M1 put it there on a
+   measurement.** §2.3 says "The emitter carries no optimizer, ever".
+   `Fn_::hoist_walks` hoists a loop's array walk out of the body when
+   `header_invariant` proves the header's base and count invariant on the
+   SYNTAX, and `each_expr`/`each_stmt` are the walks that proof needs — 311
+   lines of loop-invariant code motion in the file that says it does none. It
+   is not stray: M1's record measures it, and nbody under V8 goes 2.97 s to
+   2.16 s with it. So the census files it under the sentence it breaks and the
+   ranked list below does NOT put it first: what removes it is the core making
+   a loop-invariant header a named place, which is M1's own thesis and
+   `vyrn-lower`'s file. Deleting it here would cost the web route 27 % and
+   state the rule nowhere.
 
 **What leaves first, ranked, with the licence each needs.** The licence method
 is the M3 records': a deletion that is "the same wasm from one place" is shown
@@ -7998,14 +8005,14 @@ and `tests/residue.rs` are the behaviour gates either way.
 | # | what | lines | licence |
 |---|---|---|---|
 | 1 | the runtime's numbering machinery — TAKEN below | 142 | byte-identical: the deleted code emitted nothing |
-| 2 | the optimizer (`cached_walk`, `hoist_walks`, `indexed_names`, `header_invariant`) | 311 | moves bytes in every program with an indexed loop, so it needs one reason read at the source and a benchmark: §2.3's claim is that the engine optimizes better, and that claim has never been measured here |
-| 3 | `rel_at`'s recursive release walk | 431 | a release per type, monomorphised and called — a call site changes, so every row with a non-trivial drop moves. Needs the core to name the release, which is M3's own next step |
-| 4 | `copy_at`'s recursive copy walk | 434 | the same shape as 3 and the same licence; the two walk the same structure in opposite orders and say so in their comments |
-| 5 | `Fn_::try_` — `?`, `??`, the optional `if let` | 362 | byte-identical if the rewrite moves to the parser and lowers to the same tree; a moved byte is a finding about which rewrite was right |
-| 6 | `Fn_::coerce`, the coercion ladder | 277 | §2.7 deletes it in both backends; it waits on the typed judgment stating the coercion, so it is M6's, not M3's |
-| 7 | the snapshot family (`snap_at`, `store_bufs`, `store_boxes`) | 140 | byte-identical if the core's store row names the buffers instead of the type being re-read here |
-| 8 | `emit_validation` and `proven` | 121 | waits on a `check` row; §2.3's "does not know what a validated type is" has no other home yet |
-| 9 | `bounds_check` | 62 | the same: the core has no `check` row to tell it |
+| 2 | `rel_at`'s recursive release walk | 431 | a release per type, monomorphised and called — a call site changes, so every row with a non-trivial drop moves. Needs the core to name the release, which is M3's own next step |
+| 3 | `copy_at`'s recursive copy walk | 434 | the same shape as 2 and the same licence; the two walk the same structure in opposite orders and say so in their comments |
+| 4 | `Fn_::try_` — `?`, `??`, the optional `if let` | 362 | byte-identical if the rewrite moves to the parser and lowers to the same tree; a moved byte is a finding about which rewrite was right |
+| 5 | `Fn_::coerce`, the coercion ladder | 277 | §2.7 deletes it in both backends; it waits on the typed judgment stating the coercion, so it is M6's, not M3's |
+| 6 | the snapshot family (`snap_at`, `store_bufs`, `store_boxes`) | 140 | byte-identical if the core's store row names the buffers instead of the type being re-read here |
+| 7 | `emit_validation` and `proven` | 121 | waits on a `check` row; §2.3's "does not know what a validated type is" has no other home yet |
+| 8 | `bounds_check` | 62 | the same: the core has no `check` row to tell it |
+| — | the optimizer (`cached_walk`, `hoist_walks`, `indexed_names`, `header_invariant`) | 311 | NOT ranked: it is a measured win, and a deletion states the rule nowhere. It leaves when the core hoists |
 
 **The first deletion: the runtime's numbering machinery, which had nothing left
 to number (142 lines).** `Rt::slots` was a slot allocator — it handed out a
@@ -8063,6 +8070,20 @@ scaffolding is what this slice found — 142 lines of a mechanism whose job was
 finished, still compiled, still tested, and holding a test that asserted things
 about an empty collection. The census exists so the next 142 lines like it are
 found by counting rather than by reading a compiler warning.
+
+**Why there is no second deletion in this slice, said with the numbers.** The
+brief for it expected the fat to be in kind (3) or kind (4), and the count
+refuses both: kind (3) has seven hand-written instructions left in it, and kind
+(4)'s biggest item averages 15 code lines an arm with no sub-family to
+table-drive. Every remaining candidate is in kind (2), and every one of them
+waits on another pass to state the rule first: 2 and 3 need the core to name a
+release and a copy, 4 needs the rewrite to move to the parser, 5 needs the typed
+judgment, 6 needs the store row to name the buffers, 7 and 8 need a `check` row.
+Taking any of them here would move the statement rather than delete it, which is
+the mistake this RFC is named after. The one that needs nobody — the optimizer —
+is the one that is worth 27 % on the web route, so it waits for the core to hoist
+instead. The census is what makes that answer checkable rather than an opinion:
+the next reader can run the table and see the same nine rows.
 
 #### The emitter census's gates (2026-09-07)
 
