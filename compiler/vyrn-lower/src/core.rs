@@ -1079,7 +1079,6 @@ fn build_seeded(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        caps: Default::default(),
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -1180,7 +1179,6 @@ pub fn build_module_state<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        caps: Default::default(),
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1281,7 +1279,6 @@ fn build_outside_seeded<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        caps: Default::default(),
     };
     let mut out = Vec::new();
     b.block(block, &mut out)?;
@@ -1328,9 +1325,6 @@ struct Builder<'a> {
     /// [`last_owner`] decided over the build before it. Empty on the first
     /// build, which is where the candidates come from.
     seed: &'a std::collections::HashSet<usize>,
-    /// The capability of every declared position, built the once a body needs
-    /// it — see [`Builder::arg_released`].
-    caps: std::cell::OnceCell<HashMap<String, Vec<Capability>>>,
 }
 
 impl<'a> Builder<'a> {
@@ -2859,11 +2853,7 @@ impl<'a> Builder<'a> {
         };
         let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
             || self.is_variant(callee);
-        let cap = mc::arg_cap(
-            self.caps.get_or_init(|| mc::arg_caps(self.program)),
-            callee,
-            ix,
-        );
+        let cap = mc::arg_cap(&self.own.arg_caps, callee, ix);
         if mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
             == mc::ArgVerdict::Released
         {

@@ -1364,6 +1364,16 @@ pub struct Ownership {
     /// pass that has read every body can give, and the core asks it at a call
     /// through a fn value, where no capability row answers.
     pub fnval_clear: std::collections::HashSet<String>,
+    /// The capability of every declared position, by callee name — see
+    /// [`crate::movecheck::arg_caps`].
+    ///
+    /// It is a read of the DECLARATIONS and says nothing about a body, so it
+    /// is the same table for every body of the program. The core used to build
+    /// it per body, and a program with hundreds of functions paid the whole
+    /// declaration list once for each of them (RFC-0125 §3 M3, the placer's
+    /// cost). It sits beside `lending` and `retains` because the core asks all
+    /// three at the same position, in [`crate::movecheck::arg_verdict`].
+    pub arg_caps: HashMap<String, Vec<Capability>>,
 }
 
 /// One analysis per build — RFC-0125 §3 M3, the repetition slice.
@@ -1906,6 +1916,7 @@ fn analyze_now(program: &Program) -> Ownership {
         retains: facts.retains.clone(),
         escapers: facts.escapers.clone(),
         fnval_clear: facts.fnval_clear.clone(),
+        arg_caps: crate::movecheck::arg_caps(program),
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
     // this analysis owes and did not place. It runs the lowering, which runs
