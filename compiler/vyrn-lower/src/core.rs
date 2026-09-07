@@ -1017,11 +1017,14 @@ fn refuse<T>(message: String, line: usize) -> Result<T, Gap> {
 /// once (RFC-0125 §3 M3, the third derivation slice).
 pub fn build(program: &Program, inst: &Instance<'_>, own: &Ownership) -> Result<Body, Gap> {
     let none = std::collections::HashSet::new();
+    let b1 = vyrn_frontend::prof::phase("placer: build: first");
     let first = build_seeded(program, inst, own, &none)?;
+    drop(b1);
     let seed = last_owner(&first);
     if seed.is_empty() {
         return Ok(first);
     }
+    let _b2 = vyrn_frontend::prof::phase("placer: build: seeded");
     build_seeded(program, inst, own, &seed)
 }
 

@@ -1437,11 +1437,17 @@ pub fn analyze(program: &Program) -> Ownership {
 }
 
 fn analyze_now(program: &Program) -> Ownership {
+    let _p = crate::prof::phase("own: analyze_now");
+    let ps = crate::prof::phase("own: Owned::new");
     let proto = Owned::new(program);
+    drop(ps);
     // What every `let` in the program still owns where its block ends, decided
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
+    let fs = crate::prof::phase("own: movecheck::facts");
     let mut facts = crate::movecheck::facts(program);
+    drop(fs);
+    let fold = crate::prof::phase("own: the fold");
     let revived = fold_revived(&facts);
     let exit_sites = std::mem::take(&mut facts.exit_sites);
     let lets = facts.lets;
@@ -1875,6 +1881,7 @@ fn analyze_now(program: &Program) -> Ownership {
         alias: Default::default(),
         alias_log: Default::default(),
     };
+    drop(fold);
     let mut ownership = Ownership {
         plan,
         owned_fns,
