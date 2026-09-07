@@ -23,7 +23,11 @@
 //!   - an example with no row must come out clean — new examples do not get
 //!     to leak quietly;
 //!   - a `leak` row that comes out clean, or smaller, passes and says so —
-//!     that is a nudge to shrink the baseline, not an error.
+//!     that is a nudge to shrink the baseline, not an error;
+//!   - a `clean` row that stops exiting 0 fails. Parity used to hold that,
+//!     and parity is gone: a double free through a pointer wrong enough that
+//!     `free` reads its header out of bounds traps before `auditDeath` can
+//!     say anything, so the exit code is the only witness left.
 //!
 //! `other` rows exit nonzero by design (their own exit codes are their
 //! outputs); they pass as long as the audit stays quiet.
@@ -136,12 +140,29 @@ fn judge(
                 )),
             }
         }
-        Some(_) => {
+        Some(0) => {}
+        Some(code) => {
             // The program's own exit code. `other` rows exit nonzero by
             // design; a `leak` row that reaches here came out clean.
-            if let Expect::Leak(_) = expect {
-                *nudges += 1;
-                eprintln!("ratchet: {name} ({engine}) is CLEAN now — move its row to `clean`");
+            //
+            // A `clean` row that stops exiting 0 is a FAILURE, and this rule is
+            // new. The old ratchet let any exit code through because parity ran
+            // beside it and caught a trap; parity is gone, and the defect this
+            // rule catches is the one class the audit cannot report — a double
+            // free through a pointer so wrong that `free` reads its header out
+            // of bounds and traps before `auditDeath` sees it. Reverting the
+            // release-row floor (`403131c9`) is exactly that, on
+            // `examples/looptemp.vyrn`, and nothing else in the corpus moves.
+            match expect {
+                Expect::Leak(_) => {
+                    *nudges += 1;
+                    eprintln!("ratchet: {name} ({engine}) is CLEAN now — move its row to `clean`");
+                }
+                Expect::Clean => failures.push(format!(
+                    "{name} ({engine}): exited {code}, and its row says clean — a clean row \
+                     exits 0, so this is a trap or a refusal the row does not know about\n{err}"
+                )),
+                Expect::Other => {}
             }
         }
         None => failures.push(format!("{name} ({engine}): killed by signal")),
