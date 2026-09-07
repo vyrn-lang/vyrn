@@ -51,8 +51,8 @@ domdemo	clean
 ecs	clean
 encoding	clean
 enum	other
-enumarray	leak	1
-enumcodec	leak	19
+enumarray	clean
+enumcodec	clean
 eventloop	clean
 externdemo2	clean
 fallible	clean
@@ -67,16 +67,16 @@ floats	other
 fnvalarg	clean
 fnvalstore	leak	1
 foreach	other
-freelist	leak	100000
+freelist	other
 gendemo	clean
 genericpayload	clean
 generics	clean
 genref	clean
 gentable	clean
-graphql	leak	21
+graphql	clean
 herofield	clean
 htmlrefuse	other
-htmltree	clean
+htmltree	other
 i18ndemo	clean
 ifexpr	clean
 inlinewhere	clean
@@ -84,22 +84,22 @@ input	clean
 intkeys	clean
 jchain	clean
 jsonbytes	clean
-jsoncodec	leak	2
-jsondecbytes	leak	27
-jsondepth	leak	2
+jsoncodec	other
+jsondecbytes	leak	2
+jsondepth	clean
 jsonplace	clean
 jsonschema	clean
 knucleotide	clean
 lambdas	clean
-langbench	leak	1
+langbench	clean
 lazyfield	clean
-linkedlist	leak	5
+linkedlist	other
 listdir	clean
 logging	clean
 looptemp	clean
 mandelbrot	clean
 map	clean
-mapdemo	leak	7
+mapdemo	leak	5
 mapkey	clean
 mapkeyowned	clean
 matchown	leak	200
@@ -109,15 +109,15 @@ modifyself	clean
 modules	clean
 mustuse	clean
 namedplace	clean
-namespace	leak	1
+namespace	clean
 nbody	clean
-nestedsum	leak	6
+nestedsum	leak	2
 numbytes	clean
 numparse	clean
 option	clean
 ownedcontainer	clean
 ownership	other
-pagesdemo	leak	3
+pagesdemo	clean
 parallel	clean
 patchdemo	clean
 pidigits	clean
@@ -137,7 +137,7 @@ regionarena	clean
 regionescape	leak	1
 releaseacrossexit	clean
 releaseacrosstry	clean
-rest	leak	26
+rest	clean
 revcomp	clean
 rpc	clean
 rpcsplit	clean
@@ -163,7 +163,7 @@ slottable	clean
 smallarray	clean
 spectralnorm	clean
 statemod	clean
-storage	leak	1
+storage	clean
 stream	clean
 streamlazy	clean
 streammove	clean
@@ -178,7 +178,7 @@ templates	clean
 testing	clean
 textbytes	clean
 threeengines	clean
-tree	leak	4
+tree	other
 tryplace	clean
 twdemo	clean
 utility	clean
@@ -188,7 +188,7 @@ validate_store	other
 validate_sum	other
 validatestr	clean
 validation	other
-vlog	leak	7
+vlog	clean
 vondemo	clean
 vyxdemo	clean
-wirekey	leak	3
+wirekey	leak	1
