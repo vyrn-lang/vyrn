@@ -7090,51 +7090,37 @@ impl<'a> Checker<'a> {
             }
             return Ok(Type::Unit);
         }
+        // (RFC-0125 §3 M6 deleted the sixteen arms whose whole behaviour was the
+        // arity, the parameter types and the result of a row in
+        // `prelude::rows`: the ten input/output builtins (`args`, `readLine`,
+        // `readFile`, `readFileBytes`, `writeFile`, `writeFileBytes`,
+        // `writeStdout`, `renameFile`, `fsyncFile`, `stringFromBytes`), the two
+        // directory listings (`listDir`, `listDirKinds`), the two IEEE-754 bit
+        // views (`floatBits`, `floatFromBits`), `parse`, and `@concat`. Each was
+        // a second statement of its row, and the fall-through below states it
+        // once: [`crate::prelude::checkable`] hands over the row and the
+        // ordinary call path types the call against it. What the arms carried
+        // beyond the row was the WORDING of two refusals — "`readFile`
+        // takes 1 argument, got 2" against the generic "`readFile` expects 1
+        // argument, got 2" — and RFC-0094 M1 held them back for exactly that.
+        // Their spans and their refusal counts are the M6 record's table.
+        //
+        // What the deletion FOUND: `floatBits` answered a `UInt64` in the arm
+        // and an `Int64` on its row, and `floatFromBits` took the mirror pair.
+        // Nothing read the wrong half, because both are scalars and every
+        // reading of the row asks about heap. The row says `UInt64` now.
+        //
+        // The remaining arms are the ones a row cannot carry: a gate on where
+        // the call stands (`assert`, `blackBox`, `moduleInterface`,
+        // `contractOf`, the code quotes), a type NAME as an argument
+        // (`schemaOf`, `jsonSchema`, `fromJson`), a result taken from the
+        // context (`unboxStream`, `pullAt`), a parameter that is a union
+        // (`print`, `@str`, `toJson`, `value`, `@push`'s two container kinds,
+        // `bytes`'s two arities), or a refusal about the ELEMENT type
+        // (`@append`, `@copyFrom`, `@clear`), which is a rule and not a
+        // signature. Names with no row at all — `logger`, the log levels,
+        // `lineAt`, `colAt`, `@charCount`, `@toArray` — are the next seed rows.
 
-        // Input I/O effects (RFC-0014). Free builtins like `print`/`logger`; each
-        // joins `SPAWN_FORBIDDEN` and is never constant (`Expr::Call` never folds).
-        // Error payloads are canonical Vyrn wording (never OS text) — the parity
-        // rule; the strings are built at the use site in the interpreter and by
-        // the codegen, kept byte-identical.
-        if name == "args" {
-            if !args.is_empty() {
-                return Err(cerr!(line, "`args` takes no arguments, got {}", args.len()));
-            }
-            return Ok(Type::Array(Box::new(Type::Str)));
-        }
-        if name == "readLine" {
-            if !args.is_empty() {
-                return Err(cerr!(
-                    line,
-                    "`readLine` takes no arguments, got {}",
-                    args.len()
-                ));
-            }
-            return Ok(Type::option(Type::Str));
-        }
-        if name == "readFile" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`readFile` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`readFile` needs a String path, found {t}"));
-            }
-            return Ok(Type::result(Type::Str, Type::Str));
-        }
-        // `listDir(path) -> Result<Array<String>, String>` (RFC-0021 family): the
-        // entry names directly under `path` (no `.`/`..`, unsorted-by-OS order the
-        // interpreter sorts for determinism). At generation time it is mediated
-        // through the loader's resolver and scoped to the generator's path args;
-        // at runtime it lists the real filesystem. Canonical error `cannot list
-        // \`p\``.
         // `lineAt(bytes, off)` / `colAt(bytes, off)` — the 1-based line and
         // column of a byte offset in a UTF-8 buffer (RFC-0033 origin directives
         // are 1-based, and this is what feeds them).
@@ -7200,23 +7186,6 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, "`{name}`'s offset must be an `Int64`"));
             }
             return Ok(Type::Int);
-        }
-        // `listDirKinds(path)` (RFC-0119): `listDir`'s listing with each
-        // directory entry's name carrying a trailing `/`, because `listDir`'s
-        // error cannot tell "not a directory" from "unreadable" and a walker
-        // was listing every subdirectory twice to find out.
-        if name == "listDir" || name == "listDirKinds" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`{name}` needs a String path, found {t}"));
-            }
-            return Ok(Type::result(Type::Array(Box::new(Type::Str)), Type::Str));
         }
         // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
         // reflection over a module's exported surface. It is generation-ONLY —
@@ -7365,187 +7334,6 @@ impl<'a> Checker<'a> {
                 _ => unreachable!(),
             }
         }
-        if name == "writeFile" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`writeFile` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if t != Type::Str {
-                    return Err(cerr!(line, "`writeFile` needs String arguments, found {t}"));
-                }
-            }
-            return Ok(Type::result(Type::Bool, Type::Str));
-        }
-        // RFC-0111: the byte sink. `writeFile` for bytes that are not text —
-        // same create/truncate/write-all, same `Result<Bool, String>`, same
-        // canonical `@.io.writeerr` wording. It exists because a Vyrn `String`
-        // cannot hold a NUL or invalid UTF-8, so a program could compute a
-        // binary artifact and have no way to emit it.
-        if name == "writeFileBytes" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`writeFileBytes` takes 2 arguments (path, bytes), got {}",
-                    args.len()
-                ));
-            }
-            let p = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(p, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if p != Type::Str {
-                return Err(cerr!(
-                    line,
-                    "`writeFileBytes` needs a String path, found {p}"
-                ));
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let b = self.base(&self.expr(&args[1], scope, Some(&want), fn_ret)?);
-            if matches!(b, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if b != want {
-                return Err(cerr!(
-                    line,
-                    "`writeFileBytes` needs an Array<UInt8>, found {b}"
-                ));
-            }
-            return Ok(Type::result(Type::Bool, Type::Str));
-        }
-        // RFC-0111: `print` for bytes. No result, for `print`'s reason — a
-        // write to a closed stdout is not a condition a Vyrn program can act
-        // on, and inventing one here would make the two output builtins
-        // disagree about whether output can fail.
-        if name == "writeStdout" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`writeStdout` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let b = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
-            if matches!(b, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if b != want {
-                return Err(cerr!(
-                    line,
-                    "`writeStdout` needs an Array<UInt8>, found {b}"
-                ));
-            }
-            return Ok(Type::Unit);
-        }
-        // RFC-0044: atomically move `from` over `to` (the host primitive behind
-        // `writeAtomic`). Same error shape as `writeFile` — `Result<Bool, String>`
-        // with canonical `@.io.*` wording.
-        if name == "renameFile" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`renameFile` takes 2 arguments (from, to), got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if t != Type::Str {
-                    return Err(cerr!(
-                        line,
-                        "`renameFile` needs String arguments, found {t}"
-                    ));
-                }
-            }
-            return Ok(Type::result(Type::Bool, Type::Str));
-        }
-        // RFC-0044: flush a file's contents to stable storage (the optional
-        // power-durability upgrade over `writeAtomic`'s crash-consistency).
-        if name == "fsyncFile" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`fsyncFile` takes 1 argument (a path), got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`fsyncFile` needs a String path, found {t}"));
-            }
-            return Ok(Type::result(Type::Bool, Type::Str));
-        }
-        // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
-        if name == "readFileBytes" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`readFileBytes` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(
-                    line,
-                    "`readFileBytes` needs a String path, found {t}"
-                ));
-            }
-            return Ok(Type::result(
-                Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                })),
-                Type::Str,
-            ));
-        }
-        if name == "stringFromBytes" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`stringFromBytes` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != want {
-                return Err(cerr!(
-                    line,
-                    "`stringFromBytes` needs an Array<UInt8>, found {t}"
-                ));
-            }
-            return Ok(Type::result(Type::Str, Type::Str));
-        }
 
         // (`len(String)` was removed — see the migration hint above; its byte
         // length now lives on the `String.length` field, resolved at `Expr::Field`.)
@@ -7556,48 +7344,6 @@ impl<'a> Checker<'a> {
         // states. `slice` carried one line more — it read its return type out of
         // the link, because the type it answers is a std declaration — and that
         // reading is what an ordinary imported call does for free.)
-
-        // The two IEEE-754 bit views (RFC-0078 M4a). `floatBits` is a `Float64`
-        // read as its 64 raw bits and `floatFromBits` is the inverse — not a
-        // numeric conversion, which rounds, but a reinterpretation, which is
-        // one instruction on every engine (`f64::to_bits`,
-        // `bitcast double to i64`, `i64.reinterpret_f64`).
-        //
-        // They are here because they are irreducible. Given them, decimal ->
-        // binary and binary -> decimal are ordinary Vyrn (`std/num`); without
-        // them there is no expression in the language that can BUILD a
-        // `Float64` from anything but another number, which is what blocked
-        // RFC-0078 M3.
-        if name == "floatBits" || name == "floatFromBits" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
-            }
-            let (want, got) = if name == "floatBits" {
-                (
-                    Type::Float,
-                    Type::IntN {
-                        bits: 64,
-                        signed: false,
-                    },
-                )
-            } else {
-                (
-                    Type::IntN {
-                        bits: 64,
-                        signed: false,
-                    },
-                    Type::Float,
-                )
-            };
-            let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != want {
-                return Err(cerr!(line, "`{name}` needs a {want}, found {t}"));
-            }
-            return Ok(got);
-        }
 
         // (RFC-0094 M2 deleted the two codec arms here — three encoders and three
         // decoders, all routed to `std/codecs` since RFC-0078 M4b — and the
@@ -7642,29 +7388,6 @@ impl<'a> Checker<'a> {
                 bits: 8,
                 signed: false,
             })));
-        }
-
-        // Internal string concat (`a + b` on Strings, and interpolation): the
-        // `@concat` spelling is produced by the desugarer / the `+` lowering,
-        // never by user source. Heap-allocated result.
-        if name == "@concat" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`@concat` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                let t = self.base(&self.expr(a, scope, None, fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if t != Type::Str {
-                    return Err(cerr!(line, "`@concat` needs Strings, found {t}"));
-                }
-            }
-            return Ok(Type::Str);
         }
 
         // `@join` — the internal spelling of `t.join()`: await a spawned task.
@@ -7725,19 +7448,6 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(Type::Int);
-        }
-        if name == "parse" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`parse` takes 1 argument, got {}", args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`parse` needs a String, found {t}"));
-            }
-            return Ok(Type::option(Type::Int));
         }
 
         // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
@@ -9121,17 +8831,52 @@ impl<'a> Checker<'a> {
             }
             return Ok(t);
         }
-        let (params, ret) = self
-            .sigs
-            .get(name)
-            .ok_or_else(|| match moved_to_std(name) {
-                Some(module) => cerr!(
-                    line,
-                    "`{name}` is `{module}`'s — add \
+        // A seeded builtin's row is a declaration (RFC-0094: *a builtin's
+        // contract is its signature; the compiler seeds the signature; the
+        // passes read it; there is no second list*), and this is the pass
+        // reading it. A row that spells a type it does not mean answers `None`
+        // — [`crate::prelude::checkable`] says which — and the guarded arms
+        // above still hold those names, so nothing reaches here that the row
+        // cannot type.
+        //
+        // A user declaration WINS: `self.sigs` is asked first, exactly as the
+        // binding lookup at the head of this function shadows a builtin.
+        let seeded = match self.sigs.contains_key(name) {
+            true => None,
+            false => crate::prelude::checkable(name),
+        };
+        let seeded_sig = seeded.map(|f| {
+            (
+                f.params.iter().map(|p| p.ty.clone()).collect::<Vec<Type>>(),
+                f.ret.clone(),
+            )
+        });
+        let (params, ret) = match (self.sigs.get(name), &seeded_sig) {
+            (Some(sig), _) => sig,
+            (None, Some(sig)) => sig,
+            (None, None) => {
+                return Err(match moved_to_std(name) {
+                    Some(module) => cerr!(
+                        line,
+                        "`{name}` is `{module}`'s — add \
                  `import {{ {name} }} from \"{module}\"`"
-                ),
-                None => cerr!(line, "call to unknown function `{name}`"),
-            })?;
+                    ),
+                    None => cerr!(line, "call to unknown function `{name}`"),
+                })
+            }
+        };
+        // The row's other two columns, read the same way: its type parameters
+        // are solved from the arguments like any generic call's, and its
+        // capabilities discipline the call like any declaration's.
+        let seeded_generics = seeded
+            .map(|f| f.type_params.clone())
+            .filter(|tps| !tps.is_empty());
+        let seeded_caps = seeded.map(|f| {
+            f.params
+                .iter()
+                .map(|p| p.capability)
+                .collect::<Vec<Capability>>()
+        });
         if params.len() != args.len() {
             return Err(cerr!(
                 line,
@@ -9142,7 +8887,7 @@ impl<'a> Checker<'a> {
         }
 
         // Generic call: infer the type parameters from the argument types.
-        if let Some(type_params) = self.generics.get(name) {
+        if let Some(type_params) = self.generics.get(name).or(seeded_generics.as_ref()) {
             let mut subst: HashMap<String, Type> = HashMap::new();
             let mut atys: Vec<Type> = vec![Type::Err; args.len()];
             // Pass 1: the ordinary (non-`fn`) arguments bind the type parameters
@@ -9186,7 +8931,7 @@ impl<'a> Checker<'a> {
             // Capability discipline applies to generic calls exactly as to
             // concrete ones (this path used to return early and skip it,
             // letting `f<T>(c: modify C, ..)` mutate immutable bindings).
-            let caps = self.caps.get(name);
+            let caps = self.caps.get(name).or(seeded_caps.as_ref());
             for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
                 match caps.and_then(|c| c.get(i)) {
                     Some(&Capability::Modify) => {
@@ -9246,7 +8991,7 @@ impl<'a> Checker<'a> {
             return Ok(rty);
         }
 
-        let caps = self.caps.get(name);
+        let caps = self.caps.get(name).or(seeded_caps.as_ref());
         for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
             // A `fn`-typed parameter (RFC-0023) takes a lambda, a named function,
             // or a pass-through `fn`-typed parameter — never an ordinary value —
@@ -12885,19 +12630,46 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
+    /// Every refusal these five calls used to get from a hand-written arm, in
+    /// the words the seeded row now gets them (RFC-0125 §3 M6). The arms said
+    /// "`readFile` needs a String path"; the row says which argument and what
+    /// it expects, which is what every user declaration has always said.
     #[test]
     fn io_builtins_reject_wrong_arguments() {
         let e = check_src("fn main() -> Int64 { let r = readFile(5); return 0 }").unwrap_err();
-        assert!(e.contains("`readFile` needs a String path"), "{e}");
+        assert!(e.contains("`readFile` argument 1 expects String"), "{e}");
         let e = check_src("fn main() -> Int64 { let r = writeFile(\"p\"); return 0 }").unwrap_err();
-        assert!(e.contains("`writeFile` takes 2 arguments"), "{e}");
+        assert!(e.contains("`writeFile` expects 2 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let a = args(1); return 0 }").unwrap_err();
-        assert!(e.contains("`args` takes no arguments"), "{e}");
+        assert!(e.contains("`args` expects 0 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let l = readLine(\"x\"); return 0 }").unwrap_err();
-        assert!(e.contains("`readLine` takes no arguments"), "{e}");
+        assert!(e.contains("`readLine` expects 0 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let s = stringFromBytes(\"x\"); return 0 }")
             .unwrap_err();
-        assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
+        assert!(
+            e.contains("`stringFromBytes` argument 1 expects Array<UInt8>"),
+            "{e}"
+        );
+    }
+
+    /// The two bit views, and the drift the deletion found: the arm answered a
+    /// `UInt64` and the row said `Int64`. The row says `UInt64` now, and this
+    /// is the assertion that says which (RFC-0125 §3 M6).
+    #[test]
+    fn the_bit_views_answer_a_uint64() {
+        let src = "fn main() -> Int64 { \
+                       let b: UInt64 = floatBits(1.0) \
+                       let f: Float64 = floatFromBits(b) \
+                       return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+        let e = check_src("fn main() -> Int64 { let b = floatBits(7); return 0 }").unwrap_err();
+        assert!(e.contains("`floatBits` argument 1 expects Float64"), "{e}");
+        let e =
+            check_src("fn main() -> Int64 { let f = floatFromBits(1.5); return 0 }").unwrap_err();
+        assert!(
+            e.contains("`floatFromBits` argument 1 expects UInt64"),
+            "{e}"
+        );
     }
 
     /// The eleven names RFC-0094 M2 gave back, and what a caller who spells one
@@ -13055,9 +12827,9 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
         let e =
             check_src("fn main() -> Int64 { let r = renameFile(\"a\"); return 0 }").unwrap_err();
-        assert!(e.contains("`renameFile` takes 2 arguments"), "{e}");
+        assert!(e.contains("`renameFile` expects 2 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let r = fsyncFile(1); return 0 }").unwrap_err();
-        assert!(e.contains("`fsyncFile` needs a String path"), "{e}");
+        assert!(e.contains("`fsyncFile` argument 1 expects String"), "{e}");
     }
 
     #[test]

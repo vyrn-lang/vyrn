@@ -34,6 +34,7 @@
 //! | the receiver is written through | `Capability::Modify` on parameter 0 | `checker::mut_array_receiver` |
 //! | what the result IS | the return type | `declared::Declared::new` |
 //! | the access site's lowering | the whole row | `crate::project::inline` |
+//! | the call's arity, argument types and result | the whole row | `checker::Checker::call` |
 //!
 //! A row is keyed by the name the **call site carries**, because that is what
 //! every pass matches on: `@push`, `@pop` and `@swapRemove` are the internal
@@ -46,10 +47,18 @@
 //! - **Effects.** `SPAWN_FORBIDDEN` and the lattice's `gen` column are 29 rows and no
 //!   signature in this language carries an effect. That is a language feature,
 //!   not a milestone.
-//! - **Arity and parameter types.** The checker's per-builtin arms already
-//!   refuse on both, with hand-written wording that reads better than anything
-//!   a generic signature check would print. The declared types below are the
-//!   census's, and they are read only where the table above says so.
+//! Arity and parameter types WERE here, and this bullet used to say the
+//! opposite: the checker's per-builtin arms refused on both, "with hand-written
+//! wording that reads better than anything a generic signature check would
+//! print". RFC-0125 §3 M6 counted what the wording cost — sixteen names, 328
+//! lines of `Checker::call` and 26 of its 190 refusals, every one a second
+//! statement of a row below — and deleted the arms. [`checkable`] is the
+//! reading, and the arms that remain are the ones a row cannot carry.
+//!
+//! The deletion also found the drift a second statement always risks:
+//! `floatBits` said `UInt64` in its arm and `Int64` on its row, and
+//! `floatFromBits` said the mirror pair. Nothing read the wrong half because
+//! both are scalars, which is the only reason it survived M1.
 //!
 //! ## Where a declared type is INERT, and how a reader tells
 //!
@@ -177,6 +186,10 @@ fn rows() -> Vec<Function> {
             signed: false,
         })
     };
+    let u64_ = || Type::IntN {
+        bits: 64,
+        signed: false,
+    };
     let step = || Type::Fn(vec![Int, Int, Bool], Box::new(opt(t())));
     vec![
         // ---- the seeded `impl Index for <builtin container>` (RFC-0091 M2) --
@@ -242,8 +255,15 @@ fn rows() -> Vec<Function> {
             Type::result(Str, Str),
             &[],
         ),
-        row("floatBits", &[], &[("x", Read, Float)], Int, &[]),
-        row("floatFromBits", &[], &[("b", Read, Int)], Float, &[]),
+        // The bit pattern is a `UInt64`, not an `Int64`. RFC-0094 M1 wrote
+        // `Int64` on both rows and the checker's arm said `UInt64`, and the two
+        // spellings sat side by side until RFC-0125 §3 M6 read them together —
+        // the same drift `stringFromBytes` had, one type narrower. Nothing read
+        // the wrong half (both are scalars, so `owns_heap` answers alike for
+        // either), which is exactly why it stood: a fact stated twice is only
+        // checked where somebody happens to compare the two statements.
+        row("floatBits", &[], &[("x", Read, Float)], u64_(), &[]),
+        row("floatFromBits", &[], &[("b", Read, u64_())], Float, &[]),
         row("parse", &[], &[("s", Read, Str)], opt(Int), &[]),
         // ---- control (RFC-0079, RFC-0015, RFC-0055) -------------------------
         // `panic` diverges; the language has no `Never`, so the return is spelled
@@ -615,6 +635,29 @@ pub fn signature(name: &str) -> Option<&'static Function> {
         name
     };
     all().iter().find(|f| f.name == name)
+}
+
+/// The row a CALL SITE may be checked against — arity, parameter types and
+/// result — or `None` where the row spells a type it does not mean.
+///
+/// The module comment names the two kinds of inert row, and this is that same
+/// list read as a predicate rather than as prose. A **lending** row cannot name
+/// its result (`at`, `atSet`: the type is the receiver's element). A row with a
+/// `Unit` PARAMETER cannot name its argument — `@str`, `print`, `toJson`,
+/// `jsonSchema`, `schemaOf` and `contractOf` each take a union or a type name,
+/// and no builtin genuinely takes a `Unit` value, so the spelling is the
+/// marker. Everything else on a row is the contract, and
+/// [`crate::checker::Checker::call`] types the call against it exactly as it
+/// types a call against a user declaration (RFC-0125 §3 M6).
+///
+/// This is the reading RFC-0094 M1 held back. Its module comment said arity and
+/// parameter types stayed in the checker's hand-written arms "with wording that
+/// reads better than anything a generic signature check would print", and that
+/// was true of the wording and false of the cost: sixteen names paid 328 lines
+/// and 26 refusals for a sentence the row already carried.
+pub fn checkable(name: &str) -> Option<&'static Function> {
+    let f = signature(name)?;
+    (!lends(name) && !f.params.iter().any(|p| p.ty == Type::Unit)).then_some(f)
 }
 
 /// What each seeded builtin gives back, for the declared-types reading
