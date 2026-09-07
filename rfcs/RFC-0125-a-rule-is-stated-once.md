@@ -15362,6 +15362,54 @@ moved it:
 5. **The spawn fixpoint, 207 lines**, once 2 and 3 land and the reachability
    trade is decided the way finding 7 decided it for the floor.
 
+#### Gates for the three deletions (2026-09-07)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at `C:\wtcdtmp` — a shallow scratch directory outside the checkout,
+because other worktrees gate at the same time and the suites scratch under fixed
+names.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, and no new warning — the nine that stand are the branch point's |
+| `cargo test -p vyrn-cli`, no filter | 586 passed, 36 ignored, no failure |
+| `kernel` `--ignored` | 1, 66 s |
+| `coretables` `--ignored` | 1, 56 s |
+| `typed` `--ignored` | 1, 98 s |
+| `effects` `--ignored` | 2, 97 s |
+| `fixtures` `--ignored` | 1, 37 s |
+| `testsweep` `--ignored` | 1, 118 s |
+| `cargo test -p vyrn-frontend` | 1,166, 5 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,212, 12 ignored |
+| `vyrn-lsp`'s own tests | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 290 s |
+| the residue ratchet | 1, 365 s — **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed**, which is the branch point's row exactly |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — a checker-only change moves no byte, and the slice that touched `direct.rs` touched one pattern |
+| `genwasm`, release, `--ignored`, fresh `VYRN_GEN_CACHE_DIR` | 1, 11 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 26 files |
+
+`checker.rs` across the three slices: **16,339 to 16,269**, seventy lines. By
+census kind, from `tests/checker_census.rs`:
+
+| kind | at `d90b594c` | now | moved by |
+|---|---|---|---|
+| the typing judgment | 3,159 / 135 | 3,152 / 135 | the address comparison in `check_match` |
+| a rule the checker states | 1,525 / 58 | 1,455 / 57 | `check_benches` (-43, -1 refusal) and `gen_refused` (-27) |
+| the checker's part in a rewrite stated elsewhere | 451 / 16 | 454 / 16 | `arm_block`'s doc comment |
+| one arm per form, type constructor or builtin | 4,321 / 248 | 4,321 / 248 | unmoved |
+| shared machinery | 2,233 / 30 | 2,229 / 30 | the `Cell` out, the driver's two calls in |
+| tests | 4,650 / 0 | 4,658 / 0 | the `bench` half of the duplicate-name rule |
+
+Two of the three deletions come out of one kind, and that is the census's own
+finding standing up: the rule-stating sections are 9.3 per cent of the file, and
+taking two of the six candidates off them moves 70 lines. The surface is
+unmoved, which is where the size is.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
