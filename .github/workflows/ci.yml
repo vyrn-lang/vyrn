@@ -308,6 +308,22 @@ jobs:
             exit 1
           }
           echo "$dir" >> "$GITHUB_PATH"
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (RFC-0102: a project that never pinned behaves as it
+        # always did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          compiler/target/debug/vyrn update --locked wabt >/dev/null
+          compiler/target/debug/vyrn update --locked simde >/dev/null
+          wasm2c=$(compiler/target/debug/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/debug/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
       - name: Workspace tests
         working-directory: compiler
         # `cargo nextest run`, not `cargo test`: cargo runs the workspace's 65
@@ -674,6 +690,20 @@ jobs:
         # app cold (minutes in a debug build) — too slow for the test job.
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test universal_pages -- --ignored
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (RFC-0102: a project that never pinned behaves as it
+        # always did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          wasm2c=$(compiler/target/debug/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/debug/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
       - name: The native bench harness (RFC-0055)
         # Ignored-tier because it compiles the route, which this job has the
         # tools for and the test job does not.

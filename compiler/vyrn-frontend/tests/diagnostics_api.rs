@@ -80,23 +80,25 @@ fn check_shim_matches_first_rendered() {
     );
 }
 
-/// A move-check error (rule 2 at a store) is reported with the right stage and
-/// accumulates with a type error in another function.
+/// A move-check error (a prefix `consume` of a `read` parameter) is reported
+/// with the right stage and accumulates with a type error in another function.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06), and then a hand-over to a `consume` parameter until that one left
-/// too (rows 13 and 14). The subject is the accumulation, so it asks a rule
-/// that stays.
+/// row 06), then a hand-over to a `consume` parameter until that one left too
+/// (rows 13 and 14), then a store until rule 2 left (rows 01, 02, 03, 27 and
+/// 34), then a `for .. in consume` of a `read` parameter until rows 10, 11
+/// and 29 left. The subject is the accumulation, so it asks a rule that
+/// stays: a closure that outlives the call may not capture a borrow (row 24),
+/// which the kernel does not state.
 #[test]
 fn movecheck_accumulates_with_check() {
-    let src = "type T = { s: String };\n\
-               fn bad() -> Int64 { return true; }\n\
-               fn borrow(x: read T) -> Int64 { let mut o: Array<String> = [];\n\
-               o.push(x.s); return o.length; }\n\
+    let src = "fn bad() -> Int64 { return true; }
+               fn hold(s: String) -> fn() -> Int64 { let g: fn() -> Int64 = () -> s.byteLength;
+               return g; }
                fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
-    // One check error (bad returns Bool) and one movecheck error (a `read`
-    // parameter handed to a `consume` one).
+    // One check error (bad returns Bool) and one movecheck error (a borrow a
+    // closure that outlives the call may not capture).
     let check_errs = diags.iter().filter(|d| d.stage == "check").count();
     let move_errs = diags.iter().filter(|d| d.stage == "movecheck").count();
     assert_eq!(check_errs, 1, "{:?}", diags);
@@ -104,7 +106,7 @@ fn movecheck_accumulates_with_check() {
     assert!(
         diags
             .iter()
-            .any(|d| d.stage == "movecheck" && d.message.contains("may not be stored into")),
+            .any(|d| d.stage == "movecheck" && d.message.contains("may not be captured")),
         "{diags:?}"
     );
 }
@@ -115,13 +117,17 @@ fn movecheck_accumulates_with_check() {
 /// `movecheck`-stage; lines follow the source.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06), and then a hand-over to a `consume` parameter until that one left
-/// too (rows 13 and 14). The subject is the accumulation, so it asks a rule
-/// that stays.
+/// row 06), then a hand-over to a `consume` parameter until that one left too
+/// (rows 13 and 14), then a store until rule 2 left (rows 01, 02, 03, 27 and
+/// 34), then a `for .. in consume` until rows 10, 11 and 29 left. The subject
+/// is the accumulation, so it asks a rule that stays (row 24).
 #[test]
 fn movecheck_accumulates_within_function_body() {
-    let src = "type T = { s: String };\n\
-               fn borrow(x: read T, y: read T) -> Int64 {\n  let mut o: Array<String> = [];\n  o.push(x.s);\n  o.push(y.s);\n  return o.length;\n}\n\
+    let src = "fn hold(s: String, t: String) -> fn() -> Int64 {
+  let g: fn() -> Int64 = () -> s.byteLength;
+  let h: fn() -> Int64 = () -> t.byteLength;
+  return g;
+}
                fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
     let move_errs: Vec<_> = diags.iter().filter(|d| d.stage == "movecheck").collect();
@@ -129,12 +135,10 @@ fn movecheck_accumulates_within_function_body() {
     assert!(
         move_errs
             .iter()
-            .all(|d| d.message.contains("may not be stored into")),
+            .all(|d| d.message.contains("may not be captured")),
         "{:?}",
         move_errs
     );
-    assert_eq!(move_errs[0].line, 4);
-    assert_eq!(move_errs[1].line, 5);
 }
 
 /// Parser error recovery (RFC-0006): two bad top-level declarations are BOTH

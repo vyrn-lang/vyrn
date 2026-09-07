@@ -278,10 +278,68 @@ struct Kernel<'b> {
     part: std::cell::Cell<usize>,
     /// How that taker takes ([`Taker`]).
     takes: Taker,
+    /// Whether the name being consumed is leaving its SCOPE rather than
+    /// being taken: the release this pass places, and a literal whose scope
+    /// ends. Nothing took it, so the report records no taker — the statement
+    /// around the exit is a `return` and would otherwise lend it its words.
+    ending: std::cell::Cell<bool>,
+    /// Whether the taker of the statement being judged is a BUILTIN call —
+    /// which is how a must-use value is disposed of rather than moved
+    /// (`movecheck::sinks` answers false at a linear parameter, so the
+    /// checker records no move there either).
+    builtin: bool,
+    /// How that taker READS, for the memory report's wording ([`TookHow`]).
+    how: TookHow,
+    /// What took each name, for the memory report — the FIRST take on any
+    /// path, which is the one answer a per-binding report gives (RFC-0125 §3
+    /// M3, the report slice). `State::taker` says the same thing per path and
+    /// is part of no judgment either; this outlives the paths, because the
+    /// report is about the binding and not about the walk that reached it.
+    took: std::cell::RefCell<Vec<Option<Took>>>,
+    /// The names a release ALREADY IN THE BODY reclaims, and the holes it
+    /// walks around — a `St::Row`, which is a row the placement walk placed.
+    /// The judgment's own [`Missing`] rows are the releases owed and NOT
+    /// placed, so the report needs both halves to say "reclaimed at block
+    /// exit" (RFC-0125 §3 M3, the report slice).
+    released: std::cell::RefCell<Vec<Option<Vec<String>>>>,
     /// The loop being walked: the state at its entry, the states at its
     /// `break`s, and the names bound inside it (which its back edge must find
     /// consumed).
     loops: Vec<LoopCtx>,
+    /// The `match` arms open around the statement being judged, innermost
+    /// last: the arm's site, its index, and the binders it bound.
+    ///
+    /// A binder still held where the arm ENDS is the arm's own row
+    /// ([`Kernel::binders_end`]). Since a `return` inside the arm carries the
+    /// exit (RFC-0125 §3 M3, row 17), a binder is as often still held at an
+    /// exit INSIDE the arm — and it is the same row: the table the emitters
+    /// read is keyed by the arm, and an arm binder is no binding of the frame
+    /// that an exit row could name.
+    arms: Vec<(usize, u32, Vec<Name>)>,
+}
+
+/// What took one name, for the memory report (RFC-0125 §3 M3): where, in
+/// whose words, and by which construct.
+#[derive(Clone, Debug)]
+pub struct Took {
+    pub line: usize,
+    /// The taker in the checker's words — `` `f(..)` ``, "the field `s`",
+    /// "the `for .. in consume` loop". Empty for a `return` and a `drop`,
+    /// which the report words itself.
+    pub by: String,
+    pub how: TookHow,
+    /// A builtin call took it: for a must-use value that is the DISPOSAL, not
+    /// a move (RFC-0075 M1, RFC-0095 M1).
+    pub builtin: bool,
+}
+
+/// Which construct took a name — the three the report gives its own sentence
+/// to. Everything else is worded by [`Took::by`] alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TookHow {
+    Return,
+    Drop,
+    Other,
 }
 
 /// Which taker a right-hand side is.
@@ -328,7 +386,15 @@ pub fn check(body: &Body) -> Result<(), Refusal> {
 /// body is refused for another reason — a double free, a use after release —
 /// which no placement repairs. Every such refusal of the body is there, not
 /// only the first: see [`Kernel::refusals`].
-pub fn placement(body: &Body) -> Result<Vec<Missing>, Vec<Refusal>> {
+/// What one placement run found: the releases owed and not placed, what took
+/// each name, and which names a release already in the body reclaims.
+pub struct Placement {
+    pub missing: Vec<Missing>,
+    pub took: Vec<Option<Took>>,
+    pub released: Vec<Option<Vec<String>>>,
+}
+
+pub fn placement(body: &Body) -> Result<Placement, Vec<Refusal>> {
     match run(body, Mode::Place, false) {
         Ok(m) => Ok(m),
         // Refused: walk it again, stepping over each refused statement, so
@@ -340,7 +406,7 @@ pub fn placement(body: &Body) -> Result<Vec<Missing>, Vec<Refusal>> {
     }
 }
 
-fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refusal>> {
+fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>> {
     let mut k = Kernel {
         body,
         mode,
@@ -348,11 +414,17 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refus
         refusals: Vec::new(),
         recover,
         loops: Vec::new(),
+        arms: Vec::new(),
         here: 0,
         by: String::new(),
         made: Vec::new(),
         part: std::cell::Cell::new(0),
         takes: Taker::Stores,
+        how: TookHow::Other,
+        ending: std::cell::Cell::new(false),
+        builtin: false,
+        took: std::cell::RefCell::new(vec![None; body.names.len()]),
+        released: std::cell::RefCell::new(vec![None; body.names.len()]),
     };
     let mut st = State {
         own: vec![Own::Gone; body.names.len()],
@@ -383,7 +455,11 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refus
         k.also(ended);
     }
     match k.refusals.is_empty() {
-        true => Ok(k.missing),
+        true => Ok(Placement {
+            missing: k.missing,
+            took: k.took.into_inner(),
+            released: k.released.into_inner(),
+        }),
         false => Err(k.refusals),
     }
 }
@@ -438,7 +514,26 @@ impl<'b> Kernel<'b> {
             0 => self.takes,
             _ => Taker::Stores,
         };
-        st.taker[n as usize] = Some((self.here, by, takes));
+        st.taker[n as usize] = Some((self.here, by.clone(), takes));
+        // The report's copy, flattened over the paths: a binding gets ONE
+        // sentence. A statement with no taker in it — a release this pass
+        // placed, a scope end — takes nothing, and a rebind clears the row
+        // again, so what is left is the last take the binding was not given a
+        // value back after.
+        if !by.is_empty() && !self.ending.get() {
+            self.took.borrow_mut()[n as usize] = Some(Took {
+                line: self.here,
+                by,
+                how: self.how,
+                builtin: self.builtin,
+            });
+        }
+    }
+
+    /// The name is bound, or bound again: whatever took it before, it holds a
+    /// value of its own now, and the report says so.
+    fn rebound(&self, n: Name) {
+        self.took.borrow_mut()[n as usize] = None;
     }
 
     /// The name is out of scope: like [`Kernel::gone`], but nothing took it.
@@ -809,12 +904,35 @@ impl<'b> Kernel<'b> {
                 )
                 .unwrap_err();
         }
-        let msg = if by == "a `return`" {
-            format!("`{s}` may not be returned — {what}")
+        // The export's own sentence, as [`Kernel::param_take`] gives it one
+        // borrow over: the caller across this boundary is JS and `wasi-min.js`
+        // frees every String an export hands back (RFC-0012 M2, RFC-0089 M3b),
+        // so an export owns its result whatever the borrow is — a parameter
+        // there, a read of a place here — and the copy is the one way out. It
+        // was on one of the two paths and not the other, which is the same
+        // accident `movecheck::refuse_return` exists to stop (RFC-0125 §3 M3,
+        // row 17).
+        let msg = if by == "a `return`" && self.body.export {
+            format!(
+                "`{s}` may not be returned from an exported function — {what}, and the JS \
+                 caller releases what it is handed"
+            )
+        } else if by == "a `return`" {
+            // The same clause the parameter's own return sentence carries
+            // ([`Kernel::param_take`]) and the checker's: what makes the read
+            // wrong here is the exit, not the read.
+            format!("`{s}` may not be returned — {what}, and a return is owned")
         } else {
             format!("{} — {what}", self.may_not(s))
         };
-        self.refuse_at::<()>(self.here, menu(msg, self.place_fixes(st, n)))
+        let fixes = if by == "a `return`" && self.body.export {
+            vec![format!(
+                "`{s}.copy()` — an `export extern fn` owns its result"
+            )]
+        } else {
+            self.place_fixes(st, n)
+        };
+        self.refuse_at::<()>(self.here, menu(msg, fixes))
             .unwrap_err()
     }
 
@@ -898,7 +1016,19 @@ impl<'b> Kernel<'b> {
     fn may_not(&self, s: &str) -> String {
         let by = &self.by;
         if by == "a literal" {
-            return format!("`{s}` may not be stored into the literal");
+            // A part of a RECORD literal goes into a field, and the checker
+            // names it. "The literal" is what is left where the core has no
+            // field names — an array, a map, a variant (RFC-0125 §3 M3, row
+            // 07). The same list [`Kernel::gone`] reads for a rule-1 move.
+            return match self
+                .part
+                .get()
+                .checked_sub(1)
+                .and_then(|i| self.made.get(i))
+            {
+                Some(field) => format!("`{s}` may not be stored into {field}"),
+                None => format!("`{s}` may not be stored into the literal"),
+            };
         }
         if !by.ends_with("(..)`") {
             return format!("`{s}` may not be stored into {by}");
@@ -1010,6 +1140,19 @@ impl<'b> Kernel<'b> {
         exit: Exit,
         site: usize,
     ) -> Result<(), Refusal> {
+        self.ending.set(true);
+        let out = self.scope_end_inner(st, names, exit, site);
+        self.ending.set(false);
+        out
+    }
+
+    fn scope_end_inner(
+        &mut self,
+        st: &mut State,
+        names: &[Name],
+        exit: Exit,
+        site: usize,
+    ) -> Result<(), Refusal> {
         for n in names {
             if self.owned(*n) && st.own[*n as usize] == Own::Static {
                 self.gone(st, *n);
@@ -1027,11 +1170,27 @@ impl<'b> Kernel<'b> {
                 // set on another path.
                 if self.mode == Mode::Place {
                     let holes = self.holes_owned(st, *n);
+                    // An exit INSIDE an arm is one arm's exit, and an exit row
+                    // is keyed by the exit alone — so a row read off one arm
+                    // would be emitted on the arm beside it, which took the
+                    // name (`std/html.vyrn`'s `keyed`). Both tables that are
+                    // keyed by the ARM say it once: the binder's own row for a
+                    // binder, and RFC-0114 Rule N's edge for a name the frame
+                    // bound outside (RFC-0125 §3 M3, row 17).
+                    let (exit, site, kind) = match self.arms.last() {
+                        Some((s, arm, binds)) if *s != 0 && binds.contains(n) => {
+                            (Exit::Block, *s, MissingKind::ArmBinder { arm: *arm })
+                        }
+                        Some((s, arm, _)) if *s != 0 => {
+                            (exit, *s, MissingKind::Edge { edge: *arm })
+                        }
+                        _ => (exit, site, MissingKind::Exit),
+                    };
                     self.missing.push(Missing {
                         exit,
                         site,
                         name: *n,
-                        kind: MissingKind::Exit,
+                        kind,
                         holes,
                     });
                     self.gone(st, *n);
@@ -1070,8 +1229,20 @@ impl<'b> Kernel<'b> {
             // rule 4 refused: the place that owns the value releases it, and
             // this frame is not that place. Worded as the checker words a
             // `drop` (RFC-0125 §3 M3, the census, rows 21 and 29).
+            //
+            // A `for x in consume xs` is the exception, and it is the reason
+            // rows 10, 11 and 29 could not leave the checker: the container's
+            // release is where the loop's take lands, and a reader who wrote
+            // the loop was told about a `drop` no program of theirs contains.
+            // The form is on the name the core bound the container to, as it
+            // is at the `let` ([`crate::core::NameInfo::for_consume`]).
             if st.alias[n as usize].is_some() {
-                let by = std::mem::replace(&mut self.by, "a `drop`".to_string());
+                let form = if self.body.names[n as usize].for_consume {
+                    "the `for .. in consume` loop"
+                } else {
+                    "a `drop`"
+                };
+                let by = std::mem::replace(&mut self.by, form.to_string());
                 let r = self.alias_take(st, n, false);
                 self.by = by;
                 return Err(r);
@@ -1559,14 +1730,43 @@ impl<'b> Kernel<'b> {
     fn stmt(&mut self, s: &St, st: &mut State, bound_here: &mut Vec<Name>) -> Result<(), Refusal> {
         // The line and the taker every consumption in this statement is
         // recorded with (RFC-0125 M3, third slice).
+        self.how = match s {
+            St::Return { .. } => TookHow::Return,
+            St::Drop(_, _, line) if *line > 0 => TookHow::Drop,
+            _ => TookHow::Other,
+        };
+        self.builtin = matches!(
+            s,
+            St::Let(
+                _,
+                Rhs::Call {
+                    declared: false,
+                    ctor: false,
+                    ..
+                }
+            ) | St::Do(
+                Rhs::Call {
+                    declared: false,
+                    ctor: false,
+                    ..
+                },
+                _
+            )
+        );
         match s {
             St::Let(n, rhs) => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = self.by_of(rhs, Some(*n));
                 self.takes = taker_of(rhs);
                 self.made = self.body.names[*n as usize].fields.clone();
+                self.rebound(*n);
+                self.released.borrow_mut()[*n as usize] = None;
             }
             St::Store { place, line, .. } => {
+                if let Place::Name(n) = place {
+                    self.rebound(*n);
+                    self.released.borrow_mut()[*n as usize] = None;
+                }
                 self.here = *line;
                 self.takes = Taker::Stores;
                 self.by = match place {
@@ -1609,6 +1809,14 @@ impl<'b> Kernel<'b> {
             St::Drop(n, _, line) if *line > 0 => {
                 self.here = *line;
                 self.by = "`drop`".to_string();
+            }
+            // A row the placement walk placed: this is what "reclaimed at
+            // block exit" means, and the row carries the holes it walks
+            // around (RFC-0093 M2).
+            St::Row { name: n, holes, .. } => {
+                self.here = self.body.names[*n as usize].line;
+                self.by = String::new();
+                self.released.borrow_mut()[*n as usize] = Some(holes.clone());
             }
             St::Drop(n, ..) | St::Row { name: n, .. } => {
                 self.here = self.body.names[*n as usize].line;
@@ -1846,6 +2054,7 @@ impl<'b> Kernel<'b> {
                 on,
                 arms,
                 consuming,
+                carries,
                 ..
             } => {
                 if *consuming {
@@ -1871,7 +2080,14 @@ impl<'b> Kernel<'b> {
                     // The binders' scope is the arm; they must be consumed
                     // within it, which `stmts` checks for what it binds and
                     // this checks for the binders.
-                    self.stmts(body, &mut a)?;
+                    if *carries {
+                        self.arms.push((*site, *index, binds.clone()));
+                    }
+                    let walked = self.stmts(body, &mut a);
+                    if *carries {
+                        self.arms.pop();
+                    }
+                    walked?;
                     if !a.ended {
                         self.binders_end(&mut a, binds, *site, *index)?;
                     }

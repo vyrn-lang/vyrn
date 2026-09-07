@@ -1476,6 +1476,7 @@ pub fn substitute(ty: &Type, subst: &HashMap<String, Type>) -> Type {
 /// A program's type declarations by name — the map `resolve` and the JSON codec
 /// take. Every engine builds one of these; this is the shared spelling.
 pub fn decl_map(p: &crate::ast::Program) -> HashMap<String, TypeDecl> {
+    let _pp = crate::prof::phase("types::decl_map");
     p.type_decls
         .iter()
         .map(|t| (t.name.clone(), t.clone()))

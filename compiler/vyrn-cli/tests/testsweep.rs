@@ -8,10 +8,10 @@
 //! red on four platforms at once because a test binary was their only reader.
 //!
 //! This file is the same sweep with the same rule, over the other corpus. It
-//! reads every `tests/*.rs`, lifts the Vyrn-looking string literals out, and
-//! runs `vyrn check` on each one twice — once with the kernel and once with
-//! `VYRN_NO_KERNEL=1`. A program only the first refuses is the finding, and
-//! nothing else is.
+//! reads every test source (`test_sources`), lifts the Vyrn-looking string
+//! literals out, and runs `vyrn check` on each one twice — with the kernel
+//! and with `VYRN_NO_KERNEL=1`. A program only the first refuses is the
+//! finding, and nothing else is.
 //!
 //! **Why that pair of runs is the whole filter.** Most of what comes out of a
 //! test file is not a program: a `format!` template with `{PRELUDE}` still in
@@ -42,8 +42,29 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn tests_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
+/// Where the sweep reads test sources from.
+///
+/// `vyrn-cli/tests` is where it started. The other four are RFC-0125 §3 M3's
+/// safety slice: `vyrn-frontend` does not link the kernel, so its own tests
+/// cannot ask it, and a test there that asserts a program is CLEAN — through
+/// `diagnostics`, `analyze` or `check` — asserts only that the checker had
+/// nothing to say. Thirty-eight tests do that, with a symbol, a schema or a
+/// type as their subject rather than ownership. Their programs are lifted here
+/// instead, where the kernel runs, so the reading is checked even though the
+/// assertion cannot be. `vyrn-lsp` links the kernel but installs it in `main`,
+/// which its unit tests do not call.
+fn test_sources() -> Vec<PathBuf> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    [
+        "tests",
+        "../vyrn-frontend/tests",
+        "../vyrn-frontend/src",
+        "../vyrn-lsp/tests",
+        "../vyrn-lsp/src",
+    ]
+    .iter()
+    .map(|d| root.join(d))
+    .collect()
 }
 
 /// Undo Rust's string escapes, and its line continuation: a `\` at the end of
@@ -192,6 +213,15 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     ("has nothing to take", "row 09"),
     ("may not be passed to a `consume` parameter via", "row 12"),
     ("may not be returned from a closure", "row 28"),
+    (
+        "may not be returned — it is",
+        "rows 15, 16 and 18, rule 3 at the return",
+    ),
+    ("may not be returned from an exported function", "row 17"),
+    (
+        "may not be stored into",
+        "rows 01, 02, 03, 27 and 34, rule 2 at a store",
+    ),
     ("is dropped here but was already consumed by", "row 20"),
     ("may not be dropped — it is", "row 21"),
     ("was moved here into", "row 07, rule 1's move"),
@@ -203,6 +233,21 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
     (
         "must be a value of its own",
         "row 26, a rebuilding builtin takes its receiver",
+    ),
+    (
+        "the `for .. in consume` loop",
+        "rows 10, 11 and 29, the take a loop writes",
+    ),
+    // Not a rule that left: a rule the checker never had. `@borrow` is a name
+    // the core mints and no program contains, so a refusal that quotes it is
+    // the kernel's alone. Row 17's other half — a borrow an arm yields, which
+    // reaches the kernel as a store into the result temporary because the core
+    // does not carry the exit. `refusals.rs`'s
+    // `the_programs_the_passs_unit_tests_read_as_accepted` pins the one
+    // program in the corpus that earns it, with the sentence.
+    (
+        "`@borrow` may not be returned",
+        "row 17's other half, a borrow an arm yields",
     ),
 ];
 
@@ -226,10 +271,15 @@ fn check(path: &Path, no_kernel: bool) -> (bool, String) {
 fn no_program_a_test_writes_is_accepted_without_the_kernel_and_refused_with_it() {
     let dir = std::env::temp_dir().join("vyrn-testsweep");
     std::fs::create_dir_all(&dir).unwrap();
-    let mut files: Vec<PathBuf> = std::fs::read_dir(tests_dir())
-        .unwrap()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+    let mut files: Vec<PathBuf> = test_sources()
+        .into_iter()
+        .flat_map(|d| {
+            std::fs::read_dir(&d)
+                .unwrap_or_else(|e| panic!("read {}: {e}", d.display()))
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+                .collect::<Vec<_>>()
+        })
         .collect();
     files.sort();
     assert!(!files.is_empty(), "no test sources found");
@@ -254,8 +304,16 @@ fn no_program_a_test_writes_is_accepted_without_the_kernel_and_refused_with_it()
             for (name, value) in &subs {
                 s = s.replace(name.as_str(), value);
             }
-            let stem = f.file_stem().unwrap().to_string_lossy().to_string();
-            let path = dir.join(format!("{stem}-{i}.vyrn"));
+            // The crate's name is in the stem: two of these directories hold a
+            // `contracts.rs`, and a report has to say which one.
+            let crate_of = f
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let stem = format!("{crate_of}/{}", f.file_stem().unwrap().to_string_lossy());
+            let path = dir.join(format!("{}-{i}.vyrn", stem.replace('/', "-")));
             std::fs::write(&path, &s).unwrap();
             let (without, _) = check(&path, true);
             if !without {
@@ -278,14 +336,18 @@ fn no_program_a_test_writes_is_accepted_without_the_kernel_and_refused_with_it()
         refused.len(),
         refused.join("\n\n")
     );
+    println!(
+        "{programs} programs lifted from {} test sources",
+        files.len()
+    );
     // A lift that stops finding programs must fail rather than pass quietly.
-    // The floor is under the count this ran at, not a target: 169 literals
-    // across 71 test sources reassembled into something the compiler accepts.
-    // It is 142 across 72 sources since RFC-0125 §3 M4's fourth slice, which
-    // deleted `parity.rs`, `residue.rs` and the `_natively` half of `memory.rs`
-    // — the sources, not the lift, so the floor moves with them.
+    // The floor is under the count this ran at, not a target. It was 169
+    // literals across 71 test sources; the safety slice added `vyrn-frontend`'s
+    // and `vyrn-lsp`'s own test sources to the sweep, and RFC-0125 §3 M4's
+    // fourth slice deleted `parity.rs`, `residue.rs` and the `_natively` half
+    // of `memory.rs` — the sources, not the lift, so the floor moves with them.
     assert!(
-        programs >= 130,
+        programs >= 300,
         "the lift found only {programs} runnable programs across {} test sources — \
          it stopped reassembling them",
         files.len()

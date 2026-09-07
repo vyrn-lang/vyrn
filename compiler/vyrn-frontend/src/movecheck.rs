@@ -736,8 +736,19 @@ fn let_id(s: &Stmt) -> usize {
 /// copies its element out. A `Slots<String>` read through it leaked, silently.
 /// The pin that stops that is now `prelude`'s own
 /// `every_seeded_name_is_reserved_or_unspellable`.
+///
+/// A USER projection (RFC-0120) says the same thing about the same value: a
+/// result capability IS "the result is a place the receiver owns", which is the
+/// builtin half's whole definition. It was left out because nothing could fire
+/// on it — `Declared::type_of` refused a projection call a type, so every rule
+/// that keys on a lender stood down for want of a type rather than for a
+/// reason. The checker types a projection call like any other call
+/// (RFC-0125 §3 M3, the type slice), so the fact has to be stated. Three
+/// programs say what it costs otherwise: `namedplace` minted a temporary row
+/// for `led.wrapped(2)` and the kernel refused the release, and `protoplace`
+/// and `assoctype` freed the label a projection handed out.
 fn views(name: &str) -> bool {
-    crate::prelude::lends(name)
+    crate::prelude::lends(name) || named_projection(name)
 }
 
 thread_local! {
@@ -1202,7 +1213,15 @@ fn run(program: &Program, want: Want) -> Run {
         .filter(|f| f.is_export_extern)
         .map(|f| f.name.clone())
         .collect();
-    let decl = Declared::new(program);
+    // RFC-0125 §3 M3, the type slice: the type of a node is the checker's
+    // answer, read off its record. `recorded` serves the analysis's own check
+    // where one was made and checks once where none was, and the record it
+    // makes here is held for the rest of the analysis — so the check the
+    // lowering used to pay for is the one this asks for.
+    let rec_span = crate::prof::phase("movecheck: checker::record");
+    let rec = crate::checker::recorded(program);
+    drop(rec_span);
+    let decl = Declared::new(program).recording(rec);
     let mc = MoveCheck {
         caps: &caps,
         impls: &program.impls,
@@ -1429,13 +1448,34 @@ fn run(program: &Program, want: Want) -> Run {
     }
 }
 
-/// Check every function for use-after-consume. Runs after type checking. Returns
-/// the first problem found (rendered as the historical `"line {N}: {message}"`
-/// string). Thin shim over [`check_accum`].
-pub fn check(program: &Program) -> Result<(), String> {
+/// The refusal THIS PASS states about `program`, rendered as the historical
+/// `"line {N}: {message}"` string. Thin shim over [`check_accum`], and the one
+/// door a test asks this pass through.
+///
+/// **There is no acceptance answer here, and there may not be one**
+/// (RFC-0125 §3 M3, the safety slice). Two passes judge ownership: this one and
+/// the kernel, which states rules this file no longer holds and which
+/// `vyrn-frontend` does not link. So this pass going quiet means it has nothing
+/// to say, and a reader who takes that for "the compiler accepts the program"
+/// states a second, weaker rule. Three unit tests did. One of them pinned
+/// `for x in consume r.xs` as compiling; the compiler has refused it since the
+/// kernel came in.
+///
+/// A test that wants "this program compiles" asks the whole compiler, in
+/// `compiler/vyrn-cli/tests/refusals.rs`, which links the kernel and runs
+/// `vyrn check`. This function panics where the pass is silent, and that is the
+/// guard: the wrong pin cannot be written, because there is no value to write
+/// it against.
+pub fn refusal(program: &Program) -> String {
     match check_accum(program).into_iter().next() {
-        Some(d) => Err(d.render()),
-        None => Ok(()),
+        Some(d) => d.render(),
+        None => panic!(
+            "this pass states no refusal about the program, and silence is not \
+             acceptance: the kernel states ownership rules it does not, and \
+             `vyrn-frontend` does not link the kernel. Pin acceptance in \
+             `compiler/vyrn-cli/tests/refusals.rs`, which asks the whole compiler \
+             (RFC-0125 §3 M3, the safety slice)."
+        ),
     }
 }
 
@@ -1646,25 +1686,6 @@ impl Borrow {
                 copy,
             ],
             Borrow::Element(_) | Borrow::Projection => vec![copy],
-        }
-    }
-}
-
-/// Which form wrote the `consume` — the two share [`MoveCheck::check_take`] and
-/// differ only in how the first refusal reads.
-#[derive(Clone, Copy)]
-enum TakeForm {
-    /// `for x in consume xs`.
-    Loop,
-    /// `consume p` as a prefix on a place (RFC-0093).
-    Prefix,
-}
-
-impl TakeForm {
-    fn what(self) -> &'static str {
-        match self {
-            TakeForm::Loop => "a `for` loop",
-            TakeForm::Prefix => "a take",
         }
     }
 }
@@ -2567,15 +2588,17 @@ impl MoveCheck<'_> {
         self.borrows.borrow().get(name).cloned().flatten()
     }
 
-    /// The declared type of `e` here, or `None` where this reading cannot name it.
+    /// The type of `e` here, or `None` where nothing names it.
     ///
-    /// [`crate::declared::Declared::type_of`] first, then the readings only this
-    /// pass may have. **The widening lives here and not in `Declared`** because
-    /// `own.rs` shares that reading and decides `free` with it: a type answered
-    /// there that was not answered before changes what a program releases. Here
-    /// it changes only what the program is allowed to say.
+    /// [`crate::declared::Declared::type_of`] — the checker's own answer for
+    /// this node — and then the readings only this pass may have, which are the
+    /// ones a record has a HOLE at: a node the checker did not walk, in a body
+    /// a synthesis added after it. The widening stays here and not in
+    /// `Declared` for the reason it always did: what this method answers
+    /// decides what a program may SAY, and a type `Declared` answers decides
+    /// what a program FREES.
     fn type_of(&self, e: &Expr) -> Option<Type> {
-        if let Some(t) = self.decl.type_of(&self.vars.borrow(), e) {
+        if let Some(t) = self.decl.type_of(e) {
             return Some(t);
         }
         match e {
@@ -2595,11 +2618,10 @@ impl MoveCheck<'_> {
             Expr::Consume { place, .. } => self.type_of(place),
             // An element read: `xs[i]` lowers to `@at`, and `x.copy()` is already
             // answered by `Declared`. The element type is the container's. A
-            // NAMED projection (RFC-0120) reads an element too, but its result
-            // type is the projection's own declaration, which this pass does
-            // not resolve — `elem_of` answers only for builtin containers, so
-            // the named form falls through to `None` exactly as `@at` on a
-            // user container does.
+            // NAMED projection (RFC-0120) reads an element too; the checker's
+            // record answers for one, and where there is no record `elem_of`
+            // answers only for builtin containers, so the named form falls
+            // through to `None` exactly as `@at` on a user container does.
             Expr::Call { name, args, .. } if projection_call(name) => {
                 let c = self.type_of(args.first()?)?;
                 self.decl.elem_of(&c)
@@ -2627,31 +2649,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// A store of `value` into `into` — RFC-0089 rule 1, and rule 2's refusal.
-    ///
-    /// `into` is the destination in words ("the binding `t`", "the field `r.s`").
-    /// Three outcomes:
-    ///
-    /// - the value owns no heap, or is fresh (a call result, a literal, an
-    ///   operator result): nothing happens, because nothing else holds it;
-    /// - the source is a **borrow**: refused here, with its fixes named;
-    /// - the source is an owned place: it MOVES, and a later use of it is the
-    ///   error [`MoveCheck::expr`] reports.
-    ///
-    /// `outlives` is what separates a store from a rebinding. A borrow's
-    /// lifetime is the call, so putting one in a field, a container, module
-    /// state or a return is refused, and giving it a second local name is not:
-    /// `let t = s` cannot outlive `s`, and rule 2's whole point is that a borrow
-    /// needs no lifetime because it never leaves the frame. The new name is a
-    /// borrow too — see [`MoveCheck::borrow_from`].
-    ///
-    /// A type this reading cannot name does NOT move. That is the same
-    /// under-approximation `own.rs` makes and it costs the same thing — a
-    /// diagnostic that is not printed. It is not the unsound direction: 4b
-    /// decides what a program may SAY, and every value it fails to move is one
-    /// today's engines already leak rather than free twice.
-    /// Answers whether the store **took** the source place, which is what
-    /// Phase 4c reads: a place that did not move is still somebody else's.
     /// Whether parameter `i` of the builtin `name` takes its argument for good,
     /// under **rule 1**.
     ///
@@ -2674,6 +2671,22 @@ impl MoveCheck<'_> {
         sinks(self.decl, name, i)
     }
 
+    /// A store of `value` into `into` — RFC-0089 rule 1's move, and nothing else.
+    ///
+    /// `into` is the destination in words ("the binding `t`", "the field `r.s`").
+    /// The answer is whether the store **took** the source place, which is what
+    /// Phase 4c reads: a place that did not move is still somebody else's. A
+    /// fresh value, a scalar, a borrow and a projection all take nothing.
+    ///
+    /// Rule 2's refusal was here — a borrow or a projection put anywhere that
+    /// outlives the call — and it is the kernel's now (RFC-0125 §3 M3, census
+    /// rows 01, 02, 03, 27 and 34). `outlives` stays, because it is what tells
+    /// a store from a rebinding and the retention row is keyed on it.
+    ///
+    /// A type this reading cannot name does NOT move. That is the same
+    /// under-approximation `own.rs` makes and it costs the same thing — a row
+    /// that is not written. It is not the unsound direction: every value it
+    /// fails to move is one today's engines already leak rather than free twice.
     fn store(
         &self,
         value: &Expr,
@@ -2684,39 +2697,22 @@ impl MoveCheck<'_> {
         line: usize,
         outlives: bool,
         consumed: &mut Consumed,
-    ) -> Result<bool, Diagnostic> {
+    ) -> bool {
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
-        //
-        // M1 widens `store` to see it, which M0 left as this milestone's
-        // decision. The reason is the RFC's own thesis: `let t = xs[i]` already
-        // binds a `Borrow::Projection` (see [`MoveCheck::borrow_from`]) and rule
-        // 2 already refuses storing `t`. Leaving the inline form alone would
-        // reproduce, for elements, exactly the two-spellings-two-verdicts defect
-        // this RFC exists to remove. Refused whatever the container is, because a
-        // borrowed container's element is no more storable than an owned one's.
-        if let Some((root, path)) = element_path(value) {
+        if let Some((_, path)) = element_path(value) {
             if self.projections.is_some() && outlives {
                 let ty = self.type_of(value);
                 self.note_projection("elem-store", &path, into(), ty, line);
             }
             if outlives && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
-                let b = self.borrow_of(&root).unwrap_or(Borrow::Projection);
                 self.note_retention(value);
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be stored into {} — it is {}",
-                        into(),
-                        b.what(&path)
-                    ),
-                    self.fixes_here(&b, &root, &path),
-                ));
+                return false;
             }
         }
         let Some((root, path)) = place_path(value) else {
-            return Ok(false);
+            return false;
         };
         // RFC-0092 M0's instrument, kept as M1's regression guard: it records
         // what the branch below now refuses, so a site that reappears is counted.
@@ -2729,53 +2725,25 @@ impl MoveCheck<'_> {
         }
         // A scalar copies. An unnamed type is left alone — see the doc above.
         if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
-            return Ok(false);
+            return false;
         }
-        if let Some(b) = self.borrow_of(&root) {
-            if !outlives {
-                return Ok(false);
+        // A borrow does not move: the caller still owns it. The retention row
+        // says the borrow was put somewhere that outlives the call, which is
+        // what the call graph is closed over.
+        if self.borrow_of(&root).is_some() {
+            if outlives {
+                self.note_retention(value);
             }
-            self.note_retention(value);
-            // Rule 2. A borrow may be observed and passed on; it may not be put
-            // anywhere that outlives the call.
-            return Err(menu(
-                line,
-                format!(
-                    "`{path}` may not be stored into {} — it is {}",
-                    into(),
-                    b.what(&path)
-                ),
-                self.fixes_here(&b, &root, &path),
-            ));
+            return false;
         }
-        // RFC-0092's rule: **a projection is a borrow of its root, whatever the
-        // root is.** Reading a field out of a record does not take the record —
-        // the record still owns the buffer — so putting that buffer anywhere the
-        // frame does not end with gives it two owners. The old bail said the
-        // binding this store makes is "recorded by the caller", which is true of
-        // a `let` and false of `out.push(d.title)`: there is no `let` and no
-        // caller to record anything.
-        //
-        // A rebinding is not a store, and rule 2 does not refuse one either:
-        // `let t = d.title` is fine and [`MoveCheck::borrow_from`] gives `t` the
-        // projection, which rule 2 then enforces on.
+        // A projection does not move either: reading a field out of a record
+        // does not take the record.
         if path != root {
-            if !outlives {
-                return Ok(false);
-            }
-            return Err(menu(
-                line,
-                format!(
-                    "`{path}` may not be stored into {} — it is {}",
-                    into(),
-                    Borrow::Projection.what(&path)
-                ),
-                self.fixes_here(&Borrow::Projection, &root, &path),
-            ));
+            return false;
         }
         self.took(&root, Gone::Moved { line, by: into() });
         consumed.insert(root, Consumption { line, hole: false });
-        Ok(true)
+        true
     }
 
     /// The borrow status a `let` of `value` gives its binding.
@@ -2919,54 +2887,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// A take: `consume p` as a prefix (RFC-0093), or the `p` of
-    /// `for x in consume p`. Three refusals, and RFC-0093 M1 deleted the fourth.
-    ///
-    /// The deleted one refused a PROJECTION — `consume b.tags` — on the ground
-    /// that it would leave a hole in `b`. It offered `for .. in consume b`
-    /// instead, which does not typecheck when `b` is a record, so the reader was
-    /// sent to a second error. A hole is now a thing the pass can say, so the
-    /// menu no longer has to name the root: the path is the answer.
-    ///
-    /// `by` names the form for the message — a loop and a prefix refuse the same
-    /// three things and word the first one differently.
-    fn check_take(
-        &self,
-        e: &Expr,
-        line: usize,
-        scope: &[HashSet<String>],
-        by: TakeForm,
-    ) -> Result<(), Diagnostic> {
-        // A `consume` whose operand names no place — an element, or a value
-        // that is already owned — is refused by the desugar that writes the
-        // take (`vyrn_lower::core::take_names_a_place`), in these same words
-        // and with this same menu (RFC-0125 §3 M3, rows 08 and 09).
-        let Some((root, path)) = place_path(e) else {
-            return Ok(());
-        };
-        if self.globals.contains(&root) && !Self::in_scope(scope, &root) {
-            return Err(Diagnostic::error(
-                line,
-                0,
-                "movecheck",
-                format!(
-                    "module state `{root}` may not be consumed by {} — \
-                     nothing may take ownership of module state (it lives for the whole module \
-                     and is never dropped)",
-                    by.what()
-                ),
-            ));
-        }
-        if let Some(b) = self.borrow_of(&root) {
-            return Err(menu(
-                line,
-                format!("`{root}` may not be consumed — it is {}", b.what(&root)),
-                b.fixes(&root, &path),
-            ));
-        }
-        Ok(())
-    }
-
     /// Whether the callee may KEEP a `fn` value passed as argument `i` — the
     /// question a lambda written at a call argument has to answer, because a
     /// kept closure outlives the call and its captures leave the frame with it.
@@ -2983,167 +2903,35 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Rule 3: a function returns an owned value, always.
+    /// Rule 3's RECORD, and no longer its refusal (RFC-0125 §3 M3, row 17).
     ///
-    /// It looks THROUGH a `match` and an if-expression, because each of them
-    /// yields one of its arms and an arm can be a place. Phase 4c found the hole:
-    /// `fn text(h: Html) -> String { return match h { Text(s) => s, .. } }` names
-    /// no place at the `return`, so the check passed, and the caller then owned —
-    /// and freed — a payload the enum still held.
-    /// **The reach through the arms is narrower than the rule**, on purpose.
-    /// A place named directly at the `return` is refused for every type that
-    /// owns heap, exactly as Phase 4b left it. An arm is refused only where the
-    /// caller RELEASES the result — a `String`, an `Array`, a `Map`, a cell, or a
-    /// declared `Owned` type. That is where the hole costs a use-after-free.
+    /// A returned borrow was refused here at three exits — a place named
+    /// straight at the `return`, a projection of a place the frame owns, and a
+    /// borrow yielded by a `match` or an `if` arm — and by one shared sentence
+    /// under them, which carried the export's own words. The kernel states the
+    /// rule at ONE exit now, because the core carries the exit into the arms
+    /// and does not release the place a returned projection reads out of.
+    /// Sixteen programs of the corpus reach the rule and all sixteen get the
+    /// same refusal with the checker standing aside, menu included.
     ///
-    /// **RFC-0092 M1 widened it to a projection.** Phase 4b stopped at a borrowed
-    /// PARAMETER because the named fix is `.copy()`, which `Html` and `Json` could
-    /// not answer: a type that refers to itself had no structural copy (RFC-0089
-    /// M1b). RFC-0091 M1's `Copy` protocol answers it, so `return d.title` out of
-    /// a record this frame owns is refused now, and so is a projection or a
-    /// pattern binder yielded by a `match` arm.
-    fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic> {
+    /// What is left is what nothing else states: RFC-0092's instrument counts
+    /// the returned projections, and [`MoveCheck::lends`] records that this
+    /// function hands a borrow on. That record is read after every body is
+    /// walked, and half of it — the lend through a wrapper — was never a
+    /// refusal at all.
+    fn note_return(&self, e: &Expr, line: usize) {
         self.note_returned_projection(e, line);
-        if !self.decl.owns_heap(&self.ret.borrow()) {
-            return Ok(());
-        }
-        // A place named straight at the `return` keeps Phase 4b's rule whole:
-        // every borrow is refused, whatever kind it is.
-        if let Some((root, path)) = place_path(e) {
-            if let Some(b) = self.borrow_of(&root) {
-                return Err(self.refuse_return(&b, &root, &path, line));
-            }
-            // Module state is not a borrow, and Phase 6 found that this is where
-            // that costs a use-after-free. A global lives for the whole module
-            // and nothing may take it (RFC-0013), so `return title` hands the
-            // caller a buffer the module still holds — and rule 3 makes the
-            // caller free it. `examples/` never wrote it, so parity never saw it:
-            // the interpreter's values cannot dangle and the wasm allocator
-            // handed the block straight back out.
-            //
-            // This one does NOT go through [`MoveCheck::refuse_return`], and the
-            // reason is that it is a different FACT rather than a different
-            // caller: "nothing may take module state" is true of a Vyrn caller
-            // and a JS caller alike, and its menu already names `.copy()` alone.
-            // Routing it through the shared exit would replace a true sentence
-            // with a vaguer one.
-            if self.decl.releases(&self.ret.borrow()) && self.is_module_state(&root) {
-                return Err(menu(
-                    line,
-                    format!(
-                        "`{path}` may not be returned — it is module state, which nothing \
-                         may take, and a return is owned"
-                    ),
-                    vec![format!(
-                        "`{path}.copy()` — the caller releases what it is handed"
-                    )],
-                ));
-            }
-            // RFC-0092's rule at the return. `return d.title` out of a record
-            // this frame owns hands the caller a buffer `d` still holds, and rule
-            // 3 makes the caller free it. `borrow_of` answers `None` for an owned
-            // local, so this shape reached no reading at all — not refused, and
-            // not even recorded as a lend.
-            if path != root {
-                return Err(self.refuse_return(&Borrow::Projection, &root, &path, line));
-            }
-            return Ok(());
-        }
         if !self.decl.releases(&self.ret.borrow()) {
-            return Ok(());
+            return;
         }
-        let found = self.returned_borrow(e);
-        let wrapped = self.lends_through_a_wrapper(e);
-        // Whatever it is, the caller may not release it. Recorded even where it
-        // is not refused below — that is the half of the hole this phase closes
-        // without a diagnostic.
-        if found.is_some() || wrapped.is_some() {
+        // A place named straight at the `return` is no lend to record: the
+        // refusal was the whole of what this walk had to say about it.
+        if place_path(e).is_some() {
+            return;
+        }
+        if self.returned_borrow(e).is_some() || self.lends_through_a_wrapper(e).is_some() {
             self.lends();
         }
-        let Some((b, root, path)) = found else {
-            // The census's finding 2: `fn wrap(s: String) -> Option<String> {
-            // return Some(s) }` puts a borrow into the value it hands back, so
-            // the caller may release NEITHER — not the argument, which escapes
-            // into the constructor, nor the result, whose producer does not own
-            // it. Both leak, 48.8 MB over a million turns, and no release rule
-            // may ever close it: freeing around a lend is the alias analysis
-            // this repo deleted. The fix is the signature, which is the
-            // language's own answer since RFC-0089 — a capability is declared,
-            // not inferred.
-            //
-            // The refusal is the kernel's (RFC-0125 §3 M3, row 19), at the
-            // constructor rather than at the `return`: a value put into a
-            // constructor is taken wherever the constructor stands, and the
-            // return was the second place this pass said so. The wrapper
-            // reading stays, because it RECORDS the lend above.
-            return Ok(());
-        };
-        // An export refuses every kind, so it is asked before the narrowing.
-        if self.exported.contains(&*self.cur_fn.borrow()) {
-            return Err(self.refuse_return(&b, &root, &path, line));
-        }
-        // A borrowed PARAMETER and, since RFC-0092 M1, a PROJECTION. The
-        // parameter is the class Phase 4b missed: 4b read `return p` as a
-        // statement, and these return a parameter from inside a `match` arm,
-        // which is an expression. The projection is the other half — `numText(j)`
-        // hands back the enum's own text — and 4b left it recorded as a lend
-        // because the named fix is `.copy()`, which `Json` and `Html` could not
-        // answer. RFC-0091 M1's `Copy` protocol answers it.
-        //
-        // A `for` variable ([`Borrow::Element`]) is NOT widened here. It is a
-        // projection of its container in kind, but it is outside this RFC's three
-        // sites and outside the count that priced them, so it keeps 4b's verdict.
-        if !matches!(b, Borrow::Read(_) | Borrow::Modify(_) | Borrow::Projection) {
-            return Ok(());
-        }
-        Err(self.refuse_return(&b, &root, &path, line))
-    }
-
-    /// The refusal a returned borrow gets — **the one exit for all three of
-    /// them**.
-    ///
-    /// [`MoveCheck::check_return`] refuses a return from three different places:
-    /// a place named straight at the `return` whose root is a borrow (`return
-    /// q`), a projection of a place the frame owns (`return d.title`), and a
-    /// borrow yielded by a `match` or `if` arm (`return match t { W(s) => s }`).
-    /// They are separate because each answers a different question first, and
-    /// merging them would merge those questions.
-    ///
-    /// What they must NOT differ about is the answer, and they did. The
-    /// `exported` check lived at the arm exit alone, so an `export extern fn`
-    /// that returned a `read` parameter directly was handed the general menu and
-    /// told to ``declare the parameter `q: consume ..` `` — which its own
-    /// signature then refuses: *"the caller across this boundary is JS, and it
-    /// releases the String when the call returns"* (RFC-0089 M3b). One program
-    /// spelled two ways got two menus, one of which sent the reader to a second
-    /// error. Fixing that at one exit fixed two spellings and missed the third,
-    /// twice, which is what this function exists to stop.
-    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) -> Diagnostic {
-        // A Vyrn caller reads the lend out of `lending` and releases nothing; a
-        // JS caller reads nothing, and since RFC-0089 M3b `wasi-min.js` frees
-        // every String an export hands back. So an export owns its result or it
-        // does not compile, and `.copy()` is the only fix that exists for it.
-        if self.exported.contains(&*self.cur_fn.borrow()) {
-            return menu(
-                line,
-                format!(
-                    "`{path}` may not be returned from an exported function — it is {}, \
-                     and the JS caller releases what it is handed",
-                    b.what(path)
-                ),
-                vec![format!(
-                    "`{path}.copy()` — an `export extern fn` owns its result"
-                )],
-            );
-        }
-        menu(
-            line,
-            format!(
-                "`{path}` may not be returned — it is {}, and a return is owned",
-                b.what(path)
-            ),
-            b.fixes(root, path),
-        )
     }
 
     /// Note that argument `i` of `callee` was handed a place.
@@ -3783,7 +3571,7 @@ impl MoveCheck<'_> {
                     *line,
                     hoisted,
                     consumed,
-                )?;
+                );
                 self.note_wrapped_lend(value);
                 // Phase 4c: the row this binding is reclaimed by. Written BEFORE
                 // the binding enters scope, so `let s = s + "x"` records the new
@@ -3888,7 +3676,7 @@ impl MoveCheck<'_> {
                         format!("`{name}`")
                     }
                 };
-                let _ = self.store(value, &into, *line, global, consumed)?;
+                self.store(value, &into, *line, global, consumed);
                 // An assignment rebinds, exactly as a `let` does, so it must
                 // carry the same answer: `t = d.title` makes `t` a projection of
                 // `d`. Without this, `let t = d.title` was refused at the next
@@ -3938,13 +3726,13 @@ impl MoveCheck<'_> {
             } => {
                 self.site("field", *line, value, None);
                 self.walk_writeback(&format!("{name}.{field}"), value, consumed, scope)?;
-                let _ = self.store(
+                self.store(
                     value,
                     &|| format!("the field `{name}.{field}`"),
                     *line,
                     true,
                     consumed,
-                )?;
+                );
                 // RFC-0093: a write fills the hole a take left. The same
                 // sentence `Stmt::Assign` has carried since Phase 4b, one dot
                 // down — and the reason no drop flag is needed to say it.
@@ -3991,7 +3779,7 @@ impl MoveCheck<'_> {
                 self.expr(index, consumed, scope)?;
                 self.site("element", *line, value, None);
                 self.expr(value, consumed, scope)?;
-                let _ = self.store(value, &|| format!("`{name}`"), *line, true, consumed)?;
+                self.store(value, &|| format!("`{name}`"), *line, true, consumed);
                 // A map takes its KEY. Both backends write the key pointer into
                 // `keys[len]` and copy nothing, so `hs[k] = v` moves `k` — and
                 // no rule said so until RFC-0092 M5 needed it to. `httpHeaders`
@@ -4016,7 +3804,7 @@ impl MoveCheck<'_> {
                 // (`std/http`) is `for k in base.keys() { hs[k] = .. }`, and the
                 // snapshot is a temporary the loop owns (M5), so `k` binds an
                 // OWNED element and the store still records the move.
-                let _ = self.store(index, &|| format!("`{name}`"), *line, true, consumed)?;
+                self.store(index, &|| format!("`{name}`"), *line, true, consumed);
                 self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 self.note_carrying_store(name, value);
                 Ok(false)
@@ -4035,7 +3823,7 @@ impl MoveCheck<'_> {
                             sink.borrow_mut().insert(self.cur_fn.borrow().clone());
                         }
                     }
-                    self.check_return(e, *line)?;
+                    self.note_return(e, *line);
                     // Rule 3: the caller owns the result. Everything the returned
                     // expression reads may be inside it, so this block releases
                     // none of it. Only a heap return type can carry anything out.
@@ -4253,9 +4041,6 @@ impl MoveCheck<'_> {
                 self.loop_ids.borrow_mut().push(m2_lid);
                 self.expr(iter, consumed, scope)?;
                 self.site("iterate", *line, iter, None);
-                if *consuming {
-                    self.check_take(iter, *line, scope, TakeForm::Loop)?;
-                }
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
                 // RFC-0089 rule 2: the loop variable is a borrow only while the
                 // container outlives the loop. A `consume`d container is the
@@ -4713,7 +4498,7 @@ impl MoveCheck<'_> {
                                 // thirty-seven).
                                 (Expr::Call { name, args, .. }, _) if name == "@copy" => args
                                     .first()
-                                    .and_then(|a| self.decl.type_of(&self.vars.borrow(), a))
+                                    .and_then(|a| self.decl.type_of(a))
                                     .and_then(|t| self.decl.release_kind(&t))
                                     .and_then(|k| match k {
                                         crate::own::DropKind::FreeStr
@@ -4765,12 +4550,10 @@ impl MoveCheck<'_> {
                     self.expr(expr, consumed, scope)
                 }
             },
-            // RFC-0093 — the take. `check_take` says whether the frame may give
-            // this place away; the record below is what makes a later read of it,
-            // or of anything overlapping it, a rule-1 error.
+            // RFC-0093 — the take. The record below is what makes a later read
+            // of this place, or of anything overlapping it, a rule-1 error.
             Expr::Consume { place, line } => {
                 self.expr(place, consumed, scope)?;
-                self.check_take(place, *line, scope, TakeForm::Prefix)?;
                 // A `consume` of what names no place is the desugar's refusal
                 // now (rows 08 and 09), so this walk records nothing for it.
                 let Some((root, path)) = place_path(place) else {
@@ -4839,13 +4622,13 @@ impl MoveCheck<'_> {
                 for (f, v) in fields {
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
-                    let _ = self.store(
+                    self.store(
                         v,
                         &|| format!("the field `{name}.{f}`"),
                         *line,
                         true,
                         consumed,
-                    )?;
+                    );
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -4855,7 +4638,7 @@ impl MoveCheck<'_> {
                 for a in args {
                     self.site("literal", *line, a, None);
                     self.expr(a, consumed, scope)?;
-                    let _ = self.store(a, &|| format!("`{name}`"), *line, true, consumed)?;
+                    self.store(a, &|| format!("`{name}`"), *line, true, consumed);
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -5214,13 +4997,13 @@ impl MoveCheck<'_> {
                         // A builtin whose parameter declares `consume`. Rule 1
                         // governs it exactly as it governs `xs = [.., v]`, which
                         // is what it means.
-                        let _ = self.store(
+                        self.store(
                             arg,
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),
                             *line,
                             true,
                             consumed,
-                        )?;
+                        );
                     }
                 }
                 Ok(())
@@ -5232,13 +5015,13 @@ impl MoveCheck<'_> {
                 for e in elems {
                     self.site("literal", *line, e, None);
                     self.expr(e, consumed, scope)?;
-                    let _ = self.store(
+                    self.store(
                         e,
                         &|| "the array literal".to_string(),
                         *line,
                         true,
                         consumed,
-                    )?;
+                    );
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -5249,10 +5032,8 @@ impl MoveCheck<'_> {
                     self.expr(k, consumed, scope)?;
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
-                    let _ =
-                        self.store(k, &|| "the map literal".to_string(), *line, true, consumed)?;
-                    let _ =
-                        self.store(v, &|| "the map literal".to_string(), *line, true, consumed)?;
+                    self.store(k, &|| "the map literal".to_string(), *line, true, consumed);
+                    self.store(v, &|| "the map literal".to_string(), *line, true, consumed);
                 }
                 self.call_keeps.set(outer);
                 Ok(())
@@ -5978,26 +5759,22 @@ mod tests {
     /// `examples/`, `std/` and `site/` all compile, so they say nothing about
     /// a refusal. `VYRN_DUMP_MOVECHECK=<dir> cargo test -p vyrn-frontend
     /// movecheck` writes every program checked here to that directory,
-    /// `no_*` for the refused ones, and each of those through
-    /// `VYRN_NO_MOVECHECK=1 vyrn check` is the licence: a program the checker
-    /// refuses and the kernel accepts is a rule that may not leave this file.
-    fn run(src: &str) -> Result<(), String> {
+    /// `no_*` for them, and each through `VYRN_NO_MOVECHECK=1 vyrn check` is
+    /// the licence: a program the checker refuses and the kernel accepts is a
+    /// rule that may not leave this file.
+    ///
+    /// Every program asked here is refused, because [`super::refusal`] is the
+    /// only door and it panics on silence (RFC-0125 §3 M3, the safety slice).
+    /// The programs these tests read as ACCEPTED are asked of the whole
+    /// compiler instead, in `compiler/vyrn-cli/tests/refusals.rs`.
+    fn run(src: &str) -> String {
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        let r = super::check(&program);
-        record(src, r.is_ok());
-        r
+        record(src);
+        super::refusal(&program)
     }
 
     /// One program of the corpus, written out.
-    ///
-    /// A test that parses for itself — because it asks [`super::ownership`] of
-    /// the same program — calls this beside its own `check`. Five did not, and
-    /// the corpus was blind to exactly those five: row 19 read `licensed` over
-    /// 134 programs, and the program its OWN unit test writes (a loop variable
-    /// put into `Some(..)`) is worded differently by the two passes (RFC-0125
-    /// §3 M3, the corpus slice). A licence is only ever as wide as what it was
-    /// read from.
-    fn record(src: &str, ok: bool) {
+    fn record(src: &str) {
         let Ok(dir) = std::env::var("VYRN_DUMP_MOVECHECK") else {
             return;
         };
@@ -6005,8 +5782,15 @@ mod tests {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(src, &mut h);
         let n = std::hash::Hasher::finish(&h);
-        let tag = if ok { "ok" } else { "no" };
-        let _ = std::fs::write(format!("{dir}/{tag}_{n:016x}.vyrn"), src);
+        let _ = std::fs::write(format!("{dir}/no_{n:016x}.vyrn"), src);
+    }
+
+    /// The guard itself: a program this pass says nothing about has no answer
+    /// here to assert on (RFC-0125 §3 M3, the safety slice).
+    #[test]
+    #[should_panic(expected = "silence is not acceptance")]
+    fn this_pass_has_no_acceptance_answer() {
+        run("fn main() -> Int64 { return 0 }");
     }
 
     /// What `views` and `sinks` answer, now that both read a signature.
@@ -6067,9 +5851,6 @@ mod tests {
                        return xs.length\n\
                    }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        let r = super::check(&program);
-        record(src, r.is_ok());
-        assert!(r.is_ok());
         let rows = super::ownership(&program);
         let payload = rows
             .values()
@@ -6082,31 +5863,6 @@ mod tests {
     }
 
     #[test]
-    fn allows_read_reuse() {
-        let src = "type T = { id: Int64 }; \
-                   fn peek(t: read T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; return peek(x) + peek(x); }";
-        assert!(run(src).is_ok());
-    }
-
-    #[test]
-    fn consume_then_no_reuse_is_ok() {
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; return take(x); }";
-        assert!(run(src).is_ok());
-    }
-
-    #[test]
-    fn reassignment_revives() {
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let mut x = T { id: 1 }; let a = take(x); \
-                                      x = T { id: 2 }; return a + take(x); }";
-        assert!(run(src).is_ok());
-    }
-
-    #[test]
     fn rejects_drop_after_a_partial_take() {
         // F2-049: the taken field belongs to whoever received it, and `drop`
         // reclaims storage by TYPE — freeing the whole binding here frees
@@ -6114,113 +5870,11 @@ mod tests {
         let src = "type T = { id: Int64, name: String }; \
                    fn main() -> Int64 { let t = T { id: 1, name: \"n\" }; \
                                       consume t.name; drop t; return 0; }";
-        let e = run(src).unwrap_err();
+        let e = run(src);
         assert!(e.contains("may not be dropped"), "{e}");
     }
 
-    #[test]
-    fn allows_partial_take_of_the_loop_variable() {
-        // The loop variable is fresh every iteration, so taking a projection
-        // of it each turn is legal — the root of `u.name` is not in scope and
-        // the reuse check must keep skipping it.
-        let src = "type E = { name: String, id: Int64 }; \
-                   fn main() -> Int64 { let mut out = 0; \
-                                      let xs = [E { name: \"a\", id: 1 }, E { name: \"b\", id: 2 }]; \
-                                      for u in consume xs { consume u.name } return out; }";
-        assert!(run(src).is_ok());
-    }
-
-    #[test]
-    fn local_shadowing_global_may_be_consumed() {
-        // A local `g` shadows the global, so consuming it is fine.
-        let src = "type T = { id: Int64 } \
-                   let g = T { id: 1 } \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn use_it() -> Int64 { let g = T { id: 2 } return take(g); } \
-                   fn main() -> Int64 { return 0; }";
-        assert!(run(src).is_ok(), "{:?}", run(src));
-    }
-
-    #[test]
-    fn consume_on_break_branch_not_moved_on_fall_through() {
-        // `x` is consumed only on the branch that breaks; the fall-through path
-        // never consumed it, so a later read in the same body is fine (RFC-0060).
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn peek(t: read T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; let mut s = 0; \
-                       for i in [0, 1, 2] { \
-                           if i == 2 { let a = take(x); break } \
-                           s = s + peek(x) } \
-                       return s; }";
-        assert!(run(src).is_ok(), "{:?}", run(src));
-    }
-
-    #[test]
-    fn use_after_break_is_unreachable_clean() {
-        // The second `take(x)` is after an unconditional `break` — unreachable, so
-        // it is not a use-after-consume (RFC-0060: code after break is dead).
-        let src = "type T = { id: Int64 }; \
-                   fn take(t: consume T) -> Int64 { return t.id; } \
-                   fn main() -> Int64 { let x = T { id: 1 }; \
-                       while true { break let a = take(x); let b = take(x); } \
-                       return 0; }";
-        assert!(run(src).is_ok(), "{:?}", run(src));
-    }
-
     // ---- RFC-0089 Phase 4b: rules 1 and 3 --------------------------------
-
-    #[test]
-    fn a_last_use_may_move() {
-        // The half that keeps rule 1 usable: `let t = s` with no later `s` is
-        // not an error, so the common rename costs nothing.
-        assert!(run("fn main() -> Int64 { let s = \"a\" + \"b\" let t = s \
-                     return t.byteLength }")
-        .is_ok());
-        // And a scalar never moves at all.
-        assert!(run("fn main() -> Int64 { let a = 1 let b = a return a + b }").is_ok());
-    }
-
-    #[test]
-    fn a_borrowed_parameter_may_not_be_returned() {
-        // Rule 3, and the 36 corpus sites Phase 1's gate counted.
-        let src = "fn id(s: String) -> String { return s } fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("`s` may not be returned"), "{e}");
-        assert!(
-            e.contains("fix: declare the parameter `s: consume ..`"),
-            "{e}"
-        );
-        assert!(e.contains("fix: `s.copy()`"), "{e}");
-        // Both named fixes work.
-        assert!(run("fn id(s: consume String) -> String { return s } \
-                     fn main() -> Int64 { return 0 }")
-        .is_ok());
-        assert!(run("fn id(s: String) -> String { return s.copy() } \
-                     fn main() -> Int64 { return 0 }")
-        .is_ok());
-    }
-
-    /// The `.copy()` the constructor refusal names compiles, and what it makes
-    /// is OWNED: no row survives that would stop the caller reclaiming it.
-    ///
-    /// The refusal itself is the kernel's since row 19 left (RFC-0125 §3 M3),
-    /// and `tests/refusals.rs` asks it of the whole compiler — for this
-    /// program too, whose loop variable is the shape a census row could not
-    /// see (the corpus slice).
-    #[test]
-    fn the_copy_a_wrapped_borrow_needs_is_owned() {
-        let src = "type M = { name: String } \
-                   type C = { members: Array<M> } \
-                   fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m.copy()) } \
-                   return None } \
-                   fn main() -> Int64 { let c = C { members: [] } \
-                   if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }";
-        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        let r = super::check(&program);
-        record(src, r.is_ok());
-        assert!(r.is_ok(), "{r:?}");
-    }
 
     /// Phase 10a keyed the scrutinee row on `place_key == 0`, and 0 means two
     /// things: no place at all, and a place with no `let` row. A parameter is
@@ -6233,9 +5887,6 @@ mod tests {
                    if let Some(s) = v { return s.byteLength } return 0 } \
                    fn main() -> Int64 { return 0 }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        let r = super::check(&program);
-        record(src, r.is_ok());
-        assert!(r.is_ok());
         assert!(
             super::ownership(&program)
                 .values()
@@ -6255,373 +5906,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_returned_scalar_parameter_is_not_a_borrow() {
-        // The surface only exists where heap is owned (RFC-0089 "What it costs").
-        assert!(
-            run("fn id(n: Int64) -> Int64 { return n } fn main() -> Int64 { return id(1) }")
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn a_loop_variable_is_a_read_borrow() {
-        // The PLAN's decision log: iteration binds a `read` borrow, so the
-        // element belongs to the container and returning one is rule 3.
-        let src = "fn first(xs: Array<String>) -> String { for x in xs { return x } return \"\" } \
-                   fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("`x` may not be returned") && e.contains("a loop variable"),
-            "{e}"
-        );
-        assert!(run(
-            "fn first(xs: Array<String>) -> String { for x in xs { return x.copy() } \
-                     return \"\" } fn main() -> Int64 { return 0 }"
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn a_field_read_does_not_take_the_record() {
-        // A place owns its contents (rule 4), so `r.s` is a projection: naming it
-        // locally is free, and returning that name is still rule 3.
-        let src = "type R = { s: String } \
-                   fn get(r: R) -> String { let t = r.s return t } \
-                   fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("`t` may not be returned"), "{e}");
-        // Reading two fields out of one record is not two moves of the record.
-        assert!(run("type R = { a: String, b: String } \
-                     fn use2(r: R) -> Int64 { let x = r.a let y = r.b \
-                     return x.byteLength + y.byteLength } fn main() -> Int64 { return 0 }")
-        .is_ok());
-    }
-
-    /// RFC-0089 rule 3, Phase 6. Module state is nobody's borrow, and that is
-    /// where `check_return` let a lend through: `return title` handed the caller
-    /// a buffer the module still holds, and the caller freed it at block exit.
-    /// The interpreter's values cannot dangle, so the wasm column printed the
-    /// next allocation's bytes where the interpreter printed the String.
-    #[test]
-    fn returning_module_state_is_refused() {
-        let src = "let mut title = \"x\" \
-                   fn get() -> String { return title } \
-                   fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("`title` may not be returned") && e.contains("module state"),
-            "{e}"
-        );
-        assert!(e.contains("fix: `title.copy()`"), "{e}");
-        // A field of module state is the same buffer through one more hop.
-        let src = "type R = { s: String } let mut r = R { s: \"x\" } \
-                   fn get() -> String { return r.s } \
-                   fn main() -> Int64 { return 0 }";
-        assert!(
-            run(src).unwrap_err().contains("`r.s` may not be returned"),
-            "field"
-        );
-        // The named fix compiles.
-        assert!(run(
-            "let mut title = \"x\" fn get() -> String { return title.copy() } \
-                     fn main() -> Int64 { return 0 }"
-        )
-        .is_ok());
-        // A RECORD of module state is refused too since RFC-0092 M3, and the
-        // reason is the row rather than this pass: the gate is "does the caller
-        // release the result", and until M3 a record answered no. Handing one
-        // out was a leak; it is a use-after-free now, and the same sentence
-        // refuses it.
-        let e = run("type R = { s: String } let mut r = R { s: \"x\" } \
-                     fn get() -> R { return r } fn main() -> Int64 { return 0 }")
-        .unwrap_err();
-        assert!(
-            e.contains("`r` may not be returned") && e.contains("module state"),
-            "{e}"
-        );
-        // A type nobody releases is still not a use-after-free, so it is still
-        // not refused: a record of scalars owns no heap and has no row.
-        assert!(run("type R = { n: Int64 } let mut r = R { n: 1 } \
-                     fn get() -> R { return r } fn main() -> Int64 { return 0 }")
-        .is_ok());
-    }
-
-    /// An arm-yielded projection is refused for EVERY caller since RFC-0092 M1,
-    /// and the export boundary still says something the general rule does not.
-    ///
-    /// This test used to open by asserting that an ordinary function MAY lend
-    /// one — the `lending` set records it and the Vyrn caller releases nothing.
-    /// That is the guesser RFC-0092's "Rejected" section exists to remove, and
-    /// it was Phase 4b's asymmetry written down: Phase 6 already refused the
-    /// direct spelling of the very same program (`return title` on module state,
-    /// `movecheck.rs`'s module-state branch), so `return match tag { Word(s) =>
-    /// s }` on module state was one program with two verdicts. Both are refused
-    /// now, and both name `.copy()`.
-    ///
-    /// What is still the export's own is the WORDING and the FIX: a JS caller
-    /// reads no `lending` set, and since RFC-0089 M3b `wasi-min.js` frees every
-    /// String an export hands back.
-    #[test]
-    fn an_export_may_not_lend_its_result() {
-        let enum_and_state = "type Tag = | Word(String) | Num(Int64) \
-                              let mut tag = Word(\"w\") ";
-        let body = "return match tag { Word(s) => s, Num(n) => \"num\", } } \
-                    fn main() -> Int64 { return 0 }";
-        // An ordinary function may not lend one either (RFC-0092 M1), and the
-        // general refusal is what it gets.
-        let e = run(&format!("{enum_and_state} fn text() -> String {{ {body}")).unwrap_err();
-        assert!(e.contains("`s` may not be returned"), "{e}");
-        assert!(e.contains("read out of a place that owns it"), "{e}");
-        assert!(!e.contains("exported function"), "{e}");
-        // The export says the same no in its own words, and offers its own fix.
-        let e = run(&format!(
-            "{enum_and_state} export extern fn text() -> String {{ {body}"
-        ))
-        .unwrap_err();
-        assert!(
-            e.contains("may not be returned from an exported function"),
-            "{e}"
-        );
-        assert!(
-            e.contains("the JS caller releases what it is handed"),
-            "{e}"
-        );
-        assert!(e.contains("fix: `s.copy()`"), "{e}");
-        // The one fix both of them name compiles, either side of the boundary.
-        let fixed = "return match tag { Word(s) => s.copy(), Num(n) => \"num\", } } \
-                     fn main() -> Int64 { return 0 }";
-        assert!(run(&format!("{enum_and_state} fn text() -> String {{ {fixed}")).is_ok());
-        assert!(run(&format!(
-            "{enum_and_state} export extern fn text() -> String {{ {fixed}"
-        ))
-        .is_ok());
-    }
-
-    /// Phase 6's other half of the menu: inside an `export extern fn` the
-    /// `consume` fix does not exist, so it is not offered.
-    ///
-    /// **Every way of getting the refusal, in one test, because they drifted.**
-    /// `check_return` refuses a return from three places, and RFC-0092 M1 put
-    /// the `exported` question at one of them, then at two. The third —
-    /// `return q`, the plainest spelling there is — kept offering ``declare the
-    /// parameter `q: consume ..` ``, which the same compiler then refuses at the
-    /// signature (RFC-0089 M3b). All three share
-    /// [`MoveCheck::refuse_return`] now, and all three are asserted here so the
-    /// next person to touch one has to look at the others.
-    #[test]
-    fn an_exports_borrow_menu_names_copy_alone() {
-        // A store into module state.
-        let src = "let mut kept = \"x\" \
-                   export extern fn set(arg: String) { kept = arg } \
-                   fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("fix: `arg.copy()`"), "{e}");
-        assert!(
-            !e.contains("consume"),
-            "an export may not consume a String: {e}"
-        );
-        // Every spelling of a returned borrow: the parameter named straight at
-        // the `return`, a projection of a place the frame owns, and a borrow
-        // yielded by an arm. Each reaches `check_return` by a different route.
-        let spellings = [
-            "export extern fn plain(q: String) -> String { return q }",
-            "type D = { s: String } \
-             export extern fn field(q: String) -> String \
-             { let d = D { s: q.copy() } return d.s }",
-            "export extern fn pick(p: String, q: String) -> String \
-             { return if p == \"\" { q } else { p } }",
-        ];
-        for s in spellings {
-            let e = run(&format!("{s} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
-            assert!(
-                e.contains("may not be returned from an exported function"),
-                "{s}\n{e}"
-            );
-            assert!(
-                e.contains("the JS caller releases what it is handed"),
-                "{s}\n{e}"
-            );
-            assert!(
-                e.contains("an `export extern fn` owns its result"),
-                "{s}\n{e}"
-            );
-            assert!(
-                !e.contains("consume"),
-                "an export may not consume a String: {s}\n{e}"
-            );
-        }
-        assert!(run("let mut kept = \"x\" \
-                     export extern fn set(arg: String) { kept = arg.copy() } \
-                     fn main() -> Int64 { return 0 }")
-        .is_ok());
-    }
-
-    #[test]
-    fn rule_2_refuses_a_stored_borrow() {
-        let src = "type R = { s: String }                    fn keep(x: String) -> R { return R { s: x } }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("may not be stored into the field `R.s`"), "{e}");
-        assert!(
-            e.contains("fix: declare the parameter `x: consume ..`"),
-            "{e}"
-        );
-        // Both named fixes work.
-        assert!(run("type R = { s: String } fn keep(x: consume String) -> R { return R { s: x } }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-        assert!(run("type R = { s: String } fn keep(x: String) -> R { return R { s: x.copy() } }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-    }
-
-    #[test]
-    fn a_stored_loop_variable_names_the_consuming_form() {
-        // The half of rule 2 the corpus is made of, and the fix that is not a
-        // copy: the loop takes the container.
-        let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("fix: `for x in consume xs` if the loop should take"),
-            "{e}"
-        );
-        // Taking the container needs the function to own it, and the diagnostic
-        // says so before it says `copy`.
-        assert!(e.contains("fix: `x.copy()`"), "{e}");
-    }
-
-    #[test]
-    fn a_consuming_loop_owns_its_elements() {
-        // `for x in consume xs`: the container is the loop's, so storing an
-        // element is a move and needs no copy.
-        assert!(run("fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]                      let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-        // And the container is dead afterwards, which is row 07's error. The
-        // sentence is the kernel's since the row left, so `tests/refusals.rs`
-        // asks it of the whole compiler (RFC-0125 §3 M3, row 07).
-    }
-
-    #[test]
-    fn a_consuming_loop_needs_a_container_it_may_take() {
-        // A borrow is not the loop's to give away, and the two-step fix says so.
-        let src = "fn go(xs: Array<String>) -> Int64 { let mut out: Array<String> = []                    for x in consume xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("`xs` may not be consumed — it is a `read` parameter"),
-            "{e}"
-        );
-        assert!(run("fn go(xs: consume Array<String>) -> Int64 { let mut out: Array<String> = []                      for x in consume xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-        // A field of a BORROWED record is still refused, and RFC-0093 moved the
-        // reason to the true one: the frame does not own `r`, so it may not give
-        // any part of it away. The old refusal said "would leave a hole" and
-        // offered `for .. in consume r`, which does not typecheck for a record —
-        // one question, two answers. That branch is gone.
-        let src = "type R = { xs: Array<String> }                    fn go(r: R) -> Int64 { let mut out: Array<String> = []                    for x in consume r.xs { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(
-            e.contains("`r` may not be consumed — it is a `read` parameter"),
-            "{e}"
-        );
-        assert!(!e.contains("for .. in consume r`"), "{e}");
-        // A field of a record this frame OWNS is the take, and it is legal now.
-        assert!(run("type R = { xs: Array<String> }                      fn make() -> R { return R { xs: [\"a\"] } }                      fn go() -> Int64 { let r = make() let mut out: Array<String> = []                      for x in consume r.xs { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-        // Module state lives for the whole module and is nobody's to take.
-        let src = "let g: Array<String> = []                    fn go() -> Int64 { let mut out: Array<String> = []                    for x in consume g { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("module state `g` may not be consumed"), "{e}");
-    }
-
-    #[test]
-    fn a_loop_over_a_temporary_owns_its_elements() {
-        // 91 of the corpus sites. `for o in diff(..)` iterates a container
-        // nobody else holds, so the elements are the loop's with no word for it.
-        assert!(run("fn make() -> Array<String> { return [\"a\" + \"b\"] }                      fn go() -> Int64 { let mut out: Array<String> = []                      for x in make() { out.push(x) } return out.length }                      fn main() -> Int64 { return 0 }")
-            .is_ok());
-        // An element read is NOT a temporary: `xs[i]` is a place the container
-        // still owns, so a loop over one still borrows.
-        let src = "fn go(xs: Array<Array<String>>) -> Int64 { let mut out: Array<String> = []                    for x in xs[0] { out.push(x) } return out.length }                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
-        assert!(e.contains("may not be stored"), "{e}");
-    }
-
-    #[test]
-    fn consume_before_an_iterable_is_contextual() {
-        // `consume` is a capability only when an identifier follows it, so a
-        // user function called `consume` is untouched — the same rule a
-        // parameter's capability follows.
-        assert!(run("fn consume(n: Int64) -> Array<Int64> { return [n] }                      fn main() -> Int64 { let mut t = 0 for x in consume(1) { t = t + x }                      return t }")
-            .is_ok());
-        // The prefix reads the word at a third position and is contextual by the
-        // same test: `consume(1)` in an argument is still a call (RFC-0093).
-        assert!(run("fn consume(n: Int64) -> Array<Int64> { return [n] }                      fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }                      fn main() -> Int64 { return take(consume(1)) }")
-            .is_ok());
-    }
-
     // ---- RFC-0093: the take ---------------------------------------------
-
-    /// The whole of the path-keyed hole, in the three sentences that define it
-    /// here. The fourth — the root read as a WHOLE while the hole is still in
-    /// it — is the kernel's now (RFC-0125 §3 M3, row 04), so this pass says
-    /// nothing about it and `tests/refusals/r04` is where it is pinned.
-    #[test]
-    fn a_take_empties_one_path_and_leaves_the_rest() {
-        const DECLS: &str = "type Bag = { a: String, b: String } \
-                             fn make() -> Bag { return Bag { a: \"x\" + \"y\", b: \"p\" + \"q\" } } ";
-        let go = |body: &str| {
-            run(&format!(
-                "{DECLS} fn go() -> Int64 {{ {body} }} fn main() -> Int64 {{ return 0 }}"
-            ))
-        };
-
-        // A sibling field survives the take. This is the sentence a whole-root
-        // move cannot say, and the nine-line drain in `std/vyx` is made of it.
-        assert!(go("let d = make() let mut o: Array<String> = [] o.push(consume d.a) o.push(consume d.b) return o.length").is_ok());
-        // The taken path does not, and that sentence is the kernel's since row
-        // 07 left: `tests/refusals.rs` asks it of the whole compiler.
-        // A write fills the hole.
-        assert!(go("let mut d = make() let mut o: Array<String> = [] o.push(consume d.a) d.a = \"z\" return d.a.byteLength").is_ok());
-    }
-
-    /// The two refusals that stay, each with the menu it prints. The other two
-    /// — an element, and a value already owned — left with rows 08 and 09
-    /// (RFC-0125 §3 M3): the desugar states both, from the syntax.
-    #[test]
-    fn a_take_needs_a_place_the_frame_owns() {
-        const DECLS: &str = "type Bag = { a: String } \
-                             let g: String = \"m\" \
-                             fn fresh() -> String { return \"f\" } ";
-        let go = |sig: &str, body: &str| {
-            run(&format!("{DECLS} fn go({sig}) -> Int64 {{ let mut o: Array<String> = [] {body} return o.length }} fn main() -> Int64 {{ return 0 }}"))
-        };
-        // A borrowed root: the frame does not own it, so it may not give it away.
-        let e = go("d: read Bag", "o.push(consume d.a)").unwrap_err();
-        assert!(
-            e.contains("`d` may not be consumed — it is a `read` parameter"),
-            "{e}"
-        );
-        // Module state is nobody's to take.
-        let e = go("", "o.push(consume g)").unwrap_err();
-        assert!(
-            e.contains("module state `g` may not be consumed by a take"),
-            "{e}"
-        );
-    }
-
-    /// The menu RFC-0092 M1 could only answer with `.copy()` names the take
-    /// first now — and only where `check_take` would accept it.
-    #[test]
-    fn the_projection_menu_offers_the_take_where_it_exists() {
-        const DECLS: &str = "type Bag = { a: String } \
-                             fn make() -> Bag { return Bag { a: \"x\" + \"y\" } } ";
-        let owned = run(&format!("{DECLS} fn go() -> Int64 {{ let d = make() let mut o: Array<String> = [] o.push(d.a) return o.length }} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
-        assert!(
-            owned.contains("fix: `consume d.a` if `d` should give it up"),
-            "{owned}"
-        );
-        // A borrowed root has no take, so the menu must not name one.
-        let borrowed = run(&format!("{DECLS} fn go(d: read Bag) -> Int64 {{ let mut o: Array<String> = [] o.push(d.a) return o.length }} fn main() -> Int64 {{ return 0 }}")).unwrap_err();
-        assert!(!borrowed.contains("`consume d.a`"), "{borrowed}");
-    }
 
     // ---- rule 2 at the third exit: a borrow may not be consumed -----------
 
@@ -6635,27 +5920,10 @@ mod tests {
             "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) } \
              fn go(q: read String) -> Int64 { return reg(n -> n + q.byteLength) } \
              fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
+        );
         assert!(
             e.contains("may not be captured by a closure that outlives this call"),
             "{e}"
-        );
-        // An owned capture is safe: the closure takes it along, and the block
-        // releases nothing it gave up.
-        assert!(run(
-            "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) } \
-             fn go() -> Int64 { let s = \"a\" + \"b\" return reg(n -> n + s.byteLength) } \
-             fn main() -> Int64 { return 0 }"
-        )
-        .is_ok());
-        // The fast path survives: a parameter that provably borrows keeps the
-        // non-escaping assumption, which is every `map`-style call.
-        assert!(
-            run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) } \
-             fn go(q: read String) -> Int64 { return apply(n -> n + q.byteLength) } \
-             fn main() -> Int64 { return 0 }")
-            .is_ok()
         );
     }
 
@@ -6673,9 +5941,6 @@ mod tests {
                    let r = g(arr) let s2 = h(arr) \
                    return r.name.byteLength + s2[0].byteLength }";
         let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        let r = super::check(&program);
-        record(src, r.is_ok());
-        assert!(r.is_ok());
         assert!(
             super::ownership(&program).values().all(|r| {
                 let fc = r.from_call.as_deref();
@@ -6689,7 +5954,7 @@ mod tests {
     fn a_modify_borrow_is_exclusive() {
         let src = "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 { return a.length } \
                    fn main() -> Int64 { let mut xs: Array<Int64> = [] return f(xs, xs) }";
-        let e = run(src).unwrap_err();
+        let e = run(src);
         assert!(
             e.contains("as `modify` and read again in the same call"),
             "{e}"
@@ -6710,7 +5975,7 @@ mod tests {
                    impl Merging for T { fn merge(modify self, other: T) -> Unit \
                    { self.n = self.n + other.n } } \
                    fn main() -> Int64 { let mut t = T { n: 1 } t.merge(t) return 0 }";
-        let e = run(src).unwrap_err();
+        let e = run(src);
         assert!(
             e.contains("as `modify` and read again in the same call"),
             "{e}"
@@ -6718,53 +5983,12 @@ mod tests {
     }
 
     #[test]
-    fn a_map_key_may_not_be_a_borrow() {
-        // `m[k] = v` used to be the one store that did not ask rule 2, while the
-        // map LITERAL asked it — one fact, two spellings, two verdicts. Both
-        // spellings of the borrow are here: the element read inline, and the
-        // `for` variable over a borrowed container.
-        let inline = "fn build(ks: Array<String>) -> Map<String, Int64> \
-                      { let mut m: Map<String, Int64> = [:] m[ks[0]] = 1 return m } \
-                      fn main() -> Int64 { return 0 }";
-        let e = run(inline).unwrap_err();
-        assert!(e.contains("`ks[0]` may not be stored into `m`"), "{e}");
-        assert!(e.contains("`ks[0].copy()`"), "{e}");
-
-        let loop_var = "fn build(ks: Array<String>) -> Map<String, Int64> \
-                        { let mut m: Map<String, Int64> = [:] \
-                        for k in ks { m[k] = 1 } return m } \
-                        fn main() -> Int64 { return 0 }";
-        let e = run(loop_var).unwrap_err();
-        assert!(e.contains("`k` may not be stored into `m`"), "{e}");
-
-        // A copy is a value of this frame's, and so is a key with no other
-        // owner — neither is refused.
-        assert!(run("fn build(ks: Array<String>) -> Map<String, Int64> \
-                 { let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m } \
-                 fn main() -> Int64 { return 0 }")
-        .is_ok());
-        assert!(
-            run("fn main() -> Int64 { let mut m: Map<String, Int64> = [:] \
-                 m[\"a\" + \"b\"] = 1 return 0 }")
-            .is_ok()
-        );
-    }
-
-    #[test]
     fn an_escaping_closure_may_not_capture_a_borrow() {
-        // A lambda whose callee provably borrows it (`apply`'s parameter is a
-        // plain borrow) does not outlive the call, so it captures freely; one
-        // that is stored, or handed to a `consume fn` parameter that may keep
-        // it, is a value and may not.
-        assert!(
-            run("fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) } \
-                     fn go(s: String) -> Int64 { return apply(n -> n + s.byteLength) } \
-                     fn main() -> Int64 { return 0 }")
-            .is_ok()
-        );
+        // A lambda that is stored, or handed to a `consume fn` parameter that
+        // may keep it, is a value and may not capture a borrow.
         let src = "fn go(s: String) -> Int64 { let f = n -> n + s.byteLength return f(1) } \
                    fn main() -> Int64 { return 0 }";
-        let e = run(src).unwrap_err();
+        let e = run(src);
         assert!(
             e.contains("may not be captured by a closure that outlives this call"),
             "{e}"
@@ -6817,14 +6041,10 @@ mod tests {
         // Reading the name afterwards is row 07's error, in the kernel's words
         // since the row left: `tests/refusals.rs` asks it of the whole compiler.
 
-        // A `read` parameter's buffer may not go into a stream: the caller still
-        // owns it, and the stream's close would free it.
-        let e = run(
-            "fn mk(xs: Array<Int64>) -> Stream<Int64> { return fromArray(xs) } \
-                     fn main() -> Int64 { return 0 }",
-        )
-        .unwrap_err();
-        assert!(e.contains("may not be stored into `fromArray(..)`"), "{e}");
+        // A `read` parameter's buffer may not go into a stream: the caller
+        // still owns it, and the stream's close would free it. That refusal is
+        // the kernel's since RFC-0125 §3 M3, rows 01, 02, 03, 27 and 34, and
+        // `tests/refusals.rs` asks it of the whole compiler.
     }
 
     // ---- RFC-0089 Phase 4a: the site census ------------------------------

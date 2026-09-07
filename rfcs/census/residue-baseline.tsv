@@ -27,6 +27,11 @@ autorelease	clean
 autovalidate	clean
 benching	clean
 binarytrees	clean
+# nestedsum read 6 when this file was written and 7 once RFC-0125 §3 M3's type
+# slice merged beside it: that slice's manifest note says the program trades
+# one free for a memory.copy, and the block that free reclaimed is the one
+# that now stays. Grown by hand, with this reason, for the leak triage to
+# read at the source (2026-09-07).
 bits	other
 blockarms	clean
 branchtypes	clean

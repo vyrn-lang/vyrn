@@ -3533,8 +3533,6 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(());
         }
         match self.cx.resolve(ty) {
-            // A `String` buffer allocated inside a `region` belongs to the arena
-            // — [`Fn_::str_owned`] records it and `region_free` hands it back.
             // This arm asks nothing about the region: the ownership test is the
             // block header and `free` states it once (an arena block carries a
             // class word of 0 and is refused in silence), so the walk hands
@@ -5709,16 +5707,11 @@ impl<'p> Fn_<'_, 'p> {
     /// the call. The tee is HERE — where the argument is evaluated — rather than
     /// at the call, so the evaluation order stays the one the program wrote.
     ///
-    /// Inside a `region` it stands down, because the arena is the single owner
-    /// there — the same condition [`crate::Gen::gen_expr`] reads.
-    ///
-    /// It used to keep a SECOND fact: whether the expression allocated a `String`
-    /// while a region was open, judged by [`vyrn_frontend::own::str_temporary`].
-    /// That was the arena's routing rule, and it was a different rule from the
-    /// one the textual backend uses — that backend routes at the ALLOCATION
-    /// (`Gen::heap_alloc`), so it holds a `String` an expression's INTERIOR
-    /// allocated, which no verdict about the expression node can see. The routing
-    /// is at the allocation on both backends now: see [`Fn_::str_owned`].
+    /// It asks nothing about a `region`. It used to stand down inside one, on
+    /// the argument that the arena was the single owner there; the arena owns
+    /// what [`Fn_::arena_route`] routes into it and nothing else, and `free`
+    /// refuses one of its blocks by the class word in its header. So the
+    /// temporary is handed back at whatever depth it was made.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
         if self.cx.arg_drop_row(e as *const Expr as usize) {

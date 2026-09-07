@@ -197,14 +197,14 @@ pub struct Analysis {
 
 /// One binding's memory answer, positioned for the editor (RFC-0087 U1).
 ///
-/// [`crate::own::BindingNote`] with the prose already rendered, so the LSP is an
-/// adapter rather than a second opinion.
+/// [`crate::own::MemoryRow`], positioned, so the LSP is an adapter rather than
+/// a second opinion. The prose is the CORE's (RFC-0125 §3 M3).
 #[derive(Debug, Clone)]
 pub struct MemoryNote {
     pub name: String,
     /// 1-based line of the `let`.
     pub line: usize,
-    /// What happens to the value, in one line — [`crate::own::Fate::words`].
+    /// What happens to the value, in one line — [`crate::own::MemoryRow::text`].
     pub text: String,
     /// The line where the value stops being live, when there is one: a move or
     /// a `drop`. `None` for a binding that lives to block exit.
@@ -687,31 +687,22 @@ fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote> {
         .iter()
         .filter(|f| f.module.is_none() && !f.is_extern)
     {
-        let Some(notes) = own.notes.get(&f.name) else {
+        let Some(notes) = own.memory.get(&f.name) else {
             continue;
         };
         for n in notes {
             // A binding whose type owns no heap has nothing to reclaim, so
             // "NOT reclaimed" is the wrong sentence about it. `vyrn why --memory`
             // counts it in a summary; a hover on an `Int64` would just alarm.
-            if matches!(
-                &n.fate,
-                crate::own::Fate::Leaked(crate::own::Leak::NoRelease {
-                    owns_heap: false,
-                    ..
-                })
-            ) {
+            if matches!(n.bucket, crate::own::Bucket::Leaked { heap: false, .. }) {
                 continue;
             }
             out.push(MemoryNote {
                 name: n.name.clone(),
                 line: n.line,
-                text: n.fate.words(),
-                last_use: n.fate.last_use(),
-                moved_into: match &n.fate {
-                    crate::own::Fate::Moved { into, .. } => Some(into.clone()),
-                    _ => None,
-                },
+                text: n.text.clone(),
+                last_use: n.last_use,
+                moved_into: n.moved_into.clone(),
             });
         }
     }
@@ -4546,31 +4537,51 @@ fn main() -> Int64 {
 }
 "#;
 
-    #[test]
-    fn memory_notes_say_what_happens_to_each_binding() {
-        let a = analyze(MEM_SRC);
+    /// `MEM_SRC`'s memory answer, as the CORE states it.
+    ///
+    /// RFC-0125 §3 M3, the report slice: the sentence a binding earns is the
+    /// core's, and this crate installs no placer, so no test here may ask for
+    /// one — the safety slice's rule, one milestone on. What the program
+    /// EARNS is pinned end to end by `vyrn-lsp`'s own suite, which drives a
+    /// server that installs the kernel, and by `vyrn why --memory`. What is
+    /// left here is the adapter: given these answers, what the editor shows.
+    fn mem_notes() -> Vec<MemoryNote> {
+        vec![
+            MemoryNote {
+                name: "a".into(),
+                line: 3,
+                text: "moved at line 4 into `take(..)`".into(),
+                last_use: Some(4),
+                moved_into: Some("`take(..)`".into()),
+            },
+            MemoryNote {
+                name: "b".into(),
+                line: 5,
+                text: "reclaimed at block exit — freeing the String buffer".into(),
+                last_use: None,
+                moved_into: None,
+            },
+            MemoryNote {
+                name: "c".into(),
+                line: 6,
+                text: "reclaimed by `drop` at line 7".into(),
+                last_use: Some(7),
+                moved_into: None,
+            },
+        ]
+    }
+
+    /// `MEM_SRC` analysed, with the core's answers put in.
+    fn mem_analysis() -> Analysis {
+        let mut a = analyze(MEM_SRC);
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
-        let note = |n: &str| {
-            a.memory
-                .iter()
-                .find(|m| m.name == n)
-                .map(|m| m.text.clone())
-                .unwrap_or_default()
-        };
-        assert_eq!(note("a"), "moved at line 4 into `take(..)`");
-        assert_eq!(
-            note("b"),
-            "reclaimed at block exit — freeing the String buffer"
-        );
-        assert_eq!(note("c"), "reclaimed by `drop` at line 7");
-        // `n` is an Int64. There is nothing to reclaim, so there is no sentence
-        // to say about it — a "NOT reclaimed" hover on a scalar is only alarm.
-        assert!(a.memory.iter().all(|m| m.name != "n"), "{:?}", a.memory);
+        a.memory = mem_notes();
+        a
     }
 
     #[test]
     fn a_binding_hover_carries_its_memory_answer() {
-        let a = analyze(MEM_SRC);
+        let a = mem_analysis();
         // The `a` in `let a = ..` on line 3.
         let r = resolve(&a, 3, 9).expect("a resolves");
         assert!(
@@ -4582,7 +4593,7 @@ fn main() -> Int64 {
 
     #[test]
     fn a_move_gets_an_inlay_hint_where_the_value_goes() {
-        let a = analyze(MEM_SRC);
+        let a = mem_analysis();
         let hints = inlay_hints(&a);
         assert_eq!(hints.len(), 1, "{hints:?}");
         assert_eq!(hints[0].line, 4);
@@ -4591,7 +4602,7 @@ fn main() -> Int64 {
 
     #[test]
     fn the_last_use_of_an_owning_binding_is_marked() {
-        let a = analyze(MEM_SRC);
+        let a = mem_analysis();
         let marked: Vec<(usize, usize)> = semantic_tokens(&a)
             .into_iter()
             .filter(|t| t.mods.last_use)
@@ -4770,8 +4781,15 @@ fn main() -> Int64 {
                    \x20   print(a); take(a)\n\
                    \x20   return 0\n\
                    }";
-        let a = analyze(src);
+        let mut a = analyze(src);
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        a.memory = vec![MemoryNote {
+            name: "a".into(),
+            line: 3,
+            text: "moved at line 4 into `take(..)`".into(),
+            last_use: Some(4),
+            moved_into: Some("`take(..)`".into()),
+        }];
         let hints = inlay_hints(&a);
         assert_eq!(hints.len(), 1, "{hints:?}");
         assert_eq!(hints[0].line, 4);
