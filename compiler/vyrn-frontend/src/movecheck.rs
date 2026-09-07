@@ -736,8 +736,19 @@ fn let_id(s: &Stmt) -> usize {
 /// copies its element out. A `Slots<String>` read through it leaked, silently.
 /// The pin that stops that is now `prelude`'s own
 /// `every_seeded_name_is_reserved_or_unspellable`.
+///
+/// A USER projection (RFC-0120) says the same thing about the same value: a
+/// result capability IS "the result is a place the receiver owns", which is the
+/// builtin half's whole definition. It was left out because nothing could fire
+/// on it — `Declared::type_of` refused a projection call a type, so every rule
+/// that keys on a lender stood down for want of a type rather than for a
+/// reason. The checker types a projection call like any other call
+/// (RFC-0125 §3 M3, the type slice), so the fact has to be stated. Three
+/// programs say what it costs otherwise: `namedplace` minted a temporary row
+/// for `led.wrapped(2)` and the kernel refused the release, and `protoplace`
+/// and `assoctype` freed the label a projection handed out.
 fn views(name: &str) -> bool {
-    crate::prelude::lends(name)
+    crate::prelude::lends(name) || named_projection(name)
 }
 
 thread_local! {
@@ -1202,7 +1213,15 @@ fn run(program: &Program, want: Want) -> Run {
         .filter(|f| f.is_export_extern)
         .map(|f| f.name.clone())
         .collect();
-    let decl = Declared::new(program);
+    // RFC-0125 §3 M3, the type slice: the type of a node is the checker's
+    // answer, read off its record. `recorded` serves the analysis's own check
+    // where one was made and checks once where none was, and the record it
+    // makes here is held for the rest of the analysis — so the check the
+    // lowering used to pay for is the one this asks for.
+    let rec_span = crate::prof::phase("movecheck: checker::record");
+    let rec = crate::checker::recorded(program);
+    drop(rec_span);
+    let decl = Declared::new(program).recording(rec);
     let mc = MoveCheck {
         caps: &caps,
         impls: &program.impls,
@@ -2569,15 +2588,17 @@ impl MoveCheck<'_> {
         self.borrows.borrow().get(name).cloned().flatten()
     }
 
-    /// The declared type of `e` here, or `None` where this reading cannot name it.
+    /// The type of `e` here, or `None` where nothing names it.
     ///
-    /// [`crate::declared::Declared::type_of`] first, then the readings only this
-    /// pass may have. **The widening lives here and not in `Declared`** because
-    /// `own.rs` shares that reading and decides `free` with it: a type answered
-    /// there that was not answered before changes what a program releases. Here
-    /// it changes only what the program is allowed to say.
+    /// [`crate::declared::Declared::type_of`] — the checker's own answer for
+    /// this node — and then the readings only this pass may have, which are the
+    /// ones a record has a HOLE at: a node the checker did not walk, in a body
+    /// a synthesis added after it. The widening stays here and not in
+    /// `Declared` for the reason it always did: what this method answers
+    /// decides what a program may SAY, and a type `Declared` answers decides
+    /// what a program FREES.
     fn type_of(&self, e: &Expr) -> Option<Type> {
-        if let Some(t) = self.decl.type_of(&self.vars.borrow(), e) {
+        if let Some(t) = self.decl.type_of(e) {
             return Some(t);
         }
         match e {
@@ -2597,11 +2618,10 @@ impl MoveCheck<'_> {
             Expr::Consume { place, .. } => self.type_of(place),
             // An element read: `xs[i]` lowers to `@at`, and `x.copy()` is already
             // answered by `Declared`. The element type is the container's. A
-            // NAMED projection (RFC-0120) reads an element too, but its result
-            // type is the projection's own declaration, which this pass does
-            // not resolve — `elem_of` answers only for builtin containers, so
-            // the named form falls through to `None` exactly as `@at` on a
-            // user container does.
+            // NAMED projection (RFC-0120) reads an element too; the checker's
+            // record answers for one, and where there is no record `elem_of`
+            // answers only for builtin containers, so the named form falls
+            // through to `None` exactly as `@at` on a user container does.
             Expr::Call { name, args, .. } if projection_call(name) => {
                 let c = self.type_of(args.first()?)?;
                 self.decl.elem_of(&c)
@@ -4478,7 +4498,7 @@ impl MoveCheck<'_> {
                                 // thirty-seven).
                                 (Expr::Call { name, args, .. }, _) if name == "@copy" => args
                                     .first()
-                                    .and_then(|a| self.decl.type_of(&self.vars.borrow(), a))
+                                    .and_then(|a| self.decl.type_of(a))
                                     .and_then(|t| self.decl.release_kind(&t))
                                     .and_then(|k| match k {
                                         crate::own::DropKind::FreeStr

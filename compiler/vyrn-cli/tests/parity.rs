@@ -4626,18 +4626,18 @@ fn main() -> Int64 {
 /// recorded conservatism exits 135 naming the leak. The instrument being
 /// two-sided is what makes its silence on a program MEAN something.
 ///
-/// The leaky side is the whole-value ALIAS (RFC-0125 §3 M3, the named-binding
-/// slice): an arm of a join that yields a name bound outside it hands the
-/// value on for one edge and not the other, so neither name may be released
-/// and the buffer the other edge built is never freed. RFC-0089 has no word
-/// for a shared owner, and the leak is what it takes over a double free.
+/// **The leaky side was the loop STORE — `s = p.name.copy()` inside a `for`,
+/// which never released the displaced copy — until RFC-0125 §3 M3's type
+/// slice.** That leak was the declared reading having no type for a loop
+/// binder's field: `names_a_place` read the copy as a copy of a HANDLE, which
+/// shares what it points at, so the binding got no release row at all. The
+/// checker's record names the field, and the program exits 0 now.
 ///
-/// It used to be the loop-store conservatism (`s = p.name.copy()` inside a
-/// `for` never released the displaced copy). That one is gone: the plan
-/// typed `p.name` through its declared reading, got nothing for a loop
-/// binder's field, and read `.copy()` as a copied HANDLE — so it stood the
-/// binding's release down and every displaced buffer stayed. The core states
-/// the binding's ownership off the value it lowered, and the store releases.
+/// What still leaks is one position over: a call result DISCARDED inside a
+/// loop, where the value the container holds was copied out of a place. The
+/// element the discard drops has no row, and `k`'s two turns leak two blocks.
+/// A literal in the same position is clean, which is what says the row is
+/// about provenance and not about the discard.
 #[test]
 #[ignore]
 fn leak_check_is_two_sided() {
@@ -4683,10 +4683,18 @@ fn main() -> Int64 {
     );
     let leaky = build_and_run(
         "leakleak",
-        r#"fn main() -> Int64 {
-    let st = "a name long enough to allocate" + "!"
-    let rel = if st.byteLength > 100 { st } else { "x" + "y" }
-    print(rel.byteLength)
+        r#"type P = { name: String }
+
+fn main() -> Int64 {
+    let mut acc: Array<String> = []
+    let people = [P { name: "a name long enough to allocate" }]
+    let mut i = 0
+    while i < 2 {
+        acc.push(people[0].name.copy())
+        acc.swapRemove(0)
+        i = i + 1
+    }
+    print(acc.length)
     return 0
 }
 "#,
@@ -4694,7 +4702,7 @@ fn main() -> Int64 {
     assert_eq!(
         leaky.status.code(),
         Some(135),
-        "the recorded whole-value alias must be VISIBLE to the instrument:
+        "a recorded conservatism must be VISIBLE to the instrument:
 {}",
         norm(&leaky.stderr)
     );
@@ -4702,5 +4710,34 @@ fn main() -> Int64 {
         norm(&leaky.stderr).contains("never freed"),
         "{}",
         norm(&leaky.stderr)
+    );
+    // The leak the type slice closed, pinned CLEAN so it cannot come back:
+    // `s = p.name.copy()` inside a `for`, which was this instrument's leaky
+    // side until the plan read the checker's record for a loop binder's field.
+    let closed = build_and_run(
+        "leakclosed",
+        r#"type P = { name: String }
+
+fn main() -> Int64 {
+    let people = [P { name: "a name long enough to allocate" }]
+    let mut s = ""
+    let mut i = 0
+    while i < 3 {
+        for p in people {
+            s = p.name.copy()
+        }
+        i = i + 1
+    }
+    print(s.byteLength)
+    return 0
+}
+"#,
+    );
+    assert_eq!(
+        closed.status.code(),
+        Some(0),
+        "the loop store releases the copy it displaces (RFC-0125 SS3 M3, the type slice):
+{}",
+        norm(&closed.stderr)
     );
 }
