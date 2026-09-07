@@ -130,9 +130,9 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::ArrayN` | 16 | 7 | 18 | 9 | 0 | 4 | 54 |
 | `Type::SmallArray` | 22 | 2 | 21 | 7 | 1 | 4 | 57 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 26 | 3 | 19 | 7 | 6 | 4 | 65 |
-| `Type::Stream` | 18 | 1 | 9 | 7 | 1 | 1 | 37 |
-| `Type::Task` | 10 | 1 | 4 | 7 | 1 | 1 | 24 |
+| `Type::Map` | 25 | 3 | 19 | 7 | 6 | 4 | 64 |
+| `Type::Stream` | 19 | 1 | 9 | 7 | 1 | 1 | 38 |
+| `Type::Task` | 8 | 1 | 4 | 7 | 1 | 1 | 22 |
 | `Type::Logger` | 2 | 1 | 2 | 1 | 0 | 1 | 7 |
 | `Type::Fn` | 28 | 5 | 24 | 10 | 1 | 0 | 68 |
 | `Type::Lazy` | 7 | 1 | 1 | 9 | 0 | 0 | 18 |
