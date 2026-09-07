@@ -216,7 +216,7 @@ the same; it is still two copies.
 | request too large | refused above `SIZE_MAX` (never on LP64) | refused above 2 GiB, and a heap top past 4 GiB | limit differs; both print `OUT_OF_MEMORY` |
 | `realloc` | in place through libc | none; every grow is allocate, copy, free | behaviour differs on the copy count; observable only in time |
 | free of a foreign pointer | under the audit: `free audit: double or foreign free`, exit 134; without it, undefined | silently refused when below `HEAP_BASE` or the class is out of range; the block leaks | a class of defect one engine reports and the other hides |
-| leak check | `VYRN_LEAK_CHECK` walks the audit table after teardown, exit 135 | none | the residue ratchet measures the native binary only |
+| leak check | `VYRN_LEAK_CHECK` walks the audit table after teardown, exit 135 | a live-block count and a per-block mark in the allocator, under the same variable as a BUILD flag, exit 135 (RFC-0125 §3 M4) | agreed since the restoration; the row read "none" while the shim was the only instrument |
 | poison on free | `0xDD` fill under the audit | none | a use-after-free reads stale bytes on one engine and `0xDD` on the other |
 | integer to text | `vsnprintf("%lld")` through `__vyrn_snprintf` | `int_str`, 86 lines by hand | agree by test, not by construction |
 | text to integer | `strtoll` | `parse_i64` and `str_i64`; `str_i64` skips no whitespace and does not clamp, and says so | `strtoll` accepts leading whitespace; only harness inputs reach it |
@@ -631,7 +631,9 @@ U5's rewrite), because the wording is `trap.rs`'s and parity compares stderr
 byte for byte. §4.2 decision 1 (the audit and the poison go): the wasm copy
 never had either, and the C shim's stay behind `VYRN_FREE_AUDIT` and
 `VYRN_LEAK_CHECK` until step 3 deletes the shim's allocator; the residue
-ratchet still measures natively. Nothing outside the allocator read the
+ratchet still measures natively. (The audit came BACK, into this allocator, in
+RFC-0125 §3 M4's restoration slice — under a build flag, so an ordinary module
+is the byte-identical one this decision asked for. The poison did not.) Nothing outside the allocator read the
 header: `args`'s comment on the header slack is the one mention, and it
 describes a refusal that still holds (the second header word is never
 written). Gates: workspace, kernel (ratchet held), lowered, fixtures, parity 41
