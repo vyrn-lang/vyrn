@@ -10486,11 +10486,13 @@ fn render_int_literal(n: i64) -> String {
 /// Every name here is also in [`RESERVED`], and has to be: a name the compiler
 /// does not own is a user function, which this list would then forbid by
 /// coincidence of spelling. `spawn_forbidden_names_are_reserved` checks it.
+///
+/// Every name here is also an ATOM of a row outside `Effects::SPAWN_ALLOWS`
+/// (RFC-0125 §3 M6, the four-names slice), so the list is a SUBSET of the
+/// lattice and never a second rule; `spawn_forbidden_names_are_effects`
+/// checks it.
 const SPAWN_FORBIDDEN: &[&str] = &[
     "print",
-    // `close` frees a stream's buffer: the caller may still hold it across the
-    // task boundary.
-    "close",
     "trace",
     "debug",
     "info",
@@ -10508,11 +10510,8 @@ const SPAWN_FORBIDDEN: &[&str] = &[
     "renameFile",
     "fsyncFile",
     "readFileBytes",
-    "stringFromBytes",
     "listDir",
     "listDirKinds",
-    "lineAt",
-    "colAt",
 ];
 
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
@@ -13691,6 +13690,23 @@ mod tests {
     /// whatever user function happened to share the spelling, and an entry that
     /// LEAVES `RESERVED` would keep forbidding it silently. Removing `afree` is
     /// how that became checkable rather than remembered.
+    /// Every forbidden name is an effect the isolation rule refuses — RFC-0125
+    /// §3 M6, the four-names slice, which took `close`, `stringFromBytes`,
+    /// `lineAt` and `colAt` off the list because they are in no row of it.
+    #[test]
+    fn spawn_forbidden_names_are_effects() {
+        for n in SPAWN_FORBIDDEN {
+            let e = crate::effects::atom(n).unwrap_or_else(|| {
+                panic!("`{n}` is forbidden inside a task and is in no row of the lattice")
+            });
+            assert!(
+                !crate::effects::Effects::SPAWN_ALLOWS.has(e),
+                "`{n}` is forbidden inside a task and its row `{}` is one a task may have",
+                e.name()
+            );
+        }
+    }
+
     #[test]
     fn spawn_forbidden_names_are_reserved() {
         for n in SPAWN_FORBIDDEN {

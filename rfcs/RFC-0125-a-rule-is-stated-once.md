@@ -15513,6 +15513,102 @@ so`, `compiler/vyrn-frontend/src/effects.rs`, `floor.rs`,
 `compiler/vyrn-lower/src/effects.rs`, `compiler/vyrn-cli/tests/effects.rs`, the
 lattice table and this record.
 
+#### The four names that were on the list and in no row (2026-09-07)
+
+The ranked list's third item. `SPAWN_FORBIDDEN` held 21 names and four of them
+— `close`, `stringFromBytes`, `lineAt`, `colAt` — were in no row of
+`effects::ATOMS`. Three had no comment at all. The order was "classify them or
+drop them, with a witness each", and all four drop.
+
+**`stringFromBytes`, `lineAt`, `colAt`: the classification is pure.** Their
+signatures say it. `stringFromBytes(b: Array<UInt8>) -> Result<String, String>`
+is a conversion whose whole effect is the allocation of its result, and `alloc`
+is a row a task MAY have. `lineAt(bytes, offset)` and `colAt(bytes, offset)`
+answer a line and a column from a byte buffer and an offset — an `Int64` out of
+a borrow, no allocation at all. The judgment says so in one word each:
+`VYRN_EFFECTS_DUMP` prints `alloc` for the first and `pure` for the other two.
+The interpreter memoizes a line-start table per buffer, which is a cache under
+the language and observable nowhere.
+
+**`close`: the classification is ownership, and the ownership judgment already
+states it.** Its comment named a real hazard — "frees a stream's buffer: the
+caller may still hold it across the task boundary" — and the probe says who
+refuses it. `rfcs/probes-0125/stream-disposed-by-task-and-caller.vyrn` hands a
+`Stream<Int64>` to a task and consumes it again in the caller, and the refusal
+is not the spawn rule's:
+
+```
+`s` is a `Stream` and is disposed more than once
+  note: a stream must be consumed with `for … in`, forwarded by returning it,
+  or released with `close(s)` — on every path
+```
+
+That is RFC-0075's must-use judgment, and it refuses every route into the
+hazard, `close` included, whether or not a `spawn` is anywhere near. What the
+list added on top was a refusal of the CORRECT program:
+`rfcs/probes-0125/task-closes-its-own-stream.vyrn` builds a stream inside the
+task and closes it there, nothing outside the task ever names it, and the
+checker refused it.
+
+**The witnesses, one per name, both directions.**
+
+| probe | before | after |
+|---|---|---|
+| `probes-0125/task-closes-its-own-stream.vyrn` — a task that makes and closes its own stream | refused: "does I/O or touches shared mutable state" | **ok** |
+| a task handed a stream that closes it, the caller having moved it | refused, same sentence | **ok** |
+| `probes-0125/stream-disposed-by-task-and-caller.vyrn` — the hazard `close`'s comment named | refused by the must-use judgment | refused, the same words |
+| `probes-0125/task-converts-bytes-to-a-string.vyrn` — `stringFromBytes` in a task | refused | **ok** |
+| a task calling `lineAt` | refused | **ok** |
+| a task reading a global, a task with a `modify` parameter, a task holding a `drop` | refused | refused, unchanged |
+| a `Stream<Int64>` as a spawn argument with no `close` anywhere | ok | ok |
+
+The last two rows are the direction that matters: nothing else moved. The three
+conditions the previous record counted are all still refused, and the one shape
+that was already accepted still is.
+
+**What stands in place of the four.** `SPAWN_FORBIDDEN` is 17 names now and
+every one is an atom of a row outside `Effects::SPAWN_ALLOWS`, which
+`spawn_forbidden_names_are_effects` asserts. The list can therefore only be
+NARROWER than the lattice, never a second answer — and it is narrower, by the
+twelve atoms it does not name: the clock's two, entropy's one, `serveStream`,
+and the eight generation-only names. Widening it to the derived set is not this
+slice's: it would refuse a task that reads the clock, which is a rule RFC-0004
+§Q4's determinism argument supports and which nothing has measured. Deleting
+the list outright is the spawn fixpoint's slice, where the judgment states the
+whole rule.
+
+**The licence.** The whole-stderr corpus diff over the same 419 programs, and
+the seven probes, because the corpus does not reach this rule.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,269 | 16,285 |
+
+The corpus is silent because no corpus program spawns a callee that touches any
+of the four. The probes are the measurement, and three of them are in the tree
+now.
+
+**The arithmetic is honest and it is the wrong sign.** The four names and their
+comment are seven lines out; the pin that keeps the list a subset of the lattice
+is twenty-three lines in, of which nineteen are the test. A rule that was a
+hand-written list beside the lattice is now a hand-written list the lattice
+checks, and that is worth the sixteen lines until the list goes entirely.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | shared machinery | 2,229 lines | 2,228 | `SPAWN_FORBIDDEN` loses four names and its `close` comment, and gains three doc lines |
+| | tests | 4,658 | 4,675 | `spawn_forbidden_names_are_effects` |
+| RFC-0126 §3, RFC-0127 §3 | — | unmoved | the slice names no type constructor and no form |
+
+**Commit.** `four names come off the task's forbidden list, and the lattice
+checks the rest`, `compiler/vyrn-frontend/src/checker.rs` (+16),
+`compiler/vyrn-cli/tests/checker_census.rs`, three probes under
+`rfcs/probes-0125/`, and this record.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

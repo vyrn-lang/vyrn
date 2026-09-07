@@ -1,0 +1,30 @@
+/// RFC-0125 §3 M6, the four-names slice: the hazard, still refused.
+///
+/// The caller hands the stream to the task AND consumes it again. Taking
+/// `close` off `SPAWN_FORBIDDEN` does not open this: the ownership judgment
+/// refuses it in its own words — `s` is a `Stream` and is disposed more than
+/// once — which is the rule that was always doing the work.
+fn work(s: Stream<Int64>) -> Int64 {
+  let mut sum = 0
+  for v in s {
+    sum = sum + v
+  }
+  return sum
+}
+
+fn total(s: Stream<Int64>) -> Int64 {
+  let mut sum = 0
+  for v in s {
+    sum = sum + v
+  }
+  return sum
+}
+
+fn main() -> Int64 {
+  let mut xs: Array<Int64> = []
+  xs.push(1)
+  let s = fromArray(xs)
+  let t = spawn work(s)
+  let again = total(s)
+  return t.join() + again
+}
