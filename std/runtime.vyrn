@@ -78,6 +78,7 @@
 
 import {
     load8, load32, load64, store8, store32, store64, copy, fill, memorySize, grow, heapBase, trap,
+    procExit,
     fdWrite, fdRead, fdClose, pathOpen, pathRename, fdSync, fdPrestatGet, argsSizesGet, argsGet,
     environSizesGet, environGet, clockTimeGet, randomGet, fdReaddir, genRead, genFetch,
 } from "std/mem"
@@ -327,9 +328,12 @@ export fn regexRun(s: Int32, table: Int32, start: Int32, accept: Int32) -> Bool 
 // and `sub` the two bits under `t`'s leading one, the class is
 // `shift * 4 + sub` and its size `(sub + 5) << shift`. Classes 3 to 115 are in
 // use: 8 bytes to 2 GiB, every size a multiple of eight, and the round-up is
-// at most 25 percent. Every block carries an eight-byte header whose first
+// at most 25 percent. Classes 0, 1 and 2 cannot compute, so their three heads
+// are dead memory and the instrument at the end of this section uses them. Every block carries an eight-byte header whose first
 // word is the class (§4.2 decision 3: `free` needs the class and nothing needs
-// the size). The second header word is never written and reads as zero.
+// the size). The second header word is never written and reads as zero — the
+// exit-residue instrument below is the one thing that ever writes it, and
+// only in an audited build.
 //
 // The heap's first 480 bytes are the allocator's own: one head per class,
 // 116 words, then the bump offset at 464, then the arena's three words at
@@ -391,6 +395,7 @@ export fn malloc(n: Int64) -> Int32 {
     let head = Int32(load32(h))
     if head != 0 {
         store32(h, load32(head))
+        auditBirth(head, size)
         return head
     }
     let p = base + 8768 + Int32(load32(base + 464))
@@ -408,6 +413,7 @@ export fn malloc(n: Int64) -> Int32 {
     }
     store32(base + 464, UInt32(end - Int64(base) - 8768))
     store32(p, UInt32(cls))
+    auditBirth(p + 8, size)
     return p + 8
 }
 
@@ -421,9 +427,148 @@ export fn free(p: Int32) {
     if cls < 3 || cls > 115 {
         return
     }
+    auditDeath(p, cls)
     let h = base + (cls << 2)
     store32(p, load32(h))
     store32(h, UInt32(p))
+}
+
+// ---------------------------------------------------------------------------
+// The exit-residue instrument (RFC-0114 §25; restored by RFC-0125 §3 M4)
+// ---------------------------------------------------------------------------
+//
+// The ratchet asks one question of a finished program: is every block this
+// allocator handed out back on a free list? The instrument that answers it is
+// four calls inside the allocator — a birth, a death, an init and an exit —
+// and it is written ONCE, here, so every engine that runs the module has it.
+//
+// **The switch.** A call to a function whose name begins with `audit` is
+// emitted only when the build is audited (`VYRN_LEAK_CHECK` in the
+// compiler's environment; `Fn_::call` in `direct.rs` drops the call
+// otherwise). An unaudited build therefore emits no call, and `Module::sweep`
+// drops these bodies with the data they interned: not one byte of a normal
+// build moves, which is what `VYRN_WASM_MANIFEST=check` asserts.
+//
+// **The state.** Classes 0, 1 and 2 cannot exist — `malloc` floors a request
+// at eight bytes and the smallest class that computes is 3 — so the first
+// three list heads at `heapBase() + 0`, `+ 4` and `+ 8` are dead memory in
+// every build. The instrument keeps its own block's address in the first of
+// them, and zero there means "not armed", which is what an unaudited build
+// and the window before `auditInit` both read. The block holds the live
+// count, the live bytes and the four wordings the emitter interns for it.
+//
+// **The liveness mark** is the block header's SECOND word, the one at `p - 4`
+// that nothing else writes (§4.2 decision 3 kept only the class). A live
+// block carries 1 there and a free one 0, so a free of a block that is not
+// live — a double free, or a free of an address inside a block already on a
+// list — is one load and one compare, at the site, before the push corrupts
+// the list.
+
+/// A class's payload size, the inverse of `malloc`'s `cls`.
+fn classSize(cls: Int32) -> Int32 {
+    return ((cls & 3) + 5) << (cls >> 2)
+}
+
+/// Arm the instrument: the emitter calls this first in `_start`, with the
+/// four wordings interned. The block is allocated BEFORE the address is
+/// stored, so the instrument never counts itself.
+fn auditInit(pre: Int32, mid: Int32, post: Int32, dbl: Int32) {
+    let s = malloc(32)
+    store32(s, 0)
+    store32(s + 4, 0)
+    store32(s + 8, UInt32(pre))
+    store32(s + 12, UInt32(mid))
+    store32(s + 16, UInt32(post))
+    store32(s + 20, UInt32(dbl))
+    store32(heapBase(), UInt32(s))
+}
+
+/// A block leaves the allocator: mark it live and count it.
+fn auditBirth(p: Int32, size: Int32) {
+    let s = Int32(load32(heapBase()))
+    if s == 0 {
+        return
+    }
+    store32(p - 4, 1)
+    store32(s, load32(s) + 1)
+    store32(s + 4, load32(s + 4) + UInt32(size))
+}
+
+/// A block goes back, after `free`'s two refusals and before its push. A
+/// block that is not marked live is a double or foreign free.
+fn auditDeath(p: Int32, cls: Int32) {
+    let s = Int32(load32(heapBase()))
+    if s == 0 {
+        return
+    }
+    if load32(p - 4) != 1 {
+        auditFail(s)
+    }
+    store32(p - 4, 0)
+    store32(s, load32(s) - 1)
+    store32(s + 4, load32(s + 4) - UInt32(classSize(cls)))
+}
+
+/// A block the RUNTIME holds for the life of the process is not the
+/// program's residue: `envGet`'s environment blob is the one such block, and
+/// its own comment says why nothing frees it. Forget it rather than let every
+/// program that reads an injected value take a baseline row.
+fn auditForget(p: Int32) {
+    let s = Int32(load32(heapBase()))
+    if s == 0 {
+        return
+    }
+    store32(p - 4, 0)
+    store32(s, load32(s) - 1)
+    store32(s + 4, load32(s + 4) - UInt32(classSize(Int32(load32(p - 8)))))
+}
+
+/// The double-free report: one line on descriptor 2 and exit 134, at the
+/// site, so the list the free would have corrupted is still readable.
+fn auditFail(s: Int32) {
+    let msg = Int32(load32(s + 20))
+    writeAll(2, msg, strLen(msg))
+    procExit(134)
+}
+
+/// The completeness assertion: the emitter calls this at the end of `_start`,
+/// after the standard output buffer is flushed and before the exit code is
+/// taken. A program with live blocks left exits 135 with the line the old C
+/// instrument printed, which is the line the ratchet reads.
+///
+/// The arena's retained chunks are the allocator's own and not the program's:
+/// `regionExit` keeps the oldest standard chunk on purpose (§4.3), so a
+/// `region` in a loop asks the allocator nothing after its first turn. They
+/// are subtracted here rather than left to a baseline row.
+export fn auditExit() {
+    let base = heapBase()
+    let s = Int32(load32(base))
+    if s == 0 {
+        return
+    }
+    let mut live = Int32(load32(s))
+    let mut bytes = Int32(load32(s + 4))
+    let mut c = Int32(load32(base + 468))
+    while c != 0 {
+        live = live - 1
+        bytes = bytes - classSize(Int32(load32(c - 8)))
+        c = Int32(load32(c))
+    }
+    if live == 0 {
+        return
+    }
+    let pre = Int32(load32(s + 8))
+    let mid = Int32(load32(s + 12))
+    let post = Int32(load32(s + 16))
+    let buf = base + 8736
+    writeAll(2, pre, strLen(pre))
+    let n = digitsAt(buf, 31, Int64(live), false)
+    writeAll(2, n, buf + 32 - n)
+    writeAll(2, mid, strLen(mid))
+    let bn = digitsAt(buf, 31, Int64(bytes), false)
+    writeAll(2, bn, buf + 32 - bn)
+    writeAll(2, post, strLen(post))
+    procExit(135)
 }
 
 // ---------------------------------------------------------------------------
@@ -1204,6 +1349,7 @@ export fn envGet(key: Int32) -> Int32 {
     let cnt = Int32(load32(sc))
     let ptrs = malloc(Int64((cnt << 2) + 8))
     let blob = malloc(Int64(Int32(load32(sc + 4)) + 1))
+    auditForget(blob)
     environGet(ptrs, blob)
     let mut i: Int32 = 0
     while UInt32(i) < UInt32(cnt) {

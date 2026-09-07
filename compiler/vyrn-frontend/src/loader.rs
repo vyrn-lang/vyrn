@@ -769,6 +769,21 @@ pub const MEM_PREFIX: &str = "mem$";
 /// The reserved prefix of every `std/runtime` declaration.
 pub const RUNTIME_PREFIX: &str = "runtime$";
 
+/// Whether this build is AUDITED: `VYRN_LEAK_CHECK` set to anything but `0`
+/// in the compiler's environment (RFC-0114 §25, restored by RFC-0125 §3 M4).
+///
+/// It selects `std/runtime`'s accounting allocator — the emitter emits the
+/// four `audit` calls, the module-state teardown behind them, and the
+/// lowering's `<teardown>` root. A BUILD flag rather than a runtime one: a
+/// runtime switch would put a branch in `malloc` that every recorded wasm
+/// hash pays for, and an unaudited build has to be byte-identical or
+/// `VYRN_WASM_MANIFEST=check` is measuring the instrument instead of the
+/// language. Read here rather than in each crate so the emitter and the
+/// lowering cannot disagree about what a build is.
+pub fn audit_build() -> bool {
+    std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Every runtime module, in load order.
 pub const RT_MODULES: &[RtModule] = &[
     // `fromJson` links this one too, and for the same reason `toJson` does: the
