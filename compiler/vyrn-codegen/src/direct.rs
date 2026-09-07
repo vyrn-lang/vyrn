@@ -4697,6 +4697,7 @@ impl<'p> Fn_<'_, 'p> {
                 iter,
                 body,
                 line,
+                consuming,
                 ..
             } => {
                 // RFC-0091 M3: a user container declares how it is iterated. The
@@ -4862,6 +4863,22 @@ impl<'p> Fn_<'_, 'p> {
                 // The fall-through release (RFC-0092 M5), after every exit path
                 // has rejoined. A body that returned already ran it and branched.
                 self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
+                // `for x in consume xs` — the loop TOOK the container, so the
+                // loop gives it back, and the core says so with a release of
+                // its own rather than a row (RFC-0125 §3 M3, the walk's
+                // deletion). The take is what the kernel judges at the loop:
+                // it is where a consuming loop over a `read` parameter's field
+                // or over module state is refused (the census, rows 10, 11 and
+                // 29), so the core cannot leave it to an exit row — and a
+                // release only the core states is one no row names, which is
+                // why the two are exclusive here.
+                if *consuming && !self.releases_whole(key) {
+                    if let Some(r) = self.rel_slots.get(&key).cloned() {
+                        self.emit_rel(m, b, r.place, &r.rel, *line)?;
+                        self.rel_slots.remove(&key);
+                        self.rel_pending.retain(|(k, _)| *k != key);
+                    }
+                }
             }
             Stmt::IndexSet {
                 name,
@@ -12856,7 +12873,12 @@ impl<'p> Fn_<'_, 'p> {
         // `if let` states: an arm that returns walks the frames, and an arm may
         // build over the scratch the scrutinee was left in.
 
-        if self.drops.contains_key(&key) {
+        // A ROW, not the droppable table: a construct that TOOK its scrutinee
+        // has no row, and a slot registered for a release nobody emits is a
+        // slot no later statement can reuse — the frame then grows once per
+        // construct, and one generated `main` of 316 matches went past the
+        // 8 KB limit (RFC-0125 §3 M3, the walk's deletion).
+        if self.releases_whole(key) {
             if let Some(r) = self.rel_for(&st, line)? {
                 let own = b.alloc(sl.size, sl.align);
                 b.slot(own);
@@ -12936,8 +12958,34 @@ impl<'p> Fn_<'_, 'p> {
             let binds = self.pattern_binds(&sum, arm.pattern, line)?;
             let ptys: Vec<Type> = binds.iter().map(|(_, t)| t.clone()).collect();
             let mut bound: Vec<(String, Place, Type)> = Vec::new();
+            // The binders' own plan keys, taken off the pattern the reader
+            // wrote — the same address the core keys them by
+            // ([`vyrn_frontend::own::binder_key`]). A synthetic pattern this
+            // backend builds has none in the plan and registers nothing.
+            let keys: Vec<usize> = match arm.pattern {
+                Pattern::Variant(_, ns) => ns
+                    .iter()
+                    .map(|n| vyrn_frontend::own::binder_key(n))
+                    .collect(),
+                Pattern::Success(n) | Pattern::Failure(n) => {
+                    vec![vyrn_frontend::own::binder_key(n)]
+                }
+                Pattern::Other => Vec::new(),
+            };
             for (i, (n, t)) in binds.into_iter().enumerate() {
                 let place = self.bind_payload(b, addr, &sl, &ptys, i, &t, line, free_box)?;
+                // A binder the arm owns is released at every exit INSIDE the
+                // arm, and the placer's row names it there (RFC-0125 §3 M3,
+                // the walk's deletion). The arm's END is the other half and
+                // `arm_row` below states it; the two are exclusive, since a
+                // binder handed out or already freed is held at neither.
+                if let Some(key) = keys.get(i).copied() {
+                    if self.drops.contains_key(&key) {
+                        if let Some(rel) = self.rel_for(&t, line)? {
+                            self.register_rel(b, key, place.clone(), rel);
+                        }
+                    }
+                }
                 bound.push((n.clone(), place.clone(), t.clone()));
                 self.scope.push((n, place, t));
             }
@@ -12981,6 +13029,16 @@ impl<'p> Fn_<'_, 'p> {
                         self.emit_rel(m, b, place, &rel, line)?;
                     }
                 }
+            }
+            // A binder's scope is its arm, and so is the row that names it:
+            // no exit past this point can reach one. Un-pinning the slot here
+            // is what keeps the frame the size it was — a row held to the
+            // function's `return` would hold its slot with it, and one
+            // generated `main` grew past the 8 KB frame limit
+            // (`numbers.rs`'s differential parser).
+            for key in &keys {
+                self.rel_slots.remove(key);
+                self.rel_pending.retain(|(k, _)| k != key);
             }
             self.scope.truncate(mark);
             self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;
@@ -13556,7 +13614,24 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 _ => true,
             };
-        consumed && !self.drops.contains_key(&key) && self.region_depth == 0 && !own_receiver
+        consumed && !self.releases_whole(key) && self.region_depth == 0 && !own_receiver
+    }
+
+    /// Whether a placed row releases the value at `key` WHOLE — the question
+    /// [`Fn_::frees_boxes`] used to ask of the plan's droppable table
+    /// (RFC-0125 §3 M3, the walk's deletion).
+    ///
+    /// The two are not the same question. The table says the type of the
+    /// value has a release; a ROW says one runs here. While the walk placed a
+    /// row at every frame exit the two agreed, and once the take is the
+    /// core's own answer they part: a construct that TOOK its scrutinee has
+    /// no row, and the boxes its binders came out of are then its to give
+    /// back. `releaseacrossexit`'s `overIfLet` is the reading — its `Option`
+    /// box outlived the arm that took the payload.
+    fn releases_whole(&self, key: usize) -> bool {
+        self.placed
+            .values()
+            .any(|rows| rows.iter().any(|(binding, _)| *binding == key))
     }
 }
 

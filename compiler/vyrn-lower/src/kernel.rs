@@ -1141,7 +1141,19 @@ impl<'b> Kernel<'b> {
         site: usize,
     ) -> Result<(), Refusal> {
         self.ending.set(true);
+        let mark = self.missing.len();
         let out = self.scope_end_inner(st, names, exit, site);
+        // Newest binding first, which is the order a frame is unwound in
+        // (RFC-0125 §3 M3, the walk's deletion). `names` is CREATION order at
+        // every one of the three exits — `bound_here` for a block,
+        // `bound_inside` for a loop edge, `all_names` for a return — so
+        // reversing what this scope end pushed is that order: a block's exit
+        // runs its own frame alone; a `break` or a `continue` unwinds from the
+        // loop body inward, and an inner frame's names are created after the
+        // frame outside it; a return walks every frame, and a parameter has
+        // the lowest name index of all, so it is released LAST, which is what
+        // RFC-0114 says an owned `consume` parameter does.
+        self.missing[mark..].reverse();
         self.ending.set(false);
         out
     }
@@ -1177,11 +1189,31 @@ impl<'b> Kernel<'b> {
                     // keyed by the ARM say it once: the binder's own row for a
                     // binder, and RFC-0114 Rule N's edge for a name the frame
                     // bound outside (RFC-0125 §3 M3, row 17).
+                    //
+                    // The edge table takes only what it can carry, which is
+                    // the same rule [`Kernel::equalize`] states one level
+                    // down. It names a row by its SPELLING, so a temporary the
+                    // lowering minted cannot go in it — `std/hash.vyrn`'s
+                    // `sha1Hex` holds one at both arms of a returned `match`,
+                    // and the rebuild could not lower it at all. And an edge
+                    // row releases the WHOLE value, so a name with holes
+                    // cannot go in it either — `graphql.vyrn`'s `gqlResolve`
+                    // holds an `arg` whose `.err` a path before the `match`
+                    // took, and the edge drop freed it around a field no arm
+                    // had taken. Both take the exit's own row instead, like
+                    // any other local of the frame: one rule for a frame's
+                    // locals, stated once (RFC-0125 §3 M3, the walk's
+                    // deletion). Neither is a name one arm takes and another
+                    // holds, which is what the edge table is for.
                     let (exit, site, kind) = match self.arms.last() {
                         Some((s, arm, binds)) if *s != 0 && binds.contains(n) => {
                             (Exit::Block, *s, MissingKind::ArmBinder { arm: *arm })
                         }
-                        Some((s, arm, _)) if *s != 0 => {
+                        Some((s, arm, _))
+                            if *s != 0
+                                && !self.body.names[*n as usize].source.starts_with('@')
+                                && self.body.names[*n as usize].holes.is_empty() =>
+                        {
                             (exit, *s, MissingKind::Edge { edge: *arm })
                         }
                         _ => (exit, site, MissingKind::Exit),
@@ -1826,22 +1858,31 @@ impl<'b> Kernel<'b> {
         }
         match s {
             St::Let(n, rhs) => {
-                // A literal, or a literal built from literals (`[]`,
-                // `Body { nodes: [] }`), owns no heap yet.
-                // `Static` is a statement about a RELEASE — there is none
-                // until a store gives the name a buffer — so a name that
-                // owes none is never `Static`, only held or gone.
-                let is_static = self.releases(*n)
-                    && match rhs {
-                        Rhs::Val(Val::Lit) => true,
-                        Rhs::Make(vs) => vs.iter().all(|v| match v {
-                            Val::Lit => true,
-                            Val::Name(m) => {
-                                !self.releases(*m) || st.own[*m as usize] == Own::Static
-                            }
-                        }),
-                        _ => false,
-                    };
+                // A LITERAL owns no heap yet: `let mut acc = ""` names the
+                // data segment until a store gives it a buffer. `Static` is a
+                // statement about a RELEASE — there is none until then — so a
+                // name that owes none is never `Static`, only held or gone.
+                //
+                // A `Make` of literals is NOT one, and the walk's deletion is
+                // what showed it (RFC-0125 §3 M3). `[4, 5]` calls the
+                // runtime's constructor and the buffer it hands back is this
+                // frame's; the core says so where it binds the name — an
+                // array literal is no `Expr::Str` and
+                // [`crate::core::Builder::owned_binding`] never called it
+                // literal — and the plan's row freed it on every engine. The
+                // kernel alone said `Static`, so with the walk's row gone
+                // nothing released a local array at all: 34 corpus programs
+                // began to leak, `consume_handover`'s `b` the smallest.
+                //
+                // A RECORD of literals is no exception, and the corpus says
+                // which way: `Book { title: "Dune", body: () -> loadBody(1) }`
+                // holds a thunk the construction allocated
+                // (`examples/lazyfield.vyrn`), so a rule that spared a record
+                // spared that too. What the whole `Make` arm was buying is one
+                // refusal the kernel now gives as well as the checker —
+                // `r22_drop_with_a_hole`'s `drop p` after a take of `p.name`
+                // — and the census records it there.
+                let is_static = self.releases(*n) && matches!(rhs, Rhs::Val(Val::Lit));
                 // An alias: a borrow read out of a place, or a second name
                 // for a borrow. What it reads is kept, and a second name for
                 // a borrow is not a take of it.

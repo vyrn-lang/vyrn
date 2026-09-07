@@ -12749,6 +12749,139 @@ does, `place_body`, `Live`, `Place` and `Ownership::releases` stand,
 `movecheck`'s `Kind::Rows` stands at 1,748, and the four readers of
 `Ownership::releases` named in the last record wait with them.
 
+#### The walk goes, and the exit rule is the core's alone (2026-09-07, `track-da`)
+
+The last record built the walk's deletion, measured it and refused it: eight
+corpus programs, in two causes. This slice answers both, applies the deletion
+and lands it. `own.rs` falls from **3,802 lines to 3,471** — `place_body`,
+`Live`, `Place`, `impl Place`, `owned_params` and `stmt_line` all go — and the
+kernel over the corpus reads **24,775 instances accepted, 0 refused, 0
+unlowered**, the number it read before.
+
+**Cause 1: a binder is a binding of the frame.** `MissingKind::ArmBinder` is
+read at an arm's END, and a payload binder held at a `return` inside the arm
+needs a row at the `return`. The kernel already reported one — `scope_end`
+names every held name at every exit — but `place_frames` dropped it, because
+`NameInfo::binding` is `None` for a binder and a row needs a plan key. So a
+binder gets one: `own::binder_key`, the address of the name the reader wrote,
+which is `own::for_var_key`'s rule one binding form over. `bind_pattern` keys
+every binder, owned or borrowed, because the FIRST build of a pair takes
+nothing and a key given only to an owned binder would leave the second build's
+row with no name to land on. The exit rule is then the one it already was:
+`drops_at` emits the row, and it skips a row for a name this frame does not
+own, which is what a borrowed binder is. Three refusals gone —
+`clidemo`/`clifail`'s `s`, `rest`'s `ps`, `vlog`'s `lvl`.
+
+**Cause 2: the take stops reading what the placer writes.** `Reads` counted a
+`St::Row` as a read of its name, so "the plan placed a row here" and "something
+reads the name after the switch" were one sentence — which is why the take rule
+reproduced the plan's silence exactly, and why the facts rebuild read rows the
+placer had just added and seeded a different take than the rows were placed
+for. A release row is not a read now. The take is decided over the core's own
+statements, and the rows are derived FROM it: the placer runs the kernel over
+the body the decision made, a value the construct took is gone at the
+scrutinee's exit, and no row is placed there. The fixpoint holds in both
+directions — a construct that takes places no scrutinee row and takes again on
+the next build; one that does not places a row that no longer perturbs the
+answer.
+
+**What the two causes turned up, which is the slice's real content.** The
+deletion is 331 lines of `own.rs`. Answering for them cost four more findings,
+each a rule the plan's row was carrying and no pass stated:
+
+| what | where it was | what it is now |
+|---|---|---|
+| a placer row with an EMPTY hole set fell back to the binding's own | `place_frames`, the add path (the rewrite path above it always said `Some`) | `holes: Some(holes)` — the kernel's set at THIS exit, empty included. `regexredux`'s `compile` abandons a `Builder` at three early `Err` returns that precede every take of its arrays, and round fifty-two's `full` flag reconstructed that from walk order; the pass that judged the path says it now |
+| Rule N's edge table took a row it cannot name | `kernel::scope_end`, the arm keying | the edge table names a row by its SPELLING and releases the value WHOLE, so a temporary the lowering minted and a name with holes both take the exit's own row instead. `std/hash.vyrn`'s `sha1Hex` held a `@t2` at both arms of a returned `match` and the rebuild could not lower it at all; `graphql.vyrn`'s `gqlResolve` held an `arg` whose `.err` a path before the `match` took, and the edge drop freed it around a field no arm had taken |
+| a `Make` of literals was `Static` | the kernel's `St::Let` | `[4, 5]` calls the runtime's constructor and the buffer is this frame's. The core always said so — an array literal is no `Expr::Str`, and `owned_binding` never called it literal — and the plan's row freed it on every engine. The kernel alone said `Static`, so with the walk's row gone nothing released a local array: **34 corpus programs began to leak**, `consume_handover`'s `b` the smallest. `lazyfield`'s `Book { title: "Dune", body: () -> loadBody(1) }` says a record is no exception: the construction allocated the thunk |
+| the emitter asked the droppable TABLE where it meant a ROW | `direct.rs`'s `frees_boxes` and the `match`/`if let` scrutinee slot | `Fn_::releases_whole`. The table says the TYPE has a release; a row says one runs here. While the walk placed a row at every frame exit the two agreed. `releaseacrossexit`'s `overIfLet` is the reading: its `Option` box outlived the arm that took the payload. And a slot registered for a release nobody emits is a slot no later statement can reuse — one generated `main` of 316 matches went past the 8 KB frame limit |
+
+**The one rule the core could not take off the emitters.** `for x in consume
+xs` releases the container where the loop ends, and the core states it with a
+`St::Drop` rather than a row — because the take is what the kernel JUDGES at
+the loop, and it is where a consuming loop over a `read` parameter's field or
+over module state is refused (the census, rows 10, 11 and 29). A release only
+the core states is one no row names, and `fold_facts` gives a `Site::None` drop
+to no emitter, so `consumingLoop` leaked. The wasm backend now emits the
+container's release at the loop's own exit when no row names the key — the two
+are exclusive by construction. It is this backend's own reading of `consume` on
+a `for`, spelled beside `frees_boxes`'s two structural disjuncts and for the
+same reason.
+
+**A refusal the kernel gained.** `r22_drop_with_a_hole` — `drop p` after
+`consume p.name` — was `Kernel::No` in the structural census: the kernel read
+the record literal as static data and never judged the `drop`. It gives the
+rule now, in its own words, and the census row says so.
+
+**The bytes, read at the source.** `VYRN_WASM_MANIFEST=check` moves **150 of
+176** examples, which is the number the last record measured for the deletion
+with the order fix. No example gained or lost a function. 137 are net smaller
+and 13 net bigger, and every one is a release moving or a dead one going:
+
+| what moved | read at | why |
+|---|---|---|
+| two instructions after a `br 1`, unreachable | `autorelease`, `freelist`, `slottable`, `clearkeep`, `fallible`, `ownership` | a block-exit release the walk emitted on a path nothing reaches |
+| a release moving from after a construct INTO the arm that carries the value out, and the dead copy after the `br` going | `binarytrees`, `region` | the arm ends with the `return`, so the arm's own exit is where the release belongs |
+| a whole deep-free loop moving from BEFORE a `for` to after it, and the frame growing because the container and the snapshot are live at once | `looptemp`, `floats`, the eight `simd*` examples, `sizedints`, `externdemo`, `numbytes` | the consuming loop's release is emitted at the loop's exit now, which is where the core states it |
+| frame offsets renumbered | every one of the 150 | the slots follow the releases |
+
+Nothing lost a release, and the residue ratchet is the proof: **163 clean, 12
+leaking, 0 double-free on each engine**, which is this branch's baseline
+unchanged. `route` and `testsweep` agree on the values.
+
+**The censuses.** RFC-0127 §3's form table: `own`'s column falls by 2 on every
+statement row (the walk's `stmt` arm and `stmt_line`'s) and by 1 on every
+expression row (the walk's `expr` arm); the wasm column rises by 1 on all four
+pattern rows, for the binder keys `direct.rs` now takes off the pattern. 1,390
+mentions to **1,346**, and `Stmt::Continue`'s floor from 25 to 23. The
+structural census of `movecheck.rs` does NOT move: `Kind::Rows` stands at
+**1,748**, because this deletion takes `own.rs`'s placement walk and not
+`movecheck`'s fact tables — `own.rs` still asks `movecheck::facts` and
+`movecheck::arg_caps` at 25 sites, round fifty-two's `full` flag among them.
+That is the next payer's list.
+
+**What `Ownership::releases` is now.** The placer's rows and the analysis's
+injected ones, and nothing structural: no pass writes a row per frame exit any
+more, and every row in it is one the kernel found owed over a body the core
+built. Its four readers outside the emitters (`lib.rs`'s per-instance
+`DropKind`, `render.rs`, `tests/lowered.rs`, `tests/kernel.rs`) are a move and
+not a deletion still.
+
+**The lines.** `compiler/vyrn-frontend/src/own.rs` 3,802 to **3,471**;
+`compiler/vyrn-lower/src/core.rs` 5,724 to **5,765**;
+`compiler/vyrn-lower/src/kernel.rs` 2,550 to **2,591**;
+`compiler/vyrn-codegen/src/direct.rs` 16,477 to **16,552**. `movecheck.rs`
+stands at 6,320.
+
+#### Gates (2026-09-07, the walk's deletion)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 76 suites, all green |
+| `kernel` `--ignored`, release | 1, 18 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 18 s |
+| `typed` `--ignored`, release | 1, 33 s |
+| `effects` `--ignored`, release | 2, 30 s |
+| `fixtures` `--ignored`, release | 1, 14 s |
+| `testsweep` `--ignored`, release | 1, 37 s |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 20 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 300 s |
+| the residue ratchet `--ignored`, release | **engine 163 clean, 12 leaking; route 163 clean, 12 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, on a manifest regenerated with `write`: 150 of 176 rows moved, each read above |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

@@ -260,7 +260,10 @@ fn census() -> Vec<Row> {
             "RFC-0093",
             "`p` may not be dropped — `p.name` was taken out of it on line 17, and `drop` \
              releases the whole binding",
-            Kernel::No,
+            // The kernel gives it too since the walk's deletion (RFC-0125 §3
+            // M3): it used to read a record literal of literals as static
+            // data and so never judged the `drop`.
+            Kernel::Other("is released whole although a `consume` took `.name` out of it"),
         ),
         row(
             "r23_modify_is_exclusive.vyrn",
