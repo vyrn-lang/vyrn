@@ -14148,6 +14148,319 @@ order is now the whole of the rule.
   Both already state their rule once — `finite::string_flow_proven` and
   `consteval::eval` — and both are call sites of it.
 
+#### What `checker.rs` is, with a reader against every part (2026-09-07)
+
+`compiler/vyrn-frontend/src/checker.rs` is 16,339 lines. It is the largest file
+in the workspace now that the textual emitter is gone. §2.7 estimates 139,000
+lines down to 40,000–45,000. That estimate deletes about 96,500 lines, and this
+one file is a sixth of them. `own.rs` was censused by a reader against every
+part (M2's records) and `movecheck.rs` by the kind table in
+`tests/refusals.rs`. Nobody had counted the checker. This is that count.
+
+**The method is `refusals.rs`'s, with one column added.** A section is one item
+— a `fn`, a `struct`, an `enum`, a `const`, a `mod` — with every item after it
+up to the next section's anchor. A span runs from the anchor's own doc comment
+to the line before the next anchor's, so every line of the file is in exactly
+one section and the counts add up to the file.
+`compiler/vyrn-cli/tests/checker_census.rs` computes the spans and asserts the
+per-kind totals; the table below is printed from the test's own rows
+(`cargo test -p vyrn-cli --test checker_census -- --ignored --nocapture
+the_structural_census_as_a_table`), so the prose and the tree cannot drift by
+one edit.
+
+The added column is the refusal count. `movecheck.rs`'s census has a kind per
+section and nothing else, because every one of its rules IS a section. The
+checker's are not. 190 of its 487 refusals are inside `Checker::call`, which is
+a table with one arm per builtin, and a kind alone would file all 190 under the
+surface and lose them. Each section therefore carries the number of
+`cerr!`/`cerr_at!` sites it holds, and a rule that leaves the checker moves two
+numbers.
+
+**The six kinds.**
+
+| kind | lines | share of the file | refusals | what it is |
+|---|---|---|---|---|
+| one arm per form, type constructor or builtin | 4,321 | 26.4% | 248 | the `(surface × types × builtins)` product of §1.1, counted per constructor by RFC-0126 §3 and per form by RFC-0127 §3 |
+| the typing judgment | 3,159 | 19.3% | 135 | inference, unification, assignability, the type of every node, and the `Recorded` table every later pass reads since M3 |
+| shared machinery | 2,233 | 13.7% | 30 | the entry points, the whole-program tables, the scope stacks, the walks, the renderers |
+| a rule the checker states | 1,525 | 9.3% | 58 | a section whose output is a `Diagnostic` and nothing else. The deletion candidates |
+| the checker's part in a rewrite stated elsewhere | 451 | 2.8% | 16 | the arms that recognise a desugar's output, and the re-typing of AST the parser synthesized |
+| tests | 4,650 | 28.5% | 0 | the file's own unit tests |
+
+**The first finding is the shape of that table, and it refuses the obvious
+plan.** The obvious plan was movecheck's: find the rules another pass already
+states and delete them. Over `movecheck.rs` that plan took 1,114 lines, because
+in `movecheck.rs` a rule is a section. Here the sections that exist only to
+state a rule are 1,525 lines — 13.0 per cent of the 11,689 lines that are not
+tests — and they hold 58 of the 487 refusals. The other 429 refusals are inside
+the surface tables and inside the judgment, where they are one arm of a `match`
+and not a section anybody can delete. **Deleting every rule-stating section in
+the checker would take 9.3 per cent of the file and leave 88 per cent of its
+refusals where they are.** What is big here is the surface: 4,321 lines of one
+arm per constructor, per operator and per builtin, of which `Checker::call`
+alone is 2,501 lines and 190 refusals — 21.4 per cent of the non-test file and
+39.0 per cent of every refusal in it. RFC-0126 §8 and RFC-0127 are the strand
+that reaches those lines, and this census says by how much: the checker's size
+is a surface problem, not a duplication problem.
+
+**The table, with a reader against every part.**
+
+| `macro_rules! cerr` | 64 | 3 | shared machinery | the module head and the two error macros — every refusal in the file is one of these two spellings |
+| `pub fn check_accum_reusing` | 74 | 0 | shared machinery | the incremental entry point: a module's diagnostics are reused when its hash and the signature fingerprint both hold |
+| `pub fn set_gen_host(on: bool)` | 75 | 0 | shared machinery | the thread-local host flags a generator host and a test host set, and the three atom-stream primitives |
+| `fn signature_fingerprint` | 51 | 0 | shared machinery | the hash over everything a body may refer to by name, which is what makes the reuse above sound |
+| `pub fn check_accum_with_let_types` | 14 | 0 | shared machinery | the entry points a caller uses |
+| `pub const RESERVED: &[&str] = &[` | 154 | 0 | one arm per form, type constructor or builtin | the builtin name table and RFC-0094 M2's moved names — one row per builtin, the `builtins` factor of RFC-0125 §1.1 |
+| `pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<Type>, Vec<Type>)` | 73 | 0 | shared machinery | the full-check entry point and the two renderers a conformance refusal quotes an impl head with |
+| `fn check_accum_inner` | 948 | 26 | shared machinery | the driver: it builds every whole-program table — types, variants, signatures, generics, capabilities, the spawn-safety fixpoint, the protocol registries — and then walks the declarations. Its 26 refusals are the declaration-level ones (a name defined twice, an impl that does not conform, `main`'s signature); the tables are what the rest of the file reads |
+| `fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)` | 108 | 4 | a rule the checker states | the shape of a `place` projection body (RFC-0091 M2): one exit, no `?`, a place and not a value, rooted where the access site owns |
+| `fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(Diagnostic))` | 122 | 6 | a rule the checker states | the same shape for an optional projection (RFC-0122): one prologue, one decision, `Some` of a place |
+| `fn let_borrows_from(e: &Expr, roots: &std::collections::HashSet<String>) -> bool` | 37 | 0 | the checker's part in a rewrite stated elsewhere | whether a `let`'s initializer borrows from a root — read by the projection shape rules over the refutable-`let` desugar's `match` |
+| `fn count_yields(b: &crate::ast::Block) -> usize` | 24 | 0 | shared machinery | how many `yield`s a projection body has, counting every branch |
+| `fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)` | 58 | 1 | a rule the checker states | every `test` body is checked as a synthetic Unit function with `in_test` set, and a name may not repeat inside one module |
+| `fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)` | 53 | 1 | a rule the checker states | the same sentence for `bench` (RFC-0055), written out a second time — its own doc comment says "structurally identical" |
+| `pub fn check_accum(program: &Program) -> Vec<Diagnostic>` | 51 | 0 | shared machinery | the two public entry points, one accumulating and one first-error |
+| `pub struct Recorded` | 192 | 0 | the typing judgment | the recorded answers, keyed by AST node address — the type of every expression, the solved substitutions, the `let` types. Since RFC-0125 §3 M3 every later pass reads this table instead of typing the tree again, so it is the judgment's public form |
+| `struct Checker<'a>` | 229 | 0 | shared machinery | the pass's state: the whole-program tables it borrows, the region floor, the scope stacks, the error sink, the collection cells the loader reads back, and the three-way answer a leaf gives the shared type walk |
+| `fn base(&self, ty: &Type) -> Type` | 6 | 0 | the typing judgment | a validated `Named` type decays to its representation |
+| `fn check_key_shape(&self, key: &Type, ty: &Type, line: usize) -> Result<(), Diagnostic>` | 33 | 3 | a rule the checker states | RFC-0117 M2: a user `Map` key is heapless all the way down, no float anywhere, no payload-bearing enum |
+| `fn refuse_chained_projection` | 80 | 1 | the checker's part in a rewrite stated elsewhere | the type a chained projection access resolves to, and the refusal when it resolves to nothing an engine can inline (RFC-0123) |
+| `fn optional_scrutinee` | 93 | 3 | the checker's part in a rewrite stated elsewhere | an `if let` whose scrutinee is an optional projection call — the hit is a borrow of a place, so the arm is typed against the projection's result and not against an `Option` value |
+| `fn place_result` | 61 | 3 | the checker's part in a rewrite stated elsewhere | the result capability of a projection call (RFC-0120): `read` or `modify`, and what the access site may do with it |
+| `fn solve_head(&self, imp: &crate::ast::ImplBlock, recv: &Type, ty: &Type, line: usize) -> Type` | 16 | 0 | the typing judgment | solve an impl head against a receiver and read a declared type through the solution |
+| `fn declared_owned_in` | 52 | 0 | one arm per form, type constructor or builtin | the first part of a type that declares `impl Owned` — one arm per type constructor, resolving named types, cycle-guarded |
+| `fn enum_type_params(&self, enum_name: &str) -> Vec<String>` | 9 | 0 | shared machinery | the generic parameters of the enum a variant belongs to |
+| `fn reaches(&self, ty: &Type, at: &dyn Fn(&Type) -> Reach) -> bool` | 60 | 0 | shared machinery | the resolving descent the three questions below share: every part of every container, a named type through its declaration, and a `seen` list of declaration heads so a recursive record terminates. It was written out once per question until RFC-0125 §3 M6 |
+| `fn contains_stream(&self, ty: &Type) -> bool` | 22 | 0 | one arm per form, type constructor or builtin | whether a type reaches a `Stream` (RFC-0075) — one arm per type constructor, and nothing else: the descent is the walk's |
+| `fn contains_fn(&self, ty: &Type) -> bool` | 19 | 0 | one arm per form, type constructor or builtin | whether a type reaches a function value (RFC-0037) — the second verdict over the same walk |
+| `fn assignable(&self, from: &Type, to: &Type) -> bool` | 134 | 0 | the typing judgment | structural assignability, with the descent depth in hand |
+| `fn mentions_open_param(&self, ty: &Type) -> bool` | 63 | 0 | the typing judgment | which type parameters nothing has settled, by name and as a predicate |
+| `fn coercible(&self, from: &Type, to: &Type) -> bool` | 26 | 0 | the typing judgment | whether a value may cross into a declared type at a value boundary |
+| `fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic>` | 53 | 2 | a rule the checker states | a constant that fails its target's predicate is refused before any engine runs — the compile-time half of `where-scalar`, and the coercion census's one checker row |
+| `fn prove_string_interpolation` | 38 | 1 | the checker's part in a rewrite stated elsewhere | RFC-0020 M1: an interpolation whose parts are all proved needs no run-time validation |
+| `fn ensure_no_stream(&self, ty: &Type, line: usize, where_: &str) -> Result<(), Diagnostic>` | 19 | 1 | a rule the checker states | a `Stream` in a position that stores it (RFC-0075) |
+| `fn ensure_type_exists(&self, ty: &Type, line: usize) -> Result<(), Diagnostic>` | 248 | 21 | one arm per form, type constructor or builtin | one arm per type constructor: every written type is resolved, its arity checked and its arguments recursed into. The largest single statement of the `types` factor outside `types.rs` |
+| `fn ensure_param_type(&self, ty: &Type, line: usize) -> Result<(), Diagnostic>` | 31 | 2 | a rule the checker states | what a parameter's type may be (RFC-0023) |
+| `fn check_protocol_decl(&self, p: &ProtocolDecl) -> Vec<Diagnostic>` | 25 | 0 | a rule the checker states | a protocol's method signatures (RFC-0002 §5) |
+| `fn check_contract_decl(&self, c: &ContractDecl) -> Vec<Diagnostic>` | 52 | 0 | a rule the checker states | a module contract's members (RFC-0071) |
+| `fn check_member_default` | 31 | 1 | a rule the checker states | a contract member's default against the type it stands in for |
+| `fn check_type_decl(&self, t: &TypeDecl) -> Result<(), Diagnostic>` | 178 | 13 | a rule the checker states | what a type declaration may say: the `where` predicate's shape, the transformer bases, the record and enum forms |
+| `fn param_has_bound(&self, t: &str, bound: &str) -> bool` | 17 | 0 | the typing judgment | whether the function being checked declared a bound on `t` |
+| `fn type_satisfies(&self, ty: &Type, bound: &str) -> bool` | 41 | 0 | one arm per form, type constructor or builtin | one arm per built-in bound, over one arm per type constructor |
+| `fn check_extern_sig(&self, f: &Function) -> Result<(), Diagnostic>` | 61 | 3 | a rule the checker states | the `extern` ABI type domain (RFC-0012) |
+| `fn check_globals(&self, program: &Program, out: &mut Vec<Diagnostic>)` | 113 | 3 | a rule the checker states | every module-state binding in declaration order (RFC-0013) |
+| `fn function(&self, f: &Function) -> Result<(), Diagnostic>` | 64 | 1 | shared machinery | one function body: the parameter scope, the bounds, the return check |
+| `fn record_desugar(&self, scope: &Scope, run: impl FnOnce(&Self, &mut Scope))` | 33 | 0 | the checker's part in a rewrite stated elsewhere | type AST nobody wrote and record its answers only — the entry every synthesized tree is typed through |
+| `fn block(&self, block: &Block, ret: &Type, scope: &mut Scope) -> bool` | 57 | 0 | shared machinery | the statement loop and the error recovery at its boundary |
+| `fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<bool, Diagnostic>` | 564 | 30 | the typing judgment | one arm per statement form (RFC-0127 §3's form column), each giving the form its type and its bindings |
+| `fn contains_heap(&self, ty: &Type) -> bool` | 28 | 0 | one arm per form, type constructor or builtin | whether a type carries a heap allocation — the third verdict over that walk |
+| `fn region_store_guard` | 68 | 2 | a rule the checker states | the `region` escape rules at a store and at a call boundary |
+| `fn expr` | 774 | 39 | the typing judgment | one arm per expression form: the type of every node, and the recording wrapper the `Recorded` table is filled through. The centre of the judgment |
+| `fn check_struct_lit` | 153 | 7 | the typing judgment | a record literal against its declaration, field by field |
+| `fn check_try` | 86 | 6 | the checker's part in a rewrite stated elsewhere | `expr?` (RFC-0079): the scrutinee is an `Option`/`Result` and the enclosing return agrees. The rewrite is the parser's |
+| `fn check_match` | 42 | 1 | the typing judgment | a `match` over a built-in sum: both variants, once each |
+| `fn arm_block` | 23 | 2 | the checker's part in a rewrite stated elsewhere | a block arm (RFC-0118) is legal in statement position — a fact about the text, reconstructed here by comparing the arms slice's ADDRESS with a `Cell` the statement walk set |
+| `fn check_match_enum` | 299 | 18 | the typing judgment | a `match` over a user enum, the arm patterns and their binders, the `if`-expression form and the arm-type fold |
+| `fn binop_type(&self, op: BinOp, l: Type, r: Type, line: usize) -> Result<Type, Diagnostic>` | 231 | 18 | one arm per form, type constructor or builtin | one arm per operator times one arm per operand type — the `surface x types` product at its densest |
+| `fn vector_call` | 379 | 19 | one arm per form, type constructor or builtin | the SIMD builtins (RFC-0075): one arm per lane type per operation |
+| `fn show_dispatch(&self, t: &Type) -> Option<String>` | 71 | 1 | the typing judgment | which `impl Show` a value renders through, and the hint a refusal adds when there is none |
+| `fn call` | 2501 | 190 | one arm per form, type constructor or builtin | the builtin table: fifty-three guarded blocks naming sixty-odd builtins, each giving its arity, its argument types, its result and its refusals, then the fall-through to a user function. The single largest thing in the file and the `builtins` factor written out |
+| `fn solve_fn_param` | 25 | 0 | the typing judgment | solve a `fn` parameter's own parameter type against the value |
+| `fn check_fn_arg` | 244 | 13 | the typing judgment | a `fn`-typed argument (RFC-0023): a lambda, a named function or a binding, monomorphized at the position |
+| `fn stored_fn_lambda` | 226 | 7 | the typing judgment | a function value that is STORED (RFC-0037): the source is collected for defunctionalization and its signature solved |
+| `fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 27 | 3 | a rule the checker states | which named functions may become values (RFC-0037) |
+| `fn check_lambda_body_captures` | 18 | 1 | a rule the checker states | a lambda's capture discipline (RFC-0023) |
+| `fn captures_block` | 210 | 0 | one arm per form, type constructor or builtin | one arm per form again, collecting the names a lambda body captures |
+| `fn check_modify_arg` | 51 | 4 | a rule the checker states | the call-site discipline for a `modify` parameter |
+| `fn unify` | 120 | 11 | the typing judgment | match a generic parameter type against a concrete argument and extend the substitution |
+| `fn check_construction` | 51 | 3 | the typing judgment | `TypeName(arg)`, and the constant folded through its predicate |
+| `fn shadows_here(&self, name: &str) -> bool` | 44 | 0 | shared machinery | the three scope queries: shadowing, lookup, and whether a name is module state |
+| `fn mut_array_receiver` | 50 | 5 | the typing judgment | the element type of the array a mutating receiver names |
+| `pub(crate) fn pred_summary(expr: &Expr) -> String` | 60 | 0 | shared machinery | a predicate rendered back into one line, for a refusal to quote |
+| `fn type_mentions_self(ty: &Type) -> bool` | 17 | 0 | one arm per form, type constructor or builtin | whether a type names `Self`, one arm per constructor |
+| `fn stmt_source_line(s: &Stmt) -> usize` | 23 | 0 | shared machinery | the line a literal's range error is attributed to |
+| `fn int_literal_fits(n: i64, bits: u8, signed: bool) -> bool` | 86 | 0 | the typing judgment | the sized-integer literal rules: the value a literal denotes, whether it fits, and the name and range a refusal quotes |
+| `const SPAWN_FORBIDDEN: &[&str] = &[` | 35 | 0 | shared machinery | the builtins a concurrent task may not use |
+| `fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool` | 14 | 0 | one arm per form, type constructor or builtin | which type constructors may appear in an `extern` signature |
+| `fn contains_drop(b: &Block) -> bool` | 97 | 0 | one arm per form, type constructor or builtin | two whole-tree searches, one arm per form each: does this body `drop`, does it `spawn` |
+| `fn gen_refused(name: &str) -> Option<String>` | 23 | 0 | a rule the checker states | the `gen` column of the effect lattice, as RFC-0021's fence asks it — the table itself is `effects.rs` |
+| `fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>)` | 138 | 2 | a rule the checker states | the generation fence over the AST: a `gen fn` body's effects, joined transitively. `vyrn_lower::effects` judges the same lattice over the named core; this copy exists because a `gen fn` no lowering instantiates has no core to judge |
+| `pub struct StoredSource` | 111 | 0 | shared machinery | the stored-function-value facts (RFC-0037) the loader and the effect judgment read back, and whether two signatures could name one value |
+| `fn stored_unsafe_sigs` | 43 | 0 | a rule the checker states | which stored signatures are not spawn-safe to call through |
+| `fn extend_spawn_safe` | 58 | 0 | a rule the checker states | the spawn-isolation fixpoint over the call graph — RFC-0004 §Q4, which `vyrn_lower::effects::judge` also states over the core, and `tests/effects.rs` holds the two equal per function |
+| `pub fn module_state_use` | 141 | 0 | shared machinery | RFC-0025's `--workers` gate: does a root reach module state |
+| `fn touches_globals(f: &Function, globals: &std::collections::HashSet<String>) -> bool` | 40 | 0 | one arm per form, type constructor or builtin | one arm per binding form, collecting what a block binds |
+| `fn sum_arm_arity(name: &str, binds: usize, line: usize) -> Result<(), Diagnostic>` | 15 | 1 | a rule the checker states | the payload count a built-in sum's variant carries |
+| `fn pattern_binders(p: &Pattern) -> Vec<String>` | 26 | 0 | shared machinery | what a pattern binds, and one arm's scope |
+| `fn global_ref_block` | 129 | 0 | one arm per form, type constructor or builtin | one arm per form, deciding whether a body reads or writes a global |
+| `fn init_restrictions` | 147 | 5 | a rule the checker states | what a module-state initializer may do (RFC-0013, RFC-0029) |
+| `pub fn fn_calls(b: &Block) -> std::collections::HashSet<String>` | 139 | 0 | one arm per form, type constructor or builtin | one arm per form again, collecting every callee name — the call graph the two fixpoints above run over |
+| `mod tests` | 4650 | 0 | tests | the file's own unit tests |
+
+**The rules stated twice, and where the other statement is.** Every
+rule-stating section was read against the kernel's judgment
+(`vyrn-lower/src/kernel.rs`), the typed judgment
+(`vyrn-lower/src/typed.rs`), the effect judgment
+(`vyrn-lower/src/effects.rs`), the move check and the parser. Four are stated
+twice. The rest are stated once, and the largest of them —
+`region_store_guard`, 68 lines — is stated once because the kernel says nothing
+about a region at all (`region` does not appear in `kernel.rs`).
+
+| the checker's statement | lines | the other statement | what blocks the deletion |
+|---|---|---|---|
+| the spawn-isolation fixpoint: `SPAWN_FORBIDDEN` (35), `stored_unsafe_sigs` (43), `extend_spawn_safe` (58), the pre-check fixpoint inside `check_accum_inner` (71) and the refusal in `Checker::expr` | 207 | `vyrn_lower::effects`, whose module head names it: "One inclusion check lives here: the spawn-isolation rule of RFC-0004 §Q4". `tests/effects.rs` already holds the two equal: every spawn site the checker accepted has a callee whose judged set is inside the rule, over the whole corpus | the effect judgment reads the named core, and a `vyrn check` must refuse before a core exists for every instance. `VYRN_EFFECTS_GAPS` names the instances that have none. Closing it is M3's "the load and the lowering share one expansion", extended to `check` |
+| `check_comptime_purity`, the generation fence over the AST | 138 | `vyrn_lower::effects` judges the same lattice over the named core | its own doc comment states the blocker: a `gen fn` that no lowering instantiates has no core to judge, and RFC-0021 enforces the fence on EVERY `gen fn` |
+| `gen_refused`, the `gen` column of the lattice | 23 | `vyrn_frontend::effects::gen_refusal`, since M6's fifth slice | nothing. What is left here is a call and the `VYRN_NO_JUDGE=1` bisect knob; the knob is what the fifth slice's record says it needs, and it goes when the bisect is retired |
+| `check_benches` | 53 | `check_tests`, 58 lines above it in the same file. Its doc comment says the two are "structurally identical" | nothing but the work. `test` and `bench` differ in the keyword and in one refusal's noun |
+
+One finding beside them. The sentence "an `export extern fn` may not take
+ownership of a String its JS caller releases" is written three times: as a
+refusal in `checker::check_extern_sig`, as a fix menu in `kernel.rs`, and as a
+fix menu in `movecheck::fixes_here`. The third is dead — `cargo build` warns
+that `fixes_here` is never used — so this is one rule, one live fix menu and
+one copy to delete. The deletion is `movecheck.rs`'s and not this track's.
+
+**The desugars, and where each belongs.** Eight sections, 451 lines, 16
+refusals. Not one of them performs a rewrite. Every rewrite is already the
+parser's; what is here is the checker's part in it, and that part is a type
+rule in seven of the eight.
+
+| section | lines | what it does | its home |
+|---|---|---|---|
+| `optional_scrutinee` | 93 | types an `if let` whose scrutinee is an optional projection call (RFC-0122) | stays: it is the type of a hit, and a type is the checker's |
+| `check_try` | 86 | types `expr?` (RFC-0079) against the enclosing return | stays: the rewrite is `parser.rs`'s and this is its type rule |
+| `refuse_chained_projection` | 80 | the type a chained projection resolves to, and the refusal when nothing can inline it (RFC-0123) | stays |
+| `place_result` | 61 | the result capability of a projection call, `read` or `modify` (RFC-0120) | stays |
+| `prove_string_interpolation` | 38 | proves an interpolation needs no run-time validation (RFC-0020 M1) | stays: it is `finite`'s proof, asked here |
+| `let_borrows_from` | 37 | whether a `let`'s initializer borrows from a root, over the refutable-`let` desugar's `match` | stays |
+| `record_desugar` | 33 | types AST nobody wrote and records the answers only | stays: it is the entry every synthesized tree is typed through |
+| `arm_block` | 23 | refuses a block arm outside statement position (RFC-0118) | **`parser.rs`**. The fact is syntactic and the parser knows it. The checker reconstructs it by writing `arms.as_ptr() as usize` into a `Cell` during the statement walk and comparing the address again in `Checker::expr` |
+
+`arm_block` is the one desugar with a home somewhere else, and the reason is
+the pointer address. A `match` in statement position is a fact about the text.
+The parser has it and drops it; the checker gets it back by comparing where the
+arms slice lives in memory. A `bool` on the node, set where the parser builds
+it, states the fact once and deletes the `Cell` field, its two sites, the
+`stmt_pos` parameter threaded through `check_match_enum` and `arm_block`, and
+the address comparison. It moves RFC-0127 §3's form census, so it is a slice of
+its own.
+
+**What licences a deletion here, and why movecheck's method does not
+transfer.** `VYRN_NO_MOVECHECK=1` stands a whole pass aside, and the corpus
+run with it off against the corpus run with it on is the licence: the stderr
+that only the pass produced is exactly what the pass is worth. The checker
+cannot be stood aside. It is not a pass beside the pipeline — it is the
+judgment every later pass reads, and with it off nothing lowers, so there is no
+"with" and "without" to compare. The licence for a checker rule is therefore
+per-rule: switch the one refusal off, run the corpus, and diff whole stderr.
+`VYRN_NO_JUDGE=1` is already that shape, and its doc comment says so — one knob
+for the two cells M6's fourth and fifth slices moved, so a new refusal can be
+told from an old one. A rule taken out of the checker needs one more such knob,
+or the one that exists needs one more cell.
+
+**The slice: the resolving type walk, stated three times.** The checker asks
+three questions about a type — does it reach a `Stream` (RFC-0075), does it
+reach a function value (RFC-0037), does it carry a heap allocation (RFC-0114's
+`region` guard). Each was a `fn walk` written out in full: every part of every
+container, a record's fields, an enum's payloads, a `Named`/`App` through its
+type arguments AND through the declaration it names, and a `seen` list of
+declaration heads so `type Node = { v: Int64, next: Option<Node> }` terminates.
+The three descents were the same descent. They differed only in the verdict at
+a leaf.
+
+They are one walk now. `Checker::reaches` takes the leaf verdict as a
+three-valued answer — `Reach::Yes`, `Reach::No`, `Reach::Parts` — and the three
+questions are the three verdicts. Nothing else changed: each question keeps the
+arms it had, including the two that look like accidents and are not.
+`contains_stream` answers `No` at a `Fn`, which is RFC-0074 M3a's finding —
+`fn(Request) -> Stream<String>` stores no stream. `contains_fn` answers `No` at
+a `Stream`, which it did before by having no `Stream` arm at all. That second
+one is a DIFFERENCE between the three walks, and the slice records it rather
+than repairing it: repairing it would refuse programs, and a slice that states
+a rule once must refuse nothing.
+
+The licence numbers:
+
+| measure | before | after |
+|---|---|---|
+| `checker.rs` | 16,349 | 16,339 |
+| the three questions, doc comments included | 153 lines | 66 lines, over a 59-line shared walk and an 18-line enum |
+| RFC-0126 §3's per-constructor mentions, all six files | 1,612 | 1,587 |
+| ...of which `checker.rs`'s | — | 25 fewer, over fourteen constructors |
+| refusals in `checker.rs` | 487 | 487 |
+| the corpus | — | unchanged: `fixtures`, `parity`, `testsweep` and the site export all give the bytes they gave |
+
+Ten lines is a small number and the honest one. The line count is not what
+this slice is for: 25 of RFC-0126 §3's mentions are, because that census counts
+CASES, and fourteen type constructors stopped being a case in the checker three
+times over. `Type::Named` falls from 40 to 38, `Type::Array` from 49 to 47,
+`Type::App` from 17 to 14. One mention rose: `Type::Stream` from 18 to 19,
+because the difference above is now written down where it used to be a missing
+arm. That is the trade this whole RFC makes — a rule stated once costs a line
+where a rule stated three times cost none, and the reader who has to know
+whether `contains_fn` looks inside a `Stream` can now find the answer.
+
+**Ranked, what to take next.**
+
+1. **The surface, not the rules.** 4,321 lines and 248 refusals are one arm per
+   constructor, per operator and per builtin. `Checker::call` alone is 2,501
+   lines and 190 refusals. RFC-0126 §8 is already taking the `Option`/`Result`
+   collapse a step at a time, and RFC-0094's "a builtin is a declaration" is
+   what reaches `Checker::call`. Nothing else in this file is this size.
+2. **The spawn-isolation fixpoint, 207 lines.** The rule is stated twice and
+   `tests/effects.rs` already holds the two equal at every spawn site in the
+   corpus. It waits on a core at check time for every instance, which is M3's
+   work extended to `check`.
+3. **`check_benches`, 53 lines.** A rule stated twice, in one file, eight
+   sections apart, and the doc comment admits it. The smallest honest deletion
+   in the census.
+4. **`arm_block`'s pointer address, 23 lines and a `Cell`.** A syntactic fact
+   belongs to the parser. It moves RFC-0127 §3.
+5. **`check_comptime_purity`, 138 lines.** Stated twice, blocked by a `gen fn`
+   that no lowering instantiates. It closes when the fence can ask for a core
+   for one function on demand.
+6. **`gen_refused`, 23 lines.** Already stated once; what is left is the bisect
+   knob, and it goes when M6's bisect is retired.
+
+The census does not rank the judgment, the shared machinery or the tests,
+because none of them is a second statement of anything. 3,159 lines of typing
+judgment is what a checker is.
+
+#### Gates (2026-09-07)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, and no new warning |
+| `cargo test -p vyrn-cli`, no filter | 585 passed, 36 ignored, no failure |
+| `kernel` `--ignored` | 1, 19 s |
+| `coretables` `--ignored` | 1, 16 s |
+| `typed` `--ignored` | 1, 27 s |
+| `effects` `--ignored` | 2, 29 s |
+| `fixtures` `--ignored` | 1, 14 s |
+| `vyrn-frontend` | 1,166 and 5 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,212 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 325 s |
+| the residue ratchet | 1, 282 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — the slice moves no byte of any module |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 11 s |
+| `testsweep` `--ignored` | 1, 43 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 26 files |
+
+The three censuses this slice moves are re-pinned in the same commit: the
+surface census (`tests/surface.rs` and RFC-0126 §3, 1,612 mentions to 1,587),
+the forms census (`tests/forms.rs` and RFC-0127 §3, unmoved — the slice touches
+no form), and the new structural census
+(`tests/checker_census.rs`, which is what this record's table is).
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

@@ -2305,6 +2305,23 @@ impl std::ops::DerefMut for Scope {
     }
 }
 
+/// What [`Checker::reaches`] does at one type: answer, or look at its parts.
+///
+/// Three walks over a type's parts used to be written out here, one per
+/// question — does this type reach a `Stream`, a function value, a heap
+/// allocation. Each spelled the same descent: every part of every container,
+/// a named type through its declaration, a `seen` list of declaration heads so
+/// a recursive record does not recur forever. They differed only in the answer
+/// at a leaf, which is what this enum is (RFC-0125 §3 M6, the size strand).
+enum Reach {
+    /// The question is answered here: yes.
+    Yes,
+    /// The question is answered here: no, and the parts are not looked at.
+    No,
+    /// Not answered here — look at the parts.
+    Parts,
+}
+
 impl<'a> Checker<'a> {
     // ---- type relations -------------------------------------------------
 
@@ -2658,50 +2675,56 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
     }
 
-    /// Whether `ty` transitively contains a `Stream<T>` (RFC-0075), resolving
-    /// named types so `type Feed = Stream<Int64>` cannot launder one into a
-    /// record field. Structural rather than a `contains_fn` clone because a
-    /// stream may not be a type argument either: `Option<Stream<T>>` is exactly
-    /// the storage the scope rule forbids.
-    fn contains_stream(&self, ty: &Type) -> bool {
-        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+    /// Whether any part of `ty` answers [`Reach::Yes`], resolving a named type
+    /// through its declaration and guarding a cycle with the heads already
+    /// visited.
+    ///
+    /// This is the descent the three questions below share. A container is
+    /// looked into, a record's fields and an enum's payloads are looked into,
+    /// a `Named`/`App` is looked into through its type arguments AND through
+    /// the declaration it names — and a declaration head is entered once, so
+    /// `type Node = { v: Int64, next: Option<Node> }` terminates. A `fn` type
+    /// is not looked into by any of them: what a call takes and answers is not
+    /// what the value holds, so every caller decides at the `Fn` itself.
+    fn reaches(&self, ty: &Type, at: &dyn Fn(&Type) -> Reach) -> bool {
+        fn go(
+            ty: &Type,
+            types: &HashMap<String, TypeDecl>,
+            at: &dyn Fn(&Type) -> Reach,
+            seen: &mut Vec<String>,
+        ) -> bool {
+            match at(ty) {
+                Reach::Yes => return true,
+                Reach::No => return false,
+                Reach::Parts => {}
+            }
             match ty {
-                Type::Stream(_) => true,
                 Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
                 | Type::Task(i)
                 | Type::Partial(i)
-                // A `lazy T` field stores a T (forced on read), so a stream
-                // behind it is exactly the storage the scope rule forbids.
-                | Type::Lazy(i) => walk(i, types, seen),
+                | Type::Stream(i)
+                | Type::Lazy(i)
+                | Type::Omit(i, _)
+                | Type::Pick(i, _) => go(i, types, at, seen),
                 Type::Map(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
+                    go(a, types, at, seen) || go(b, types, at, seen)
                 }
-                Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
-                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
+                Type::Record(fs) => fs.iter().any(|f| go(&f.ty, types, at, seen)),
                 Type::Enum(vs) => vs
                     .iter()
-                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                // NOT a storing position, and this is RFC-0074 M3a's finding: a
-                // `fn` type's parameters and return ARE the two places M1 declared
-                // legal, so `fn(Request) -> Stream<String>` stores no stream — it
-                // describes a call that produces one, and the caller owes it the
-                // moment it exists. Descending here was safe only while nothing in
-                // the corpus had a `fn` type mentioning a stream; `std/http`'s
-                // `Feed` is one, and rejecting it would forbid the shape M1's own
-                // rules already permit twice over.
-                Type::Fn(_, _) => false,
+                    .any(|v| v.payload.iter().any(|p| go(p, types, at, seen))),
                 Type::Named(n) | Type::App(n, _) => {
                     let args = match ty {
                         Type::App(_, a) => a.as_slice(),
                         _ => &[],
                     };
-                    args.iter().any(|a| walk(a, types, seen))
+                    args.iter().any(|a| go(a, types, at, seen))
                         || (!seen.iter().any(|s| s == n)
                             && types.get(n).is_some_and(|d| {
                                 seen.push(n.clone());
-                                let r = walk(&d.base, types, seen);
+                                let r = go(&d.base, types, at, seen);
                                 seen.pop();
                                 r
                             }))
@@ -2709,7 +2732,29 @@ impl<'a> Checker<'a> {
                 _ => false,
             }
         }
-        walk(ty, self.types, &mut Vec::new())
+        go(ty, self.types, at, &mut Vec::new())
+    }
+
+    /// Whether `ty` transitively contains a `Stream<T>` (RFC-0075), resolving
+    /// named types so `type Feed = Stream<Int64>` cannot launder one into a
+    /// record field. A stream may not be a type argument either:
+    /// `Option<Stream<T>>` is exactly the storage the scope rule forbids.
+    fn contains_stream(&self, ty: &Type) -> bool {
+        self.reaches(ty, &|t| match t {
+            Type::Stream(_) => Reach::Yes,
+            // NOT a storing position, and this is RFC-0074 M3a's finding: a
+            // `fn` type's parameters and return ARE the two places M1 declared
+            // legal, so `fn(Request) -> Stream<String>` stores no stream — it
+            // describes a call that produces one, and the caller owes it the
+            // moment it exists. Descending here was safe only while nothing in
+            // the corpus had a `fn` type mentioning a stream; `std/http`'s
+            // `Feed` is one, and rejecting it would forbid the shape M1's own
+            // rules already permit twice over.
+            Type::Fn(_, _) => Reach::No,
+            // A `lazy T` field stores a T (forced on read), so a stream behind
+            // it is exactly the storage the scope rule forbids.
+            _ => Reach::Parts,
+        })
     }
 
     /// Whether `ty` transitively contains a function-value type (RFC-0037),
@@ -2717,45 +2762,18 @@ impl<'a> Checker<'a> {
     /// the positions that stay illegal: `extern`/`gen` signatures, `Task`
     /// payloads, and nested function signatures.
     fn contains_fn(&self, ty: &Type) -> bool {
-        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
-            match ty {
-                // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
-                // position a stored function value is kept out of.
-                Type::Fn(..) | Type::Lazy(_) => true,
-                Type::Array(i)
-                | Type::ArrayN(i, _)
-                | Type::SmallArray(i, _)
-                | Type::Task(i)
-                | Type::Partial(i) => walk(i, types, seen),
-                Type::Map(a, b) | Type::Merge(a, b) => walk(a, types, seen) || walk(b, types, seen),
-                Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
-                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
-                Type::Enum(vs) => vs
-                    .iter()
-                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                Type::App(n, args) => {
-                    args.iter().any(|a| walk(a, types, seen))
-                        || (!seen.iter().any(|s| s == n)
-                            && types.get(n).is_some_and(|d| {
-                                seen.push(n.clone());
-                                let r = walk(&d.base, types, seen);
-                                seen.pop();
-                                r
-                            }))
-                }
-                Type::Named(n) => {
-                    !seen.iter().any(|s| s == n)
-                        && types.get(n).is_some_and(|d| {
-                            seen.push(n.clone());
-                            let r = walk(&d.base, types, seen);
-                            seen.pop();
-                            r
-                        })
-                }
-                _ => false,
-            }
-        }
-        walk(ty, self.types, &mut Vec::new())
+        self.reaches(ty, &|t| match t {
+            // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
+            // position a stored function value is kept out of.
+            Type::Fn(..) | Type::Lazy(_) => Reach::Yes,
+            // A `Stream<T>`'s element is not looked at, which is where this
+            // walk differs from the two beside it. It differed before the
+            // walk was stated once, by having no `Stream` arm at all; the
+            // difference is recorded rather than repaired, because repairing
+            // it refuses programs and this slice refuses none.
+            Type::Stream(_) => Reach::No,
+            _ => Reach::Parts,
+        })
     }
 
     /// Whether a value of type `from` can be used where `to` is expected.
@@ -4611,55 +4629,27 @@ impl<'a> Checker<'a> {
     /// record/enum/Option/Result that transitively contains one).
     /// Used by the `region` escape guard.
     ///
-    /// The walk threads a `seen` list of declaration heads, exactly like
-    /// [`Self::contains_stream`]/[`Self::contains_fn`]: a legal recursive
-    /// record (`type Node = { v: Int64, next: Option<Node> }`) re-enters
-    /// itself through its own name, and an unguarded descent overflowed
-    /// the stack the moment such a value was stored inside a `region`.
+    /// The walk threads a `seen` list of declaration heads ([`Self::reaches`]):
+    /// a legal recursive record (`type Node = { v: Int64, next: Option<Node> }`)
+    /// re-enters itself through its own name, and an unguarded descent
+    /// overflowed the stack the moment such a value was stored inside a
+    /// `region`.
     fn contains_heap(&self, ty: &Type) -> bool {
-        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
-            match ty {
-                Type::Str => true,
-                // Array buffers are always malloc'd (never in the region arena),
-                // so only their *contents* can dangle.
-                // A `Stream<T>` is an `Array<T>`'s three words with a malloc'd
-                // buffer (RFC-0075), so it dangles exactly where an array does.
-                Type::Array(inner)
-                | Type::ArrayN(inner, _)
-                | Type::SmallArray(inner, _)
-                | Type::Stream(inner)
-                | Type::Task(inner) => walk(inner, types, seen),
-                // A Map's buffers are malloc'd; its keys are always heap (String)
-                // and its values may be — either way it carries heap (RFC-0028).
-                Type::Map(..) => true,
-                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
-                Type::Enum(vs) => vs
-                    .iter()
-                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                Type::Merge(a, b) => walk(a, types, seen) || walk(b, types, seen),
-                Type::Omit(b, _) | Type::Pick(b, _) | Type::Partial(b) => walk(b, types, seen),
-                // A stored function value (RFC-0037) may hold heap captures
-                // (a snapshotted String/Array/record), so treat it as
-                // heap-carrying. A `lazy T` field is one (RFC-0085 M4a).
-                Type::Fn(..) | Type::Lazy(_) => true,
-                Type::Named(n) | Type::App(n, _) => {
-                    let args = match ty {
-                        Type::App(_, a) => a.as_slice(),
-                        _ => &[],
-                    };
-                    args.iter().any(|a| walk(a, types, seen))
-                        || (!seen.iter().any(|s| s == n)
-                            && types.get(n).is_some_and(|d| {
-                                seen.push(n.clone());
-                                let r = walk(&d.base, types, seen);
-                                seen.pop();
-                                r
-                            }))
-                }
-                _ => false,
-            }
-        }
-        walk(ty, self.types, &mut Vec::new())
+        self.reaches(ty, &|t| match t {
+            Type::Str => Reach::Yes,
+            // A Map's buffers are malloc'd; its keys are always heap (String)
+            // and its values may be — either way it carries heap (RFC-0028).
+            Type::Map(..) => Reach::Yes,
+            // A stored function value (RFC-0037) may hold heap captures
+            // (a snapshotted String/Array/record), so treat it as
+            // heap-carrying. A `lazy T` field is one (RFC-0085 M4a).
+            Type::Fn(..) | Type::Lazy(_) => Reach::Yes,
+            // Array buffers are always malloc'd (never in the region arena),
+            // so only their *contents* can dangle. A `Stream<T>` is an
+            // `Array<T>`'s three words with a malloc'd buffer (RFC-0075), so
+            // it dangles exactly where an array does.
+            _ => Reach::Parts,
+        })
     }
 
     /// The `region` escape guard for a store into the binding `name`: inside a
