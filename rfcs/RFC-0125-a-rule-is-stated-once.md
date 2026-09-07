@@ -14887,6 +14887,155 @@ The three censuses are re-pinned in the same commit: the structural census
 4,680, and the `fn call` section's reader), the surface census (RFC-0126 §3,
 1,512 mentions to 1,496), and the forms census (RFC-0127 §3, unmoved again).
 
+#### The `consume` slice: six rows the block did not check (2026-09-07)
+
+The block census puts six blocks in class (a\*) — `fromArray`, `fromStep`,
+`close`, `boxStream`, `serveStream` and `@join`, 123 lines and 15 refusals. Each
+is class (a) except for one thing: its row carries `Capability::Consume`, and
+the fall-through reads a capability, so deleting the block runs
+`region_consume_guard` where the block did not. That is a refusal ADDED, and the
+record above held the deletion back until a corpus pass priced it.
+
+The pass is below. The added guard costs nothing on this corpus, and the
+deletion found four defects that the six blocks were hiding.
+
+**What went.** Six blocks, 123 statement lines, 15 refusals, and the comment
+paragraphs that explain them. The rows were already written — RFC-0094 M1 wrote
+all six — so `prelude::rows` gains no row in this slice, only the prose.
+`fromStep`'s cursor paragraphs and `serveStream`'s SSE paragraphs moved verbatim
+to the rows, because the row is now where the rule is.
+
+| the block | lines | refusals |
+|---|---|---|
+| `fromArray` | 18 | 2 |
+| `fromStep` | 38 | 5 |
+| `boxStream` | 18 | 2 |
+| `close` | 14 | 2 |
+| `serveStream` | 25 | 2 |
+| `@join` | 10 | 2 |
+| **all** | **123** | **15** |
+
+**The four defects the deletion found.** These six rows are the first GENERIC
+rows to reach the fall-through — the twenty names already typed by a row alone
+carry no type parameter — so the generic solve, the recorded substitution and
+the monomorphization worklist each met a seeded row for the first time. Every
+defect below stood in the tree before this slice and reached nothing.
+
+1. **`unify` had no `Task` arm.** `@join`'s row is
+   `(self: consume Task<T>) -> T`, and `Task<T>` against `Task<Int64>` fell
+   through to the assignability default, so every `t.join()` reported "argument
+   expects `Task<T>`, found `Task<Int64>`". The `Stream` arm beside it records
+   the same defect being fixed for streams. The `Task` arm was missing because
+   no rule had ever unified against a `Task`: `@join` was hand-written and read
+   the payload straight out of the type.
+2. **A `fn`-typed argument's node was never typed.** `check_fn_arg`'s
+   `Expr::Var` arm reads the binding itself and never calls `Checker::expr`, so
+   the node had no entry in the recorded table. `vyrn_lower`'s walk reads
+   `node_types` for every row, and a call argument with no row type is one the
+   ownership rules cannot see. It showed the moment a `consume` parameter was
+   `fn`-typed: `fromStep(c.slot, c.gen, run)` in `std/stream` moved `run` into
+   the step slot AND released it at its binding, and the kernel refused eight
+   corpus programs with "`run` was moved here into `fromStep(..)`". The arm
+   types the argument first now and discards the answer, because a top-level
+   function name is not a binding and the named-function arm below answers for
+   it.
+3. **A refusal at line 0.** `fromStep(0, 0, 5)` printed "`fromStep` argument 3
+   must be a lambda" at `0:0`. A literal carries no line of its own —
+   `Expr::line` answers 0 for the five of them — and the arm printed the
+   argument's. It prints the call's line now.
+4. **The worklist chased a builtin.** A generic row's solved substitution is
+   recorded against the call node like any other call's, and `follow` then
+   looked the name up among the program's functions and stopped with "the callee
+   is not a function of this program". A row is a signature, not a body, so
+   `follow` skips a seeded name. `lowered.rs`'s
+   `every_backend_type_equals_the_recorded_one` is the gate that said so.
+
+One more difference was a cascade rather than a defect. Three corpus programs
+write `close(s.copy())` on a `Stream`, and `copy` refuses first. The block
+answered `Ok(Type::Err)` after a failed argument; the generic solve added
+"cannot infer type parameter `T` of `close`", a second sentence about the same
+mistake. The solve answers `Type::Err` now when an argument is `Type::Err`,
+which is the convention the rest of the file already keeps.
+
+**The licence.** The same measurement as the two slices above, on a corpus one
+testsweep lift larger again. `vyrn check` over `examples/`, `site/`,
+`compiler/vyrn-cli/tests/` and testsweep's 1,936-program lift, at `ebb27e01` and
+with the six blocks gone, and the two streams compared WHOLE.
+
+| the corpus | count |
+|---|---|
+| programs | 2,313 |
+| accepted, both | 1,105 |
+| refused, both | 1,208 |
+| byte-identical stderr | 2,313 |
+| differing text | 0 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+
+The added `region_consume_guard` fires on no corpus program. `std/stream` is
+where these calls live and a `region` around one is plausible, which is why the
+record above demanded the pass; the answer is that nobody writes one today. The
+guard is stated once now, on the rows, and it holds these six names the way it
+holds every user `consume` parameter.
+
+The fifteen refusals were witnessed one at a time, under both binaries. All
+fifteen still refuse, on the same line, in the fall-through's words.
+
+| the refusal | before | after |
+|---|---|---|
+| `fromArray(xs, 1)` | "`fromArray` takes 1 argument, got 2" | "`fromArray` expects 1 argument(s), got 2" |
+| `fromArray(7)` | "`fromArray` needs an `Array<T>`, found Int64" | "expected `Array<T>`, found Int64" |
+| `fromStep(0, step)` | "takes 3 arguments, got 2" | "expects 3 argument(s), got 2" |
+| `fromStep("x", 0, step)` | "needs an `Int64` cursor slot, found String" | "argument expects Int64, found String" |
+| `fromStep(0, "x", step)` | "needs an `Int64` cursor generation, found String" | "argument expects Int64, found String" |
+| `fromStep(0, 0, 5)` | "needs a `fn(Int64, Int64, Bool) -> Option<T>` step, found Int64" | "argument 3 must be a lambda, a function name, or an expression of `fn` type (RFC-0023); found Int64" |
+| a two-parameter step | the same sentence | "`step` takes 2 argument(s), but `fromStep` argument 3 expects a 3-argument function" |
+| a step answering `Int64` | the same sentence | "expected Option, found Int64" |
+| `boxStream(s, 1)` | "takes 1 argument, got 2" | "expects 1 argument(s), got 2" |
+| `boxStream(5)` | "needs a `Stream<T>`, found Int64" | "expected `Stream<T>`, found Int64" |
+| `close(s, 1)` | "takes 1 argument, got 2" | "expects 1 argument(s), got 2" |
+| `close(5)` | "needs a `Stream<T>`, found Int64" | "expected `Stream<T>`, found Int64" |
+| `serveStream(s, 1)` | "takes 1 argument, got 2" | "expects 1 argument(s), got 2" |
+| `serveStream(s)` on a `Stream<Int64>` | "needs a `Stream<String>` of encoded frames, found `Stream<Int64>`" | "`serveStream` argument 1 expects `Stream<String>`, found `Stream<Int64>`" |
+| `t.join(1)` | "`join` takes no arguments" | "`join` expects 1 argument(s), got 2" |
+| `5.join()` | "`.join()` needs a Task, found Int64" | "expected `Task<T>`, found Int64" |
+
+One program uses all five stream names and `join` correctly, and it compiles
+under both binaries.
+
+`t.join(1)` counts the receiver, which is the gap the seed extension above
+records for `@charCount`: the checker holds `@join(t, 1)` by the time it types
+the call, and subtracting one for a receiver would be a hand-written exception
+of exactly the kind this milestone deletes. `fromStep`'s three "needs a step"
+refusals become three DIFFERENT sentences, one per way a step can be wrong,
+because the fall-through names what it found instead of restating what it
+wanted.
+
+**The numbers.**
+
+| measure | at `a77838e8` | after the first slice | after the seed extension | after this one |
+|---|---|---|---|---|
+| `checker.rs` | 16,339 | 16,111 | 16,029 | 15,924 |
+| `Checker::call` | 2,501 lines, 190 refusals | 2,246, 163 | 2,161, 156 | 2,009, 141 |
+| guarded blocks naming a builtin | 58 | 44 | 41 | 35 |
+| builtin names typed by a row alone | 0 | 16 | 20 | 26 |
+| refusals in `checker.rs` | 487 | 460 | 453 | 439 |
+| the census's `Surface` kind | 4,321 lines, 248 refusals | 4,066, 221 | 3,981, 214 | 3,829, 199 |
+| RFC-0126 §3's six-file mentions | 1,612 | 1,512 | 1,496 | 1,471 |
+| `prelude.rs` | 872 | 915 | 972 | 1,013 |
+
+`checker.rs` falls 105 lines where the section falls 152: the `Task` arm, the
+four defects' comments and two new unit tests are the difference. The census's
+`Judgment` kind rises from 3,159 lines and 135 refusals to 3,191 and 136 for
+exactly that, and its `Tests` kind from 4,680 to 4,695.
+
+The three censuses are re-pinned in the same commit: the structural census
+(`tests/checker_census.rs` — `Surface` 3,981 lines and 214 refusals to 3,829 and
+199, `Judgment` 3,159 and 135 to 3,191 and 136, `Tests` 4,680 to 4,695, and the
+`fn call` section's reader), the surface census (`tests/surface.rs` and
+RFC-0126 §3, 1,496 mentions to 1,471), and the forms census (`tests/forms.rs`
+and RFC-0127 §3, unmoved — the slice touches no form).
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

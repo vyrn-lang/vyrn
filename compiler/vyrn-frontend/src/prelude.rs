@@ -56,7 +56,11 @@
 //! the reading, and the blocks that remain are the ones a row cannot carry.
 //! Four more names then got the row they never had (`logger`, `lineAt`,
 //! `colAt`, `@charCount`), which took 84 lines and 7 refusals more and retired
-//! `@charCount`'s hand-written exception in [`capability`].
+//! `@charCount`'s hand-written exception in [`capability`]. Six `consume` rows
+//! followed (`fromArray`, `fromStep`, `close`, `boxStream`, `serveStream`,
+//! `@join`, 123 lines and 15 refusals): their blocks did not check the
+//! `consume` their rows carry, so the deletion ADDS `region_consume_guard` to
+//! those calls, which a corpus pass priced at nothing.
 //!
 //! The deletion also found the drift a second statement always risks:
 //! `floatBits` said `UInt64` in its block and `Int64` on its row, and
@@ -396,6 +400,12 @@ fn rows() -> Vec<Function> {
         // The two PR #118 rows. A stream's close frees what its producer was
         // handed — the array's buffer, or the step's capture block — so the frame
         // that handed it over may not release it a second time.
+        //
+        // `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
+        // `fromStep(slot, gen, step)` hands over a producer instead; `close(s)`
+        // is the explicit release for either. All three are builtins because
+        // none can be written in Vyrn — there is no other way to make or unmake
+        // a `Stream`.
         row(
             "fromArray",
             &["T"],
@@ -403,6 +413,25 @@ fn rows() -> Vec<Function> {
             stm(t()),
             &[],
         ),
+        // `fromStep` (RFC-0075 M2b, re-hosted by RFC-0090 M3) is the pull
+        // producer: the stream carries the two words of a cursor its CALLER
+        // minted, and every `next` hands them back to `step`, which reads the
+        // cursor, writes the next one, and answers `Some(v)` or `None`.
+        //
+        // The cursor used to be a `Ref<Int64>` — a Path B cell, allocated at
+        // the call. It is two plain `Int64`s now, and the slab they index lives
+        // in `std/stream` over `std/slots`. What did not change is the property
+        // the `Ref` was pinned at `Int64` for: the dispatcher a stream calls is
+        // keyed by the step's SIGNATURE, so that signature must be a function
+        // of the element type alone. That is why this row spells the step's
+        // `fn` type exactly, and the checker holds a call to it.
+        //
+        // The third parameter is how a release reaches the slab. A close is
+        // type-erased in the runtime and the slab is not, so `close` asks the
+        // step to release itself: `closing` is true exactly once per stream,
+        // and the step answers `None` after giving its slot back. That is also
+        // what makes a wrapper's walk ordinary Vyrn — it closes its own source,
+        // and `movecheck` checks that release like any other.
         row(
             "fromStep",
             &["T"],
@@ -421,6 +450,22 @@ fn rows() -> Vec<Function> {
         // these rows change is that the fact is now WRITTEN.
         row("close", &["T"], &[("s", Consume, stm(t()))], Unit, &[]),
         row("boxStream", &["T"], &[("s", Consume, stm(t()))], Int, &[]),
+        // `serveStream(s)` (RFC-0074 M3a) hands a producer to the HOST: the
+        // request that opened it returns an ordinary `Response` carrying only
+        // the header block, and the host then pulls one element at a time,
+        // writes it, and `close`s the stream the first time a write fails. That
+        // is the whole disconnect mechanism — the socket rather than a host
+        // event — and it is why this is a builtin rather than a library
+        // function: a stream must escape the call that made it, which is the
+        // one thing M1's linearity otherwise forbids, and `close` on the far
+        // side is what discharges it.
+        //
+        // `Stream<String>` and not `Stream<Event>`, which is what this row's
+        // parameter type says: the element is one already encoded frame, so
+        // every byte of SSE's syntax stays in `std/http` where the vocabulary
+        // belongs, and the host learns nothing about the protocol beyond "write
+        // this, flush, ask again". `ws` (M3b) is the same handoff with a
+        // different encoder.
         row("serveStream", &[], &[("s", Consume, stm(Str))], Unit, &[]),
         // The box's inverse. Its argument is an `Int64` address, so it consumes
         // nothing a binding could double-release; what it DOES carry is the

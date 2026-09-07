@@ -442,11 +442,11 @@ fn sections() -> Vec<Section> {
         sec(
             "fn call(",
             Surface,
-            "the builtin table: forty-one guarded blocks naming a builtin, \
+            "the builtin table: thirty-five guarded blocks naming a builtin, \
              each giving its arity, its argument types, its result and its \
              refusals, then the fall-through, which since RFC-0125 §3 M6 types \
-             a seeded builtin against its row — twenty names have no block at \
-             all. The single largest thing in the file and the `builtins` \
+             a seeded builtin against its row — twenty-six names have no block \
+             at all. The single largest thing in the file and the `builtins` \
              factor written out",
         ),
         sec(
@@ -748,12 +748,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3159, 135),
+        ("the typing judgment", 3191, 136),
         ("a rule the checker states", 1525, 58),
         ("the checker's part in a rewrite stated elsewhere", 451, 16),
-        ("one arm per form, type constructor or builtin", 3981, 214),
+        ("one arm per form, type constructor or builtin", 3829, 199),
         ("shared machinery", 2233, 30),
-        ("tests", 4680, 0),
+        ("tests", 4695, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

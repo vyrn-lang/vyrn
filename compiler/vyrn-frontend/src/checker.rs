@@ -7316,18 +7316,6 @@ impl<'a> Checker<'a> {
             })));
         }
 
-        // `@join` — the internal spelling of `t.join()`: await a spawned task.
-        if name == "@join" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`join` takes no arguments"));
-            }
-            match self.base(&self.expr(&args[0], scope, None, fn_ret)?) {
-                Type::Task(inner) => return Ok((*inner).clone()),
-                Type::Err => return Ok(Type::Err),
-                other => return Err(cerr!(line, "`.join()` needs a Task, found {other}")),
-            }
-        }
-
         // `@str` — the internal spelling of `x.toString()` and of interpolation
         // holes: render a scalar to a fresh String. `parse` (below) is the
         // fallible inverse.
@@ -7705,85 +7693,6 @@ impl<'a> Checker<'a> {
             }
             return Ok(elem);
         }
-        // RFC-0075. `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
-        // `fromStep(seed, f)` (M2b) hands over a producer instead; `close(s)` is
-        // the explicit release for either. All three are builtins because none
-        // can be written in Vyrn — there is no other way to make or unmake a
-        // `Stream`.
-        if name == "fromArray" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`fromArray` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Err);
-            }
-            let Type::Array(inner) = at else {
-                return Err(cerr!(line, "`fromArray` needs an `Array<T>`, found {at}"));
-            };
-            return Ok(Type::Stream(inner));
-        }
-        // RFC-0075 M2b, re-hosted by RFC-0090 M3. `fromStep(slot, gen, step)` is
-        // the pull producer: the stream carries the two words of a cursor its
-        // CALLER minted, and every `next` hands them back to `step`, which reads
-        // the cursor, writes the next one, and answers `Some(v)` or `None`.
-        //
-        // The cursor used to be a `Ref<Int64>` — a Path B cell, allocated here.
-        // It is two plain `Int64`s now, and the slab they index lives in
-        // `std/stream` over `std/slots`. What did not change is the property the
-        // `Ref` was pinned at `Int64` for: the dispatcher a stream calls is keyed
-        // by the step's SIGNATURE, so that signature must be a function of the
-        // element type alone.
-        //
-        // The third parameter is how a release reaches the slab. A close is
-        // type-erased in the runtime and the slab is not, so `close` asks the
-        // step to release itself: `closing` is true exactly once per stream, and
-        // the step answers `None` after giving its slot back. That is also what
-        // makes a wrapper's walk ordinary Vyrn — it closes its own source, and
-        // `movecheck` checks that release like any other.
-        if name == "fromStep" {
-            if args.len() != 3 {
-                return Err(cerr!(
-                    line,
-                    "`fromStep` takes 3 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for (i, what) in ["slot", "generation"].iter().enumerate() {
-                let st = self.expr(&args[i], scope, Some(&Type::Int), fn_ret)?;
-                let st = self.base(&st);
-                if matches!(st, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if st != Type::Int {
-                    return Err(cerr!(
-                        line,
-                        "`fromStep` needs an `Int64` cursor {what}, found {st}"
-                    ));
-                }
-            }
-            let ft = self.expr(&args[2], scope, None, fn_ret)?;
-            let want = "fn(Int64, Int64, Bool) -> Option<T>";
-            let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            };
-            if ps.len() != 3
-                || self.base(&ps[0]) != Type::Int
-                || self.base(&ps[1]) != Type::Int
-                || self.base(&ps[2]) != Type::Bool
-            {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            }
-            let Some(inner) = crate::types::option_payload(&self.base(&ret)).cloned() else {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            };
-            return Ok(Type::Stream(Box::new(inner)));
-        }
         // RFC-0075 M2c, re-hosted by RFC-0090 M3. `boxStream(s)` moves a
         // stream into one heap box and hands back its address, `unboxStream(a)` takes
         // it back out, and `pullAt(a)` asks the stream at `a` for one element.
@@ -7798,24 +7707,6 @@ impl<'a> Checker<'a> {
         // `unboxStream` are the two halves of ONE move — `movecheck` sees the first as
         // a disposal and the second as an acquisition, so a chain that fails to
         // close its source does not compile.
-        if name == "boxStream" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`boxStream` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let st = self.expr(&args[0], scope, None, fn_ret)?;
-            let st = self.base(&st);
-            if matches!(st, Type::Err) {
-                return Ok(Type::Int);
-            }
-            if !matches!(st, Type::Stream(_)) {
-                return Err(cerr!(line, "`boxStream` needs a `Stream<T>`, found {st}"));
-            }
-            return Ok(Type::Int);
-        }
         if name == "unboxStream" || name == "pullAt" {
             if args.len() != 1 {
                 return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
@@ -7847,59 +7738,6 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, "`{name}` answers a `{want}`, not {exp}"));
             }
             return Ok(exp.clone());
-        }
-        if name == "close" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`close` takes 1 argument, got {}", args.len()));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            if !matches!(at, Type::Stream(_)) {
-                return Err(cerr!(line, "`close` needs a `Stream<T>`, found {at}"));
-            }
-            return Ok(Type::Unit);
-        }
-        // RFC-0074 M3a. `serveStream(s)` hands a producer to the HOST: the
-        // request that opened it returns an ordinary `Response` carrying only the
-        // header block, and the host then pulls one element at a time, writes it,
-        // and `close`s the stream the first time a write fails. That is the whole
-        // disconnect mechanism — the socket rather than a host event — and it is
-        // why this is a builtin rather than a library function: a stream must
-        // escape the call that made it, which is the one thing M1's linearity
-        // otherwise forbids, and `close` on the far side is what discharges it.
-        //
-        // `Stream<String>` and not `Stream<Event>`: the element is one already
-        // encoded frame, so every byte of SSE's syntax stays in `std/http` where
-        // the vocabulary belongs, and the host learns nothing about the protocol
-        // beyond "write this, flush, ask again". `ws` (M3b) is the same handoff
-        // with a different encoder.
-        if name == "serveStream" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`serveStream` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            let ok = match &at {
-                Type::Stream(inner) => self.base(inner) == Type::Str,
-                _ => false,
-            };
-            if !ok {
-                return Err(cerr!(
-                    line,
-                    "`serveStream` needs a `Stream<String>` of encoded frames, found {at}"
-                ));
-            }
-            return Ok(Type::Unit);
         }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Method-only (`@pop`); the receiver must be a `mut`
@@ -8878,6 +8716,16 @@ impl<'a> Checker<'a> {
             }
             for tp in type_params {
                 if !subst.contains_key(tp) {
+                    // An argument that failed to type is `Type::Err`, and the
+                    // parameter it should have bound stays open. Every block a
+                    // seeded row replaced answered `Ok(Type::Err)` there rather
+                    // than a second sentence about the same mistake, and so
+                    // does this: `close(s.copy())` on a `Stream` said "cannot
+                    // infer type parameter `T` of `close`" under a `copy` that
+                    // had already been refused (RFC-0125 §3 M6).
+                    if atys.iter().any(|t| matches!(t, Type::Err)) {
+                        return Ok(Type::Err);
+                    }
                     return Err(cerr!(
                         line,
                         "cannot infer type parameter `{tp}` of `{shown}`"
@@ -9080,6 +8928,19 @@ impl<'a> Checker<'a> {
             // A bare name: either a pass-through `fn`-typed parameter, or a named
             // top-level function used as a function value.
             Expr::Var { name: vn, .. } => {
+                // Type the argument as an expression first, so its node is
+                // RECORDED (RFC-0101 M1) the way every other argument's is.
+                // Nothing here needs the answer — the arms below read the
+                // binding themselves — but the core does: `vyrn_lower`'s walk
+                // reads `node_types` for each row, and a call argument with no
+                // row type is one the ownership rules cannot see. It showed as
+                // a double release the first time a `consume` parameter was
+                // `fn`-typed: `fromStep(c.slot, c.gen, run)` moved `run` into
+                // the step slot AND released it at its binding (RFC-0125 §3
+                // M6, the `consume` slice). The error is discarded because a
+                // top-level function name is not a binding, and the named-fn
+                // arm below is what answers for it.
+                let _ = self.expr(arg, scope, None, fn_ret);
                 // Base-resolve so a stored value under a named fn-type alias
                 // (RFC-0037, e.g. `Transform`) passes through too.
                 if let Some(Type::Fn(vptys, vret)) =
@@ -9168,8 +9029,17 @@ impl<'a> Checker<'a> {
             other => {
                 let aty = self.expr(other, scope, None, fn_ret)?;
                 let Type::Fn(vptys, vret) = self.base(&aty) else {
+                    // A literal carries no line of its own — `Expr::line`
+                    // answers 0 for the five of them — so `fromStep(0, 0, 5)`
+                    // printed this refusal at `0:0` the moment a row rather
+                    // than a block typed the call. The call's own line is the
+                    // one the reader wrote (RFC-0125 §3 M6).
+                    let at = match other.line() {
+                        0 => line,
+                        l => l,
+                    };
                     return Err(cerr!(
-                        other.line(),
+                        at,
                         "`{callee}` argument {} must be a lambda `|..| ..`, a \
                          function name, or an expression of `fn` type (RFC-0023); \
                          found {aty}",
@@ -9816,6 +9686,16 @@ impl<'a> Checker<'a> {
             // so `type Feed = Stream<Paste>` unifies like the stream it is.
             Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
                 Type::Stream(a) => self.unify(inner, &a, subst, line),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
+            },
+            // A generic `Task<T>` binds `T` the way `Stream<T>` does, and for
+            // the same reason: `@join`'s row is `(self: consume Task<T>) -> T`,
+            // so without this arm every `t.join()` reported "argument expects
+            // Task<T>, found Task<Int64>". The arm was missing because no rule
+            // had ever unified against a `Task` — `@join` was hand-written and
+            // read the payload out of the type itself (RFC-0125 §3 M6).
+            Type::Task(inner) => match crate::types::resolve(aty, self.types) {
+                Type::Task(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic `SmallArray<T, N>` binds `T` from the element type; `N`
@@ -12783,10 +12663,25 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
+    /// `unify` had no `Task` arm until RFC-0125 §3 M6, because no rule had ever
+    /// unified against one — `@join` was hand-written and read the payload out
+    /// of the type itself. Its row is the first signature that names a `Task`,
+    /// and without the arm every `t.join()` reported "argument expects
+    /// `Task<T>`, found `Task<Int64>`".
+    #[test]
+    fn a_task_binds_its_payload_through_a_signature() {
+        let src = "fn work() -> Int64 { return 7 } \
+                   fn main() -> Int64 { let t = spawn work() return t.join() }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// `@join`'s row is `(self: consume Task<T>) -> T`, so the receiver is
+    /// refused by the unify against `Task<T>` — the sentence the row gives, in
+    /// place of the block's "`.join()` needs a Task" (RFC-0125 §3 M6).
     #[test]
     fn rejects_join_of_non_task() {
         let e = check_src("fn main() -> Int64 { let x = 5; return x.join(); }").unwrap_err();
-        assert!(e.contains("`.join()` needs a Task"), "{e}");
+        assert!(e.contains("expected Task<T>, found Int64"), "{e}");
     }
 
     // ---- extern (RFC-0012 M1) --------------------------------------------

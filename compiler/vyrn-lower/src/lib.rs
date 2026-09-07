@@ -812,6 +812,17 @@ fn follow<'a>(
             })
         };
         let Some(target) = by_name.get(callee) else {
+            // A seeded builtin's row is a signature, not a body (RFC-0094):
+            // there is nothing to instantiate, and every engine implements the
+            // name directly. It reaches this list at all because a GENERIC row
+            // — `@join`, `close`, `fromArray`, `fromStep`, `boxStream` — solves
+            // its type parameters the way a user call does, and the checker
+            // records that solution against the node. RFC-0125 §3 M6's
+            // `consume` slice is where the first generic row stopped having a
+            // hand-written block and started being typed here.
+            if vyrn_frontend::prelude::signature(callee).is_some() {
+                continue;
+            }
             stop(Why::NotAFunction, 0, Vec::new());
             continue;
         };
