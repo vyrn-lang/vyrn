@@ -3198,7 +3198,6 @@ impl<'a> Builder<'a> {
             producer,
             kind,
             verdict: mc::ArgVerdict::Unknown,
-            owner: self.func_name.clone(),
             view_copies,
             elem_producers,
         };
@@ -4648,9 +4647,10 @@ pub fn join_ty(node: usize) -> Option<Type> {
 /// emitters walk the AST, so the walk over the core is folded into this
 /// side table once per compile and every emitter reads it by node.
 ///
-/// `compiler/vyrn-cli/tests/coretables.rs` proves the two sources agree at
-/// every site in the corpus. `VYRN_PLAN_ROWS=1` makes an emitter read the
-/// plan again, which is the bisect for a difference this table would hide.
+/// `compiler/vyrn-cli/tests/coretables.rs` counts every row of it over the
+/// corpus. There is no second source to compare against any more: `own.rs`
+/// states none of these tables (RFC-0125 §3 M3, the
+/// emitter-reads-the-core-alone slice).
 #[derive(Default, Clone, Debug)]
 pub struct Facts {
     /// RFC-0114 R1′: the `Expr::Field` node of an unnamed receiver the core
@@ -5142,13 +5142,11 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // the core's answers, and the core built above read the plan as it was
     // before this pass filled it (RFC-0125 §3 M3, the deletion-preparation
     // slice). The lowering is reused, so this costs the naming pass alone.
-    // `VYRN_PLAN_ROWS=1` puts every emitter back on the plan, and then the
-    // second build has no reader and is not run. An armed memo has none
-    // either: a served body contributes no frame, so these facts would be a
-    // partial answer, and the readers of the facts are the two compiled
-    // backends and the interpreter's arm rows — none of which a host that
-    // armed the memo runs (RFC-0125 §3 M3, the memo slice).
-    if memo.is_some() || std::env::var("VYRN_PLAN_ROWS").is_ok() {
+    // An armed memo has no reader for them: a served body contributes no
+    // frame, so these facts would be a partial answer, and the reader of the
+    // facts is the emitter — which a host that armed the memo does not run
+    // (RFC-0125 §3 M3, the memo slice).
+    if memo.is_some() {
         return;
     }
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
@@ -5520,7 +5518,6 @@ fn place_frames(
                     if trace {
                         eprintln!("placer: {} store at {} releases", body.name, m.site);
                     }
-                    own.plan.owners.insert(m.site, owner.to_string());
                     touched.insert(owner.to_string());
                 }
                 continue;
@@ -5541,7 +5538,6 @@ fn place_frames(
             if let Some(producer) = info.producer {
                 let fresh = PLACED.with(|p| p.borrow_mut().producers.insert(producer));
                 if fresh {
-                    own.plan.owners.insert(producer, owner.to_string());
                     touched.insert(owner.to_string());
                 }
                 continue;
@@ -5581,7 +5577,6 @@ fn place_frames(
                             touched.insert(owner.to_string());
                         }
                     });
-                    own.plan.owners.insert(m.site, owner.to_string());
                     continue;
                 }
                 // The same table, one level down: the sub-place one edge took,
@@ -5597,7 +5592,6 @@ fn place_frames(
                             touched.insert(owner.to_string());
                         }
                     });
-                    own.plan.owners.insert(m.site, owner.to_string());
                     continue;
                 }
                 // Round forty's table: the arm's unmoved payload binders, one
@@ -5612,22 +5606,18 @@ fn place_frames(
                             touched.insert(owner.to_string());
                         }
                     });
-                    own.plan.owners.insert(m.site, owner.to_string());
                     continue;
                 }
                 MissingKind::Exit => {}
                 MissingKind::Store => unreachable!("read above, keyed by the store"),
             }
-            // The unnamed receiver of a field read: R1′'s table, with the
-            // field the read took as its hole. Freed right after the read,
-            // whichever exit found it held.
-            if let Some(node) = info.receiver {
-                own.plan.receiver_frees.insert(node);
-                if !holes.is_empty() {
-                    own.plan.receiver_holes.insert(node, holes);
-                }
-                own.plan.owners.insert(node, owner.to_string());
-                touched.insert(owner.to_string());
+            // The unnamed receiver of a field read: R1′'s row, with the
+            // field the read took as its hole. The core states it on the
+            // name itself (`NameInfo::receiver`, `NameInfo::holes`) and this
+            // pass places nothing for it — `own.rs` has no receiver table
+            // left to write into (RFC-0125 §3 M3, the
+            // emitter-reads-the-core-alone slice).
+            if info.receiver.is_some() {
                 continue;
             }
             let Some(binding) = info.binding else {

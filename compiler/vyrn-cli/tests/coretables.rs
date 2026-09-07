@@ -1,75 +1,27 @@
-//! RFC-0125 §3 M3, the deletion-preparation slice: the census's "core carries
-//! it" column, pinned by a diff over the whole corpus.
+//! RFC-0125 §3 M3: the tables the emitters read, counted over the whole
+//! corpus.
 //!
-//! The direct wasm emitter reads the plan's per-node tables
-//! (`compiler/vyrn-codegen/src/direct.rs`). M3's end state is that it reads
-//! the core instead, so those tables in `own.rs` can go. Before an emitter is
-//! moved off a table, the two answers have to be proved equal — otherwise a
-//! flip changes the emitted bytes and nobody knows which source was right.
+//! The direct wasm emitter used to read the plan's per-node tables
+//! (`compiler/vyrn-codegen/src/direct.rs`) and this test diffed each against
+//! the core's answer at the same site, so a table could not be flipped until
+//! the two were proved equal. Every one of them is flipped now, and since
+//! the emitter-reads-the-core-alone slice `own.rs` states NONE of them: the
+//! last four — `receiver_frees`, `receiver_holes`, `receiver_malloc` and
+//! `discarded_results` — went with the fallbacks that read them.
 //!
-//! This test walks every corpus program, runs the analysis with the placer
-//! installed, and diffs the core's side table (`vyrn_lower::core::facts`,
-//! folded out of every body and every lambda frame after the placer has
-//! added its rows) against the plan's answer at the same site. A difference
-//! is printed with program, function and site.
+//! So there is no second answer left to diff, and this test is a CENSUS: it
+//! walks every corpus program, runs the analysis with the placer installed,
+//! folds the core's side table (`vyrn_lower::core::facts`, out of every body
+//! and every lambda frame after the placer has added its rows) and prints
+//! how many rows of each kind the core states. The counts are what a later
+//! slice reads to see a row appear or vanish. What a WRONG answer fails is
+//! measurement — the residue ratchet and the memory suite — and the recorded
+//! wasm hashes, which move when a release moves.
 //!
-//! One table is pinned at zero differences, and the emitter reads the core
-//! for it: `receiver_frees` and `receiver_holes`, from a `St::Drop` of a name
-//! whose `NameInfo::receiver` names the `Expr::Field` node.
-//!
-//! `arm_frees` is DERIVED and no longer diffed: `own.rs` states no arm table
-//! since RFC-0125 §3 M3's derivation slice, so the kernel's answer is the
-//! only one and this test counts it. What a wrong answer fails is the
-//! residue ratchet and the memory suite, which measure.
-//!
-//! **The derivation slice (RFC-0125 §3 M3) changed what a difference MEANS
-//! for a table the core derives.** While the core read the plan, a diff was a
-//! filter of the plan's own set and could not disagree; and where the placer
-//! had written the row, the core's answer was the plan's answer handed back.
-//! A derived table has neither property, so the plan's side is the ANALYSIS's
-//! own answer and a difference is a real second opinion. Each is read at the
-//! source and its verdict recorded in the RFC; the direction that would free
-//! twice stays pinned, and the direction where the core states what the
-//! analysis alone does not is counted with the count pinned exactly, so a
-//! new site is read rather than absorbed.
-//!
-//! `receiver_malloc` (row 11b) is pinned one way and counted the other: the
-//! core states it from the producer it records beside that name, and a plan
-//! row the core loses would stop a free inside a `region`, while the core
-//! answering yes where the plan's spelling of the producer says no is
-//! counted, at one site.
-//!
-//! A third is pinned since M6's third judgment took its third slice: every
-//! `Rhs` in the core names the type its node produces, and none is an
-//! exception. That is what lets the typed judgment ask what produced a value
-//! rather than counting the store as unjudged.
-//!
-//! Four more are pinned since the emitter-reads-the-core slice, and each
-//! needed the core taught to carry a key first ([`vyrn_lower::core::Site`]):
-//!
-//!   - `store_owned` and `store_fresh`, from a `St::Store` at the store
-//!     statement's node — the core states the two as one answer, because
-//!     both compiled backends read them as one. DERIVED and no longer
-//!     diffed since the store slice: `own.rs` states no store table, the
-//!     kernel's answer is the only one, and it is counted here;
-//!   - `discarded_results`, from a `St::Drop` at the `Stmt::Expr`'s node;
-//!   - `arg_drops`, from `NameInfo::arg_drop` on the name the argument
-//!     bound. DERIVED and no longer diffed since the LAST table's slice:
-//!     `own.rs` states no argument table, the emitters read the core alone,
-//!     and the row is counted here;
-//!   - `edge_releases`, from a `St::Drop` at a `Site::Edge` — DERIVED and no
-//!     longer diffed since the derivation slice, for the reason `arm_frees`
-//!     is not.
-//!
-//! The diff is structural in both directions: a plan row the core states
-//! nothing for is a site a flipped emitter would stop releasing at, and a
-//! core answer the plan does not have is one it would release twice.
-//!
-//! `consuming` is DERIVED and no longer diffed either, since the third
-//! derivation slice. `St::Switch`'s answer is the whole disjunction the
-//! emitter computes in `frees_boxes` — a `consume`, a scrutinee that names
-//! no place, or a NAMED scrutinee the frame reads no more — and `own.rs`
-//! states none of it. Counted, like the other two.
+//! One pin is left, and it is not about placement: every `Rhs` in the core
+//! names the type its node produces, and none is an exception. That is what
+//! lets the typed judgment ask what produced a value rather than counting
+//! the store as unjudged (M6's third judgment, third slice).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -154,7 +106,7 @@ fn producers(stmts: &[St], out: &mut BTreeMap<(&'static str, bool), usize>) {
 
 #[test]
 #[ignore = "walks the whole corpus; run explicitly: cargo test -p vyrn-cli --test coretables -- --ignored"]
-fn the_core_and_the_plan_agree_on_every_table() {
+fn the_core_states_every_table_the_emitters_read() {
     // The frontend recurses deeply on a realistic program; the CLI runs it on
     // a thread with the interpreter's reserve, and so does this.
     std::thread::Builder::new()
@@ -172,7 +124,6 @@ fn run() {
     // corpus. Installing is idempotent.
     vyrn_genwasm::install();
     vyrn_lower::install();
-    let mut diffs: Vec<String> = Vec::new();
     let mut counted: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut produced: BTreeMap<(&'static str, bool), usize> = BTreeMap::new();
     let mut programs = 0usize;
@@ -183,23 +134,6 @@ fn run() {
         let lowered = vyrn_lower::lower(&program);
         let own = vyrn_frontend::own::analyze(&program);
         let facts = vyrn_lower::core::facts().expect("the placer fills the core's facts");
-        let file = path.file_name().unwrap().to_string_lossy().to_string();
-        // The plan holds a row for every function the checker walked; the core
-        // holds one for every function the lowering instantiated. A row in a
-        // function nothing instantiated is nobody's to state, exactly as
-        // `ReleasePlan::unconsumed` skips one in a function nothing emitted.
-        let built: std::collections::HashSet<String> = lowered
-            .instances
-            .iter()
-            .map(|i| i.func.name.clone())
-            .collect();
-        let owner = |at: &usize| own.plan.owners.get(at).cloned().unwrap_or_default();
-        let reached = |at: &usize| {
-            own.plan
-                .owners
-                .get(at)
-                .is_some_and(|f| built.contains(f) || f.is_empty())
-        };
 
         // RFC-0125 §3 M3, the derivation slice: `own.rs` states no arm
         // table any more, so there is nothing left to diff here. What the
@@ -209,14 +143,6 @@ fn run() {
             *counted.entry("arm_frees").or_default() += 1;
             *counted.entry("arm binders freed").or_default() += core_says.len();
         }
-
-        // The plan's own total, so the census can be read off this test.
-        *counted.entry("discarded_results (plan)").or_default() += own
-            .plan
-            .discarded_results
-            .iter()
-            .filter(|a| reached(a))
-            .count();
 
         // RFC-0125 §3 M3, the store slice: `own.rs` states no store table any
         // more, so there is nothing left to diff here either. The core's
@@ -230,21 +156,10 @@ fn run() {
             }
         }
         *counted.entry("stores the core stands down at").or_default() += facts.stood_down.len();
-        for at in &facts.discarded {
-            *counted.entry("discarded_results").or_default() += 1;
-            if !own.plan.discarded_results.contains(at) {
-                diffs.push(format!(
-                    "{file}: site {at}: discarded_results: core yes, plan no"
-                ));
-            }
-        }
-        for at in own.plan.discarded_results.iter().filter(|a| reached(a)) {
-            if !facts.discarded.contains(at) {
-                diffs.push(format!(
-                    "{file}: site {at}: discarded_results: plan yes, core no"
-                ));
-            }
-        }
+        // The same again since the emitter-reads-the-core-alone slice:
+        // `own.rs` states no discarded table, so the core's row is counted
+        // rather than diffed.
+        *counted.entry("discarded_results").or_default() += facts.discarded.len();
 
         // RFC-0125 §3 M3, the last table's slice: `own.rs` states no
         // argument table any more, so there is nothing left to diff. The two
@@ -265,66 +180,17 @@ fn run() {
             *counted.entry("edge rows").or_default() += rows.len();
         }
 
-        for (node, core_holes) in &facts.receivers {
+        // R1′ and row 11b, since the emitter-reads-the-core-alone slice:
+        // `own.rs` states no receiver table and no producer screen any more,
+        // so there is no second answer to diff. The counts stay, because the
+        // corpus totals are what a later slice reads to see a row appear or
+        // vanish; what a wrong answer fails is the residue ratchet and the
+        // memory suite, which measure.
+        for (_node, core_holes) in &facts.receivers {
             *counted.entry("receiver_frees").or_default() += 1;
-            let plan_free = own.plan.receiver_free(*node);
-            let plan_holes = own.plan.receiver_holes_at(*node);
-            // A hole the PLAN names and the core does not is a place a take
-            // already gave an owner, released twice: pinned. The other way
-            // round the core frees LESS than the row asks, which is the
-            // direction the derivation was built to correct, so it is
-            // counted with the free itself below.
-            if plan_free && plan_holes.iter().any(|h| !core_holes.contains(h)) {
-                diffs.push(format!(
-                    "{file}: site {node}: receiver_frees: core {core_holes:?}, \
-                     plan free {plan_free} holes {plan_holes:?}"
-                ));
-            }
-            // The core derives this row since the derivation slice, so the
-            // plan's is the ANALYSIS's own answer and no longer the core's
-            // fed back through the placer. Where the two differ the core is
-            // the reader every engine has, and the count is pinned so a
-            // third site is read rather than absorbed.
-            if !plan_free || *core_holes != plan_holes {
-                *counted.entry("receiver frees: core only").or_default() += 1;
-            }
-            // Row 11b, the region stand-down: whether a CALLEE allocated the
-            // block. The emitter asks its own region depth beside it. The
-            // plan losing a row here would stop a free inside a `region`,
-            // so that direction is pinned; the core saying yes where the
-            // plan's SPELLING of the producer says no is counted. It was
-            // one — `gqlParseQuery(query).sels`, whose producer the analysis
-            // spells `@fieldof:gqlParseQuery` and screens out with the
-            // arena's own `@` names, though a callee allocated it — and the
-            // reach slice adds thirteen receivers in bodies outside a
-            // function, which the analysis states nothing about at all.
-            let core_malloc = facts.receiver_malloc.contains(node);
-            let plan_malloc = own.plan.receiver_malloc_at(*node);
-            if plan_malloc && !core_malloc {
-                diffs.push(format!(
-                    "{file}: site {node} in {}: receiver_malloc: plan yes, core no",
-                    owner(node)
-                ));
-            }
-            *counted.entry("receiver_malloc: core only").or_default() +=
-                usize::from(core_malloc && !plan_malloc);
+            *counted.entry("receiver holes").or_default() += core_holes.len();
         }
-
-        // The other direction, added by the derivation slice: a receiver the
-        // ANALYSIS frees and the core states no R1′ row for. Every engine
-        // reads "no free" out of a missing key here, so the row stands for
-        // nothing — which is the close-out's own finding about a HEAP field
-        // read: the receiver of `gqlSplitDecl(src).rhs.startsWith("{")` must
-        // outlive the consumer, so its free is the argument-temporary drop
-        // keyed by the producer and not this row. Counted, and the count is
-        // pinned, so a second such row is read at the source.
-        for node in own.plan.receiver_frees.iter().filter(|a| reached(a)) {
-            if !facts.receivers.contains_key(node) {
-                *counted
-                    .entry("receiver rows the core states nothing for")
-                    .or_default() += 1;
-            }
-        }
+        *counted.entry("receiver_malloc").or_default() += facts.receiver_malloc.len();
 
         // RFC-0125 §3 M3, the third derivation slice: `St::Switch`'s
         // `consuming` is the core's own answer and `own.rs` states none, so
@@ -348,7 +214,7 @@ fn run() {
             }
         }
     }
-    eprintln!("core-vs-plan over the corpus: {programs} programs");
+    eprintln!("the core's tables over the corpus: {programs} programs");
     for (what, n) in &counted {
         eprintln!("  {n:6} sites  {what}");
     }
@@ -359,61 +225,6 @@ fn run() {
             if *typed { "typed" } else { "UNTYPED" }
         );
     }
-    // Grouped: the class first, then a handful of each, so a run that finds
-    // thousands of one shape is still readable.
-    let mut classes: BTreeMap<String, Vec<&String>> = BTreeMap::new();
-    for d in &diffs {
-        let class = d.split(": ").skip(2).take(2).collect::<Vec<_>>().join(": ");
-        classes.entry(class).or_default().push(d);
-    }
-    for (class, ds) in &classes {
-        eprintln!("  {:6} DIFF {class}", ds.len());
-        for d in ds.iter().take(40) {
-            eprintln!("           {d}");
-        }
-    }
-    assert!(
-        diffs.is_empty(),
-        "{} sites where the core and the plan disagree",
-        diffs.len()
-    );
-    assert_eq!(
-        counted
-            .get("receiver_malloc: core only")
-            .copied()
-            .unwrap_or(0),
-        14,
-        "`gqlParseQuery(query).sels` and the thirteen bodies outside a function"
-    );
-    // RFC-0125 §3 M3, the derivation slice: the two sites in `std/graphql`
-    // the analysis alone does not state — `gqlParseQuery(query).sels` in
-    // `gqlTestProject`, whose row the placer used to write, and
-    // `gqlSplitDecl(t.source).name` in `sdl`, whose row the analysis writes
-    // without the hole the binding's take leaves. Both were the placer's
-    // answer through the plan before, so no emitted byte moves.
-    //
-    // The reach slice adds twelve, one per corpus file whose `test` or
-    // `bench` body reads a heap field off a temporary: `enumarray`,
-    // `enumcodec`, `graphql`, `jsoncodec`, `jsondecbytes`, `jsonplace`,
-    // `mapdemo`, `membench`, `rest`, `storage`, `vlog`, `wirekey`. The core
-    // reaches those bodies now and states the row the analysis never wrote
-    // there, so a compiled `vyrn test` frees a receiver it used to keep.
-    assert_eq!(
-        counted
-            .get("receiver frees: core only")
-            .copied()
-            .unwrap_or(0),
-        14,
-        "the two `std/graphql` receivers and the twelve bodies outside a function"
-    );
-    assert_eq!(
-        counted
-            .get("receiver rows the core states nothing for")
-            .copied()
-            .unwrap_or(0),
-        1,
-        "`gqlSplitDecl(src).rhs` in `gqlIsRecord`, and nothing else"
-    );
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third
     // slice): every `Rhs` in the corpus names the type its node produces.
     // There is no exception list, because there is no exception: a node the

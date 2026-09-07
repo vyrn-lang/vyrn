@@ -482,9 +482,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         plan: ownership.plan.clone(),
         // The core's own answers, folded once by the placer inside
         // `own::analyze` above (RFC-0125 §3 M3).
-        facts: (std::env::var("VYRN_PLAN_ROWS").is_err())
-            .then(vyrn_lower::core::facts)
-            .flatten(),
+        facts: vyrn_lower::core::facts(),
         releases: ownership.releases,
         droppable: ownership.droppable,
         early: ownership.early,
@@ -689,29 +687,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         return Err(e);
     }
 
-    // RFC-0114 §26's finish, the textual driver's twin: every plan row in a
-    // function this emission walked must have been consumed by a query — a
-    // missed site is a silent leak, made loud at build time instead of at
-    // the memory suite's profile.
-    {
-        let mut fn_emitted: std::collections::HashSet<String> =
-            user.iter().map(|f| f.name.clone()).collect();
-        for p in cx.mono.borrow().insts.iter() {
-            match &p.key {
-                Key::Generic(n, _) | Key::Ho(n, _, _) => {
-                    fn_emitted.insert(n.clone());
-                }
-                Key::Lambda(..) => {}
-            }
-        }
-        let missed = cx.plan.unconsumed(&fn_emitted);
-        if let Some((owner, class)) = missed.first() {
-            return Err(format!(
-                "internal: RFC-0114 §26 — the release plan placed {} decision(s) the emission never consumed, first {class} in `{owner}`; a missed site is a silent leak, and this failure is the loudness the plan exists for",
-                missed.len()
-            ));
-        }
-    }
+    // RFC-0114 §26's finish check stood here. It counted the rows the PLAN
+    // placed and this emission never queried, and the emission queries no
+    // plan row any more (RFC-0125 §3 M3, the emitter-reads-the-core-alone
+    // slice). What answers the same question about the core's rows is
+    // measurement: the residue ratchet and the memory suite.
 
     // The registry is closed now, so the derived copy can be written.
     let fncopy = lower_fnval_copy(&cx)?;
@@ -1331,11 +1311,11 @@ struct Cx<'a> {
     /// The per-node release decisions (RFC-0114 §26) — the same artifact the
     /// textual backend reads, so the two cannot disagree about a site.
     plan: vyrn_frontend::own::ReleasePlan,
-    /// RFC-0125 §3 M3, the deletion-preparation slice: what the CORE says
-    /// about the tables this emitter has been moved off. `None` when the
-    /// placer is not installed (`VYRN_NO_PLACER=1`) or when
-    /// `VYRN_PLAN_ROWS=1` asks for the plan's answer instead — the bisect for
-    /// a difference the flip would otherwise hide.
+    /// What the CORE says about the releases this emitter emits. The only
+    /// source: `own.rs` states none of them (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core-alone slice). `None` when the placer is not
+    /// installed (`VYRN_NO_PLACER=1`), and then no such release is emitted,
+    /// because the placer is the pass that states them.
     facts: Option<vyrn_lower::core::Facts>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
@@ -1371,19 +1351,13 @@ impl<'a> Cx<'a> {
     /// receiver of the field read at `node`, and around which holes?
     ///
     /// The core states it as a `St::Drop` of the name whose
-    /// `NameInfo::receiver` is this node, with the name's own hole set;
-    /// `compiler/vyrn-cli/tests/coretables.rs` proves it equal to R1′'s
-    /// table at every site in the corpus. The plan is still ACKNOWLEDGED, so
-    /// §26's finish check keeps counting the rows it placed — the
-    /// acknowledgement goes when the table does.
+    /// `NameInfo::receiver` is this node, with the name's own hole set.
+    ///
+    /// There is no second answer to fall back to: `own.rs` states no
+    /// receiver table any more (RFC-0125 §3 M3, the emitter-reads-the-core-
+    /// alone slice).
     fn receiver_row(&self, node: usize) -> Option<Vec<String>> {
-        let Some(f) = &self.facts else {
-            return self
-                .plan
-                .receiver_free(node)
-                .then(|| self.plan.receiver_holes_at(node));
-        };
-        self.plan.acknowledge(node);
+        let f = self.facts.as_ref()?;
         f.receivers.get(&self.plan.key_of(node)).cloned()
     }
 
@@ -1395,17 +1369,9 @@ impl<'a> Cx<'a> {
     /// this emitter's question, as it does at a store: the core lowers a
     /// `region` as an ordinary block.
     fn receiver_malloc(&self, node: usize) -> bool {
-        let Some(f) = &self.facts else {
-            return self.plan.receiver_malloc_at(node);
-        };
-        let key = self.plan.key_of(node);
-        // A receiver the core states no free for states no producer either,
-        // and the site keeps the plan's answer.
-        if f.receivers.contains_key(&key) {
-            f.receiver_malloc.contains(&key)
-        } else {
-            self.plan.receiver_malloc_at(node)
-        }
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.receiver_malloc.contains(&self.plan.key_of(node)))
     }
 
     /// RFC-0114 M2 and exit-residue round eighteen read off the core
@@ -1435,11 +1401,7 @@ impl<'a> Cx<'a> {
     /// alone.
     fn store_fact(&self, node: usize) -> Option<bool> {
         let f = self.facts.as_ref()?;
-        let released = f.stores.get(&self.plan.key_of(node)).copied();
-        if released.is_some() {
-            self.plan.acknowledge(node);
-        }
-        released
+        f.stores.get(&self.plan.key_of(node)).copied()
     }
 
     /// Round twenty-eight read off the core (RFC-0125 §3 M3, the
@@ -1447,13 +1409,14 @@ impl<'a> Cx<'a> {
     /// result the emission frees rather than drops? The core states it as a
     /// `St::Drop` of the temporary the statement's value bound, keyed by the
     /// `Stmt::Expr` node.
+    ///
+    /// There is no second answer to fall back to: `own.rs` states no
+    /// discarded table any more (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core-alone slice).
     fn discarded_row(&self, node: usize) -> bool {
-        let Some(f) = &self.facts else {
-            return self.plan.discarded_result(node);
-        };
-        // As `Cx::arg_drop_row`: a node this pass of the core states nothing
-        // for keeps the plan's answer.
-        f.discarded.contains(&self.plan.key_of(node)) || self.plan.discarded_result(node)
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.discarded.contains(&self.plan.key_of(node)))
     }
 
     /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
@@ -3066,13 +3029,8 @@ impl<'p> Fn_<'_, 'p> {
         if matches!(fr, Repr::Unit) || matches!(place, Place::Local(_)) {
             return Ok(None);
         }
-        // The plan placed its store decision on the idiom's own statements. A
-        // heapless element owes no release, so the decision is acknowledged and
-        // nothing is emitted for it — acknowledged, because §26's finish check
-        // counts a placed decision the emission never looked at as a leak.
-        for st in &stmts[..3] {
-            self.cx.plan.acknowledge(st as *const Stmt as usize);
-        }
+        // A heapless element owes no release, so nothing is emitted for the
+        // store decision on the idiom's own statements.
         // From here on, code is emitted: the same prefix as `Stmt::IndexSet`.
         let w = match self.walks.get(parent.as_str()).cloned() {
             Some(w) => w,
@@ -4920,9 +4878,7 @@ impl<'p> Fn_<'_, 'p> {
                 if let Some(blk) =
                     vyrn_frontend::project::store_index(&self.cx.impls, name, index, value, &ty)?
                 {
-                    // The projection's own statements decide the release —
-                    // acknowledged for §26's finish check.
-                    self.cx.plan.acknowledge(s as *const Stmt as usize);
+                    // The projection's own statements decide the release.
                     // RFC-0125 §3 M3, the store slice: the core judged THIS
                     // statement and this pass walks the expansion, so the
                     // store inside it is pointed back at the node the answer
@@ -4958,9 +4914,7 @@ impl<'p> Fn_<'_, 'p> {
                     let drop_old = self.region_depth == 0
                         && !vyrn_frontend::movecheck::mentions_place(value, name)
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
-                    // The entry's release is `map_set`'s own two questions —
-                    // acknowledged for §26's finish check.
-                    self.cx.plan.acknowledge(s as *const Stmt as usize);
+                    // The entry's release is `map_set`'s own two questions.
                     return self
                         .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }
