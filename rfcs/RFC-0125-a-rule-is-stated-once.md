@@ -15204,6 +15204,164 @@ check this slice leaves behind — it fails the moment either cell comes back.
 `compiler/vyrn-frontend/src/checker.rs` (-27), `floor.rs`,
 `compiler/vyrn-cli/tests/floor.rs`, `tests/checker_census.rs`.
 
+#### The spawn rule is not one rule, and this is the count (2026-09-07)
+
+The census ranked the spawn-isolation fixpoint second: 207 lines —
+`SPAWN_FORBIDDEN` (35), `stored_unsafe_sigs` (43), `extend_spawn_safe` (58),
+the pre-check fixpoint inside `check_accum_inner` (71) and the refusal in
+`Checker::expr` — against `vyrn_lower::effects::judge`, whose module head names
+the same rule and whose corpus test already holds the two equal. The blocker it
+recorded was the core at check time: "a `vyrn check` must refuse before a core
+exists for every instance, and `VYRN_EFFECTS_GAPS` names the instances that have
+none". That blocker was measured, and it is empty. A different one is not.
+
+**The recorded blocker, counted.** The effect suite prints its own gap tally,
+and `cargo test -p vyrn-cli --test effects -- --ignored --nocapture` on this
+tree gives `184 programs ... 30197 functions judged, 10484 pure, 0 unlowered`.
+**Zero.** Every instance the lowering produces has a core, so
+`VYRN_EFFECTS_GAPS` names nothing over this corpus. The second half of the same
+blocker — the fifth slice's "a hook with no answer would drop the fence out of
+the LSP, which installs no judge" — is stale too: `vyrn-lsp/src/main.rs` has
+called `vyrn_lower::install()` since M3's accumulation slice, so the editor gets
+the same judgment the CLI does.
+
+**What has no core is a function no instance covers, and that was counted
+too.** A scratch pass over the same 184 programs, loading each as the effect
+suite loads it and comparing `program.functions` against
+`lower(program).instances`:
+
+| | count |
+|---|---|
+| functions declared | 37,046 |
+| covered by at least one instance | 30,137 |
+| covered by none | 6,909 |
+| ...of which a `gen fn` | **0** |
+| ...of which generic (`type_params` non-empty) | 260 |
+| ...of which plain, and simply unreached | 6,649 |
+| bodies holding a `spawn` | 4 |
+| ...of which covered by no instance | **0** |
+
+The 6,649 are the runtime's own intrinsics — `mem$load32`, `mem$fdWrite`,
+`runtime$malloc` and their neighbours, 184 of each because every program links
+the same `std/runtime.vyrn` — and the tail of every module a program imports
+one name from. The class cv's census named, a `gen fn` no lowering
+instantiates, is empty: a `gen fn` is instantiated like any other function, which
+is why the effect tally has a `GenBody` kind with 216 members in it.
+
+**The blocker that is real: the checker's rule is the effect rule plus three
+things that are not effects.** `Checker`'s `spawn_safe` set is built by
+`check_accum_inner` from five conditions, and only two of them are the lattice:
+
+| the condition | is it an effect? |
+|---|---|
+| the callee is `extern` | yes — `Effect::Extern` |
+| a callee name is in `SPAWN_FORBIDDEN` | for 17 of its 21 names |
+| a parameter has the `modify` capability | **no** — an aliasing rule |
+| the body holds a `drop` | **no** — an ownership rule |
+| the body reads or writes module state | **no** — no row of the lattice holds it |
+
+Four of the 21 names in `SPAWN_FORBIDDEN` are in no row of `effects::ATOMS`:
+`close`, `stringFromBytes`, `lineAt` and `colAt`. `close` has a reason in its
+own comment and it is not an effect either — it frees a stream's buffer the
+caller may still hold across the task boundary, which is ownership again. The
+other three have no comment.
+
+Three probes, run against this tree's `vyrn check`, show each non-effect
+condition refusing on its own. Each callee's effect set is `alloc, trap` — the
+join of the atoms in its body, and none of these is an atom — so
+`judged.spawns[..].outside()` is empty for all three and the judgment accepts
+what the checker refuses:
+
+| probe | the checker |
+|---|---|
+| `fn work(xs: modify Array<Int64>)`, spawned | refused: "does I/O or touches shared mutable state" |
+| a callee whose body holds `drop s` | refused, same sentence |
+| a callee calling `stringFromBytes(b)` | refused, same sentence |
+
+**`tests/effects.rs` proves one direction, and it is not the direction a
+deletion needs.** Its assertion is `spawn_outside.is_empty()`: of the 12 spawn
+sites the corpus holds, every one the checker ACCEPTED has a callee whose judged
+set is inside `alloc, trap`. That says the judgment is no weaker than the
+checker on programs that compile. A deletion needs the other direction — that
+the judgment refuses everything the checker refuses — and the three probes are
+counterexamples to it.
+
+**So the 207 lines stay, and what would move them is a decision, not work.**
+Two orders, either of which closes it:
+
+1. **Give the lattice the three rules.** Module state, an aliasing capability
+   and an ownership operation are not effects of a call, so this means widening
+   what "effect" means, or adding a second judgment beside it. RFC-0004 §Q4's
+   rule is "isolated", and isolation is more than the effects a body performs.
+2. **Split the rule.** Let the judgment state the effect half and leave the
+   three non-effect conditions in the checker. This saves nothing: the pre-check
+   fixpoint, `extend_spawn_safe` and `stored_unsafe_sigs` all still have to run
+   for the half that stays, and the file would then state a fragment of a rule
+   whose other fragment is elsewhere — which is worse than stating one rule
+   once.
+
+Beside them stands a third question that only matters once one of those is
+answered: the rule would become REACHABILITY-dependent, because a function no
+instance covers has no core. Over this corpus nothing moves — all four
+spawn-holding bodies are covered — but a `spawn` inside an uninstantiated
+generic would stop being refused. That is the same trade the floor made
+deliberately in the sixth slice (finding 7, `an_unreached_host_import_is_no_-
+capability`), so there is a precedent for taking it; it is a decision and this
+record does not take it.
+
+Four of the `SPAWN_FORBIDDEN` names being in no row is the cheapest thread to
+pull, and it is a question for whoever wrote them: `stringFromBytes`, `lineAt`
+and `colAt` are pure conversions by their signatures, and if they are on the
+list for a reason nobody wrote down, the list is three names shorter and the gap
+between the two statements is three names narrower.
+
+#### `check_comptime_purity` has one non-effect condition, and it is the same one (2026-09-07)
+
+The census's fifth candidate, 138 lines, was to be taken after the spawn rule.
+The spawn rule did not move, and the same measurement answers this one, so the
+count is here rather than deferred.
+
+Its recorded blocker — "a `gen fn` that no lowering instantiates has no core to
+judge, and RFC-0021 enforces the fence on EVERY `gen fn`" — is the class the
+table above counts at **0** over 184 programs. Every `gen fn` in the corpus is
+instantiated. That is not a proof that one cannot fail to be, but it is the
+measurement, and it is the same number the spawn rule's blocker gave.
+
+Its conditions against the lattice, the way the spawn rule's were:
+
+| the condition | is it an effect? |
+|---|---|
+| a callee is refused by the `gen` column | yes — that IS the lattice, and it is stated once already since M6's fifth slice |
+| the body holds a `spawn` | yes — `Effect::Spawn`, whose `gen` cell is `no` |
+| the body calls an `extern` | yes — `Effect::Extern`, with finding 7's difference: the checker asks the DECLARATION, the judgment asks the call |
+| the body reads or writes module state | **no** — no row of the lattice holds it |
+
+One condition out of four, against the spawn rule's three. This is the closer
+of the two, and it closes on the same question: module state is not an effect of
+a call, and until the lattice or a judgment beside it can say "this body reads a
+global", both rules keep a copy of the walk that answers it. `touches_globals`
+is 40 lines and `global_ref_block` is 129, and they are the shared machinery
+both of these rules read — so the module-state question is worth about 380
+lines of `checker.rs` across the three sections that ask it, and it is one
+question.
+
+**Ranked, what to take next**, replacing the census's list where this record
+moved it:
+
+1. **The surface, unchanged from the census.** 4,321 lines and 248 refusals;
+   `Checker::call` alone is 2,501 and 190. Nothing else in the file is this
+   size, and RFC-0126 §8 and RFC-0094 are the strands that reach it.
+2. **Module state as a judged fact.** It is the one non-effect condition
+   `check_comptime_purity` has left and one of the three the spawn rule has,
+   and answering it is what lets either of them go. Roughly 380 lines depend
+   on it.
+3. **The four unrowed `SPAWN_FORBIDDEN` names.** `close`, `stringFromBytes`,
+   `lineAt`, `colAt`: classify them or drop them. Cheap, and it narrows the
+   spawn rule's gap to two conditions.
+4. **`check_comptime_purity`, 138 lines**, once 2 lands.
+5. **The spawn fixpoint, 207 lines**, once 2 and 3 land and the reachability
+   trade is decided the way finding 7 decided it for the floor.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
