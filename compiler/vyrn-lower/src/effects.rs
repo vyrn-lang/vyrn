@@ -10,7 +10,8 @@
 //!
 //! The judgment knows nothing about the surface language. It sees a call by
 //! its callee's name, the spawn marker on a call (`Rhs::Call::spawn`), an
-//! owned name born of a primitive or a literal (an allocation), and a trap.
+//! owned name born of a primitive or a literal (an allocation), a read or a
+//! write of a global place (module state, RFC-0013), and a trap.
 //! A call through a function value names a local, and the caller answers
 //! for its type with the closed set of functions a value of that type may
 //! hold — RFC-0037's stored sources AND the functions handed straight to a
@@ -31,7 +32,7 @@ use std::collections::HashMap;
 use vyrn_frontend::ast::Type;
 use vyrn_frontend::floor;
 
-use crate::core::{Body, Rhs, St};
+use crate::core::{Body, Place, Rhs, St};
 
 /// The lattice's table — the effects, the sets and [`ATOMS`] — lives in
 /// `vyrn_frontend::effects`, because RFC-0021's generation fence reads the
@@ -231,6 +232,9 @@ impl Walk<'_> {
         match s {
             St::Let(n, rhs) => {
                 let atom_call = self.rhs(rhs, self.body.names[*n as usize].line);
+                if let Rhs::Read(p) | Rhs::Take(p) = rhs {
+                    self.place(p);
+                }
                 // An owned name born of a primitive, a literal or a builtin
                 // is an allocation. Born of a user call, the callee's own
                 // set says whether it allocated or handed a parameter back.
@@ -257,12 +261,25 @@ impl Walk<'_> {
                     self.stmts(&a.body);
                 }
             }
-            St::Store { .. }
-            | St::Drop(..)
+            St::Store { place, .. } => self.place(place),
+            St::Drop(..)
             | St::Row { .. }
             | St::Break { .. }
             | St::Continue { .. }
             | St::Return { .. } => {}
+        }
+    }
+
+    /// A place the body reads or writes. Module state is the one thing a place
+    /// can say about effects: a global is shared by every frame that names it,
+    /// which is what RFC-0004 §Q4 means by state a task must not touch and
+    /// what RFC-0021 refuses a generator. A place rooted at a name is the
+    /// frame's own and says nothing.
+    fn place(&mut self, p: &Place) {
+        match p {
+            Place::Global(_) => self.own = self.own.with(Effect::ModuleState),
+            Place::Name(_) => {}
+            Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => self.place(b),
         }
     }
 

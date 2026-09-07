@@ -12786,15 +12786,19 @@ whether it allocated. `pure` is the bottom.
 | `extern` | every other extern declaration, resolved by name | the `vyrn` namespace | trap | no instantiation | yes | no |
 | `serve` | `serveStream` | — | trap | trap | trap | no |
 | `spawn` | no name: the marker the core keeps on a spawned call (§2.1; the spawn flag of a core call, second slice) | — | yes | yes, eager | yes, eager | no |
+| `module-state` | no name: a read or a write of a global place, which is how the core spells a module-state binding (RFC-0013) | — | yes | yes | yes | no |
 | `trap` | `panic`, `@panicAt`, `assert`, `assertEq`, `runtime$trap`, `mem$trap`; and the core's trap statement | `proc_exit` | yes | yes | yes | yes |
 | `gen-only` | `moduleInterface`, `contractOf`, `lex`, `render`, `raw`, `rawAt`, `@codeText`, `@codeSplice` | — | no | no | no | yes |
 
 Every one of the fifteen preview1 imports `direct.rs` declares is in the
 third column; `environ_sizes_get` and `environ_get` serve the clock and the
 seed and nothing else. The runtime module's own primitives (`std/mem`,
-`std/runtime`) are pure but for the four rows that name them. `spawn` has
-no atom: the core keeps a marker on the call (`Rhs::Call::spawn`, second
-slice), and the spawning body carries the effect. The spawn-isolation rule
+`std/runtime`) are pure but for the four rows that name them. Two rows have
+no atom. `spawn` is a marker the core keeps on the call
+(`Rhs::Call::spawn`, second slice), and the spawning body carries the
+effect. `module-state` is a PLACE — the core spells a module-state binding
+as a global place, and the body that reads or writes one carries the effect
+(M6, the module-state slice). The spawn-isolation rule
 of RFC-0004 §Q4 is the one inclusion check the judgment makes today: the
 spawned callee's set within `effects::Effects::SPAWN_ALLOWS`, which is
 `alloc, trap`. The harness counts every spawn site and puts one outside the
@@ -15409,6 +15413,105 @@ Two of the three deletions come out of one kind, and that is the census's own
 finding standing up: the rule-stating sections are 9.3 per cent of the file, and
 taking two of the six candidates off them moves 70 lines. The surface is
 unmoved, which is where the size is.
+
+#### Module state is a row of the lattice (2026-09-07)
+
+The ranked list's second item. `check_comptime_purity` has one non-effect
+condition and the spawn rule has three, and the same one is in both: **does this
+body read or write module state**. The two orders the last record left open
+were "give the lattice the three rules" and "split the rule". This slice takes
+the first, for this one condition, in the cheapest form it has: module state
+becomes a ROW, not a second judgment beside the effect set.
+
+**Why a row and not a fact beside the set.** RFC-0004 §Q4's word is *isolated*,
+and its own sentence says what it means: a task "may `read`/`share` immutable
+data but cannot `print` or `modify` outside state". Module state IS outside
+state. An effect system's rows are the observable interactions a body has with
+something the frame does not own, and a read of a global is the oldest one of
+those — it is a state effect in every reading of the word. The lattice already
+holds two rows with no atom: `spawn` is a marker on a call and `trap` is a
+statement. A place is the third kind of thing the core has, so the row's atoms
+column says *no name: a read or a write of a global place*, and
+`vyrn_lower::effects::Walk::place` raises it at `Rhs::Read`, `Rhs::Take` and
+`St::Store` — walking `Field`, `Elem` and `Key` down to the root, because
+`g.f[i]` is module state and `x.f[i]` is not.
+
+**What the two options cost.**
+
+| option | cost |
+|---|---|
+| a row of the lattice | one enum variant, one row of the RFC table, three exhaustive matches (`Effect::ALL`, `Effect::gen`, `floor::Capability::of`), and a nine-line `place` walk in the judgment. The row maps to no floor capability — every target has module state — so the floor, the audience pass and `vyrn why --capability` do not move |
+| a fact beside the effect set | a second field on `Judged`, a second fixpoint or a widened one, a second inclusion rule at the spawn site, and a second thing every reader of a judgment has to know about. It buys precision nobody asked for: the spawn rule and the generation fence both want the join, which is what the lattice already computes |
+| a `Capability` of the floor | wrong twice: the floor is a TARGET question (RFC-0103) and every target has module state, so the row would refuse nothing there |
+
+The `gen` cell is **no**. A generator that read a module-state binding would
+read whatever the generation order left in it, and RFC-0021's cache key cannot
+name it — the same argument the clock row's cell makes.
+
+**The licence, and the finding it found.** `tests/effects.rs` now stands the
+row beside `checker::module_state_use`, per function, over the 184 programs and
+30,197 judged functions. That is the checker's own walk — `touches_globals`
+through the call graph, expanded through impls and RFC-0037's stored values —
+and it is the SAME question the row answers, so the two lists are the licence
+any deletion of the checker's copy will need.
+
+| direction | count | verdict |
+|---|---|---|
+| the checker's walk says yes and the row says no | **0** | exact, asserted. The judgment has no hole, so replacing the checker's copy would accept nothing the checker refuses |
+| the row says yes and the checker's walk says no | **21** | ratcheted, and the cause is documented already |
+
+The 21 are one cause, and `StoredFnEffects::arg_sources` states it in its own
+words: a function handed to a `fn`-typed PARAMETER (RFC-0023, monomorphized, no
+defunctionalization tag) is collected in `arg_sources`, "the spawn and
+`--workers` analyses read `sources` alone, so their verdicts do not move", and
+the judgment reads both. `VYRN_EFFECTS_DUMP=rpc.vyrn:usersById` shows it in one
+line: `calls cb: alloc, module-state`. `cb` is the completion callback the
+in-process RPC dispatcher takes, and `examples/rpc.vyrn`'s callbacks write the
+module-state binding `line`. The checker's walk does not follow a parameter, so
+it says `usersById` is module-state-free and the row says it is not.
+
+That is a hole in the `--workers` gate (RFC-0025) rather than a hole in the row:
+a `handle` that reaches module state through a callback passes a gate that
+exists to refuse exactly that. It is not this slice's to fix — closing it means
+deciding whether the gate joins over every function of a matching signature in
+the program, which is the over-approximation the judgment makes — and it is now
+written down with its 21 members instead of being a sentence in a doc comment.
+
+**The three probes, re-run.** The last record's three non-effect conditions,
+with the judgment's answer for each callee before and after. Each probe is the
+callee with its `spawn` removed, so the program checks and lowers, and
+`VYRN_EFFECTS_DUMP` prints the set:
+
+| probe | the checker | the judgment before | the judgment now |
+|---|---|---|---|
+| `fn bump(n)` reading the global `counter` | refused | `pure` — accepted | **`module-state`** — refused |
+| `fn work(xs: modify Array<Int64>)` | refused | `alloc` — accepted | `alloc` — accepted |
+| a body holding `drop s` | refused | `pure` — accepted | `pure` — accepted |
+
+One of the three conditions is the judgment's now, and it is the one both rules
+have. The other two are the spawn rule's alone, and the next record takes them.
+
+**The licence for the checker: zero.** `vyrn check` over 419 programs —
+`examples`, `std`, `site`, and the three fixture directories under
+`compiler/vyrn-cli/tests` — whole stderr with the exit code. Nothing in
+`checker.rs` changed in this slice; the row is a fact the judgment states and no
+frontend reader asks for yet.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,269 | 16,269 |
+
+**The censuses this moves.** None. `checker.rs` is untouched, so
+`tests/checker_census.rs` is unmoved; the slice names no type constructor and no
+surface form, so RFC-0126 §3 and RFC-0127 §3 are unmoved. The table above is the
+census that did move, and it is this file's own.
+
+**Commit.** `module state is an effect, and the lattice grows the row that says
+so`, `compiler/vyrn-frontend/src/effects.rs`, `floor.rs`,
+`compiler/vyrn-lower/src/effects.rs`, `compiler/vyrn-cli/tests/effects.rs`, the
+lattice table and this record.
 
 ### The surface collapse — RFC-0126 §8, one line per step
 

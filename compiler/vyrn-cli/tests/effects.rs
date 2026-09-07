@@ -387,6 +387,23 @@ fn run_corpus() {
     let mut judged_gen = 0usize;
     let mut judged_carried = 0usize;
     let mut judged_differ: Vec<String> = Vec::new();
+    // The module-state row against the checker's own walk. RFC-0125 §3 M6,
+    // the module-state slice: `checker::touches_globals` and the lattice's
+    // `module-state` row answer one question, and this holds them together per
+    // function so the copy that is deleted is the copy the corpus licensed.
+    // The checker's answer is `module_state_use`, which is the same walk from
+    // a named root, transitively, through impls and stored values.
+    //
+    // Two lists, because the two directions are not the same fact. A function
+    // the CHECKER says reaches module state and the judgment does not is a
+    // hole in the judgment, and a deletion of the checker's copy would accept
+    // a program the checker refuses: exact, always zero. The other way is the
+    // documented asymmetry of `StoredFnEffects::arg_sources` — the judgment
+    // follows a function handed to a `fn`-typed PARAMETER (RFC-0023) and the
+    // checker's two walks read `sources` alone — so the judgment reaches
+    // module state through a callback the checker does not follow. Ratcheted.
+    let mut module_state_missed: Vec<String> = Vec::new();
+    let mut module_state_extra: Vec<String> = Vec::new();
     let mut gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
     let show_gaps = std::env::var("VYRN_EFFECTS_GAPS").ok();
     let mut unloadable = 0usize;
@@ -670,6 +687,8 @@ fn run_corpus() {
         // monomorphizes and gives no tag (RFC-0125 §3 M6, finding 14). A
         // named source is its instances; a lambda source is its frame.
         let stored = vyrn_frontend::checker::stored_fn_effects(&program);
+        let mut module_state_of: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
         let mut through = |ty: &Type| -> Callee {
             // The sources are collected with aliases resolved; a local is
             // typed as the program spelled it.
@@ -787,6 +806,27 @@ fn run_corpus() {
             } else {
                 FloorKind::CoreBlind
             };
+
+            // The module-state row, against the checker's walk from the same
+            // root. Memoized by NAME because the checker's question is about a
+            // function and an instance repeats one.
+            let ms_judged = e.has(Effect::ModuleState);
+            let ms_checker = *module_state_of
+                .entry(inst.func.name.clone())
+                .or_insert_with(|| {
+                    !program.globals.is_empty()
+                        && vyrn_frontend::checker::module_state_use(
+                            &program,
+                            &inst.func.name,
+                            &stored,
+                        )
+                        .is_some()
+                });
+            if ms_checker && !ms_judged {
+                module_state_missed.push(format!("{file}:{} {}", inst.func.line, inst.spelling()));
+            } else if ms_judged && !ms_checker {
+                module_state_extra.push(format!("{file}:{} {}", inst.func.line, inst.spelling()));
+            }
 
             // The moved rows, compared alone. `gen-body` and `callee-carried`
             // are the same two non-disagreements the whole-floor comparison
@@ -953,6 +993,18 @@ fn run_corpus() {
         "  judged:     {judged_agree} agree, {judged_carried} callee-carried, {judged_gen} gen-body, {} differ",
         judged_differ.len()
     );
+    eprintln!(
+        "  module state: {} the judgment misses, {} it reaches through an argument the checker does not follow",
+        module_state_missed.len(),
+        module_state_extra.len()
+    );
+    for d in module_state_missed
+        .iter()
+        .chain(module_state_extra.iter())
+        .take(30)
+    {
+        eprintln!("    {d}");
+    }
     for d in judged_differ.iter().take(20) {
         eprintln!("    {d}");
     }
@@ -1036,6 +1088,25 @@ fn run_corpus() {
         disagreements[0].file,
         disagreements[0].line,
         disagreements[0].name
+    );
+    // The judgment has no hole: everything the checker's walk reaches, the
+    // row reaches. EXACT — a miss here is a program a deletion of the
+    // checker's copy would start accepting.
+    assert!(
+        module_state_missed.is_empty(),
+        "{} functions the checker's walk says reach module state and the `module-state` row does not;          the first: {}",
+        module_state_missed.len(),
+        module_state_missed.first().map(String::as_str).unwrap_or("none")
+    );
+    // The other direction, ratcheted: the argument-source route of RFC-0023,
+    // which the checker's two walks do not read (`StoredFnEffects::arg_sources`
+    // says so in its own words). It may fall, never rise.
+    const MODULE_STATE_EXTRA: usize = 21;
+    assert!(
+        module_state_extra.len() <= MODULE_STATE_EXTRA,
+        "{} functions the `module-state` row reaches and the checker's walk does not, more than          the {MODULE_STATE_EXTRA} recorded; the first new one is worth reading: {}",
+        module_state_extra.len(),
+        module_state_extra.first().map(String::as_str).unwrap_or("none")
     );
     assert!(
         judged_differ.is_empty(),
