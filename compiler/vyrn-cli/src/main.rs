@@ -482,8 +482,8 @@ fn real_main() -> ExitCode {
         // FINISH (audit A5.2). Monomorphization is only visible while emitting,
         // so `check` emits and throws the code away, and reports the depth
         // refusal alone — every other codegen error stays `build`'s.
-        "check" => match load_program(path, &source) {
-            Ok(program) => {
+        "check" => match loaded(path, &source) {
+            Ok((program, _dsg)) => {
                 let _memo = shared_desugars(&program);
                 match vyrn_codegen::check_instantiations(&program) {
                     Ok(()) => {
@@ -504,7 +504,7 @@ fn real_main() -> ExitCode {
             // of the table `run_wasm` prints (RFC-0125 §3 M5, the `run-profile`
             // row).
             let clock = std::time::Instant::now();
-            let program = match load_program(path, &source) {
+            let (program, _dsg) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
@@ -525,7 +525,7 @@ fn real_main() -> ExitCode {
         // also what `build` hands wasm2c, so a property no program output can
         // show is readable on either.
         "emit-wat" => {
-            let program = match load_program(path, &source) {
+            let (program, _dsg) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
@@ -547,7 +547,7 @@ fn real_main() -> ExitCode {
         // `why --memory`'s rule, because a linked program's imports are another
         // file's answer.
         "emit-lowered" => {
-            let program = match load_program(path, &source) {
+            let (program, _dsg) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
@@ -3238,33 +3238,40 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
     }
 }
 
-/// Share every projection expansion for the rest of this command
-/// ([`vyrn_frontend::project::Memo`], RFC-0101 M2d).
+/// [`load_program`] with the projection memo opened FIRST, so the load and the
+/// command share one expansion per site.
 ///
-/// `a[i]` and `for x in c` over a user container inline a `place at` / `place
-/// nth` AT the access site, so the nodes an engine walks there are nodes the
-/// source does not contain. Without this every engine expands for itself: the
-/// lowering and each backend land on their own sets of addresses,
-/// and a side table keyed by address — `own`'s rows, `movecheck`'s, the
-/// lowering's own — cannot reach any but its own. With it there is one tree per
-/// site, typed by the checker `vyrn_lower::lower` runs, and every engine reads
-/// the same answers. Until RFC-0101 M6's second phase this was opened by the
-/// corpus gate only, so every residue number the RFC records was measured under
-/// a sharing a released compiler did not do.
+/// The pair is the whole of RFC-0125 §3 M3's one analysis: the load judges the
+/// program, and the guard the caller opens next
+/// ([`vyrn_frontend::own::Memo`]) adopts that judgment instead of recomputing
+/// it. Adoption is sound only if both readings walk the same nodes, and a
+/// projection's nodes are minted by the inline — so the memo has to be open
+/// before the load, not after it.
+fn loaded(
+    path: &str,
+    source: &str,
+) -> Result<(vyrn_frontend::ast::Program, vyrn_frontend::project::Memo), ExitCode> {
+    let memo = vyrn_frontend::project::Memo::open();
+    Ok((load_program(path, source)?, memo))
+}
+
+/// Hold this command's ONE ownership analysis of `program`
+/// ([`vyrn_frontend::own::Memo`], RFC-0125 §3 M3).
 ///
-/// **After the load, deliberately.** The loader runs generators (RFC-0021) by
-/// loading and checking whole programs of their own and throwing them away, and
-/// a memo keyed by node address over a program that dies is the leak the
-/// `Memo` doc warns about — with the verification bill still attached. What
-/// this covers is the one program the command is about, from the point it is
-/// linked to the point it has been lowered and emitted.
-fn shared_desugars(
-    program: &vyrn_frontend::ast::Program,
-) -> (vyrn_frontend::project::Memo, vyrn_frontend::own::Memo<'_>) {
-    (
-        vyrn_frontend::project::Memo::open(),
-        vyrn_frontend::own::Memo::open(program),
-    )
+/// The load already judged the program, and this guard adopts that judgment.
+/// The projection memo it used to open beside itself is [`loaded`]'s, because a
+/// site inlined after the load is not the site the load judged.
+///
+/// Why the projection memo matters to this one: `a[i]` and `for x in c` over a
+/// user container inline a `place at` / `place nth` AT the access site, so the
+/// nodes an engine walks there are nodes the source does not contain. Without
+/// the memo every engine expands for itself: the lowering and each backend land
+/// on their own sets of addresses, and a side table keyed by address — `own`'s
+/// rows, `movecheck`'s, the lowering's own — cannot reach any but its own. With
+/// it there is one tree per site, typed by the checker `vyrn_lower::lower`
+/// runs, and every engine reads the same answers.
+fn shared_desugars(program: &vyrn_frontend::ast::Program) -> vyrn_frontend::own::Memo<'_> {
+    vyrn_frontend::own::Memo::open(program)
 }
 
 /// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
@@ -3750,7 +3757,7 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match load_program(path, &source) {
+    let (program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
@@ -3850,7 +3857,7 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match load_program(path, &source) {
+    let (program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
@@ -4699,6 +4706,11 @@ fn vyrnServeMain() -> Int64 {
 /// answers the same question about the same shape.
 fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
     use vyrn_frontend::ast::Expr;
+    // The load judged the program this rewrites, and a renamed function and a
+    // renamed call are not in that judgment. Nothing here changes `own::ident`,
+    // so the guard the caller opens next would adopt an answer about a program
+    // that no longer exists (RFC-0125 §3 M3, the one analysis).
+    vyrn_frontend::own::forget_loaded();
     let has_main = program
         .functions
         .iter()
@@ -4821,7 +4833,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     // rest. Appending also leaves every line of the program where it was, so a
     // diagnostic still points where the author looks.
     let source = format!("{source}\n{SERVE_SHIM}");
-    let mut program = match load_program(path, &source) {
+    let (mut program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
@@ -5168,7 +5180,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         "{source}
 {SERVE_SHIM}"
     );
-    let mut program = match load_program(&server_path, &source) {
+    let (mut program, _dsg) = match loaded(&server_path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
@@ -6472,7 +6484,7 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     };
 
-    let program = match load_program(path, &source) {
+    let (program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };

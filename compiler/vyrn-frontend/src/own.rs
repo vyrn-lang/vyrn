@@ -1376,13 +1376,13 @@ pub struct Ownership {
     pub arg_caps: HashMap<String, Vec<Capability>>,
 }
 
-/// One analysis per build — RFC-0125 §3 M3, the repetition slice.
+/// One analysis per command — RFC-0125 §3 M3, the repetition slice.
 ///
 /// [`analyze`] runs the placer, which builds a core body for every instance of
-/// the LINKED program and judges it. Every command asks for the analysis twice:
-/// once so `kernel_refuses` prints this program's refusals, and once inside the
-/// engine that lowers or emits. The second answer is the first one recomputed,
-/// and the count is in §3 M3's table.
+/// the LINKED program and judges it. The load asks for one so `kernel_refuses`
+/// can print this program's refusals, and the engine that lowers or emits used
+/// to ask for a second. The second answer was the first one recomputed. It is
+/// now the first one, handed on by [`hand_on`] and adopted here.
 ///
 /// The guard BORROWS the program it caches for, so the program outlives the
 /// guard and no other `Program` can take that address while the entry is held.
@@ -1398,6 +1398,59 @@ pub struct Memo<'a> {
     program: std::marker::PhantomData<&'a Program>,
 }
 
+/// A program's identity, from the point the load judges it to the point the
+/// command lowers it.
+///
+/// The `Program` STRUCT moves in between — the CLI's load returns it by value —
+/// so its address is not one. The heap buffer behind `functions` does not move
+/// with it, and no two live programs share a buffer, so its address plus the
+/// two lengths a synthesis can change is an identity that survives the move.
+fn ident(program: &Program) -> (usize, usize, usize) {
+    (
+        program.functions.as_ptr() as usize,
+        program.functions.len(),
+        program.type_decls.len(),
+    )
+}
+
+thread_local! {
+    /// The analysis the LOAD made, and the identity of the program it was made
+    /// for. [`Memo::open`] adopts it when the two agree.
+    static LOADED: std::cell::RefCell<Option<((usize, usize, usize), Ownership)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Hand the load's analysis on to the guard the command opens next.
+///
+/// Called by [`crate::movecheck::refusals`], which is the one analysis a
+/// judgment may be reused for.
+///
+/// **Only inside a compile scope** ([`crate::project::memo_open`]), and
+/// [`Memo::open`] adopts under the same condition. That scope is the proof
+/// [`ident`] cannot give on its own: the analysis is about NODES, and only
+/// inside it does a projection site keep one expansion, so only inside it are
+/// the load's nodes the ones the command lowers. It also bounds who can be
+/// wrong. The editor opens no compile scope — it re-checks a program per
+/// keystroke, drops it, and builds the next one, and an allocator that hands
+/// the same `functions` buffer to a program of the same shape would make
+/// `ident` agree about two different texts.
+pub fn hand_on(program: &Program, ownership: &Ownership) {
+    if !crate::project::memo_open() {
+        return;
+    }
+    LOADED.with(|l| *l.borrow_mut() = Some((ident(program), ownership.clone())));
+}
+
+/// Drop what the load handed on, because this program is no longer the one the
+/// load judged.
+///
+/// One caller: `vyrn serve` rewrites call names and one function's name in
+/// place after the load. Neither shows in [`ident`], and an analysis of the
+/// program before the rewrite is not an analysis of the program after it.
+pub fn forget_loaded() {
+    LOADED.with(|l| *l.borrow_mut() = None);
+}
+
 thread_local! {
     /// The program this memo answers for, or 0. An address, never dereferenced.
     static MEMO_FOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1407,21 +1460,27 @@ thread_local! {
 }
 
 impl<'a> Memo<'a> {
-    /// Hold one analysis of `program` until the guard is dropped.
+    /// Hold one analysis of `program` until the guard is dropped, adopting the
+    /// load's if the load made one for this program.
     ///
     /// The load makes an analysis of its own — the ownership stage judges every
     /// program it checks (RFC-0125 §3 M3, the accumulation slice) — and this
-    /// guard does NOT adopt it. It cannot: a projection is inlined into its
-    /// caller's block with a per-inline tag (`project.rs`), so the analysis the
-    /// load made names bindings `@p26.h` and the lowering a tool runs next
-    /// names them `@p31.h`. A plan whose rows are keyed by those names then
-    /// places nothing, and `examples/genref.vyrn` leaked a block that the
-    /// residue ratchet had recorded clean. Adoption is worth about a third of
-    /// `vyrn check site/export.vyrn` and it needs the inline to be memoized
-    /// across the load and the command, which the project memo is not.
+    /// guard now takes it. It could not before: a projection is inlined into
+    /// its caller's block with a per-inline tag (`project.rs`), so the analysis
+    /// the load made named bindings `@p26.h` and the lowering a tool ran next
+    /// named them `@p31.h`; a plan whose rows are keyed by those nodes then
+    /// placed nothing, and `examples/genref.vyrn` leaked a block. What closed
+    /// it is scope, not a new tag: the CLI opens [`crate::project::Memo`]
+    /// BEFORE the load, so a site is inlined once for the whole command and
+    /// both readings walk the same nodes.
     pub fn open(program: &'a Program) -> Memo<'a> {
         MEMO_FOR.with(|p| p.set(program as *const Program as usize));
-        MEMO.with(|m| *m.borrow_mut() = None);
+        let adopted = LOADED
+            .with(|l| l.borrow_mut().take())
+            .filter(|_| crate::project::memo_open())
+            .filter(|(id, _)| *id == ident(program))
+            .map(|(_, o)| o);
+        MEMO.with(|m| *m.borrow_mut() = adopted);
         // RFC-0125 §3 M3, the one check: what the checker decided about every
         // node of this program, for the same span and on the same proof. The
         // lowering reads it (`checker::recorded`) instead of checking the
