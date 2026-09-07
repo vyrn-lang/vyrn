@@ -7,7 +7,9 @@
   what they would cost. Two defects it found are fixed: `Type::Stream`'s doc
   comment in `ast.rs` claimed a lowering the code stopped using at RFC-0075 M2b
   (§6), and the "no nested Option/Result" rule refused a type all three engines
-  already ran (§8.7).
+  already ran (§8.7). §9 takes every price again with one emitter (2026-09-07):
+  the census is 1,611 mentions where it was 2,110, no verdict changes, and
+  nothing in §5 is free.
 - **Depends on:** RFC-0125 §2.8, which deferred this census and named its
   candidates; RFC-0082 (containers are Vyrn — the array and Map collapses were
   already attempted, and the numbers that stopped them are quoted here);
@@ -99,40 +101,6 @@ the_surface_census_as_a_table` and checked against the code by
 `the_surface_census_is_what_the_rfc_records`.
 
 | constructor | checker | shared | wasm | types | prelude | editor | all six |
-|---|---|---|---|---|---|---|---|
-| `Type::Int` | 68 | 3 | 47 | 10 | 0 | 2 | 130 |
-| `Type::IntN` | 33 | 4 | 13 | 21 | 2 | 2 | 75 |
-| `Type::Float` | 22 | 3 | 20 | 5 | 0 | 2 | 52 |
-| `Type::Float32` | 23 | 3 | 17 | 5 | 0 | 1 | 49 |
-| `Type::F32x4` | 7 | 1 | 7 | 1 | 0 | 0 | 16 |
-| `Type::I32x4` | 11 | 1 | 7 | 1 | 0 | 0 | 20 |
-| `Type::F64x2` | 8 | 1 | 10 | 1 | 0 | 0 | 20 |
-| `Type::Mask32x4` | 5 | 1 | 5 | 1 | 0 | 0 | 12 |
-| `Type::Mask64x2` | 6 | 1 | 6 | 1 | 0 | 0 | 14 |
-| `Type::Bool` | 38 | 2 | 28 | 6 | 0 | 2 | 76 |
-| `Type::Str` | 90 | 2 | 76 | 8 | 0 | 4 | 180 |
-| `Type::Unit` | 34 | 4 | 29 | 9 | 1 | 0 | 77 |
-| `Type::Named` | 40 | 3 | 9 | 9 | 3 | 6 | 70 |
-| `Type::Record` | 14 | 3 | 6 | 18 | 0 | 5 | 46 |
-| `Type::Omit` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
-| `Type::Pick` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
-| `Type::Merge` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
-| `Type::Partial` | 5 | 1 | 0 | 9 | 0 | 0 | 15 |
-| `Type::Enum` | 14 | 5 | 9 | 12 | 0 | 3 | 43 |
-| `Type::Param` | 18 | 2 | 9 | 4 | 8 | 1 | 42 |
-| `Type::App` | 17 | 3 | 1 | 11 | 0 | 0 | 32 |
-| `Type::Array` | 49 | 4 | 41 | 7 | 2 | 5 | 108 |
-| `Type::ArrayN` | 18 | 7 | 18 | 9 | 0 | 4 | 56 |
-| `Type::SmallArray` | 24 | 2 | 21 | 7 | 1 | 4 | 59 |
-| `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 26 | 3 | 18 | 7 | 6 | 4 | 64 |
-| `Type::Stream` | 18 | 1 | 9 | 7 | 1 | 1 | 37 |
-| `Type::Task` | 10 | 1 | 4 | 7 | 1 | 1 | 24 |
-| `Type::Logger` | 2 | 1 | 2 | 1 | 0 | 1 | 7 |
-| `Type::Fn` | 28 | 5 | 24 | 10 | 1 | 0 | 68 |
-| `Type::Lazy` | 7 | 1 | 1 | 9 | 0 | 0 | 18 |
-| `Type::Never` | 4 | 2 | 4 | 2 | 0 | 0 | 12 |
-| `Type::Err` | 138 | 1 | 0 | 1 | 0 | 0 | 140 |
 |---|---|---|---|---|---|---|---|
 | `Type::Int` | 68 | 3 | 47 | 10 | 0 | 2 | 130 |
 | `Type::IntN` | 33 | 4 | 13 | 21 | 2 | 2 | 75 |
@@ -1385,3 +1353,219 @@ row §8.15 recorded as drifted. The three readers only fire on a sum the corpus
 did not have, and the ownership row only differs where the impl is generic —
 `examples/fallible.vyrn` is concrete, so its row substitutes nothing and answers
 what it answered.
+---
+
+## 9. The census with one emitter — 2026-09-07
+
+RFC-0125 §3 M4 deleted the text-IR emitter, and the direct wasm emitter is the
+only emitter. Every price in §3, §4 and §5 was taken with two emitters and an
+interpreter. This section takes them again with one, and answers the question
+the deletion raises: which refused collapse is free now, and which verdict
+changes.
+
+**No verdict changes, and one number says why.** Every blocker §4 and §5 record
+is a language decision. Not one of them was an emitter question. The retirement
+moved 499 mentions and moved no decision.
+
+### 9.1 What the retirement removed, row by row
+
+The census is 1,611 mentions in six files. It was 2,110 in the same six at
+commit `b390c6c1`, the last tip with two emitters. The `native` column held 574
+of those. The `shared` column that replaced it holds 75 — `llt_of`, the shapes
+`layout` parses back, and the lowering both emitters called. So 499 went.
+
+| constructor | two emitters | one emitter | fell by | of which `wasm` now |
+|---|---|---|---|---|
+| `Type::Int` | 173 | 130 | 43 | 47 |
+| `Type::IntN` | 102 | 75 | 27 | 13 |
+| `Type::Float` | 70 | 52 | 18 | 20 |
+| `Type::Float32` | 70 | 49 | 21 | 17 |
+| `Type::F32x4` | 25 | 16 | 9 | 7 |
+| `Type::I32x4` | 28 | 20 | 8 | 7 |
+| `Type::F64x2` | 29 | 20 | 9 | 10 |
+| `Type::Mask32x4` | 16 | 12 | 4 | 5 |
+| `Type::Mask64x2` | 19 | 14 | 5 | 6 |
+| `Type::Bool` | 103 | 76 | 27 | 28 |
+| `Type::Str` | 233 | 180 | 53 | 76 |
+| `Type::Unit` | 108 | 77 | 31 | 29 |
+| `Type::Named` | 99 | 70 | 29 | 9 |
+| `Type::Record` | 58 | 46 | 12 | 6 |
+| `Type::Omit` | 18 | 15 | 3 | 0 |
+| `Type::Pick` | 17 | 15 | 2 | 0 |
+| `Type::Merge` | 17 | 15 | 2 | 0 |
+| `Type::Partial` | 17 | 15 | 2 | 0 |
+| `Type::Enum` | 52 | 43 | 9 | 9 |
+| `Type::Param` | 54 | 42 | 12 | 9 |
+| `Type::App` | 37 | 32 | 5 | 1 |
+| `Type::Array` | 149 | 108 | 41 | 41 |
+| `Type::ArrayN` | 80 | 56 | 24 | 18 |
+| `Type::SmallArray` | 85 | 59 | 26 | 21 |
+| `Type::ConstInt` | 7 | 4 | 3 | 0 |
+| `Type::Map` | 81 | 64 | 17 | 18 |
+| `Type::Stream` | 46 | 37 | 9 | 9 |
+| `Type::Task` | 30 | 24 | 6 | 4 |
+| `Type::Logger` | 10 | 7 | 3 | 2 |
+| `Type::Fn` | 95 | 68 | 27 | 24 |
+| `Type::Lazy` | 21 | 18 | 3 | 1 |
+| `Type::Never` | 20 | 12 | 8 | 4 |
+| `Type::Err` | 141 | 140 | 1 | 0 |
+
+**Every row fell by exactly `native` minus `shared`.** All 33 of them. The
+`checker`, `wasm`, `types`, `prelude` and `editor` columns did not move by one
+mention. A count cannot prove that a deleted statement was a restatement. This
+is as near as a count comes: an emitter left, and no other file had to say
+anything it did not already say.
+
+### 9.2 The three facts the new columns state
+
+**A collapse is a frontend question now.** Read each row as an engine side
+(`shared` plus `wasm`) against a surface side (`checker` plus `types` plus
+`prelude` plus `editor`). Eighteen rows of 33 cost more on the engine side with
+two emitters. **One does now** — `Type::F64x2`, at 11 of 20 — and four tie
+(`F32x4`, `Mask32x4`, `Mask64x2`, `Never`). No constructor's mentions are in
+`direct.rs` alone, and no constructor is a lowering question. Twenty-nine rows
+of 33 are decided in the frontend.
+
+**Six rows cost nothing in the emitter at all.** `Omit`, `Pick`, `Merge`,
+`Partial`, `ConstInt` and `Err` each have a zero `wasm` column and exactly one
+`shared` mention, and each of those six is one arm of `llt_of` that the code's
+own comment calls unreachable or defensive. A collapse of any of them edits the
+frontend and one line of `vyrn-codegen`.
+
+**The second-largest row is the checker's own recovery.** `Type::Err` is 140,
+and 138 of them are `checker.rs`. §4's verdict stands, and the row's own text
+should read 140 rather than 141.
+
+### 9.3 §5, re-priced
+
+| item | saved then | saved now | the blocker | did the blocker change |
+|---|---|---|---|---|
+| 5.1 `Lazy` into `Fn([], T)` | 21 | 18 | the marker's carrier, `ast::Field` | no, and §5.1 over-states its size |
+| 5.2 the four transformers into `Record` | 69 | 60 | a transformer over a bare type parameter | no |
+| 5.3 `ConstInt` into the type-argument parse | 7 | 4 | RFC-0006's accumulation | no |
+| 5.4 `Float`/`Float32` into `FloatN{bits}` | 0 of 140 touched | 0 of 101 touched | none; there is nothing to save | no |
+| 5.5 `Option`/`Result` into `Enum` | 205 | taken | none left | §8.15 took it |
+| 5.6 `SmallArray`, `Map` | refused | refused | a measurement | it got stronger |
+
+**5.1 — `Lazy`, 18 saved, and the blocker is smaller than §5.1 says.** `resolve`
+answers `Fn([], T)` already, so no engine has a layout for a `lazy T`, and
+`llt_of`'s own comment calls the arm unreachable. The constructor is a marker in
+field position and three passes read it. §5.1 prices the marker's move at **246
+places** that build `ast::Field`. That number is wrong, and this re-derivation
+found it: the repository holds **95** `Field {` sites, and 78 of the ones §5.1
+counted are `Expr::Field {`, which is a field ACCESS and carries no type. The
+retirement did not move this — it was 96 at `b390c6c1`. So the ratio is 95 edits
+for 18 mentions, not 246 for 21. **Still not taken**, for §5.1's reason at a
+fifth of its stated size.
+
+**5.2 — the four transformers, 60 saved, and now a frontend edit.** With two
+emitters the four cost 13 mentions in `native`. They cost 4 now, one `llt_of`
+arm each, and the arm is in the unreachable list. The rest is `checker` (20) and
+`types` (36). The blocker is one line of `resolve` and it did not change:
+`fields_d` answers `None` for a transformer over a bare type parameter, so
+`Partial<T>` resolves to `Type::Unit`. The gate §5.2 states is still the gate —
+refuse a transformer over a bare type parameter — and it is still a language
+decision with no payer. **Not taken. It is the largest open item in the table
+and the one with the smallest engine surface.**
+
+**5.3 — `ConstInt`, 4 saved.** It is the smallest row in the census. Two of the
+four mentions are the two refusals §5.3 names, one is `llt_of`'s `void`, and one
+is a `types` walk. The blocker did not change: a parse error stops a file and a
+checker error accumulates (RFC-0006). Four mentions buy a worse first error even
+less than seven did. **Not taken.**
+
+**5.4 — `Float`/`Float32`, 0 saved.** 101 mentions touched, where §5.4 counted
+154 over seven files. The verdict does not depend on the count: a `FloatN{bits}`
+gives every arm a width guard and deletes no rule. **Not taken.**
+
+**5.5 — `Option`/`Result`.** §5.5 says "not taken as a slice", and §8.15
+superseded it: M5 shipped on 2026-09-04, `ast::Type` has 33 constructors, and
+§8.16 closed the defect the collapse left. No step of §5.5 remains. The item is
+in this list to be closed, not to be re-priced.
+
+**5.6 — `SmallArray` and `Map`, and the one price the retirement raised.**
+RFC-0082 M3's 18x is an interpreter measurement and does not move. RFC-0091 M4's
+"13% more wasm" now costs twice what it did: the native route is wasm2c and
+clang over the SAME module, so a wasm module that grows 13% grows the native
+binary too. The refusal is stronger than when §5.6 wrote it. **Refused, and more
+firmly.**
+
+### 9.4 §4, re-read
+
+§4 is the record of 2026-09-04 and stands as written. Six of its rows quote a
+count in their reason, and each count was taken with two emitters. The current
+readings:
+
+| §4 row | the count it quotes | the count today |
+|---|---|---|
+| `Type::Int` | renames 182 sites | 130 |
+| `Type::Mask32x4` and `Type::Mask64x2` | saves 43 mentions | 26 |
+| `Type::Str` | 242 mentions | 180 |
+| `Type::ConstInt` | seven mentions | 4 |
+| `Type::Logger` | eleven mentions | 7 |
+| `Type::Err` | 138 of its 141 | 138 of 140 |
+
+**No verdict changes.** Each of the six `decide` rows names a decision, and each
+decision is about the language: whether the UTF-8 invariant is a validated type;
+whether the two float widths differ by more than a width at the coercion ladder;
+whether the AST may spell `Mask<N>` when the surface may not; whether two
+diagnostics may become fatal; where RFC-0008's level filtering lives. An emitter
+answered none of these, and its deletion answers none of them.
+
+**Two rows read differently, although their verdict holds.**
+
+- **`Type::Str`.** The port's engine half fell from 131 mentions in two emitters
+  to 76 in one. That is a 42% cut, the largest in the table. The operation set
+  an `Array<UInt8>` port must re-express is stated once now. The number that
+  decides this row is 76 and not 180, and the language question in front of it
+  did not move.
+- **`Type::Mask32x4` and `Type::Mask64x2`.** With one emitter the pair reads as
+  §5.4 reads `Float`: a `Mask{lanes}` gives every arm a lane guard, and 11 of
+  the 26 mentions are the emitter's opcodes, which differ by lane. The row's
+  "saves 43" was never a saving, and it is 26 now.
+
+### 9.5 Nothing is free, and the numbers say so
+
+A collapse may be taken here if it is zero-cost and zero-bytes. **None is.** 5.1
+needs 95 edits for 18 mentions. 5.2 and 5.3 each need a language decision, and a
+decision is not free at any count. 5.4 saves nothing. 5.5 is done. 5.6 is
+refused by measurement. Nothing was taken.
+
+### 9.6 The decision list, ranked
+
+Each line names the number it rests on.
+
+1. **The four transformers (5.2), 60.** Take it when somebody owns the refusal
+   of a transformer over a bare type parameter. It is 20 `checker` mentions, 36
+   `types` mentions and four `llt_of` arms.
+2. **`Str` (§4), 180 of which 76 in the emitter.** Do not price the port again
+   until the UTF-8 invariant has an answer. The engine half is half what §4
+   priced.
+3. **`Mask32x4` and `Mask64x2` (§4), 26.** Decline unless RFC-0083 is re-opened.
+   A lane guard in every arm deletes no rule, which is §5.4's finding at a
+   different width.
+4. **`Lazy` (5.1), 18.** Hold. The blocker is 95 sites and not 246, and it is
+   still five times the prize. Take it the day `ast::Field` grows a constructor
+   for another reason.
+5. **`Logger` (§4), 7.** The cheapest `decide` row that is not `ConstInt`. It
+   needs a home for RFC-0008's level filtering, and `impl` blocks can hold the
+   five methods.
+6. **`ConstInt` (5.3), 4.** Decline. The smallest row in the table cannot pay
+   for a fatal first error.
+7. **`Float32` (§4), 101 touched and 0 saved.** Decline, unchanged.
+8. **`SmallArray` and `Map` (5.6).** Refused, and the retirement raised the
+   price of overturning them.
+9. **`Err` (§4), 140.** Not a collapse. Correct the row's own "141" when
+   something else edits §4.
+
+### 9.7 Two defects this re-derivation found
+
+- **§3 carried its cost table twice.** Two identical copies stood one after the
+  other, with a header rule between them. `tests/surface.rs` reads rows until a
+  line that does not start a row, so the rule stopped it and the pin read the
+  first copy alone. A table nothing checks is the table that drifts, which is
+  what §2 says about prose. The duplicate is deleted.
+- **§5.1's 246 is 95.** Recorded above. A reader who prices the `Lazy` collapse
+  from §5.1 prices an edit two and a half times the real one. That is §6's
+  defect in the other direction: there a stale comment made a collapse look
+  free, here a stale count makes one look impossible.
