@@ -310,24 +310,12 @@ pub struct Facts {
     /// `own::analyze` folds it into the store-ownedness set; nothing else
     /// reads it.
     pub store_events: Vec<StoreEv>,
-    /// RFC-0114 R1′: `.byteLength` reads whose receiver is an unnamed String
-    /// temporary — `(Expr::Field address, producer)`, producer a function name
-    /// or `@concat`/`@str`. Lenders are already filtered out; `own::analyze`
-    /// keeps the rows whose producer transfers ownership, and the backends
-    /// free the receiver right after the header read. The third member is the
-    /// enclosing function — see [`ArgTemp::owner`].
-    pub receiver_temps: Vec<(usize, String, String)>,
     /// The walk-order positions of every early exit — see [`fold context`] in
     /// `own::fold_revived`, its only reader.
     pub exit_orders: Vec<u32>,
     /// Round twenty-one: every `return` and `?` the walk met, with enough
     /// context to place an early release — see `own::fold_early_releases`.
     pub exit_sites: Vec<ExitEv>,
-    /// Round twenty-eight: statement-position calls whose OWNED heap result
-    /// nothing binds — `remove(s, h)` for the return value's side effect —
-    /// with the callee name for the lender screen. The backends free the
-    /// discarded value right after the call.
-    pub discarded: Vec<(usize, String)>,
     /// The two closures over the call graph, kept so a reader can ask whether
     /// either says anything (RFC-0125 §3 M3, the checker's deletion path).
     ///
@@ -487,27 +475,8 @@ pub fn facts(program: &Program) -> Facts {
     Facts {
         lets,
         store_events: r.store_events,
-        // A lender's result names storage inside its argument; freeing it
-        // would free the argument. Filtered here because the lender set is
-        // only complete once every body has been read.
-        receiver_temps: r
-            .receiver_temps
-            .into_iter()
-            .filter(|(_, n, _)| {
-                let base = n.strip_prefix("@fieldof:").unwrap_or(n);
-                !r.lending.contains(base)
-            })
-            .collect(),
         exit_orders: r.exit_orders,
         exit_sites: r.exit_sites,
-        // Round twenty-eight: a wrapped lender's result names storage inside
-        // its argument — freeing a discarded one is a use-after-free, so the
-        // closed lending set screens here.
-        discarded: r
-            .discarded
-            .into_iter()
-            .filter(|(_, n)| !r.lending.contains(n))
-            .collect(),
         lending: r.lending,
         retains: r.retains,
         escapers: r.param_escapers,
@@ -543,11 +512,9 @@ struct Run {
     retains: HashSet<(String, usize)>,
     projections: Vec<ProjectionSite>,
     store_events: Vec<StoreEv>,
-    receiver_temps: Vec<(usize, String, String)>,
     exit_orders: Vec<u32>,
     param_escapers: HashSet<String>,
     exit_sites: Vec<ExitEv>,
-    discarded: Vec<(usize, String)>,
     fnval_clear: HashSet<String>,
 }
 
@@ -1258,11 +1225,9 @@ fn run(program: &Program, want: Want) -> Run {
         handed_on: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         param_ix: RefCell::new(HashMap::new()),
         store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        receiver_temps: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         carrying_locals: RefCell::new(HashSet::new()),
         exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
-        discarded: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
@@ -1433,17 +1398,12 @@ fn run(program: &Program, want: Want) -> Run {
         retains,
         projections,
         store_events: mc.store_events.map(RefCell::into_inner).unwrap_or_default(),
-        receiver_temps: mc
-            .receiver_temps
-            .map(RefCell::into_inner)
-            .unwrap_or_default(),
         exit_orders: mc.exit_orders.map(RefCell::into_inner).unwrap_or_default(),
         param_escapers: mc
             .param_escapers
             .map(RefCell::into_inner)
             .unwrap_or_default(),
         exit_sites: mc.exit_sites.map(RefCell::into_inner).unwrap_or_default(),
-        discarded: mc.discarded.map(RefCell::into_inner).unwrap_or_default(),
         fnval_clear,
     }
 }
@@ -1579,7 +1539,6 @@ struct MoveCheck<'a> {
     /// RFC-0114 M2: the write/take event stream (see [`StoreEv`]), and the
     /// assigns to module state, which are owned unconditionally.
     store_events: Option<RefCell<Vec<StoreEv>>>,
-    receiver_temps: Option<RefCell<Vec<(usize, String, String)>>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
     /// Round fifty-six: per-body provenance for the escape screen — locals
     /// whose value may HOLD a borrowed parameter's storage (`let r =
@@ -1587,7 +1546,6 @@ struct MoveCheck<'a> {
     /// per body; consulted only where `param_escapers` records.
     carrying_locals: RefCell<HashSet<String>>,
     exit_sites: Option<RefCell<Vec<ExitEv>>>,
-    discarded: Option<RefCell<Vec<(usize, String)>>>,
     /// Round forty-six: the arity of every lambda the walk met. A lambda has
     /// no capability rows and no retention rows, so a signature any lambda
     /// could inhabit (matched by arity — the declared reading does not type
@@ -4175,23 +4133,10 @@ impl MoveCheck<'_> {
             // Matched by name rather than by type because this pass has no
             // types; `panic` is reserved, so no user function can be it.
             Stmt::Expr(e) => {
-                // Round twenty-eight: a statement-position call whose OWNED
-                // heap result nothing binds — the value must be freed right
-                // after the call, or it is one leaked block per call
-                // (freelist's 100,000 discarded `remove` results). Views and
-                // lenders are screened later; a panic diverges and returns
-                // nothing to anyone.
-                if let (Some(sink), Expr::Call { name, .. }) = (&self.discarded, e) {
-                    if !crate::ast::is_panic(name)
-                        && !views(name)
-                        && !name.starts_with('@')
-                        && !self.decl.constructs(name)
-                        && self.type_of(e).is_some_and(|t| self.decl.owns_heap(&t))
-                    {
-                        sink.borrow_mut()
-                            .push((s as *const Stmt as usize, name.clone()));
-                    }
-                }
+                // Round twenty-eight was recorded here: a
+                // statement-position call whose OWNED heap result nothing
+                // binds. The core states it as a `St::Drop` at the
+                // `Stmt::Expr`, and the emitter reads the core alone.
                 self.expr(e, consumed, scope)
                     .map(|_| matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name)))
             }
@@ -4458,7 +4403,7 @@ impl MoveCheck<'_> {
             // Walking into the root instead would ask it of `er` and refuse
             // `er.next` after `consume er.node`, which is the case RFC-0093
             // exists to allow. The root still gets its capture bookkeeping.
-            Expr::Field { expr, field, .. } => match place_path(e) {
+            Expr::Field { expr, .. } => match place_path(e) {
                 Some(_) => {
                     let (root, rline) = root_var(e);
                     self.mention_ev(root);
@@ -4468,85 +4413,14 @@ impl MoveCheck<'_> {
                     Ok(())
                 }
                 None => {
-                    // RFC-0114 R1′: a receiver with no name — `.byteLength` on
-                    // a String temporary, `.length` on a container one, or a
-                    // record field of one — is a value nothing else will ever
-                    // release. Recorded here for every field of a call
-                    // producer, decided against `owned_fns` in `own::analyze`,
-                    // freed by the backends after the read: after the header
-                    // for the projections, deep after a SCALAR record field
-                    // (a heap field takes ownership instead — see
-                    // `names_a_place`).
-                    {
-                        if let Some(sink) = &self.receiver_temps {
-                            // `.length` receivers are containers, so only a
-                            // call can produce an owned one; the concat form
-                            // belongs to `.byteLength` alone. Which field it
-                            // was does not travel: the checker already ties
-                            // the field to the type, and `own` filters by the
-                            // producer's return KIND.
-                            let tag = match (&**expr, field.as_str()) {
-                                // `.copy()` transfers ownership of a FRESH
-                                // value of the receiver's type, so the chained
-                                // projection (`m.copy().length`) is its last
-                                // observer. The name-keyed filter in `own`
-                                // cannot see the copy's type, so the silent
-                                // screen runs here, where the typing lives:
-                                // only the four buffer kinds pass, and a type
-                                // whose walk could reach a declared release
-                                // stands aside (exit-residue round
-                                // thirty-seven).
-                                (Expr::Call { name, args, .. }, _) if name == "@copy" => args
-                                    .first()
-                                    .and_then(|a| self.decl.type_of(a))
-                                    .and_then(|t| self.decl.release_kind(&t))
-                                    .and_then(|k| match k {
-                                        crate::own::DropKind::FreeStr
-                                        | crate::own::DropKind::FreeArr
-                                        | crate::own::DropKind::FreeSmallArr
-                                        | crate::own::DropKind::FreeMap => {
-                                            Some("@copy".to_string())
-                                        }
-                                        // A Deep copy is still wholly the
-                                        // frame's — a copy shares nothing —
-                                        // but a walk that could CALL a
-                                        // declared release has user-visible
-                                        // timing, and only one that cannot
-                                        // is silent enough to run here.
-                                        crate::own::DropKind::Deep(t)
-                                            if !self.decl.reaches_declared(&t) =>
-                                        {
-                                            Some("@copy".to_string())
-                                        }
-                                        _ => None,
-                                    }),
-                                (Expr::Call { name, .. }, _) => Some(name.clone()),
-                                (Expr::Binary { op: BinOp::Add, .. }, "byteLength") => {
-                                    Some("@concat".to_string())
-                                }
-                                // A CHAINED projection: `makeRec().name.byteLength`
-                                // — the receiver is a heap field of a record
-                                // temporary. The projection's read is silent
-                                // whatever the record's walk would be, so `own`
-                                // admits it without the Deep gate; the marker
-                                // keeps the producer name for the lender filter.
-                                (Expr::Field { expr: inner, .. }, "byteLength" | "length") => {
-                                    match &**inner {
-                                        Expr::Call { name, .. } => Some(format!("@fieldof:{name}")),
-                                        _ => None,
-                                    }
-                                }
-                                _ => None,
-                            };
-                            if let Some(t) = tag {
-                                sink.borrow_mut().push((
-                                    e as *const Expr as usize,
-                                    t,
-                                    self.cur_fn.borrow().clone(),
-                                ));
-                            }
-                        }
-                    }
+                    // RFC-0114 R1′ was recorded here: a receiver with no
+                    // name — `.byteLength` on a String temporary, `.length`
+                    // on a container one, a record field of one. The core
+                    // states that row on the name itself now
+                    // (`NameInfo::receiver`), and the emitter reads the core
+                    // alone, so this walk records nothing for it
+                    // (RFC-0125 §3 M3, the emitter-reads-the-core-alone
+                    // slice).
                     self.expr(expr, consumed, scope)
                 }
             },

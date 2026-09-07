@@ -11336,6 +11336,210 @@ previous slice and the merge changes neither the corpus nor the route);
 (41 files, up to date); the site export (29 s, 82 routes and 14 assets) and
 `vyrn test` per site file (189 test blocks).
 
+#### The census of every reader, and the emitter reads the core alone (2026-09-07)
+
+`own.rs` is 4,013 lines and states two kinds of thing: per-NODE release
+decisions (`ReleasePlan`) and per-EXIT placement rows (`Ownership::releases`,
+placed by `place_body`). Both reach the emitter. This slice takes the census of
+every reader of both, and then moves the emitter off every per-node table it
+still had a plan answer for.
+
+**The census.** Every reader of an `own.rs` export and of `movecheck`'s
+placement rows, the question it asks, and what the core says about it:
+
+| reader | the question | the core's answer |
+| --- | --- | --- |
+| `direct.rs` `Cx::receiver_row` | does this frame free the unnamed receiver of a field read, and around which holes | `Facts::receivers`, off the name whose `NameInfo::receiver` is the node |
+| `direct.rs` `Cx::receiver_malloc` | did a CALLEE allocate that receiver | `Facts::receiver_malloc`, off `NameInfo::receiver_malloc` |
+| `direct.rs` `Cx::store_row` / `store_fact` | does this store release what it displaces | `Facts::stores`, off `St::Store`'s `releases` |
+| `direct.rs` `Cx::discarded_row` | does this statement discard an owned result | `Facts::discarded`, off a `St::Drop` at `Site::Node` |
+| `direct.rs` `Cx::arg_drop_row` | does the caller free this argument | `Facts::arg_drops`; the plan states none since the last table's slice |
+| `direct.rs` `Cx::edge_rows` | Rule N at a join | `Facts::edges`; the plan states none |
+| `direct.rs` `Cx::match_consumes` | did the construct take its scrutinee | `Facts::consuming`; the plan states none |
+| `direct.rs` `Cx::arm_row` | which payload binders an arm frees | `Facts::arms`; the plan states none |
+| `direct.rs` `Fn_::placed`, out of `own::placed(Cx::releases)` | which releases run at which exit, and in what order | **none.** The core READS these rows; it does not state them |
+| `direct.rs` `plan.key_of`, `alias_clones*`, `alias_scope`, `alias_unwind` | which node a CLONE stands for | not a release question: node identity |
+| `direct.rs` `plan.unconsumed` and `plan.acknowledge` | RFC-0114 §26's finish check over the plan's own rows | vacuous once no plan row is read |
+| `direct.rs` `plan.malloc_scrutinee` | round twenty-seven's scrutinee stand-down | **no reader at all**, and none at `e97a67da` |
+| `direct.rs` `Cx::droppable`, `early`, `holes` | which `let`s own a value, and their holes | the core reads `droppable` too, and `place_frames` writes into it |
+| `core.rs` `Builder::placed`, `drops_at` | where the plan placed a release | reads `Ownership::releases` |
+| `core.rs` `place_frames` | what the analysis owes and did not place | writes back into `own.releases` and `own.plan` |
+| `kernel.rs` `St::Row` | a release already in the body | the plan's row, through the build |
+| `lib.rs` `Instance::releases` | the same rows per instance, with `DropKind` substituted | reads `Ownership::releases` |
+| `render.rs`, `tests/lowered.rs`, `tests/kernel.rs` | print the rows, count the ones inside a lambda, dump them beside a refusal | read `Instance::releases` |
+| `main.rs`, `symbols.rs` | `own.memory`, `own.owned_fns` | the core writes `memory` through the placer slot |
+| `movecheck.rs` `Facts::receiver_temps` | R1′'s candidate receivers | the core states the row on the name |
+| `movecheck.rs` `Facts::discarded` | round twenty-eight's statement calls | the core states a `St::Drop` |
+| `tests/coretables.rs` | diffs the plan against the core at every site | the diff has no second side left |
+| `tests/stores.rs` | `plan.key_of` | node identity |
+
+**The count the census was taken for.** The emitter asks nine release
+questions. Eight are per-NODE, and the core already answered all eight — four
+of them (`arg_drops`, `edges`, `consuming`, `arms`) with no plan answer at all,
+and four (`receivers`, `receiver_malloc`, `stores`, `discarded`) with the plan
+still standing behind them as a fallback. The ninth is the per-EXIT placement,
+and there the core answers nothing: it READS the plan's rows and adds the ones
+the analysis owed. So **8 of 9 read the core and 1 reads the plan**, and the
+one that reads the plan is the thesis one level up.
+
+**What this slice did.** The four fallbacks go, and every table that thereby
+loses its last reader goes with them.
+
+- `Cx::receiver_row`, `Cx::receiver_malloc` and `Cx::discarded_row` return the
+  core's answer or nothing. `Cx::store_fact` already did.
+- RFC-0114 §26's finish check goes. Its one remaining class was a receiver
+  free, it counted rows the PLAN placed, and the emission queries no plan row
+  any more. Every `ReleasePlan::acknowledge` call went with it. What answers
+  the same question about the core's rows is measurement — the residue ratchet
+  and the memory suite — and the recorded wasm hashes, which move when a
+  release moves.
+- `ReleasePlan` keeps ONE thing: the alias map, and `key_of` over it. That is
+  not a release decision. A user-container `for` and RFC-0091 M2's `place at`
+  rewrite CLONE the statements they expand, so the core files its answers under
+  nodes the emission never walks, and `key_of` resolves a clone back to the
+  node the core keyed. It is named as the next payer below.
+- `VYRN_PLAN_ROWS=1` goes. It put an emitter back on the plan for a bisect, and
+  there is no plan answer to bisect against.
+- `movecheck.rs` stops recording two row kinds: `Facts::receiver_temps` (R1′'s
+  candidate receivers, with the `@copy` / `@concat` / `@fieldof:` producer tags)
+  and `Facts::discarded`. Their only reader was `analyze_now`'s construction of
+  the tables above.
+
+**The manifest, read before the flip and after it.** `VYRN_WASM_MANIFEST=check`
+is green with **no row rewritten**, so no `write` was needed and no difference
+had to be read at the source. That is the assertion this slice is worth: four
+tables the emitter had two answers for now have one, and the emitted bytes are
+identical over every example.
+
+Two readings the check could not make, each verified another way:
+
+- **`discarded` looked empty and is not.** `coretables` counts 0 discarded rows
+  over the corpus, from either source, so no example exercises this table. A
+  probe outside the corpus — a statement-position call whose owned `String`
+  result nothing binds — was compiled to wasm before the flip and after it,
+  byte-identical. That is the evidence the manifest could not give. (A NATIVE
+  build of the same probe differs, and only because the output path is in the
+  binary; the wasm the emitter writes is the same.)
+- **`receiver_malloc`'s fallback was unreachable.** The emitter asks it only
+  where `receiver_row` returned `Some`, which means the core has the key, so
+  the `else` arm that read the plan could not run.
+
+**What `coretables` is now.** It was a DIFF and it is a CENSUS. Its purpose was
+to prove two answers equal before an emitter was flipped, and there is no
+second answer left: the last four tables joined `arg_drops`, `edges`,
+`consuming`, `arms` and `stores`. The three exact pins it carried
+(`receiver_malloc: core only` = 14, `receiver frees: core only` = 14,
+`receiver rows the core states nothing for` = 1) were pins on a DIFFERENCE, and
+they go with the difference. What it prints instead is the count of every row
+the core states, over 170 programs:
+
+| row | count |
+| --- | --- |
+| `arg_drops` | 23,882 |
+| `arm_frees` | 26,314, freeing 503 binders |
+| `store_owned` | 56,749, of which 2,744 release and 53,992 stand down |
+| switch sites | 12,572, of which 1,621 took the scrutinee |
+| `edge_releases` | 41, in 54 rows |
+| `receiver_frees` | 271, 2 of them with a hole |
+| `receiver_malloc` | 269 |
+| `discarded_results` | 0 |
+
+**Lines, by part.** 314 deleted from `own.rs`, 15 added:
+
+| part | net |
+| --- | --- |
+| `ReleasePlan`'s six tables and `owners` | −35 |
+| its seven query methods and `unconsumed` | −86 |
+| `analyze_now`'s construction of them | −102 |
+| `Emit`'s `malloc_value`, `malloc_scrutinees` and `FnResult`'s field | −51 |
+| the finish check's unit test | −30 |
+
+| file | before | after |
+| --- | --- | --- |
+| `vyrn-frontend/src/own.rs` | 4,013 | **3,714** |
+| `vyrn-frontend/src/movecheck.rs` | 6,453 | **6,327** |
+| `vyrn-codegen/src/direct.rs` | 16,324 | **16,278** |
+| `vyrn-lower/src/core.rs` | 5,587 | **5,578** |
+| `vyrn-cli/tests/coretables.rs` | 431 | **242** |
+
+Three censuses move with it. The structural census (`tests/refusals.rs`) reads
+`movecheck.rs`: **placement rows 1,786 → 1,755** and **shared machinery 3,765 →
+3,670**, the two halves of the 126 lines deleted, with every other kind
+unchanged. The form census (RFC-0127 §3.1) falls 1,401 → **1,390**: five rows
+lose an `own` mention (`Expr::Str`, `Expr::Var`, `Expr::Call`, `Expr::Match`,
+`Expr::Field`) and three lose a `movecheck` one (`Expr::Binary`, `Expr::Field`,
+and `Expr::Call` by four). The surface census (RFC-0126 §3) does not move: the
+deleted code names no type constructor.
+
+**What blocks the walk's deletion, named exactly.** `place_body` and the core's
+placer do not order releases the same way, and the order is emitted.
+
+- `Place::place` walks the live frames from the innermost outward, and each
+  frame's bindings newest first. `Kernel::scope_end` walks the name list it is
+  given in INDEX order, which is creation order — the exact reverse.
+- RFC-0114 states that an owned `consume` parameter releases LAST. `Place`
+  spells that by tracking parameters first on the outermost frame. The kernel
+  gives a parameter the lowest name index, so in index order it would release
+  FIRST.
+- The core's build cannot yet place what the kernel judges. `Builder::drops_at`
+  reads `self.placed` to make each `St::Row`, and `kernel::placement` then
+  reports what is left. With no rows read, `missing` becomes the whole
+  placement — but only after the order above is decided, because the rows ARE
+  the emitted order.
+- **The core reads the plan's SILENCE as a fact, in three places.**
+  `Builder::taken_by` answers "the construct took its scrutinee" as
+  `releases(t) && !placed.contains_key(&(Exit::Scrutinee, construct))`, and
+  `Stmt::ForIn`'s streaming and `consume` arms ask the same key before they
+  release the container. Empty the map and every one of them flips to yes, so
+  `bind_pattern` binds owned where it bound borrowed and the emitted code
+  changes. The core has its own answer for this — `last_owner` over the first
+  build, which is what `Facts::consuming` already reports — so the guard has
+  somewhere to go, but moving it is a decision about takes and not about
+  placement.
+- `Ownership::releases` has four readers besides the core's build. `lib.rs`
+  substitutes `DropKind` per instance into `Instance::releases`, and
+  `render.rs`, `tests/lowered.rs` and `tests/kernel.rs` read that. The
+  substitution has somewhere to go — `NameInfo::ty` is already per-instance —
+  but it is a move, not a deletion.
+
+So the deletion is one decision and then a mechanical change: **is the kernel's
+order the language's order, or must the kernel be taught the frame
+discipline?** Reverse index order reproduces `place_body`'s order in the common
+case — a name created later is bound in an inner block, and a parameter has the
+lowest index of all — and that is the answer to test first. It moves emitted
+bytes either way, so it is its own slice with its own manifest reading, and it
+is not this one.
+
+**What stays, and the next payer.** `holes` and `droppable` stay: the core
+reads both. The four call-graph answers (`lending`, `retains`, `escapers`,
+`fnval_clear`) stay: only a pass that has read every body can give them. And
+`ReleasePlan` is node identity alone now — `key_of` over the alias map — which
+is a question about a REWRITE and not about ownership. The pass that expands a
+`place at` projection is the one that should say which node its expansion
+stands for.
+
+Gate, in the brief's order: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (76 suites, all
+green); the ignored corpus suites `kernel` (62 s), `coretables` (103 s),
+`typed` (164 s), `effects` (166 s), `fixtures` (55 s), `testsweep` (110 s);
+`cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (6 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (2 passed, 381 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (39 s, **no byte
+moved**); `--release --test genwasm -- --ignored` with a fresh
+`VYRN_GEN_CACHE_DIR`; `vyrn doc --std -o ../docs/api --verify` (41 files, up to
+date); the site export (82 routes and 14 assets) and `vyrn test` per site file
+(**189 test blocks**). `residue -- --ignored` is not in the list, because the
+suite is not on this tree yet.
+
+**One failure this slice did not cause and did not fix.** `cargo test
+-p vyrn-frontend --test primitives` failed once, on a stale `include_str!` of
+`direct.rs`: the scan could not find the region it locates by content. A
+rebuild made it pass on the same source. It is cargo's dependency tracking of
+an `include_str!` across crates, and nothing in the tree.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

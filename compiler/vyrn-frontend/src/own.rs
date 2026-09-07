@@ -944,51 +944,21 @@ pub enum Bucket {
     },
 }
 
-/// RFC-0114 §26's artifact, as landed: every per-NODE release decision, one
-/// struct, produced here and consumed by address in both backends — which
-/// therefore cannot disagree about a site. (`droppable` and `releases` stay
-/// beside it: they are per-BINDING and per-EXIT, keyed by name and placement,
-/// and the backends' runtime registries are built from them.)
+/// What is left of RFC-0114 §26's artifact: node IDENTITY, and no release
+/// decision at all.
+///
+/// Every table this struct carried has gone with the emitter reader that
+/// asked it (RFC-0125 §3 M3, the emitter-reads-the-core-alone slice). What
+/// remains is the alias map, which answers a question no pass states: a
+/// user-container `for` and a `place at` rewrite CLONE the statements they
+/// expand, so the core's answers are filed under nodes the emission never
+/// walks, and [`ReleasePlan::key_of`] resolves a clone back to the node the
+/// core keyed. That is the next payer named in §3 M3.
 #[derive(Clone, Default)]
 pub struct ReleasePlan {
-    /// Round twenty-seven: droppable scrutinee rows minted INSIDE a region
-    /// because their value is a callee's (malloc-side) allocation — the
-    /// textual emission frees these with its region guard stood down; the
-    /// direct backend keeps skipping (a leak wasm cannot measure, never a
-    /// double free).
-    pub malloc_scrutinees: std::collections::HashSet<usize>,
-    /// Round twenty-eight: statement-position calls whose OWNED heap result
-    /// nothing binds, lenders screened — the backends free the discarded
-    /// value right after the call.
-    pub discarded_results: std::collections::HashSet<usize>,
-    /// RFC-0114 R1′: the `Expr::Field` nodes whose unnamed receiver this
-    /// frame owns — freed right after the read (the header for a projection,
-    /// the whole record deep after a scalar field).
-    pub receiver_frees: std::collections::HashSet<usize>,
-    /// Round fifty-seven: the receiver frees whose producer is a CALL — the
-    /// block is the callee's own (region-free) allocation, so the free stands
-    /// even inside a `region` (the round twenty-seven malloc-side reading,
-    /// extended from match scrutinees to receivers). The `@`-spelled
-    /// producers route through the arena lexically and stay region-gated.
-    pub receiver_malloc: std::collections::HashSet<usize>,
-    /// RFC-0125 M3: for a receiver in [`ReleasePlan::receiver_frees`] one of
-    /// whose heap fields the read TOOK (`let sels = parse(q).sels`), the
-    /// holes the free walks around — the taken field. The analysis kept such
-    /// a receiver out of the set because a whole walk would free what the
-    /// binding took; the placer puts it in with its hole.
-    pub receiver_holes: HashMap<usize, Vec<String>>,
-    /// §26's finish check: which function each row above lives in, so
-    /// [`ReleasePlan::unconsumed`] can skip rows whose owner an emission
-    /// never reached — dead code alarms nobody, a missed site in emitted
-    /// code fails the build.
-    pub owners: HashMap<usize, String>,
-    /// The rows the emitters actually consumed, recorded by the query
-    /// methods below. Interior-mutable because the backends hold the plan by
-    /// shared reference; codegen is single-threaded.
-    taken: std::cell::RefCell<std::collections::HashSet<usize>>,
     /// Clone-to-original address pairs from `project::iterate_loop` (RFC-0114
-    /// §26): a user-container `for` clones its body, so the plan's addresses
-    /// live on nodes the emission never walks — every query resolves through
+    /// §26): a user-container `for` clones its body, so the core's answers
+    /// live on nodes the emission never walks — every lookup resolves through
     /// this map first, chaining for a clone of a clone (a nested loop).
     alias: std::cell::RefCell<HashMap<usize, usize>>,
     /// The keys [`ReleasePlan::alias_clones_scoped`] added, in order — what
@@ -1045,97 +1015,11 @@ impl ReleasePlan {
         at
     }
 
-    /// The node a plan row is keyed by, for a reader that holds its own
-    /// answer and needs only the key (RFC-0125 §3 M3, the
+    /// The node a core answer is keyed by, for a reader that walks a CLONE
+    /// of the statement the core judged (RFC-0125 §3 M3, the
     /// deletion-preparation slice).
     pub fn key_of(&self, at: usize) -> usize {
         self.resolve(at)
-    }
-
-    /// Record that the emission considered the rows at `at`, without asking
-    /// what they say. An emitter that takes its answer from the core still
-    /// owes §26's finish check an acknowledgement, or every row it no longer
-    /// reads is counted as a decision the emission walked past. The
-    /// acknowledgement goes when the tables go.
-    pub fn acknowledge(&self, at: usize) {
-        let at = self.resolve(at);
-        self.taken.borrow_mut().insert(at);
-    }
-
-    /// Round twenty-seven: may this match free the boxes its arms extract,
-    /// though its scrutinee is a PLACE? True only where the fold proved the
-    /// binding is never read after the match.
-    /// Round twenty-seven: is this droppable scrutinee provably malloc-side
-    /// though it sits inside a `region`?
-    pub fn malloc_scrutinee(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        self.malloc_scrutinees.contains(&at)
-    }
-
-    /// Round twenty-eight: does this statement discard an owned result?
-    pub fn discarded_result(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        self.discarded_results.contains(&at)
-    }
-
-    /// RFC-0114 R1′: does this frame own (and free) the unnamed receiver?
-    pub fn receiver_free(&self, at: usize) -> bool {
-        let at = self.resolve(at);
-        let hit = self.receiver_frees.contains(&at);
-        if hit {
-            self.taken.borrow_mut().insert(at);
-        }
-        hit
-    }
-
-    /// RFC-0125 M3: the holes a receiver's free walks around, when the read
-    /// took a field out of it. Empty for every receiver the analysis placed.
-    pub fn receiver_holes_at(&self, at: usize) -> Vec<String> {
-        self.receiver_holes
-            .get(&self.resolve(at))
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// Round fifty-seven: is this receiver's block a CALLEE allocation —
-    /// malloc-side even inside a `region`?
-    pub fn receiver_malloc_at(&self, at: usize) -> bool {
-        self.receiver_malloc.contains(&self.resolve(at))
-    }
-
-    /// §26's loudness: every planned row whose owner WAS emitted and that no
-    /// query ever hit — a release decision the emission walked past, which is
-    /// a silent leak the memory suite would otherwise find by measurement.
-    /// Rows in functions the emission never reached (dead code, an
-    /// uninstantiated generic, an uncompiled test body) are not the
-    /// emitters' to discharge and are skipped, which is the reachability
-    /// answer §26 said the check was waiting for. Residue, recorded: a
-    /// generic emitted under several instances shares one row per site, so
-    /// "taken at least once" cannot see an instance that missed it.
-    pub fn unconsumed(
-        &self,
-        emitted: &std::collections::HashSet<String>,
-    ) -> Vec<(String, &'static str)> {
-        let taken = self.taken.borrow();
-        let classes: [(&'static str, Box<dyn Iterator<Item = &usize> + '_>); 1] =
-            [("a receiver free", Box::new(self.receiver_frees.iter()))];
-        let mut out: Vec<(String, &'static str)> = Vec::new();
-        for (label, it) in classes {
-            for at in it {
-                if taken.contains(at) {
-                    continue;
-                }
-                let Some(owner) = self.owners.get(at) else {
-                    continue;
-                };
-                if emitted.contains(owner) {
-                    out.push((owner.clone(), label));
-                }
-            }
-        }
-        out.sort();
-        out.dedup();
-        out
     }
 }
 
@@ -1309,10 +1193,8 @@ fn analyze_now(program: &Program) -> Ownership {
             constructs.extend(vs.iter().map(|v| v.name.clone()));
         }
     }
-    let mut malloc_scrutinees: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut emit = |name: String, params: &[crate::ast::Param], body: &Block| {
         let mut r = emit_body(body, &lets, &proto, &revived, &constructs);
-        malloc_scrutinees.extend(r.malloc_scrutinees.drain());
         // RFC-0114: a `consume` parameter whose row says nothing took its
         // value (or whose take was provably revived) is the callee's to
         // release at exit — the same decision a `let` gets, minus the
@@ -1616,113 +1498,13 @@ fn analyze_now(program: &Program) -> Ownership {
         }
         early
     };
-    // Round twenty-eight: the discarded set, lenders already screened by
-    // `facts()`.
-    let discarded_results: std::collections::HashSet<usize> =
-        facts.discarded.iter().map(|(id, _)| *id).collect();
     // Rule 3: a return is owned. The return type is the whole answer.
     let owned_fns: HashMap<String, DropKind> = program
         .functions
         .iter()
         .filter_map(|f| proto.release_kind(&f.ret).map(|k| (f.name.clone(), k)))
         .collect();
-    // RFC-0114 R1′: keep the `.byteLength` receivers whose producer transfers
-    // ownership of a String — a user function returning one (a lender was
-    // already filtered out by `facts`), or the fresh forms `@concat`/`@str`.
-    let receiver_frees: std::collections::HashSet<usize> = facts
-        .receiver_temps
-        .iter()
-        .filter(|(_, n, _)| {
-            n == "@concat"
-                || n == "@str"
-                // `.copy()` receivers arrive pre-screened: movecheck tags
-                // `@copy` only when the copy's own release is silent — the
-                // four buffer kinds, or a Deep walk that cannot reach a
-                // declared release (round thirty-seven).
-                || n == "@copy"
-                // A SEEDED builtin producer (round forty-one): fresh unless
-                // its row hands a parameter back, lends, or spells an
-                // `@`-desugar — the same screen `call_may_forward` reads —
-                // and silent by its declared return. `bytes(s).length` inside
-                // an interpolation was the witness.
-                || (!n.starts_with('@')
-                    && !crate::prelude::lends(n)
-                    && crate::prelude::signature(n).is_some_and(|f| {
-                        let hands_back = matches!(&f.ret, Type::Param(r)
-                            if f.params.iter().any(
-                                |p| matches!(&p.ty, Type::Param(q) if q == r)));
-                        !hands_back
-                            && proto.release_kind(&f.ret).is_some_and(|k| {
-                                matches!(
-                                    k,
-                                    DropKind::FreeStr
-                                        | DropKind::FreeArr
-                                        | DropKind::FreeSmallArr
-                                        | DropKind::FreeMap
-                                )
-                            })
-                    }))
-                || matches!(
-                    owned_fns.get(n),
-                    Some(
-                        DropKind::FreeStr
-                            | DropKind::FreeArr
-                            | DropKind::FreeSmallArr
-                            | DropKind::FreeMap
-                    )
-                )
-                // A record producer joins when ITS OWN walk cannot call a
-                // declared release — the timing of one is user-visible. The
-                // per-type walk replaced the program-wide emptiness gate in
-                // round thirty-seven.
-                || matches!(owned_fns.get(n),
-                    Some(DropKind::Deep(t)) if !proto.reaches_declared(t))
-                // The chained projection frees only the FIELD it read — a
-                // String or a container, silent either way — so the record's
-                // walk never runs and the gate above does not apply.
-                || n
-                    .strip_prefix("@fieldof:")
-                    .is_some_and(|p| matches!(owned_fns.get(p), Some(DropKind::Deep(_))))
-        })
-        .map(|(k, _, _)| *k)
-        .collect();
-    // Round fifty-seven: which of those receivers a CALL produced — a
-    // callee's allocation is malloc-side whatever region is open at the call
-    // site (`joinWith(parts, "-").byteLength` inside a `region` leaked one
-    // joined String per call; the round twenty-seven scrutinee reading,
-    // extended). The `@` spellings route through the arena lexically.
-    let receiver_malloc: std::collections::HashSet<usize> = facts
-        .receiver_temps
-        .iter()
-        .filter(|(k, n, _)| receiver_frees.contains(k) && !n.starts_with('@'))
-        .map(|(k, _, _)| *k)
-        .collect();
-    // §26's finish check: every plan row remembers its function, read off
-    // the walker's own attribution — the reachability half is then the
-    // emitters' emitted-set, and dead code alarms nobody.
-    let mut owners: HashMap<usize, String> = HashMap::new();
-    for (k, n, owner) in &facts.receiver_temps {
-        if std::env::var("VYRN_PLAN_DEBUG").is_ok() {
-            eprintln!(
-                "plan-debug receiver id={k} tag={n} owner={owner} kept={}",
-                receiver_frees.contains(k)
-            );
-        }
-        if receiver_frees.contains(k) {
-            owners.insert(*k, owner.clone());
-        }
-    }
-    let plan = ReleasePlan {
-        malloc_scrutinees,
-        discarded_results,
-        receiver_frees,
-        receiver_malloc,
-        receiver_holes: HashMap::new(),
-        owners,
-        taken: Default::default(),
-        alias: Default::default(),
-        alias_log: Default::default(),
-    };
+    let plan = ReleasePlan::default();
     let mut ownership = Ownership {
         plan,
         owned_fns,
@@ -2289,7 +2071,6 @@ fn stmt_line(s: &Stmt) -> usize {
 
 struct FnResult {
     droppable: HashMap<usize, DropKind>,
-    malloc_scrutinees: std::collections::HashSet<usize>,
     holes: HashMap<usize, Vec<String>>,
 }
 
@@ -2303,7 +2084,6 @@ fn emit_body(
 ) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
-        malloc_scrutinees: std::collections::HashSet::new(),
         constructs,
         revived,
         holes: HashMap::new(),
@@ -2314,7 +2094,6 @@ fn emit_body(
     e.block(body);
     FnResult {
         droppable: e.droppable,
-        malloc_scrutinees: e.malloc_scrutinees,
         holes: e.holes,
     }
 }
@@ -2336,10 +2115,6 @@ struct Emit<'a> {
     /// malloc-side by itself (regionescape's payload route double-freed on
     /// the first version of round twenty-seven).
     constructs: &'a std::collections::HashSet<String>,
-    /// Round twenty-seven: droppable scrutinee rows minted INSIDE a region
-    /// because their value is a callee's (malloc-side) allocation — the
-    /// emission must free these with the region guard stood down.
-    malloc_scrutinees: std::collections::HashSet<usize>,
     /// RFC-0114 untake: bindings whose taken value was provably re-established
     /// — their FINAL value is this block's to release. See [`fold_revived`].
     revived: &'a std::collections::HashSet<usize>,
@@ -2359,41 +2134,6 @@ impl Emit<'_> {
         }
     }
 
-    /// Round twenty-seven: is `e`'s VALUE provably malloc-side — a callee's
-    /// allocation, a static literal, or a match over one whose arms yield only
-    /// its payload, a binder projection, another such value, or a literal?
-    /// Inside a `region` these are the values whose release must NOT stand
-    /// down: the arena never owned them. Anything unproven answers false,
-    /// which keeps the region partition safe (an arena block freed early is
-    /// the double free the guard exists for).
-    fn malloc_value(&self, e: &Expr, binders: &[String]) -> bool {
-        match e {
-            Expr::Call { name, .. } => !name.starts_with('@') && !self.constructs.contains(name),
-            Expr::Str(_) => true,
-            Expr::Var { name, .. } => binders.iter().any(|b| b == name),
-            Expr::Field { .. } => crate::movecheck::place_path(e)
-                .is_some_and(|(root, _)| binders.iter().any(|b| *b == root)),
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.malloc_value(scrutinee, binders)
-                    && arms.iter().all(|a| match &a.body {
-                        ArmBody::Expr(b) => {
-                            let mut bs: Vec<String> =
-                                crate::movecheck::pattern_bindings(&a.pattern)
-                                    .into_iter()
-                                    .map(str::to_string)
-                                    .collect();
-                            bs.extend(binders.iter().cloned());
-                            self.malloc_value(b, &bs)
-                        }
-                        ArmBody::Block(_) => false,
-                    })
-            }
-            _ => false,
-        }
-    }
-
     fn stmt(&mut self, s: &Stmt) {
         match s {
             Stmt::Let { value, line, .. } => {
@@ -2405,12 +2145,6 @@ impl Emit<'_> {
                     self.droppable.insert(id(s), kind);
                     if !holes.is_empty() {
                         self.holes.insert(id(s), holes);
-                    }
-                    // Round twenty-seven: a region-lexical `let` holding a
-                    // malloc-side value frees for real — the emission's region
-                    // guard stands down for exactly this row.
-                    if self.region_depth > 0 && self.malloc_value(value, &[]) {
-                        self.malloc_scrutinees.insert(id(s));
                     }
                 }
             }
@@ -2591,9 +2325,6 @@ impl Emit<'_> {
                 if let Some((kind, holes)) = f {
                     if holes.is_empty() {
                         self.droppable.insert(key, kind);
-                        if self.region_depth > 0 {
-                            self.malloc_scrutinees.insert(key);
-                        }
                     }
                 }
             }
@@ -2888,36 +2619,6 @@ pub(crate) mod tests {
             "a lambda-captured binding reclaims, not {:?}",
             fs[0]
         );
-    }
-
-    /// RFC-0114 §26's finish check, mechanism-tested: a plan row in an
-    /// emitted function that no query hit is reported, a queried one is not,
-    /// and a row in an UNEMITTED function alarms nobody (the reachability
-    /// answer the check waited for).
-    ///
-    /// One class is left to check it on. The argument drops went with their
-    /// table (RFC-0125 §3 M3, the last table's slice), and a receiver free is
-    /// the other row the check has always covered.
-    #[test]
-    fn a_missed_plan_row_is_loud_and_a_taken_or_dead_one_is_not() {
-        // `("x" + "y").byteLength` reads a field off a String nothing names —
-        // one `receiver_frees` row in `main`.
-        let src = "fn main() -> Int64 { return (\"x\" + \"y\").byteLength }";
-        let (o, _) = analyze_src(src);
-        assert_eq!(o.plan.receiver_frees.len(), 1, "the fixture's one row");
-        let at = *o.plan.receiver_frees.iter().next().unwrap();
-        assert_eq!(o.plan.owners.get(&at).map(String::as_str), Some("main"));
-        let emitted: HashSet<String> = ["main".to_string()].into();
-        // Unqueried and emitted: loud.
-        assert_eq!(
-            o.plan.unconsumed(&emitted),
-            vec![("main".to_string(), "a receiver free")]
-        );
-        // Unemitted: silent — dead code is not the emitters' to discharge.
-        assert!(o.plan.unconsumed(&HashSet::new()).is_empty());
-        // Queried: consumed, and quiet thereafter.
-        assert!(o.plan.receiver_free(at));
-        assert!(o.plan.unconsumed(&emitted).is_empty());
     }
 
     /// RFC-0089 rule 1, Phase 4c. `let t = s` MOVES: the new name owns the
