@@ -1712,13 +1712,9 @@ fn log_level_requires_a_logger() {
     assert!(run(src).is_err());
 }
 
-#[test]
-fn logging_is_forbidden_in_spawned_tasks() {
-    // A spawned function must be pure; logging is observable I/O.
-    let src = "fn work(n: Int64) -> Int64 { let l = logger(\"w\"); l.info(\"hi\"); return n; } \
-                   fn main() -> Int64 { let t = spawn work(1); return t.join(); }";
-    assert!(run(src).is_err());
-}
+// `logging_is_forbidden_in_spawned_tasks` is `tests/isolation.rs`'s now: the
+// spawn rule is the effect judgment's, and this file's `run` does not install
+// it (RFC-0125 §3 M6, the isolation slice).
 
 #[test]
 fn logging_config_block_parses_and_runs() {

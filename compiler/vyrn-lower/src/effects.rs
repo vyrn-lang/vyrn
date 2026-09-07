@@ -418,6 +418,46 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         .filter_map(|e| floor::Capability::of(e).map(|cap| (e, cap)))
         .collect();
 
+    with_judgment(program, |judged, _refs, insts, top| {
+        for (i, inst) in insts.iter().enumerate() {
+            // The generation context, which is the table's `gen` column becoming a
+            // check (RFC-0125 §3 M6, fifth slice). A `gen fn` body runs at
+            // GENERATION time against the compiler's filesystem and is never
+            // compiled into the artifact, so what it reaches is no capability of
+            // the artifact — the same rule `floor::carried` states by skipping a
+            // `gen fn`, and the reason 216 corpus bodies are `gen-body` and not a
+            // disagreement (finding 9). The fence decides what a generator may do;
+            // the floor decides what a target may do; this is the line between.
+            if inst.func.is_gen {
+                continue;
+            }
+            let e = judged.effects[top[i]];
+            for (effect, cap) in &rows {
+                if e.has(*effect) {
+                    add(inst.func.module.as_ref(), *cap);
+                }
+            }
+        }
+    });
+    out
+}
+
+/// The judgment over a whole checked program, handed to `then`.
+///
+/// Everything between a `Program` and a [`Judged`] is one setup — the lowering,
+/// the ownership plan, a core body per instance and per projection, the frame
+/// list a lambda is keyed in, and the two resolvers. Two readers want it: the
+/// floor's [`reaches`] and the isolation rule's [`spawn_refusals`]. It is a
+/// callback rather than a return because `refs` borrows `bodies`, and a
+/// function cannot hand back both.
+///
+/// `then` is given the judgment, every frame in the order it was judged, the
+/// instances that have a core, and `top[i]` — the frame index of instance `i`'s
+/// own body.
+fn with_judgment<R>(
+    program: &vyrn_frontend::ast::Program,
+    then: impl FnOnce(&Judged, &[&crate::core::Body], &[&crate::Instance], &[usize]) -> R,
+) -> R {
     let lowered = crate::lower(program);
     let own = vyrn_frontend::own::analyze(program);
     let mut bodies = Vec::new();
@@ -521,7 +561,15 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         if let Some(idx) = place_tops.get(name) {
             return Callee::Bodies(idx.clone());
         }
-        Callee::Pure
+        // Not a name this program declares. [`Callee::Unknown`] and not
+        // [`Callee::Pure`], because `Walk::callee` asks `through` about a name
+        // of the BODY only when the answer is unknown: a call through a
+        // function value names a local, and its closed set is the sources
+        // RFC-0037 collected. This said `Pure` until RFC-0125 §3 M6's isolation
+        // slice, and a call through a stored value then contributed nothing —
+        // `tests/effects.rs` has always ended its own resolver with `Unknown`,
+        // which is why the corpus harness saw the sources and this did not.
+        Callee::Unknown
     };
     let stored = vyrn_frontend::checker::stored_fn_effects(program);
     let mut through = |ty: &Type| -> Callee {
@@ -554,24 +602,86 @@ pub fn reaches(program: &vyrn_frontend::ast::Program) -> Vec<(String, floor::Cap
         }
     };
     let judged = judge(&refs, &mut resolve, &mut through);
-    for (i, inst) in insts.iter().enumerate() {
-        // The generation context, which is the table's `gen` column becoming a
-        // check (RFC-0125 §3 M6, fifth slice). A `gen fn` body runs at
-        // GENERATION time against the compiler's filesystem and is never
-        // compiled into the artifact, so what it reaches is no capability of
-        // the artifact — the same rule `floor::carried` states by skipping a
-        // `gen fn`, and the reason 216 corpus bodies are `gen-body` and not a
-        // disagreement (finding 9). The fence decides what a generator may do;
-        // the floor decides what a target may do; this is the line between.
-        if inst.func.is_gen {
-            continue;
+    then(&judged, &refs, &insts, &top)
+}
+
+/// The spawn-isolation rule of RFC-0004 §Q4, stated once — RFC-0125 §3 M6, the
+/// isolation slice.
+///
+/// `checker.rs` stated it as a fixpoint over the AST call graph: a seed of
+/// functions with no forbidden callee, no `extern`, no `modify` parameter, no
+/// `drop` and no module state, shrunk until every callee of a member was a
+/// member, and a second fixpoint beside it for calls through a stored function
+/// value (RFC-0037). This is the same rule over the core: the callee's effect
+/// set, joined to a fixpoint through every route including a stored value and a
+/// `fn`-typed argument, held inside [`Effects::SPAWN_ALLOWS`].
+///
+/// One condition of the checker's five is not an effect and is still here: a
+/// `modify` parameter is a fact about the SIGNATURE, and it needs no fixpoint —
+/// only the spawned callee's own parameters can alias what the caller keeps,
+/// because only the spawned callee is handed the caller's values. The other
+/// four are the lattice's now: `extern` and the forbidden builtins were always
+/// rows, module state became one, and the `drop` search was deleted rather than
+/// moved (the ownership judgment refuses every body it caught that was worth
+/// refusing).
+///
+/// The refusal is stated after the check, where a core exists. Its price is
+/// reachability: a `spawn` inside a function no instance covers has no core and
+/// is not judged. That is the trade finding 7 made for the floor, taken again
+/// here, and the corpus holds no such site — all four spawn-holding bodies are
+/// covered.
+pub fn spawn_refusals(
+    program: &vyrn_frontend::ast::Program,
+) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
+    use vyrn_frontend::ast::Capability;
+    let mut out: Vec<(
+        String,
+        usize,
+        String,
+        vyrn_frontend::diagnostics::Diagnostic,
+    )> = Vec::new();
+    with_judgment(program, |judged, refs, _insts, _top| {
+        for sp in &judged.spawns {
+            // A `modify` parameter of the SPAWNED callee: the caller keeps the
+            // value it hands over, so the task and the caller would write one
+            // place. Named apart from the effects, because it is one.
+            let modifies = program
+                .functions
+                .iter()
+                .find(|f| f.name == sp.callee)
+                .and_then(|f| {
+                    f.params
+                        .iter()
+                        .find(|p| p.capability == Capability::Modify)
+                        .map(|p| p.name.clone())
+                });
+            let outside = sp.outside();
+            let text = if let Some(p) = modifies {
+                format!(
+                    "`spawn {}(..)` is not allowed: `{}` declares the `modify` parameter \
+                     `{p}`, so the task and its caller would write one value. A spawned \
+                     function must be isolated (pure).",
+                    sp.callee, sp.callee
+                )
+            } else if !outside.is_pure() {
+                format!(
+                    "`spawn {}(..)` is not allowed: `{}` (or something it calls) does \
+                     `{outside}`, so running it as a task could race or interleave. A \
+                     spawned function must be isolated (pure).",
+                    sp.callee, sp.callee
+                )
+            } else {
+                continue;
+            };
+            let file = refs[sp.body].file.clone();
+            let mut d = vyrn_frontend::diagnostics::Diagnostic::error(sp.line, 0, "check", text);
+            d.file = file.clone();
+            out.push((file.unwrap_or_default(), sp.line, sp.callee.clone(), d));
         }
-        let e = judged.effects[top[i]];
-        for (effect, cap) in &rows {
-            if e.has(*effect) {
-                add(inst.func.module.as_ref(), *cap);
-            }
-        }
-    }
-    out
+    });
+    // One refusal per site, whatever how many instances of the enclosing
+    // function reached it, and in a fixed order.
+    out.sort_by(|a, b| (&a.0, a.1, &a.2).cmp(&(&b.0, b.1, &b.2)));
+    out.dedup_by(|a, b| (&a.0, a.1, &a.2) == (&b.0, b.1, &b.2));
+    out.into_iter().map(|(_, _, _, d)| d).collect()
 }

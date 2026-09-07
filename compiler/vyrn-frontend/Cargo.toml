@@ -21,6 +21,10 @@ vyrn-cli = { path = "../vyrn-cli", default-features = false }
 # tree-walker behind it, and a test that runs a `gen fn` had one for free. The
 # tests that run one now supply the engine, which is what every driver does.
 vyrn-genwasm = { path = "../vyrn-genwasm" }
+# RFC-0125 §3 M6, the isolation slice: the effect judgment states RFC-0004 §Q4's
+# spawn rule, and `check_and_synthesize` reaches it through an installed slot. A
+# test of that rule has to install it, and only an integration test can.
+vyrn-lower = { path = "../vyrn-lower" }
 
 [lib]
 name = "vyrn_frontend"

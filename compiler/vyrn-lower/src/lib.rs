@@ -55,6 +55,10 @@ pub fn install() {
     // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
     // so a capability row is answered by the judgment and not by a second scan.
     vyrn_frontend::floor::install_judge(effects::reaches);
+    // RFC-0125 M6, the isolation slice: RFC-0004 §Q4's spawn rule, stated by
+    // the same judgment over the same core instead of by two fixpoints over the
+    // AST call graph.
+    vyrn_frontend::isolation::install_judge(effects::spawn_refusals);
 }
 pub use core::{refuses as kernel_refuses, take_refusals};
 pub use render::render;

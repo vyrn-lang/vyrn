@@ -15693,6 +15693,139 @@ who does`, `compiler/vyrn-frontend/src/checker.rs` (-9),
 `compiler/vyrn-cli/tests/checker_census.rs`, RFC-0127 §3, two probes under
 `rfcs/probes-0125/`, and this record.
 
+#### The spawn rule is the effect judgment (2026-09-07)
+
+The ranked list's fifth item, taken. RFC-0004 §Q4's isolation rule leaves
+`checker.rs`: **454 lines out**, and what states it is
+`vyrn_lower::effects::spawn_refusals`, over the same core the floor's judgment
+reads.
+
+**What the answer to "can the judgment carry them" turned out to be.** The
+census recorded three conditions of the checker's five that are not effects.
+Two are gone already — module state is a row of the lattice and the `drop`
+search was deleted — and this record answers the third:
+
+| condition | the judgment's answer |
+|---|---|
+| the callee is `extern` | the `extern` row, always was |
+| a callee name is in `SPAWN_FORBIDDEN` | seventeen atoms of rows outside `SPAWN_ALLOWS`; the list is deleted |
+| the body reads or writes module state | the `module-state` row, since this milestone's module-state slice |
+| the body holds a `drop` | nothing: the rule was deleted, because the ownership judgment states it |
+| a parameter has the `modify` capability | **not an effect, and it needs no fixpoint.** Only the SPAWNED callee's parameters can alias what the caller keeps, because only the spawned callee is handed the caller's values. It is a test on one signature at one site |
+
+The checker applied the `modify` test to every function in the seed, so a
+helper taking `modify` on a task's OWN local data poisoned the whole call graph
+above it. That was never the rule; it was the shape of the seed.
+
+**The wall was never the conditions. It was where the rule is stated.** A
+`vyrn check` refuses while the checker is still deciding what a node's type is,
+and the judgment reads a core that does not exist until the check is over. The
+seam already existed and the floor already uses it: `check_and_synthesize` holds
+a decision until `diags.is_empty()`, and `floor::install_judge` is the slot a
+driver installs. `crate::isolation` is the same slot for this rule, 39 lines,
+and `vyrn_lower::install()` fills it beside the placer, the refusals, the
+must-use judgment and the floor's judge.
+
+**What it cost, honestly.**
+
+| paid | lines |
+|---|---|
+| `vyrn-lower`: `with_judgment`, the callback that hands one setup to two readers, and `spawn_refusals` | +110 |
+| `vyrn-frontend/src/isolation.rs`, the slot | +39 |
+| `vyrn-frontend/tests/isolation.rs`, the fifteen unit tests that can no longer be unit tests | +248 |
+| **`checker.rs`** | **-454** |
+
+The fifteen tests are the honest half of that. They asserted through
+`checker::check`, which no longer answers this question, so they move to an
+integration test where `vyrn_lower::install()` can run — the same move M3's
+accumulation slice made for the kernel's refusals. `vyrn-lower` becomes a
+DEV-dependency of `vyrn-frontend`, beside `vyrn-cli` and `vyrn-codegen`, which
+the crate's own `Cargo.toml` comment already allows for exactly this reason.
+
+**The three trades, each deliberate.**
+
+1. **Reachability.** A `spawn` inside a function no instance covers has no core
+   and is not judged. That is finding 7's trade for the floor, taken again. The
+   corpus holds four spawn-holding bodies and every one is covered.
+2. **Order.** A program with type errors gets its type errors and no isolation
+   refusal, because the judgment cannot lower a program that does not type. The
+   floor's rule, and the same words in the code.
+3. **An uninstalled slot answers nothing.** A consumer that checks a program
+   without `vyrn_lower::install()` loses the rule. The CLI and the editor both
+   install; `tests/semantics.rs` does not, and the one test there that needed
+   the rule moved to `tests/isolation.rs` rather than turning the placer on for
+   two hundred tests that were written without it.
+
+**The defect a moved test found.** `spawning_through_a_stateful_stored_value_is_rejected`
+failed on the judgment, and the reason was not the spawn rule.
+`reaches` — the FLOOR's judgment, live since M6's fourth slice — ended its
+resolver with `Callee::Pure` for a name the program does not declare. But
+`Walk::callee` asks `through` about a name of the body only when the answer is
+`Callee::Unknown`, so **a call through a function value contributed nothing to
+the floor's judgment**: RFC-0037's whole stored-source machinery was wired into
+the judgment and unreachable from this reader. `tests/effects.rs` has always
+ended its own resolver with `Unknown`, which is why the corpus harness saw the
+sources and the floor did not, and why no gate caught it. One word, and the two
+resolvers agree.
+
+**The one sentence, instead of two.** The rule refused in two wordings before —
+one for the pre-check and one for the stored-value fixpoint, "invokes a stored
+function value (RFC-0037) whose possible targets do I/O". There is one rule now
+and one sentence, and it names the effects it found rather than saying "does I/O
+or touches shared mutable state" about all of them:
+
+```
+`spawn work(..)` is not allowed: `work` (or something it calls) does
+`module-state`, so running it as a task could race or interleave. A spawned
+function must be isolated (pure).
+```
+
+A `modify` parameter gets its own sentence, because it is its own rule: "`spawn
+work(..)` is not allowed: `work` declares the `modify` parameter `xs`, so the
+task and its caller would write one value."
+
+**The licence.** The whole-stderr corpus diff over the same 419 programs, and
+sixteen tests, because the corpus reaches this rule at zero sites — not one of
+the 419 programs is refused for isolation, which is why the tests are the
+measurement and the record says so.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `cargo test -p vyrn-cli` | 586 passed, 36 ignored | 586, 36 |
+| `cargo test -p vyrn-frontend` | 1,166 | 1,166 |
+| the effect suite, `--ignored` | 30,197 judged, 12 spawn sites, 0 outside | the same, to the number |
+| `checker.rs` | 16,276 | **15,822** |
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | a rule the checker states | 1,455 lines, 57 refusals | 1,354, 57 | `stored_unsafe_sigs` and `extend_spawn_safe` are two whole sections, and neither held a `cerr!` — the refusal they earned was stated at the call site |
+| | shared machinery | 2,231 / 30 | 2,091 / 29 | `SPAWN_FORBIDDEN`, the driver's fixpoint and its four tables, and step 8's refusal |
+| | the typing judgment | 3,151 / 135 | 3,131 / 134 | the `Expr::Spawn` arm loses the isolation refusal and the site record; the lambda source loses its `forbidden` flag |
+| | tests | 4,681 | 4,488 | fifteen tests moved to `tests/isolation.rs` |
+| | one arm per form, type constructor or builtin | 4,304 | 4,304 | unmoved, and that is the census's standing finding: the size is in the surface |
+| RFC-0127 §3.2 | `functions` | checker 22, row 71 | 16, **65** | the fixpoints walked `program.functions` five times |
+| | `impls` | checker 15, row 32 | 13, 30 | two method-impl expansions, one per fixpoint |
+| | `globals` | checker 14, row 32 | 13, 31 | the seed's global-name table |
+| | the total | 287 mentions | 278 | |
+| RFC-0127 §3.1, RFC-0126 §3 | — | unmoved | the slice deletes no arm of a form and names no type constructor |
+
+**What is left of the spawn rule in `checker.rs`.** Three refusals at the site,
+and all three are the SHAPE of the call rather than the isolation rule: the
+callee must exist, it must not be a `gen fn` (its body is never emitted), and it
+must take no function-value parameter (RFC-0037's thunk carries plain data).
+None of them is a question about effects, and none is stated anywhere else.
+
+**Commit.** `the spawn rule is the effect judgment, and the checker stops
+keeping a copy`, `compiler/vyrn-frontend/src/checker.rs` (-454),
+`isolation.rs` (new), `lib.rs`, `Cargo.toml`,
+`compiler/vyrn-frontend/tests/isolation.rs` (new), `loader_run.rs`,
+`semantics.rs`, `compiler/vyrn-lower/src/effects.rs`, `lib.rs`,
+`compiler/vyrn-cli/tests/checker_census.rs`, RFC-0127 §3.2, and this record.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

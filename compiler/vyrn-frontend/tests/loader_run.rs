@@ -197,6 +197,9 @@ mod tests {
         // nextest a test is its own process, and the sibling that used to
         // install it is not there.
         vyrn_genwasm::install();
+        // RFC-0125 §3 M6, the isolation slice: RFC-0004 §Q4's spawn rule is
+        // the effect judgment's, reached through an installed slot.
+        vyrn_lower::install();
         let files: Vec<(&str, &str)> = files
             .iter()
             .copied()
