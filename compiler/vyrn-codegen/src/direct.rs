@@ -13539,13 +13539,15 @@ impl<'p> Fn_<'_, 'p> {
     /// this is not a declared `release` destructuring its own receiver, whose
     /// caller walks the boxes.
     ///
-    /// The textual rule also frees a MAP LOOKUP's box, which `map_at` builds
-    /// fresh here too. Not this one: telling a map lookup from an element read
-    /// needs the receiver's type, and `peek` on the receiver before the arms
-    /// is not free of effect in this backend — with the free itself off, that
-    /// one call made every `std/vyx` generator trap under the wasm engine
-    /// (the cross-engine generator gate). The lookup's box stays the leak it
-    /// was here; `element_path` keeps every `@at` scrutinee out of the free.
+    /// A MAP LOOKUP is the one `@at` that is not an element read: `map_at`
+    /// BUILDS its `Option<V>` and boxes the value into a block of its own,
+    /// so the box is the construct's like any temporary's. It reads as a
+    /// place, which is why it stood outside the free until this slice, and
+    /// the receiver's type is what tells the two apart. The type is read off
+    /// the checker's own answer ([`vyrn_lower::core::node_ty`]) rather than
+    /// through [`Fn_::peek`], which is `&mut` and records an observation:
+    /// nothing is derived here, so no second statement of the typing rule
+    /// exists to disagree with the first.
     fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
         use vyrn_frontend::movecheck::{element_path, place_path};
         // RFC-0125 §3 M3, the deletion slice: the third disjunct is the
@@ -13556,6 +13558,7 @@ impl<'p> Fn_<'_, 'p> {
         // own reading of the source and no table's.
         let consumed = matches!(scrutinee, Expr::Consume { .. })
             || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
+            || self.map_lookup(scrutinee)
             || self.cx.match_consumes(key);
         let own_receiver = self.is_release
             && match scrutinee {
@@ -13567,6 +13570,19 @@ impl<'p> Fn_<'_, 'p> {
         consumed && !self.drops.contains_key(&key) && !own_receiver
     }
 
+    /// Whether `e` is `m[k]` on a `Map` — see [`Fn_::frees_boxes`].
+    fn map_lookup(&self, e: &Expr) -> bool {
+        let Expr::Call { name, args, .. } = e else {
+            return false;
+        };
+        if name != "@at" || args.len() != 2 {
+            return false;
+        }
+        let at = &args[0] as *const Expr as usize;
+        vyrn_lower::core::node_ty(at)
+            .or_else(|| vyrn_lower::core::node_ty(self.cx.plan.key_of(at)))
+            .is_some_and(|t| matches!(self.cx.resolve(&self.cx.sub(&t)), Type::Map(..)))
+    }
 }
 
 // ---------------------------------------------------------------------------

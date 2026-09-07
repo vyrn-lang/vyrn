@@ -125,7 +125,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::ArrayN` | 18 | 7 | 18 | 9 | 0 | 4 | 56 |
 | `Type::SmallArray` | 24 | 2 | 21 | 7 | 1 | 4 | 59 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 26 | 3 | 18 | 7 | 6 | 4 | 64 |
+| `Type::Map` | 26 | 3 | 19 | 7 | 6 | 4 | 65 |
 | `Type::Stream` | 18 | 1 | 9 | 7 | 1 | 1 | 37 |
 | `Type::Task` | 10 | 1 | 4 | 7 | 1 | 1 | 24 |
 | `Type::Logger` | 2 | 1 | 2 | 1 | 0 | 1 | 7 |
@@ -159,7 +159,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::ArrayN` | 18 | 7 | 18 | 9 | 0 | 4 | 56 |
 | `Type::SmallArray` | 24 | 2 | 21 | 7 | 1 | 4 | 59 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 26 | 3 | 18 | 7 | 6 | 4 | 64 |
+| `Type::Map` | 26 | 3 | 19 | 7 | 6 | 4 | 65 |
 | `Type::Stream` | 18 | 1 | 9 | 7 | 1 | 1 | 37 |
 | `Type::Task` | 10 | 1 | 4 | 7 | 1 | 1 | 24 |
 | `Type::Logger` | 2 | 1 | 2 | 1 | 0 | 1 | 7 |

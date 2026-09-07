@@ -60,7 +60,7 @@ falliblegeneric	leak	1
 fannkuch	clean
 fasta	clean
 fib	other
-fieldmut	leak	1
+fieldmut	clean
 files	clean
 finitekeys	clean
 floats	other
@@ -111,7 +111,7 @@ mustuse	clean
 namedplace	clean
 namespace	clean
 nbody	clean
-nestedsum	leak	2
+nestedsum	clean
 numbytes	clean
 numparse	clean
 option	clean
@@ -152,7 +152,7 @@ simd	clean
 simdbench	clean
 simdint	clean
 simdmem	clean
-simdmem2	leak	2
+simdmem2	clean
 simdoob	other
 simdoobstore	other
 simdround	clean
