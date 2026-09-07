@@ -10174,6 +10174,159 @@ previous slice and the merge changes neither the corpus nor the route);
 (41 files, up to date); the site export (29 s, 82 routes and 14 assets) and
 `vyrn test` per site file (189 test blocks).
 
+#### The exit-residue ratchet comes back, in the allocator (2026-09-07)
+
+RFC-0114 §25's instrument is in `std/runtime`'s allocator now, which is the one
+place every engine shares. The previous record left a design — a live-block
+word in the heap header, incremented in `malloc` and decremented in `free`,
+read by the host at exit — and this slice took two of its three parts and
+changed the third, because the third would have cost every recorded wasm hash.
+
+**Where the state lives, and why it is free.** Classes 0, 1 and 2 cannot
+compute: `malloc` floors a request at eight bytes and the smallest class that
+comes out of `shift * 4 + sub` is 3. So the first three free-list heads at
+`heapBase() + 0`, `+ 4` and `+ 8` are dead memory in every build, and the
+instrument keeps its block's address in the first of them. Zero there means
+"not armed", which is what an unaudited build and the window before
+`auditInit` both read. The liveness MARK is the block header's second word,
+the one §4.2 decision 3 left unwritten when it kept only the class: 1 live, 0
+free. So a free of a block that is not live — a double free, or a free of an
+address inside a block already on a list — is one load and one compare, at the
+site, before the push that would corrupt the list. `heapBase() + 476` was not
+the gap the previous record thought: it is the arena's routing flag.
+
+**The switch is a BUILD flag and it moves no byte.** `VYRN_LEAK_CHECK` in the
+COMPILER's environment, read in one place (`loader::audit_build`) so the
+emitter and the lowering cannot disagree about what a build is. `Fn_::call`
+drops a call to any `runtime$audit*` name when the flag is off — the arguments
+at all four sites are locals and constants, so dropping the statement drops
+nothing else — the four bodies then reach no export, `Module::sweep` takes them
+with the data they interned, and `VYRN_WASM_MANIFEST=check` is green with no
+row rewritten. That is the assertion that the instrument is not in the language
+when nobody asked for it. A runtime switch would have put a branch in `malloc`
+that all 173 hashes paid for.
+
+**The module reports, and the host is where it lands.** The previous record's
+design had the host read the counters at `proc_exit`; this writes the report in
+Vyrn instead, and the reason is the same one that put the counter in the
+allocator: there are two hosts (`wasmrun.rs` and `wasi_host.c`) and one
+allocator. `auditExit` writes `free audit: N block(s), M bytes, never freed` on
+descriptor 2 and calls `procExit(135)`; `auditFail` writes one line and
+`procExit(134)`. Both wordings are interned by the emitter and handed over, the
+way `boolStr` and `strFromBytes` are handed theirs, and the digits go through
+`digitsAt` into the fixed cell at 8736 — so the report allocates nothing it
+would then have to count. The line and the two exit codes are the old C
+instrument's, which is what the suites read.
+
+**Two things had to come back with it.**
+
+- The MODULE-STATE TEARDOWN. Module state outlives `main` by design
+  (RFC-0013), so without it the ratchet measures that rule rather than a
+  defect: a five-line program whose only global is a concatenated `String`
+  reported one block. `lower_globals_teardown` releases every top-level `let`
+  at its fixed address in reverse declaration order, emitted only in an audited
+  build, before `auditExit` and after the flush.
+- `vyrn-lower`'s `<teardown>` ROOT, under the same flag, because a global of a
+  DECLARED generic release reaches the teardown and no other emission. Gated
+  rather than restored outright: unconditional it queues bodies nothing emits
+  and `lowered.rs` reports each as a difference with no rule, which is what
+  took it out with the text-IR route.
+
+**A generator is never audited.** A generator module (RFC-0076 M7) runs inside
+the compiler and its exit code is a protocol between the host and the module,
+so an audited one turned a residue report into a failed generator and took
+eight examples off the corpus. `emit` reads `gen.is_none()` beside the flag.
+
+**What the corpus says, on both engines.** `tests/residue.rs` is back over
+`route.rs`'s corpus and its three exclusion lists — a program that does not
+build is not a residue verdict, and the `skip` column the old baseline carried
+is therefore gone. One audited build per program, run twice: `vyrn run` and the
+route's own executable.
+
+| | clean | leaking | double-free | failed |
+| --- | --- | --- | --- | --- |
+| the engine (`vyrn run`) | 149 | 26 | 0 | 0 |
+| the route (wasm2c and clang) | 149 | 26 | 0 | 0 |
+
+The two engines agree row for row, which is what one instrument inside one
+module should produce. 175 programs: 128 `clean` rows, 21 `other` rows (they
+exit nonzero by design and the audit stays quiet), 26 `leak` rows.
+
+**The leak column is not empty, and that is the finding.** RFC-0114 closed at
+143 clean / 0 leaking / 0 double-free — on the TEXT-IR route, whose emitter no
+longer exists. Nothing ever held the direct wasm emitter to that number: parity
+compared OUTPUT, and a leak is invisible in output. The 26 rows are the wasm
+route's first measurement. One of them reproduces in a dozen lines: a
+`fromJson` into a two-variant enum whose payload is an `Array<Int64>`, matched
+and printed, leaks 1 block of 16 bytes — the box the decoder built. The same
+enum constructed and matched WITHOUT the codec is clean, and so are the
+`Result` and `Option` payload shapes, so the row is the decoder's and not the
+enum's. Each of the 26 is a defect for a later slice; the ratchet's job here is
+that none of them may grow and no clean row may join them.
+
+**One rule is new, and the revert experiment is why.** Reverting `403131c9`'s
+release-row floor in `direct.rs` — the slot a `for` over an unnamed iterable
+keeps — makes `examples/looptemp.vyrn` free a slot twice through a pointer at
+address -16. `free` reads that header out of bounds and TRAPS, before
+`auditDeath` can say anything, so the old ratchet's rules (which let any exit
+code through, because parity ran beside it) would have stayed green on exactly
+the defect the experiment was aimed at. A `clean` row exits 0 now, and a clean
+row that stops exiting 0 fails. With the floor reverted the ratchet reported
+`looptemp (engine): exited 1, and its row says clean` and the same for the
+route — `residue: engine 148 clean, 26 leaking; route 148 clean, 26 leaking; 2
+failed` — and NOTHING ELSE in the corpus moved, on either engine. The floor was
+restored and the ratchet is green again.
+
+**CI.** The `residue` step is back, in the `route` job, which is the job that
+has clang, wabt and simde. The route leg SKIPS where they are missing and the
+engine leg still measures the same module, so the ratchet is not hostage to a
+platform nobody has pinned wabt for. It roughly doubles that job, and the head
+comment's timing table says so.
+
+**Files.** `std/runtime.vyrn` +148 −2 (the instrument, the two call sites in
+`malloc`, the one in `free`, the `auditForget` in `envGet`), `direct.rs` +99,
+`vyrn-lower/src/lib.rs` +43 −8, `loader.rs` +15, `tests/residue.rs` **279**
+(new), `rfcs/census/residue-baseline.tsv` **194** (new),
+`.github/workflows/ci.yml` +26 −5.
+
+**One census row moved.** The surface census (`tests/surface.rs`, RFC-0126 §3):
+`Type::Unit` in the wasm column 29 → **30**, its row 77 → **78**, the total
+1,611 → **1,612 mentions in six files**. It is the `Ok(Type::Unit)` the dropped
+audit call returns. The coercion, form, declaration and builtin censuses are
+unchanged — this slice states no coercion rung, adds no form and dispatches on
+no builtin name — and the wasm manifest is unchanged on all 173, which is the
+point of the switch.
+
+**What is left, named rather than implied.**
+
+- The 26 leaking rows. Each is a defect and the baseline is a ledger of them,
+  not a licence.
+- `auditForget` has one caller, `envGet`'s environment blob, which the runtime
+  holds for the life of the process. A second such block would need a second
+  call; there is no rule that finds them.
+- The verbose form the old instrument had (`VYRN_LEAK_CHECK=2`, one line per
+  leaked block with its size) is not restored. It would be a walk of the heap
+  from `heapBase() + 8768` reading the marks, which is a dozen lines whenever a
+  triage wants them.
+
+Gate, in the brief's order: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (77 suites, all
+green); the ignored corpus suites `kernel` (56 s), `coretables` (54 s),
+`typed` (125 s), `effects` (122 s), `fixtures` (40 s) and `testsweep` (43 s);
+`cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (6 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**175 checked, 33
+skipped, 0 failed**, 397 s);
+`cargo test --release -p vyrn-cli --test residue -- --ignored` (**149 clean, 26
+leaking, 0 double-free, 0 failed on each engine**, 402 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (60 s, no byte moved);
+`--release --test genwasm -- --ignored`; `vyrn doc --std -o ../docs/api --verify`
+(41 files, up to date); the site export (20 s, 82 routes and 14 assets) and
+`vyrn test` per site file (**189 test blocks**). `parity` is not in the list
+because the suite does not exist.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

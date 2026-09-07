@@ -452,6 +452,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         .collect();
 
     let ownership = vyrn_frontend::own::analyze(program);
+    // RFC-0114 §25's instrument, and never on the GENERATOR path (RFC-0076
+    // M7): a generator module runs inside the compiler and its exit code is a
+    // protocol between the host and the module, so a residue report there
+    // would fail the build instead of measuring the program.
+    let audited = gen.is_none() && vyrn_frontend::loader::audit_build();
     let mut cx = Cx {
         types,
         lambdas: vyrn_frontend::ast::lambdas(program),
@@ -497,6 +502,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // Reserved only for a file sink, so every console-sink module — which is
         // every example — is byte-for-byte what it was.
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
+        audit: audited,
     };
 
     // Every function the module will define, indexed before any body exists, so a
@@ -567,6 +573,12 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // where in the sequence it lands.
     let has_globals = !program.globals.is_empty();
     let init_index = m.reserve_func(&[], &[]);
+    // RFC-0114 §25: the teardown that drops every module-state binding after
+    // `main`, so what the instrument reports is the program's residue and not
+    // the module state it never had a place to release. Reserved only in an
+    // audited build, which is the whole of what keeps an ordinary module's
+    // indices where they were.
+    let teardown_index = (cx.audit && has_globals).then(|| m.reserve_func(&[], &[]));
     // The derived `fn`-value copy (Phase 10b), reserved for a dispatcher's
     // reason: its switch covers every construction in the module, so its body
     // cannot be written until the last body is walked, while a copy site in the
@@ -587,6 +599,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // module — and an empty body is two bytes.
     let init = lower_globals_init(&mut m, program, &cx)?;
     m.fill(init_index, init);
+    // Before the drain, like every other body: a global of a DECLARED generic
+    // release reaches the teardown and nowhere else, and its instance has to
+    // be on a worklist the drain below still reads. That instance is what
+    // `vyrn-lower`'s `<teardown>` root queues.
+    if let Some(ti) = teardown_index {
+        let t = lower_globals_teardown(&mut m, program, &cx)?;
+        m.fill(ti, t);
+    }
 
     // Drain what the bodies discovered, and then the dispatchers the drain
     // discovered, until neither has anything left. One body may discover more of
@@ -725,7 +745,36 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         };
         (at, cx.rt.intern(&mut m, path), cx.rt.open_at)
     });
+    // RFC-0114 §25's instrument, when the build is audited: the four wordings
+    // interned here and handed to `auditInit`, the way `boolStr` and
+    // `strFromBytes` are handed theirs. The two indices are ordinary module
+    // functions — nothing but this reaches them, so an unaudited build sweeps
+    // them away with the data.
+    let audit = if cx.audit {
+        let words = [
+            cx.rt.intern(&mut m, "free audit: "),
+            cx.rt.intern(&mut m, " block(s), "),
+            cx.rt.intern(&mut m, " bytes, never freed\n"),
+            cx.rt.intern(&mut m, "free audit: double or foreign free\n"),
+        ];
+        let at = |n: &str| {
+            cx.sigs.get(n).map(|s| s.index).ok_or_else(|| {
+                format!("direct backend: VYRN_LEAK_CHECK is set and `std/runtime` has no `{n}`")
+            })
+        };
+        Some((at("runtime$auditInit")?, at("runtime$auditExit")?, words))
+    } else {
+        None
+    };
     let start = m.func(&[], &[], &[], 0, |b| {
+        // First of all, so no block is handed out before the instrument can
+        // mark it: `auditInit` allocates its own state and only then arms.
+        if let Some((init, _, words)) = audit {
+            for w in words {
+                b.ins(&Instruction::I32Const(w as i32));
+            }
+            b.ins(&Instruction::Call(init));
+        }
         // Before the initializers, because a top-level `let` may log — the same
         // order `vyrn_entry` uses.
         if let Some((at, path, open_at)) = log_open {
@@ -755,6 +804,17 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
                 .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::Call(wasi.fd_close))
                 .ins(&Instruction::Drop);
+        }
+        // After the flush, so a leaking program's own output arrives before the
+        // report, and before the exit code, because the report REPLACES it with
+        // 135. The old instrument sat in exactly this place — after
+        // `vyrn_main` returned, on the normal path only, so a program that
+        // trapped reported nothing.
+        if let Some(ti) = teardown_index {
+            b.ins(&Instruction::Call(ti));
+        }
+        if let Some((_, exit, _)) = audit {
+            b.ins(&Instruction::Call(exit));
         }
         b.ins(&Instruction::I64Const(255))
             .ins(&Instruction::I64And)
@@ -1293,7 +1353,17 @@ struct Cx<'a> {
     /// `None` for a console sink, so a program that does not log to a file
     /// reserves nothing and its module is unchanged.
     log_fd: Option<u32>,
+    /// RFC-0114 §25: this build is AUDITED, so `std/runtime`'s four `audit`
+    /// calls are emitted and `_start` arms the instrument and asserts on it.
+    /// False is every ordinary build: the calls are dropped, the bodies reach
+    /// no export, [`wasm::Module::sweep`] takes them, and not one byte moves.
+    audit: bool,
 }
+
+/// The reserved prefix of the exit-residue instrument's calls inside
+/// `std/runtime` (RFC-0114 §25). One prefix rather than four names, so a
+/// fifth hook needs no edit here.
+const AUDIT_PREFIX: &str = "runtime$audit";
 
 impl<'a> Cx<'a> {
     /// RFC-0114 R1′ read off the core (RFC-0125 §3 M3, the
@@ -2163,6 +2233,28 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
         }
         // One frame holds every initializer's temporaries, so the bound is
         // checked per global: the one that crossed it is the one to name.
+        frame_fits(&b, &g.name, g.line)?;
+    }
+    Ok(b)
+}
+
+/// The module-state teardown (RFC-0114 §25), emitted only in an audited
+/// build: every top-level `let`'s binding released at its fixed address, in
+/// reverse declaration order — the order the bindings would come off a stack.
+///
+/// It is what makes the instrument's question the PROGRAM's. Module state
+/// outlives `main` by design (RFC-0013), so without a teardown every global
+/// that owns heap is residue and the ratchet would measure the language's own
+/// rule instead of a defect. A binding whose value is a data-segment literal
+/// releases nothing: `free` refuses an address below `HEAP_BASE`.
+fn lower_globals_teardown(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
+    let mut b = Frame::new(0, &[], 0);
+    let mut f = top_level(cx);
+    for g in program.globals.iter().rev() {
+        let (place, ty) = cx.globals[&g.name].clone();
+        if let Some(rel) = f.rel_for(&ty, g.line)? {
+            f.emit_rel(m, &mut b, place, &rel, g.line)?;
+        }
         frame_fits(&b, &g.name, g.line)?;
     }
     Ok(b)
@@ -7118,6 +7210,12 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        // RFC-0114 §25: the instrument's hooks are calls only in an audited
+        // build. The arguments are locals and constants at every one of the
+        // four sites, so dropping the statement drops nothing else with it.
+        if !self.cx.audit && name.starts_with(AUDIT_PREFIX) {
+            return Ok(Type::Unit);
+        }
         let mark = self.arg_frees.len();
         let r = self.call_inner(m, b, name, args, line);
         // RFC-0125 M3, third slice: a lending call's result points into an
@@ -16086,6 +16184,7 @@ mod tests {
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,
             log_fd: None,
+            audit: false,
             // Every index 0: a `Cx` for a type-level test never emits a call, and
             // a field per runtime function would have to be edited for each new
             // one.

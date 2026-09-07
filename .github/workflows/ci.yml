@@ -15,7 +15,8 @@
 #   ---------------------------------------------------------------
 #   job total                       1141 1043      1243     692
 #
-#   route (was parity): harness 468, build 18, codegen 8, universal-pages 13   -> 561
+#   route (was parity): harness 468, residue 468, build 18, codegen 8,
+#     universal-pages 13                                           -> 1029
 #   gen-engine: the one release test 57                            ->  66
 #   bench: run + compare 114, build 15                             -> 134
 #
@@ -95,10 +96,14 @@
 # balance a two-way split is supposed to find and the reason a third job would
 # only have added a checkout.
 #
-# THERE IS NO SINGLE POLE any more. `route` swings 271-500 s across the fleet
-# (one `#[test]` walking 40 programs) and the Windows test leg sits at ~310-320 s;
-# which one tops a given run is scheduling. Cutting further therefore means the
-# route harness itself — a change to the harness, not to this file.
+# THERE IS NO SINGLE POLE any more — except that the exit-residue ratchet
+# (RFC-0114 §25, restored in the route job) compiles the corpus a second and a
+# third time and roughly doubles that job, which makes `route` the pole again
+# at about 17 minutes. It is a whole-corpus gate that has caught real leaks and
+# it runs in parallel with everything else, so the added WALL time is its own
+# excess over the test job and nothing else waits on it. The Windows test leg
+# sits at ~310-320 s. Cutting further therefore means the two harnesses
+# themselves — a change to them, not to this file.
 
 name: CI
 
@@ -619,6 +624,22 @@ jobs:
         # variable, the pin, the `tools/` walk — and the pin is what answers
         # here. clang stays discovered (RFC-0102 M3).
         run: cargo test --quiet --release -p vyrn-cli --test route -- --ignored --nocapture
+      - name: The exit-residue ratchet (RFC-0114 §25)
+        working-directory: compiler
+        # Every corpus program compiled with `VYRN_LEAK_CHECK=1` in the
+        # compiler's environment, which selects `std/runtime`'s accounting
+        # allocator, and run once — under `vyrn run` and under the route's own
+        # executable, which are two engines over one module. The verdicts are
+        # compared against `rfcs/census/residue-baseline.tsv`: a double free
+        # fails outright, a clean row that leaks or stops exiting 0 fails, a
+        # leak row may only shrink.
+        #
+        # It is here rather than in the test job for the reason the route
+        # harness is: the route leg needs clang, wabt and simde, and this is
+        # the job that has them. The leg SKIPS where they are missing and the
+        # engine leg still measures the same module, so the ratchet is not
+        # hostage to a platform nobody has pinned wabt for.
+        run: cargo test --quiet --release -p vyrn-cli --test residue -- --ignored --nocapture
       - name: The codegen integration tests that need a toolchain (RFC-0077)
         working-directory: compiler
         # THE JOB THAT MAKES `layout_vs_clang` A GATE. These six tests —
