@@ -15914,6 +15914,64 @@ cell closes — which is the signal that this deletion is ready.
 **Commit.** Recorded with the two probes under `rfcs/probes-0125/`; no code
 change.
 
+#### Gates for the isolation arc (2026-09-07)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at `C:\wtcdtmp` — a shallow scratch directory outside the checkout,
+because other worktrees gate at the same time and the suites scratch under fixed
+names.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, and no new warning — the nine that stand are the branch point's |
+| `cargo test -p vyrn-cli`, no filter | 586 passed, 36 ignored, no failure |
+| `kernel` `--ignored` | 1, 126 s |
+| `coretables` `--ignored` | 1, 102 s |
+| `typed` `--ignored` | 1, 206 s |
+| `effects` `--ignored` | 2, 147 s — 30,197 judged, 804 with `module-state`, 12 spawn sites and 0 outside the rule, 0 the judgment misses and 21 it reaches through an argument |
+| `fixtures` `--ignored` | 1, 70 s |
+| `testsweep` `--ignored` | 1, 175 s |
+| `cargo test -p vyrn-frontend` | 1,166, 5 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,212, 12 ignored |
+| `vyrn-lsp`'s own tests | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 278 s |
+| the residue ratchet | 1, 272 s — **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed**, which is the branch point's row exactly |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 17 s — a checker-only change moves no byte, and no slice here touched an emitter |
+| `genwasm`, release, `--ignored`, fresh `VYRN_GEN_CACHE_DIR` | 1, 23 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files, 0 failed |
+| `vyrn check` over the 419-program corpus, whole stderr | **0 bytes differ** against the branch point, over all four slices together |
+
+`checker.rs` across the arc: **16,269 to 15,822**, four hundred and forty-seven
+lines. By census kind, from `tests/checker_census.rs`:
+
+| kind | at `161423d7` | now | moved by |
+|---|---|---|---|
+| the typing judgment | 3,152 / 135 | 3,131 / 134 | the `Expr::Spawn` arm's isolation refusal and site record; the lambda source's `forbidden` flag |
+| a rule the checker states | 1,455 / 57 | 1,354 / 57 | `stored_unsafe_sigs` and `extend_spawn_safe`, neither of which held a `cerr!` |
+| the checker's part in a rewrite stated elsewhere | 454 / 16 | 454 / 16 | unmoved |
+| one arm per form, type constructor or builtin | 4,321 / 248 | 4,304 / 248 | `contains_drop` |
+| shared machinery | 2,229 / 30 | 2,091 / 29 | `SPAWN_FORBIDDEN`, the pre-check fixpoint and its four tables, the stored-value re-check |
+| tests | 4,658 / 0 | 4,488 / 0 | fifteen tests to `tests/isolation.rs`, three list tests rewritten |
+
+Every kind but one fell, and the one that did not is the surface at 4,304 — the
+census's finding, standing where it stood four slices ago. What the arc bought
+is not the 447 lines: it is that RFC-0004 §Q4's isolation rule, which was five
+conditions in two fixpoints over the AST, is one inclusion check over the same
+core the floor reads, plus one test on one signature.
+
+**The corpus is silent for all four slices**, and that is the honest weakness of
+this arc rather than its strength: not one of 419 programs is refused for
+isolation or for comptime purity, so the licence is sixteen tests and eleven
+probes. Three of those probes are in `rfcs/probes-0125/` because they show a
+program the old rule refused and the new one accepts; two more are there because
+they show the rule that does the refusing instead; two more because they are the
+cell that keeps the generation fence where it is.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
