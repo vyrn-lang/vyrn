@@ -1169,7 +1169,6 @@ fn check_accum_inner(
         impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
-        stmt_match: std::cell::Cell::new(0),
         in_loop: RefCell::new(false),
         let_types: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
@@ -2093,12 +2092,6 @@ struct Checker<'a> {
     /// which a binding is "outer" — a heap value must not be assigned there, or
     /// it would dangle when the region frees at block exit.
     region_floor: RefCell<Vec<usize>>,
-    /// The arms of a `match` sitting DIRECTLY in statement position
-    /// (RFC-0118), by the arms slice's address; 0 = none. Set by `Stmt::Expr`
-    /// and consumed by `check_match`, so block arms are legal exactly there
-    /// and a nested match — expression position by construction — never
-    /// inherits it.
-    stmt_match: std::cell::Cell<usize>,
     /// Inferred (or declared) type of each `let` binding and each `for`-in loop
     /// variable that checked cleanly, keyed by `(line, name)`. Populated as a
     /// side effect of checking so the symbol-query layer can show `let x: Int`
@@ -4556,12 +4549,6 @@ impl<'a> Checker<'a> {
                 ))
             }
             Stmt::Expr(e) => {
-                // A `match` directly here is in STATEMENT position (RFC-0118):
-                // its arms may be blocks. The flag is the arms' address, so a
-                // match nested anywhere inside stays expression-position.
-                if let Expr::Match { arms, .. } = e {
-                    self.stmt_match.set(arms.as_ptr() as usize);
-                }
                 // A `panic` statement is `Never`-typed, so it satisfies the
                 // return-path check the way a `return` does (RFC-0079): the
                 // statements after it are unreachable and a function whose body
@@ -5094,8 +5081,9 @@ impl<'a> Checker<'a> {
             Expr::Match {
                 scrutinee,
                 arms,
+                stmt_pos,
                 line,
-            } => self.check_match(scrutinee, arms, *line, scope, expected, fn_ret),
+            } => self.check_match(scrutinee, arms, *stmt_pos, *line, scope, expected, fn_ret),
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -5695,19 +5683,17 @@ impl<'a> Checker<'a> {
 
     /// Check a `match` over an `Option` or `Result`: both variants covered
     /// exactly once with the right patterns, all arm bodies a common type.
+    #[allow(clippy::too_many_arguments)]
     fn check_match(
         &self,
         scrutinee: &Expr,
         arms: &[MatchArm],
+        stmt_pos: bool,
         line: usize,
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        // Statement position (RFC-0118), consumed HERE so a nested match —
-        // expression position by construction — sees the flag cleared. The
-        // enum path receives it as a plain bool.
-        let stmt_pos = self.stmt_match.replace(0) == arms.as_ptr() as usize;
         let raw_sty = self.expr(scrutinee, scope, None, fn_ret)?;
         // Resolve a transparent alias so `match` over `type X = Result<..>` (or an
         // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
@@ -5736,7 +5722,10 @@ impl<'a> Checker<'a> {
     }
 
     /// Check one block arm (RFC-0118): legal only in statement position, and
-    /// then checked exactly as the block it is.
+    /// then checked exactly as the block it is. `stmt_pos` is the node's own
+    /// field, which the parser set — this used to be recovered here by
+    /// comparing the arms slice's address with a `Cell` the statement walk had
+    /// written.
     fn arm_block(
         &self,
         b: &Block,

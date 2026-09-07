@@ -4514,6 +4514,7 @@ impl MoveCheck<'_> {
                 scrutinee,
                 arms,
                 line,
+                ..
             } => {
                 self.expr(scrutinee, consumed, scope)?;
                 // The scrutinee's row, and the same two cases `if let` has since

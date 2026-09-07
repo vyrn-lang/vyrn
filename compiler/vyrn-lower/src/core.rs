@@ -1843,6 +1843,7 @@ impl<'a> Builder<'a> {
                 scrutinee,
                 arms,
                 line: mline,
+                ..
             } if arms.iter().all(|a| matches!(a.body, ArmBody::Expr(_))) => {
                 let sty = self.ty_of(scrutinee)?;
                 let mid = e as *const Expr as usize;
@@ -3888,6 +3889,7 @@ impl<'a> Builder<'a> {
                 scrutinee,
                 arms,
                 line,
+                ..
             } => {
                 let ty = self.ty_of(e)?;
                 let sty = self.ty_of(scrutinee)?;

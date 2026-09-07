@@ -1350,10 +1350,18 @@ pub enum Expr {
     /// `match scrutinee { Some(x) => e, None => e }` — an expression yielding a
     /// value (RFC-0005). An arm is a single expression here; in STATEMENT
     /// position an arm may be a block instead (RFC-0118), which is what
-    /// [`ArmBody`] carries and what the checker's position flag decides.
+    /// [`ArmBody`] carries and what `stmt_pos` permits.
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
+        /// Whether this `match` stands DIRECTLY in statement position, which is
+        /// where a block arm is legal (RFC-0118). It is a fact about the text
+        /// and the parser has it: `Stmt::Expr` sets it and nothing else does,
+        /// so a `match` nested anywhere inside an expression keeps `false`.
+        /// Every synthesized `match` — the `?`/`??` desugars, refutable `let`,
+        /// the codec and storage expansions — is false, because each has
+        /// single-expression arms by construction.
+        stmt_pos: bool,
         line: usize,
     },
     /// `if cond { expr } else if cond2 { expr } else { expr }` used in an

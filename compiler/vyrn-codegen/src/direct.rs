@@ -6046,6 +6046,7 @@ impl<'p> Fn_<'_, 'p> {
                 scrutinee,
                 arms,
                 line,
+                ..
             } => self.match_expr(
                 m,
                 b,

@@ -15056,6 +15056,80 @@ they will move again when those land.
 `compiler/vyrn-frontend/src/checker.rs` (-32),
 `compiler/vyrn-cli/tests/checker_census.rs`, RFC-0126 §3, RFC-0127 §3.
 
+#### The census's fourth candidate: the parser keeps the fact it knew (2026-09-07)
+
+The census's fourth-ranked item was `arm_block`'s pointer address. A block arm
+is legal in one place, statement position (RFC-0118), and that is a fact about
+the text. The parser has it. It threw it away, and the checker got it back like
+this: `Checker::stmt`'s `Stmt::Expr` arm wrote `arms.as_ptr() as usize` into a
+`Cell`, and `check_match` compared the address of the arms slice it was looking
+at against the address the walk had left. Equal meant statement position.
+
+**The fact is now on the node.** `Expr::Match` carries `stmt_pos: bool`. The
+parser sets it in one place — where it builds `Stmt::Expr(e)`, which is the only
+place a `match` stands directly in statement position — and every synthesized
+`match` leaves it false, which is right for all seven of them (`?`, `??`,
+refutable `let`, and the four codec and storage expansions) because each has
+single-expression arms by construction. `Checker::expr` reads the field and
+passes it down the path that already threaded a `bool`. The `Cell`, its five
+lines of doc comment, its initializer, the setter in `Stmt::Expr` and the
+address comparison are gone.
+
+The new field is stronger than the `Cell` was, in one way worth naming. The
+`Cell` was set by the CHECKER's statement walk and consumed by the first
+`check_match` that ran after it, so the same `match` node checked through a
+path that did not pass `Stmt::Expr` — a re-check, a synthesized re-type — saw a
+cleared flag and its block arm was refused. The field travels with the node
+through every clone, so the answer no longer depends on how the node was
+reached.
+
+**The licence.** The same method as the slice above: `vyrn check` over 419
+programs, whole stderr including the exit code, before and after.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419 | 419 |
+| refused | 78 | 78 |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,307 | 16,296 |
+
+The rule is in the corpus, so the licence is not vacuous:
+`examples/blockvalarm.vyrn` is the fixture `tests/common/mod.rs` holds for
+RFC-0118, and its stderr is the same byte for byte — `blockvalarm.vyrn:5:0: a
+`match` used as a value has single-expression arms; a block arm needs statement
+position (RFC-0118)`. Two probes hold the other direction: the same `match` with
+block arms compiles as a statement and is refused at the same line as the
+initializer of a `let`.
+
+**The cost, which is an AST field.** `Expr::Match` gained a field, so every
+exhaustive pattern over it names the field or ignores it. Eight sites: three
+constructions in `parser.rs` and four more in its codec and storage desugars,
+one in `vyrn-genwasm`, and `..` in six patterns — two in `loader.rs`, one in
+`movecheck.rs`, two in `core.rs` and one in `direct.rs`. That is the price of
+moving a fact from an address comparison to a declaration, and it is paid once.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | the typing judgment | 3,159 lines | 3,152 | `check_match` loses the address comparison and its comment |
+| | the checker's part in a rewrite stated elsewhere | 451 | 454 | `arm_block`'s doc comment says where the fact now comes from |
+| | shared machinery | 2,236 | 2,229 | the `Cell` field, its doc, its initializer and the setter |
+| RFC-0127 §3 | `Expr::Match` | parser 7, checker 10, row 50 | parser 8, checker 9, row 50 | the form moved one mention from the checker to the parser, which is the whole slice in one number |
+| `tests/refusals.rs` | shared machinery | 3,670 | 3,671 | `movecheck.rs` gained the one `..` |
+
+The `Expr::Match` row is the honest measure of this slice. The line count fell
+by eleven, which is small; the census row that matters says the checker names
+the form once less and the parser once more, and the total is unchanged. RFC-0127
+§3's own thesis is that a form costs one arm in every walk — this slice does not
+remove an arm, it moves a fact to the walk that already had it.
+
+**Commit.** `the parser writes down that a match is a statement, and the checker
+stops guessing from an address`, `compiler/vyrn-frontend/src/ast.rs`,
+`parser.rs`, `checker.rs` (-11), `loader.rs`, `movecheck.rs`,
+`compiler/vyrn-lower/src/core.rs`, `compiler/vyrn-codegen/src/direct.rs`,
+`compiler/vyrn-genwasm/src/lib.rs`, the four censuses.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

@@ -149,7 +149,7 @@ the_form_census_as_a_table` and checked against the code by
 | `Expr::Unary` | 4 | 8 | 6 | 2 | 7 | 3 | 2 | 2 | 34 |
 | `Expr::Binary` | 3 | 7 | 8 | 3 | 8 | 4 | 2 | 1 | 36 |
 | `Expr::Call` | 22 | 13 | 25 | 3 | 26 | 4 | 12 | 1 | 106 |
-| `Expr::Match` | 7 | 10 | 13 | 3 | 9 | 3 | 4 | 1 | 50 |
+| `Expr::Match` | 8 | 9 | 13 | 3 | 9 | 3 | 4 | 1 | 50 |
 | `Expr::IfExpr` | 1 | 8 | 12 | 2 | 8 | 3 | 2 | 1 | 37 |
 | `Expr::Try` | 1 | 7 | 6 | 2 | 6 | 3 | 4 | 1 | 30 |
 | `Expr::StructLit` | 2 | 8 | 8 | 2 | 9 | 3 | 3 | 1 | 36 |
