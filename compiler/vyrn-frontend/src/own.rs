@@ -376,6 +376,17 @@ impl Owned {
         self.linear_kind(ty).is_some()
     }
 
+    /// The program's nominal declarations, read once when this table was built.
+    ///
+    /// [`crate::types::decl_map`] CLONES every declaration of the program, and a
+    /// pass that calls it per node pays the whole program's type table at every
+    /// node. This table already holds that map — every rule above resolves
+    /// through it — so a pass that has an `Owned` has the declarations too, and
+    /// has them once (RFC-0125 §3 M3, the placer's cost).
+    pub fn types(&self) -> &HashMap<String, TypeDecl> {
+        &self.types
+    }
+
     /// Whether `ty` transitively owns heap, against this program's declarations.
     ///
     /// Not the same question as [`Owned::release_kind`] answering `Some`, and
@@ -1203,6 +1214,16 @@ pub struct Ownership {
     /// pass that has read every body can give, and the core asks it at a call
     /// through a fn value, where no capability row answers.
     pub fnval_clear: std::collections::HashSet<String>,
+    /// The capability of every declared position, by callee name — see
+    /// [`crate::movecheck::arg_caps`].
+    ///
+    /// It is a read of the DECLARATIONS and says nothing about a body, so it
+    /// is the same table for every body of the program. The core used to build
+    /// it per body, and a program with hundreds of functions paid the whole
+    /// declaration list once for each of them (RFC-0125 §3 M3, the placer's
+    /// cost). It sits beside `lending` and `retains` because the core asks all
+    /// three at the same position, in [`crate::movecheck::arg_verdict`].
+    pub arg_caps: HashMap<String, Vec<Capability>>,
 }
 
 /// One analysis per build — RFC-0125 §3 M3, the repetition slice.
@@ -1287,11 +1308,17 @@ pub fn analyze(program: &Program) -> Ownership {
 }
 
 fn analyze_now(program: &Program) -> Ownership {
+    let _p = crate::prof::phase("own: analyze_now");
+    let ps = crate::prof::phase("own: Owned::new");
     let proto = Owned::new(program);
+    drop(ps);
     // What every `let` in the program still owns where its block ends, decided
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
+    let fs = crate::prof::phase("own: movecheck::facts");
     let mut facts = crate::movecheck::facts(program);
+    drop(fs);
+    let fold = crate::prof::phase("own: the fold");
     let revived = fold_revived(&facts);
     let exit_sites = std::mem::take(&mut facts.exit_sites);
     let lets = facts.lets;
@@ -1723,6 +1750,7 @@ fn analyze_now(program: &Program) -> Ownership {
         alias: Default::default(),
         alias_log: Default::default(),
     };
+    drop(fold);
     let mut ownership = Ownership {
         plan,
         owned_fns,
@@ -1736,6 +1764,7 @@ fn analyze_now(program: &Program) -> Ownership {
         retains: facts.retains.clone(),
         escapers: facts.escapers.clone(),
         fnval_clear: facts.fnval_clear.clone(),
+        arg_caps: crate::movecheck::arg_caps(program),
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
     // this analysis owes and did not place. It runs the lowering, which runs

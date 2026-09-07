@@ -6306,6 +6306,143 @@ row's count and column are what they were.
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
 
+**The placer's cost, measured and halved twice (2026-09-07, `track-cq`).** The
+last measurement of a build (`track-at`, above) left the placer as the larger
+half and gave it to whoever owns `core.rs`. `track-cl` then read 5.71 s over
+2,172 frames on `vyrn check site/app/chart.vyrn`. This slice measures where that
+time goes and takes the two structural payers. **Nothing in it changes a
+judgment's answer**: `vyrn why --memory` is byte-identical over all 208
+examples, `VYRN_WASM_MANIFEST=check` is green and the manifest file is
+untouched, the corpus pins are unmoved, and the structural census is unmoved.
+
+**The instrument first.** `VYRN_BUILD_PROFILE=1` said `placer` and one number.
+The rows under it now split the analysis into what it does — `own: Owned::new`,
+`own: movecheck::facts`, `own: the fold`, `placer` — and the placer's per-body
+work into the first build, the seeded second build and the kernel judgment. One
+row, `types::decl_map`, counts a table a pass rebuilds, because a COUNT is what
+tells a rebuilt table from a shared one. `placer: build: seeded` reads zero on
+every program measured: `last_owner` is empty on all of them, so `build` runs
+`build_seeded` once. `movecheck::arg_caps` carries no row, and the reason is
+worth the line: `movecheck.rs` is the file the structural census counts, so an
+instrument in it moves a number this RFC records.
+
+**The kernel judgment is not the cost. The core BUILD is.** `vyrn check
+site/app/chart.vyrn`, release, before this slice:
+
+| row | count | total |
+|---|---|---|
+| `placer: core::build` | 1,764 | 1.884 s |
+| `placer: facts: rebuilt` | 284 | 855.54 ms |
+| `placer: build_outside` | 2 | 464.28 ms |
+| `placer: lower_with` | 2 | 95.65 ms |
+| `placer: kernel::placement` | 2,172 | 42.80 ms |
+| `placer` | 2 | 3.413 s |
+
+The judgment this RFC is about is **1.3%** of the pass that runs it. Every other
+row builds a core body.
+
+**`types::decl_map` was called at every node, and it clones the program.**
+`vyrn_frontend::types::decl_map(program)` clones every `TypeDecl` of the linked
+program into a fresh `HashMap`. `core.rs` called it at FIFTEEN sites inside the
+`Builder`, each on a per-node path — a field read, an element read, a pattern, a
+call, a variant test. One profiled run of `chart.vyrn` counted **54,829 calls
+and 2.587 s**, which is 60% of the placer.
+
+`Owned` already holds that map. It is built once per program, every ownership
+rule resolves through it, and the `Builder` already holds an `&Owned`. So the
+table is read off the one that exists: `Owned::types()`, fifteen sites, no new
+state and no cache. `types::decl_map` falls to 15 calls and 1.15 ms.
+
+**`movecheck::arg_caps` was rebuilt per body.** It reads the capability of every
+parameter of every declared function and protocol method. That is a read of the
+DECLARATIONS and says nothing about a body, so it is the same table for each of
+them; the core built it in a `OnceCell` on the `Builder`, which is per body.
+`chart.vyrn` built it **1,045 times for 61 ms** of a 302 ms placer, and a
+program with more functions pays more per body. It moves to `Ownership`, beside
+`lending`, `retains` and `fnval_clear` — the other whole-program answers the
+core asks at the same position, in `arg_verdict`. One build per analysis: 5
+calls and 1 ms.
+
+**What the two are worth.** `vyrn check`, release, minimum of five runs on a
+machine other tracks were also building on:
+
+| program | before | after | |
+|---|---|---|---|
+| `site/app/chart.vyrn` | 3.050 s | 0.453 s | 6.7x |
+| `site/app/docs.vyrn` | 2.439 s | 0.425 s | 5.7x |
+| `examples/nbody.vyrn` | 0.109 s | 0.054 s | 2.0x |
+| `site/export.vyrn` | 13.592 s | 1.571 s | 8.7x |
+
+And the placer alone, from the phase table of the fastest of five profiled runs
+(a check runs the placer twice; see item 1 below):
+
+| program | before | after | |
+|---|---|---|---|
+| `site/app/chart.vyrn` | 3.413 s | 233.63 ms | 14.6x |
+| `site/app/docs.vyrn` | 2.641 s | 226.65 ms | 11.7x |
+| `examples/nbody.vyrn` | 80.54 ms | 22.07 ms | 3.6x |
+| `site/export.vyrn` | 18.483 s | 728.25 ms | 25.4x |
+
+**The time is many small bodies, and no body is large.** A probe over each
+`build` of one placer run of `chart.vyrn` reports 882 bodies and 34 ms. The
+LARGEST single body is 0.7 ms, which is 2% of the total; the top tenth of the
+bodies carry 47%; the median body is 20 µs and the mean 38 µs. There is no head
+to attack. The first sample of this probe showed two bodies at 40 ms and 35 ms —
+55% of the run between them — and they did not repeat: on a machine at 64% load
+a cold body reads a scheduler stall, and a distribution taken once is not a
+distribution.
+
+**The stopping condition is met: the per-body cost is flat across programs.**
+Mean core build, after: `examples/nbody.vyrn` 38 µs over 105 bodies (5 modules),
+`chart.vyrn` 38.5 µs over 882 (29 modules), `site/export.vyrn`'s root 40 µs over
+554 and its largest generated program 55 µs over 2,100 (192 modules). A cost
+that was 44, 72 and 141 µs over the same three sizes is now 38, 38.5 and 55. The
+residual spread is body size, not program size.
+
+**The editor does not regress.** `keystroke_cost_on_the_sites_own_modules`,
+median of three alternating runs of one test binary against two servers, which
+is the method the memo record uses:
+
+| file | before | after |
+|---|---|---|
+| `site/app/bench.vyrn` | 79.7 ms | 42.5 ms |
+| `site/app/guide.vyrn` | 110.0 ms | 115.4 ms |
+| `site/app/chart.vyrn` | 223.9 ms | 144.9 ms |
+| `site/app/docs.vyrn` | 192.7 ms | 177.8 ms |
+
+`guide.vyrn` is inside its own spread — its three readings were 84.9, 115.4 and
+162.1 ms — and the memo already serves most of a keystroke there.
+
+**What is left, and why each is still here.**
+
+1. **Every `vyrn check` runs the analysis TWICE, and each runs the whole
+   placer.** `movecheck::check` asks for one inside the load, and
+   `vyrn_lower::lower` asks for another after it. `own::Memo` cannot serve the
+   first to the second, and `Memo::open`'s own doc records why: a projection is
+   inlined with a per-inline tag, so the load's analysis names a binding
+   `@p26.h` where the lowering names it `@p31.h`, a plan keyed by those names
+   places nothing, and `examples/genref.vyrn` leaked a block the residue ratchet
+   had recorded clean. Sharing needs the project inline memo to span the load
+   AND the command. That is a decision about the memo's scope, not a cost fix,
+   and this slice does not take it. It is worth the other half of every number
+   above.
+2. **`placer: lower_with` is now the largest row** — 85.56 ms of `chart.vyrn`'s
+   233.63 ms. It is `checker::recorded` plus the instance walk, once per placer
+   run, and it is proportional to the program. It is not a rebuilt table.
+3. **`own: movecheck::facts`** is 55.42 ms of the 307.15 ms analysis. One walk
+   of every body, proportional.
+4. **The instance sort is NOT a payer, and it was measured rather than
+   assumed.** `lower_with` sorts by `(module, name, spelling())`, and `spelling`
+   formats a `String` on both sides of every comparison. A `sort_by_cached_key`
+   was written and measured: the whole sort is 0.66 ms. The change was reverted,
+   because a diff that moves nothing is a diff.
+
+#### Gates (2026-09-07, the placer's cost)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. This line carries
+no `parity` and no `residue` suite; `route` `--ignored` replaced parity.
+
 | gate | result |
 |---|---|
 | `cargo fmt --check`, all three manifests | clean |
@@ -7599,6 +7736,27 @@ cj's tree narrows them to record holes is a question about cj's tree, and the
 answer to it belongs where that work lands. Bringing another track's unmerged
 branch onto this one to re-ask it would import risk for at most 44 lines of a
 pass the milestone is emptying anyway.
+
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 576 passed, 34 ignored |
+| `kernel` `--ignored`, release | 1, 18 s |
+| `coretables` `--ignored`, release | 1, 16 s |
+| `typed` `--ignored`, release | 1, 26 s |
+| `effects` `--ignored`, release | 2, 31 s |
+| `fixtures` `--ignored`, release | 1, 26 s |
+| `vyrn-frontend` | 1,192 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,238 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 6 |
+| `route` `--ignored`, release | 2, 408 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 23 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+| `vyrn why --memory` over `examples/*.vyrn` | byte-identical, 208 programs |
 
 ### M4 — the runtime in Vyrn
 
