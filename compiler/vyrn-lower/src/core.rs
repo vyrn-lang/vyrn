@@ -29,7 +29,7 @@ use vyrn_frontend::ast::{
     ArmBody, BinOp, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program,
     Stmt, Type,
 };
-use vyrn_frontend::own::{DropKind, Exit, Owned, Ownership, Release};
+use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Owned, Ownership, Release};
 use vyrn_frontend::prelude;
 
 use crate::kernel::MissingKind;
@@ -156,6 +156,44 @@ pub struct NameInfo {
     /// it, and it words a use after it as a `consume` parameter's, not as a
     /// move into a sink. RFC-0125 §3 M3, row 07.
     pub linear: bool,
+    /// Whether a `let` a reader WROTE bound this name. A `for` variable, a
+    /// pattern binder and a temporary are keyed by a node too, and none of
+    /// them is a binding the memory report is about.
+    pub bound_by_let: bool,
+    /// Why the value this name binds is NOT this frame's, where it is not —
+    /// the core's own statement, minted where [`Builder::owned_binding`]
+    /// decides it (RFC-0125 §3 M3, the report slice). `None` for a name the
+    /// frame owns and for every temporary.
+    ///
+    /// It is the reason half of the same question `releases` and `borrow`
+    /// answer as flags. Nothing in a judgment reads it: it is what the memory
+    /// report says out loud, so the report and the ownership rule are one
+    /// statement rather than two walks that could disagree.
+    pub not_owned: Option<NotOwned>,
+}
+
+/// Why a `let` binds a value the frame does not own — the report's reasons,
+/// in the order [`Builder::owned_binding`] asks them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotOwned {
+    /// The type releases nothing. `heap` says whether it owns heap anyway,
+    /// which is the difference between "nothing to reclaim" and "no release
+    /// rule yet" (RFC-0092 M0).
+    NoRelease { heap: bool },
+    /// The type carries a must-use obligation, and the construct that
+    /// discharges it reclaims the value (RFC-0075 M1, RFC-0095 M1).
+    MustUse(Linear),
+    /// A literal, in the module's data segment. Nothing allocated it.
+    Static,
+    /// A String allocated lexically inside a `region` — the arena owns it.
+    Region,
+    /// Somebody else owns the storage. The words say what the binding is, as
+    /// `movecheck::Borrow::what` words them.
+    Borrow(String),
+    /// A join arm handed this binding's value on ([`Builder::alias_out`]):
+    /// the frame holds one value under two names afterwards and stops
+    /// answering for this one. Carries the join's line.
+    Aliased(usize),
 }
 
 /// The path a reader wrote for a place read, spelled as the checker quotes it
@@ -297,7 +335,7 @@ pub enum Site {
 pub enum Val {
     Name(Name),
     /// A literal: nothing to own. A string literal is static data
-    /// ([`vyrn_frontend::own::Fate::Static`]).
+    /// ([`NotOwned::Static`]).
     Lit,
 }
 
@@ -1389,6 +1427,8 @@ impl<'a> Builder<'a> {
             fields: Vec::new(),
             loop_var: None,
             linear,
+            bound_by_let: false,
+            not_owned: None,
         });
         (self.body.names.len() - 1) as Name
     }
@@ -1399,6 +1439,13 @@ impl<'a> Builder<'a> {
         let n = self.name("@borrow", ty, false, line);
         self.body.names[n as usize].path = reader_path(e);
         n
+    }
+
+    /// The same, for a `let` a reader wrote — the bindings the memory report
+    /// is about.
+    fn keyed_let(&mut self, n: Name, binding: usize) {
+        self.keyed(n, binding);
+        self.body.names[n as usize].bound_by_let = true;
     }
 
     /// Record the plan's key for a name, and the name for the key.
@@ -1453,6 +1500,56 @@ impl<'a> Builder<'a> {
             Rhs::Read(_) => false,
             Rhs::Val(Val::Name(m)) => !self.body.names[*m as usize].borrow,
             _ => true,
+        }
+    }
+
+    /// Why a `let` binds a value this frame does not own, in the order the
+    /// REPORT needs the questions — RFC-0125 §3 M3, the report slice, and the
+    /// rule `own.rs`'s `Fate` used to state a second time.
+    ///
+    /// [`Builder::owned_binding`] beside it asks the same facts of the same
+    /// `Rhs`, the same type table and the same region depth; it asks them in
+    /// the order a JUDGMENT needs, which is ownership first. A reader needs
+    /// the type first: what does it release? Nothing, and there is nothing
+    /// more to say. Something, and then: does anybody else own this storage?
+    /// So the two orders differ and the facts do not, and neither walks the
+    /// tree a second time.
+    fn report_reason(
+        &self,
+        rhs: &Rhs,
+        ty: &Type,
+        literal: bool,
+        mutable: bool,
+        lends: bool,
+    ) -> Option<NotOwned> {
+        // What the type releases. A must-use type reaches a `let` BECAUSE it
+        // is discharged on every path — that is a compile error otherwise —
+        // so "nothing reclaims it" is the wrong sentence about one.
+        let Some(kind) = self.proto.release_kind(ty) else {
+            return Some(match self.proto.linear_kind(ty) {
+                Some(l) => NotOwned::MustUse(l),
+                None => NotOwned::NoRelease {
+                    heap: self.proto.owns_heap(ty),
+                },
+            });
+        };
+        // A literal lives in the data segment. It answers only for a binding
+        // nothing can reassign: a `mut` slot is released by its FINAL value.
+        if literal && !mutable {
+            return Some(NotOwned::Static);
+        }
+        if kind == DropKind::FreeStr && self.region_depth > 0 {
+            return Some(NotOwned::Region);
+        }
+        if lends {
+            return Some(NotOwned::Borrow("a view into its argument".into()));
+        }
+        match rhs {
+            Rhs::Read(_) => Some(NotOwned::Borrow("read out of a place that owns it".into())),
+            Rhs::Val(Val::Name(m)) if self.body.names[*m as usize].borrow => {
+                Some(NotOwned::Borrow("a borrow of somebody else's value".into()))
+            }
+            _ => None,
         }
     }
 
@@ -1815,11 +1912,14 @@ impl<'a> Builder<'a> {
                 let ty = self.ty_of(value)?;
                 if !matches!(value, Expr::Var { .. }) && is_place_read(value) {
                     let place = self.place(value, out)?;
-                    let n = self.name(name, ty, false, *line);
-                    out.push(St::Let(n, Rhs::Read(place)));
+                    let n = self.name(name, ty.clone(), false, *line);
+                    let rhs = Rhs::Read(place);
+                    self.body.names[n as usize].not_owned =
+                        self.report_reason(&rhs, &ty, false, false, self.lends(value));
+                    out.push(St::Let(n, rhs));
                     self.release_receiver(value, out, true);
                     self.scope.push((name.clone(), n));
-                    self.keyed(n, sid);
+                    self.keyed_let(n, sid);
                     return Ok(());
                 }
                 let rhs = self.rhs(value, out)?;
@@ -1832,7 +1932,9 @@ impl<'a> Builder<'a> {
                 // type says, and that screen is the one thing about the
                 // value the `Rhs` does not carry.
                 let mutable = matches!(s, Stmt::Let { mutable: true, .. });
-                let owned = !self.lends(value) && self.owned_binding(&rhs, &ty, literal, mutable);
+                let lends = self.lends(value);
+                let owned = !lends && self.owned_binding(&rhs, &ty, literal, mutable);
+                let reason = self.report_reason(&rhs, &ty, literal, mutable, lends);
                 // Not owned is not the same as borrowed: static data (`let s
                 // = ""`, a literal of literals) and a value whose type owns
                 // no heap are nobody's borrow. A lending call and a second
@@ -1847,6 +1949,7 @@ impl<'a> Builder<'a> {
                     self.arena.insert(n);
                 }
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
+                self.body.names[n as usize].not_owned = reason;
                 self.record_fields(n, value);
                 // `let t = s` on a `read` parameter: `t` is a second name for
                 // it, and the checker says so in the refusal it gives at `t`.
@@ -1870,7 +1973,7 @@ impl<'a> Builder<'a> {
                     self.release_receiver(value, out, false);
                 }
                 self.scope.push((name.clone(), n));
-                self.keyed(n, sid);
+                self.keyed_let(n, sid);
             }
             Stmt::Assign { name, value, line } => {
                 let v = self.val(value, out)?;
@@ -2680,7 +2783,7 @@ impl<'a> Builder<'a> {
     ///
     /// Round twenty-seven's question used to be asked of the plan's note, and
     /// the note answered it the wrong way round: `let o = tag(7)` in `let s =
-    /// match o { Some(v) => v, .. }` is `Leak::Aliased`, because the
+    /// match o { Some(v) => v, .. }` is an ALIAS out of the join, because the
     /// construct hands the payload out and `s` reclaims it. Read as "never
     /// owned", that made this pass bind `o` as a borrow, so the rule that
     /// asks whether the construct TOOK it rested on the decision it feeds.
@@ -3526,10 +3629,11 @@ impl<'a> Builder<'a> {
     /// name from outside is told from a payload binder: `match o { Some(v)
     /// => v }` yields a binder minted inside the arm, and the scrutinee is
     /// this frame's to take (`takes_scrutinee`).
-    fn alias_out(&mut self, v: &Val, mark: usize) {
+    fn alias_out(&mut self, v: &Val, mark: usize, line: usize) {
         let Val::Name(m) = v else { return };
         if (*m as usize) < mark {
             self.body.names[*m as usize].releases = false;
+            self.body.names[*m as usize].not_owned = Some(NotOwned::Aliased(line));
         }
     }
 
@@ -3678,7 +3782,7 @@ impl<'a> Builder<'a> {
                 let mark = self.body.names.len();
                 let mut t = Vec::new();
                 let tv = self.val(then_branch, &mut t)?;
-                self.alias_out(&tv, mark);
+                self.alias_out(&tv, mark, *line);
                 let then_borrows = self.borrows(&tv);
                 t.push(St::Store {
                     place: Place::Name(res),
@@ -3693,7 +3797,7 @@ impl<'a> Builder<'a> {
                 match else_branch {
                     Some(eb) => {
                         let ev = self.val(eb, &mut f)?;
-                        self.alias_out(&ev, mark);
+                        self.alias_out(&ev, mark, *line);
                         let else_borrows = self.borrows(&ev);
                         f.push(St::Store {
                             place: Place::Name(res),
@@ -3749,7 +3853,7 @@ impl<'a> Builder<'a> {
                     match &arm.body {
                         ArmBody::Expr(ae) => {
                             let v = self.val(ae, &mut body)?;
-                            self.alias_out(&v, outer);
+                            self.alias_out(&v, outer, *line);
                             // An arm that yields a borrow makes the result
                             // one (`movecheck::names_a_place`).
                             if self.borrows(&v) {
@@ -5061,6 +5165,217 @@ fn remember(
     );
 }
 
+/// The memory report for one frame — RFC-0125 §3 M3, the report slice.
+///
+/// `vyrn why --memory` and the editor's memory hints read this. Every word
+/// comes off the core: the type table decided how the type is released, the
+/// `let` decided whose the value is ([`NameInfo::not_owned`]), and the kernel
+/// decided what took it and where the release stands. `own.rs` kept a second
+/// walk of the tree that answered the same question off the checker's notes,
+/// and this deletes it.
+///
+/// One row per source `let`, in line order — a temporary the lowering minted
+/// names nothing a reader wrote, and is in no report.
+fn report(
+    body: &Body,
+    owner: &str,
+    missing: &[crate::kernel::Missing],
+    took: &[Option<crate::kernel::Took>],
+    released: &[Option<Vec<String>>],
+    own: &mut Ownership,
+) {
+    // The exit releases the kernel found owed, and the holes each walks
+    // around: this is "reclaimed at block exit", stated once.
+    let mut exits: HashMap<Name, Vec<String>> = HashMap::new();
+    for m in missing {
+        if m.kind == crate::kernel::MissingKind::Exit {
+            exits.entry(m.name).or_insert_with(|| plan_holes(&m.holes));
+        }
+    }
+    // The rows are built against a borrowed `own` and put in at the end: the
+    // type table is a map of every declaration in the program, and a copy of
+    // it per frame is a copy per keystroke.
+    let mut rows = std::mem::take(own.memory.entry(owner.to_string()).or_default());
+    for (i, info) in body.names.iter().enumerate() {
+        // The report is about the `let`s a reader wrote. A parameter, a `for`
+        // variable, a pattern binder and a temporary this pass minted are all
+        // keyed by a node too, and none of them is one.
+        if !info.bound_by_let {
+            continue;
+        }
+        // A generic function is lowered once per instantiation and the report
+        // is about the source `let`, so the first instance answers for it.
+        if rows
+            .iter()
+            .any(|r| r.name == info.source && r.line == info.line)
+        {
+            continue;
+        }
+        let name = info.source.clone();
+        let line = info.line;
+        let took = took.get(i).and_then(|t| t.as_ref());
+        let leaked = |text: String, reason: &'static str, heap: bool| MemoryRow {
+            name: name.clone(),
+            line,
+            text,
+            last_use: None,
+            moved_into: None,
+            bucket: Bucket::Leaked { reason, heap },
+        };
+        let row = match (&info.not_owned, took) {
+            // What the type releases, asked first, because a reader told that
+            // the type reclaims nothing needs no second sentence.
+            (Some(NotOwned::NoRelease { heap: false }), _) => leaked(
+                format!("NOT reclaimed — the type {} owns no heap", info.ty),
+                "the type owns no heap",
+                false,
+            ),
+            (Some(NotOwned::NoRelease { heap: true }), _) => leaked(
+                format!("NOT reclaimed — nothing releases the type {} yet", info.ty),
+                "the type has no release rule",
+                true,
+            ),
+            // A String the arena owns, and a literal in the data segment:
+            // both are decided at the `let` and neither turns on a take.
+            (Some(NotOwned::Region), _) => leaked(
+                "NOT reclaimed — it is inside a `region` — the arena owns it".to_string(),
+                "inside a `region`",
+                true,
+            ),
+            (Some(NotOwned::Borrow(what)), _) => leaked(
+                format!("NOT reclaimed — it is {what}"),
+                "it names somebody else's value",
+                true,
+            ),
+            (Some(NotOwned::Aliased(at)), _) => leaked(
+                format!("NOT reclaimed — another binding aliases it at line {at}"),
+                "aliased by another binding",
+                true,
+            ),
+            (Some(NotOwned::Static), _) => MemoryRow {
+                name,
+                line,
+                text: "static data — nothing reclaims it, and nothing needs to".to_string(),
+                last_use: None,
+                moved_into: None,
+                bucket: Bucket::Static,
+            },
+            // A must-use value handed to a BUILTIN is disposed of, not moved:
+            // `movecheck::sinks` answers false at a linear parameter, so the
+            // checker records no move there either, and the construct that
+            // discharges the obligation is what frees it.
+            (Some(NotOwned::MustUse(l)), Some(t)) if t.builtin => MemoryRow {
+                name,
+                line,
+                text: discharged(l),
+                last_use: None,
+                moved_into: None,
+                bucket: Bucket::Discharged,
+            },
+            // A `drop` the reader wrote reclaims it, so the automatic path
+            // must not.
+            (_, Some(t)) if t.how == crate::kernel::TookHow::Drop => MemoryRow {
+                name,
+                line,
+                text: format!("reclaimed by `drop` at line {}", t.line),
+                last_use: Some(t.line),
+                moved_into: None,
+                bucket: Bucket::Dropped,
+            },
+            // It left: whoever holds it now reclaims it, so this block must
+            // not. A `return` gets the report's own words, because "a
+            // `return`" names no taker a reader can go and look at.
+            (_, Some(t)) => {
+                let into = match t.how {
+                    crate::kernel::TookHow::Return => "the return".to_string(),
+                    _ => t.by.clone(),
+                };
+                MemoryRow {
+                    name,
+                    line,
+                    text: format!("moved at line {} into {into}", t.line),
+                    last_use: Some(t.line),
+                    moved_into: Some(into),
+                    bucket: Bucket::Moved,
+                }
+            }
+            // A must-use value nothing took: the construct that DISCHARGES it
+            // reclaims it, and a program that reaches here has been proved to
+            // discharge every one of them (RFC-0075 M1, RFC-0095 M1).
+            (Some(NotOwned::MustUse(l)), None) => MemoryRow {
+                name,
+                line,
+                text: discharged(l),
+                last_use: None,
+                moved_into: None,
+                bucket: Bucket::Discharged,
+            },
+            (None, None) => match (
+                own.proto.release_kind(&info.ty),
+                exits
+                    .get(&(i as Name))
+                    .cloned()
+                    .or_else(|| released[i].as_deref().map(plan_holes)),
+            ) {
+                (Some(kind), Some(holes)) => MemoryRow {
+                    name,
+                    line,
+                    text: reclaimed(&kind, &holes),
+                    last_use: None,
+                    moved_into: None,
+                    bucket: Bucket::Reclaimed,
+                },
+                // The frame owns it and the kernel placed no release for it.
+                // The sentence says what is known rather than guessing a
+                // reason the core does not state.
+                _ => leaked(
+                    "NOT reclaimed — nothing in this frame releases it".to_string(),
+                    "nothing releases it here",
+                    info.heap,
+                ),
+            },
+        };
+        rows.push(row);
+    }
+    rows.sort_by_key(|r| r.line);
+    own.memory.insert(owner.to_string(), rows);
+}
+
+/// "reclaimed at block exit — …", with the places a `consume` took out of the
+/// value (RFC-0093 M2), which the release walks around.
+fn reclaimed(kind: &DropKind, holes: &[String]) -> String {
+    if holes.is_empty() {
+        return format!("reclaimed at block exit — {}", kind.words());
+    }
+    let places = holes
+        .iter()
+        .map(|p| format!("`{p}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "reclaimed at block exit — {}, except {places}, which a `consume` took",
+        kind.words()
+    )
+}
+
+/// The must-use sentence, one tense over from the menu `movecheck` prints:
+/// there the reader is told what to write, here what the program already
+/// wrote, and which lowering does the freeing.
+fn discharged(l: &Linear) -> String {
+    match l {
+        Linear::Stream => "discharged, not leaked — a stream is consumed, forwarded or closed \
+             on every path, and that lowering frees it"
+            .to_string(),
+        Linear::Task => "discharged, not leaked — a task is joined, forwarded or dropped on \
+             every path, and that lowering frees it"
+            .to_string(),
+        Linear::Declared(by) => format!(
+            "discharged, not leaked — `{by}` declares `impl MustUse`, so it is handed on or \
+             dropped on every path"
+        ),
+    }
+}
+
 /// Place what one built body owes, frame by frame (RFC-0125 §3 M3).
 ///
 /// `owner` is the name the plan's tables are keyed by: a function's own name
@@ -5080,7 +5395,11 @@ fn place_frames(
         let ks = vyrn_frontend::prof::phase("placer: kernel::placement");
         let placed = crate::kernel::placement(body);
         drop(ks);
-        let missing = match placed {
+        let crate::kernel::Placement {
+            missing,
+            took,
+            released,
+        } = match placed {
             Ok(m) => m,
             Err(rs) => {
                 for r in rs {
@@ -5097,6 +5416,9 @@ fn place_frames(
                 continue;
             }
         };
+        let rp = vyrn_frontend::prof::phase("placer: report");
+        report(body, owner, &missing, &took, &released, own);
+        drop(rp);
         for m in missing {
             // A store's row is keyed by the STORE and by nothing else: the
             // place it writes into may be module state or a sub-place, which

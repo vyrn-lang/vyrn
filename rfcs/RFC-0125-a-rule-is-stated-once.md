@@ -7104,6 +7104,183 @@ surface census.
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
 
+**The memory report is the core's (2026-09-07).** `own.rs` held two of the
+ten parts the census above names for one reader: **the report** (`Leak`,
+`Fate`, `BindingNote`, 247 lines) and half of **the note walk**, which worded
+it. `vyrn why --memory` printed the words and the editor wrote them beside a
+`let`. Since the named-binding slice the core states a named binding's
+ownership itself (`Builder::owned_binding`), so the report was that rule said a
+second time, off a second pass's notes, over a different program.
+
+**The census: every row of the report, and what the core already knew.** The
+sentence is what a reader is told; the fact is what the core has to say it.
+
+| the report said | who read it | the core's own fact |
+|---|---|---|
+| `Fate::Reclaimed(kind, holes)` — "reclaimed at block exit — …, except `p`, which a `consume` took" | `why --memory` (`main.rs:1464`), the LSP (`symbols.rs:707`) | a `St::Row` the placement walk put in the body, or the kernel's own `Missing { kind: Exit }` when it did not; the holes ride on the row |
+| `Fate::Moved { line, into }` — "moved at line N into …" | both, and the LSP's inlay hint reads `into` and `last_use` | `Kernel::took` — the take the judgment made, in the words a refusal uses |
+| `Fate::Dropped { line }` — "reclaimed by `drop` at line N" | both, `last_use` | the same, `TookHow::Drop` |
+| `Fate::Static` — "static data — nothing reclaims it, and nothing needs to" | both | `literal && !mutable`, which is `owned_binding`'s second screen — `NotOwned::Static` |
+| `Fate::Discharged(Linear)` — three sentences | both | `Owned::linear_kind`, and a take by a BUILTIN, which is what `movecheck::sinks` excepts — `NotOwned::MustUse` |
+| `Leak::NoRelease { owns_heap: false }` — "the type `T` owns no heap" | `why` counts it; the LSP SKIPS it, because a hover on an `Int64` alarms | `Owned::release_kind` answers `None` and `owns_heap` false |
+| `Leak::NoRelease { owns_heap: true }` — "nothing releases the type `T` yet" | both. No corpus witness | the same, `owns_heap` true |
+| `Leak::Borrowed(what)` — "it is …" | both | `NameInfo::borrow`, and the words at the `let` that made it — `NotOwned::Borrow` |
+| `Leak::Region` — "it is inside a `region` — the arena owns it" | both | `Builder::region_depth` and `DropKind::FreeStr`, `owned_binding`'s third screen |
+| `Leak::Aliased { line }` — "another binding aliases it at line N" | both | `Builder::alias_out`, which is where the core stops answering for the name — `NotOwned::Aliased` |
+| `Leak::Captured { line }` — "a lambda or a spawn captures it at line N" | both. No corpus witness | NOTHING. The core owns a captured binding and the kernel places its release |
+| `Leak::Escaped { callee, line }` — "it escapes into the call to `f` at line N" | both. No corpus witness | nothing, and nothing needs it: a program that lends this way is refused before any report is printed |
+| `Leak::Hole { paths, line }` — "a `consume` took `p` …, so it has a hole in it" | both. No corpus witness | the kernel's own hole set, which a placed row carries |
+| `BindingNote::name` | both | `NameInfo::source` |
+| `BindingNote::line` | both | `NameInfo::line` |
+| `Leak::kind()` — the grouped reason in the summary | `why` | the row's own `Bucket::Leaked { reason }` |
+
+Three of the thirteen reasons have no corpus witness, and two of those three
+have no core fact behind them either. That is the census's own answer to
+whether the report was a statement: a rule nothing states and nothing prints is
+not one.
+
+**What is in `vyrn-frontend` now.** `MemoryRow` and `Bucket`, 43 lines: a name,
+a line, the sentence, the last use, what took it, and which counter it falls
+in. The core fills `Ownership::memory` through the placer slot `install`
+already fills, so this crate gains no dependency and states no rule. `why
+--memory` prints the rows; `symbols.rs` positions them. Both are adapters.
+
+**What the note walk still is.** `Emit`, `emit_body` and `Emit::kept` — the
+last is what `Emit::fate` became. It answers ONE question, "does this frame
+reclaim the binding at block exit, and around which holes", which is
+`droppable`, `holes` and `malloc_scrutinees` for the emitters. `early` never
+came from this walk; `analyze` folds it out of the same `lets` table. So no
+producer moved: the walk lost its second job, not its first.
+
+**Where the report is built.** `core::report`, per frame, right after
+`kernel::placement`. The kernel hands back what it already computed —
+`Missing`, plus one row per name saying what took it and one saying whether a
+release in the body reclaims it. The memo does not reach the report: it keys
+only a NON-root module (`Judgments::key` returns `None` for the root), and both
+readers filter to the root.
+
+**The cost, measured rather than argued.** `placer: report` is a `prof` phase.
+Over `vyrn check site/app/chart.vyrn`, the deepest program in the tree: **9.40
+ms across 2,172 frames**, inside a placer that spends 5.71 s. That is 0.16 per
+cent of the pass that produces it. The keystroke measurement below reads as
+noise around it, which the phase number is what says.
+
+| file | before, six runs | after, six runs |
+|---|---|---|
+| `site/app/bench.vyrn` | 87–105 ms, median 97 | 97–197 ms, median 111 |
+| `site/app/guide.vyrn` | 138–166 ms, median 145 | 142–385 ms, median 159 |
+| `site/app/chart.vyrn` | 256–306 ms, median 284 | 268–941 ms, median 347 |
+| `site/app/docs.vyrn` | 192–224 ms, median 210 | 200–491 ms, median 224 |
+
+Other tracks gated on the same machine throughout, and the spread says so: the
+after column's three worst runs are 941, 736 and 491 ms, against a best of 268
+on the same binary. Read the minima, which move by 3 to 11 ms, and read the
+phase number beside them.
+
+**One cost WAS real and is gone.** The first version copied the type table into
+every frame, to keep the borrow checker happy while writing into
+`Ownership::memory`. `Owned` is a map of every declaration in the program, so
+that was a copy of the program per frame, per keystroke. The rows are built
+against a borrowed `own` and put in at the end.
+
+**The licence: 1,916 rows before, 1,916 after.** One row per source `let`, in
+source order, over the 208 programs of `examples/`. 1,577 rows say the same
+sentence. 341 differ, in 28 classes, and every class is below. The counters
+barely move: 601 reclaimed against 598, 305 moved against 307, 42 dropped
+against 40, 21 discharged and 28 static unchanged, 919 not reclaimed against
+922.
+
+| rows | the report said | the core says | why |
+|---|---|---|---|
+| 217 | "the type `unknown` owns no heap" | the type's own name | the checker recorded no type for the `let`; the core types every name it binds |
+| 30 | "moved at line N into the return" | the same, another line | a body with several returns: the checker records the first take, the kernel the last one no rebind followed |
+| 22 | "moved at line N into `` `consume` ``" | "into `` `Invalid(..)` ``" | one take, two names for it: the checker names the keyword the reader wrote, the kernel names the callee that took it, which is the word its refusals use |
+| 14 | "the type `Age` owns no heap" | "the type `Int64` owns no heap" | an alias, a `where` type or a type parameter: the core reports the instance it lowered |
+| 9 | "moved at line N into `` `push(..)` ``" | "another binding aliases it at line N" | `fs = if p { fs.push(x) } else { fs }`: the buffer comes back on one edge, so the core stops answering for the name at the JOIN and not at the call |
+| 7 | "releasing what the `{ tag: T, … }` holds" | "… `{ tag: String, … }` …" | the same monomorphisation |
+| 6 | "another binding aliases it at line N" | "moved at line N into a value" | `match local { .. }` over a name: the core TAKES the scrutinee, so the binding moved rather than gained a second name |
+| 4 | "the type `unknown` owns no heap" | "it is read out of a place that owns it" | the checker had no type, so it could not reach the borrow question |
+| 4 | "the type `unknown` owns no heap" | "reclaimed at block exit — freeing the String buffer" | the same, one rule further: the value is this frame's and the placer already frees it |
+| 4 | "moved at line N into `` `consume` ``" / "`` `takeWords(..)` ``" | "into a value" | the core binds the taken value to a temporary first, and a temporary has no name to quote |
+| 3 | "releasing what the `Array<U>` holds" | "freeing the array buffer" | monomorphisation again, and the right way round: an `Array<Int64>` has no per-element release |
+| 2 | "the type `unknown` owns no heap" | "another binding aliases it at line N" | as above |
+| 2 | "the type `unknown` owns no heap" | "it is a view into its argument" | as above |
+| 2 | "moved at line N into the field `` `Fam.note` ``" | "into the binding `` `out` ``" | the core builds the record through a binding, so the taker it names is that binding |
+| 1 | "moved at line N into `` `flip(..)` ``" | "into the field `` `Folded.buf` ``" | the same, the other way round |
+| 1 | "reclaimed at block exit — freeing the String buffer" | "it is a borrow of somebody else's value" | `refutablelet.vyrn`'s `tag`: the core reads the binding as a borrow of the matched place, and places no release for it — the report and the emission disagreed, and the emission is the core's |
+| 1 | "the payload of a place somebody owns" | "a borrow of somebody else's value" | one borrow, two wordings; the core keeps one |
+| 1 | "moved at line N into the array literal" | "into a literal" | `Rhs::Make` is an array, a record and a map; the core does not tell the three apart |
+| 1 | "the type `unknown` owns no heap" | "reclaimed by `drop` at line N" | as above |
+| 1 | "moved at line N into `` `put(..)` ``" | "reclaimed by `drop` at line 35" | `map.vyrn`'s `m`: `put` hands the buffer back and the reader drops it, which is what the program says |
+| 1 | "the type `unknown` owns no heap" | "moved at line N into a value" | as above |
+| 1 | "the type `unknown` owns no heap" | "moved at line N into the field `` `xs` ``" | as above |
+| 1 | "it is a second name for a value it did not take" | "nothing in this frame releases it" | `fnvalstore.vyrn`'s `sink`, below |
+| 1 | "the type `unknown` owns no heap" | "nothing in this frame releases it" | `closures2.vyrn`'s `named`, below |
+| 1 | "it is a borrow of somebody else's value" | "nothing in this frame releases it" | `matchown.vyrn`'s `out`, below |
+| 2 | two rows swap places | the same two rows | the report is in SOURCE order now; the walk emitted a lambda's `let` before the binding that holds the lambda |
+
+The fixture in `memory.rs` moves two more, and both are the same finding:
+`let second = ticket` said "`ticket` NOT reclaimed — another binding aliases
+it" and "`second` NOT reclaimed — it is a second name for a value it did not
+take", which is nobody reclaiming a value the emitters release. The core says
+"`ticket` moved at line 52 into the binding `second`" and "`second` reclaimed
+at block exit". A `spawn`'s capture moves the same way: the report said "`sent`
+NOT reclaimed — a lambda or a spawn captures it at line 55" about a row the
+placer had already placed.
+
+**The finding: one sentence the core has to invent, three times in 1,916
+rows.** "NOT reclaimed — nothing in this frame releases it" is what is left
+when the core OWNS the binding and the kernel places no release for it. Three
+bindings reach it: `closures2.vyrn`'s `let named = double` and
+`fnvalstore.vyrn`'s `let sink: IntSink = double`, both a bare named function
+bound as a value, and `matchown.vyrn`'s `let mut out = ""` whose only store is
+inside an `if let` arm. Each is a leak, and the report used to borrow another
+pass's reason for it. Naming it as unexplained is what makes it a finding
+rather than a sentence.
+
+**Two bindings have no core body at all.** `jsondepth.vyrn`'s `nest__from0` is
+not lowered, so no frame reports its two `let`s, and the rows are absent. Every
+other function of the corpus is lowered, generic ones through their instances.
+
+**What `own.rs` is now.** The ten-part table above, re-measured. The report
+part shrank from 247 lines to 43; the type table's span grew by 50 because
+`holes_under` and `str_temporary` sat BETWEEN `Leak` and `Fate` and now sit
+above the report, so the type table's own content is unchanged.
+
+| part | lines, before → after | who reads it |
+|---|---|---|
+| the vocabulary — `Exit`, `Release`, `DropKind`, `Linear` | 188 → 188 | every pass, unchanged |
+| the type table — `Owned`, `self_referring`, the free `owns_heap`, and the two free helpers | 618 → 668 | unchanged; the boundary moved, not the content |
+| the report — `MemoryRow`, `Bucket` | 247 → 43 | `why --memory`, and the LSP's hints. It states no rule now: the core fills it |
+| the plan the emitters read — `ReleasePlan` | 195 → 195 | both compiled emitters, and the core writes three of its sets |
+| `Ownership` and `Memo` | 127 → 131 | every command, and the one analysis per build |
+| the fold — `analyze`, `analyze_now` | 482 → 480 | it builds everything above and runs the placer |
+| the channels — `for_var_key`, `Placer`, `Refusals` | 80 → 80 | `vyrn-lower` installs the slots |
+| `fold_revived` and `placed` | 127 → 127 | the note walk, and both emitters |
+| the placement walk — `Live`, `Place`, `place_body` | 330 → 330 | `Ownership::releases`, read by the core and by both emitters |
+| the note walk — `Emit`, `emit_body`, `kept` | 565 → 493 | `droppable`, `holes` and `malloc_scrutinees`, for the core and the emitters. It words nothing |
+
+`own.rs` 4,013 against 4,209: the code falls 224 lines and the tests rise 28.
+`core.rs` 5,587 against 5,265 and `kernel.rs` 2,550 against 2,416, which is
+where the 43 lines of report type earn their sentences.
+
+**The tests that could not stay.** Four unit tests in `own.rs` read a
+binding's REASON off `notes`. This crate installs no placer, so
+`Ownership::memory` is empty inside it and no test here may ask for a reason —
+the safety slice's rule, one milestone on. They ask `kept` instead, through a
+helper that walks the function's `let`s in source order, and they pin what the
+walk still decides: the hole set, the block-exit row, and that a discharged
+task earns no automatic row. The corpus census in the same file counts the
+bindings and the block-exit rows; the REASONS are counted by `vyrn why
+--memory` over the same corpus, which is the licence above.
+
+#### The report slice's gates (2026-09-07)
+
+The full list, in §1.4's order, one at a time, in the foreground, with `TMP`
+and `TEMP` pointed at a shallow scratch directory outside the checkout. Other
+tracks gated on the same machine throughout, which is what the wall times
+below say more than the tree does.
+
 | gate | result |
 |---|---|
 | `cargo fmt --all --check`, and the two excluded manifests | clean |
@@ -7149,6 +7326,59 @@ pointed at a shallow scratch directory outside the checkout.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+| `cargo test -p vyrn-cli --no-fail-fast`, no filter | 589 passed, 75 ignored, 1 failed — the one below, and it is red at the branch point too |
+| `kernel` `--ignored` | 1, 133 s |
+| `coretables` `--ignored` | 1, 157 s |
+| `typed` `--ignored` | 1, 324 s |
+| `effects` `--ignored` | 2, 441 s |
+| `fixtures` `--ignored` | 1, 120 s |
+| `vyrn-frontend` | 1,172 — down 35: the six tests below leave, and `own.rs`'s own pins split |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,348 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored — including the three that pin the memory hover and the inlay hint through a real server |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 10, 24 s |
+| `parity` `--ignored`, release | 41 of 41, 258 s |
+| the residue ratchet | 1, 257 s, clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 329 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks |
+| **the licence**: `vyrn why --memory` over `examples/*.vyrn` | 1,916 rows both sides, 1,577 unchanged, 341 in the 28 classes above |
+
+**The one red, and it is inherited.**
+`refusals.rs`'s `the_programs_the_passs_unit_tests_read_as_accepted` fails on
+its row "a lender forwarded through an aggregate": it records
+`` `@borrow` may not be returned `` and the compiler now says `` `x` may not be
+returned — it is a loop variable, and a return is owned ``. Checked out at
+`2ec8223c`, the branch point, the same row fails the same way. Row 17's slice
+moved that sentence and the census was not re-pinned with it. Nothing this
+slice touches states a refusal.
+
+**The six tests that could not stay in `vyrn-frontend`.** Five in
+`symbols.rs` and one in `tests/symbols_api.rs` read a binding's memory ANSWER
+through `Analysis::memory`. This crate installs no placer, so that field is
+empty inside it and the answer they read was the checker's own — the exact
+shape the safety slice named one milestone ago, in the exact place it said to
+look next. What they pinned splits in two:
+
+  - the ANSWER — "`a` moved at line 4 into `` `take(..)` ``", "`b` reclaimed
+    at block exit" — is pinned end to end by `vyrn-lsp`'s own suite, which
+    drives a server that installs the kernel, and by `vyrn why --memory`. It
+    was already pinned there, twice over, which is why the data half of the
+    unit test is deleted rather than moved;
+  - the ADAPTER — the hover line, the inlay hint's label and column, the
+    `last_use` token modifier — stays here and takes its rows as a fixture.
+    That test states no ownership rule, which is what makes it writable in a
+    crate that cannot judge one.
+
+The structural census (`refusals.rs`), the form census (`forms.rs` and
+RFC-0127 §3) and the surface census (`surface.rs` and RFC-0126 §3) all hold:
+no mention moved. The forms census counts an AST form's mentions per file, and
+the note walk lost no form — `Emit::kept` reads the same `Expr::Str` and the
+same `Stmt` kinds `Emit::fate` did.
 
 ### M4 — the runtime in Vyrn
 

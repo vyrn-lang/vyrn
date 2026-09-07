@@ -278,6 +278,30 @@ struct Kernel<'b> {
     part: std::cell::Cell<usize>,
     /// How that taker takes ([`Taker`]).
     takes: Taker,
+    /// Whether the name being consumed is leaving its SCOPE rather than
+    /// being taken: the release this pass places, and a literal whose scope
+    /// ends. Nothing took it, so the report records no taker — the statement
+    /// around the exit is a `return` and would otherwise lend it its words.
+    ending: std::cell::Cell<bool>,
+    /// Whether the taker of the statement being judged is a BUILTIN call —
+    /// which is how a must-use value is disposed of rather than moved
+    /// (`movecheck::sinks` answers false at a linear parameter, so the
+    /// checker records no move there either).
+    builtin: bool,
+    /// How that taker READS, for the memory report's wording ([`TookHow`]).
+    how: TookHow,
+    /// What took each name, for the memory report — the FIRST take on any
+    /// path, which is the one answer a per-binding report gives (RFC-0125 §3
+    /// M3, the report slice). `State::taker` says the same thing per path and
+    /// is part of no judgment either; this outlives the paths, because the
+    /// report is about the binding and not about the walk that reached it.
+    took: std::cell::RefCell<Vec<Option<Took>>>,
+    /// The names a release ALREADY IN THE BODY reclaims, and the holes it
+    /// walks around — a `St::Row`, which is a row the placement walk placed.
+    /// The judgment's own [`Missing`] rows are the releases owed and NOT
+    /// placed, so the report needs both halves to say "reclaimed at block
+    /// exit" (RFC-0125 §3 M3, the report slice).
+    released: std::cell::RefCell<Vec<Option<Vec<String>>>>,
     /// The loop being walked: the state at its entry, the states at its
     /// `break`s, and the names bound inside it (which its back edge must find
     /// consumed).
@@ -292,6 +316,30 @@ struct Kernel<'b> {
     /// read is keyed by the arm, and an arm binder is no binding of the frame
     /// that an exit row could name.
     arms: Vec<(usize, u32, Vec<Name>)>,
+}
+
+/// What took one name, for the memory report (RFC-0125 §3 M3): where, in
+/// whose words, and by which construct.
+#[derive(Clone, Debug)]
+pub struct Took {
+    pub line: usize,
+    /// The taker in the checker's words — `` `f(..)` ``, "the field `s`",
+    /// "the `for .. in consume` loop". Empty for a `return` and a `drop`,
+    /// which the report words itself.
+    pub by: String,
+    pub how: TookHow,
+    /// A builtin call took it: for a must-use value that is the DISPOSAL, not
+    /// a move (RFC-0075 M1, RFC-0095 M1).
+    pub builtin: bool,
+}
+
+/// Which construct took a name — the three the report gives its own sentence
+/// to. Everything else is worded by [`Took::by`] alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TookHow {
+    Return,
+    Drop,
+    Other,
 }
 
 /// Which taker a right-hand side is.
@@ -338,7 +386,15 @@ pub fn check(body: &Body) -> Result<(), Refusal> {
 /// body is refused for another reason — a double free, a use after release —
 /// which no placement repairs. Every such refusal of the body is there, not
 /// only the first: see [`Kernel::refusals`].
-pub fn placement(body: &Body) -> Result<Vec<Missing>, Vec<Refusal>> {
+/// What one placement run found: the releases owed and not placed, what took
+/// each name, and which names a release already in the body reclaims.
+pub struct Placement {
+    pub missing: Vec<Missing>,
+    pub took: Vec<Option<Took>>,
+    pub released: Vec<Option<Vec<String>>>,
+}
+
+pub fn placement(body: &Body) -> Result<Placement, Vec<Refusal>> {
     match run(body, Mode::Place, false) {
         Ok(m) => Ok(m),
         // Refused: walk it again, stepping over each refused statement, so
@@ -350,7 +406,7 @@ pub fn placement(body: &Body) -> Result<Vec<Missing>, Vec<Refusal>> {
     }
 }
 
-fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refusal>> {
+fn run(body: &Body, mode: Mode, recover: bool) -> Result<Placement, Vec<Refusal>> {
     let mut k = Kernel {
         body,
         mode,
@@ -364,6 +420,11 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refus
         made: Vec::new(),
         part: std::cell::Cell::new(0),
         takes: Taker::Stores,
+        how: TookHow::Other,
+        ending: std::cell::Cell::new(false),
+        builtin: false,
+        took: std::cell::RefCell::new(vec![None; body.names.len()]),
+        released: std::cell::RefCell::new(vec![None; body.names.len()]),
     };
     let mut st = State {
         own: vec![Own::Gone; body.names.len()],
@@ -394,7 +455,11 @@ fn run(body: &Body, mode: Mode, recover: bool) -> Result<Vec<Missing>, Vec<Refus
         k.also(ended);
     }
     match k.refusals.is_empty() {
-        true => Ok(k.missing),
+        true => Ok(Placement {
+            missing: k.missing,
+            took: k.took.into_inner(),
+            released: k.released.into_inner(),
+        }),
         false => Err(k.refusals),
     }
 }
@@ -449,7 +514,26 @@ impl<'b> Kernel<'b> {
             0 => self.takes,
             _ => Taker::Stores,
         };
-        st.taker[n as usize] = Some((self.here, by, takes));
+        st.taker[n as usize] = Some((self.here, by.clone(), takes));
+        // The report's copy, flattened over the paths: a binding gets ONE
+        // sentence. A statement with no taker in it — a release this pass
+        // placed, a scope end — takes nothing, and a rebind clears the row
+        // again, so what is left is the last take the binding was not given a
+        // value back after.
+        if !by.is_empty() && !self.ending.get() {
+            self.took.borrow_mut()[n as usize] = Some(Took {
+                line: self.here,
+                by,
+                how: self.how,
+                builtin: self.builtin,
+            });
+        }
+    }
+
+    /// The name is bound, or bound again: whatever took it before, it holds a
+    /// value of its own now, and the report says so.
+    fn rebound(&self, n: Name) {
+        self.took.borrow_mut()[n as usize] = None;
     }
 
     /// The name is out of scope: like [`Kernel::gone`], but nothing took it.
@@ -1056,6 +1140,19 @@ impl<'b> Kernel<'b> {
         exit: Exit,
         site: usize,
     ) -> Result<(), Refusal> {
+        self.ending.set(true);
+        let out = self.scope_end_inner(st, names, exit, site);
+        self.ending.set(false);
+        out
+    }
+
+    fn scope_end_inner(
+        &mut self,
+        st: &mut State,
+        names: &[Name],
+        exit: Exit,
+        site: usize,
+    ) -> Result<(), Refusal> {
         for n in names {
             if self.owned(*n) && st.own[*n as usize] == Own::Static {
                 self.gone(st, *n);
@@ -1633,14 +1730,43 @@ impl<'b> Kernel<'b> {
     fn stmt(&mut self, s: &St, st: &mut State, bound_here: &mut Vec<Name>) -> Result<(), Refusal> {
         // The line and the taker every consumption in this statement is
         // recorded with (RFC-0125 M3, third slice).
+        self.how = match s {
+            St::Return { .. } => TookHow::Return,
+            St::Drop(_, _, line) if *line > 0 => TookHow::Drop,
+            _ => TookHow::Other,
+        };
+        self.builtin = matches!(
+            s,
+            St::Let(
+                _,
+                Rhs::Call {
+                    declared: false,
+                    ctor: false,
+                    ..
+                }
+            ) | St::Do(
+                Rhs::Call {
+                    declared: false,
+                    ctor: false,
+                    ..
+                },
+                _
+            )
+        );
         match s {
             St::Let(n, rhs) => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = self.by_of(rhs, Some(*n));
                 self.takes = taker_of(rhs);
                 self.made = self.body.names[*n as usize].fields.clone();
+                self.rebound(*n);
+                self.released.borrow_mut()[*n as usize] = None;
             }
             St::Store { place, line, .. } => {
+                if let Place::Name(n) = place {
+                    self.rebound(*n);
+                    self.released.borrow_mut()[*n as usize] = None;
+                }
                 self.here = *line;
                 self.takes = Taker::Stores;
                 self.by = match place {
@@ -1683,6 +1809,14 @@ impl<'b> Kernel<'b> {
             St::Drop(n, _, line) if *line > 0 => {
                 self.here = *line;
                 self.by = "`drop`".to_string();
+            }
+            // A row the placement walk placed: this is what "reclaimed at
+            // block exit" means, and the row carries the holes it walks
+            // around (RFC-0093 M2).
+            St::Row { name: n, holes, .. } => {
+                self.here = self.body.names[*n as usize].line;
+                self.by = String::new();
+                self.released.borrow_mut()[*n as usize] = Some(holes.clone());
             }
             St::Drop(n, ..) | St::Row { name: n, .. } => {
                 self.here = self.body.names[*n as usize].line;

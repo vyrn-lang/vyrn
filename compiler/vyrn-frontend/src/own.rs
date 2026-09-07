@@ -380,7 +380,7 @@ impl Owned {
     ///
     /// Not the same question as [`Owned::release_kind`] answering `Some`, and
     /// the gap between the two is every row RFC-0092 M3 adds: a record owns two
-    /// Strings and has no release rule. [`Leak::NoRelease`] needs both answers to
+    /// Strings and has no release rule. The report needs both answers to
     /// word itself.
     pub fn owns_heap(&self, ty: &Type) -> bool {
         owns_heap(ty, &self.types)
@@ -851,98 +851,6 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
     go(ty, types, &mut Vec::new())
 }
 
-/// Why a binding is **not** reclaimed at block exit (RFC-0087 U1).
-///
-/// Three of the rows come straight from [`crate::movecheck`], which decided them
-/// while it was enforcing rules 1 to 3. The other two are this file's, because
-/// neither is about the value: an arena owns what is allocated inside it, and a
-/// literal was never allocated.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Leak {
-    /// The type releases nothing. Carries the type, or `unknown`, and whether
-    /// that type owns heap.
-    ///
-    /// One `None` from `release_kind` mints two different facts, and calling
-    /// them one thing made the printer contradict itself: `vyrn why --memory`
-    /// said "the type `Doc` owns no heap" about a record holding two Strings,
-    /// one line under "the caller owns the result". A scalar has nothing to
-    /// reclaim and is not a leak; a type that owns heap and has no release row
-    /// is the leak this arc is closing (RFC-0092 M0).
-    NoRelease { ty: String, owns_heap: bool },
-    /// The binding names storage somebody else owns (rule 2). Carries what it
-    /// is, in words.
-    Borrowed(&'static str),
-    /// Lexically inside a `region` — the arena owns it.
-    Region,
-    /// A lambda or a `spawn` holds it, and either can outlive this block.
-    Captured { line: usize },
-    /// A second name reads it without taking it, so neither name is the owner.
-    Aliased { line: usize },
-    /// It reached a call that may retain it.
-    Escaped { callee: String, line: usize },
-    /// A `consume` took one of its places (RFC-0093 M1) and the walk may not be
-    /// told to skip it, so releasing the binding would free what the take gave
-    /// away. Carries the places taken.
-    ///
-    /// RFC-0093 M2 releases the rest of the value wherever the walk CAN skip
-    /// them, which is [`Fate::Reclaimed`]'s second field. Three cases stay here,
-    /// and each of them is a place the walk cannot be told about: a declared
-    /// `release`, which is a user function; a path that is not a chain of record
-    /// fields, because an enum's live variant is a runtime tag; and a hole a
-    /// later write filled, because the store that filled it already released
-    /// what the take gave away.
-    Hole { paths: Vec<String>, line: usize },
-}
-
-impl Leak {
-    /// The reason with its lines and names removed, so a corpus of them groups.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Leak::NoRelease {
-                owns_heap: false, ..
-            } => "the type owns no heap",
-            Leak::NoRelease {
-                owns_heap: true, ..
-            } => "the type has no release rule",
-            Leak::Borrowed(_) => "it names somebody else's value",
-            Leak::Region => "inside a `region`",
-            Leak::Captured { .. } => "captured by a lambda or a spawn",
-            Leak::Aliased { .. } => "aliased by another binding",
-            Leak::Escaped { .. } => "escaped into a call",
-            Leak::Hole { .. } => "a `consume` took one of its places",
-        }
-    }
-}
-
-impl std::fmt::Display for Leak {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Leak::NoRelease {
-                ty,
-                owns_heap: false,
-            } => write!(f, "the type {ty} owns no heap"),
-            Leak::NoRelease {
-                ty,
-                owns_heap: true,
-            } => write!(f, "nothing releases the type {ty} yet"),
-            Leak::Borrowed(what) => write!(f, "it is {what}"),
-            Leak::Region => write!(f, "it is inside a `region` — the arena owns it"),
-            Leak::Captured { line } => {
-                write!(f, "a lambda or a spawn captures it at line {line}")
-            }
-            Leak::Aliased { line } => write!(f, "another binding aliases it at line {line}"),
-            Leak::Escaped { callee, line } => {
-                write!(f, "it escapes into the call to `{callee}` at line {line}")
-            }
-            Leak::Hole { paths, line } => write!(
-                f,
-                "a `consume` took {} at line {line}, so it has a hole in it",
-                places(paths)
-            ),
-        }
-    }
-}
-
 /// The holes that live INSIDE the field `name`, with the field's own hop
 /// removed — what a release walk carries one level down (RFC-0093 M2).
 ///
@@ -993,109 +901,47 @@ pub fn str_temporary(e: &Expr) -> bool {
     }
 }
 
-/// The places a hole names, in the words both surfaces print.
-fn places(paths: &[String]) -> String {
-    paths
-        .iter()
-        .map(|p| format!("`{p}`"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// What happens to a `let` binding's value at the end of its block.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Fate {
-    /// The engines release it here, this way — MINUS the places a `consume`
-    /// took out of it (RFC-0093 M2), which are relative to the binding
-    /// (`title`, `head.err`) and empty for every binding nothing took from.
-    ///
-    /// The set rides with the verdict rather than with the [`DropKind`], because
-    /// a kind is a property of the TYPE and a hole is a property of one binding:
-    /// two records of one type, one drained and one whole, release differently.
-    Reclaimed(DropKind, Vec<String>),
-    /// It left: a `return` carried it out, or a store took it. Whoever holds it
-    /// now reclaims it, so this block must not.
-    Moved { line: usize, into: String },
-    /// `drop name` reclaims it, so the automatic path must not.
-    Dropped { line: usize },
-    /// It is static data in the module's data segment. Nothing reclaims it,
-    /// and nothing needs to (census §1).
-    Static,
-    /// It carries a must-use obligation, and the construct that DISCHARGES it
-    /// reclaims it (`rfcs/census-regions.md`, defect 2). Carries the row.
-    ///
-    /// [`Owned::release_kind`] answers `None` for a `Stream<T>` and a `Task<T>`
-    /// on purpose — an automatic block-exit row would free each a second time —
-    /// and this analysis read that `None` as "nothing reclaims it". The report
-    /// then said "nothing releases the type `Task<Int64>` yet" about a task
-    /// `examples/concurrency.vyrn` joins on the next line, which is 21 of the
-    /// bindings the corpus census flagged.
-    ///
-    /// The claim is CATEGORICAL rather than per binding. A must-use value that
-    /// is not discharged on every path is a compile error (RFC-0075 M1 for a
-    /// stream, RFC-0095 M1 for a task), so a program that reaches this analysis
-    /// has already been proved to discharge every one of them.
-    Discharged(Linear),
-    /// Nothing reclaims it.
-    Leaked(Leak),
-}
-
-impl Fate {
-    /// What happens to the value, in one line.
-    ///
-    /// The wording `vyrn why --memory` has printed since Phase 1, lifted here so
-    /// the editor says the same thing (RFC-0087 U1). Nothing re-derives it.
-    pub fn words(&self) -> String {
-        match self {
-            Fate::Reclaimed(kind, holes) if holes.is_empty() => {
-                format!("reclaimed at block exit — {}", kind.words())
-            }
-            Fate::Reclaimed(kind, holes) => format!(
-                "reclaimed at block exit — {}, except {}, which a `consume` took",
-                kind.words(),
-                places(holes)
-            ),
-            Fate::Moved { line, into } => format!("moved at line {line} into {into}"),
-            Fate::Dropped { line } => format!("reclaimed by `drop` at line {line}"),
-            Fate::Static => "static data — nothing reclaims it, and nothing needs to".into(),
-            // The three menus are the ones `movecheck` prints, one tense over.
-            // There the reader is told what to write; here the reader is told
-            // what the program already wrote, so the sentence names the same
-            // three discharges and says which lowering does the freeing.
-            Fate::Discharged(Linear::Stream) => "discharged, not leaked — a stream is consumed, \
-                 forwarded or closed on every path, and that lowering frees it"
-                .into(),
-            Fate::Discharged(Linear::Task) => "discharged, not leaked — a task is joined, \
-                 forwarded or dropped on every path, and that lowering frees it"
-                .into(),
-            Fate::Discharged(Linear::Declared(by)) => format!(
-                "discharged, not leaked — `{by}` declares `impl MustUse`, so it is handed on \
-                 or dropped on every path"
-            ),
-            Fate::Leaked(reason) => format!("NOT reclaimed — {reason}"),
-        }
-    }
-
-    /// The line where the value stops being live, when there is one.
-    ///
-    /// A move and a `drop` are points in the source; block-exit reclamation, a
-    /// literal and a leak are not. This is what the editor marks as the last use
-    /// (RFC-0087 U1) and what it writes an inlay hint beside.
-    pub fn last_use(&self) -> Option<usize> {
-        match self {
-            Fate::Moved { line, .. } | Fate::Dropped { line } => Some(*line),
-            _ => None,
-        }
-    }
-}
-
-/// One `let` binding and what happens to its value — the report behind
-/// `vyrn why --memory`.
+/// One `let` binding and what happens to its value — the row behind `vyrn why
+/// --memory` and the editor's memory hints (RFC-0087 U1).
+///
+/// The prose is already rendered, because the pass that DECIDED a binding's
+/// ownership is the pass that words it: the core, through the placer slot
+/// (`vyrn_lower::core`, RFC-0125 §3 M3, the report slice). This crate states
+/// no rule about a named binding's fate any more, so there is no second
+/// opinion left to disagree with the first.
 #[derive(Clone, Debug)]
-pub struct BindingNote {
+pub struct MemoryRow {
     pub name: String,
+    /// 1-based line of the `let`.
     pub line: usize,
-    pub fate: Fate,
+    /// What happens to the value, in one line.
+    pub text: String,
+    /// The line where the value stops being live, when there is one: a move
+    /// or a `drop`. `None` for a binding that lives to block exit.
+    pub last_use: Option<usize>,
+    /// What took it, for the inlay hint. `Some` exactly when the value moved.
+    pub moved_into: Option<String>,
+    /// Which of the report's six counters this row falls in.
+    pub bucket: Bucket,
+}
+
+/// The counters `vyrn why --memory` sums, and the grouping its leak table
+/// prints.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bucket {
+    Reclaimed,
+    Moved,
+    Dropped,
+    Static,
+    Discharged,
+    /// Not reclaimed. `reason` is the row with its lines and names removed,
+    /// so a corpus of them groups; `heap` says whether the type owns heap at
+    /// all, because a scalar has nothing to reclaim and the editor writes no
+    /// hint about one.
+    Leaked {
+        reason: &'static str,
+        heap: bool,
+    },
 }
 
 /// RFC-0114 §26's artifact, as landed: every per-NODE release decision, one
@@ -1320,11 +1166,15 @@ pub struct Ownership {
     /// TYPE and every construction site of it would have to carry an empty set,
     /// including the ones that answer for a store or for an explicit `drop`.
     pub holes: HashMap<String, HashMap<usize, Vec<String>>>,
-    /// Per function: every `let` in source order, and what happens to its value
-    /// — the same decisions `droppable` carries, plus the reason for each one
-    /// this analysis did NOT take. Recorded by the walker that decides, so the
-    /// report and the emission cannot disagree (RFC-0087 U1).
-    pub notes: HashMap<String, Vec<BindingNote>>,
+    /// Per function: every `let` in source order, and what happens to its
+    /// value, in the words `vyrn why --memory` and the editor print
+    /// (RFC-0087 U1).
+    ///
+    /// Written by the CORE, through the placer slot: it is the pass that
+    /// states a named binding's ownership, so it is the pass that words the
+    /// report (RFC-0125 §3 M3, the report slice). Empty where no placer is
+    /// installed (`VYRN_NO_PLACER=1`) and for a body the core does not lower.
+    pub memory: HashMap<String, Vec<MemoryRow>>,
     /// The `Owned` table this analysis decided with. Handed out so a backend
     /// lowering an explicit `drop x` asks the SAME question the automatic path
     /// asked, instead of keeping a second copy of the answer.
@@ -1448,7 +1298,6 @@ fn analyze_now(program: &Program) -> Ownership {
 
     let mut droppable = HashMap::new();
     let mut holes = HashMap::new();
-    let mut notes = HashMap::new();
     let mut releases = HashMap::new();
     // Variant constructor names, the builtins included — see `Emit::constructs`.
     let mut constructs: std::collections::HashSet<String> = ["Some", "None", "Ok", "Err"]
@@ -1496,8 +1345,7 @@ fn analyze_now(program: &Program) -> Ownership {
         }
         releases.insert(name.clone(), place_body(body, &r.droppable, &owned_params));
         droppable.insert(name.clone(), r.droppable);
-        holes.insert(name.clone(), r.holes);
-        notes.insert(name, r.notes);
+        holes.insert(name, r.holes);
     };
     for f in &program.functions {
         emit(f.name.clone(), &f.params, &f.body);
@@ -1881,7 +1729,7 @@ fn analyze_now(program: &Program) -> Ownership {
         droppable,
         early,
         holes,
-        notes,
+        memory: HashMap::new(),
         proto,
         releases,
         lending: facts.lending.clone(),
@@ -2443,7 +2291,6 @@ struct FnResult {
     droppable: HashMap<usize, DropKind>,
     malloc_scrutinees: std::collections::HashSet<usize>,
     holes: HashMap<usize, Vec<String>>,
-    notes: Vec<BindingNote>,
 }
 
 /// One body's drop sites, in source order.
@@ -2460,7 +2307,6 @@ fn emit_body(
         constructs,
         revived,
         holes: HashMap::new(),
-        notes: Vec::new(),
         region_depth: 0,
         lets,
         proto,
@@ -2470,7 +2316,6 @@ fn emit_body(
         droppable: e.droppable,
         malloc_scrutinees: e.malloc_scrutinees,
         holes: e.holes,
-        notes: e.notes,
     }
 }
 
@@ -2500,8 +2345,6 @@ struct Emit<'a> {
     revived: &'a std::collections::HashSet<usize>,
     /// The places a take took out of a droppable `let` (RFC-0093 M2).
     holes: HashMap<usize, Vec<String>>,
-    /// One row per `let`, in source order, with what happens to its value.
-    notes: Vec<BindingNote>,
     region_depth: usize,
     /// What every `let` in the program still owns where its block ends.
     lets: &'a HashMap<usize, LetOwnership>,
@@ -2553,15 +2396,15 @@ impl Emit<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
-            Stmt::Let {
-                name, value, line, ..
-            } => {
+            Stmt::Let { value, line, .. } => {
                 self.exprs(value);
-                let fate = self.fate(id(s), matches!(s, Stmt::Let { mutable: true, .. }), value);
-                if let Fate::Reclaimed(kind, holes) = &fate {
-                    self.droppable.insert(id(s), kind.clone());
+                let _ = line;
+                if let Some((kind, holes)) =
+                    self.kept(id(s), matches!(s, Stmt::Let { mutable: true, .. }), value)
+                {
+                    self.droppable.insert(id(s), kind);
                     if !holes.is_empty() {
-                        self.holes.insert(id(s), holes.clone());
+                        self.holes.insert(id(s), holes);
                     }
                     // Round twenty-seven: a region-lexical `let` holding a
                     // malloc-side value frees for real — the emission's region
@@ -2570,11 +2413,6 @@ impl Emit<'_> {
                         self.malloc_scrutinees.insert(id(s));
                     }
                 }
-                self.notes.push(BindingNote {
-                    name: name.clone(),
-                    line: *line,
-                    fate,
-                });
             }
             Stmt::If {
                 cond,
@@ -2607,19 +2445,17 @@ impl Emit<'_> {
             } => {
                 self.exprs(scrutinee);
                 // A hole is a path into a RECORD, and a scrutinee is a sum — so
-                // `skippable` answers false at the first hop and `fate` says
-                // `Leaked` before this can see one. The guard says so, which is
+                // `skippable` answers false at the first hop and `kept` answers
+                // `None` before this can see one. The guard says so, which is
                 // what `ForIn` beside it already said; the branch this replaces
                 // wrote the hole set into a map neither backend reads, and a
                 // corpus-wide probe plus a `consume d.title` written INSIDE an
                 // arm confirmed it could not fire.
-                if let Fate::Reclaimed(kind, holes) = self.fate(id(s), false, scrutinee) {
+                if let Some((kind, holes)) = self.kept(id(s), false, scrutinee) {
                     if holes.is_empty() {
                         self.droppable.insert(id(s), kind);
                     }
                 }
-                // No `BindingNote`: `vyrn why --memory` lists bindings, and this
-                // is a temporary with no name to print.
                 let _ = line;
                 self.block(then_block);
                 if let Some(eb) = else_block {
@@ -2651,9 +2487,9 @@ impl Emit<'_> {
                 if !streaming {
                     // A hole is a path relative to a RECORD, and nothing a `for`
                     // walks is one — `skippable` therefore answers false and
-                    // `fate` says `Leaked` before this ever sees a hole. The
+                    // `kept` answers `None` before this ever sees a hole. The
                     // guard says so rather than depending on it.
-                    if let Fate::Reclaimed(kind, holes) = self.fate(id(s), false, iter) {
+                    if let Some((kind, holes)) = self.kept(id(s), false, iter) {
                         if holes.is_empty() {
                             self.droppable.insert(id(s), kind);
                         }
@@ -2663,7 +2499,7 @@ impl Emit<'_> {
                         // downgraded every such row to a buffer-only free and
                         // was REFUSED: fourteen parity divergences,
                         // `aliascontext` trapping outright on wasm, because a
-                        // `Fate::Moved` here did not always mean "an element
+                        // a moved row here did not always mean "an element
                         // left" — a LENT or producer-owned snapshot has a
                         // buffer that is somebody else's, and freeing it is a
                         // use-after-free. The row says WHICH take marked it
@@ -2686,8 +2522,6 @@ impl Emit<'_> {
                         }
                     }
                 }
-                // No `BindingNote`: the snapshot is a temporary with no name to
-                // print, exactly as an `if let`'s scrutinee is.
                 self.block(body)
             }
             Stmt::Region { body, .. } => {
@@ -2746,15 +2580,15 @@ impl Emit<'_> {
                 // A hole is a path into a RECORD and a scrutinee is not one, so
                 // this says what `ForIn` says: a kind with holes is not this
                 // row's.
-                let f = self.fate(key, false, scrutinee);
+                let f = self.kept(key, false, scrutinee);
                 if std::env::var("VYRN_SCRUT_DUMP").is_ok() {
                     eprintln!(
-                        "scrut: ty={:?} from={:?} fate={f:?}",
+                        "scrut: ty={:?} from={:?} kept={f:?}",
                         self.lets.get(&key).and_then(|r| r.ty.as_ref()),
                         self.lets.get(&key).and_then(|r| r.from_call.as_deref())
                     );
                 }
-                if let Fate::Reclaimed(kind, holes) = f {
+                if let Some((kind, holes)) = f {
                     if holes.is_empty() {
                         self.droppable.insert(key, kind);
                         if self.region_depth > 0 {
@@ -2868,47 +2702,26 @@ impl Emit<'_> {
         })
     }
 
-    /// What happens to one `let` binding's value — RFC-0089 rule 4, in full.
+    /// Whether this frame RECLAIMS one `let` binding's value where its block
+    /// ends, and around which holes — the only half of RFC-0089 rule 4 the
+    /// emitters read off this file (`droppable`, `holes`).
     ///
-    /// The order of the questions is the order a reader needs them. What does
-    /// the TYPE release? Nothing, and there is nothing more to say. Something,
-    /// and then: does anything else own this storage?
+    /// The other half — WHY a binding is not reclaimed, in a sentence — is the
+    /// core's (`vyrn_lower::core::NameInfo::not_owned`, RFC-0125 §3 M3, the
+    /// report slice). This walk used to state both, and the reason half was a
+    /// second statement of what the core decides at the same `let`.
     ///
     /// `key` is the node address the row is keyed by — a `Stmt`'s for a `let`
     /// and for the two statements that walk a temporary, an `Expr`'s for a
     /// `match`. `mutable` is the one thing the STATEMENT still answers: a `let
     /// mut` may end the block holding something other than its initializer.
-    fn fate(&self, key: usize, mutable: bool, value: &Expr) -> Fate {
+    fn kept(&self, key: usize, mutable: bool, value: &Expr) -> Option<(DropKind, Vec<String>)> {
         let row = self.lets.get(&key);
         let bty = row.and_then(|r| r.ty.as_ref());
-        let Some(kind) = bty.and_then(|t| self.proto.release_kind(t)) else {
-            // A must-use type reaches here BECAUSE it is discharged elsewhere,
-            // so "nothing reclaims it" is the wrong sentence about it — see
-            // [`Fate::Discharged`]. A `drop` and a move still answer for
-            // themselves: each names a line, and a line the reader can go to is
-            // worth more than the categorical sentence.
-            let Some(linear) = bty.and_then(|t| self.proto.linear_kind(t)) else {
-                return Fate::Leaked(Leak::NoRelease {
-                    ty: match bty {
-                        Some(t) => t.to_string(),
-                        None => "unknown".into(),
-                    },
-                    owns_heap: bty.is_some_and(|t| self.proto.owns_heap(t)),
-                });
-            };
-            return match row.and_then(|r| r.gone.as_ref()) {
-                Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
-                Some(Gone::Returned { line }) => Fate::Moved {
-                    line: *line,
-                    into: "the return".into(),
-                },
-                Some(Gone::Moved { line, by }) => Fate::Moved {
-                    line: *line,
-                    into: by.clone(),
-                },
-                _ => Fate::Discharged(linear),
-            };
-        };
+        // A type with no release rule releases nothing here, whatever else is
+        // true of the binding: a scalar, a must-use value the construct that
+        // discharges it frees, a type RFC-0092 M0 has not reached yet.
+        let kind = bty.and_then(|t| self.proto.release_kind(t))?;
         // A string literal lives in the data segment. Nothing allocated it and
         // nothing reclaims it (census §1).
         //
@@ -2916,48 +2729,33 @@ impl Emit<'_> {
         // change.** `let mut acc: String = ""` is the opening line of every
         // accumulator in this language, and the value the block exits with is
         // whatever the last `acc = acc + …` left — a heap buffer, which this
-        // rule used to read as the literal it started as. Measured on the direct
-        // backend before the `mut` clause below, a local accumulator grown once
-        // a call: 851,968 bytes after 500 calls and 3,211,264 after 2,000
-        // (RFC-0096 M3, defect 3).
+        // rule used to read as the literal it started as. Measured on the
+        // direct backend before the `mut` clause below, a local accumulator
+        // grown once a call: 851,968 bytes after 500 calls and 3,211,264 after
+        // 2,000 (RFC-0096 M3, defect 3).
         //
         // A release of a slot that still holds the literal is not a second
         // defect: `@__vyrn_str_free` reads a `cap` of 0 as "never `realloc`,
         // never free" and returns, and both compiling backends emit a literal
-        // that way. So the loop that never runs, and the branch that assigns
-        // another literal, both free nothing.
-        //
-        // This waited on the `region` defect beside it, because releasing a
-        // reassigned accumulator is what made a `String` returned out of a
-        // `region` reachable — the caller freed a pointer 8 bytes into an arena
-        // block and the native heap corrupted. The arena hands out a
-        // `__vyrn_malloc` block now (`REGION_RUNTIME`), and a `String` inside a
-        // region still answers `Leak::Region` one rule down.
+        // that way.
         if matches!(value, Expr::Str(_)) && !mutable {
-            return Fate::Static;
+            return None;
         }
         // A dynamic string inside a region is the arena's, and the two
         // mechanisms partition every allocation — nothing is freed twice.
         if kind == DropKind::FreeStr && self.region_depth > 0 {
-            return Fate::Leaked(Leak::Region);
+            return None;
         }
         // A `mut` binding is released by its slot's FINAL value in all three
         // engines (Phase 8b), so a declared `release` — ordinary Vyrn that may
         // print — runs on the same value everywhere and a `mut` container
         // reclaims. Nothing refuses a binding for being `mut` any more.
         match row.and_then(|r| r.gone.as_ref()) {
-            None => Fate::Reclaimed(kind, Vec::new()),
-            Some(Gone::Borrowed(what)) => Fate::Leaked(Leak::Borrowed(what)),
-            Some(Gone::Aliased { line }) => Fate::Leaked(Leak::Aliased { line: *line }),
-            Some(Gone::Lent { line, to }) => Fate::Leaked(Leak::Escaped {
-                callee: to.clone(),
-                line: *line,
-            }),
+            None => Some((kind, Vec::new())),
             // Round fifty-seven: a lambda's capture is its own deep snapshot
             // (§25 round three), so the binding's value is still this frame's.
             // A spawn's capture crosses to a task and stays leaked.
-            Some(Gone::Captured { spawned: false, .. }) => Fate::Reclaimed(kind, Vec::new()),
-            Some(Gone::Captured { line, .. }) => Fate::Leaked(Leak::Captured { line: *line }),
+            Some(Gone::Captured { spawned: false, .. }) => Some((kind, Vec::new())),
             // RFC-0093 M2. The walk is the type and the type does not know that
             // a place left, so the hole set travels with the verdict and the
             // walk skips exactly these places. Where it cannot be told — a
@@ -2965,41 +2763,19 @@ impl Emit<'_> {
             // hole a later write filled — the whole binding leaks, which is what
             // M1 shipped and the direction this analysis fails in.
             Some(Gone::Hole {
-                line,
-                paths,
-                skippable,
-            }) => {
-                if *skippable
-                    && matches!(kind, DropKind::Deep(_))
-                    && bty.is_some_and(|t| self.skippable(t, paths))
-                {
-                    Fate::Reclaimed(kind, paths.clone())
-                } else {
-                    Fate::Leaked(Leak::Hole {
-                        paths: paths.clone(),
-                        line: *line,
-                    })
-                }
+                paths, skippable, ..
+            }) => (*skippable
+                && matches!(kind, DropKind::Deep(_))
+                && bty.is_some_and(|t| self.skippable(t, paths)))
+            .then(|| (kind, paths.clone())),
+            // RFC-0114 untake: the take is real, but the binding was provably
+            // re-established afterwards, so what the block exits with is this
+            // frame's — the same per-slot final value all three engines already
+            // release for a reassigned `mut` binding.
+            Some(Gone::Dropped { .. } | Gone::Moved { .. }) if self.revived.contains(&key) => {
+                Some((kind, Vec::new()))
             }
-            // RFC-0114 untake: the take is real, but the binding was
-            // provably re-established afterwards, so what the block exits
-            // with is this frame's — the same per-slot final value all three
-            // engines already release for a reassigned `mut` binding.
-            Some(Gone::Dropped { .. }) if self.revived.contains(&key) => {
-                Fate::Reclaimed(kind, Vec::new())
-            }
-            Some(Gone::Moved { .. }) if self.revived.contains(&key) => {
-                Fate::Reclaimed(kind, Vec::new())
-            }
-            Some(Gone::Dropped { line }) => Fate::Dropped { line: *line },
-            Some(Gone::Returned { line }) => Fate::Moved {
-                line: *line,
-                into: "the return".into(),
-            },
-            Some(Gone::Moved { line, by }) => Fate::Moved {
-                line: *line,
-                into: by.clone(),
-            },
+            _ => None,
         }
     }
 }
@@ -3049,13 +2825,9 @@ pub(crate) mod tests {
                        }\n\
                    }\n\
                    fn main() -> Int64 { return 0 }";
-        let fs = fates(src, "go");
+        let fs = kepts(src, "go");
         assert_eq!(fs.len(), 1, "one binding: arg");
-        assert!(
-            matches!(fs[0], Fate::Reclaimed(..)),
-            "`arg` is reclaimed, not {:?}",
-            fs[0]
-        );
+        assert!(fs[0].is_some(), "`arg` is reclaimed, not {:?}", fs[0]);
     }
 
     /// Round fifty-six: the codec forms build fresh values, so a binding read
@@ -3073,13 +2845,9 @@ pub(crate) mod tests {
                        }\n\
                    }\n\
                    fn main() -> Int64 { return 0 }";
-        let fs = fates(src, "go");
+        let fs = kepts(src, "go");
         assert_eq!(fs.len(), 1, "one binding: arg");
-        assert!(
-            matches!(fs[0], Fate::Reclaimed(..)),
-            "`arg` is reclaimed, not {:?}",
-            fs[0]
-        );
+        assert!(fs[0].is_some(), "`arg` is reclaimed, not {:?}", fs[0]);
     }
 
     /// Round fifty-seven: `Some(x)` types as `Option<type_of(x)>`, so the
@@ -3092,13 +2860,9 @@ pub(crate) mod tests {
                        let o = Some(mk())\n\
                        return 0\n\
                    }";
-        let fs = fates(src, "main");
+        let fs = kepts(src, "main");
         assert_eq!(fs.len(), 1);
-        assert!(
-            matches!(fs[0], Fate::Reclaimed(..)),
-            "`o` is reclaimed, not {:?}",
-            fs[0]
-        );
+        assert!(fs[0].is_some(), "`o` is reclaimed, not {:?}", fs[0]);
     }
 
     /// Round fifty-seven: a lambda's capture is a deep snapshot (both
@@ -3117,10 +2881,10 @@ pub(crate) mod tests {
                        keep(n -> print(\"\\{tag}:\\{n}\"))\n\
                        return 0\n\
                    }";
-        let fs = fates(src, "main");
+        let fs = kepts(src, "main");
         assert_eq!(fs.len(), 1, "one binding: tag");
         assert!(
-            matches!(fs[0], Fate::Reclaimed(..)),
+            fs[0].is_some(),
             "a lambda-captured binding reclaims, not {:?}",
             fs[0]
         );
@@ -3413,29 +3177,79 @@ pub(crate) mod tests {
 
     // ---- RFC-0093 M2: a take leaves a hole, and the walk skips it --------
 
-    /// The fate of every binding in `which`, in source order.
-    fn fates(src: &str, which: &str) -> Vec<Fate> {
-        let (o, _) = analyze_src(src);
-        o.notes
-            .get(which)
-            .map(|ns| ns.iter().map(|n| n.fate.clone()).collect())
-            .unwrap_or_default()
+    /// Every `let` in `body`, in source order, nested blocks included.
+    fn let_stmts<'a>(body: &'a Block, out: &mut Vec<&'a Stmt>) {
+        for s in &body.stmts {
+            if matches!(s, Stmt::Let { .. }) {
+                out.push(s);
+            }
+            match s {
+                Stmt::If {
+                    then_block,
+                    else_block,
+                    ..
+                }
+                | Stmt::IfLet {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    let_stmts(then_block, out);
+                    if let Some(e) = else_block {
+                        let_stmts(e, out);
+                    }
+                }
+                Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
+                    let_stmts(body, out)
+                }
+                _ => {}
+            }
+        }
     }
 
-    /// The hole set of the binding named `name`, or `None` where it leaks.
+    /// What this walk decided for every `let` in `which`, in source order:
+    /// the release the frame reclaims with and the holes it walks around, or
+    /// `None` where the frame reclaims nothing.
+    ///
+    /// The REASON for a `None` is the core's, and this crate installs no
+    /// placer, so no test here may ask for one — the safety slice's rule.
+    fn kepts(src: &str, which: &str) -> Vec<Option<(DropKind, Vec<String>)>> {
+        let (o, p) = analyze_src(src);
+        let f = p.functions.iter().find(|f| f.name == which).unwrap();
+        let d = o.droppable.get(which).cloned().unwrap_or_default();
+        let h = o.holes.get(which).cloned().unwrap_or_default();
+        let mut lets = Vec::new();
+        let_stmts(&f.body, &mut lets);
+        lets.iter()
+            .map(|s| {
+                let k = *s as *const Stmt as usize;
+                d.get(&k)
+                    .cloned()
+                    .map(|kind| (kind, h.get(&k).cloned().unwrap_or_default()))
+            })
+            .collect()
+    }
+
+    /// The hole set of the binding named `name`, or `None` where nothing
+    /// reclaims it.
     fn holes_of(src: &str, name: &str) -> Option<Vec<String>> {
-        let (o, _) = analyze_src(src);
-        let n = o
-            .notes
-            .get("main")
-            .unwrap()
+        let (o, p) = analyze_src(src);
+        let f = p.functions.iter().find(|f| f.name == "main").unwrap();
+        let mut lets = Vec::new();
+        let_stmts(&f.body, &mut lets);
+        let s = lets
             .iter()
-            .find(|n| n.name == name)
+            .find(|s| matches!(s, Stmt::Let { name: n, .. } if n == name))
             .unwrap();
-        match &n.fate {
-            Fate::Reclaimed(_, holes) => Some(holes.clone()),
-            _ => None,
-        }
+        let k = *s as *const Stmt as usize;
+        o.droppable.get("main").unwrap().get(&k)?;
+        Some(
+            o.holes
+                .get("main")
+                .and_then(|m| m.get(&k))
+                .cloned()
+                .unwrap_or_default(),
+        )
     }
 
     const DOC: &str = "type Doc = { title: String, body: String } \
@@ -3487,9 +3301,9 @@ pub(crate) mod tests {
              d.title = \"z\"; return Int64(t.byteLength) + Int64(d.title.byteLength); }}"
         );
         assert!(
-            matches!(holes_of(&src, "d"), None),
+            holes_of(&src, "d").is_none(),
             "a filled hole must not be skipped: {:?}",
-            fates(&src, "main")
+            kepts(&src, "main")
         );
     }
 
@@ -3507,12 +3321,6 @@ pub(crate) mod tests {
              fn main() -> Int64 {{ return take(\"x\").byteLength; }}"
         );
         let (o, _) = analyze_src(&src);
-        let n = o.notes.get("take").unwrap().iter().find(|n| n.name == "d");
-        assert!(
-            matches!(n.map(|n| &n.fate), Some(Fate::Moved { .. })),
-            "{:?}",
-            n.map(|n| &n.fate)
-        );
         assert!(o.droppable.get("take").unwrap().is_empty());
     }
 
@@ -3526,11 +3334,7 @@ pub(crate) mod tests {
                    fn mk(a: String) -> Box { return Box { name: a + \"n\", n: 1 } } \
                    fn main() -> Int64 { let b = mk(\"x\"); let t = consume b.name; \
                    return Int64(t.byteLength) + b.n; }";
-        assert!(
-            matches!(holes_of(src, "b"), None),
-            "{:?}",
-            fates(src, "main")
-        );
+        assert!(holes_of(src, "b").is_none(), "{:?}", kepts(src, "main"));
     }
 
     // ---- auto-free for mutable arrays -----------------------------------
@@ -3865,9 +3669,9 @@ pub(crate) mod tests {
                    let t = consume d.title; return t.byteLength; }";
         // `t` is the String the record gave away, and `d` is the rest of it.
         assert_eq!(
-            fates(src, "main"),
+            kepts(src, "main"),
             vec![
-                Fate::Reclaimed(
+                Some((
                     DropKind::Deep(Type::Record(vec![
                         Field {
                             name: "title".into(),
@@ -3879,29 +3683,28 @@ pub(crate) mod tests {
                         },
                     ])),
                     vec!["title".to_string()]
-                ),
-                Fate::Reclaimed(DropKind::FreeStr, Vec::new()),
+                )),
+                Some((DropKind::FreeStr, Vec::new())),
             ]
         );
     }
 
     /// `rfcs/census-regions.md` defect 2. A `Task<T>` has no release row on
-    /// purpose, and the report read that as a leak — about a task the next line
-    /// joins. The obligation is proved elsewhere, so the sentence is
-    /// categorical; a `drop` still answers with its own line.
+    /// purpose, and the automatic path must place none — the construct that
+    /// discharges the obligation frees it, and a second row would free it
+    /// twice. The SENTENCE a reader is told is the core's now (RFC-0125 §3 M3,
+    /// the report slice), and this crate installs no placer to ask.
     #[test]
-    fn a_discharged_task_is_not_a_leak() {
+    fn a_discharged_task_gets_no_automatic_row() {
         let src = "fn work(n: Int64) -> Int64 { return n + 1 } \
                    fn main() -> Int64 { let t = spawn work(1) let u = spawn work(2) \
                    let n = t.join() drop u return n }";
-        let f = fates(src, "main");
-        assert_eq!(f[0], Fate::Discharged(Linear::Task), "{f:?}");
-        assert!(matches!(f[1], Fate::Dropped { .. }), "{f:?}");
-        assert_eq!(
-            f[0].words(),
-            "discharged, not leaked — a task is joined, forwarded or dropped on every path, \
-             and that lowering frees it"
+        let f = kepts(src, "main");
+        assert!(
+            f[0].is_none(),
+            "a joined task gets no block-exit row: {f:?}"
         );
+        assert!(f[1].is_none(), "a dropped task gets none either: {f:?}");
     }
 
     /// Census §14, Phase 5. An `Option` and a `Result` DO own their payload:
@@ -4080,14 +3883,20 @@ pub(crate) mod tests {
                 }
             }
 
-            for notes in own.notes.values() {
-                for n in notes {
-                    total += 1;
-                    match &n.fate {
-                        Fate::Leaked(r) => *reasons.entry(r.kind()).or_default() += 1,
-                        _ => kept += 1,
+            // The bindings, and which of them this walk reclaims. The
+            // REASON for the rest is the core's, and this crate installs no
+            // placer — `vyrn why --memory` over the same corpus is where the
+            // reasons are counted (RFC-0125 §3 M3, the report slice).
+            for f in &program.functions {
+                let d = own.droppable.get(&f.name).cloned().unwrap_or_default();
+                walk_stmts(&f.body, &mut |s| {
+                    if matches!(s, Stmt::Let { .. }) {
+                        total += 1;
+                        if d.contains_key(&(s as *const Stmt as usize)) {
+                            kept += 1;
+                        }
                     }
-                }
+                });
             }
         }
 
@@ -4113,13 +3922,8 @@ pub(crate) mod tests {
             println!("    {s}");
         }
         println!("move surface: {}", param_returns.len() + aliases.len());
-        println!(
-            "bindings: {total} — {kept} reclaimed/moved/dropped/discharged/static, \
-             {leaks} not reclaimed"
-        );
-        for (reason, count) in rows {
-            println!("  {count:>5}  {reason}");
-        }
+        println!("bindings: {total} — {kept} reclaimed at block exit");
+        let _ = (leaks, rows);
     }
 
     /// Every `return p` in `body` that names one of `params`, with its line.

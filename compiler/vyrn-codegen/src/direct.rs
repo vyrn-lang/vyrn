@@ -3197,8 +3197,8 @@ impl<'p> Fn_<'_, 'p> {
             // Inside a `region` the arena owns it ([`Fn_::str_owned`]), so this
             // stands aside exactly as [`Fn_::rel_at`]'s `Str` arm does. `own`
             // denies the automatic block-exit row inside a region
-            // (`Fate::Leaked(Leak::Region)`), so the arm that reaches here at all
-            // is `drop s`, which mints `Fate::Dropped` and knows nothing about the
+            // (the arena owns it), so the arm that reaches here at all
+            // is `drop s`, which is the reader's own release and knows nothing about the
             // arena: `region { let s = a + b  drop s }` freed the block twice.
             Rel::Str if self.region_depth > 0 => Ok(()),
             Rel::Str => {
@@ -3472,7 +3472,7 @@ impl<'p> Fn_<'_, 'p> {
             // A `String` buffer allocated inside a `region` belongs to the arena
             // — [`Fn_::str_owned`] records it and `region_free` hands it back.
             // `own` states the same exception one binding at a time
-            // (`Fate::Leaked(Leak::Region)` for `DropKind::FreeStr`), and it can
+            // (the arena owns a `DropKind::FreeStr` value), and it can
             // only see the binding's OWN type: the `String` under an
             // `Array<String>`, under a record field, under a `Map` key reached
             // this line and was freed a second time
