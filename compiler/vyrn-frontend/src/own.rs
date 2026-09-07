@@ -872,8 +872,6 @@ pub enum Leak {
     /// The binding names storage somebody else owns (rule 2). Carries what it
     /// is, in words.
     Borrowed(&'static str),
-    /// Lexically inside a `region` — the arena owns it.
-    Region,
     /// A lambda or a `spawn` holds it, and either can outlive this block.
     Captured { line: usize },
     /// A second name reads it without taking it, so neither name is the owner.
@@ -905,7 +903,6 @@ impl Leak {
                 owns_heap: true, ..
             } => "the type has no release rule",
             Leak::Borrowed(_) => "it names somebody else's value",
-            Leak::Region => "inside a `region`",
             Leak::Captured { .. } => "captured by a lambda or a spawn",
             Leak::Aliased { .. } => "aliased by another binding",
             Leak::Escaped { .. } => "escaped into a call",
@@ -926,7 +923,6 @@ impl std::fmt::Display for Leak {
                 owns_heap: true,
             } => write!(f, "nothing releases the type {ty} yet"),
             Leak::Borrowed(what) => write!(f, "it is {what}"),
-            Leak::Region => write!(f, "it is inside a `region` — the arena owns it"),
             Leak::Captured { line } => {
                 write!(f, "a lambda or a spawn captures it at line {line}")
             }
@@ -2958,16 +2954,23 @@ impl Emit<'_> {
         // reassigned accumulator is what made a `String` returned out of a
         // `region` reachable — the caller freed a pointer 8 bytes into an arena
         // block and the native heap corrupted. The arena hands out a
-        // `__vyrn_malloc` block now (`REGION_RUNTIME`), and a `String` inside a
-        // region still answers `Leak::Region` one rule down.
+        // `__vyrn_malloc` block now (`REGION_RUNTIME`).
+        //
+        // A `region` says NOTHING here any more. It used to answer
+        // `Leak::Region` for a dynamic String bound inside one, which claimed
+        // for the arena every block the frame minted at that depth — a
+        // callee's `String` included, and the arena never had those
+        // (`examples/matchown.vyrn`, `examples/regionescape.vyrn`). The
+        // ownership test is the block header and it is stated once, in `free`:
+        // an arena block carries a class word of 0 and `free` refuses it in
+        // silence. So the walk asks for every block it holds and the arena
+        // keeps the ones that are its.
         if matches!(value, Expr::Str(_)) && !mutable {
             return Fate::Static;
         }
         // A dynamic string inside a region is the arena's, and the two
         // mechanisms partition every allocation — nothing is freed twice.
-        if kind == DropKind::FreeStr && self.region_depth > 0 {
-            return Fate::Leaked(Leak::Region);
-        }
+
         // A `mut` binding is released by its slot's FINAL value in all three
         // engines (Phase 8b), so a declared `release` — ordinary Vyrn that may
         // print — runs on the same value everywhere and a `mut` container

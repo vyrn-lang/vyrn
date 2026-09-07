@@ -1387,27 +1387,6 @@ impl<'a> Cx<'a> {
         f.receivers.get(&self.plan.key_of(node)).cloned()
     }
 
-    /// Round fifty-seven read off the core (RFC-0125 §3 M3, the deletion
-    /// slice): did a CALLEE allocate the receiver freed at `node`? A
-    /// callee's block is malloc-side whatever `region` is open here, so the
-    /// free stands inside one; the `@`-spelled producers route through the
-    /// arena lexically and stay region-gated. The region depth itself stays
-    /// this emitter's question, as it does at a store: the core lowers a
-    /// `region` as an ordinary block.
-    fn receiver_malloc(&self, node: usize) -> bool {
-        let Some(f) = &self.facts else {
-            return self.plan.receiver_malloc_at(node);
-        };
-        let key = self.plan.key_of(node);
-        // A receiver the core states no free for states no producer either,
-        // and the site keeps the plan's answer.
-        if f.receivers.contains_key(&key) {
-            f.receiver_malloc.contains(&key)
-        } else {
-            self.plan.receiver_malloc_at(node)
-        }
-    }
-
     /// RFC-0114 M2 and exit-residue round eighteen read off the core
     /// (RFC-0125 §3 M3, the emitter-reads-the-core slice): does the store at
     /// `node` release the value it displaces?
@@ -3286,13 +3265,6 @@ impl<'p> Fn_<'_, 'p> {
                 let elem = elem.clone();
                 self.stream_release(m, b, p, &elem, line)
             }
-            // Inside a `region` the arena owns it ([`Fn_::str_owned`]), so this
-            // stands aside exactly as [`Fn_::rel_at`]'s `Str` arm does. `own`
-            // denies the automatic block-exit row inside a region
-            // (`Fate::Leaked(Leak::Region)`), so the arm that reaches here at all
-            // is `drop s`, which mints `Fate::Dropped` and knows nothing about the
-            // arena: `region { let s = a + b  drop s }` freed the block twice.
-            Rel::Str if self.region_depth > 0 => Ok(()),
             Rel::Str => {
                 // A `String` is a scalar, so a `Place::Local` holds the pointer —
                 // the opposite of what a local holding an aggregate means, which is
@@ -3563,23 +3535,20 @@ impl<'p> Fn_<'_, 'p> {
         match self.cx.resolve(ty) {
             // A `String` buffer allocated inside a `region` belongs to the arena
             // — [`Fn_::str_owned`] records it and `region_free` hands it back.
-            // `own` states the same exception one binding at a time
-            // (`Fate::Leaked(Leak::Region)` for `DropKind::FreeStr`), and it can
-            // only see the binding's OWN type: the `String` under an
-            // `Array<String>`, under a record field, under a `Map` key reached
-            // this line and was freed a second time
-            // (`rfcs/census-regions.md` defect 1). The key is the key the
-            // allocation side records by, so the two sides partition the same way
-            // at every depth — the sentence [`crate::Gen::deep_release`] states
-            // for the textual backend.
-            Type::Str if self.region_depth == 0 => {
+            // This arm asks nothing about the region: the ownership test is the
+            // block header and `free` states it once (an arena block carries a
+            // class word of 0 and is refused in silence), so the walk hands
+            // back every block it holds and the arena keeps the ones that are
+            // its. Standing aside here instead claimed for the arena every
+            // `String` a CALLEE minted at this depth, which the arena never
+            // had — `examples/matchown.vyrn` leaked four blocks a turn.
+            Type::Str => {
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word()));
                 str_hdr(b);
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
-            Type::Str => Ok(()),
             // The elements first, then the buffer they live in — the reverse of
             // the order `copy_at` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.
@@ -3809,13 +3778,11 @@ impl<'p> Fn_<'_, 'p> {
             // below frees only the BOX, which is `malloc`'s at every depth the way
             // an `Array` buffer is, and the `String` inside it is `rel_at`'s.
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
-                if self.region_depth == 0 {
-                    b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I64Load(at(off)));
-                    b.ins(&Instruction::I32WrapI64);
-                    str_hdr(b);
-                    b.ins(&Instruction::Call(self.cx.rt.free));
-                }
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
             Word::Boxed => {
@@ -4513,7 +4480,7 @@ impl<'p> Fn_<'_, 'p> {
                     .cx
                     .store_fact(s as *const Stmt as usize)
                     .unwrap_or(false);
-                let snap = if owned_here && self.region_depth == 0 {
+                let snap = if owned_here {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
                         (Place::Local(l), Repr::Scalar(_)) => {
@@ -4564,8 +4531,7 @@ impl<'p> Fn_<'_, 'p> {
                 // per-binding registry guess (`place_owns`), queried before
                 // the region gate so an arena-owned site still counts as
                 // considered. The value-alias guard folded with it.
-                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
-                {
+                let snap = if self.cx.store_row(s as *const Stmt as usize) {
                     let a = self.addr_local(b, place, foff);
                     self.snap_at(b, a, &fty, *line)?
                 } else {
@@ -4955,8 +4921,7 @@ impl<'p> Fn_<'_, 'p> {
                     // states at its own map arm: a map owns its values outright,
                     // so who owns the MAP does not change who owns the value this
                     // store displaces. The arena and aliasing are what is asked.
-                    let drop_old = self.region_depth == 0
-                        && !vyrn_frontend::movecheck::mentions_place(value, name)
+                    let drop_old = !vyrn_frontend::movecheck::mentions_place(value, name)
                         && !vyrn_frontend::movecheck::mentions_place(index, name);
                     // The entry's release is `map_set`'s own two questions —
                     // acknowledged for §26's finish check.
@@ -4980,8 +4945,7 @@ impl<'p> Fn_<'_, 'p> {
                 // Rule 4 through an element. The element address is already on the
                 // stack, so it is teed rather than recomputed; the snapshot is
                 // stack-neutral and the store finds its address where it left it.
-                let snap = if self.cx.store_row(s as *const Stmt as usize) && self.region_depth == 0
-                {
+                let snap = if self.cx.store_row(s as *const Stmt as usize) {
                     let ea = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(ea));
                     self.snap_at(b, ea, &elem, *line)?
@@ -5757,7 +5721,7 @@ impl<'p> Fn_<'_, 'p> {
     /// is at the allocation on both backends now: see [`Fn_::str_owned`].
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
         let t = self.expr_inner(m, b, e)?;
-        if self.cx.arg_drop_row(e as *const Expr as usize) && self.region_depth == 0 {
+        if self.cx.arg_drop_row(e as *const Expr as usize) {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push((l, t.clone()));
@@ -5873,9 +5837,7 @@ impl<'p> Fn_<'_, 'p> {
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
                 let row = self.cx.receiver_row(e as *const Expr as usize);
-                let rfree = row.is_some()
-                    && (self.region_depth == 0
-                        || self.cx.receiver_malloc(e as *const Expr as usize));
+                let rfree = row.is_some();
                 let tee = if rfree {
                     let l = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(l));
@@ -13013,7 +12975,7 @@ impl<'p> Fn_<'_, 'p> {
             // Round forty: the unmoved payload binders the row names — the
             // textual backend's `gen_arm_body` twin.
             let owed = self.cx.arm_row(key, arm_ix as u32);
-            if let Some(rows) = owed.filter(|_| self.region_depth == 0) {
+            if let Some(rows) = owed {
                 for (n, place, ty) in &bound {
                     let Some((_, holes)) = rows.iter().find(|(r, _)| r == n) else {
                         continue;
@@ -13602,8 +13564,9 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 _ => true,
             };
-        consumed && !self.drops.contains_key(&key) && self.region_depth == 0 && !own_receiver
+        consumed && !self.drops.contains_key(&key) && !own_receiver
     }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -13673,7 +13636,7 @@ impl<'p> Fn_<'_, 'p> {
         // `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first.
         // A repeated key updates in place, so the value it shadows has no owner
         // left — `["usd": 1, "usd": 3]`. Inside a `region` the arena owns it.
-        let drop_old = self.region_depth == 0;
+        let drop_old = true;
         for (ke, ve) in entries {
             self.map_set(m, b, hdr, &l, ke, ve, &key_t, &val, drop_old, line)?;
         }
@@ -14035,7 +13998,7 @@ impl<'p> Fn_<'_, 'p> {
         // back at the exit — freeing it here would give one block two owners.
         // The same partition `rel_at` draws for a `String`, drawn here too. An
         // Int64 key owns nothing, so it has no surplus to return (RFC-0117).
-        if mk == MapKey::Str && self.region_depth == 0 {
+        if mk == MapKey::Str {
             b.ins(&Instruction::LocalGet(k));
             str_hdr(b);
             b.ins(&Instruction::Call(self.cx.rt.free));

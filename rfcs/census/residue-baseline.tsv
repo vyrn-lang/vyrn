@@ -102,7 +102,7 @@ map	clean
 mapdemo	leak	5
 mapkey	clean
 mapkeyowned	clean
-matchown	leak	200
+matchown	clean
 membench	clean
 modify	other
 modifyself	clean
@@ -134,7 +134,7 @@ regex	clean
 regexredux	clean
 region	other
 regionarena	clean
-regionescape	leak	1
+regionescape	clean
 releaseacrossexit	clean
 releaseacrosstry	clean
 rest	clean

@@ -352,8 +352,14 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     has("branch           reclaimed at block exit — freeing the String buffer");
     has("given            reclaimed at block exit — freeing the String buffer");
     has("alias            reclaimed at block exit — freeing the String buffer");
+    // A `region` is no longer one of the reasons. `own` answered
+    // `Leak::Region` for a dynamic String bound inside one, which claimed for
+    // the arena every block the frame minted at that depth, a callee's
+    // included; the ownership test is the block header and `free` states it
+    // once, so the walk asks for this binding like any other and the arena
+    // refuses the ones that are its (RFC-0125 §3 M4, the region triage).
+    has("arena            reclaimed at block exit — freeing the String buffer");
     // Every reason the printer can still name.
-    has("arena            NOT reclaimed — it is inside a `region`");
     has("c                NOT reclaimed — the type Bool owns no heap");
     // Round fifty-seven: a LAMBDA's capture is a deep snapshot, so the
     // captured binding reclaims; only a `spawn`'s capture stays a leak.
@@ -937,16 +943,17 @@ const ROWS: &[Row] = &[
     Row {
         export: "regionRebind",
         census: "RFC-0004 §4, the routing's price",
-        today: Shape::Leaks,
-        why: "the other half of the row above, and the one place this rule is deliberately \
-              inexact. A store inside a region takes no snapshot at all — it cannot, because \
-              a `String` the place holds is the arena's and the snapshot would free it a \
-              second time — but an `Array` buffer is never the arena's, so a container \
-              reassigned inside a region hands its old buffer to nobody. BOTH backends leak \
-              it identically, which is the point: a leak both engines share is a parity \
-              citizen, and it was the trade for a double free. Making it exact means \
-              filtering the `String` entry out of `Fn_::store_bufs` rather than refusing the \
-              snapshot, on both backends at once; do that and this row flips to Steady",
+        today: Shape::Steady,
+        why: "the other half of the row above, and it was the one place this rule was \
+              deliberately inexact. A store inside a region took no snapshot at all, on the \
+              argument that a `String` the place holds is the arena's and the snapshot would \
+              free it a second time — so a container reassigned inside a region handed its \
+              old buffer to nobody, on both backends alike. The argument was wrong about who \
+              owns the block: `free` refuses an arena block by its class word, so a snapshot \
+              may ask for every buffer and the arena keeps the ones that are its. The row's \
+              own note said what to do — make it exact and this flips to Steady — and \
+              RFC-0125 §3 M4's region triage did, by deleting the region gate at the store \
+              rather than by filtering `Fn_::store_bufs`",
     },
     Row {
         export: "consumingLoop",

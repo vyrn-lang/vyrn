@@ -2075,18 +2075,12 @@ impl<'a> Builder<'a> {
                 let Some(n) = self.lookup(name) else {
                     return gap("a `drop` of module state", *line);
                 };
-                // A String bound inside a `region` is the arena's: both
-                // compiling backends emit its release as nothing under
-                // `region_depth`, and the plan notes it `Leak::Region`.
-                let info = &self.body.names[n as usize];
-                if !info.releases
-                    && matches!(
-                        self.fate_of(&info.source, info.line),
-                        Some(Fate::Leaked(Leak::Region))
-                    )
-                {
-                    return Ok(());
-                }
+                // `drop s` inside a `region` used to lower to nothing,
+                // because the plan noted the binding `Leak::Region` and the
+                // arena would give the block back at the brace. The arena
+                // answers for its own blocks now — `free` refuses one by its
+                // class word — so a `drop` inside a region is an ordinary
+                // drop.
                 out.push(St::Drop(n, Site::None, *line));
             }
             Stmt::Expr(e) => {
@@ -2105,10 +2099,10 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            // The arena owns what is allocated inside it: the plan notes such
-            // a binding `Leak::Region` and it is not this frame's, so the
-            // body is an ordinary block here and the closing brace is the
-            // runtime's.
+            // The arena owns what IT was handed, which is what `arena_route`
+            // routes into it; every other block the body mints is the frame's,
+            // and the closing brace is the runtime's. So the body is an
+            // ordinary block here.
             Stmt::Region { body, .. } => self.block(body, out)?,
         }
         Ok(())
