@@ -4250,8 +4250,7 @@ impl<'p> Fn_<'_, 'p> {
     /// the last unlowered kind, so the gap reporter that used to sit here (and the
     /// `stmt_name`/`stmt_line` pair feeding it) was dead code claiming to cover
     /// something. A statement kind added to the AST is now a compile error naming
-    /// this match, which is the same trade `Rt::slots`'s all-fields-named struct
-    /// literal makes. Expressions keep theirs — `expr_name` still has work.
+    /// this match. Expressions keep theirs — `expr_name` still has work.
     fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {
         match s {
             Stmt::Let {
@@ -15568,12 +15567,17 @@ struct Rt {
     /// Vyrn since PLAN-0125-runtime §6 step 4, with `concat`, `str_append`
     /// and `str_from_bytes` below.
     str_new: u32,
-    /// The ten functions `std/runtime` supplies (PLAN-0125-runtime §6 step 1):
-    /// `strlen`, `strcmp`, `int_str`, `utf8valid`, `starts`, `str_i64`,
-    /// `regex_run`, `parse_i64`, `line_at`, `col_at`. Not slots of this table —
-    /// [`VyrnRt`] reserves them before `runtime` runs and `runtime` copies the
-    /// indices in, so every call site reads one field whichever side wrote the
-    /// body.
+    /// Of the ten functions `std/runtime` supplies (PLAN-0125-runtime §6 step
+    /// 1), the seven this emitter calls: `strlen`, `strcmp`, `int_str`,
+    /// `regex_run`, `parse_i64`, `line_at`, `col_at`. `utf8Valid`, `starts` and
+    /// `strI64` are the other three, and no field carries them, because nothing
+    /// here calls them: `starts` and `strI64` were reached by the hand-emitted
+    /// runtime that §6 deleted, and `utf8Valid` is reached from inside
+    /// `std/runtime`. They keep their [`VYRN_RUNTIME`] rows, which is what
+    /// reserves their indices; a Vyrn caller finds them through `sigs` like any
+    /// other function. Not slots of this table — [`VyrnRt`] reserves them before
+    /// `runtime` runs and `runtime` copies the indices in, so every call site
+    /// reads one field whichever side wrote the body.
     strlen: u32,
     strcmp: u32,
     /// The address of the UTF-8 DFA table `utf8Valid` walks, interned by
@@ -15601,7 +15605,6 @@ struct Rt {
     /// and calls this; the module spells none of the eight wordings.
     trap_at: u32,
     trap_table: u32,
-    utf8valid: u32,
     /// `std/runtime`'s `strFromBytes`; its two failure messages, interned by
     /// `runtime` from `io_message`, go in as its last two arguments so the
     /// wording stays `trap.rs`'s. What DECIDES between them is `std/text`'s
@@ -15609,8 +15612,6 @@ struct Rt {
     str_from_bytes: u32,
     bnul: u32,
     butf8: u32,
-    starts: u32,
-    str_i64: u32,
     // RFC-0014's input I/O and RFC-0043's host boundary, `std/runtime`'s since
     // PLAN-0125-runtime §6 step 7, over the host imports `std/mem` declares
     // (M2j served them straight from WASI rather than through the shim — a
@@ -15701,7 +15702,6 @@ struct Rt {
     /// belongs to the caller now, so the bump stays where it is.
     region_enter: u32,
     region_exit: u32,
-    count: u32,
     /// RFC-0004 §4's region nesting counter: four reserved bytes, because the
     /// depth is dynamic (a `region` in a callee nests inside its caller's) and
     /// entering a 65th is a trap the interpreter also takes. Storage rather than a
@@ -15717,129 +15717,6 @@ struct Rt {
 }
 
 impl Rt {
-    /// Hand out the index of every runtime function, in the order the bodies are
-    /// emitted below.
-    ///
-    /// The numbering has to precede the emission, because a body calls helpers
-    /// that do not exist yet — `print_str` calls `strlen`, `concat` calls
-    /// `malloc`. What it does NOT have to do is name numbers: `slot` appends and
-    /// gives back what it appended, so a new helper is one line here beside the
-    /// place its body is emitted, `count` is however many were handed out, and the
-    /// two cannot disagree. The hand-numbered version could: an entry inserted
-    /// mid-table renumbered every entry after it, and a `call` that came out
-    /// pointing at the wrong function only failed loudly where the two signatures
-    /// differed. Two helpers with the same wasm signature swapped silently, and
-    /// there are several such sets here: `read_file` and `read_file_bytes` are both
-    /// `(i32, i32) -> ()`, and `strlen` and `utf8valid` are both `(i32) -> i32`.
-    ///
-    /// The hazard was paid off rather than argued about: retiring `charcount`
-    /// (RFC-0078's census) is the first REMOVAL this table has seen, and it was one
-    /// deleted line here and one deleted body below, with nothing to renumber.
-    ///
-    /// The returned table is that record: name beside index, which is what the
-    /// consistency test checks and what a reader wanting the emission order reads.
-    fn slots(base: u32) -> (Rt, Vec<(&'static str, u32)>) {
-        let mut table: Vec<(&'static str, u32)> = Vec::new();
-        let mut slot = |name: &'static str| {
-            let i = base + table.len() as u32;
-            table.push((name, i));
-            i
-        };
-        // Every field is named, so a field added to `Rt` and forgotten here is a
-        // compile error rather than an index of zero pointing at `write_all`.
-        let mut rt = Rt {
-            proc_exit: 0,
-            wasi: Wasi::default(),
-            write_all: 0,
-            malloc: 0,
-            free: 0,
-            str_new: 0,
-            strlen: 0,
-            utf8d: 0,
-            bnul: 0,
-            butf8: 0,
-            strcmp: 0,
-            trap: 0,
-            print_str: 0,
-            print_i64: 0,
-            int_str: 0,
-            bool_str: 0,
-            str_true: 0,
-            str_false: 0,
-            concat: 0,
-            str_append: 0,
-            trap_at: 0,
-            trap_table: 0,
-            utf8valid: 0,
-            str_from_bytes: 0,
-            starts: 0,
-            str_i64: 0,
-            now_millis: 0,
-            mono_nanos: 0,
-            random_seed: 0,
-            args: 0,
-            read_line: 0,
-            open_at: 0,
-            read_file: 0,
-            read_file_bytes: 0,
-            write_file_bytes: 0,
-            write_file: 0,
-            rename_file: 0,
-            fsync_file: 0,
-            list_dir: 0,
-            read_file_gen: 0,
-            read_file_bytes_gen: 0,
-            list_dir_gen: 0,
-            fixed_time: 0,
-            fixed_seed: 0,
-            readerr: (0, 0),
-            utf8err: (0, 0),
-            nulerr: (0, 0),
-            writeerr: (0, 0),
-            xdeverr: (0, 0),
-            listerr: (0, 0),
-            map_find: 0,
-            map_put: 0,
-            map_reserve: 0,
-            map_remove_at: 0,
-            map_keys_copy: 0,
-            arr_push: 0,
-            arr_reserve: 0,
-            arr_append: 0,
-            arr_copy_from: 0,
-            arr_clear: 0,
-            regex_run: 0,
-            parse_i64: 0,
-            line_at: 0,
-            col_at: 0,
-            region_enter: 0,
-            region_exit: 0,
-            // Derived, not declared. The data segment addresses are filled in by
-            // `runtime` as it interns them.
-            count: 0,
-            region_sp: 0,
-            call_depth: 0,
-        };
-        rt.count = table.len() as u32;
-        (rt, table)
-    }
-
-    /// Assert that the function about to be emitted is the one `want` reserved.
-    ///
-    /// The declared order and the emission order are two lists, and a `call`
-    /// carries an index — so this is the seam where they have to agree, and it is
-    /// checked at every helper rather than once at the end because a swap WITHIN
-    /// the runtime leaves the count right. That is the silent case: `read_file` and
-    /// `read_file_bytes` have the same wasm signature, so a module with the two
-    /// exchanged still validates and then reads the wrong thing.
-    fn next_is(&self, m: &Module, want: u32) {
-        assert_eq!(
-            m.next_func(),
-            want,
-            "a runtime helper was emitted out of declared order"
-        );
-    }
-
     /// A string literal's address in the data segment: its `{ len, cap }` header
     /// (RFC-0089 M1a), then the bytes, then the NUL. The address handed back is
     /// the BYTES, so a literal is an ordinary `String` pointer and every C-shaped
@@ -15947,10 +15824,10 @@ fn cap_at() -> MemArg {
 
 fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     let proc_exit = wasi.proc_exit;
-    // After the imports AND the ten functions `VyrnRt` reserved: the table
-    // below is dense from wherever the module is when it starts.
-    let base = m.next_func();
-    let (mut rt, _table) = Rt::slots(base);
+    // Every field is an index [`VyrnRt`] already reserved, or an address the
+    // interning below hands back. This function emits no wasm function of its
+    // own, so there is no order to keep and nothing to number.
+    let mut rt = Rt::default();
     rt.proc_exit = proc_exit;
     rt.malloc = v.get("malloc");
     rt.free = v.get("free");
@@ -15960,11 +15837,8 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     rt.str_from_bytes = v.get("strFromBytes");
     rt.strlen = v.get("strLen");
     rt.strcmp = v.get("strCmp");
-    rt.starts = v.get("starts");
     rt.int_str = v.get("intStr");
     rt.parse_i64 = v.get("parseI64");
-    rt.str_i64 = v.get("strI64");
-    rt.utf8valid = v.get("utf8Valid");
     rt.line_at = v.get("lineAt");
     rt.col_at = v.get("colAt");
     rt.regex_run = v.get("regexRun");
@@ -16062,8 +15936,7 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     // continuation bytes. RFC-0078's census found `charCount` the one builtin with
     // no justification for being one, and `std/text`'s `charCountV` is the same scan
     // written in Vyrn, so this backend has a row it no longer has to lower. It is
-    // the first runtime function this table has LOST, which is what made the
-    // self-registering `next_is` worth doing in 5d6a857.)
+    // the first runtime function this table has LOST.)
 
     // Björn Höhrmann's UTF-8 DFA, the SAME table the textual backend emits
     // (`crate::utf8d_table`). Sharing the bytes is the point: two tables would
@@ -16084,18 +15957,12 @@ fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
     // test, a continuation-byte probe at each cut point, two interned trap strings
     // and a `memory.copy`. RFC-0079 M3 deleted it along with the interpreter's arm
     // and the textual emitter's branch; `std/strpred`'s `sliceV` is the one range
-    // check now. Removing a slot is a one-line deletion in `slots` because the
-    // table hands indices out in field order — the second removal it has seen,
-    // after `charcount`.)
+    // check now — the second removal this table has seen, after `charcount`.)
 
     // (`float_str` was emitted here — see the note where its 511 lines stood.
-    // RFC-0081 M2 routed `%f` to `std/num`'s `f64Str`; removing its slot is a
-    // one-line deletion in `slots` because the table hands indices out in field
-    // order — the third removal it has seen, after `charcount` and `slice`.)
+    // RFC-0081 M2 routed `%f` to `std/num`'s `f64Str` — the third removal this
+    // table has seen, after `charcount` and `slice`.)
 
-    // And the total: `count` is derived from the declarations, so this is the one
-    // place it meets the emission.
-    assert_eq!(m.next_func(), base + rt.count, "runtime function count");
     rt
 }
 
@@ -16229,29 +16096,20 @@ mod tests {
         );
     }
 
-    /// The runtime table's invariant, checked rather than maintained by care:
-    /// one index per helper, all distinct, dense from `base`, and `count` equal to
-    /// however many were handed out. `runtime` asserts the other half — that the
-    /// bodies arrive at the indices declared here.
+    /// The runtime table's invariant, now that every runtime FUNCTION is
+    /// `std/runtime`'s (`PLAN-0125-runtime.md` §6): a name is declared once, so
+    /// [`VyrnRt::reserve`] hands out one index per row and [`VyrnRt::take`] can
+    /// find the row a body belongs to. The other half — that every row gets a
+    /// body — is [`VyrnRt::check`], which refuses the link rather than asserting.
     #[test]
-    fn every_runtime_helper_gets_its_own_index() {
-        let base = 7; // any offset; the imports are not always the same count
-        {
-            let (rt, table) = Rt::slots(base);
-            assert_eq!(
-                table.len() as u32,
-                rt.count,
-                "count is the number of slots handed out"
-            );
-            let names: std::collections::HashSet<&str> = table.iter().map(|(n, _)| *n).collect();
-            assert_eq!(names.len(), table.len(), "a name is registered twice");
-            let idx: Vec<u32> = table.iter().map(|(_, i)| *i).collect();
-            assert_eq!(
-                idx,
-                (base..base + rt.count).collect::<Vec<_>>(),
-                "indices are dense and distinct"
-            );
-        }
+    fn every_runtime_helper_is_declared_once() {
+        let names: std::collections::HashSet<&str> =
+            VYRN_RUNTIME.iter().map(|(n, ..)| *n).collect();
+        assert_eq!(
+            names.len(),
+            VYRN_RUNTIME.len(),
+            "a runtime function is declared twice"
+        );
     }
 
     fn cx() -> Cx<'static> {
