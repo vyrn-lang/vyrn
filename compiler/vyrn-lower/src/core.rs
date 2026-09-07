@@ -601,11 +601,25 @@ pub struct Body {
     /// borrowed inputs, its own bindings are ordinary, and the plan keys its
     /// rows by its own nodes under the enclosing function's name.
     pub lambdas: Vec<Body>,
-    /// RFC-0125 §3 M3, the third derivation slice: the `(construct, name)`
-    /// pairs whose note says the construct gave the binding away. Whether it
-    /// may TAKE it is decided over this body by [`last_owner`], and the
-    /// second build acts on what that decided.
-    pub(crate) cands: Vec<(usize, Name)>,
+    /// RFC-0125 §3 M3, the third derivation slice: every construct that may
+    /// take the value it was handed, with the name that value has here and
+    /// the shape of the construct. Whether it DOES take it is decided over
+    /// this body by [`last_owner`], and the second build acts on what that
+    /// decided.
+    pub(crate) cands: Vec<(usize, Name, Cand)>,
+}
+
+/// What a candidate construct is, which is what [`last_owner`] has to ask of
+/// it — RFC-0125 §3 M3, the take-rule slice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Cand {
+    /// A `match`, an `if let` or a `?`: the core switches on the value, and
+    /// the construct is its last owner where nothing reads the name after
+    /// the switch.
+    Switch,
+    /// A `for`: the core loops over the value, and the construct is its last
+    /// owner where the name's last read is INSIDE the loop.
+    Loop,
 }
 
 impl Body {
@@ -851,16 +865,23 @@ fn borrow_root(sv: &Val, consuming: bool) -> Option<Name> {
     }
 }
 
-/// Which candidate constructs are their scrutinee's LAST owner — RFC-0125
-/// §3 M3, the third derivation slice, and the rule `own.rs`'s
-/// `consuming_matches` used to state off `movecheck`'s event stream.
+/// Which candidate constructs are their value's LAST owner — RFC-0125
+/// §3 M3, the third derivation slice and the take-rule slice, and the rule
+/// `own.rs`'s `consuming_matches` used to state off `movecheck`'s event
+/// stream.
 ///
-/// The question is an order over the core the first build made. A construct
-/// takes its named scrutinee where nothing reads that name after it — a
-/// payload binder is a name of its own, so an arm reading the payload is not
-/// a read of the scrutinee, and a release the plan placed is a `Drop` and
-/// reads it — and where the binding and the construct stand under the same
-/// loops, so one value is not taken twice.
+/// The question is an order over the core the first build made, and it is
+/// the same question for every shape a candidate has. A construct takes the
+/// value it was handed where nothing reads that name after it — a payload
+/// binder is a name of its own, so an arm reading the payload is not a read
+/// of the scrutinee, and a release the plan placed is a row and reads it —
+/// and where the binding and the construct stand under the same loops, so
+/// one value is not taken twice.
+///
+/// A [`Cand::Switch`] asks it of the switch the core emitted: the name's
+/// last read is the switch's own. A [`Cand::Loop`] asks it of the loop: the
+/// name's last read is DEEPER than the frame it was bound in, so it is
+/// inside the loop and nothing after the loop reads it.
 ///
 /// Every screen the fold applied is here in the core's own terms: its order
 /// window is an order, its loop test is a nesting depth, and its "no read of
@@ -873,34 +894,46 @@ fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
         }
         let mut w = Reads {
             last: vec![0; f.names.len()],
+            deep: vec![0; f.names.len()],
             bound: vec![usize::MAX; f.names.len()],
             switches: Vec::new(),
             order: 0,
+            depth: 0,
         };
         w.stmts(&f.stmts, 0);
         for p in &f.params {
             w.bound[*p as usize] = 0;
         }
-        for (site, n) in &f.cands {
-            let at = w.switches.iter().find(|(s, m, _, _)| s == site && m == n);
-            if let Some((_, _, depth, order)) = at {
-                if w.last[*n as usize] == *order && w.bound[*n as usize] == *depth {
-                    out.insert(*site);
+        for (site, n, kind) in &f.cands {
+            let takes = match kind {
+                Cand::Switch => {
+                    let at = w.switches.iter().find(|(s, m, _, _)| s == site && m == n);
+                    at.is_some_and(|(_, _, depth, order)| {
+                        w.last[*n as usize] == *order && w.bound[*n as usize] == *depth
+                    })
                 }
+                Cand::Loop => {
+                    w.bound[*n as usize] != usize::MAX && w.deep[*n as usize] > w.bound[*n as usize]
+                }
+            };
+            if takes {
+                out.insert(*site);
             }
         }
     }
     out
 }
 
-/// One frame's last read of each name, the loop depth each name was bound
-/// at, and every switch over a bare name with its depth and the order of its
-/// own read. See [`last_owner`].
+/// One frame's last read of each name, the loop depth that read stood at,
+/// the loop depth each name was bound at, and every switch over a bare name
+/// with its depth and the order of its own read. See [`last_owner`].
 struct Reads {
     last: Vec<usize>,
+    deep: Vec<usize>,
     bound: Vec<usize>,
     switches: Vec<(usize, Name, usize, usize)>,
     order: usize,
+    depth: usize,
 }
 
 impl Reads {
@@ -908,6 +941,7 @@ impl Reads {
         self.order += 1;
         if let Val::Name(n) = v {
             self.last[*n as usize] = self.order;
+            self.deep[*n as usize] = self.depth;
         }
     }
 
@@ -916,6 +950,7 @@ impl Reads {
             Place::Name(n) => {
                 self.order += 1;
                 self.last[*n as usize] = self.order;
+                self.deep[*n as usize] = self.depth;
             }
             Place::Global(_) => {}
             Place::Field(b, _) => self.place(b),
@@ -946,10 +981,12 @@ impl Reads {
     fn name(&mut self, n: Name) {
         self.order += 1;
         self.last[n as usize] = self.order;
+        self.deep[n as usize] = self.depth;
     }
 
     fn stmts(&mut self, stmts: &[St], depth: usize) {
         for st in stmts {
+            self.depth = depth;
             match st {
                 St::Let(n, r) => {
                     self.rhs(r);
@@ -2408,15 +2445,14 @@ impl<'a> Builder<'a> {
                 if streaming {
                     self.stream_loops.pop();
                     // The loop pulled the stream to its end, or a `break`
-                    // left early: either way the loop closes it here.
-                    if self.body.names[it as usize].releases
-                        && !self.placed.contains_key(&(Exit::Scrutinee, sid))
-                    {
+                    // left early: either way the loop closes it here, where
+                    // the loop is the stream's last owner.
+                    if self.body.names[it as usize].releases && self.taken_by_loop(it, sid) {
                         out.push(St::Drop(it, Site::None, 0));
                     }
-                } else if *consuming && !self.placed.contains_key(&(Exit::Scrutinee, sid)) {
-                    // The loop took the container and the plan placed no row
-                    // for it, so the loop gives it back here.
+                } else if *consuming && self.taken_by_loop(it, sid) {
+                    // The loop took the container and is its last owner, so
+                    // the loop gives it back here.
                     out.push(St::Drop(it, Site::None, 0));
                 }
                 self.drops_at(Exit::Scrutinee, sid, out)?;
@@ -2765,7 +2801,7 @@ impl<'a> Builder<'a> {
                 // it may TAKE it is the second question, and the first build
                 // answers it over the core it just made ([`last_owner`]): the
                 // candidate is recorded here, and only a seeded site acts.
-                self.body.cands.push((construct, n));
+                self.body.cands.push((construct, n, Cand::Switch));
                 if !self.seed.contains(&construct) {
                     return Ok((Val::Name(n), false));
                 }
@@ -2839,12 +2875,33 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether the construct took the temporary `t` it owns: the payloads
-    /// moved into the arms' binders and the boxes were freed there, so the
-    /// plan placed no release of the whole value after the construct. Where it
-    /// did place one, the binders borrowed and the value is released whole.
-    fn taken_by(&self, t: Name, construct: usize) -> bool {
-        self.body.names[t as usize].releases
-            && !self.placed.contains_key(&(Exit::Scrutinee, construct))
+    /// moved into the arms' binders and the boxes were freed there. Where it
+    /// did not, the binders borrowed and the value is released whole.
+    ///
+    /// A `consume` expression and a computed scrutinee are CANDIDATES like a
+    /// named one (RFC-0125 §3 M3, the take-rule slice). The value is the
+    /// construct's own temporary, so nothing screens it but ownership; which
+    /// construct is its LAST owner is [`last_owner`]'s answer over the first
+    /// build, and only a seeded site acts.
+    ///
+    /// This used to read the plan's SILENCE — no release placed at the
+    /// scrutinee's exit — which is one answer stated twice: the plan's row
+    /// IS a read of the name in the core, so the order the core already
+    /// holds says the same thing without the plan.
+    fn taken_by(&mut self, t: Name, construct: usize) -> bool {
+        if !self.body.names[t as usize].releases {
+            return false;
+        }
+        self.body.cands.push((construct, t, Cand::Switch));
+        self.seed.contains(&construct)
+    }
+
+    /// The same question at a `for`: whether the loop is the last owner of
+    /// the container it was handed, so the loop releases it where it ends.
+    /// [`Cand::Loop`], answered by [`last_owner`] over the first build.
+    fn taken_by_loop(&mut self, it: Name, sid: usize) -> bool {
+        self.body.cands.push((sid, it, Cand::Loop));
+        self.seed.contains(&sid)
     }
 
     /// Bind a pattern's names. Owned binders when the match consumed its

@@ -12741,6 +12741,175 @@ the 19 rows were written); `--release --test genwasm -- --ignored`;
 `vyrn doc --std -o ../docs/api --verify` (41 files, up to date); the site
 export (6 s, 82 routes and 14 assets) and `vyrn test` per site `.vyrn` file
 (**191 test blocks**, 54 files, 0 failed).
+#### The take is the core's own answer at every scrutinee (2026-09-07, `track-cx`)
+
+The last record priced the walk's two blockers and named the slice before the
+walk's deletion: a `consume` expression and a computed scrutinee become
+CANDIDATES like a named one, so `last_owner` decides their take and
+`Builder::taken_by` reads the seed instead of the plan's silence. This slice
+takes it. The wasm manifest is untouched — **not one emitted byte moved over
+176 examples** — and the kernel's refusals over the corpus are unchanged.
+
+**What a candidate was, and what it is.** A candidate was a NAMED scrutinee the
+frame owns: `Builder::takes_scrutinee` screened a local for `releases && heap
+&& !borrow` under a construct with arms, `Builder::scrutinee` pushed
+`(construct, name)`, and `last_owner` decided the take over the first build. A
+candidate is now **any value the construct owns**, at all three spellings:
+
+| the scrutinee | the name it has in the core | what screens it | who decides the take |
+|---|---|---|---|
+| a named local — `match o { .. }` | the local itself | `takes_scrutinee`: owned, heap, not a borrow, under a construct with arms | `last_owner` over the first build |
+| a `consume` expression — `if let Some(v) = consume o` | the temporary the `consume` binds | ownership alone: the temporary is the construct's own | `last_owner` over the first build |
+| a computed value — `if let Some(s) = cliTypeOf(t, i)` | the temporary the call's result binds | ownership alone | `last_owner` over the first build |
+| a `for`'s container — `for x in consume c` | the temporary the loop binds | ownership, and the loop takes or streams | `last_owner` over the first build |
+
+`Cand` says which shape a candidate has, because that is the only thing
+`last_owner` has to ask differently. A `Cand::Switch` is its value's last owner
+where the name's last read is the switch's own — the rule as it stood. A
+`Cand::Loop` is one where the name's last read is DEEPER than the frame it was
+bound in, which is to say inside the loop and not after it. `Reads` gained one
+vector for that: the loop depth of each name's last read, beside the order.
+
+**The three readers now read the seed.** `Builder::taken_by` (`core.rs`) asked
+`releases(t) && !placed.contains_key(&(Exit::Scrutinee, construct))`, and
+`Stmt::ForIn`'s streaming and `consume` arms asked the same key before placing
+a release of their own. All three ask `self.seed.contains(&site)` now, and
+`core.rs` has one reader of `placed` left: `drops_at_but`, which emits the
+plan's rows and is the walk's deletion's business.
+
+**Why no byte moved, which is also what is left.** The plan's row IS a read of
+the name in the core: `drops_at` emits `St::Row` at the scrutinee's exit, and
+`Reads` counts it. So "the plan placed a row here" and "something reads the
+name after the switch" are the same sentence today, and the seed reproduces the
+silence exactly. The reading has moved into the core's own order; the FACT it
+reads is still the plan's `Emit::kept` — did a payload leave the construct —
+and the next record says what that costs.
+
+**The candidates, counted.** `vyrn check` over all 209 examples, one line per
+decision `last_owner` made:
+
+| shape | candidates | taken |
+|---|---|---|
+| a named scrutinee | 44 | 13 |
+| a `consume` or a computed value | 13,323 | 2,844 |
+| a `for`'s container | 158 | 33 |
+
+The named path is the small one. The value path is what the plan's silence was
+load-bearing for, and it is the 48 programs the last record priced.
+
+**The lines.** `compiler/vyrn-lower/src/core.rs` 5,667 to 5,724, and nothing
+else in the tree changed. `own.rs` stands at 3,802 and `movecheck.rs` at 6,320.
+
+#### Gates (2026-09-07, the take rule)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 77 suites |
+| `kernel` `--ignored`, release | 1, 31 s |
+| `coretables` `--ignored`, release | 1, 19 s |
+| `typed` `--ignored`, release | 1, 41 s |
+| `effects` `--ignored`, release | 2, 39 s |
+| `fixtures` `--ignored`, release | 1, 27 s |
+| `testsweep` `--ignored`, release | 1, 80 s |
+| `cargo test -p vyrn-frontend` | 10 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 17 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 450 s |
+| the residue ratchet `--ignored`, release | **engine 163 clean, 12 leaking; route 163 clean, 12 leaking; 0 failed**, 376 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn`, `markup.vyrn` and each `site/app/*.vyrn` | 189 blocks over 26 files, 0 failed |
+
+#### The walk's deletion, measured and refused (2026-09-07)
+
+The slice above was the one the walk's deletion waited for. The deletion was
+then built and measured, and it is NOT committed: it refuses eight instances of
+the corpus, and what refuses them is a design decision about the take rule
+rather than a defect to repair. What follows is the measurement, so the next
+payer starts from it and not from the top.
+
+**What was built.** `place_body`, `Live`, `Place` and `impl Place` go — 321
+lines of `own.rs` — with `owned_params` and `stmt_line`, which fed only them.
+`analyze` inserts no row, so `Ownership::releases` holds the placer's rows
+alone. `kernel::scope_end` gains the last record's three-line order fix,
+`self.missing[mark..].reverse()`, so the placer's rows run newest binding first
+at each exit.
+
+**The order fix is worth exactly one program, from the other side.** The last
+record measured it against the walk: one example of 176 moved, `graphql.vyrn`.
+Measured against the walk's ABSENCE it is the same one.
+`VYRN_WASM_MANIFEST=check` differs on **151 of 176** without the reversal and
+**150 of 176** with it.
+
+**Two byte moves, read at the source.** `autorelease.vyrn` loses two
+instructions, `local.get 0` and `call 19`, which stand after a `br 1` and are
+unreachable: a block-exit release the walk emitted on a path nothing reaches.
+`args.vyrn` loses a whole deep-free loop in the same position, and moves one
+release from after a `match` into the arm that carries a value out. Neither is
+a lost release. That is the shape of the 150, and it is not why the deletion
+stops.
+
+**Why it stops: the take rule's second half is not an order fact.**
+`last_owner` answers whether the construct is the value's LAST OWNER, and that
+is an order over the core. `taken_by` needs a second answer beside it: given
+that the construct is the last owner, does it TAKE the value — the payloads
+move into the binders — or release it whole? The plan answers that today with
+`Emit::kept`, and the answer reaches the core as a release row at the
+scrutinee's exit. Empty that channel and every such construct flips to taken.
+`vlog.vyrn`'s `cmdFilter` is the smallest reading: `switch @t1!` becomes
+`switch @t1! (taken)` and `arm(lvl)` becomes `arm(lvl!)`.
+
+**What the flip refuses, in the kernel's own words**
+(`cargo test --release -p vyrn-cli --test kernel -- --ignored`, 8 refused
+against a ratchet of 0):
+
+| program | the refusal | the class |
+|---|---|---|
+| `clidemo.vyrn`, `clifail.vyrn`: `cliBaseOf` | `s` (line 364) is still held at a `return` — no release is placed for it | a payload binder at an exit inside its arm |
+| `rest.vyrn`: `mount` | `ps` (line 892), the same words | the same |
+| `vlog.vyrn`: `cmdFilter` | `lvl` (line 323), the same words | the same |
+| `graphql.vyrn`: `gqlParseQuery`, `gqlSelSet`, `gqlResolve` | `set` is released around `.err` on a path that did not take it | a hole set the kernel calls too wide |
+| `regexredux.vyrn`: `compile` | `bd` is released around `.op` on a path that did not take it | the same |
+
+**The first class has no channel.** A payload binder held at a `return` INSIDE
+its arm is `MissingKind::ArmBinder`, which `kernel::scope_end_inner` keys by
+the ARM and the emitter reads at the arm's END. A binder is not `keyed` in the
+core — `NameInfo::binding` is `None` for it, because only a `let`, a parameter,
+a `for` variable and a construct's own container get a plan key — so
+`place_frames` skips it before it can place an exit row. The walk placed one,
+keyed by the `Stmt::IfLet` node, and the emitter had a slot for it. Closing
+this needs the core to state a binder's release at every exit inside its arm,
+which is the frame walk the deletion removes.
+
+**And the two builds stop agreeing.** `build` runs `last_owner` over its first
+build, and the first build reads `own.releases`. The placer WRITES
+`own.releases`. So the facts rebuild's first build reads rows the placer just
+added, decides a different seed, and builds a body the placed rows were not
+placed for. That is the second class: a row carries the hole set the kernel saw
+at an exit of a body that is no longer the body being judged.
+
+**The probe that says the dependence is real.** Make a release stop counting as
+a read — `St::Drop` and `St::Row` do nothing in `Reads` — and the take fires
+wherever nothing ELSE reads the value. The corpus refuses at once, on the
+walk's own tree: `@t3` is released here but was already consumed by a `match`
+on line 319, in `std/text.vyrn`, which is a double free. So the order alone is
+not the rule, and the plan's row is carrying a fact the core does not state.
+
+**What unblocks the walk, in one sentence.** The core must say for itself
+whether an ARM hands the payload out — the question `Emit::kept` answers — and
+must place a payload binder's release at every exit inside its arm. Until it
+does, `place_body`, `Live`, `Place` and `Ownership::releases` stand,
+`movecheck`'s `Kind::Rows` stands at 1,748, and the four readers of
+`Ownership::releases` named in the last record wait with them.
 
 ### M6 — the other two judgments
 
