@@ -2451,3 +2451,151 @@ fn main() -> Int64 {
         "{text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// RFC-0125 §3 M3, the safety strand: a join arm hands out a name bound outside
+// an enclosing loop.
+//
+// Two core rules meet at a back edge. An arm that yields an outer name stands
+// that name down (`core::Builder::alias_out`), because the join's result is
+// what releases the value now; and a `let` owns what the core lowered into it
+// (`core::Builder::owned_binding`), so the result is released at its block's
+// exit. Inside a loop that block is the body, so the release repeats and the
+// outer name's buffer is freed once per turn. `examples/loopalias.vyrn` is the
+// program, and it exited 134 under `VYRN_LEAK_CHECK=1`.
+//
+// The kernel refuses it now. These rows pin the sentence, at both join forms,
+// and pin the two shapes that are NOT it: the `.copy()` the menu offers, and a
+// rebind, which binds nothing and so releases nothing per turn.
+// ---------------------------------------------------------------------------
+
+/// `vyrn check` over one source, as its whole standard error.
+fn check_text(stem: &str, source: &str) -> (bool, String) {
+    let dir = std::env::temp_dir().join(format!("vyrn-loopalias-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("{stem}.vyrn"));
+    std::fs::write(&file, source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("check")
+        .arg(&file)
+        .output()
+        .expect("vyrn check");
+    let _ = std::fs::remove_file(&file);
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
+    )
+}
+
+const LOOP_ALIAS_IF: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        let picked = if i > 0 { names } else { ["z"] }
+        n = n + picked.length
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+const LOOP_ALIAS_MATCH: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let opts: Array<Option<Int64>> = [None, Some(1), Some(2)]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        let picked: Array<String> = match opts[i] { None => ["z"], Some(_) => names }
+        n = n + picked.length
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+/// The `for` spelling of the same loop, so the refusal does not depend on which
+/// statement wrote the back edge. The loop VARIABLE is minted inside the mark,
+/// so each turn's element is its own and only the container is refused.
+const LOOP_ALIAS_FOR: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    for c in [1, 2, 3] {
+        let picked = if c > 1 { names } else { ["z"] }
+        n = n + picked.length
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+/// The second door: an argument position binds no name a reader wrote, and the
+/// unnamed temporary owns and releases the join's result just the same. The
+/// store into `n` is a rebind, and a rebind's flag answers for that expression
+/// and no expression inside it.
+const LOOP_ALIAS_ARGUMENT: &str = r#"fn size(xs: Array<String>) -> Int64 {
+    return xs.length
+}
+
+fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        n = n + size(if i > 0 { names } else { ["z"] })
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+#[test]
+fn a_join_arm_may_not_hand_an_outer_name_out_of_a_loop() {
+    let sentence = "`names` may not be handed out of an arm inside a loop — the result is \
+                    released on every turn, and `names` is bound outside the loop";
+    for (stem, src) in [
+        ("if", LOOP_ALIAS_IF),
+        ("match", LOOP_ALIAS_MATCH),
+        ("for", LOOP_ALIAS_FOR),
+        ("argument", LOOP_ALIAS_ARGUMENT),
+    ] {
+        let (ok, err) = check_text(stem, src);
+        assert!(!ok, "the {stem} form was accepted; it double-frees:\n{err}");
+        assert!(err.contains(sentence), "the {stem} form said:\n{err}");
+        assert!(
+            err.contains("fix: `names.copy()` if the arm should hand out a value of its own"),
+            "the {stem} form's menu:\n{err}"
+        );
+    }
+}
+
+#[test]
+fn the_copy_the_menu_offers_is_accepted_and_a_rebind_is_untouched() {
+    let (ok, err) = check_text(
+        "copied",
+        &LOOP_ALIAS_IF.replace("{ names }", "{ names.copy() }"),
+    );
+    assert!(ok, "the fix the menu names was refused:\n{err}");
+
+    // A rebind releases once, at the name's own block exit, however many turns
+    // wrote it. `std/html.vyrn`'s `attrKey` is the shape, and it must stay
+    // lowered as it was.
+    let (ok, err) = check_text(
+        "rebound",
+        r#"fn main() -> Int64 {
+    let mut names: Array<String> = ["a", "b"]
+    let mut i = 0
+    while i < 3 {
+        names = if i > 0 { names } else { ["z"] }
+        i = i + 1
+    }
+    print("\{names.length}")
+    return 0
+}
+"#,
+    );
+    assert!(ok, "a rebind is not a second owner:\n{err}");
+}

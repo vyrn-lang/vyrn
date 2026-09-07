@@ -103,6 +103,7 @@ langbench	clean
 lazyfield	clean
 linkedlist	other
 logging	clean
+loopalias	skip
 mandelbrot	clean
 map	clean
 mapdemo	clean
