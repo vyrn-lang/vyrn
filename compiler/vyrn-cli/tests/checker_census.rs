@@ -20,11 +20,12 @@
 //! # The extra column, and why
 //!
 //! `movecheck.rs`'s census has a kind per section and nothing else, because
-//! every one of its rules is a section. The checker's are not: 163 of its 460
+//! every one of its rules is a section. The checker's are not: 156 of its 453
 //! refusal sites are inside `Checker::call`, which is a table with one arm per
-//! builtin, and a kind alone would file all 163 under the surface and lose
+//! builtin, and a kind alone would file all 156 under the surface and lose
 //! them. (It was 190 of 487 when this census was written; RFC-0125 §3 M6
-//! deleted the twenty-seven that restated a seeded row.) So each section also
+//! deleted the twenty-seven that restated a seeded row, then seven more when
+//! four names that had no row got one.) So each section also
 //! carries the number of `cerr!`/`cerr_at!` sites it holds, and
 //! [`the_structural_census_is_what_the_rfc_records`] pins the
 //! per-kind refusal tally beside the per-kind line tally. A rule that leaves
@@ -441,10 +442,10 @@ fn sections() -> Vec<Section> {
         sec(
             "fn call(",
             Surface,
-            "the builtin table: forty-four guarded blocks naming a builtin, \
+            "the builtin table: forty-one guarded blocks naming a builtin, \
              each giving its arity, its argument types, its result and its \
              refusals, then the fall-through, which since RFC-0125 §3 M6 types \
-             a seeded builtin against its row — sixteen names have no block at \
+             a seeded builtin against its row — twenty names have no block at \
              all. The single largest thing in the file and the `builtins` \
              factor written out",
         ),
@@ -750,9 +751,9 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("the typing judgment", 3159, 135),
         ("a rule the checker states", 1525, 58),
         ("the checker's part in a rewrite stated elsewhere", 451, 16),
-        ("one arm per form, type constructor or builtin", 4066, 221),
+        ("one arm per form, type constructor or builtin", 3981, 214),
         ("shared machinery", 2233, 30),
-        ("tests", 4677, 0),
+        ("tests", 4680, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

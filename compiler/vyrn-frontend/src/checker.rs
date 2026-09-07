@@ -7046,20 +7046,6 @@ impl<'a> Checker<'a> {
             return Ok(Type::Unit);
         }
 
-        // built-in: logger(String) -> Logger (RFC-0008).
-        if name == "logger" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`logger` takes 1 argument, got {}", args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`logger` needs a String name, found {t}"));
-            }
-            return Ok(Type::Logger);
-        }
         // built-in log methods: <level>(Logger, String) -> Unit. Written
         // subject-first via method sugar: `log.info("..")`.
         if crate::ast::is_log_level(name) {
@@ -7118,75 +7104,15 @@ impl<'a> Checker<'a> {
         // (`print`, `@str`, `toJson`, `value`, `@push`'s two container kinds,
         // `bytes`'s two arities), or a refusal about the ELEMENT type
         // (`@append`, `@copyFrom`, `@clear`), which is a rule and not a
-        // signature. Names with no row at all — `logger`, the log levels,
-        // `lineAt`, `colAt`, `@charCount`, `@toArray` — are the next seed rows.
+        // signature. Four more names had no row at all, and the seed extension
+        // in the same milestone gave them one: `logger`, `lineAt`, `colAt` and
+        // `@charCount` are typed by their rows too, and `@charCount`'s row
+        // retired a hand-written exception in `prelude::capability`. The four
+        // log levels are the family that could NOT follow them — a row is
+        // keyed by name, `trace`/`debug`/`info`/`warn`/`error` are not
+        // reserved, and a user `fn info(..)` would inherit the row. Reserving
+        // five common words to save 28 lines is a language decision.
 
-        // `lineAt(bytes, off)` / `colAt(bytes, off)` — the 1-based line and
-        // column of a byte offset in a UTF-8 buffer (RFC-0033 origin directives
-        // are 1-based, and this is what feeds them).
-        //
-        // A builtin rather than a library loop because the obvious loop is
-        // quadratic: counting newlines from byte 0 on every call is O(offset),
-        // and a scanner asks once per node. `std/vyx` spent 122 ms of a 291 ms
-        // page compile in exactly that shape. The interpreter memoizes a
-        // line-start table per buffer, which a Vyrn library cannot do —
-        // generators may not touch module state (comptime purity), so the cache
-        // has to live below them. Any generator gets it, not just std.
-        if name == "lineAt" || name == "colAt" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`{name}` takes 2 arguments (bytes, offset), got {}",
-                    args.len()
-                ));
-            }
-            // The buffer must be a BYTE buffer, not any array. Two reasons, and
-            // they point the same way:
-            //
-            // - The engines disagreed on anything else. The interpreter reads
-            //   `v as u8` per *element*, so `[1, 10]: Array<Int64>` looks like the
-            //   bytes `01 0a`; native hands the `{ ptr, i64, i64 }` data pointer to
-            //   `__vyrn_line_at` as `unsigned char*`, where element 1 starts at
-            //   byte 8 and byte 1 is the zero padding of `01 00 00 …`. RFC-0077's
-            //   M2n note found `lineAt([1, 10], 2)` answering 2 interpreted and 1
-            //   native, and refused to pick a winner — correctly, because a line
-            //   number over an `Array<Int64>` is nonsense in both readings. So this
-            //   rejects the call instead of answering it.
-            // - `ArrayN`/`SmallArray` were never lowerable here anyway: the native
-            //   emitter `extractvalue`s a `{ ptr, i64, i64 }`, which is the growable
-            //   `Array` layout alone (`[N x T]` and `{ i64, i64, ptr, [N x T] }` are
-            //   different aggregates). Accepting them was a front-end promise no
-            //   backend kept.
-            //
-            // `bytes(s)` produces exactly `Array<UInt8>`, and that is what every
-            // real caller passes (`std/vyx`'s scanner, `std/text`'s oracles). The
-            // element goes through `base` so a validated newtype over `UInt8` — same
-            // byte, same stride — still counts.
-            let b = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-            let is_bytes = match &b {
-                Type::Array(el) => {
-                    matches!(
-                        self.base(el),
-                        Type::IntN {
-                            bits: 8,
-                            signed: false
-                        }
-                    )
-                }
-                _ => false,
-            };
-            if !matches!(b, Type::Err) && !is_bytes {
-                return Err(cerr!(
-                    line,
-                    "`{name}` needs an `Array<UInt8>` buffer, found {b}"
-                ));
-            }
-            let o = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
-            if !matches!(o, Type::Err | Type::Int) {
-                return Err(cerr!(line, "`{name}`'s offset must be an `Int64`"));
-            }
-            return Ok(Type::Int);
-        }
         // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
         // reflection over a module's exported surface. It is generation-ONLY —
         // the interpreter refuses it outside a generation and neither compiling
@@ -7429,25 +7355,6 @@ impl<'a> Checker<'a> {
                 ));
             }
             return Ok(Type::Str);
-        }
-        // `@charCount` — the internal spelling of `s.charCount()` (RFC-0058):
-        // the number of Unicode scalar values in a String. O(n): counts the
-        // non-continuation bytes (`b & 0xC0 != 0x80`) of validated UTF-8.
-        if name == "@charCount" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`charCount` takes no arguments"));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(
-                    line,
-                    "`charCount` counts the Unicode scalars of a String, found {t}"
-                ));
-            }
-            return Ok(Type::Int);
         }
 
         // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
@@ -8877,10 +8784,18 @@ impl<'a> Checker<'a> {
                 .map(|p| p.capability)
                 .collect::<Vec<Capability>>()
         });
+        // The name a reader can WRITE. An `@` spelling is the sugar's internal
+        // one and no source can lex it, so a refusal that printed it would name
+        // something the reader cannot type — PR #120's lesson, which
+        // [`Self::show_hint`] states for a loader-prefixed type. Stripping the
+        // `@` gives the method's surface spelling for every internal name that
+        // reaches here (`@charCount` is `charCount`), and it is a no-op for a
+        // user declaration, which is every other call on this path.
+        let shown = name.trim_start_matches('@');
         if params.len() != args.len() {
             return Err(cerr!(
                 line,
-                "`{name}` expects {} argument(s), got {}",
+                "`{shown}` expects {} argument(s), got {}",
                 params.len(),
                 args.len()
             ));
@@ -8965,7 +8880,7 @@ impl<'a> Checker<'a> {
                 if !subst.contains_key(tp) {
                     return Err(cerr!(
                         line,
-                        "cannot infer type parameter `{tp}` of `{name}`"
+                        "cannot infer type parameter `{tp}` of `{shown}`"
                     ));
                 }
             }
@@ -8975,7 +8890,7 @@ impl<'a> Checker<'a> {
                     let concrete = &subst[tp];
                     for b in bs {
                         if !self.type_satisfies(concrete, b) {
-                            return Err(cerr!(line, "`{name}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
+                            return Err(cerr!(line, "`{shown}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
                             ));
                         }
                     }
@@ -9005,7 +8920,7 @@ impl<'a> Checker<'a> {
             if !self.coercible(&aty, pty) {
                 return Err(cerr!(
                     line,
-                    "`{name}` argument {} expects {pty}, found {aty}",
+                    "`{shown}` argument {} expects {pty}, found {aty}",
                     i + 1
                 ));
             }
@@ -15273,6 +15188,9 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
+    /// The buffer type is the rule, and since RFC-0125 §3 M6's seed extension
+    /// the ROW is where it is written. These are the same four programs the
+    /// hand-written block refused, in the words a declaration refuses them in.
     #[test]
     fn line_at_and_col_at_demand_a_byte_buffer() {
         // The shape every real caller passes.
@@ -15292,14 +15210,14 @@ mod tests {
             .unwrap_err();
             assert_eq!(
                 e,
-                format!("line 1: `{name}` needs an `Array<UInt8>` buffer, found Array<Int64>")
+                format!("line 1: `{name}` argument 1 expects Array<UInt8>, found Array<Int64>")
             );
         }
         // Not an array at all.
         let s = check_src("fn main() -> Int64 { print(lineAt(\"ab\", 1))  return 0 }").unwrap_err();
         assert_eq!(
             s,
-            "line 1: `lineAt` needs an `Array<UInt8>` buffer, found String"
+            "line 1: `lineAt` argument 1 expects Array<UInt8>, found String"
         );
         // A `SmallArray` of bytes is refused too, and deliberately: the native
         // emitter reads a `{ ptr, i64, i64 }`, which a `SmallArray`'s
@@ -15311,7 +15229,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            sa.contains("`lineAt` needs an `Array<UInt8>` buffer"),
+            sa.contains("`lineAt` argument 1 expects Array<UInt8>"),
             "{sa}"
         );
     }

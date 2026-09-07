@@ -14758,6 +14758,135 @@ surface census (`tests/surface.rs` and RFC-0126 §3, 1,587 mentions to 1,512),
 and the forms census (`tests/forms.rs` and RFC-0127 §3, unmoved — the slice
 touches no form).
 
+#### The seed extension: four names that had no row at all (2026-09-07)
+
+The block census above puts six blocks in class (b) — a signature would answer
+them, but the row does not exist yet or cannot say one thing it must. Four of
+the six were the first kind, and this is those four.
+
+`logger`, `lineAt`, `colAt` and `@charCount` each had a hand-written block in
+`Checker::call` and NO row. Their arity, their argument types and their result
+were therefore stated exactly once, in the checker, and every other pass had
+nothing to read — which is not the rule RFC-0094 states, it is the arrangement
+RFC-0094 was written against. `@charCount` shows the cost directly: its
+receiver capability had to be written out as a special case at the top of
+`prelude::capability`, with a comment saying why ("no seeded row and no user
+declaration to read a capability from"), because a leaked temporary in
+exit-residue round twenty-three had no verdict without it.
+
+Four rows, three blocks gone, one exception gone:
+
+| block | lines | refusals |
+|---|---|---|
+| `logger` | 13 | 2 |
+| `lineAt` / `colAt` | 55 | 3 |
+| `@charCount` | 16 | 2 |
+| **all** | **84** | **7** |
+
+`lineAt`'s 55 lines are mostly the two paragraphs saying why the buffer must be
+`Array<UInt8>` and not any array — the engines disagreed on anything else, and
+RFC-0077's M2n note refused to pick a winner. That reasoning moved to the row
+verbatim, because the row is now where the rule is. A validated newtype over
+`UInt8` is still accepted: an `Array` is covariant in its element and a `Named`
+decays to its base, so the row admits exactly the set the block admitted.
+
+**What did NOT follow, and why.** The four log levels are the same shape — 28
+lines, 3 refusals, and `(l: read Logger, m: read String) -> Unit` says all of
+it — and they stay. A row is keyed by the name a call site carries, and
+`trace`, `debug`, `info`, `warn` and `error` are not in `checker::RESERVED`, so
+a program may declare `fn info(..)`. `prelude`'s own
+`every_seeded_name_is_reserved_or_unspellable` is the test that says a row may
+not be keyed by a name a user can capture, and RFC-0090 M4's `get` is the
+defect it was written for. Reserving five common words to save 28 lines is a
+language decision, not a slice. `is_log_level`'s exception in
+`prelude::capability` stays with the block.
+
+**One defect the slice found in itself.** `@charCount` is the first
+`@`-spelled name to reach the fall-through, and the fall-through printed the
+name it was given, "`@charCount` expects 1 argument(s), got 2". That is
+an unspellable name in a user's diagnostic — the mistake `show_hint` already
+guards against for a loader-prefixed type, recorded as PR #120's lesson. The
+fall-through's four refusals name `name.trim_start_matches('@')` now, which is
+the method's surface spelling for every internal name that can reach here and a
+no-op for every user declaration, which is every other call on that path.
+
+What the fall-through cannot recover is the RECEIVER. `"ab".charCount(1)` is
+`@charCount("ab", 1)` by the time the checker sees it, so the refusal reads
+"expects 1 argument(s), got 2" where the block said "takes no arguments". The
+sentence is true of the call the checker has, and it is the same sentence a
+protocol method's arity refusal gives. Subtracting one for a receiver would be
+a hand-written exception of exactly the kind this milestone deletes, so it is
+recorded rather than repaired.
+
+**The licence.** The same measurement as the first slice, on the same corpus
+one testsweep lift larger.
+
+| the corpus | count |
+|---|---|
+| programs | 2,224 |
+| accepted, both | 1,062 |
+| refused, both | 1,162 |
+| byte-identical stderr | 1,162 |
+| differing text | 0 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+
+And the seven refusals witnessed one at a time, all still stated on the same
+line: `logger("a","b")`, `logger(3)`, `lineAt(bytes("a"))`,
+`lineAt(a, 2)` on an `Array<Int64>`, `lineAt(bytes("a"), "x")`,
+`colAt("ab", 1)`, `"ab".charCount(1)` and `5.charCount()`. One program uses all
+four names correctly and still compiles.
+
+**The numbers, both slices together.**
+
+| measure | at `a77838e8` | after the first slice | after this one |
+|---|---|---|---|
+| `checker.rs` | 16,339 | 16,111 | 16,029 |
+| `Checker::call` | 2,501 lines, 190 refusals | 2,246, 163 | 2,161, 156 |
+| guarded blocks naming a builtin | 58 | 44 | 41 |
+| builtin names typed by a row alone | 0 | 16 | 20 |
+| refusals in `checker.rs` | 487 | 460 | 453 |
+| the census's `Surface` kind | 4,321 lines, 248 refusals | 4,066, 221 | 3,981, 214 |
+| RFC-0126 §3's six-file mentions | 1,612 | 1,512 | 1,496 |
+| `prelude.rs` | 872 | 915 | 972 |
+
+The two slices together move 100 of RFC-0126 §3's mentions and 34 of the
+checker's refusals, for 57 lines of new rows. That is the trade this RFC makes,
+priced: a row costs lines where a block cost cases, and the census counts cases.
+
+##### Gates (2026-09-07, the second slice)
+
+The same list, one at a time, in the foreground.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 585 passed, no failure |
+| `kernel` `--ignored` | 1, 30 s |
+| `coretables` `--ignored` | 1, 32 s |
+| `typed` `--ignored` | 1, 52 s |
+| `effects` `--ignored` | 2, 50 s |
+| `fixtures` `--ignored` | 1, 18 s |
+| `testsweep` `--ignored` | 1, 48 s |
+| `vyrn-frontend` | 1,167 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,213 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 388 s |
+| the residue ratchet | 1, 358 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — the seed extension moves no byte either |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 15 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 215 over 26 files |
+
+The three censuses are re-pinned in the same commit: the structural census
+(`Surface` 4,066 lines and 221 refusals to 3,981 and 214, `Tests` 4,677 to
+4,680, and the `fn call` section's reader), the surface census (RFC-0126 §3,
+1,512 mentions to 1,496), and the forms census (RFC-0127 §3, unmoved again).
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
