@@ -185,7 +185,12 @@ pub fn site(
         return Ok(None);
     };
     memo(
-        (recv_expr as *const Expr as usize, key, method.to_string()),
+        (
+            recv_expr as *const Expr as usize,
+            line,
+            key,
+            method.to_string(),
+        ),
         recv_expr,
         args,
         || inline(f, recv_expr, args, line),
@@ -222,6 +227,7 @@ pub fn optional_site(
         let m = m.borrow();
         let e = m.as_ref()?.get(&(
             recv_expr as *const Expr as usize,
+            line,
             key.clone(),
             method.to_string(),
         ))?;
@@ -235,7 +241,12 @@ pub fn optional_site(
     OPT_MEMO.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(
-                (recv_expr as *const Expr as usize, key, method.to_string()),
+                (
+                    recv_expr as *const Expr as usize,
+                    line,
+                    key,
+                    method.to_string(),
+                ),
                 OptExpansion {
                     recv: recv_expr.clone(),
                     args: args.to_vec(),
@@ -258,6 +269,16 @@ struct OptExpansion {
 // Desugar once
 // ---------------------------------------------------------------------------
 
+/// What identifies an access site: the receiver node's address, the LINE it
+/// stands on, the receiver's type key and the member name.
+///
+/// The line is in the key because the memo now spans the LOAD (RFC-0125 §3 M3,
+/// the one analysis), and a load builds and drops whole generator programs — so
+/// a dead node's address is handed out to a live node, and two sites with an
+/// equal receiver and equal arguments can differ only in where they stand. The
+/// expansion carries that line in the nodes it mints.
+type Key = (usize, usize, String, String);
+
 /// One expansion, and the site inputs it was built from.
 ///
 /// The inputs are kept so a hit can be VERIFIED. The key holds a node address,
@@ -276,10 +297,10 @@ thread_local! {
     static LOOPS: std::cell::RefCell<
         Option<HashMap<(usize, String, String), (Expr, Block, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
-    static MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), Expansion>>> =
+    static MEMO: std::cell::RefCell<Option<HashMap<Key, Expansion>>> =
         const { std::cell::RefCell::new(None) };
     /// The optional kind's half of [`MEMO`] (RFC-0122), same key, same rules.
-    static OPT_MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), OptExpansion>>> =
+    static OPT_MEMO: std::cell::RefCell<Option<HashMap<Key, OptExpansion>>> =
         const { std::cell::RefCell::new(None) };
     /// The store half, keyed by the INDEX node rather than by the receiver:
     /// `a[i] = v` has no receiver node — [`store_index`] synthesizes one, and a
@@ -337,7 +358,7 @@ pub fn memo_open() -> bool {
 /// The shared expansion for `key`, or `build`'s, leaked so its addresses outlive
 /// every consumer.
 fn memo(
-    key: (usize, String, String),
+    key: Key,
     recv: &Expr,
     args: &[Expr],
     build: impl FnOnce() -> Result<Projection, String>,

@@ -885,14 +885,14 @@ pub fn refusals(program: &Program) -> Vec<Diagnostic> {
         return diags;
     }
     // Runs the placer, which builds and judges a core body for every instance.
-    // The answer is not handed on: see `own::Memo::open` for why a plan made
-    // here does not fit the lowering a tool runs next.
+    // The answer IS handed on: a command opens `own::Memo` next and adopts it,
+    // so a command analyses its program once (RFC-0125 §3 M3, the one analysis).
     //
     // THIS analysis is the one a judgment may be reused for, and no other: a
     // generator load's and an engine's both run outside this call, and neither
     // reads the refusals ([`reuse_judgments`]).
     JUDGING.with(|j| j.set(true));
-    let _ = crate::own::analyze(program);
+    crate::own::hand_on(program, &crate::own::analyze(program));
     JUDGING.with(|j| j.set(false));
     let mut lines: HashSet<(Option<String>, usize)> = HashSet::new();
     for d in &diags {
