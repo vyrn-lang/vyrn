@@ -12568,6 +12568,17 @@ date); the site export (82 routes and 14 assets) and `vyrn test` over
 blocks over 26 files with tests, 0 failed**; `demohl.vyrn`, `icons.vyrn` and
 `markup.vyrn` carry none).
 
+**The core line comes in a second time.** `rfc-0125-core` at `e3d60f61` adds
+`track-ct` — one analysis per command, where the load and the lowering stop
+running the fold twice. It touches `main.rs`, `own.rs`, `project.rs`,
+`movecheck.rs` and the projection snapshot, and nothing this line edits, so it
+merged with no conflict. The whole list above ran again on it, all green and
+with every count the same: 77 vyrn-cli suites, `kernel` 104 s, `coretables`
+93 s, `typed` 194 s, `effects` 139 s, `fixtures` 40 s, `testsweep` 146 s, the
+LSP's 77, `memory`'s 8, `route`'s 2 (355 s), residue **163 clean / 12 leaking /
+0 double-free on each engine** (306 s), the manifest green with **no byte
+moved**, the docs up to date, and the site's 82 routes and 189 test blocks.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
