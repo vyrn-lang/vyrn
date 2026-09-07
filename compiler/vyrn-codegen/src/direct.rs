@@ -3658,26 +3658,40 @@ impl<'p> Fn_<'_, 'p> {
                 self.rel_each(m, b, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
-            // whose declared type owns something. One walk since RFC-0126 §8.11's
-            // M4a — the built-in two used to have arms of their own here, testing
-            // only tag 1 and writing a `Result` as one `if`/`else` where the enum
-            // writes one `if` per variant in tag order.
+            // this walk has something to give back for. One walk since RFC-0126
+            // §8.11's M4a — the built-in two used to have arms of their own here,
+            // testing only tag 1 and writing a `Result` as one `if`/`else` where
+            // the enum writes one `if` per variant in tag order.
+            //
+            // A payload the emitter BOXED is one of them whatever it holds, and
+            // reading the guard as `owns_heap(payload)` alone is what skipped it.
+            // `Option<Handle<Node>>` is the witness: a `Handle` is three `Int64`
+            // fields, it owns nothing, and the sum still holds one `malloc` block
+            // per live payload — which is why `own::owns_heap` asks
+            // `types::payload_boxed` at the SUM. The two guards have to ask the
+            // same question of the payload, and this one asks the emitter's own
+            // rule ([`Fn_::word2`]) because the box is the emitter's.
+            // `rel_word`'s `Word::Boxed` arm already frees exactly the box.
             Type::Enum(_) => {
                 let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
-                    if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                    let mut live = false;
+                    for p in &var.payload {
+                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
+                    }
+                    if !live {
                         continue;
                     }
                     tag_eq(b, a, tag as i64);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     for (j, pty) in var.payload.clone().iter().enumerate() {
-                        if !self.owns_heap(pty) {
+                        let w = self.word2(pty)?;
+                        if !self.owns_heap(pty) && w != Word::Boxed {
                             continue;
                         }
                         let at = self.cx.payload_slot(&var.payload, j);
-                        let w = self.word2(pty)?;
                         self.rel_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
@@ -3884,6 +3898,85 @@ impl<'p> Fn_<'_, 'p> {
             let t = b.local(ValType::I32);
             b.ins(&Instruction::LocalSet(t));
             out.push((t, hdr));
+        }
+        // A sum's payload BOX is a buffer too, and the one [`Fn_::store_bufs`]
+        // cannot answer with an offset: which slot holds it depends on the tag,
+        // so it is read under a tag test rather than off the address. Everything
+        // else about it is the flat case — snapshot before, free after.
+        //
+        // The local is zeroed FIRST. A store inside a loop reaches this code
+        // once and runs it every turn, so a local left over from a turn whose
+        // tag matched would be freed again on a turn whose tag does not.
+        // `free` refuses a null, which is what a variant with no box leaves.
+        for (off, sty) in self.store_boxes(ty, line)? {
+            let base = self.addr_local(b, Place::Local(addr), off);
+            let vs = self.cx.sum_vs(&sty).unwrap_or_default();
+            let l = self.layout_of(&sty, line)?;
+            for (tag, var) in vs.iter().enumerate() {
+                let mut boxed = Vec::new();
+                for (j, p) in var.payload.iter().enumerate() {
+                    if self.word2(p)? == Word::Boxed {
+                        boxed.push(self.cx.payload_slot(&var.payload, j));
+                    }
+                }
+                if boxed.is_empty() {
+                    continue;
+                }
+                let locals: Vec<u32> = boxed
+                    .iter()
+                    .map(|_| {
+                        let t = b.local(ValType::I32);
+                        b.ins(&Instruction::I32Const(0))
+                            .ins(&Instruction::LocalSet(t));
+                        t
+                    })
+                    .collect();
+                tag_eq(b, base, tag as i64);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                for (k, slot) in boxed.iter().enumerate() {
+                    b.ins(&Instruction::LocalGet(base))
+                        .ins(&Instruction::I64Load(at(l.fields[*slot])))
+                        .ins(&Instruction::I32WrapI64)
+                        .ins(&Instruction::LocalSet(locals[k]));
+                }
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                out.extend(locals.into_iter().map(|t| (t, false)));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The sums a value of `ty` holds, each as `(byte offset, the sum's type)`
+    /// — the places whose reclamation needs a tag and so cannot be one of
+    /// [`Fn_::store_bufs`]'s flat offsets.
+    ///
+    /// The same subset that function takes, walked the same way: through record
+    /// fields, and stopping at a declared `release`, whose timing is the
+    /// language's and not a store's. An `Array`, a `Map` and a `SmallArray` stop
+    /// here as they do there — a store hands back the buffer and the elements
+    /// in it leak, which is the answer this side has always given.
+    fn store_boxes(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, Type)>, String> {
+        if matches!(
+            self.cx.owned.release_kind(ty),
+            Some(DropKind::Release(..)) | None
+        ) {
+            return Ok(Vec::new());
+        }
+        let t = self.cx.resolve(ty);
+        if self.cx.sum_vs(&t).is_some() {
+            return Ok(vec![(0, t)]);
+        }
+        let Some(fields) = vyrn_frontend::types::record_fields(&t, &self.cx.types) else {
+            return Ok(Vec::new());
+        };
+        let l = self.layout_of(&t, line)?;
+        let mut out = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            for (o, st) in self.store_boxes(&f.ty, line)? {
+                out.push((l.fields[i] + o, st));
+            }
         }
         Ok(out)
     }
@@ -13019,6 +13112,13 @@ impl<'p> Fn_<'_, 'p> {
         // Reusing `bind_payload` costs one local or slot that nothing else reads,
         // and buys the four payload shapes (direct, extended, inline pair, boxed)
         // already being right here because they are right in `match`.
+        //
+        // The box question is `match`'s, so it is asked in `match`'s words: a
+        // `?` IS a switch, the core lowers it as one, and the success arm reads
+        // the payload out of the box exactly as an arm binder does. Passing
+        // `false` here was the whole of the `?` residue — every successful
+        // `parseJson` left the box its `Ok` payload came in.
+        let free_box = self.frees_boxes(e, at);
         let place = self.bind_payload(
             b,
             addr,
@@ -13027,7 +13127,7 @@ impl<'p> Fn_<'_, 'p> {
             0,
             &ok_ty,
             line,
-            false,
+            free_box,
         )?;
         match place {
             Place::Local(l) => {
