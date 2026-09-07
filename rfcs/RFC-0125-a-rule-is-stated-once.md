@@ -14981,6 +14981,432 @@ the forms census (`tests/forms.rs` and RFC-0127 §3, unmoved — the slice touch
 no form), and the new structural census
 (`tests/checker_census.rs`, which is what this record's table is).
 
+#### `Checker::call` is counted by builtin name, and sixteen names go back to their rows (2026-09-07)
+
+The section census above says where the size is: `Checker::call`, 2,501 lines
+and 190 of the checker's 487 refusals, one hand-written block per builtin. This
+is that block table counted a second time, by NAME rather than by section, and
+the first sixteen names deleted.
+
+RFC-0094 states the rule the count is read against: *a builtin's contract is
+its signature; the compiler seeds the signature; the passes read it; there is no
+second list.* Its M1 put the ownership capabilities on the rows, M2 gave eleven
+names back to `std`, M3 added the `Show` protocol. What M1 deliberately did NOT
+take is written on `prelude.rs`'s own module comment, and it is the whole of
+this slice:
+
+> **Arity and parameter types.** The checker's per-builtin arms already refuse
+> on both, with hand-written wording that reads better than anything a generic
+> signature check would print.
+
+That is a judgment about WORDING, and it was never priced. The price is below.
+
+**The census, by name.** Every top-level guarded block in `Checker::call` at
+`a77838e8`, its statement lines (the block's own braces, comments excluded), its
+refusals, and its class. The classes are the question this record was set:
+(a) the whole block is arity, parameter types and result, and a seeded row
+already carries all three; (a\*) the same, except the row also carries a
+`consume` the block does not check, so deleting the block ADDS a refusal;
+(b) the same, but the row does not exist yet or cannot say one thing it must;
+(c) typing a row cannot reach; (d) a desugar.
+
+| the block | lines | refusals | class | why |
+|---|---|---|---|---|
+| a call through a fn-typed binding | 48 | 2 | machinery | a stored value's signature, not a builtin |
+| the ten removed free functions (`str`, `concat`, `len`, `list`, `join`, `toString`, `push`, `at`, `alen`, `array`) | 57 | 10 | c | ten migration hints keyed on a name with no declaration at all |
+| `assert` / `assertEq` | 57 | 5 | c | a gate on WHERE the call stands (`test`), and an equatable-scalar union |
+| `blackBox` | 19 | 2 | c | a gate on `bench` or `test` |
+| `panic` / `@panicAt` | 26 | 2 | c | two arities on one name; the result is `Never`, which no row spells |
+| `print` | 22 | 2 | c | a union parameter, and `Show` dispatch when it misses |
+| `logger` | 13 | 2 | b | no row; `(name: String) -> Logger` would retire it whole |
+| the four log levels | 28 | 3 | b | no row; `(l: Logger, m: String) -> Unit` per level would retire it AND the hand-written `prelude::capability` exception for it |
+| `args` | 6 | 1 | **a** | |
+| `readLine` | 10 | 1 | **a** | |
+| `readFile` | 17 | 2 | **a** | |
+| `lineAt` / `colAt` | 55 | 3 | b | no row; `(b: Array<UInt8>, off: Int64) -> Int64`. 47 of the 55 lines are the two paragraphs saying why the buffer must be bytes, and those stay wherever the row goes |
+| `listDir` / `listDirKinds` | 13 | 2 | **a** | |
+| `moduleInterface` | 26 | 3 | c | a generation-only gate over a row that is otherwise (a) |
+| the code quotes (`@codeText`, `@codeSplice`, `render`, `rawAt`, `raw`, `lex`) | 94 | 7 | c | a generation gate, a shadowing rule that asks THIS module, and `Code` |
+| `writeFile` | 19 | 2 | **a** | |
+| `writeFileBytes` | 34 | 3 | **a** | |
+| `writeStdout` | 24 | 2 | **a** | |
+| `renameFile` | 22 | 2 | **a** | |
+| `fsyncFile` | 17 | 2 | **a** | |
+| `readFileBytes` | 26 | 2 | **a** | |
+| `stringFromBytes` | 24 | 2 | **a** | |
+| `floatBits` / `floatFromBits` | 30 | 2 | **a** | and the drift below |
+| `bytes` | 26 | 3 | c | two arities on one name (the whole String, or a byte range) |
+| `@concat` | 19 | 2 | **a** | |
+| `@join` | 10 | 2 | a\* | the row's `consume` on a `Task<T>` |
+| `@str` | 25 | 2 | c | a union parameter, and `Show` dispatch |
+| `@charCount` | 16 | 2 | b | no row; `(s: String) -> Int64` would retire it AND its `prelude::capability` exception |
+| `parse` | 13 | 2 | **a** | |
+| `@clear` | 27 | 3 | c | a refusal about the ELEMENT type: forgetting an element that owns heap leaks it |
+| `@reserve` | 25 | 3 | b | the row says `Array<T>`; the block answers the RECEIVER'S OWN type, so `type Buf = Array<Int64>` stays a `Buf` |
+| `@tally` | 35 | 5 | b | the same receiver-type result, over `Map<K, Int64>` |
+| `@tallyBytes` | 48 | 6 | c | a String-keyed map taking a byte key — two types in one rule |
+| `@copyFrom` | 35 | 4 | c | the element-type refusal |
+| `@append` | 35 | 4 | c | the element-type refusal |
+| `@push` | 39 | 3 | c | a union receiver whose KIND rides out in the result, plus the region store guard |
+| `@at` / `@slot` | 83 | 4 | d | the dispatch site: a user projection, then Map, Array or String |
+| `fromArray` | 18 | 2 | a\* | the row's `consume` |
+| `fromStep` | 38 | 5 | a\* | the row's `consume`, and it spells the step's `fn` type exactly |
+| `boxStream` | 18 | 2 | a\* | the row's `consume` |
+| `unboxStream` / `pullAt` | 32 | 4 | c | the result comes from the context; an address is an `Int64` whatever it addresses |
+| `close` | 14 | 2 | a\* | the row's `consume` |
+| `serveStream` | 25 | 2 | a\* | the row's `consume` |
+| `@pop` | 10 | 1 | c | the receiver must be a `mut` BINDING, which is not a type |
+| `@swapRemove` | 18 | 2 | c | the same binding rule |
+| `@toArray` | 12 | 2 | c | a union receiver |
+| `@copy` | 54 | 4 | c | `impl Copy` dispatch, and two refusals about a DECLARATION (`impl Owned`, self-reference) |
+| `@has` / `@remove` / `@keys` | 52 | 7 | c | three names on one block, and `remove` needs a `mut` binding |
+| the nine numeric conversions | 20 | 2 | c | the parameter is "any number", a union |
+| the SIMD names | 9 | 0 | d | routed to `vector_call` |
+| `schemaOf` | 21 | 3 | c | a type NAME as an argument |
+| `contractOf` | 26 | 4 | c | a declaration name as an argument, and a generation gate |
+| `jsonSchema` | 19 | 3 | c | a type NAME as an argument |
+| `toJson` | 23 | 2 | c | a union parameter, and the encoder recording |
+| `fromJson` | 37 | 5 | c | a type NAME as an argument, and the result is built FROM it |
+| `value` | 26 | 2 | c | a union parameter, and `Show` dispatch |
+| `@list` | 11 | 2 | c | the element type comes from the argument |
+| `Some` | 27 | 2 | d | a constructor with a context-inferred payload |
+| `Ok` / `Err` | 43 | 3 | d | both halves from the context |
+| an enum variant with a payload | 44 | 3 | c | |
+| a validated type's construction | 3 | 0 | c | |
+| a protocol method | 235 | 10 | c | the dispatcher; the single largest block |
+| a projection called by name (RFC-0120) | 34 | 0 | d | |
+| a projection through a bound (RFC-0123) | 12 | 1 | c | |
+| a generation-host primitive | 6 | 0 | c | |
+| the fall-through: the signature lookup | 19 | 3 | machinery | |
+| the fall-through: the generic solve | 103 | 2 | machinery | |
+| the fall-through: the capability table | 1 | 0 | machinery | |
+| the fall-through: the argument loop | 29 | 1 | machinery | |
+
+| class | blocks | lines | refusals |
+|---|---|---|---|
+| (a) a seeded row answers it today | 14 | 274 | 27 |
+| (a\*) the same, and the row carries a `consume` the block does not check | 6 | 123 | 15 |
+| (b) a row would answer it with one more thing | 6 | 172 | 18 |
+| (c) typing a row cannot reach | 33 | 1,197 | 113 |
+| (d) a desugar | 5 | 196 | 9 |
+| the fall-through itself | 5 | 200 | 8 |
+| **all** | **69** | **2,162** | **190** |
+
+The statement lines add to 2,162 against the section's 2,501; the difference is
+comment and blank lines between blocks, which belong to no block.
+
+**The slice: class (a), sixteen names.** `prelude::checkable` is the reading.
+It hands back a row only when every type on that row is the type a call site
+must have — that is, when the row does not LEND (`at`, `atSet`: the result is
+the receiver's element) and when no parameter is spelled `Unit`, which is how
+the module comment already marks a parameter that is a union or a type name
+(`@str`, `print`, `toJson`, `jsonSchema`, `schemaOf`, `contractOf`). Everything
+else on a row is the contract. `Checker::call`'s fall-through asks `self.sigs`
+first, so a user declaration still wins, then asks the row, and then types the
+call the way it types every user call — arity, parameter types, the generic
+solve over the row's type parameters, the capability discipline, the coercion
+proof, the result.
+
+Sixteen names lost their block: `args`, `readLine`, `readFile`,
+`readFileBytes`, `writeFile`, `writeFileBytes`, `writeStdout`, `renameFile`,
+`fsyncFile`, `stringFromBytes`, `listDir`, `listDirKinds`, `floatBits`,
+`floatFromBits`, `parse` and `@concat`.
+
+**What the deletion found.** `floatBits` answered a `UInt64` in its block and
+its row said `Int64`; `floatFromBits` took the same pair the other way. Nothing
+read the wrong half — both are scalars, so `owns_heap` and every other reading
+of the row answers alike for either — which is the only reason it survived M1.
+It is the same shape as the defect `prelude.rs`'s own comment records for
+`stringFromBytes`, one type narrower and one consequence luckier. The rows say
+`UInt64` now, and `the_bit_views_answer_a_uint64` is the assertion that says
+which.
+
+**The licence.** The checker cannot be stood aside, so there is no knob to
+compare against; the licence is measured against the SOURCE TREE. `vyrn check`
+was run over the whole corpus — `examples/`, `site/`, `compiler/vyrn-cli/tests/`
+and testsweep's 1,715-program lift, 2,092 programs — at `a77838e8` and again
+with the sixteen blocks gone, and the two streams compared WHOLE.
+
+| the corpus | count |
+|---|---|
+| programs | 2,092 |
+| accepted, both | 1,005 |
+| refused, both | 1,087 |
+| byte-identical stderr | 1,087 |
+| differing text | 0 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+
+Byte-identical everywhere is the weaker half of the licence, not the stronger:
+it says the corpus never gets these refusals wrong, which is exactly why the
+27 refusals had to be witnessed one at a time. Twenty-nine programs were
+written, one per refusal the sixteen blocks stated that a call site can reach,
+and each was run under both binaries. All twenty-nine still refuse, on the same
+line, in the fall-through's words:
+
+| the refusal | before | after |
+|---|---|---|
+| `readFile(5)` | "needs a String path, found Int64" | "argument 1 expects String, found Int64" |
+| `writeFile("p")` | "takes 2 arguments, got 1" | "expects 2 argument(s), got 1" |
+| `args(1)` | "takes no arguments, got 1" | "expects 0 argument(s), got 1" |
+| `floatFromBits(1.5)` | "needs a UInt64, found Float64" | "argument 1 expects UInt64, found Float64" |
+| the other 25 | the block's wording | the same sentence, argument-numbered |
+
+Each line is prefixed by the callee's name in both columns.
+
+`@concat`'s two refusals are the exception and they are unreachable: `@concat`
+does not lex, and the only thing that produces it is the `+` lowering and the
+interpolation spine, both of which check their operands first. They were dead
+before this slice and they are dead now.
+
+That is the price of M1's wording judgment, paid: sixteen names, 328 lines of
+`Checker::call` and 27 of its 190 refusals, for two words of a sentence. The
+fall-through's sentence names the argument, which the blocks' did not.
+
+**The numbers.**
+
+| measure | before | after |
+|---|---|---|
+| `checker.rs` | 16,339 | 16,111 |
+| `Checker::call` | 2,501 lines, 190 refusals | 2,246 lines, 163 refusals |
+| refusals in `checker.rs` | 487 | 460 |
+| the census's `Surface` kind | 4,321 lines, 248 refusals | 4,066 lines, 221 refusals |
+| RFC-0126 §3's per-constructor mentions, all six files | 1,587 | 1,512 |
+| ...of which `checker.rs`'s | — | 78 fewer; `Str` falls 31, `Err` 26, `Array` 6, `IntN` 6, `Bool` 4, `Float` 2, `Int` 1 |
+| `prelude.rs` | 872 | 915 |
+
+The surface census is the number that matters and 75 is the largest fall it has
+recorded. It counts every place a rule spells a type constructor, and a builtin
+block spelled its own parameter and result types where the row already did. The
+26 `Type::Err` mentions are the same story once more: each block answered
+`Ok(Type::Err)` when an argument failed to type, and the fall-through simply
+answers the row's result, which is what a user call has always done.
+
+**What class (a\*) needs, and why it is not in this commit.** Six blocks —
+`fromArray`, `fromStep`, `close`, `boxStream`, `serveStream`, `@join`, 123 lines
+and 15 refusals — are class (a) except for one thing: their rows carry
+`Capability::Consume`, and the fall-through reads a capability, so deleting the
+block would run `region_consume_guard` where the block did not. That is a
+refusal ADDED, not lost, and adding a refusal needs its own licence pass over
+the corpus. `std/stream` is where those calls live and a `region` around one is
+plausible, so the pass is real work rather than a formality. The fall-through
+already reads the seeded capability column in this commit, so the deletion is
+one `git rm` of six blocks away once the pass is run.
+
+**What class (b) needs, named.** Six blocks, 172 lines, 18 refusals, and two
+different missing things.
+
+| what the row must carry | the blocks it retires | lines | refusals |
+|---|---|---|---|
+| a row at all — `logger`, the four log levels, `lineAt`, `colAt`, `@charCount` | 4 | 112 | 10 |
+| a result spelled "the receiver's own type", so a `type Buf = Array<Int64>` receiver stays a `Buf` | `@reserve`, `@tally` | 60 | 8 |
+
+The first needs no new machinery: five rows in `prelude::rows` and the blocks
+go, and two hand-written exceptions in `prelude::capability` go with them (the
+`@charCount` receiver and the log message, each written there because the name
+had no row to read a capability from). The second is a language question wearing
+a signature's clothes — `-> Self` on a builtin row — and it is RFC-0120's result
+capability asked of a seeded declaration. It is not a slice on its own.
+
+**Ranked, what to take next.**
+
+1. **The five missing rows, class (b)'s first half.** 112 lines, 10 refusals,
+   two `prelude::capability` exceptions, no new machinery. It is the direct
+   continuation of this commit and the licence is the same shape.
+2. **Class (a\*), the six `consume` rows.** 123 lines, 15 refusals, blocked
+   only by a corpus pass that prices the added `region_consume_guard`.
+3. **The three type-name arguments — `schemaOf`, `jsonSchema`, `fromJson`, 77
+   lines and 11 refusals.** RFC-0094's "what the rule does not reach" names
+   this one first, and it is the largest coherent group left. A signature that
+   can say "the type my caller wrote" is a language feature, not a row.
+4. **The protocol dispatcher, 235 lines and 10 refusals.** The single largest
+   block and it is not a builtin at all. It belongs with RFC-0084's dispatch
+   work, not with this rule.
+5. **The ten migration hints, 57 lines and 10 refusals.** Each is a sentence
+   about a name that no longer exists. `MOVED_TO_STD` is already the same
+   shape for eleven other names, and these ten could join it — a table, not
+   a block.
+6. **The three union parameters — `print`, `@str`, `toJson`, 70 lines and 6
+   refusals.** They are one union written three times, and RFC-0094 M3 already
+   made `Show` the dispatch for all three. What is left is the union itself,
+   which the language cannot spell.
+
+Classes (c) and (d) are 1,393 lines and 122 refusals and this record does not
+rank most of them, because a row cannot carry any of it. The (d) blocks each
+already have a home: `@at`/`@slot` and the two projection blocks are the
+access-site expansion, which RFC-0120 and RFC-0123 own; `Some` and `Ok`/`Err`
+are RFC-0126 §8's collapse; the SIMD names route to `vector_call` in one line
+and are a table elsewhere. None of the four is a rewrite this file performs, so
+none of them moves to the parser or to the core — the parser produces the AST
+and the core lowers it, and what stands here is the type rule between, which is
+the checker's by definition.
+
+##### Gates (2026-09-07)
+
+The same list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 585 passed, no failure |
+| `kernel` `--ignored` | 1, 17 s |
+| `coretables` `--ignored` | 1, 15 s |
+| `typed` `--ignored` | 1, 34 s |
+| `effects` `--ignored` | 2, 27 s |
+| `fixtures` `--ignored` | 1, 15 s |
+| `testsweep` `--ignored` | 1, 46 s |
+| `vyrn-frontend` | 1,167 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,213 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 308 s |
+| the residue ratchet | 1, 279 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — a checker-only change moves no byte, and it moved none |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 16 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 215 over 26 files |
+
+Three censuses move with the slice and are re-pinned in the same commit: the
+structural census (`tests/checker_census.rs`, the `Surface` kind from 4,321
+lines and 248 refusals to 4,066 and 221, the `Tests` kind from 4,650 to 4,677
+for the two new unit tests, and the `fn call` section's own reader), the
+surface census (`tests/surface.rs` and RFC-0126 §3, 1,587 mentions to 1,512),
+and the forms census (`tests/forms.rs` and RFC-0127 §3, unmoved — the slice
+touches no form).
+
+#### The seed extension: four names that had no row at all (2026-09-07)
+
+The block census above puts six blocks in class (b) — a signature would answer
+them, but the row does not exist yet or cannot say one thing it must. Four of
+the six were the first kind, and this is those four.
+
+`logger`, `lineAt`, `colAt` and `@charCount` each had a hand-written block in
+`Checker::call` and NO row. Their arity, their argument types and their result
+were therefore stated exactly once, in the checker, and every other pass had
+nothing to read — which is not the rule RFC-0094 states, it is the arrangement
+RFC-0094 was written against. `@charCount` shows the cost directly: its
+receiver capability had to be written out as a special case at the top of
+`prelude::capability`, with a comment saying why ("no seeded row and no user
+declaration to read a capability from"), because a leaked temporary in
+exit-residue round twenty-three had no verdict without it.
+
+Four rows, three blocks gone, one exception gone:
+
+| block | lines | refusals |
+|---|---|---|
+| `logger` | 13 | 2 |
+| `lineAt` / `colAt` | 55 | 3 |
+| `@charCount` | 16 | 2 |
+| **all** | **84** | **7** |
+
+`lineAt`'s 55 lines are mostly the two paragraphs saying why the buffer must be
+`Array<UInt8>` and not any array — the engines disagreed on anything else, and
+RFC-0077's M2n note refused to pick a winner. That reasoning moved to the row
+verbatim, because the row is now where the rule is. A validated newtype over
+`UInt8` is still accepted: an `Array` is covariant in its element and a `Named`
+decays to its base, so the row admits exactly the set the block admitted.
+
+**What did NOT follow, and why.** The four log levels are the same shape — 28
+lines, 3 refusals, and `(l: read Logger, m: read String) -> Unit` says all of
+it — and they stay. A row is keyed by the name a call site carries, and
+`trace`, `debug`, `info`, `warn` and `error` are not in `checker::RESERVED`, so
+a program may declare `fn info(..)`. `prelude`'s own
+`every_seeded_name_is_reserved_or_unspellable` is the test that says a row may
+not be keyed by a name a user can capture, and RFC-0090 M4's `get` is the
+defect it was written for. Reserving five common words to save 28 lines is a
+language decision, not a slice. `is_log_level`'s exception in
+`prelude::capability` stays with the block.
+
+**One defect the slice found in itself.** `@charCount` is the first
+`@`-spelled name to reach the fall-through, and the fall-through printed the
+name it was given, "`@charCount` expects 1 argument(s), got 2". That is
+an unspellable name in a user's diagnostic — the mistake `show_hint` already
+guards against for a loader-prefixed type, recorded as PR #120's lesson. The
+fall-through's four refusals name `name.trim_start_matches('@')` now, which is
+the method's surface spelling for every internal name that can reach here and a
+no-op for every user declaration, which is every other call on that path.
+
+What the fall-through cannot recover is the RECEIVER. `"ab".charCount(1)` is
+`@charCount("ab", 1)` by the time the checker sees it, so the refusal reads
+"expects 1 argument(s), got 2" where the block said "takes no arguments". The
+sentence is true of the call the checker has, and it is the same sentence a
+protocol method's arity refusal gives. Subtracting one for a receiver would be
+a hand-written exception of exactly the kind this milestone deletes, so it is
+recorded rather than repaired.
+
+**The licence.** The same measurement as the first slice, on the same corpus
+one testsweep lift larger.
+
+| the corpus | count |
+|---|---|
+| programs | 2,224 |
+| accepted, both | 1,062 |
+| refused, both | 1,162 |
+| byte-identical stderr | 1,162 |
+| differing text | 0 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+
+And the seven refusals witnessed one at a time, all still stated on the same
+line: `logger("a","b")`, `logger(3)`, `lineAt(bytes("a"))`,
+`lineAt(a, 2)` on an `Array<Int64>`, `lineAt(bytes("a"), "x")`,
+`colAt("ab", 1)`, `"ab".charCount(1)` and `5.charCount()`. One program uses all
+four names correctly and still compiles.
+
+**The numbers, both slices together.**
+
+| measure | at `a77838e8` | after the first slice | after this one |
+|---|---|---|---|
+| `checker.rs` | 16,339 | 16,111 | 16,029 |
+| `Checker::call` | 2,501 lines, 190 refusals | 2,246, 163 | 2,161, 156 |
+| guarded blocks naming a builtin | 58 | 44 | 41 |
+| builtin names typed by a row alone | 0 | 16 | 20 |
+| refusals in `checker.rs` | 487 | 460 | 453 |
+| the census's `Surface` kind | 4,321 lines, 248 refusals | 4,066, 221 | 3,981, 214 |
+| RFC-0126 §3's six-file mentions | 1,612 | 1,512 | 1,496 |
+| `prelude.rs` | 872 | 915 | 972 |
+
+The two slices together move 100 of RFC-0126 §3's mentions and 34 of the
+checker's refusals, for 57 lines of new rows. That is the trade this RFC makes,
+priced: a row costs lines where a block cost cases, and the census counts cases.
+
+##### Gates (2026-09-07, the second slice)
+
+The same list, one at a time, in the foreground.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 585 passed, no failure |
+| `kernel` `--ignored` | 1, 30 s |
+| `coretables` `--ignored` | 1, 32 s |
+| `typed` `--ignored` | 1, 52 s |
+| `effects` `--ignored` | 2, 50 s |
+| `fixtures` `--ignored` | 1, 18 s |
+| `testsweep` `--ignored` | 1, 48 s |
+| `vyrn-frontend` | 1,167 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,213 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 388 s |
+| the residue ratchet | 1, 358 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — the seed extension moves no byte either |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 15 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 215 over 26 files |
+
+The three censuses are re-pinned in the same commit: the structural census
+(`Surface` 4,066 lines and 221 refusals to 3,981 and 214, `Tests` 4,677 to
+4,680, and the `fn call` section's reader), the surface census (RFC-0126 §3,
+1,512 mentions to 1,496), and the forms census (RFC-0127 §3, unmoved again).
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

@@ -34,6 +34,7 @@
 //! | the receiver is written through | `Capability::Modify` on parameter 0 | `checker::mut_array_receiver` |
 //! | what the result IS | the return type | `declared::Declared::new` |
 //! | the access site's lowering | the whole row | `crate::project::inline` |
+//! | the call's arity, argument types and result | the whole row | `checker::Checker::call` |
 //!
 //! A row is keyed by the name the **call site carries**, because that is what
 //! every pass matches on: `@push`, `@pop` and `@swapRemove` are the internal
@@ -46,10 +47,21 @@
 //! - **Effects.** `SPAWN_FORBIDDEN` and the lattice's `gen` column are 29 rows and no
 //!   signature in this language carries an effect. That is a language feature,
 //!   not a milestone.
-//! - **Arity and parameter types.** The checker's per-builtin arms already
-//!   refuse on both, with hand-written wording that reads better than anything
-//!   a generic signature check would print. The declared types below are the
-//!   census's, and they are read only where the table above says so.
+//! Arity and parameter types are NO LONGER excluded, and this section used to
+//! say they were: the checker's per-builtin blocks refused on both, "with
+//! hand-written wording that reads better than anything a generic signature
+//! check would print". RFC-0125 §3 M6 counted what the wording cost — sixteen
+//! names, 328 lines of `Checker::call` and 27 of its 190 refusals, every one a
+//! second statement of a row below — and deleted the blocks. [`checkable`] is
+//! the reading, and the blocks that remain are the ones a row cannot carry.
+//! Four more names then got the row they never had (`logger`, `lineAt`,
+//! `colAt`, `@charCount`), which took 84 lines and 7 refusals more and retired
+//! `@charCount`'s hand-written exception in [`capability`].
+//!
+//! The deletion also found the drift a second statement always risks:
+//! `floatBits` said `UInt64` in its block and `Int64` on its row, and
+//! `floatFromBits` said the mirror pair. Nothing read the wrong half because
+//! both are scalars, which is the only reason it survived M1.
 //!
 //! ## Where a declared type is INERT, and how a reader tells
 //!
@@ -177,6 +189,10 @@ fn rows() -> Vec<Function> {
             signed: false,
         })
     };
+    let u64_ = || Type::IntN {
+        bits: 64,
+        signed: false,
+    };
     let step = || Type::Fn(vec![Int, Int, Bool], Box::new(opt(t())));
     vec![
         // ---- the seeded `impl Index for <builtin container>` (RFC-0091 M2) --
@@ -242,9 +258,73 @@ fn rows() -> Vec<Function> {
             Type::result(Str, Str),
             &[],
         ),
-        row("floatBits", &[], &[("x", Read, Float)], Int, &[]),
-        row("floatFromBits", &[], &[("b", Read, Int)], Float, &[]),
+        // The bit pattern is a `UInt64`, not an `Int64`. RFC-0094 M1 wrote
+        // `Int64` on both rows and the checker's arm said `UInt64`, and the two
+        // spellings sat side by side until RFC-0125 §3 M6 read them together —
+        // the same drift `stringFromBytes` had, one type narrower. Nothing read
+        // the wrong half (both are scalars, so `owns_heap` answers alike for
+        // either), which is exactly why it stood: a fact stated twice is only
+        // checked where somebody happens to compare the two statements.
+        row("floatBits", &[], &[("x", Read, Float)], u64_(), &[]),
+        row("floatFromBits", &[], &[("b", Read, u64_())], Float, &[]),
         row("parse", &[], &[("s", Read, Str)], opt(Int), &[]),
+        // ---- the four rows RFC-0125 §3 M6 added (the seed extension) --------
+        // Each of these names had a hand-written block in `Checker::call` and
+        // no row at all, so its arity, its argument types and its result were
+        // stated once — in the checker — and every other pass had nothing to
+        // read. A row states them where the rest are stated, and the block goes.
+        //
+        // `logger(name)` opens a sink (RFC-0008). `Logger` is a builtin type
+        // that owns no heap, so the row buys the checker's reading and nothing
+        // else asks.
+        row("logger", &[], &[("name", Read, Str)], Type::Logger, &[]),
+        // `lineAt(bytes, off)` / `colAt(bytes, off)` — the 1-based line and
+        // column of a byte offset in a UTF-8 buffer (RFC-0033 origin directives
+        // are 1-based, and this is what feeds them).
+        //
+        // The buffer must be a BYTE buffer, not any array, and the type on this
+        // row is the whole of that rule. The engines disagreed on anything
+        // else: the interpreter reads `v as u8` per ELEMENT, so `[1, 10]:
+        // Array<Int64>` looks like the bytes `01 0a`, while native hands the
+        // `{ ptr, i64, i64 }` data pointer to `__vyrn_line_at` as `unsigned
+        // char*`, where element 1 starts at byte 8. RFC-0077's M2n note found
+        // `lineAt([1, 10], 2)` answering 2 interpreted and 1 native and refused
+        // to pick a winner, because a line number over an `Array<Int64>` is
+        // nonsense in both readings. `ArrayN`/`SmallArray` were never lowerable
+        // here either — the native emitter `extractvalue`s the growable
+        // `Array` layout alone. `bytes(s)` produces exactly `Array<UInt8>`, and
+        // that is what every real caller passes (`std/vyx`'s scanner,
+        // `std/text`'s oracles); a validated newtype over `UInt8` is the same
+        // byte at the same stride, and an `Array` is covariant in its element
+        // with a `Named` decaying to its base, so the row accepts it.
+        //
+        // They are builtins rather than a library loop because the obvious loop
+        // is quadratic: counting newlines from byte 0 on every call is
+        // O(offset), and a scanner asks once per node. `std/vyx` spent 122 ms
+        // of a 291 ms page compile in exactly that shape. The interpreter
+        // memoizes a line-start table per buffer, which a Vyrn library cannot
+        // do — generators may not touch module state (comptime purity), so the
+        // cache has to live below them. Any generator gets it, not just std.
+        row(
+            "lineAt",
+            &[],
+            &[("b", Read, u8s()), ("off", Read, Int)],
+            Int,
+            &[],
+        ),
+        row(
+            "colAt",
+            &[],
+            &[("b", Read, u8s()), ("off", Read, Int)],
+            Int,
+            &[],
+        ),
+        // `s.charCount()` (RFC-0058): the number of Unicode scalar values in a
+        // String. O(n) — it counts the non-continuation bytes (`b & 0xC0 !=
+        // 0x80`) of validated UTF-8. The row also retires a hand-written
+        // exception in [`capability`]: `@charCount` reads its receiver, and
+        // that answer used to be written there because the name had no row.
+        row("@charCount", &[], &[("s", Read, Str)], Int, &[]),
         // ---- control (RFC-0079, RFC-0015, RFC-0055) -------------------------
         // `panic` diverges; the language has no `Never`, so the return is spelled
         // `Unit` and no rule reads it.
@@ -617,6 +697,29 @@ pub fn signature(name: &str) -> Option<&'static Function> {
     all().iter().find(|f| f.name == name)
 }
 
+/// The row a CALL SITE may be checked against — arity, parameter types and
+/// result — or `None` where the row spells a type it does not mean.
+///
+/// The module comment names the two kinds of inert row, and this is that same
+/// list read as a predicate rather than as prose. A **lending** row cannot name
+/// its result (`at`, `atSet`: the type is the receiver's element). A row with a
+/// `Unit` PARAMETER cannot name its argument — `@str`, `print`, `toJson`,
+/// `jsonSchema`, `schemaOf` and `contractOf` each take a union or a type name,
+/// and no builtin genuinely takes a `Unit` value, so the spelling is the
+/// marker. Everything else on a row is the contract, and
+/// [`crate::checker::Checker::call`] types the call against it exactly as it
+/// types a call against a user declaration (RFC-0125 §3 M6).
+///
+/// This is the reading RFC-0094 M1 held back. Its module comment said arity and
+/// parameter types stayed in the checker's hand-written arms "with wording that
+/// reads better than anything a generic signature check would print", and that
+/// was true of the wording and false of the cost: sixteen names paid 328 lines
+/// and 26 refusals for a sentence the row already carried.
+pub fn checkable(name: &str) -> Option<&'static Function> {
+    let f = signature(name)?;
+    (!lends(name) && !f.params.iter().any(|p| p.ty == Type::Unit)).then_some(f)
+}
+
 /// What each seeded builtin gives back, for the declared-types reading
 /// ([`crate::declared`]) — the name a call site carries, and the row's `ret`.
 ///
@@ -634,14 +737,11 @@ pub fn returns() -> impl Iterator<Item = (&'static str, &'static Type)> {
 
 /// The capability parameter `i` of `name` declares.
 pub fn capability(name: &str, i: usize) -> Option<Capability> {
-    // `s.charCount()` lowers through the `@charCount` seam to `std/text`'s
-    // reader — an internal spelling no import can name, so it has no seeded
-    // row and no user declaration to read a capability from. The receiver is
-    // read; without this answer a call-result receiver's temporary had no
-    // verdict and leaked (exit-residue round twenty-three).
-    if name == "@charCount" && i == 0 {
-        return Some(Capability::Read);
-    }
+    // (`@charCount`'s exception stood here until RFC-0125 §3 M6's seed
+    // extension. It said the receiver is `read`, because the name had no row
+    // to read a capability from, and without that answer a call-result
+    // receiver's temporary had no verdict and leaked — exit-residue round
+    // twenty-three. `@charCount` has a row now and the row says it.)
     // A log method (RFC-0008) writes its message to the sink and keeps
     // nothing — the same seam as `@charCount`: the four level names have no
     // seeded row and no user declaration, so an interpolated message
