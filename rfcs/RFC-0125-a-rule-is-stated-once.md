@@ -7920,6 +7920,202 @@ run again on the merged tree.
 | `vyrn check`'s whole standard error over 280 programs | byte-identical |
 
 
+**The emitter is counted section by section (2026-09-07, `track-dc`).** All
+nine steps of `PLAN-0125-runtime.md` §6 landed, `track-cg` deleted the text-IR
+emitter and the C shim, and `direct.rs` still stood at 16,523 lines. Nobody had
+counted it. `own.rs` was censused by a reader against every part, `movecheck.rs`
+by the kind table in `tests/refusals.rs`, `checker.rs` by
+`tests/checker_census.rs`; this is that measurement for the one emitter, in
+`compiler/vyrn-cli/tests/emitter_census.rs`.
+
+**The method is the checker census's.** A section is one item together with
+every item after it up to the next section's anchor, from the anchor's own doc
+comment. Every line is in exactly one section, the counts add up to the file,
+and the test computes the spans while the table records the classification. 73
+sections tile the file.
+
+**The second column is different, because the output is different.** The
+checker's census counts refusals beside lines, because a refusal is what a
+checker makes. This emitter makes wasm, so the column beside lines is the number
+of `Instruction::` sites a section holds — the wasm it writes BY HAND. The two
+numbers say different things. A family that moves out of the emitter moves both.
+A family that only gets shorter moves lines and leaves the instruction count
+where it is, which is what catches a deletion that deleted prose.
+
+**The kinds, and why each.** The seven come from §2.3 read as a specification.
+
+| kind | lines | wasm | what it is, and why it is a kind |
+|---|---|---|---|
+| the mapping §2.3 names | 5,712 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| a decision §2.3 says it must not make | 2,217 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
+| the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
+| one block per builtin name | 4,806 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
+| the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
+| shared machinery | 2,359 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
+| tests | 328 | 0 | the file's own unit tests |
+
+The whole table, section by section, is what
+`the_emitter_census_as_a_table` prints:
+
+```
+cargo test -p vyrn-cli --test emitter_census -- --ignored --nocapture \
+  the_emitter_census_as_a_table
+```
+
+**Four things the count says, and the first two are not what the size strand
+expected.**
+
+1. **Kind (3) is finished.** §2.7 names the hand-emitted runtime as a deletion,
+   and `PLAN-0125-runtime.md` §6 made it: 625 lines with SEVEN hand-written
+   instructions between them, and every one of those seven is in `const SHDR`'s
+   section — the `String` header offsets and the sum's tag test, at their one
+   site each. What carries the name "the runtime" now is a declaration table of
+   40 rows, an index of it, and the wiring that copies reserved indices into
+   fields. There is no runtime family left to move.
+2. **Kind (4) is the largest hand-emitted mass and has no fat sub-family.**
+   4,806 lines and 978 instructions — half the wasm this file writes by hand.
+   But `call_inner`, its biggest item at 1,585 lines, is 58 arms over 892 lines
+   of code: a mean of 15 code lines an arm, and the largest single arm is
+   `bytes` at 89. There is no `Checker::call` here to empty, because the arms do
+   not restate a row — each one plumbs different arguments into a different
+   runtime function. A row-driven mapping is a design, not a deletion.
+3. **Kind (2) is where the lines are, and it is five families, not fifty
+   sites.** Two recursive type walks of about 430 lines each — one deciding what
+   RELEASING a type means, one deciding what COPYING it means — then the
+   coercion ladder, the `?`/`??`/`if let` rewrite, and an optimizer.
+4. **The emitter carries an optimizer, and M1 put it there on a
+   measurement.** §2.3 says "The emitter carries no optimizer, ever".
+   `Fn_::hoist_walks` hoists a loop's array walk out of the body when
+   `header_invariant` proves the header's base and count invariant on the
+   SYNTAX, and `each_expr`/`each_stmt` are the walks that proof needs — 311
+   lines of loop-invariant code motion in the file that says it does none. It
+   is not stray: M1's record measures it, and nbody under V8 goes 2.97 s to
+   2.16 s with it. So the census files it under the sentence it breaks and the
+   ranked list below does NOT put it first: what removes it is the core making
+   a loop-invariant header a named place, which is M1's own thesis and
+   `vyrn-lower`'s file. Deleting it here would cost the web route 27 % and
+   state the rule nowhere.
+
+**What leaves first, ranked, with the licence each needs.** The licence method
+is the M3 records': a deletion that is "the same wasm from one place" is shown
+byte-identical over the whole corpus by `VYRN_WASM_MANIFEST=check`; one that
+moves bytes reads every moved row at the source and says why; `tests/route.rs`
+and `tests/residue.rs` are the behaviour gates either way.
+
+| # | what | lines | licence |
+|---|---|---|---|
+| 1 | the runtime's numbering machinery — TAKEN below | 142 | byte-identical: the deleted code emitted nothing |
+| 2 | `rel_at`'s recursive release walk | 431 | a release per type, monomorphised and called — a call site changes, so every row with a non-trivial drop moves. Needs the core to name the release, which is M3's own next step |
+| 3 | `copy_at`'s recursive copy walk | 434 | the same shape as 2 and the same licence; the two walk the same structure in opposite orders and say so in their comments |
+| 4 | `Fn_::try_` — `?`, `??`, the optional `if let` | 362 | byte-identical if the rewrite moves to the parser and lowers to the same tree; a moved byte is a finding about which rewrite was right |
+| 5 | `Fn_::coerce`, the coercion ladder | 277 | §2.7 deletes it in both backends; it waits on the typed judgment stating the coercion, so it is M6's, not M3's |
+| 6 | the snapshot family (`snap_at`, `store_bufs`, `store_boxes`) | 140 | byte-identical if the core's store row names the buffers instead of the type being re-read here |
+| 7 | `emit_validation` and `proven` | 121 | waits on a `check` row; §2.3's "does not know what a validated type is" has no other home yet |
+| 8 | `bounds_check` | 62 | the same: the core has no `check` row to tell it |
+| — | the optimizer (`cached_walk`, `hoist_walks`, `indexed_names`, `header_invariant`) | 311 | NOT ranked: it is a measured win, and a deletion states the rule nowhere. It leaves when the core hoists |
+
+**The first deletion: the runtime's numbering machinery, which had nothing left
+to number (142 lines).** `Rt::slots` was a slot allocator — it handed out a
+dense index per runtime helper, in the order the bodies were emitted, and
+returned the table beside the struct so `Rt::next_is` could assert at every
+helper that the body about to be written was the one its index had reserved. It
+was written for a real hazard, and its own doc comment states it: `read_file`
+and `read_file_bytes` have the same wasm signature, so two helpers emitted in
+the wrong order still validate and then read the wrong thing.
+
+Step 9 of `PLAN-0125-runtime.md` §6 moved the last four hand-emitted functions —
+`trapV`, `trapAt`, `printI64`, `boolStr` — into `std/runtime.vyrn`. After it,
+`runtime()` emits no wasm function at all: every index it hands out was already
+reserved by `VyrnRt` from the `VYRN_RUNTIME` declaration table, and every field
+it fills is one of those or an address the interning gives back. So `slot` was
+never called, `table` came back empty, `count` was zero, `next_is` had no
+caller, and `assert_eq!(m.next_func(), base + rt.count)` compared `base` with
+`base`. The compiler was already saying two thirds of this out loud: `unused
+variable: slot`, `variable does not need to be mutable`, `method next_is is
+never used`.
+
+Gone with it: the `count` field, the `_table` binding, the assert, and the unit
+test `every_runtime_helper_gets_its_own_index`, which asserted that an empty
+table's names were distinct and that an empty range of indices was dense. What
+replaces the test is the invariant that survives —
+`every_runtime_helper_is_declared_once`, over `VYRN_RUNTIME`'s 40 rows, which is
+what makes `VyrnRt::reserve` hand out one index per row and `VyrnRt::take` find
+the row a body belongs to. The other half of the old assertion is
+`VyrnRt::check`, which refuses a link with no `std/runtime` rather than
+asserting about it.
+
+**Three `Rt` fields went with it, for the same reason.** `utf8valid`, `starts`
+and `str_i64` were written by `runtime()` and read by nobody. The doc on their
+group says why they existed: "that runtime calls these — `trap` calls `strLen`,
+`env_get` calls `starts`, the fixed-clock preamble calls `strI64`". That runtime
+is the one §6 deleted. `utf8Valid` is reached from inside `std/runtime` and
+`starts` from `envGet` there, as ordinary Vyrn calls. All three keep their
+`VYRN_RUNTIME` rows, because a row is what reserves an index and pins the
+signature the two sides agree on; only the emitter's unread copy of the index
+goes.
+
+**The licence.** The deleted code emits nothing, so the wasm cannot move, and
+the gate says so rather than the argument: `VYRN_WASM_MANIFEST=check` on
+`wasmhash` is green and `rfcs/census/wasm-sha256.tsv` is untouched — not one
+emitted byte, and no manifest row moved. `direct.rs` is 16,523 lines before and
+16,381 after. The census moves with it: the runtime kind 757 to 625, tests 337
+to 328, and the mapping kind by the one line of a doc comment that named
+`Rt::slots`.
+
+**What the deletion is evidence for.** §2.7's estimate needs 139,000 lines to
+come down to 40,000–45,000, and the size strand has been reading the emitter as
+a place where a big family might still be hiding. It is not. The runtime family
+left this file over nine steps and left its scaffolding behind, and the
+scaffolding is what this slice found — 142 lines of a mechanism whose job was
+finished, still compiled, still tested, and holding a test that asserted things
+about an empty collection. The census exists so the next 142 lines like it are
+found by counting rather than by reading a compiler warning.
+
+**Why there is no second deletion in this slice, said with the numbers.** The
+brief for it expected the fat to be in kind (3) or kind (4), and the count
+refuses both: kind (3) has seven hand-written instructions left in it, and kind
+(4)'s biggest item averages 15 code lines an arm with no sub-family to
+table-drive. Every remaining candidate is in kind (2), and every one of them
+waits on another pass to state the rule first: 2 and 3 need the core to name a
+release and a copy, 4 needs the rewrite to move to the parser, 5 needs the typed
+judgment, 6 needs the store row to name the buffers, 7 and 8 need a `check` row.
+Taking any of them here would move the statement rather than delete it, which is
+the mistake this RFC is named after. The one that needs nobody — the optimizer —
+is the one that is worth 27 % on the web route, so it waits for the core to hoist
+instead. The census is what makes that answer checkable rather than an opinion:
+the next reader can run the table and see the same nine rows.
+
+#### The emitter census's gates (2026-09-07)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 19 s |
+| `cargo test -p vyrn-cli`, no filter | 587 passed, 37 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 16 s |
+| `coretables` `--ignored`, release | 1, 19 s |
+| `typed` `--ignored`, release | 1, 32 s |
+| `effects` `--ignored`, release | 2, 43 s |
+| `fixtures` `--ignored`, release | 1, 19 s |
+| `testsweep` `--ignored`, release | 1, 41 s |
+| `emitter_census`, plain and `--ignored` | 2 and 1 — the new census, pinned |
+| `checker_census`, `refusals`, `surface`, `forms` `--ignored` | 1, 3, 1, 1, all unmoved |
+| `vyrn-frontend` | 1,170 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,217 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 316 s |
+| the residue ratchet `--ignored`, release | 1, 343 s — 163 clean, 12 leaking, 0 failed, the baseline untouched |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
