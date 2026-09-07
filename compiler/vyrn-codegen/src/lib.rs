@@ -2409,18 +2409,26 @@ mod tests {
         assert_eq!(solved(Type::Task(Box::new(t())), Type::Int), None);
     }
 
-    /// **Why the arms above are dead, and why filling them changed no program.**
+    /// **Why the arms above were dead, and why filling them changed no
+    /// program.**
     ///
     /// RFC-0086 deferred this list because "filling in `Lazy`/`Record`/`Enum`/
     /// `Task` turns some silent `Unit` into a real type and some refusal into a
-    /// compile". Neither happens, and the reason is that the CHECKER refuses all
-    /// four shapes before codegen is asked: `Checker::unify` has the same list,
-    /// and its fall-through is a diagnostic rather than a substitution. So
-    /// `solve_param` never faced one, the corpus census counts zero, and no
+    /// compile". Neither happened, and the reason was that the CHECKER refused
+    /// all four shapes before codegen was asked: `Checker::unify` had the same
+    /// list, and its fall-through is a diagnostic rather than a substitution.
+    /// So `solve_param` never faced one, the corpus census counted zero, and no
     /// program's meaning moved.
     ///
     /// If any of these ever starts checking, this test fails and says so, and
-    /// the arms it unblocks are already written and already tested.
+    /// the arms it unblocks are already written and already tested. **`Task`
+    /// has now done exactly that**, and it is off the list below.
+    /// `Checker::unify` grew a `Task` arm when `@join`'s seeded row became the
+    /// first signature that names one (RFC-0125 §3 M6, the `consume` slice), so
+    /// `fn awaitOne<T>(t: Task<T>) -> T { return t.join() }` checks, and
+    /// `solve_param`'s `Task` arm — written and asserted in the test above —
+    /// binds `T`. The program answers 42 on the native route and on the wasm
+    /// route. That is the promise this test was written to keep, kept.
     #[test]
     fn the_checker_refuses_every_shape_the_fall_through_used_to_swallow() {
         let cases: &[(&str, &str)] = &[
@@ -2446,13 +2454,9 @@ mod tests {
                  fn main() -> Int64 { let h: Holder<Int64> = Holder { body: () -> seven() }\n\
                  return h.body }",
             ),
-            // A `Task<T>` parameter.
-            (
-                "Task",
-                "fn slow(n: Int64) -> Int64 { return n * 2 }\n\
-                 fn await<T>(t: Task<T>) -> T { return t.join() }\n\
-                 fn main() -> Int64 { let t = spawn slow(21)\n return await(t) }",
-            ),
+            // (A `Task<T>` parameter stood here. It checks now — see the doc
+            // comment — so it belongs to `a_generic_task_parameter_solves`
+            // below rather than to this list.)
         ];
         for (what, src) in cases {
             assert!(
@@ -2461,5 +2465,17 @@ mod tests {
                  see the arms above and RFC-0086's last open list"
             );
         }
+    }
+
+    /// The first shape to leave the list above. A generic function taking a
+    /// `Task<T>` checks since RFC-0125 §3 M6 gave `Checker::unify` the `Task`
+    /// arm `@join`'s seeded row needed, and `solve_param` binds `T` from the
+    /// argument the way it binds one from an `Array`.
+    #[test]
+    fn a_generic_task_parameter_solves() {
+        let src = "fn slow(n: Int64) -> Int64 { return n * 2 }\n\
+                   fn awaitOne<T>(t: Task<T>) -> T { return t.join() }\n\
+                   fn main() -> Int64 { let t = spawn slow(21)\n return awaitOne(t) }";
+        assert!(check(src).is_ok(), "{:?}", check(src));
     }
 }

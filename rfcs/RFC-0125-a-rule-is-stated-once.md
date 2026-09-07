@@ -15259,6 +15259,72 @@ desugar. The ranked list the block census left is now:
    ELEMENT type (it owns heap, or it is a byte), which is a fact about the type
    argument rather than about the signature.
 
+#### The sentinel that was waiting for the `Task` arm (2026-09-07)
+
+The gate over the three slices found one red, and it is a test that exists to
+go red exactly once.
+
+`vyrn-codegen`'s `the_checker_refuses_every_shape_the_fall_through_used_to_swallow`
+holds four programs — a structural record parameter, an enum payload naming the
+parameter, a `lazy` field, and a `Task<T>` parameter — and asserts the CHECKER
+refuses all four. RFC-0086 deferred `solve_param`'s arms for those four shapes,
+and the reason the deferral cost nothing was that `Checker::unify` had the same
+gap: no arm, so the fall-through was a diagnostic rather than a substitution.
+The test's own words say what it is for: "if any of these ever starts checking,
+this test fails and says so, and the arms it unblocks are already written and
+already tested."
+
+The `consume` slice gave `Checker::unify` its `Task` arm, because `@join`'s
+seeded row is the first signature in the compiler that names a `Task`. So
+
+    fn slow(n: Int64) -> Int64 { return n * 2 }
+    fn awaitOne<T>(t: Task<T>) -> T { return t.join() }
+    fn main() -> Int64 { let t = spawn slow(21) return awaitOne(t) }
+
+checks now. `solve_param`'s `Task` arm binds `T` from the argument, which
+`the_filled_arms_bind_a_parameter_the_fall_through_walked_past` had already
+asserted, and the program answers 42 on the native route and on the wasm route.
+Nothing was written to make that work; the arm had been waiting since RFC-0086.
+
+`Task` leaves the list, `a_generic_task_parameter_solves` takes its place, and
+the doc comment says which promise was kept. Three shapes remain deferred:
+`Record`, `Enum` and `Lazy`, each still refused by the checker.
+
+##### Gates (2026-09-07, the three slices)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Run over the three slices
+together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 585 passed, no failure |
+| `kernel` `--ignored` | 1, 17 s |
+| `coretables` `--ignored` | 1, 18 s |
+| `typed` `--ignored` | 1, 27 s |
+| `effects` `--ignored` | 2, 35 s |
+| `fixtures` `--ignored` | 1, 16 s |
+| `testsweep` `--ignored` | 1, 66 s |
+| `vyrn-frontend` | 1,170 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,217 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 341 s |
+| the residue ratchet | 1, 277 s |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — three checker slices move no byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 11 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 215 over 26 files |
+
+The one red in the first pass was the sentinel above. It and
+`vyrn_lower::follow`'s one-line skip are the only changes these three slices
+made outside `checker.rs`, `prelude.rs` and the censuses. The list was run
+again whole after the sentinel was answered, and it is the table above.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
