@@ -15130,6 +15130,80 @@ stops guessing from an address`, `compiler/vyrn-frontend/src/ast.rs`,
 `compiler/vyrn-lower/src/core.rs`, `compiler/vyrn-codegen/src/direct.rs`,
 `compiler/vyrn-genwasm/src/lib.rs`, the four censuses.
 
+#### The census's sixth candidate: the knob or the rule (2026-09-07)
+
+The census's last-ranked item was `gen_refused`, 23 lines. Its verdict was
+already `vyrn_frontend::effects::gen_refusal`'s, since M6's fifth slice; what
+stood in the checker was a wrapper whose whole content was the `VYRN_NO_JUDGE=1`
+bisect knob. The census said "it goes when the bisect is retired" and left the
+choice open. This slice makes it: the knob's FLOOR half stays, its FENCE half
+goes, and `gen_refused` goes with it.
+
+**What the knob's fence half was worth, measured.** The fifth slice's record
+says the knob restores two cells of the fence: `print` is allowed in a `gen fn`
+again, and the three host-boundary names (`hostNowMillis` and its two
+neighbours) are externs again. Both were probed against the branch-point binary
+under `VYRN_NO_JUDGE=1`.
+
+| probe | before, plain | before, under the knob |
+|---|---|---|
+| a `gen fn` calling `print` | refused: `it calls \`print\`` | **`ok`, exit 0** |
+| a `gen fn` calling a declared `extern fn hostNowMillis` | refused: `it reads the clock` | refused: `it reads the clock` |
+
+The second cell could not change an answer, and the reason is the order inside
+`check_comptime_purity`: for each callee the fence asks `gen_refused` first and
+the `extern_fns` set second. Under the knob `gen_refused` fell through to the
+row for a host-boundary name — the `if` guard requires
+`host_boundary_extern(name).is_none()` — so the row's own words won before the
+extern set was ever consulted. The knob's second fence cell has been unreachable
+since the slice that wrote it. That is one cell of dead behaviour and one live
+cell, and neither has a test: nothing in the tree ran `VYRN_NO_JUDGE=1` over a
+`gen fn`, in `tests/floor.rs` or anywhere else. The three tests that do use the
+knob — `a_moved_row_refuses_in_the_words_the_pass_used`,
+`an_unreached_host_import_is_no_capability`,
+`the_log_sink_is_a_declaration_the_judgment_does_not_clear` — are all the FLOOR
+half.
+
+**The decision: the fence half goes.** A bisect knob earns its lines while the
+bisect is live. M6's fourth, fifth and sixth slices are recorded and merged, the
+floor half is what the three tests bisect, and the fence half was one cell that
+made a refused program compile. Keeping it means the checker states the `gen`
+column twice — once as the table, once as "except `print`, when a debug variable
+is set" — which is the sentence this RFC exists to delete. So `gen_refused` is
+gone and its one caller reads `crate::effects::gen_refusal` directly; the
+`extern_fns` filter in `check_comptime_purity` loses its `no_judge()` disjunct;
+and `floor::no_judge`'s doc comment now says the knob restores one thing.
+
+**The licence.** `vyrn check` over 419 programs, whole stderr with the exit
+code, before and after — and the same run again with `VYRN_NO_JUDGE=1` set,
+because this slice changes what the knob does and the knob's own corpus is the
+other half of the measurement.
+
+| measure | before | after |
+|---|---|---|
+| programs checked, plain | 419, 78 refused | 419, 78 refused |
+| stderr differing, plain | — | 0 |
+| programs checked, `VYRN_NO_JUDGE=1` | 419, 78 refused | 419, 78 refused |
+| stderr differing under the knob | — | 0 |
+| `checker.rs` | 16,296 | 16,269 |
+
+The corpus is silent in both modes, because no corpus program is a `gen fn`
+that calls `print`. The two probes are the measurement, and they are pinned now:
+`floor::the_generation_fence_is_the_same_under_the_bisect_knob` runs both, plain
+and under the knob, and asserts the two texts are one text. That test is the
+check this slice leaves behind — it fails the moment either cell comes back.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | a rule the checker states | 1,455 lines, 57 refusals | 1,455, 57 — down 27 lines from 1,482 | the section is gone; it held no `cerr!`, so the refusal count does not move |
+| RFC-0126 §3, RFC-0127 §3 | — | unmoved | the slice names no type constructor and no form |
+
+**Commit.** `the bisect knob keeps the floor and gives up the fence`,
+`compiler/vyrn-frontend/src/checker.rs` (-27), `floor.rs`,
+`compiler/vyrn-cli/tests/floor.rs`, `tests/checker_census.rs`.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

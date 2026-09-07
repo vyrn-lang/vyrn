@@ -381,13 +381,16 @@ pub fn install_judge(f: Judge) {
 }
 
 /// `VYRN_NO_JUDGE=1` — the bisect knob that stands RFC-0125 M6's judgments
-/// aside. It still restores two things, and the sixth slice says which. The
-/// floor goes back to PRESENCE: the scan's carriers are refused whether or not
-/// an instance reaches them, inside the load and before every type error, which
-/// is the rule and the order of RFC-0103 M2. The generation fence goes back to
-/// its own list of two cells in `checker::gen_refused` (RFC-0125 §3 M6, fifth
-/// slice). One knob, because the two are one milestone and a bisect that needs
-/// two is a worse bisect.
+/// aside. It restores ONE thing: the floor goes back to PRESENCE, so the scan's
+/// carriers are refused whether or not an instance reaches them, inside the load
+/// and before every type error, which is the rule and the order of RFC-0103 M2.
+///
+/// It used to restore a second thing — the generation fence's own list of two
+/// cells, in `checker::gen_refused` and in the fence's `extern_fns` set (the
+/// fifth and sixth slices). That half is retired: the fence reads the `gen`
+/// column of `crate::effects` and nothing else, so `print` in a `gen fn` is
+/// refused under the knob too and the three host-boundary names are never
+/// externs. `tests/floor.rs` pins the half that remains at three rows.
 pub fn no_judge() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var("VYRN_NO_JUDGE").is_ok_and(|v| v == "1"))

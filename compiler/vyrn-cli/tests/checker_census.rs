@@ -537,12 +537,6 @@ fn sections() -> Vec<Section> {
              `drop`, does it `spawn`",
         ),
         sec(
-            "fn gen_refused(name: &str) -> Option<String> {",
-            Refusal,
-            "the `gen` column of the effect lattice, as RFC-0021's fence asks \
-             it — the table itself is `effects.rs`",
-        ),
-        sec(
             "fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {",
             Refusal,
             "the generation fence over the AST: a `gen fn` body's effects, \
@@ -739,7 +733,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("the typing judgment", 3152, 135),
-        ("a rule the checker states", 1482, 57),
+        ("a rule the checker states", 1455, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 4321, 248),
         ("shared machinery", 2229, 30),

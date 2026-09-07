@@ -10626,34 +10626,12 @@ fn contains_spawn(b: &Block) -> bool {
     b.stmts.iter().any(stmt)
 }
 
-/// The `gen` column of the lattice table, as RFC-0021's fence asks it — the
-/// reason the sandbox may not run `name`, or `None`.
-///
-/// The list this replaced (`COMPTIME_FORBIDDEN`, deleted) was the column
-/// written a second time, and the two had drifted: `print` was allowed where
-/// `writeStdout` was refused, which is one effect with two verdicts (RFC-0125
-/// §3 M6 finding 4), and the clock was reported as an extern although
-/// RFC-0103 M2 says it is not one (finding 13). The column is stated once now,
-/// in [`crate::effects`], derived from the table in RFC-0125 §3 M6.
-///
-/// `VYRN_NO_JUDGE=1` is the fourth slice's bisect knob and stands this
-/// milestone's judgments aside — here, the two cells this slice changed — so a
-/// refusal that is new can be told from one that is not.
-fn gen_refused(name: &str) -> Option<String> {
-    if crate::floor::no_judge() && crate::trap::host_boundary_extern(name).is_none() {
-        // The list's own answer: `print` was not on it.
-        return (name != "print")
-            .then(|| crate::effects::gen_refusal(name))
-            .flatten();
-    }
-    crate::effects::gen_refusal(name)
-}
-
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
 /// `gen fn` — and everything it transitively calls — must be pure enough to run
 /// deterministically in the compiler's interpreter at generation time: no
 /// `extern`, `spawn`, module state, or an atom the lattice's `gen` column
-/// refuses ([`gen_refused`]). Because a `gen fn` may be *used* as an import target anywhere it is
+/// refuses ([`crate::effects::gen_refusal`]). Because a `gen fn` may be *used* as an
+/// import target anywhere it is
 /// visible, the restriction is enforced on EVERY `gen fn` unconditionally (v1:
 /// simpler and sound than a whole-program "reached as a generation target"
 /// analysis; a `gen fn` called only at runtime pays the same discipline, which
@@ -10673,16 +10651,11 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
     // are not host imports — the runtime shim implements them on every target —
     // so the fence must not call them "the extern" (RFC-0125 §3 M6 finding 13).
     // They are atoms of the `clock` and `random` rows and the table refuses them
-    // there, in the row's own words. Under the bisect knob they are externs
-    // again, which is what the list did.
+    // there, in the row's own words.
     let extern_fns: std::collections::HashSet<&str> = program
         .functions
         .iter()
-        .filter(|f| {
-            f.is_extern
-                && (crate::floor::no_judge()
-                    || crate::trap::host_boundary_extern(&f.name).is_none())
-        })
+        .filter(|f| f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none())
         .map(|f| f.name.as_str())
         .collect();
     let global_names: std::collections::HashSet<String> =
@@ -10719,7 +10692,7 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             return Some("reads or writes module state".to_string());
         }
         for c in expand(fn_calls(&f.body)) {
-            if let Some(why) = gen_refused(&c) {
+            if let Some(why) = crate::effects::gen_refusal(&c) {
                 return Some(why);
             }
             if extern_fns.contains(c.as_str()) {
