@@ -231,13 +231,13 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
 /// exercised by `web/externdemo.html`. KNOWN_DIVERGENT stays empty — this list
 /// is about *hosts*, not divergence.
 ///
-/// It names the harnesses that drive an OUTSIDE tool, and only those: the
-/// parity loop's wasm column is the `wasmtime` CLI and the route loop's is
-/// wasm2c, and neither knows the namespace, so neither can be compared with the
-/// other two engines. `parity::wasm_only_examples_trap_identically` asserts the
-/// decided non-wasm semantics instead: interp and native both produce the
-/// canonical `error: extern `name` is not available on this target` trap,
-/// byte-identical to each other.
+/// It names the harnesses that drive an OUTSIDE tool, and only those: the route
+/// loop compares wasm2c against the `wasmtime` CLI, and neither knows the
+/// namespace, so there is no column to compare.
+/// `route::the_extern_example_refuses_on_the_route_as_the_embedded_engine_does`
+/// asserts the decided non-page semantics instead: the route and the embedded
+/// engine both produce the canonical
+/// `error: extern `name` is not available on this target` trap, byte-identical.
 ///
 /// `tests/fixtures.rs` does NOT skip this list. Its engine is the embedded host
 /// in `vyrn-cli`'s own `wasmrun`, which answers the `vyrn` namespace with that
@@ -254,10 +254,6 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
     "calls `extern` fns; only the browser provides the `vyrn` namespace",
 )];
 
-/// Examples the wasm target runs and the text-IR backend refuses
-/// (`vyrn_codegen::LIST_DIR_NO_LOWERING`). Excluded from the parity loop's
-/// native column; the fixture gate (`fixtures.rs`) compares their output with
-/// the recorded one, and `residue-baseline.tsv` carries their `skip` row.
 /// Project entries under `examples/*/` that `vyrn check` must REFUSE, with the
 /// text the refusal must contain. `EXPECTED_CHECK_FAILURE` is the precedent and
 /// lists single files; a project's entry point is refused by its artifact's
@@ -276,10 +272,54 @@ pub const EXPECTED_PROJECT_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     ),
 ];
 
-pub const NATIVE_UNSUPPORTED: &[(&str, &str)] = &[(
-    "listdir.vyrn",
-    "`listDir` has no native lowering; the wasm target lists over `fd_readdir` (RFC-0125 §3 M5)",
-)];
+/// The one function in `src`'s module whose body contains `marker`, printed as
+/// WAT (`vyrn emit-wat`).
+///
+/// A structural count needs a function to count in, and `vyrn emit-ir` was where
+/// these tests found one until the textual route went (RFC-0125 §2.5). The
+/// module carries no name section, so a function is an index here and an index
+/// moves whenever the runtime does — hence by CONTENT. `wasmprinter` indents
+/// every function's opening `(func` by two spaces and closes it with a `)` at
+/// the same column, which is what makes the slice exact, and a marker that names
+/// two functions or none is a failure rather than a vacuous pass.
+pub fn wat_func_containing(dir: &Path, name: &str, src: &str, marker: &str) -> String {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-wat");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let wat = norm(&out.stdout);
+    let bodies: Vec<&str> = wat
+        .split("\n  (func ")
+        .skip(1)
+        .map(|f| &f[..f.find("\n  )").expect("unterminated function")])
+        .filter(|f| f.contains(marker))
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "expected exactly one function containing `{marker}`, found {}",
+        bodies.len()
+    );
+    bodies[0].to_string()
+}
+
+/// The whole module as WAT, for a test whose claim is about the module and not
+/// about one function in it.
+pub fn wat_of(dir: &Path, name: &str, src: &str) -> String {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-wat");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    norm(&out.stdout)
+}
 
 pub fn examples_dir() -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root -> examples/
@@ -462,50 +502,11 @@ pub fn run_io(mut cmd: Command, dir: &Path, stdin_fixture: &Path) -> std::proces
 /// Build `path` through the NATIVE route (the text-IR backend and clang) and
 /// run the binary under [`run_io`]'s conventions.
 ///
-/// The reference column since RFC-0125 §3 M5's twelfth slice. Every pin in
-/// `parity.rs` used to compare a compiling backend against the interpreter,
-/// because two backends can be confidently wrong together and the tree-walker
-/// was the third opinion. The tree-walker is going, so the two COMPILING routes
-/// are what remain, and they are what every pin compares now: the same source,
-/// one module through `direct.rs` and one binary through the textual backend.
-///
-/// The executable is named for the source, so one scratch directory holds a
-/// whole loop's worth. A build that fails is a failure here rather than a
-/// divergence later, because a route that will not build cannot disagree.
-pub fn native_run(
-    path: &Path,
-    dir: &Path,
-    stdin_fixture: &Path,
-    args: &[String],
-) -> std::process::Output {
-    let stem = path.file_stem().expect("a source name").to_string_lossy();
-    let exe = dir.join(format!("{stem}.exe"));
-    let build = vyrn()
-        .arg("build")
-        .arg(path)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("build native");
-    assert!(
-        build.status.success(),
-        "native build failed for {}:
-{}{}",
-        path.display(),
-        String::from_utf8_lossy(&build.stdout),
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let mut cmd = Command::new(&exe);
-    cmd.env("VYRN_FREE_AUDIT", "1");
-    cmd.args(args);
-    run_io(cmd, dir, stdin_fixture)
-}
-
 /// Program arguments for an example (RFC-0061): the tokens in `examples/<name>.args`,
 /// ONE per line (so a token may contain spaces), trailing newline ignored. These
-/// are forwarded identically to all three backends — `vyrn run <file> <args>`,
-/// the native `<exe> <args>`, and `wasmtime run ... <module> <args>` — so an argv
-/// example is a byte-identical parity citizen. No fixture ⇒ empty argv.
+/// are forwarded identically to both routes — `vyrn run <file> <args>` and
+/// `wasmtime run ... <module> <args>` — so an argv example is a byte-identical
+/// citizen of every gate. No fixture ⇒ empty argv.
 pub fn read_args(args_fixture: &Path) -> Vec<String> {
     if !args_fixture.exists() {
         return Vec::new();

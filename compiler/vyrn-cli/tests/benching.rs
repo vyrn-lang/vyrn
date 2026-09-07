@@ -190,9 +190,9 @@ fn a_branch_that_yields_blackbox_runs_under_both_engines() {
 // ---- strip guarantee --------------------------------------------------------
 
 #[test]
-fn bench_bodies_are_stripped_from_emitted_ir() {
+fn bench_bodies_are_stripped_from_the_emitted_module() {
     // A bench body's unique string literal must not reach codegen (run/build/
-    // emit-ir walk only `functions`, exactly like tests).
+    // emit-wat walk only `functions`, exactly like tests).
     let dir = scratch("strip");
     let file = dir.join("b.vyrn");
     std::fs::write(
@@ -201,21 +201,29 @@ fn bench_bodies_are_stripped_from_emitted_ir() {
          fn main() -> Int64 { print(1) return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("emit-ir").arg(&file).output().unwrap();
+    let out = vyrn().arg("emit-wat").arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let ir = norm(&out.stdout);
     assert!(
         !ir.contains("SECRET_IN_BENCH_BODY"),
-        "bench string leaked into IR"
+        "bench string leaked into the module"
     );
     assert!(
         !ir.contains("UNIQUE_BENCH_MARKER"),
-        "bench name leaked into IR"
+        "bench name leaked into the module"
     );
-    // And no optimizer barrier leaks into an ordinary compile.
-    assert!(
-        !ir.contains("asm sideeffect"),
-        "blackBox barrier leaked into a non-bench compile"
+    // And no optimizer barrier leaks into an ordinary compile: `blackBox`
+    // reserves sixteen bytes of linear memory per site (RFC-0055 on the route),
+    // so a module that stripped its benches is the module the same program
+    // without them emits. `native_bench_reports_the_expected_shape` is the
+    // other half - that the barrier IS there when the harness is built.
+    let plain_file = dir.join("plain.vyrn");
+    std::fs::write(&plain_file, "fn main() -> Int64 { print(1) return 0 }\n").unwrap();
+    let plain = vyrn().arg("emit-wat").arg(&plain_file).output().unwrap();
+    assert_eq!(
+        ir,
+        norm(&plain.stdout),
+        "the bench file's module must be the plain file's, byte for byte"
     );
 }
 
@@ -294,6 +302,28 @@ fn native_bench_reports_the_expected_shape() {
     assert!(
         stdout.contains("\n2 benches\n"),
         "missing footer:\n{stdout}"
+    );
+    // RFC-0055's barrier, on the route that ships (RFC-0125 2.5). `blackBox`
+    // was the identity in this emitter, which was right while nothing
+    // downstream optimized; the native route is now this module through wasm2c
+    // and clang at `-O2`, and with the identity in place clang folded the
+    // data-dependent loop away - `examples/benching.vyrn`'s "hash to 1000" read
+    // 1 ns against the textual route's 1.35 us. A floor and not a number: two
+    // hundred rounds of a multiply, an add and a modulo cannot take 50 ns, and
+    // a folded loop cannot take more.
+    let hash = regex_like(&stdout, "bench \"hash\"").unwrap();
+    let min = hash.split(" min ").nth(1).expect("a min column");
+    let (value, rest) = min.split_once(' ').expect("a value and a unit");
+    let ns: f64 = value.parse::<f64>().expect("a number")
+        * match rest.split_whitespace().next().unwrap_or("") {
+            "ns" => 1.0,
+            "\u{b5}s" => 1_000.0,
+            "ms" => 1_000_000.0,
+            other => panic!("unknown unit {other:?} in {hash}"),
+        };
+    assert!(
+        ns >= 50.0,
+        "the `blackBox` barrier is gone - the optimizer folded the loop: {hash}"
     );
 }
 

@@ -10657,6 +10657,455 @@ twice-freed second one cancel in `memory.buffer.byteLength`, so the row read
 steady with the defect in place. A measurement that measures nothing is what the
 census's own canary is there to catch, so it is not left in.
 
+#### The retirement census: what the text-IR route alone reads (2026-09-06)
+
+RFC-0125 §2.5 gives one emitter and one native route: the direct backend writes
+the wasm, wasm2c writes the C, clang writes the executable. The M4 step-3
+record measured that route within 2x of the text-IR route on every kernel, and
+the tools are now approved and unpacked — wabt 1.0.41 and simde v0.8.2 under
+`tools/`, both discovered by `vyrn deps`. So the text-IR route goes. This is
+the census that says what goes with it, what the wasm2c route needs kept, and
+what loses a reader that is not this track's to delete.
+
+Cranelift AOT is not built. It measured outside 2x in the same step, and no
+program pays for it. It stays a later slice.
+
+**The sizes before the change.** Rust under `compiler/` outside `target/` is
+195,566 lines. C on disk is one file, `vyrn-codegen/src/wasi_host.c`, 574
+lines: the runtime shim's own 1,092 lines of C live inside a Rust raw string
+(`toolchain::RUNTIME_SHIM_TEMPLATE`) and count as Rust here.
+
+**What goes: the text-IR route reads it and nothing else does.**
+
+| Where | What | Lines | Its last reader |
+| --- | --- | --- | --- |
+| `vyrn-codegen/src/lib.rs` 1341–15354 | `emit` and the whole textual emitter — the trap table, the coercion ladder's emitting half, the placement walk, the C symbol mangler | ~14,014 | `main.rs`'s `build`, `bench` and `emit-ir` |
+| `vyrn-codegen/src/lib.rs` 15706–19179 | `mod tests`: 131 unit tests, 124 of which call `emit` | ~3,474 | itself |
+| `vyrn-codegen/src/toolchain.rs` 25–1149 | `RUNTIME_SHIM_TEMPLATE`, `runtime_shim`, `extern_trap_stubs` — the C shim text and its per-`extern` trap stubs | ~1,125 | `build`, `bench`, `shim_wasm`, three tests |
+| `vyrn-codegen/src/toolchain.rs` 1596–1721 | `shim_key`, `shim_key_sysroot_component`, `shim_key_clang_component`, `shim_wasm` — the shim compiled to wasm and cached under `~/.vyrn/cache/shim` | ~240 | `tests/shim_link.rs`, and nothing in production |
+| `vyrn-cli/src/main.rs` | `emit-ir`, the `--route` flag, the text-IR half of `build`, the text-IR compile in `bench` | ~180 | the CLI's own usage line |
+| `vyrn-cli/tests/parity.rs` | 45 tests, 41 ignored: the corpus loop's native column and 44 hand-written three-engine comparisons | 4,704 | CI's `parity` job |
+| `vyrn-codegen/tests/shim_link.rs` | a directly-emitted module linked against the shim under wasmtime | 15.2 KB | CI's codegen step |
+| `vyrn-codegen/tests/imports_vs_shim.rs` | the emitter's `declare` lines against the shim's C definitions | 10.3 KB | CI's codegen step |
+| `vyrn-codegen/src/wasm.rs` `boundary()` | the `__vyrn_*` signatures parsed out of the shim text | ~40 | the two tests above |
+| `vyrn-cli/tests/common/mod.rs` `native_run`, `NATIVE_UNSUPPORTED` | the native column's build-and-run helper, and the one example the text-IR route refuses | ~40 | `parity.rs` only |
+| `vyrn-cli/tests/memory.rs` | four `_natively` tests | ~400 | themselves |
+| `vyrn-cli/tests/genwasm.rs` | `list_dir_is_refused_natively_and_built_for_wasm` | ~40 | itself |
+
+`shim_wasm` is the finding inside the finding. It compiles the shim to a wasm
+reactor module and caches it under a four-part key, and the split build it
+serves does not exist any more: `direct::compile` imports
+`wasi_snapshot_preview1` and the `vyrn` extern namespace and nothing else. One
+test reads it. It has been dead since RFC-0076 M7 and the census is what says
+so.
+
+**What stays: the wasm2c route needs it, or the direct backend does.**
+
+| Where | What | Why it stays |
+| --- | --- | --- |
+| `vyrn-codegen/src/direct.rs` | the one emitter | RFC-0125 §2.5 |
+| `vyrn-codegen/src/wasm.rs` | the module encoder, the memory map, `abi` | the direct backend's scaffolding |
+| `vyrn-codegen/src/layout.rs` | `of_ll`, `SHAPES` | `direct.rs` calls `layout::of_ll` at eleven sites |
+| `vyrn-codegen/src/lib.rs` 15355–15643 | `Rung`, `coerce_plan`, `plan_disagrees`, `sum_variants_of`, `llt_of` | RFC-0101's shared lowering: `direct.rs` reads the same ladder |
+| `vyrn-codegen/src/lib.rs` 723–1340 | `two_way`, `extern_abi_ll`, `gen_host`/`set_gen_host`, `CODE_IMPORTS`, the `GEN_*`/`TAG_*`/`REFLECT_*` constants, `observe`, `check_inst_depth` | `direct.rs` names 35 items from `crate::`; these are them |
+| `vyrn-codegen/src/lib.rs` scattered 9093–15514 | `lambda_captures`, `normalize_fn_sig`, `applied_type`, `settles_type_args`, `expected_type_args`, `solve_with_expected`, `serve_stream_trap`, `utf8d_table`, `append_candidates`, `global_append_candidates`, `self_append_spine` | shared helpers that sit inside the emitter's line range and must be lifted out of it, not deleted with it |
+| `vyrn-codegen/src/lib.rs` 15706–19179, seven tests | `llt_prints_the_shapes_the_layout_engine_was_verified_on`, `llt_prints_every_shape_the_layout_engine_was_verified_on`, `rfc0086_unsolvable_parameter_positions_over_the_corpus`, `the_filled_arms_bind_a_parameter_the_fall_through_walked_past`, `the_checker_refuses_every_shape_the_fall_through_used_to_swallow`, `a_moved_builtin_never_reaches_the_emitter`, `a_mangled_symbol_is_injective_over_generated_types` | the only seven that never call `emit`: they pin the checker and the shared type printer |
+| `vyrn-codegen/src/wasi_host.c` | the WASI host the route links | the route's own host |
+| `toolchain::wasm2c_from`, `simde_from`, `WASI_HOST_C`, `find_clang`, `clang_from` | tool discovery | the route runs them |
+| `toolchain::wasi_sysroot_from`, `wasi_builtins_from`, `builtins_near_sysroot` | the wasi sysroot pin | `tests/layout_vs_clang.rs` compiles for wasm32-wasip1 with it, and `vyrn deps` reports it. The sysroot survives the shim |
+| `vyrn-codegen/tests/layout_vs_clang.rs`, `tests/wasm_runs.rs`, `tests/toolchain_pin.rs` | clang's own answer for the layout engine, the encoder run under wasmtime, the pin mechanism | none of the three touches the shim |
+| `NativeTarget`, `add_native_clang_flags`, `--native-target`, `nativeTarget` | `-O2 -ffp-contract=off -march=…` | the wasm2c route passes the same flags to the same clang. The flag machinery MOVES; it does not go |
+
+**What loses a reader and is not this track's to delete.** The answer is
+nothing, and that is worth stating rather than assuming. `own.rs` exports
+thirteen names to the textual emitter and thirteen to the direct one, and the
+two sets differ by one in each direction: the textual emitter reads
+`own::release_kind`, the direct one reads `own::Release`. `direct.rs` reads
+`release_kind` too, at six sites, through `Owned::release_kind`. So
+`own::analyze`, `place_body`, `placed`, `holes_under`, `for_var_key`,
+`owns_heap`, `str_temporary`, `Ownership`, `Owned`, `ReleasePlan`, `DropKind`
+and `Exit` all keep a live reader after the deletion. No table and no walk in
+`own.rs` falls to this track. The same holds for `vyrn_lower::core`: the
+textual emitter names `decide`, `facts`, `join_ty`, `Facts`, `NameInfo` and
+`St`, and `direct.rs` names all of those but `St` — whose only other mention is
+a doc link. Nothing in the core loses its last reader either.
+
+**What the census cannot promise.** 124 unit tests go with `emit`. Each one
+was written against the textual emitter's output, and a rule one of them is the
+only pin for would go with it silently. The seven above are the ones that
+provably assert something else; the rest are read as the emitter's own
+regression suite, which is what the deletion is. `parity.rs`'s 44
+hand-written tests are the same question at a larger size: each compares the
+interpreter, the textual route and wasm, and after the flip the second and
+third are the same module. What survives of them is the interpreter-against-wasm
+half, which `tests/fixtures.rs` already runs over the whole corpus.
+
+**The route's corpus arithmetic, before slice 2.** `examples/` holds 208
+`.vyrn` files. `tests/route.rs` skips three lists — `KNOWN_DIVERGENT` (empty),
+`EXPECTED_CHECK_FAILURE` (programs that never build, by design) and `WASM_ONLY`
+(`externdemo.vyrn`) — and checks the rest. `NATIVE_UNSUPPORTED`
+(`listdir.vyrn`) is not one of its skips: the route runs the wasm, and the wasm
+has the lowering. So the only example the route excludes for a reason that
+could change is `externdemo.vyrn`, whose `extern` imports only a browser
+supplies.
+
+#### The route answers the `vyrn` namespace (2026-09-06)
+
+The one gap the step-3 record left is closed. An `extern fn` (RFC-0012) had no
+stub on the route, so `externdemo.vyrn` failed at link — `too few arguments to
+function call, expected 3, have 2` out of the host, because a module with a
+`vyrn` import gives `wasm2c_prog_instantiate` one namespace more than a module
+without one.
+
+**Where the signatures come from.** The text-IR route wrote one nullary C stub
+per declaration (`toolchain::extern_trap_stubs`) and let the linker reconcile
+it with the call. wasm2c writes a PROTOTYPE, so a stub of the wrong arity does
+not compile at all. The arity is not a free reading either: a `String` argument
+crosses this boundary as two values, which `direct::extern_abi_sig` is the one
+place that knows. So the stubs are read off the header wasm2c has just written,
+not transcribed from the declarations — `toolchain::wasi_host_c` names each
+parameter, keeps the return type, and gives the body the refusal. The same pass
+decides the instantiate arity, because a module whose `extern`s are all swept
+away has no `vyrn` import and takes the two-argument form.
+
+**What the stub prints.** ``error: extern `jsNow` is not available on this
+target`` on fd 2, exit 1: `trap::extern_unavailable`, the sentence the embedded
+engine's linker answers the namespace with and the one the text-IR route's stub
+printed. wasm2c escapes a byte outside `[A-Za-z0-9_]` as `0x` and two hex
+digits, and a Vyrn identifier may hold one — the lexer accepts every
+`is_alphabetic` char — so the symbol is demangled before it enters the message.
+
+**What pins it.** `tests/route.rs` gains
+`the_extern_example_refuses_on_the_route_as_the_embedded_engine_does`: it builds
+`externdemo.vyrn` on the route and compares stdout, stderr and exit code with
+`vyrn run`. It cannot compare against the `wasmtime` CLI, and that is the
+reason `WASM_ONLY` gives: no engine outside a browser page can instantiate the
+module, so there is no wasm column. This is
+`parity::wasm_only_examples_trap_identically` moved to the route that replaces
+it. Two unit tests in `toolchain.rs` cover the header transform and the
+demangling with no toolchain at all.
+
+**The route's corpus after the slice.** 175 checked, 33 skipped, 0 failed
+against the `wasmtime` CLI, over 208 examples — 32 of the skips are
+`EXPECTED_CHECK_FAILURE`, programs that never build by design, and the
+thirty-third is `externdemo.vyrn`, which the new test carries. No example is
+left off the route for a reason that could change.
+
+Gate: `cargo fmt --all --check`; `cargo build --release -p vyrn-cli`;
+`cargo test -p vyrn-codegen --lib toolchain` (6 passed); `cargo test --release
+-p vyrn-cli --test route -- --ignored --nocapture` (2 passed, 348 s).
+
+#### The flip: one native route (2026-09-06)
+
+`vyrn build` with no flag is the wasm2c route. `--route` is gone, `emit-ir` is
+gone, `vyrn bench` times the route's binary, and the benchmark harness's
+`vyrn-native` leg IS the route. The textual emitter is still in the tree — the
+deletion is the next slice — but nothing in the repo reaches it.
+
+**What the flip fixed on the way.** Three things broke as soon as the route
+became the default, and each was a real defect rather than a test to adjust.
+
+*`blackBox` was the identity, and clang folded the loop it protects.* The
+emitter's comment was right when it was written — "this backend never optimizes
+(RFC-0125 §2.3), so there is nothing to hide the value from" — and stopped being
+right the moment an optimizer sat downstream of it.
+`examples/benching.vyrn`'s "hash to 1000" read **1 ns** against the textual
+route's recorded 1.35 µs. `blackBox(v)` is now a store and a load through
+sixteen bytes of linear memory that nothing else names: a `reserve` rather than
+a `data` (which SHARES identical contents, so two barriers would be one
+address), and a memory round trip rather than a global (which becomes an
+instance field wasm2c's C forwards through in one step). The bench reads
+**2.80 µs**. No recorded wasm byte moves: `blackBox` is refused outside a
+`bench` or `test` block, and both are stripped from a `build`.
+`native_bench_reports_the_expected_shape` now asserts a floor of 50 ns on that
+row — two hundred rounds of a multiply, an add and a modulo cannot take less,
+and a folded loop cannot take more.
+
+*A tool found beside the compiler was not found at all.* Tool discovery walked
+up from the SOURCE file only. clang is on `PATH` and wabt is not, so `vyrn
+build` on a file in a temp directory — which is what seven ignored tests in
+`benching.rs` do — said `could not find wasm2c` with wabt unpacked two
+directories above the binary running. `discovered_tool_from` now takes the
+source's ancestors first and the running compiler's second, which is the order
+`shim_wasm` has used for the sysroot since RFC-0102.
+
+*`listDir` is not native-unsupported any more.* The textual route had no
+lowering and refused by name; the route runs the module, which has one. That is
+one example off `NATIVE_UNSUPPORTED` and onto every gate the rest of the corpus
+is on.
+
+**`emit-ir`'s twelve readers.** Five were using it as "a command that hands a
+program to a backend" and took `emit-wat` unchanged: `benching`, `testing`,
+`contracts`, `limits`, `reproducible`, `warnings`. Seven read the IR's own text,
+and each was re-asked of the module the one emitter writes:
+
+| what it pinned | before | now |
+| --- | --- | --- |
+| `simd.rs`, eight tests | `@llvm.minimum.v4f32`, `icmp slt <4 x i32>`, `@.trap.aoob` counts | `f32x4.min` against `f32x4.pmin`, `i32x4.lt_s`, `i64.ge_u` counts — wasm's own rules, which is what the compiler now decides |
+| `places.rs`, three tests | no allocating `call` in the body | the body calls ONE function and it is the trap its bounds checks branch to |
+| `nullish.rs` | `@__vyrn_free` counted in both spellings | `??` and the `match` it desugars to emit the SAME module, byte for byte |
+| `lazyfield.rs` | the modules equal with `main` cut out | the modules equal outright — the binding the explicit read needs costs nothing here |
+| `json.rs` | one `@__vyrn_str_concat` per writer | a ratio: four times the elements under eight times the time |
+| `fallible.rs` | `try.ok` present, `Fallible__` absent | withdrawn. Its own comment says the claim was measured over the corpus as 106 byte-identical modules, and the wasm manifest is that measurement, running on every commit |
+| `limits.rs`, one assertion | `[N x ptr]` and `icmp uge i64 %sp, N` | withdrawn; the interned wording and the run's wording are the pair that would disagree |
+
+Two of these are stronger than what they replace. `??` and `lazy` were asserted
+to lower "the same way"; the modules are now compared and they are equal.
+
+**What the flip costs, and it is not small.** The exit-residue ratchet
+(`tests/residue.rs`, `rfcs/census/residue-baseline.tsv`) is retired with the
+shim. Its instrument was `VYRN_LEAK_CHECK` and `VYRN_FREE_AUDIT` inside
+`RUNTIME_SHIM_TEMPLATE` — the C allocator counting its own live pointers — and
+the wasm allocator, which is Vyrn in `std/runtime` since PLAN-0125-runtime §6
+step 2, has no such counter. Left in place the suite would have passed having
+measured nothing, which is the failure mode it exists to prevent, so it is
+deleted rather than left green. RFC-0114's 143 clean / 0 leaking / 0 double-free
+stands as a record of a state; nothing watches it now.
+
+What would restore it, stated so the next slice does not have to rediscover it:
+a live-block word in the heap header (`heapBase() + 476` is a gap in the map
+above `drain`), incremented in `malloc` and decremented in `free`, and read by
+`wasi_host.c` at exit. The costs are two: every recorded wasm hash moves, and
+the allocator pays a load, an add and a store per block on a path binary-trees
+is bound by. That is a measurement of its own and belongs in its own slice.
+Four `_natively` tests in `memory.rs` go the same way and for the same reason;
+three of their four rows are steady in the wasm census anyway, and the fourth —
+the operating-system handle a `spawn` takes — is seen by nothing now.
+
+**What CI fetches, and the one row nobody has hashed.** The `parity` job is the
+`route` job: `tests/route.rs --release -- --ignored` over the same corpus, still
+`#[ignore]`d, still failing loudly through `VYRN_REQUIRE_TOOLS=1` when a tool is
+missing. wabt and simde join wasmtime in the pin table (`toolpin::KNOWN_TOOLS`,
+`tool_url`, `tool_platforms`), in `vyrn.json`, and in `vyrn.lock`:
+
+| pin | url | sha256 |
+| --- | --- | --- |
+| `tool:simde@0.8.2/any` | `https://github.com/simd-everywhere/simde/archive/refs/tags/v0.8.2.tar.gz` | `ed2a3268658f2f2a9b5367628a85ccd4cf9516460ed8604eed369653d49b25fb` |
+| `tool:wabt@1.0.41/x86_64-windows` | `https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz` | `37285ec7244384ffd382841f93fd23335aae846c92016a132d765c60f27a2f31` |
+
+Those are the two archives this machine holds, hashed from the bytes on disk.
+wabt's other three platform assets are NOT pinned, and their URLs are not
+written down either: an asset name is a pin only once someone has downloaded it
+and recorded its sha256 (RFC-0102 M1), and a URL whose hash nobody has is the
+exact thing the pin mechanism exists to refuse. `tool_platforms("wabt")` is
+therefore `["x86_64-windows"]` alone and `tool_url` refuses the rest by name.
+**CI's `route` and `bench` jobs run on ubuntu and are red until one
+`vyrn update wabt` on a linux machine with network access writes that row.** No
+other change is needed; both jobs already run `vyrn update --locked` and resolve
+through the pin.
+
+The route also outranks the `tools/` walk now, as every other pinned tool does,
+so a checkout with `tools/wabt-*/` unpacked and nothing in `~/.vyrn/cache`
+refuses with the sha it wants and the three ways to satisfy it. `vyrn vendor`,
+or a copy of the archive dropped into `~/.vyrn/cache/sha256/<sha>`, is what a
+developer does once.
+
+Gate: `cargo fmt --all --check`; `cargo build --release -p vyrn-cli`;
+`cargo test -p vyrn-cli`; the ignored corpus suites `kernel coretables typed
+effects fixtures testsweep`; `cargo test -p vyrn-frontend`;
+`cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml`; `cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1`;
+`cargo test --release -p vyrn-cli --test route -- --ignored`;
+`VYRN_WASM_MANIFEST=check ... --test wasmhash -- --ignored`;
+`--release --test genwasm -- --ignored`; `vyrn doc --verify`; the site export and
+`vyrn test` per site test file.
+
+Numbers from the run: the ignored corpus suites `kernel`, `coretables`, `typed`,
+`effects`, `fixtures` and `testsweep` all green; `cargo test -p vyrn-cli` green;
+`--test route -- --ignored` 175 checked, 33 skipped, 0 failed, plus the extern
+refusal; `--test memory -- --test-threads=1` 6 passed; the wasm manifest checked
+with no byte moved; `--test genwasm -- --ignored` green; `vyrn doc --std --verify`
+green after the two std doc comments that named `emit-ir` and the textual
+backend were rewritten; the site export 29.7 s and 189 site test blocks. Parity
+ran one last time on the flipped route and read 40 of 41 — the one failure was
+`leak_check_is_two_sided`, the residue instrument again, and it is deleted with
+the rest of the shim's readers rather than left red.
+
+#### One emitter: the text-IR route is deleted (2026-09-07)
+
+The route is gone from the tree. `vyrn-codegen/src/lib.rs` was 19,179 lines and
+is 2,465: `pub fn emit`, `struct Gen`, both of its `impl` blocks, and the 42
+private items nothing reached once they went — the string runtime, the region
+runtime, the stream runtime, the regex runtime, the encoding table, the symbol
+manglers, the static-string pool, the higher-order call machinery, the drop-slot
+and loop-context types. What is left in that file is what RFC-0101 put there for
+BOTH emitters and the direct one still asks: `coerce_plan` and `Rung`, `layout`,
+`llt_of`, `observe`, `check_instantiations`, `solve_with_expected`, the trap and
+I/O wordings re-exported from `vyrn-frontend`, and the builtin declaration
+tables.
+
+**The C shim went with it.** `RUNTIME_SHIM_TEMPLATE` (1,086 lines of C),
+`runtime_shim`, `extern_trap_stubs`, `shim_key`, `shim_key_sysroot_component`,
+`shim_key_clang_component`, `shim_wasm` and `shim_cache_dir` are deleted from
+`toolchain.rs`, which was 1,837 lines and is 702. It had been dead in production
+since RFC-0076 M7 — the generator host stopped linking two modules — and the
+flip took its last caller. `wasi_host.c` is what a native build links now, and
+`layout_vs_clang` still compares the layout engine against clang, `VMap`
+included, because that agreement is between the emitter and `std/runtime` rather
+than between two compilations of C.
+
+**Every suite that tested the route rather than the language.** `parity.rs`
+(4,621 lines), `residue.rs`, `shim_link.rs` and `imports_vs_shim.rs` are
+deleted; `common/mod.rs` loses `native_run` and `NATIVE_UNSUPPORTED`;
+`memory.rs` loses the Win32 handle and peak-bytes probes with the four
+`_natively` tests they served; `wasm.rs` loses `the_boundary_census_is_the_declare_lines`,
+which parsed the emitter's own `declare` lines. `lib.rs`'s own unit tests fell
+from 131 to **5**: 126 of them called `emit`, and the five that remain pin the
+layout engine against `llt`, every shape it was verified on, and RFC-0086's
+unsolvable parameter positions. The crate's `--lib` run is 42 tests.
+
+**Four censuses moved, and each moved by regenerating rather than by hand.**
+
+| census | what moved | why |
+| --- | --- | --- |
+| coercion (`tests/lowered.rs`, §3 M6's table) | six rows to three; the rung ladder 310 → **192** code lines | the two `native` rows were `Gen::coerce` (118 lines) and `Gen::coerce_flow` (15). The rung rule is still STATED once — by the plan — and now exactly one emitter asks it |
+| form (`tests/forms.rs`, RFC-0127 §3.1/§3.2) | the `native` column is `shared`; 1,590 → **1,432** mentions in eight files, 340 → **289** in seven | the column's file is `vyrn-codegen/src/lib.rs`, which was the emitter AND the shared lowering. The file stayed; the column is renamed to what is left in it rather than deleted, because the count is not zero |
+| surface (`tests/surface.rs`, RFC-0126 §3) | the same rename; 2,110 → **1,611** mentions in six files | same file, same reason. 499 of the surface's cost was the text-IR emitter's `match` on `ast::Type` |
+| builtin (`vyrn-frontend/tests/primitives.rs`) | four scanned regions to three | `the_backends_dispatch_on_nothing_the_census_omits` scanned `Gen::gen_call_inner`'s chain as its fourth region. Every name the remaining three dispatch on is censused |
+
+The wasm manifest did not move: `VYRN_WASM_MANIFEST=check` is green with no row
+rewritten, which is the assertion that this slice deleted an emitter and touched
+no emitted byte.
+
+**The gate found a real difference the moment the corpus grew.** `lowered.rs`
+skipped any program the text-IR backend refused, and it refused 35 of the 208
+examples; with the route gone, 138 compared programs became 173 and 570,960
+compared answers became 1,026,227. Four of the newly compared programs
+(`membench`, `streamlazy`, `streamops`, `streamunfold`) reported an instance the
+lowering built and no engine emits: `Owned__Slots__release<{ pos: Int64, src:
+Int64 }>`, `std/stream`'s module-state slab. The cause is `vyrn-lower`'s
+`<teardown>` root, which modeled RFC-0114 §25's leak check dropping every
+module-state binding after `main`. That teardown was the text-IR route's, and it
+was retired with the residue ratchet in the previous slice, so the root queued
+bodies nothing could emit. The root is deleted; RFC-0114 §25's restoration
+design brings it back with the teardown, not before it.
+
+`testsweep`'s floor moved 150 → 130 for the same kind of reason: the sweep lifts
+programs out of `vyrn-cli/tests/*.rs`, and deleting `parity.rs`, `residue.rs`
+and half of `memory.rs` took 27 of them with it. 142 across 72 sources today.
+
+**Line count, the whole track.** Rust under `compiler/` outside `target/`:
+**195,566 → 171,432**, −24,134 over four slices, of which −23,669 is this one. C
+the same way: 574 → **584**, the ten lines being `wasi_host.c`'s extern-stub
+marker from the second slice. The route's C is not in the repository at all —
+wasm2c writes it at build time.
+
+| file | net |
+| --- | --- |
+| `vyrn-codegen/src/lib.rs` | −16,714 |
+| `vyrn-cli/tests/parity.rs` | −4,704 (deleted) |
+| `vyrn-codegen/src/toolchain.rs` | −1,135 |
+| `vyrn-cli/tests/memory.rs` | −582 |
+| `vyrn-codegen/tests/shim_link.rs` | −344 (deleted) |
+| `vyrn-codegen/tests/imports_vs_shim.rs` | −269 (deleted) |
+| `vyrn-cli/tests/residue.rs` | −163 (deleted) |
+| `vyrn-cli/src/main.rs` | −122 |
+| `vyrn-codegen/src/wasm.rs` | −94 |
+| `vyrn-cli/tests/simd.rs` | −89 |
+| `vyrn-cli/tests/fallible.rs` | −44 |
+| `vyrn-lower/src/lib.rs` | −27 |
+| `vyrn-cli/tests/route.rs` | +65 |
+| `vyrn-frontend/src/toolpin.rs` | +52 |
+| `vyrn-codegen/src/direct.rs` | +47 (`blackBox`'s barrier) |
+| `vyrn-codegen/src/wasi_host.c` | +10 |
+
+**What is left for a later track, named rather than implied.**
+
+- The exit-residue ratchet. The design is in the previous record; it costs every
+  recorded wasm hash and a load/add/store per block, so it is its own slice.
+- `vyrn-lower`'s `<teardown>` root comes back with it.
+- wabt's linux and macos pins. `tool_platforms("wabt")` is `["x86_64-windows"]`
+  and `tool_url` refuses the rest by name, because an asset nobody has hashed is
+  not a pin. CI's `route` and `bench` jobs are red until one `vyrn update wabt`
+  on a linux machine writes that row.
+- `direct.rs`'s `Rt::next_is` and the unused `slot` closure in `Rt::slots` are
+  dead and were dead at `f094ee20`. Untouched: they belong to the emitter this
+  track keeps.
+
+Gate, in the brief's order: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (75 suites, all
+green); the ignored corpus suites `kernel` (166 s), `coretables` (131 s),
+`typed` (331 s), `effects` (354 s), `fixtures` (96 s) and `testsweep` (98 s);
+`cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (6 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**175 checked, 33
+skipped, 0 failed**, plus the extern refusal, 359 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (no byte moved);
+`--release --test genwasm -- --ignored`; `vyrn doc --std -o ../docs/api --verify`
+(41 files, up to date); the site export (31 s, 82 routes and 14 assets) and
+`vyrn test` per site file (**189 test blocks**). `residue -- --ignored` and
+`parity -- --ignored` are not in the list because neither suite exists.
+
+#### The core line comes in, and three censuses are re-pinned on the merged tree (2026-09-07)
+
+`track-cd` merges `rfc-0125-core` at `fb0bcc11` — ten commits, of which two are
+merges of `track-ce` and `track-cf`: a must-use obligation moved out of the
+ownership pass and onto the type (`vyrn-lower/src/typed.rs`, `tests/mustuse.rs`),
+the last placement table left `own.rs` with its producer, a body now says every
+refusal it has, and `movecheck.rs` is 2,278 lines lighter. Nothing in that line
+touches an emitter; nothing in this one touches the kernel. The two lines meet
+in three files and one of them, `vyrn-codegen/src/lib.rs`, is the file this
+track deleted 16,714 lines of.
+
+**The three conflicts, and how each was decided.**
+
+- `vyrn-codegen/src/lib.rs`. The core line rewrote `Gen::arg_drop_row` — the
+  emitter reads the core's `arg_drops` alone now, with no plan answer to fall
+  back to. That method is inside `impl Gen`, which this track deleted, so the
+  resolution is the deletion: `git diff` of the core line's hunk against the
+  merge base confirms every changed line is inside the emitter.
+- `compiler/vyrn-cli/tests/coretables.rs`. This track never edited it; the core
+  line's version stands.
+- `rfcs/RFC-0127`'s form table. Both branches regenerated it, so neither text is
+  the answer. The file is taken from `fb0bcc11` whole, the `native` column is
+  renamed `shared` (its file is the shared lowering now, and its count is not
+  zero), and the table is REGENERATED from
+  `the_form_census_as_a_table` on the merged tree rather than reconciled by
+  hand — which is what the two branches' own commits each did, and the reason
+  the conflict existed.
+
+**What the merged tree measures.** Every number below is a printer's output on
+the merged tree, not an arithmetic guess at what two branches would sum to:
+
+| census | branch tip | core tip | merged |
+| --- | --- | --- | --- |
+| form, RFC-0127 §3.1 | 1,432 in eight files | 1,575 | **1,398** |
+| declaration, RFC-0127 §3.2 | 289 in seven files | 340 | **289** |
+| surface, RFC-0126 §3 | 1,611 in six files | 2,110 | **1,611** |
+
+RFC-0127 §3.1.1's floor table is re-derived with them: the statement floor is
+`Stmt::Continue` at **25**, an expression's is `Expr::TryConstruct` at **28**,
+and `Stmt::Region`'s 30 is now four exhaustive walks rather than six —
+`collect_regex_block`, `collect_strings_block` and `mount_calls_block` were the
+text-IR emitter's and went with it.
+
+The coercion census, the builtin census and the wasm manifest are unchanged by
+the merge: the core line states no coercion rung, dispatches on no builtin name,
+and moves no emitted byte.
+
+**One defect this merge carries in from neither branch's work.** `movecheck.rs`
+arrives with two dead test constants (`FEED`, `TWICE`) that warn under `cargo
+test -p vyrn-frontend`. They belong to the checker track's slice, not this one,
+and this track does not edit `movecheck.rs`.
+
+Gate, in the brief's order, all on the merged tree: `cargo fmt --all --check`;
+`cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (76 suites);
+the ignored corpus suites `kernel` (138 s), `coretables` (147 s), `typed`
+(351 s), `effects` (401 s), `fixtures` (162 s), `testsweep` (161 s);
+`cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`;
+`cargo test --manifest-path vyrn-lsp/Cargo.toml`; `cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1`;
+`cargo test --release -p vyrn-cli --test route -- --ignored` (2 passed, 660 s;
+the per-example tally the run prints under `--nocapture` was last read at the
+previous slice and the merge changes neither the corpus nor the route);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (76 s, no byte moved);
+`--release --test genwasm -- --ignored`; `vyrn doc --std -o ../docs/api --verify`
+(41 files, up to date); the site export (29 s, 82 routes and 14 assets) and
+`vyrn test` per site file (189 test blocks).
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

@@ -28,10 +28,18 @@ pub const PLATFORMS: [&str; 4] = [
     "x86_64-windows",
 ];
 
-/// The tools the table knows. Four entries, because these are the four this
-/// repository fetches; a name outside this list is a refusal, never a
+/// The tools the table knows. A name outside this list is a refusal, never a
 /// fall-through to PATH.
-pub const KNOWN_TOOLS: [&str; 4] = ["wasmtime", "wasi-sysroot", "wasi-builtins", "cargo-nextest"];
+pub const KNOWN_TOOLS: [&str; 6] = [
+    "wasmtime",
+    "wasi-sysroot",
+    "wasi-builtins",
+    "cargo-nextest",
+    // The native route's two (RFC-0125 §2.5): `wasm2c` out of a wabt release,
+    // and the SIMD header its output includes.
+    "wabt",
+    "simde",
+];
 
 /// This machine, in [`PLATFORMS`]' vocabulary. Rust's own `ARCH`/`OS` constants
 /// already spell it that way (`x86_64`, `aarch64`; `linux`, `macos`, `windows`),
@@ -54,7 +62,13 @@ pub fn tool_spec(name: &str, version: &str, platform: &str) -> String {
 /// host. One entry, every machine.
 pub fn tool_platforms(name: &str) -> &'static [&'static str] {
     match name {
-        "wasi-sysroot" | "wasi-builtins" => &["any"],
+        // simde is headers, so it is `any` for the same reason the sysroot is.
+        "wasi-sysroot" | "wasi-builtins" | "simde" => &["any"],
+        // wabt publishes a binary release per operating system, one asset per
+        // platform below, each pinned in `vyrn.lock` by sha256. The Windows
+        // asset was hashed from the bytes on this machine; the three others
+        // carry the sha256 the release publishes beside each asset, which
+        // `vyrn update --locked` checks against the bytes it downloads.
         _ => &PLATFORMS,
     }
 }
@@ -68,6 +82,8 @@ pub fn tool_env_var(name: &str) -> &'static str {
         "wasmtime" => "VYRN_WASMTIME",
         "wasi-sysroot" => "WASI_SYSROOT",
         "wasi-builtins" => "WASI_BUILTINS",
+        "wabt" => "VYRN_WASM2C",
+        "simde" => "VYRN_SIMDE",
         _ => "",
     }
 }
@@ -151,6 +167,26 @@ pub fn tool_url(name: &str, version: &str, platform: &str) -> Result<String, Str
                  cargo-nextest-{version}-{triple}.tar.gz"
             ))
         }
+        // wabt names its assets `<os>-<arch>`, which PLATFORMS' vocabulary does
+        // not spell, so the mapping is a table and an unknown platform is a
+        // refusal rather than an invented URL.
+        "wabt" => {
+            let asset = match platform {
+                "x86_64-linux" => "linux-x64",
+                "aarch64-linux" => "linux-arm64",
+                "aarch64-macos" => "macos-arm64",
+                "x86_64-windows" => "windows-x64",
+                other => return Err(format!("this table records no wabt asset for {other}")),
+            };
+            Ok(format!(
+                "https://github.com/WebAssembly/wabt/releases/download/{version}/wabt-{version}-{asset}.tar.gz"
+            ))
+        }
+        // A source tag, not a release asset: simde is a header library and the
+        // route only needs `simde/wasm/simd128.h` off it.
+        "simde" => Ok(format!(
+            "https://github.com/simd-everywhere/simde/archive/refs/tags/v{version}.tar.gz"
+        )),
         _ => Err(unknown_tool(name)),
     }
 }
@@ -442,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn the_table_knows_four_tools_and_refuses_the_rest() {
+    fn the_table_knows_its_tools_and_refuses_the_rest() {
         assert_eq!(
             tool_url("wasmtime", "46.0.1", "x86_64-linux").unwrap(),
             "https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/\
@@ -470,8 +506,27 @@ mod tests {
         assert_eq!(
             e,
             "unknown tool `wasm-opt` in vyrn.json's `toolchain` — the tools vyrn can pin \
-             are wasmtime, wasi-sysroot, wasi-builtins, cargo-nextest"
+             are wasmtime, wasi-sysroot, wasi-builtins, cargo-nextest, wabt, simde"
         );
+
+        // The native route's two (RFC-0125 §2.5). wabt names its assets
+        // `<os>-<arch>`, one per platform, and a platform outside the table is
+        // a refusal rather than a guess.
+        assert_eq!(
+            tool_url("wabt", "1.0.41", "x86_64-windows").unwrap(),
+            "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz"
+        );
+        assert_eq!(
+            tool_url("wabt", "1.0.41", "x86_64-linux").unwrap(),
+            "https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz"
+        );
+        assert!(tool_url("wabt", "1.0.41", "riscv64-linux").is_err());
+        assert_eq!(tool_platforms("wabt"), PLATFORMS);
+        assert_eq!(
+            tool_url("simde", "0.8.2", "any").unwrap(),
+            "https://github.com/simd-everywhere/simde/archive/refs/tags/v0.8.2.tar.gz"
+        );
+        assert_eq!(tool_platforms("simde"), ["any"]);
     }
 
     #[test]

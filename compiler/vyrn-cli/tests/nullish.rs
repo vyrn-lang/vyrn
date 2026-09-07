@@ -72,19 +72,6 @@ fn prints(name: &str, exprs: &[&str]) -> String {
     norm(&out.stdout)
 }
 
-/// Compile-only, expecting a diagnostic containing `needle`.
-fn rejects(name: &str, main: &str, needle: &str) {
-    let src = format!("{PRELUDE}\nfn main() -> Int64 {{\n{main}\n    return 0\n}}\n");
-    let path = write(name, &src);
-    let out = vyrn().arg("check").arg(&path).output().expect("vyrn check");
-    let all = norm(&out.stdout) + &norm(&out.stderr);
-    assert!(!out.status.success(), "{name} was accepted:\n{all}");
-    assert!(
-        all.contains(needle),
-        "{name}: expected {needle:?}, got:\n{all}"
-    );
-}
-
 #[test]
 fn nullish_unwraps_an_option() {
     assert_eq!(
@@ -189,28 +176,29 @@ fn double_question_is_one_token_even_unspaced() {
 /// hand-written `Err(e)` arm does not free `e` either; the invariant worth
 /// pinning is that the desugar adds no free and drops no free relative to the
 /// `match` a user would write by hand.
+///
+/// It used to count `@__vyrn_free` calls in `vyrn emit-ir` and compare the two
+/// counts. The textual route went (RFC-0125 §2.5), and the module the one
+/// emitter writes says more than a count could: the two spellings compile to the
+/// SAME module, byte for byte, so no release can differ and neither can anything
+/// else.
 #[test]
-fn the_desugar_frees_exactly_what_the_handwritten_match_frees() {
-    let frees = |name: &str, expr: &str| -> usize {
+fn the_desugar_is_the_match_it_desugars_to() {
+    let module = |name: &str, expr: &str| -> String {
         let src =
             format!("{PRELUDE}\nfn main() -> Int64 {{\n    let n = {expr}\n    return n\n}}\n");
         let path = write(name, &src);
         let out = vyrn()
-            .arg("emit-ir")
+            .arg("emit-wat")
             .arg(&path)
             .output()
-            .expect("vyrn emit-ir");
+            .expect("vyrn emit-wat");
         assert!(out.status.success(), "{name}: {}", norm(&out.stderr));
         norm(&out.stdout)
-            .matches("call void @__vyrn_free(ptr")
-            .count()
     };
     assert_eq!(
-        frees("free_sugar", "toNum(\"two\") ?? -1"),
-        frees(
-            "free_match",
-            "match toNum(\"two\") { Ok(v) => v, Err(e) => -1 }"
-        ),
-        "`??` must reclaim exactly what the `match` it desugars to reclaims"
+        module("sugar", "toNum(\"two\") ?? -1"),
+        module("hand", "match toNum(\"two\") { Ok(v) => v, Err(e) => -1 }"),
+        "`??` must be the `match` a user would write, and nothing else"
     );
 }

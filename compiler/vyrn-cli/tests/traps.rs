@@ -211,21 +211,20 @@ fn no_trap_wording_is_spelled_outside_the_table() {
     );
 }
 
-/// The other half of the same rule: the table is reachable from all three
-/// engines, which is the whole reason it is in `vyrn-frontend` and not in
-/// `vyrn-lower` (RFC-0101 §6.4).
+/// The other half of the same rule: the table is reachable from every engine,
+/// which is the whole reason it is in `vyrn-frontend` and not in `vyrn-lower`
+/// (RFC-0101 §6.4).
 ///
-/// `vyrn-codegen` re-exports the I/O half under its old names, so a backend that
-/// asks `io_message` gets the table's answer and not a copy of it.
+/// `vyrn-codegen` re-exports the I/O half under its old names, so the emitter
+/// that asks `io_message` gets the table's answer and not a copy of it. It also
+/// asserted what the C shim was handed, until the shim went with the textual
+/// route (RFC-0125 §2.5) — one fewer copy for the rule to hold together.
 #[test]
-fn the_two_backends_and_the_interpreter_read_the_same_table() {
+fn the_emitter_and_the_engine_read_the_same_table() {
     assert_eq!(vyrn_codegen::io_message("readerr"), trap::io("readerr"));
     assert_eq!(
         vyrn_codegen::IO_MESSAGES.len(),
         trap::IO.len(),
         "one list, not two"
     );
-    // The framing an engine adds, and what the C shim gets handed.
-    assert!(vyrn_codegen::toolchain::runtime_shim()
-        .contains(&format!("{:?}", trap::line(trap::OUT_OF_MEMORY))));
 }

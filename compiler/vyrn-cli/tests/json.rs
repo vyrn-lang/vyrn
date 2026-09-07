@@ -183,55 +183,57 @@ fn tojson_byte_pins_hold() {
 /// appeared under a `+`, so every element re-`malloc`'d and re-copied the whole
 /// result so far and leaked the previous buffer.
 ///
-/// The pin is structural — a COUNT of copying concatenations, not a duration, so
-/// it cannot go flaky on a loaded machine. Each writer may copy exactly once, in
-/// its tail; a second `strcat` means the per-element append went back to
-/// allocating, which is the complexity class regressing. (`vyrn-codegen`'s
-/// `accumulator_returned_through_a_concat_still_appends_in_place` pins the
-/// compiler rule; this pins that `std/json` is actually written in the shape the
-/// rule recognizes, which is the half a library edit could silently undo.)
+/// The pin is a RATIO between two sizes, not a duration, so a loaded machine
+/// slows both sides and the ratio holds. Four times the elements is four times
+/// the work for a writer that appends in place and sixteen times for one that
+/// copies its accumulator per element, which is the O(N^2) `toJson` had; the
+/// threshold sits far from both.
+///
+/// It counted `@__vyrn_str_concat` calls inside `vyrn_json$emitArr` in `vyrn
+/// emit-ir` until the textual route went (RFC-0125 §2.5). The module the one
+/// emitter writes carries no name section, so there is no `emitArr` to find in
+/// it — and a complexity class was never really a fact about a symbol.
+/// (`std/json`'s own `test` blocks pin what it PRINTS; this pins what it costs,
+/// which is the half a library edit could silently undo.)
 #[test]
 fn the_json_writer_does_not_copy_once_per_element() {
+    const N: usize = 20_000;
     let dir = std::env::temp_dir().join("vyrn-json-linear");
     std::fs::create_dir_all(&dir).unwrap();
-    let file = dir.join("linear.vyrn");
-    std::fs::write(
-        &file,
-        "fn main() -> Int64 {\n\
-         let mut a: Array<Int64> = []\n\
-         a.push(1)\n\
-         print(toJson(a).byteLength)\n\
-         return 0\n\
-         }\n",
-    )
-    .unwrap();
-    let out = vyrn()
-        .arg("emit-ir")
-        .arg(&file)
-        .output()
-        .expect("vyrn emit-ir");
+    let best_of_3 = |name: &str, n: usize| -> std::time::Duration {
+        let src = format!(
+            "fn main() -> Int64 {{\n\
+             let mut a: Array<Int64> = []\n\
+             let mut i = 0\n\
+             while i < {n} {{ a.push(i)  i = i + 1 }}\n\
+             print(toJson(a).byteLength)\n\
+             return 0\n\
+             }}\n"
+        );
+        let file = dir.join(format!("{name}.vyrn"));
+        std::fs::write(&file, src).unwrap();
+        (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                t.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    let small = best_of_3("linear-small", N);
+    let big = best_of_3("linear-big", 4 * N);
     assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
+        big.as_secs_f64() < 8.0 * small.as_secs_f64(),
+        "`toJson` is copying its accumulator per element: {big:?} for {} \
+         elements against {small:?} for {N}",
+        4 * N
     );
-    let ir = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
-    for writer in ["vyrn_json$emitArr", "vyrn_json$emitObj"] {
-        let start = ir
-            .find(&format!("define ptr @{writer}("))
-            .unwrap_or_else(|| panic!("no `{writer}` in the emitted IR"));
-        let body = &ir[start..start + ir[start..].find("\n}\n").expect("unterminated body")];
-        assert!(
-            body.contains("call ptr @__vyrn_realloc"),
-            "`{writer}` must grow its accumulator in place:\n{body}"
-        );
-        assert_eq!(
-            body.matches("call ptr @__vyrn_str_concat(").count(),
-            1,
-            "`{writer}` may copy only in its tail — a second copy is one per \
-             element, which is the O(N²) `toJson` had:\n{body}"
-        );
-    }
 }
 
 /// The same, for the other direction (RFC-0078 M3): `examples/jsondecbytes.vyrn`

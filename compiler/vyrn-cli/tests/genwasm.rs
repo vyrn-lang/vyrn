@@ -310,14 +310,17 @@ fn reflection_outside_a_generator_is_still_the_same_error() {
 ///
 /// It has a runtime under `vyrn run`, which lists the real filesystem
 /// (`list_dir_is_not_generation_only`), so the front end cannot refuse the call
-/// the way it refuses the three above. The direct backend lowers it over
-/// `fd_readdir` (RFC-0125 §3 M5; `examples/listdir.vyrn` pins the output). The
-/// text-IR backend has no lowering and says so itself, from
-/// `vyrn_codegen::LIST_DIR_NO_LOWERING` rather than in the emitter's own words
-/// about its own gaps (RFC-0096's addendum).
+/// the way it refuses the three above. The emitter lowers it over `fd_readdir`
+/// (RFC-0125 §3 M5; `examples/listdir.vyrn` pins the output), and since the
+/// native route IS that module through wasm2c (RFC-0125 §2.5) both targets
+/// build it.
+///
+/// It was `list_dir_is_refused_natively_and_built_for_wasm`: the textual route
+/// had no lowering and said so in a constant of its own. The route went and took
+/// both the refusal and the constant with it, which is one example off
+/// `NATIVE_UNSUPPORTED` and onto every gate the rest of the corpus is on.
 #[test]
-fn list_dir_is_refused_natively_and_built_for_wasm() {
-    let want = vyrn_codegen::LIST_DIR_NO_LOWERING;
+fn list_dir_builds_for_both_targets() {
     let f = std::env::temp_dir().join(format!("vyrn_listdir_{}.vyrn", std::process::id()));
     std::fs::write(
         &f,
@@ -327,18 +330,6 @@ fn list_dir_is_refused_natively_and_built_for_wasm() {
          }\n",
     )
     .unwrap();
-    let native = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .arg("build")
-        .arg(&f)
-        .output()
-        .unwrap();
-    let err = String::from_utf8_lossy(&native.stderr).to_string();
-    assert!(!native.status.success(), "native compiled: {err}");
-    assert!(err.contains(want), "unexpected native refusal: {err}");
-    assert!(
-        !err.contains("no lowering for the call"),
-        "the emitter's own words reached the user: {err}"
-    );
     let wasm = f.with_extension("wasm");
     let built = Command::new(env!("CARGO_BIN_EXE_vyrn"))
         .arg("build")

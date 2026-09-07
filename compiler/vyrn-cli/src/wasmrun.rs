@@ -255,8 +255,8 @@ fn open(
     // `vyrn` import here is an `extern fn` (RFC-0012) the program REACHES. Only
     // a browser page supplies that namespace. A terminal answers each name with
     // the one refusal — `trap::extern_unavailable`'s sentence on fd 2, then
-    // exit 1 — because that is what the interpreter prints and what native's C
-    // stub prints (`vyrn_codegen::toolchain::extern_trap_stubs`), and a reached
+    // exit 1 — because that is what the interpreter prints and what the native
+    // route's host prints (`vyrn_codegen::toolchain::wasi_host_c`), and a reached
     // `extern` must fail the same way on every engine. RFC-0125 §3 M5, the
     // `extern-unavailable` row. The import stays in the module: the page still
     // fills it, and only the host that cannot answer names the function.

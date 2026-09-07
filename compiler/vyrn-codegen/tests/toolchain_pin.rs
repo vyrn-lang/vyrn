@@ -17,8 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use vyrn_codegen::toolchain::{
-    clang_from, shim_key_clang_component, wasi_builtins_from, wasi_sysroot_from, wasmtime_from,
-    BUILTINS_A,
+    clang_from, wasi_builtins_from, wasi_sysroot_from, wasmtime_from, BUILTINS_A,
 };
 use vyrn_frontend::manifest::{cache_dir, write_blob};
 use vyrn_frontend::toolpin::{host_platform, tool_spec, tools_dir};
@@ -190,7 +189,9 @@ fn the_pin_resolves_offline_and_the_order_is_env_then_pin_then_walk() {
 }
 
 /// RFC-0102 M3: the one tool that is discovered rather than pinned still has to
-/// say what it is — the version, the path, and why that path.
+/// say what it is — the version, the path, and why that path. It no longer keys
+/// a cache (the shim it compiled went with the text-IR route, RFC-0125 §3 M4),
+/// so what is left to assert is the report.
 ///
 /// Called from the one `#[test]` for the reason [`sysroot_and_builtins`] is:
 /// `$CLANG` is step 1 here too, and a second test setting it beside this one is
@@ -199,15 +200,6 @@ fn the_pin_resolves_offline_and_the_order_is_env_then_pin_then_walk() {
 /// No host-only branch: a machine with clang and one without both get an
 /// assertion, and the key component is a pure function of a string.
 fn clang_is_recorded_not_pinned() {
-    // The key component IS the version: two versions, two keys, and the same
-    // version twice is the same key — which is what makes the cache hit correct
-    // and the upgrade a miss (Exhibit 5).
-    let a = shim_key_clang_component("clang version 22.1.0");
-    let b = shim_key_clang_component("clang version 23.0.0");
-    assert_ne!(a, b, "a clang upgrade has to change the key");
-    assert_eq!(a, shim_key_clang_component("clang version 22.1.0"));
-    assert!(a.starts_with("clang"), "{a}");
-
     match clang_from() {
         Some((path, version, why)) => {
             assert!(!version.is_empty());
@@ -227,9 +219,8 @@ fn clang_is_recorded_not_pinned() {
             // The path this reports is the path `find_clang` runs.
             assert_eq!(Some(path), vyrn_codegen::toolchain::find_clang());
         }
-        // A machine with no clang is a machine where the shim does not compile,
-        // and that is unchanged: `shim_wasm` answers `None`, as it did when the
-        // key had no compiler in it.
+        // A machine with no clang is a machine where the native route cannot
+        // link, and it says so at the link step rather than here.
         None => assert!(vyrn_codegen::toolchain::find_clang().is_none()),
     }
 }

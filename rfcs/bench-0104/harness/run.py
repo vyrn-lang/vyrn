@@ -81,15 +81,17 @@ EXAMPLES = ROOT / "examples"
 BUILD = HARNESS / "build"                      # gitignored
 RESULTS = BENCHDIR / "results"
 
-# `vyrn-wasm2c` is RFC-0125 §2.5's release route (`vyrn build --route wasm2c`):
-# the same wasm the `vyrn-wasm` leg runs, through wasm2c and clang. It needs
-# wabt and simde under tools/, so it is not in the default set.
-CONTESTANTS = ["c", "rust", "js", "vyrn-native", "vyrn-wasm", "vyrn-wasm2c"]
+# `vyrn-native` IS RFC-0125 §2.5's route: the same wasm the `vyrn-wasm` leg
+# runs, through wasm2c and clang. It was a third leg named `vyrn-wasm2c` beside a
+# textual-IR `vyrn-native` for as long as the two routes both existed, which is
+# how the numbers that retired the textual one were taken. It needs wabt and
+# simde, which `vyrn build` finds through the pin or under `tools/`.
+CONTESTANTS = ["c", "rust", "js", "vyrn-native", "vyrn-wasm"]
 
 # The flags, stated rather than implied.
 #
-# `vyrn build`'s native pipeline passes clang `-O2 -ffp-contract=off
-# -Wno-override-module` and no `-march` on the default x86-64 target
+# `vyrn build`'s native route passes clang `-O2 -ffp-contract=off` and no
+# `-march` on the default x86-64 target
 # (`add_native_clang_flags` in compiler/vyrn-cli/src/main.rs). The C leg is
 # given the same two that affect code: same optimization level, same refusal to
 # fuse `a*b+c`, same baseline ISA. Without `-ffp-contract=off` the C numbers
@@ -343,9 +345,8 @@ def environment() -> dict:
             "c": "clang " + " ".join(CFLAGS),
             "rust": "rustc " + " ".join(RUSTFLAGS),
             "js": "node (no build step)",
-            "vyrn-native": "vyrn build (clang -O2 -ffp-contract=off -Wno-override-module)",
-            "vyrn-wasm": "vyrn build --target wasm (direct backend, no optimizer) + wasmtime run",
-            "vyrn-wasm2c": "vyrn build --route wasm2c (the same wasm, wasm2c to C, clang -O2 -ffp-contract=off with wasm-rt)",
+            "vyrn-native": "vyrn build (the module through wasm2c, clang -O2 -ffp-contract=off with wasm-rt)",
+            "vyrn-wasm": "vyrn build --target wasm (the emitter's module, no optimizer) + wasmtime run",
         },
     }
 
@@ -452,16 +453,12 @@ def build_all(progs: list[Program], want: list[str]):
             # one is what `make secs` is of.
             native = (p.name, "vyrn-native") if tag == "timing" else None
             wasm = (p.name, "vyrn-wasm") if tag == "timing" else None
-            wasm2c = (p.name, "vyrn-wasm2c") if tag == "timing" else None
             if "vyrn-native" in want:
                 cmd = [vyrn, "build", src, "-o", exe(f"vyrn-{p.name}-{tag}")]
                 timed_sh(native, cmd) if native else sh(cmd)
             if "vyrn-wasm" in want:
                 cmd = [vyrn, "build", src, "--target", "wasm", "-o", BUILD / f"vyrn-{p.name}-{tag}.wasm"]
                 timed_sh(wasm, cmd) if wasm else sh(cmd)
-            if "vyrn-wasm2c" in want:
-                cmd = [vyrn, "build", src, "--route", "wasm2c", "-o", exe(f"vyrn-w2c-{p.name}-{tag}")]
-                timed_sh(wasm2c, cmd) if wasm2c else sh(cmd)
 
 
 def command(contestant: str, prog: Program, n: int, tag: str) -> list:
@@ -481,8 +478,6 @@ def command(contestant: str, prog: Program, n: int, tag: str) -> list:
         return [exe(f"vyrn-{prog.name}-{tag}")]
     if contestant == "vyrn-wasm":
         return [wasmtime_exe(), "run", BUILD / f"vyrn-{prog.name}-{tag}.wasm"]
-    if contestant == "vyrn-wasm2c":
-        return [exe(f"vyrn-w2c-{prog.name}-{tag}")]
     die(f"unknown contestant {contestant}")
 
 
@@ -740,7 +735,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", type=int, default=10, help="timed runs per contestant (default 10)")
     ap.add_argument("--only", default="", help="comma-separated program names")
-    ap.add_argument("--contestants", default=",".join(c for c in CONTESTANTS if c != "vyrn-wasm2c"))
+    ap.add_argument("--contestants", default=",".join(CONTESTANTS))
     ap.add_argument("--no-build", action="store_true")
     ap.add_argument("--skip-verify", action="store_true", help="calibration only; never for a committed record")
     ap.add_argument("--floor", action="store_true", help="also measure the empty-program floor")

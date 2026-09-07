@@ -3,13 +3,13 @@
 //! Usage:
 //!   vyrn run     [file.vyrn]            Type-check and interpret; process exits with main's value.
 //!   vyrn check   [file.vyrn]            Type-check only; print "ok" or every diagnostic.
-//!   vyrn emit-ir [file.vyrn]            Print textual LLVM IR to stdout.
-//!   vyrn emit-wat [file.vyrn]           Print the direct wasm backend's module as WAT to stdout.
+//!   vyrn emit-wat [file.vyrn]           Print the emitter's module as WAT to stdout.
 //!   vyrn emit-lowered [file.vyrn]       Print the lowered form of the root module (RFC-0101).
 //!   vyrn emit-gen [file.vyrn] [--maps]  Print every synthesized generator module (RFC-0021),
 //!                                       or its RFC-0073 symbol map as JSON.
-//!   vyrn build   [file.vyrn] [-o out] [--target wasm] [--route wasm2c]
-//!                                        Compile to a native executable (or wasm) via clang.
+//!   vyrn build   [file.vyrn] [-o out] [--target wasm]
+//!                                        Compile to a native executable — the module through
+//!                                        wasm2c and clang (RFC-0125 §2.5) — or to the module.
 //!   vyrn test    [file.vyrn] [--name <substring>]
 //!                                        Run the root file's `test` blocks under the interpreter.
 //!   vyrn bench   [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]
@@ -64,7 +64,7 @@ use std::process::{Command, ExitCode};
 // builtins lookups are still there, but this driver no longer needs them to
 // BUILD: after RFC-0077 M5 nothing here compiles C for wasm — the generator
 // engine does. `vyrn deps` reads all four to REPORT them (RFC-0102 M3).
-use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
+use vyrn_codegen::toolchain::find_clang;
 
 mod remote;
 // RFC-0125 M5: the WASI host `run` runs a program's wasm under. It
@@ -72,7 +72,7 @@ mod remote;
 // their programs through it as well (RFC-0125 §3 M5, the `library-run` row).
 use vyrn_cli::wasmrun;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out] [--route wasm2c]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Rows are the phases of the compile and the run, with the operations the guest executed)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once, compiled; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Rows are the phases of the compile and the run, with the operations the guest executed)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once, compiled; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -244,30 +244,24 @@ fn native_target_for(root: &str) -> Result<NativeTarget, String> {
 ///   twice, so it is *more* accurate and therefore a different number from the
 ///   one the tree-walking interpreter computes. Byte-identical output across
 ///   interpreter, native and wasm is this project's whole invariant, so the
-///   more accurate answer is still the wrong answer. Today it is belt and
-///   braces: our input is textual IR carrying no `contract` fast-math flags and
-///   the C shim does no float arithmetic at all, so nothing fuses even at
-///   `-march=native` (verified: zero `vfmadd` in the emitted assembly at every
-///   level). The flag is what keeps that true if either of those changes.
+///   more accurate answer is still the wrong answer. It matters more on the
+///   route than it did on the textual one: the C wasm2c writes spells the
+///   module's `f64.mul` and `f64.add` as separate C operators, which is exactly
+///   the shape `-ffp-contract=on` fuses.
 ///   It costs nothing measurable — at v2 the emitted assembly is byte-identical
 ///   with and without it — and it is passed unconditionally rather than only
 ///   above v2, because aarch64's *baseline* has FMA and there is no `-march`
 ///   there to hang the condition on.
-/// - `-Wno-override-module`: our IR carries no target triple; clang supplies
-///   the target's, and we don't want the warning.
 /// - `-pthread`: worker threads (RFC-0025). Win32 threads need no flag.
 /// - `-lm`: RFC-0083's roundings. Below SSE4.1,
 ///   `llvm.ceil/floor/trunc/rint.v4f32` scalarize to `ceilf`/`floorf`/`truncf`/
 ///   `rintf`, which live in libm on Unix and in the UCRT — linked by default —
 ///   on Windows. A Windows-only check structurally cannot see this missing.
 fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
-    cmd.arg("-O2")
-        .arg("-ffp-contract=off")
-        .arg("-Wno-override-module");
-    // VYRN_DEBUG_SYMBOLS=1: keep debug info so `llvm-symbolizer --obj=<exe>`
-    // can name the rva offsets `VYRN_LEAK_CHECK=3` prints — the leak triage
-    // instrument (exit-residue round thirty-one). Off by default; -g changes
-    // no codegen under -O2, only the artifact's size.
+    cmd.arg("-O2").arg("-ffp-contract=off");
+    // VYRN_DEBUG_SYMBOLS=1: keep debug info so a symbolizer can name what a
+    // stack trace out of the route's binary points at. Off by default; -g
+    // changes no codegen under -O2, only the artifact's size.
     if std::env::var_os("VYRN_DEBUG_SYMBOLS").is_some() {
         cmd.arg("-g");
     }
@@ -526,26 +520,10 @@ fn real_main() -> ExitCode {
             }
             run_wasm(path, &program, &prog_args, want_profile.then_some(load))
         }
-        "emit-ir" => {
-            let program = match load_program(path, &source) {
-                Ok(p) => p,
-                Err(code) => return code,
-            };
-            let _memo = shared_desugars(&program);
-            match vyrn_codegen::emit(&program) {
-                Ok(ir) => {
-                    print!("{ir}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        // The other compiled backend's text form (RFC-0077). `emit-ir` prints
-        // what `build` hands clang; this prints what `build --target wasm`
-        // writes, so a property no program output can show is readable on both.
+        // The one emitter's text form (RFC-0077; RFC-0125 §2.5). It prints what
+        // `build --target wasm` writes, which since the textual route went is
+        // also what `build` hands wasm2c, so a property no program output can
+        // show is readable on either.
         "emit-wat" => {
             let program = match load_program(path, &source) {
                 Ok(p) => p,
@@ -563,9 +541,9 @@ fn real_main() -> ExitCode {
                 }
             }
         }
-        // The form BOTH compiled backends will read (RFC-0101). `emit-ir` and
-        // `emit-wat` print what one engine made of a program; this prints what
-        // was decided before either of them saw it, for the root module only —
+        // The form the emitter reads (RFC-0101). `emit-wat` prints what the
+        // engine made of a program; this prints what
+        // was decided before it saw it, for the root module only —
         // `why --memory`'s rule, because a linked program's imports are another
         // file's answer.
         "emit-lowered" => {
@@ -580,7 +558,7 @@ fn real_main() -> ExitCode {
         }
         "emit-gen" => emit_gen(path, &source, want_maps),
         other => {
-            eprintln!("unknown command `{other}` (expected run, check, fix, emit-ir, emit-wat, emit-lowered, emit-gen, build, test, bench, or serve)");
+            eprintln!("unknown command `{other}` (expected run, check, fix, emit-wat, emit-lowered, emit-gen, build, test, bench, or serve)");
             ExitCode::from(2)
         }
     }
@@ -2081,21 +2059,24 @@ fn print_toolchain(start: &Path) {
         pin("wasi-builtins").as_deref(),
         "$WASI_BUILTINS, beside the sysroot",
     ));
-    // The wasm2c route's two tools (RFC-0125 §2.5): discovered like clang, so
-    // wasm2c's row is a probe too, and simde's is a path with no version to ask.
+    // The native route's two tools (RFC-0125 §2.5). Both are pinned, under the
+    // names the lock file uses — `wabt` ships the `wasm2c` binary — so both rows
+    // read their version off the pin. wasm2c's is the exception the other way:
+    // the binary answers `--version`, and that probe runs whether or not a pin
+    // named it, so its row prints what the binary said.
     rows.push(match vyrn_codegen::toolchain::wasm2c_from(start) {
         Ok(Some(t)) => ("wasm2c".into(), show_path(&t.exe), t.version, t.why.into()),
         other => tool_row(
             "wasm2c",
             other.map(|o| o.map(|t| (t.exe, t.why))),
-            None,
+            pin("wabt").as_deref(),
             "$VYRN_WASM2C, tools/",
         ),
     });
     rows.push(tool_row(
         "simde",
         Ok(vyrn_codegen::toolchain::simde_from(start)),
-        None,
+        pin("simde").as_deref(),
         "$VYRN_SIMDE, tools/",
     ));
 
@@ -2985,7 +2966,7 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// (with their originating file) on failure and WARNINGS on success.
 ///
 /// This is the toolchain's single load site — every command that *builds a
-/// program* arrives here (`check`, `run`, `emit-ir`, `build`, `test`, `bench`,
+/// program* arrives here (`check`, `run`, `build`, `test`, `bench`,
 /// `serve`, `dev`), so warnings need exactly one print site to reach all of
 /// them. The three that do not are the three that never call `load`: `fmt` is a
 /// token-stream rewriter, `doc` renders `module_doc` over sources, and
@@ -4084,18 +4065,12 @@ import {{ benchOne }} from \"std/bench\"
     program.benches.clear();
     program.tests.clear();
 
-    // 4. Emit IR + shim, compile native via clang into a temp dir, and run it.
-    //    The same target `vyrn build` would ship, or the measurement stops
-    //    describing the artifact — the bug `-O2` just was.
+    // 4. Build the harness on the native route into a temp dir, and run it.
+    //    The same route and the same target `vyrn build` would ship, or the
+    //    measurement stops describing the artifact — the bug `-O2` just was,
+    //    and the reason the route's flip brings the timing with it.
     let target = match native_target_for(path) {
         Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return (ExitCode::FAILURE, None);
-        }
-    };
-    let ir = match vyrn_codegen::emit(&program) {
-        Ok(ir) => ir,
         Err(e) => {
             eprintln!("error: {e}");
             return (ExitCode::FAILURE, None);
@@ -4123,51 +4098,16 @@ import {{ benchOne }} from \"std/bench\"
         stem.to_string()
     };
     let out_path = dir.join(&exe_name);
-    let ll_path = out_path.with_extension("ll");
-    let shim_path = out_path.with_extension("shim.c");
-    if let Err(e) = std::fs::write(&ll_path, ir) {
-        eprintln!("error: cannot write {}: {e}", ll_path.display());
+    // The route, not a second copy of it: `vyrn bench` times the binary `vyrn
+    // build` would ship, through the same wasm2c and the same clang flags.
+    if build_wasm2c(path, &program, &out_path.to_string_lossy(), target).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
-    }
-    let mut shim = runtime_shim();
-    shim.push_str(&extern_trap_stubs(&program));
-    if let Err(e) = std::fs::write(&shim_path, &shim) {
-        eprintln!("error: cannot write {}: {e}", shim_path.display());
-        let _ = std::fs::remove_dir_all(&dir);
-        return (ExitCode::FAILURE, None);
-    }
-    let clang = match find_clang() {
-        Some(c) => c,
-        None => {
-            eprintln!(
-                "error: could not find `clang`. Install LLVM and put clang on PATH, \
-                 or set the CLANG environment variable to its full path."
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-            return (ExitCode::FAILURE, None);
-        }
-    };
-    let mut cmd = Command::new(&clang);
-    cmd.arg(&ll_path).arg(&shim_path).arg("-o").arg(&out_path);
-    add_native_clang_flags(&mut cmd, target);
-    match cmd.status() {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("error: clang exited with {s}");
-            let _ = std::fs::remove_dir_all(&dir);
-            return (ExitCode::FAILURE, None);
-        }
-        Err(e) => {
-            eprintln!("error: failed to run clang ({}): {e}", clang.display());
-            let _ = std::fs::remove_dir_all(&dir);
-            return (ExitCode::FAILURE, None);
-        }
     }
     // Run the compiled harness. When `capture` is set (`--compare`), grab its
     // stdout as the JSON report to feed the comparator; otherwise let stdout and
     // stderr stream straight through (the `--json` and human paths both print live).
-    // VYRN_BENCH_KEEP: leave the temp dir (the .ll, the shim, the binary) for
+    // VYRN_BENCH_KEEP: leave the temp dir (the wasm, the C, the binary) for
     // a debugger — a bench binary that heap-faults dies before its report
     // line, and the artifacts are all there is to read (round fifty-eight).
     let keep = std::env::var_os("VYRN_BENCH_KEEP").is_some();
@@ -6485,10 +6425,9 @@ fn bodies_wasm(
 }
 
 fn build(path: &str, rest: &[String]) -> ExitCode {
-    // parse optional `-o <out>` / `--target wasm` / `--route wasm2c`
+    // parse optional `-o <out>` / `--target wasm`
     let mut out: Option<String> = None;
     let mut wasm = false;
-    let mut wasm2c = false;
     let mut i = 0;
     while i < rest.len() {
         if rest[i] == "-o" && i + 1 < rest.len() {
@@ -6503,30 +6442,10 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
                 }
             }
             i += 2;
-        } else if rest[i] == "--route" && i + 1 < rest.len() {
-            // RFC-0125 §2.5's release route, as a flag beside the text-IR route
-            // and not in its place: PLAN-0125-runtime §6 step 3 is a decision
-            // the numbers in RFC-0125 §3 M4 are for, and this is what produces
-            // them. `wasm2c` is the only route name; the default stays the
-            // text-IR route.
-            match rest[i + 1].as_str() {
-                "wasm2c" => wasm2c = true,
-                other => {
-                    eprintln!("build: unknown route `{other}` (expected `wasm2c`)");
-                    return ExitCode::from(2);
-                }
-            }
-            i += 2;
         } else {
             eprintln!("build: unexpected argument `{}`", rest[i]);
             return ExitCode::from(2);
         }
-    }
-    if wasm && wasm2c {
-        eprintln!(
-            "build: `--route wasm2c` produces a native executable; it cannot take `--target wasm`"
-        );
-        return ExitCode::from(2);
     }
 
     // Resolved before anything expensive. A misspelled `nativeTarget` is a
@@ -6573,16 +6492,15 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     });
 
-    // `--target wasm` is the direct backend (RFC-0077 M5), unconditionally. No
-    // clang, no wasi sysroot, no builtins archive, no `.ll` and no `.shim.c` — the
-    // module is written straight out.
+    // `--target wasm` is the emitter's own output (RFC-0077 M5). No clang, no
+    // wasm2c, no host: the module is written straight out.
     //
     // There is no switch here on purpose. The LLVM wasm path was kept beside this
     // one behind `VYRN_WASM_BACKEND` for the length of M2, and the flag was given a
     // deletion milestone at the same time it was introduced, because this repo has
     // already watched an ungated second backend rot to unbuildable in twelve days
-    // (`vyrn-codegen-llvm`, b1eef04). Native keeps the textual-IR route below, with
-    // its own parity column; wasm has this one, with its own.
+    // (`vyrn-codegen-llvm`, b1eef04). The native route below now starts from these
+    // same bytes (RFC-0125 §2.5), so there is one emitter and one thing to check.
     if wasm {
         return match vyrn_codegen::direct::compile(&program) {
             Ok(bytes) => match std::fs::write(&out_path, bytes) {
@@ -6602,88 +6520,38 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         };
     }
 
-    if wasm2c {
-        return build_wasm2c(
-            path,
-            &program,
-            &out_path,
-            native_target.unwrap_or(DEFAULT_NATIVE_TARGET),
-        );
-    }
-
-    let ir = match vyrn_codegen::emit(&program) {
-        Ok(ir) => ir,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // write IR + the portable stream shim next to the output so failures are
-    // inspectable
-    let ll_path = PathBuf::from(&out_path).with_extension("ll");
-    if let Err(e) = std::fs::write(&ll_path, ir) {
-        eprintln!("error: cannot write {}: {e}", ll_path.display());
-        return ExitCode::FAILURE;
-    }
-    // The portable shim, plus a trap stub per `extern` import (RFC-0012). Native
-    // has no host to supply one, so the stub satisfies the symbol by printing the
-    // canonical "not available on this target" message and exiting — the same
-    // wording the interpreter traps with. On wasm an `extern` resolves to the host
-    // page's `vyrn` import namespace, which the direct backend declares itself.
-    let shim = runtime_shim() + &extern_trap_stubs(&program);
-    let shim_path = PathBuf::from(&out_path).with_extension("shim.c");
-    if let Err(e) = std::fs::write(&shim_path, &shim) {
-        eprintln!("error: cannot write {}: {e}", shim_path.display());
-        return ExitCode::FAILURE;
-    }
-
-    let clang = match find_clang() {
-        Some(c) => c,
-        None => {
-            eprintln!(
-                "error: could not find `clang`. Install LLVM and put clang on PATH, \
-                 or set the CLANG environment variable to its full path."
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let mut cmd = Command::new(&clang);
-    cmd.arg(&ll_path).arg(&shim_path).arg("-o").arg(&out_path);
-    // Resolved at the top of `build`; the wasm path never reaches this line.
-    add_native_clang_flags(&mut cmd, native_target.unwrap_or(DEFAULT_NATIVE_TARGET));
-    let status = cmd.status();
-    match status {
-        Ok(s) if s.success() => {
+    match build_wasm2c(
+        path,
+        &program,
+        &out_path,
+        native_target.unwrap_or(DEFAULT_NATIVE_TARGET),
+    ) {
+        Ok(()) => {
             println!("wrote {out_path}");
             ExitCode::SUCCESS
         }
-        Ok(s) => {
-            eprintln!("error: clang exited with {s}");
-            ExitCode::FAILURE
-        }
-        Err(e) => {
-            eprintln!("error: failed to run clang ({}): {e}", clang.display());
-            ExitCode::FAILURE
-        }
+        Err(()) => ExitCode::FAILURE,
     }
 }
 
-/// `vyrn build --route wasm2c` (RFC-0125 §2.5; PLAN-0125-runtime §6 step 3,
-/// first slice): the program's wasm — the bytes `--target wasm` writes — through
-/// wasm2c to C, compiled with the WASI host of `wasi_host.c` and wabt's wasm-rt
-/// by clang at the native route's own flags, into a native executable.
+/// `vyrn build` (RFC-0125 §2.5; PLAN-0125-runtime §6 step 3): the program's
+/// wasm — the bytes `--target wasm` writes — through wasm2c to C, compiled with
+/// the WASI host of `wasi_host.c` and wabt's wasm-rt by clang at the native
+/// route's own flags, into a native executable.
 ///
-/// The intermediate files stay beside the output the way the text-IR route's
-/// `.ll` and `.shim.c` do, so a failure is inspectable: `<out>.wasm`,
+/// It is THE native route since the flip. It was `--route wasm2c` beside a
+/// textual-IR route for four days, which is how long it took the measurement in
+/// RFC-0125 §3 M4 to decide it.
+///
+/// The intermediate files stay beside the output the way the textual route's
+/// `.ll` and `.shim.c` did, so a failure is inspectable: `<out>.wasm`,
 /// `<out>.w2c.c`, `<out>.w2c.h`, `<out>.host.c`.
 fn build_wasm2c(
     path: &str,
     program: &vyrn_frontend::ast::Program,
     out_path: &str,
     native_target: NativeTarget,
-) -> ExitCode {
+) -> Result<(), ()> {
     let start = Path::new(path)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -6697,11 +6565,11 @@ fn build_wasm2c(
                 "error: could not find `wasm2c`. Unpack a wabt release under tools/ \
                  (tools/wabt-<version>/bin/wasm2c) or set VYRN_WASM2C to the executable."
             );
-            return ExitCode::FAILURE;
+            return Err(());
         }
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::FAILURE;
+            return Err(());
         }
     };
     let Some((simde, _)) = vyrn_codegen::toolchain::simde_from(&start) else {
@@ -6710,7 +6578,7 @@ fn build_wasm2c(
              (tools/simde/simde/wasm/simd128.h) or set VYRN_SIMDE to the directory that \
              holds `simde/`."
         );
-        return ExitCode::FAILURE;
+        return Err(());
     };
     let clang = match find_clang() {
         Some(c) => c,
@@ -6719,7 +6587,7 @@ fn build_wasm2c(
                 "error: could not find `clang`. Install LLVM and put clang on PATH, \
                  or set the CLANG environment variable to its full path."
             );
-            return ExitCode::FAILURE;
+            return Err(());
         }
     };
 
@@ -6727,7 +6595,7 @@ fn build_wasm2c(
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::FAILURE;
+            return Err(());
         }
     };
     let out = PathBuf::from(out_path);
@@ -6742,7 +6610,7 @@ fn build_wasm2c(
         true
     };
     if !write(&wasm_path, &bytes) {
-        return ExitCode::FAILURE;
+        return Err(());
     }
     // The module name fixes the C names the host calls (`w2c_prog`,
     // `wasm2c_prog_instantiate`, `w2c_prog_0x5Fstart`); wasm2c would otherwise
@@ -6758,21 +6626,34 @@ fn build_wasm2c(
         Ok(s) if s.success() => {}
         Ok(s) => {
             eprintln!("error: wasm2c exited with {s}");
-            return ExitCode::FAILURE;
+            return Err(());
         }
         Err(e) => {
             eprintln!("error: failed to run wasm2c ({}): {e}", w2c.exe.display());
-            return ExitCode::FAILURE;
+            return Err(());
         }
     }
-    if !write(&host_path, vyrn_codegen::toolchain::WASI_HOST_C.as_bytes()) {
-        return ExitCode::FAILURE;
+    // The host is written from the header wasm2c just wrote, because RFC-0012's
+    // `vyrn` namespace is per-program: one trap stub per import, at the arity
+    // the module declares. See `toolchain::wasi_host_c`.
+    let h_path = out.with_extension("w2c.h");
+    let header = match std::fs::read_to_string(&h_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", h_path.display());
+            return Err(());
+        }
+    };
+    if !write(
+        &host_path,
+        vyrn_codegen::toolchain::wasi_host_c(&header).as_bytes(),
+    ) {
+        return Err(());
     }
 
     // The header is included by its bare name: the host sits beside it, and a
     // full path would put backslashes into a C string literal.
-    let h_name = out
-        .with_extension("w2c.h")
+    let h_name = h_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -6808,17 +6689,14 @@ fn build_wasm2c(
         cmd.arg("-lbcrypt");
     }
     match cmd.status() {
-        Ok(s) if s.success() => {
-            println!("wrote {out_path}");
-            ExitCode::SUCCESS
-        }
+        Ok(s) if s.success() => Ok(()),
         Ok(s) => {
             eprintln!("error: clang exited with {s}");
-            ExitCode::FAILURE
+            Err(())
         }
         Err(e) => {
             eprintln!("error: failed to run clang ({}): {e}", clang.display());
-            ExitCode::FAILURE
+            Err(())
         }
     }
 }

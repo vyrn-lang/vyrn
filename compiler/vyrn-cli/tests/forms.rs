@@ -47,6 +47,11 @@ use std::path::{Path, PathBuf};
 
 /// The nine files a FORM is stated in, in the RFC's order. A column may be more
 /// than one file when one pass is written in two (`vyrn-lower`).
+///
+/// The `shared` column was `native` until RFC-0125 §3 M4's fourth slice: it read
+/// `vyrn-codegen/src/lib.rs`, which was the text-IR emitter AND the lowering both
+/// emitters call. The route went; the file stayed, minus the emitter, and so did
+/// the column — under the name of what is left in it.
 const FORM_COLUMNS: &[(&str, &[&str])] = &[
     ("parser", &["vyrn-frontend/src/parser.rs"]),
     ("checker", &["vyrn-frontend/src/checker.rs"]),
@@ -63,12 +68,12 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
             "vyrn-lower/src/typed.rs",
         ],
     ),
-    ("native", &["vyrn-codegen/src/lib.rs"]),
+    ("shared", &["vyrn-codegen/src/lib.rs"]),
     ("wasm", &["vyrn-codegen/src/direct.rs"]),
     ("editor", &["vyrn-frontend/src/symbols.rs"]),
 ];
 
-/// The eight files a DECLARATION is stated in. Not the same set: a declaration
+/// The seven files a DECLARATION is stated in. Not the same set: a declaration
 /// is linked by the loader and selected by the CLI, and three of the nine above
 /// never see one.
 const DECL_COLUMNS: &[(&str, &[&str])] = &[
@@ -76,7 +81,7 @@ const DECL_COLUMNS: &[(&str, &[&str])] = &[
     ("loader", &["vyrn-frontend/src/loader.rs"]),
     ("checker", &["vyrn-frontend/src/checker.rs"]),
     ("project", &["vyrn-frontend/src/project.rs"]),
-    ("native", &["vyrn-codegen/src/lib.rs"]),
+    ("shared", &["vyrn-codegen/src/lib.rs"]),
     ("editor", &["vyrn-frontend/src/symbols.rs"]),
     ("cli", &["vyrn-cli/src/main.rs"]),
 ];
@@ -351,9 +356,9 @@ fn table(text: &str, header: &str) -> Vec<Vec<String>> {
 }
 
 const FORM_HEADER: &str =
-    "| form | parser | checker | movecheck | own | lower | native | wasm | editor | all eight |";
+    "| form | parser | checker | movecheck | own | lower | shared | wasm | editor | all eight |";
 const DECL_HEADER: &str =
-    "| declaration | parser | loader | checker | project | native | editor | cli | all seven |";
+    "| declaration | parser | loader | checker | project | shared | editor | cli | all seven |";
 const KEYWORD_HEADER: &str = "| keyword | token | lexer | parser | fmt | all three |";
 const CONTEXTUAL_HEADER: &str = "| word | lexer | parser | checker | fmt | all four |";
 const VERDICT_HEADER: &str = "| form | what it is | RFC | verdict | the desugar, or the reason |";

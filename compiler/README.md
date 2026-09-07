@@ -85,10 +85,7 @@ cargo run -p vyrn-cli -- check  ../examples/fib.vyrn     # -> ok
 #   bad.vyrn:1:0: return type mismatch: expected Int64, found Bool
 #   bad.vyrn:2:0: arithmetic needs matching numeric operands, found Int64 and String
 
-# emit LLVM IR to stdout
-cargo run -p vyrn-cli -- emit-ir ../examples/fib.vyrn
-
-# emit the direct wasm backend's module as WAT to stdout (RFC-0077)
+# emit the emitter's module as WAT to stdout (RFC-0077)
 cargo run -p vyrn-cli -- emit-wat ../examples/fib.vyrn
 
 # print every module a generator import synthesizes (RFC-0021)
@@ -152,23 +149,21 @@ cargo run -p vyrn-cli -- build ../examples/validate_fail.vyrn -o vfail.exe
 
 ## Getting a native executable  ✅ verified working
 
-The text IR targets **LLVM 15+** (opaque pointers) and has been compiled and run
-natively with `clang` (tested against clang 22 on Windows). The `build`
-subcommand does emit-IR + link in one shot:
+There is ONE native route (RFC-0125 §2.5): the module `--target wasm` writes,
+through wabt's `wasm2c` to C, compiled with the WASI host of
+`vyrn-codegen/src/wasi_host.c` by `clang` at `-O2`.
 
 ```bash
-# one-shot: emits <out>.ll next to the binary, then links with clang
+# one-shot: writes <out>.wasm, <out>.w2c.c, <out>.w2c.h and <out>.host.c
+# next to the binary, so a failure is inspectable
 cargo run -p vyrn-cli -- build ../examples/fib.vyrn -o fib.exe
 ./fib.exe ; echo $?      # prints 55, exit code 55
 ```
 
 `vyrn build` finds clang via `$CLANG`, then PATH, then
-`C:\Program Files\LLVM\bin\clang.exe`. Or do it by hand:
-
-```bash
-cargo run -p vyrn-cli -- emit-ir ../examples/fib.vyrn > fib.ll
-clang fib.ll -o fib.exe
-```
+`C:\Program Files\LLVM\bin\clang.exe`; wasm2c and simde through `$VYRN_WASM2C`
+and `$VYRN_SIMDE`, then `vyrn.lock`'s pin, then a `tools/` walk from the source
+and from the compiler.
 
 > Note: native output uses the platform C runtime, so on Windows `print` lines end
 > with `\r\n`; the wasm guest (`vyrn run`) writes `\n`. Same text, same exit codes
@@ -279,8 +274,8 @@ generation job is optimized, and a debug run is minutes slower per example.
 compiler/
 ├── Cargo.toml              workspace (excludes vyrn-lsp, vyrn-genwasm)
 ├── vyrn-frontend/          lexer, parser, ast, checker, movecheck, loader, types, diagnostics (+ tests)
-├── vyrn-codegen/           textual LLVM IR emitter + the direct wasm backend (+ unit tests)
-├── vyrn-cli/               vyrn: run | check | emit-ir | emit-wat | emit-gen | build
+├── vyrn-codegen/           the wasm emitter + the layout engine + toolchain discovery (+ unit tests)
+├── vyrn-cli/               vyrn: run | check | emit-wat | emit-gen | build
 ├── vyrn-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
 ├── vyrn-genwasm/           wasm generation engine (excluded — pulls wasmtime)
 

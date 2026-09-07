@@ -256,7 +256,7 @@ fn the_environment_variable_is_the_same_switch() {
 fn every_command_that_builds_a_program_prints_the_warning() {
     // One print site in `load_program`, so this is really a test that no command
     // reaches the loader by some other road.
-    for cmd in ["check", "run", "emit-ir"] {
+    for cmd in ["check", "run", "emit-wat"] {
         let r = run(&format!("cmd_{cmd}"), "legacy", cmd, &[], &[]);
         assert_eq!(r.code, 0, "{cmd} succeeded:\n{}", r.stderr);
         assert!(
@@ -337,7 +337,7 @@ fn an_error_severity_fails_the_load_in_the_generators_own_words() {
 fn a_generator_error_needs_no_deny_warnings_to_bite() {
     // The severity is the generator's decision, not the build's: every command
     // that builds a program refuses it with no flag set.
-    for cmd in ["check", "run", "emit-ir"] {
+    for cmd in ["check", "run", "emit-wat"] {
         let r = run(&format!("refuse_{cmd}"), "refuses", cmd, &[], &[]);
         assert_ne!(r.code, 0, "`vyrn {cmd}` refused:\n{}", r.stderr);
         assert!(

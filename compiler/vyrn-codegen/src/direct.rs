@@ -7269,10 +7269,57 @@ impl<'p> Fn_<'_, 'p> {
             // fused into the constant `trap` already receives — `"\n"` becomes
             // `" (std/slots.vyrn:189)\n"` — so the code is the same three calls
             // with one different immediate, and only the data segment grows.
-            // `blackBox(v)` (RFC-0055) is `v`. The interpreter runs it as the
-            // identity, and this backend never optimizes (RFC-0125 §2.3), so
-            // there is nothing to hide the value from.
-            "blackBox" if args.len() == 1 => return self.expr(m, b, &args[0]),
+            // `blackBox(v)` (RFC-0055): the value, round-tripped through a slot
+            // of linear memory that nothing else names.
+            //
+            // It WAS the identity, and the comment said why — this backend never
+            // optimizes (RFC-0125 §2.3), so there was nothing to hide the value
+            // from. That stopped being true when the native route became this
+            // module through wasm2c and clang at `-O2` (RFC-0125 §2.5): the
+            // optimizer is downstream of the emitter now. With the identity in
+            // place `examples/benching.vyrn`'s "hash to 1000" read 1 ns against
+            // the textual route's 1.35 µs, because clang folded a data-dependent
+            // loop the barrier existed to keep.
+            //
+            // A store and a load rather than a global, and a `reserve` rather
+            // than `data`: a global becomes an instance field wasm2c's C forwards
+            // through in one step, and `data` SHARES identical contents, so two
+            // barriers would be one address. Each site takes its own sixteen
+            // bytes, which is enough for a `v128` and is reserved only by a
+            // program that has a `blackBox` — every other module's bytes are
+            // unchanged.
+            "blackBox" if args.len() == 1 => {
+                let r = self.expr(m, b, &args[0])?;
+                let Some(t) = self.cx.repr(&r, line)?.val() else {
+                    return Ok(r);
+                };
+                let addr = m.reserve(16, 16) as i32;
+                let tmp = self.scratch(b, t, 9);
+                let at = |align: u32| MemArg {
+                    offset: 0,
+                    align,
+                    memory_index: 0,
+                };
+                b.ins(&Instruction::LocalSet(tmp))
+                    .ins(&Instruction::I32Const(addr))
+                    .ins(&Instruction::LocalGet(tmp));
+                match t {
+                    ValType::I32 => b.ins(&Instruction::I32Store(at(2))),
+                    ValType::I64 => b.ins(&Instruction::I64Store(at(3))),
+                    ValType::F32 => b.ins(&Instruction::F32Store(at(2))),
+                    ValType::F64 => b.ins(&Instruction::F64Store(at(3))),
+                    _ => b.ins(&Instruction::V128Store(at(4))),
+                };
+                b.ins(&Instruction::I32Const(addr));
+                match t {
+                    ValType::I32 => b.ins(&Instruction::I32Load(at(2))),
+                    ValType::I64 => b.ins(&Instruction::I64Load(at(3))),
+                    ValType::F32 => b.ins(&Instruction::F32Load(at(2))),
+                    ValType::F64 => b.ins(&Instruction::F64Load(at(3))),
+                    _ => b.ins(&Instruction::V128Load(at(4))),
+                };
+                return Ok(r);
+            }
             // `assert(c)` (RFC-0015): the interpreter's trap, in its words. Lowered
             // here rather than rewritten into `panic` by the CLI before the compile
             // (RFC-0125 §3 M5), so the rule is stated once.
@@ -10024,8 +10071,8 @@ impl<'p> Fn_<'_, 'p> {
     /// corpus and concluded "there IS a function table, and it is `spawn`". All
     /// nine are the *textual* emitter's `call @__vyrn_spawn(ptr @__vyrn_task_*,
     /// ptr)`, and the half of that finding which is about wasm is wrong. Read what
-    /// the shim does with the pointer on this target (`toolchain::RUNTIME_SHIM`,
-    /// `#if defined(__wasi__)`): wasm has no threads, so `__vyrn_spawn` calls
+    /// the retired C shim did with the pointer on this target: wasm has no
+    /// threads, so its `__vyrn_spawn` called
     /// `thunk(frame)` **inline** and returns a `VTask` holding the frame. The
     /// pointer is formed and consumed in one C statement, and it exists only
     /// because the LLVM path routes an eager call through a C function that cannot
