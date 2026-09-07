@@ -12312,6 +12312,100 @@ deleted, the two fields and the two writes that filled them go: 7 lines from
 `movecheck.rs` and 1 from `core.rs`. The structural census falls **1,755 →
 1,748** placement rows, and no other kind moves.
 
+#### The placement walk, priced at both of its blockers (2026-09-07)
+
+The slice before this one left the walk's deletion behind one question. This
+one asks it of the corpus. Neither probe is committed: both are measurements,
+and the tree they were taken on is the tree this record gates.
+
+**The core line comes in first.** `track-cs` merges `rfc-0125-core` at
+`7b5d5a5c` — `track-cr`'s first residue triage and the two rules under it. Only
+RFC-0125 §3 M3 conflicted, where both branches appended a record after the same
+paragraph; both are kept, the core line's first. `direct.rs` merged with no
+conflict: the triage adds release rules to the emitter and this line deletes
+plan readers from it, and the two do not meet.
+
+**The order.** `Place::place` walks the live frames from a boundary outward,
+each frame's bindings newest first. `Kernel::scope_end` walks the name list it
+is given, and that list is creation order: `bound_here` for a block,
+`bound_inside` for a loop edge, `all_names` for a return. Reversing the rows
+one scope end pushes reproduces the walk's order at all three exits, read at
+the source:
+
+- a block's exit runs only its own frame, so reversed creation order IS newest
+  first;
+- a `break` or `continue` unwinds every frame from the loop body inward, and a
+  name in an inner frame is created after the names of the frame outside it, so
+  reversed creation order puts the inner frame first;
+- a return walks every frame, and a parameter has the lowest name index of all,
+  so reversed creation order releases it LAST — which is what RFC-0114 says an
+  owned `consume` parameter does.
+
+Probe: `self.missing[mark..].reverse()` at the end of `scope_end`, three lines.
+`VYRN_WASM_MANIFEST=check` moves **1 example of 176** — `graphql.vyrn` — and no
+other. The placer adds rows at shared exits all over that program (1,158 traced
+rows), so the count says what the reversal is worth: the order of independent
+frees at one exit is a byte fact and not a behaviour fact, and today the walk
+and the kernel disagree about it in exactly one program.
+
+The probe is not committed. It has no reader while the walk still places rows,
+and a byte move with no reader is a cost with nothing on the other side. It
+belongs to the walk's deletion, which re-records the manifest anyway.
+
+**The silence.** `Builder::taken_by` answers "the construct took its scrutinee"
+as `releases(t) && !placed.contains_key(&(Exit::Scrutinee, construct))`, and
+`Stmt::ForIn`'s streaming and `consume` arms ask the same key. Empty the map
+and every one of them flips to "taken". So the second probe asks the price
+directly: make `taken_by` return `false` — the reading an empty map can never
+give — and measure.
+
+`VYRN_WASM_MANIFEST=check` refuses **48 examples of 176** at the build, with
+234 sentences of "is released although the body does not own it", 149 of "may
+not be stored into", and 78 of "read out of a place that owns it". `std/json.vyrn`
+and `std/strings.vyrn` are among the bodies that fail, so the failure is in the
+standard library and not in one example's shape.
+
+That is the blocker, priced. The plan's silence is load-bearing for 48 of 176
+programs, and it is not a placement fact: it says whether a CONSTRUCT took the
+value it was handed. The core has the rule for a NAMED scrutinee already —
+`last_owner` over the first build, seeded into `Builder::seed` — and every site
+`taken_by` answers is one the named path does not reach: a `consume`
+expression, and a computed scrutinee whose value is a fresh temporary. Neither
+records a candidate, so neither is seeded.
+
+**What unblocks the walk, in one sentence.** A `consume` expression and a
+computed scrutinee become CANDIDATES like a named one, so `last_owner` decides
+their take too, and `taken_by` reads the seed instead of the plan's silence.
+That is a change to the take rule, it moves bytes on its own, and it is the
+slice before the walk's deletion rather than part of it.
+
+**What stays until then.** `place_body`, `Live`, `Place` and
+`Ownership::releases` stand. `movecheck`'s `Kind::Rows` stands at 1,748. The
+four other readers of `Ownership::releases` (`lib.rs`'s per-instance
+`DropKind`, and `render.rs`, `tests/lowered.rs`, `tests/kernel.rs` behind it)
+are a move and not a deletion, and they wait for the same slice.
+
+Gate, in full, on the merged tree with the `owner` fields gone:
+`cargo fmt --all --check`; `cargo build --release -p vyrn-cli`;
+`cargo test -p vyrn-cli` (**77 suites**); the ignored corpus suites `kernel`
+(81 s), `coretables` (77 s), `typed` (142 s), `effects` (125 s), `fixtures`
+(57 s), `testsweep` (152 s); `cargo test -p vyrn-frontend` (10 suites);
+`cargo test --workspace --exclude vyrn-cli` (17 suites);
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (**77 passed, 5 ignored**);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (**8 passed**);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**2 passed**,
+322 s);
+`cargo test --release -p vyrn-cli --test residue -- --ignored` (**engine 163
+clean, 12 leaking; route 163 clean, 12 leaking; 0 failed**, 298 s);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (13 s, **no byte
+moved**); `--release --test genwasm -- --ignored` with a fresh
+`VYRN_GEN_CACHE_DIR`; `vyrn doc --std -o ../docs/api --verify` (41 files, up to
+date); the site export (82 routes and 14 assets) and `vyrn test` over
+`site/export.vyrn`, `site/markup.vyrn` and each `site/app/*.vyrn` (**189 test
+blocks over 26 files with tests, 0 failed**; `demohl.vyrn`, `icons.vyrn` and
+`markup.vyrn` carry none).
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
