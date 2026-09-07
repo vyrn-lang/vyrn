@@ -3003,11 +3003,18 @@ pub(crate) mod tests {
         );
     }
 
+    /// A `region` is not asked here. This walk used to skip a `String` bound
+    /// inside one, on the argument that the arena owned it — which claimed for
+    /// the arena every block the frame minted at that depth, a callee's
+    /// included. The ownership test is the block header and `free` states it
+    /// once: an arena block carries a class word of 0 and is refused in
+    /// silence. So the binding is droppable like any other and the arena keeps
+    /// the ones that are its (RFC-0125 §3 M4, the region triage).
     #[test]
-    fn skips_temporary_inside_region() {
+    fn a_binding_inside_a_region_is_droppable_like_any_other() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; let mut n = 0; \
                    region { let s = a + b; n = s.length; } return n; }";
-        assert_eq!(drop_count(src, "main"), 0);
+        assert_eq!(drop_count(src, "main"), 1);
     }
 
     /// Census §2c, closed in Phase 4c. `mut` used to mean "who owns the old value

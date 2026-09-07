@@ -112,7 +112,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::Mask32x4` | 5 | 1 | 5 | 1 | 0 | 0 | 12 |
 | `Type::Mask64x2` | 6 | 1 | 6 | 1 | 0 | 0 | 14 |
 | `Type::Bool` | 38 | 2 | 28 | 6 | 0 | 2 | 76 |
-| `Type::Str` | 90 | 2 | 76 | 8 | 0 | 4 | 180 |
+| `Type::Str` | 90 | 2 | 75 | 8 | 0 | 4 | 179 |
 | `Type::Unit` | 34 | 4 | 30 | 9 | 1 | 0 | 78 |
 | `Type::Named` | 40 | 3 | 9 | 9 | 3 | 6 | 70 |
 | `Type::Record` | 14 | 3 | 6 | 18 | 0 | 5 | 46 |
@@ -127,7 +127,7 @@ the_surface_census_as_a_table` and checked against the code by
 | `Type::ArrayN` | 18 | 7 | 18 | 9 | 0 | 4 | 56 |
 | `Type::SmallArray` | 24 | 2 | 21 | 7 | 1 | 4 | 59 |
 | `Type::ConstInt` | 2 | 1 | 0 | 1 | 0 | 0 | 4 |
-| `Type::Map` | 26 | 3 | 18 | 7 | 6 | 4 | 64 |
+| `Type::Map` | 26 | 3 | 19 | 7 | 6 | 4 | 65 |
 | `Type::Stream` | 18 | 1 | 9 | 7 | 1 | 1 | 37 |
 | `Type::Task` | 10 | 1 | 4 | 7 | 1 | 1 | 24 |
 | `Type::Logger` | 2 | 1 | 2 | 1 | 0 | 1 | 7 |
