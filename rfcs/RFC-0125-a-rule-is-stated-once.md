@@ -15826,6 +15826,94 @@ keeping a copy`, `compiler/vyrn-frontend/src/checker.rs` (-454),
 `semantics.rs`, `compiler/vyrn-lower/src/effects.rs`, `lib.rs`,
 `compiler/vyrn-cli/tests/checker_census.rs`, RFC-0127 §3.2, and this record.
 
+#### The generation fence asks by atom, and the lattice answers by row (2026-09-07)
+
+The ranked list's fourth item — `check_comptime_purity`, 134 lines — was to be
+taken once module state became a judged fact. Module state is a row now and the
+spawn rule is gone, and this one does NOT follow them out. The reason is one
+cell of the table, it is measured, and it is a cell M6's fifth slice already
+decided to keep split.
+
+**The fence's four conditions, after this milestone.** All four are the
+lattice's rows:
+
+| the condition | the row |
+|---|---|
+| a callee the `gen` column refuses | the column itself; the checker has read `effects::gen_refusal` since the fifth slice |
+| the body holds a `spawn` | `spawn`, gen cell no |
+| the body calls an `extern` | `extern`, gen cell no |
+| the body reads or writes module state | `module-state`, gen cell no, since this milestone's module-state slice |
+
+So the RULE is stated once already. What the checker keeps a copy of is not the
+rule but the WALK: `fn_calls` over the AST, the method-impl expansion, and a
+BFS to the nearest violation. The judgment does the same three things over the
+core, and the census's line "this copy exists because a `gen fn` no lowering
+instantiates has no core to judge" names a blocker the last record measured at
+**zero** over 184 programs.
+
+**The blocker that is real, in two probes.** `Effects` is a set of ROWS. The
+`gen` column has one cell that is not its row's, and it is finding 5's:
+
+| probe | verdict | row |
+|---|---|---|
+| `probes-0125/generator-reads-a-file.vyrn` — a `gen fn` calling `readFile` | **ok** | `fs-read` |
+| `probes-0125/generator-reads-file-bytes.vyrn` — a `gen fn` calling `readFileBytes` | refused: ``it calls `readFileBytes` `` | `fs-read` |
+
+Two programs, one row, opposite verdicts. A judgment that hands back
+`fs-read` cannot separate them, so the fence cannot be stated from the effect
+SET the way the spawn rule was. Finding 5 chose that split deliberately — the
+difference is the ROUTE, not the effect: `readFile` goes through the loader's
+resolver and is recorded as a cache input, `readFileBytes` does not — and it
+named its own closing condition: "the cell becomes its row's when
+`readFileBytes` takes the resolver route, and not before".
+
+**What each option costs.**
+
+| option | cost |
+|---|---|
+| **close finding 5**: `readFileBytes` takes the resolver route, the cell becomes its row's, and the fence is statable from the set alone | a change to the loader's resolver and to the cache key, in the generation engine. Then this deletion is the spawn rule's shape exactly: a `gen_refusals` beside `spawn_refusals`, over `with_judgment`, and 134 lines out |
+| **widen the judgment**: `Judged` carries the atom NAMES each body called, beside the rows | about 10 lines of state and 90 of walk. It works, and it makes the judgment answer a question the lattice was built not to ask — its module head says it sees a call by its callee's name and joins ROWS, and a per-name list beside the set is a second vocabulary for one reader |
+| **leave it**: the fence keeps its walk | 134 lines stand, and the rule is still stated once. The copy is a TRAVERSAL, not a rule |
+
+The third is what this record takes, because the first is another milestone's
+work and the second buys 134 lines by widening the thing this RFC exists to
+keep narrow. A traversal stated twice is a smaller fault than a rule stated
+twice, and the census's own kinds say so: the size of `checker.rs` is in the
+surface, at 4,304 lines, and not here.
+
+**Two more reasons to leave it, both about WHEN.** The fence gates the
+compiler's own sandbox, so its two differences from the spawn rule matter more
+than they did there. It would move behind an installable slot — a consumer that
+checks without `vyrn_lower::install()` would run generators with no fence — and
+it would become reachability-bound, for a rule RFC-0021 states over EVERY
+`gen fn`. The corpus says zero `gen fn` bodies are uninstantiated, and zero is
+a measurement and not a proof; for a task that cannot run, that trade was cheap
+(the spawn rule's), and for a generator that DOES run, at load time, before any
+of this, it is not.
+
+**What the module-state question was worth, counted.** The last record priced
+it at "about 380 lines of `checker.rs` across the three sections that ask it".
+The row bought the spawn rule's 70-line pre-check and the two fixpoints behind
+it. The rest stays, and each part now has one named reader:
+
+| section | lines | its reader |
+|---|---|---|
+| `module_state_use` | 141 | RFC-0025's `--workers` gate in `main.rs`, which needs a CHAIN and a global's name, not a boolean |
+| `global_ref_block` | 129 | `touches_globals`, and the lambda source's `touches_global` that `module_state_use` walks |
+| `touches_globals` | 40 | `check_comptime_purity` and `module_state_use` |
+| `check_comptime_purity` | 134 | itself: the generation fence |
+| `shadows_here` | 44 | the scope queries, of which "is this name module state" is one |
+
+Two readers, both inside the check, both before a core exists. That is the
+whole reason those 310 lines stand.
+
+**No licence table, because nothing changed.** This record is a decision and a
+measurement. The two probes are in the tree, and they fail the day the split
+cell closes — which is the signal that this deletion is ready.
+
+**Commit.** Recorded with the two probes under `rfcs/probes-0125/`; no code
+change.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
