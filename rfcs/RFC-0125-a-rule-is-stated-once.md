@@ -6218,6 +6218,168 @@ no `parity` and no `residue` suite; `route` `--ignored` replaced parity.
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
 | `vyrn why --memory` over `examples/*.vyrn` | byte-identical, 208 programs |
 
+**The other half: a command analyses its program once (2026-09-07, `track-ct`).**
+The last record's first open item said that every `vyrn check`, `run`, `build`
+and `test` runs the ownership analysis TWICE — `movecheck::check` inside the
+load, `vyrn_lower::lower` after it — and that each runs the whole placer. It
+also said what stood in the way, and left the decision. This slice takes it.
+**Nothing in it changes a judgment's answer**: `VYRN_WASM_MANIFEST=check` is
+green and the manifest file is untouched, `vyrn why --memory` is byte-identical
+over all 208 examples, the whole standard error of `vyrn check` is
+byte-identical over 280 programs, the corpus pins are unmoved and the structural
+census is unmoved.
+
+**The obstacle was scope, so the answer is scope and not a new tag.** A
+projection is inlined into its caller's block, and the inline mints nodes the
+source does not contain. `own`'s rows are keyed by those nodes. The projection
+memo (`project::Memo`) gives a site ONE expansion and leaks it, so every reader
+inside the memo walks the same nodes — and the CLI opened that memo AFTER the
+load, deliberately, because a load builds and drops whole generator programs. So
+the load inlined for itself, the command inlined again, and the load's plan
+named nodes the command never saw. The fix is one line moved: `loaded()` opens
+the projection memo, then loads. A site is inlined once for the whole command,
+and the load's analysis is about the command's nodes.
+
+**The analysis is handed on, not recomputed.** `movecheck::refusals` — the one
+analysis a judgment may be reused for, and already marked as such — calls
+`own::hand_on`. `own::Memo::open` adopts what it finds. `analyze` then serves
+the lowering and the emitter from the same answer, as it already served the
+second and third readers inside a command.
+
+**Two guards, because an address is not an identity here.** The CLI's load
+returns the `Program` BY VALUE, so the struct moves between the two readings and
+its address is not a key. The heap buffer behind `functions` does not move with
+it, so `own::ident` is that buffer's address plus the two lengths a synthesis
+changes. That is enough inside one command and not enough on its own, so
+adoption is also gated on `project::memo_open()` — a compile scope. The editor
+opens none. It re-checks a program per keystroke, drops it and builds the next
+one, and an allocator that hands the same buffer to a program of the same shape
+would make `ident` agree about two different texts. The second guard is
+`own::forget_loaded()`, called by `serve_rewrite`: `vyrn serve` renames one
+function and rewrites call names IN PLACE after the load, neither shows in
+`ident`, and an analysis of the program before that rewrite is not an analysis
+of the program after it.
+
+**One more key gained a field.** The projection memo verifies a hit by comparing
+the receiver and the arguments, because a freed node's address is handed out
+again. The memo now spans a load, so dead keys are reachable where they were
+not, and two sites can differ only in the line they stand on. The line joins the
+key.
+
+**What the tag became: nothing.** It is still one number per inline, and it
+still exists for the reason it was written — `s[j] = s[k]` inlines one body
+twice into one block. It just counts fewer inlines. That is the one thing a
+reader sees move: `examples/projection.vyrn`'s blessed lowered dump renames
+`@b21.k` to `@b3.k` and `@b22.k` to `@b4.k`, and nothing else in its 248 lines
+changes.
+
+**What it is worth.** `vyrn check`, release, minimum of five runs, the two
+binaries interleaved on one machine:
+
+| program | before | after | |
+|---|---|---|---|
+| `site/app/chart.vyrn` | 0.401 s | 0.291 s | 1.38x |
+| `site/app/docs.vyrn` | 0.375 s | 0.280 s | 1.34x |
+| `examples/nbody.vyrn` | 0.052 s | 0.041 s | 1.25x |
+| `site/export.vyrn` | 1.362 s | 0.990 s | 1.38x |
+
+The phase table says the same thing with counts, which is the proof the work is
+gone rather than moved. `VYRN_BUILD_PROFILE=1`, the same two binaries, count and
+total per row:
+
+| row | `chart.vyrn` before | after | `site/export.vyrn` before | after |
+|---|---|---|---|---|
+| `own: analyze_now` | 2, 296.11 ms | **1, 188.54 ms** | 2, 997.84 ms | **1, 504.80 ms** |
+| `placer` | 2, 222.38 ms | **1, 147.40 ms** | 2, 735.94 ms | **1, 372.03 ms** |
+| `lower: own::analyze` | 1, 155.44 ms | **1, 1.61 ms** | 1, 503.75 ms | **1, 3.22 ms** |
+| `lower` | 1, 167.55 ms | 1, 55.20 ms | 1, 538.35 ms | 1, 122.02 ms |
+
+`lower: own::analyze` is what the second analysis cost. It is now a clone of the
+first. Every per-body count halves with it: `placer: core::build` on
+`chart.vyrn` 1,764 to 882, `placer: kernel::placement` 2,172 to 1,086, and
+`lower: checker::record` 3 to 2.
+
+**The editor does not regress**, measured the way the last two records measure
+it: one test binary, two servers swapped between runs, three alternating runs,
+medians.
+
+| file | before | after |
+|---|---|---|
+| `site/app/bench.vyrn` | 37.4 ms | 35.6 ms |
+| `site/app/guide.vyrn` | 84.9 ms | 84.5 ms |
+| `site/app/chart.vyrn` | 151.5 ms | 148.0 ms |
+| `site/app/docs.vyrn` | 146.4 ms | 144.5 ms |
+
+That is the expected reading: the editor opens no compile scope, so it hands
+nothing on and adopts nothing, and the only code it runs that it did not run
+before is one boolean.
+
+**The rule this states once.** The LSP already analysed a program once per
+analysis — `movecheck::Judgments`, and `checker::recording_check` with
+`checker::recorded` for the type record. The CLI reaches the same mechanism
+instead of a second one: the memo slice's slot, filled by the pass that decides
+and read by the pass that needs it.
+
+**What is left, and why each is still here.**
+
+1. **`placer: lower_with` is the largest row** — 41.48 ms of `chart.vyrn`'s
+   147.40 ms placer. It is `checker::recorded` plus the instance walk, once per
+   analysis, and it is proportional to the program. The last record said the
+   same about it, and halving the analysis halved it once already.
+2. **`own: movecheck::facts`** is one walk of every body, proportional. It is
+   29.93 ms of `chart.vyrn`'s 188.54 ms analysis.
+3. **`vyrn why --memory` analyses outside a compile scope**, so it still reads
+   the load's answer by recomputing it. That is deliberate here: it opens no
+   projection memo today, and its report is pinned byte for byte by the gate
+   below. Bringing it inside the scope changes what the report says, and it
+   needs its own slice and its own re-blessing.
+4. **A second load in one command hands on twice.** Nothing does that today —
+   every command that opens `own::Memo` loads once — and `Memo::open` TAKES the
+   entry, so a stale one cannot be read twice. It is a rule held by arrangement
+   rather than by the type, and it is worth saying out loud.
+
+**Then the core line merged in (`track-cn`, 7929bed5).** One conflict, in
+RFC-0126's census table: the base held that table twice, this line had deleted
+the duplicate and the core line had edited both copies. The resolution keeps one
+table with the core line's `Type::Unit` row — 30 in the wasm column, 78 across
+the six — and `surface` agrees. The merge brings the residue ratchet back as a
+suite, and it runs here: green, and `examples/genref.vyrn` reads `clean`, which
+is the program the last record named as the one adoption used to leak.
+
+#### Gates (2026-09-07, the one analysis)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Every row below was
+run again on the merged tree.
+
+| gate | result |
+|---|---|
+| `cargo fmt --check` | clean |
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 576 passed, 35 ignored |
+| `kernel` `--ignored`, release | 1, 18 s |
+| `coretables` `--ignored`, release | 1, 16 s |
+| `typed` `--ignored`, release | 1, 24 s |
+| `effects` `--ignored`, release | 2, 28 s |
+| `fixtures` `--ignored`, release | 1, 15 s |
+| `vyrn-frontend` | 1,192 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,238 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 6 |
+| `route` `--ignored`, release | 2, 395 s |
+| the residue ratchet `--ignored`, release | 1, 346 s, and `genref` is Clean |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `testsweep` `--ignored` | 1, 19 s |
+| `surface`, plain and `--ignored` | 3 and 1, the census re-pinned by the merge |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+| `vyrn why --memory` over `examples/*.vyrn` | byte-identical, 208 programs |
+| `vyrn check`'s whole standard error over 280 programs | byte-identical |
+
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
