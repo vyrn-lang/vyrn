@@ -40,7 +40,7 @@ bytesrange	clean
 capturefn	leak	2
 clearkeep	clean
 clidemo	clean
-clifail	leak	2
+clifail	other
 clock	clean
 closures2	other
 codecbytes	clean
@@ -65,7 +65,7 @@ falliblegeneric	leak	1
 fannkuch	clean
 fasta	clean
 fib	other
-fieldmut	leak	1
+fieldmut	clean
 files	clean
 finitekeys	clean
 floats	other
@@ -90,7 +90,7 @@ intkeys	clean
 jchain	clean
 jsonbytes	clean
 jsoncodec	other
-jsondecbytes	leak	2
+jsondecbytes	clean
 jsondepth	clean
 jsonplace	clean
 jsonschema	clean
@@ -104,10 +104,10 @@ logging	clean
 looptemp	clean
 mandelbrot	clean
 map	clean
-mapdemo	leak	5
+mapdemo	clean
 mapkey	clean
 mapkeyowned	clean
-matchown	leak	200
+matchown	clean
 membench	clean
 modify	other
 modifyself	clean
@@ -116,7 +116,7 @@ mustuse	clean
 namedplace	clean
 namespace	clean
 nbody	clean
-nestedsum	leak	2
+nestedsum	clean
 numbytes	clean
 numparse	clean
 option	clean
@@ -139,7 +139,7 @@ regex	clean
 regexredux	clean
 region	other
 regionarena	clean
-regionescape	leak	1
+regionescape	clean
 releaseacrossexit	clean
 releaseacrosstry	clean
 rest	clean
@@ -157,7 +157,7 @@ simd	clean
 simdbench	clean
 simdint	clean
 simdmem	clean
-simdmem2	leak	2
+simdmem2	clean
 simdoob	other
 simdoobstore	other
 simdround	clean
@@ -196,4 +196,4 @@ validation	other
 vlog	clean
 vondemo	clean
 vyxdemo	clean
-wirekey	leak	1
+wirekey	clean

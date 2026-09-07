@@ -185,8 +185,6 @@ pub enum NotOwned {
     MustUse(Linear),
     /// A literal, in the module's data segment. Nothing allocated it.
     Static,
-    /// A String allocated lexically inside a `region` — the arena owns it.
-    Region,
     /// Somebody else owns the storage. The words say what the binding is, as
     /// `movecheck::Borrow::what` words them.
     Borrow(String),
@@ -1136,11 +1134,9 @@ fn build_seeded(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        region_depth: 0,
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
         rebinding: false,
-        arena: std::collections::HashSet::new(),
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -1241,11 +1237,9 @@ pub fn build_module_state<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        region_depth: 0,
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
         rebinding: false,
-        arena: std::collections::HashSet::new(),
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1346,11 +1340,9 @@ fn build_outside_seeded<'a>(
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
         seed,
-        region_depth: 0,
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
         rebinding: false,
-        arena: std::collections::HashSet::new(),
     };
     let mut out = Vec::new();
     b.block(block, &mut out)?;
@@ -1397,8 +1389,6 @@ struct Builder<'a> {
     /// [`last_owner`] decided over the build before it. Empty on the first
     /// build, which is where the candidates come from.
     seed: &'a std::collections::HashSet<usize>,
-    /// How many `region` blocks enclose the statement being built.
-    region_depth: u32,
     /// One entry per LOOP enclosing the statement being built: the name count
     /// when the loop's body was opened ([`Builder::alias_out`]). A name below
     /// the innermost entry is bound outside that loop, and the loop's back
@@ -1414,10 +1404,6 @@ struct Builder<'a> {
     /// temporary the value passes through owns nothing, and the loop's back
     /// edge repeats no release. `std/html.vyrn`'s `attrKey` is the shape.
     rebinding: bool,
-    /// The names the ARENA owns: a String bound inside a `region`
-    /// ([`Builder::owned_binding`]'s second screen). An explicit `drop` of
-    /// one is nothing, because the closing brace is the runtime's.
-    arena: std::collections::HashSet<Name>,
 }
 
 impl<'a> Builder<'a> {
@@ -1521,9 +1507,6 @@ impl<'a> Builder<'a> {
     ///     binding nothing can reassign: a `mut` slot is released by its
     ///     FINAL value in all three engines, and `let mut acc: String = ""`
     ///     is the opening line of every accumulator in this language;
-    ///   - a String allocated inside a `region`, which is the arena's. The
-    ///     two mechanisms partition every allocation, so nothing is freed
-    ///     twice, and both compiling backends emit its release as nothing;
     ///   - a read of a place, or a second name for a borrow. The place's
     ///     owner still owns it.
     ///
@@ -1535,9 +1518,6 @@ impl<'a> Builder<'a> {
             return false;
         }
         if literal && !mutable {
-            return false;
-        }
-        if self.region_depth > 0 && self.proto.release_kind(ty) == Some(DropKind::FreeStr) {
             return false;
         }
         match rhs {
@@ -1569,21 +1549,18 @@ impl<'a> Builder<'a> {
         // What the type releases. A must-use type reaches a `let` BECAUSE it
         // is discharged on every path — that is a compile error otherwise —
         // so "nothing reclaims it" is the wrong sentence about one.
-        let Some(kind) = self.proto.release_kind(ty) else {
+        if self.proto.release_kind(ty).is_none() {
             return Some(match self.proto.linear_kind(ty) {
                 Some(l) => NotOwned::MustUse(l),
                 None => NotOwned::NoRelease {
                     heap: self.proto.owns_heap(ty),
                 },
             });
-        };
+        }
         // A literal lives in the data segment. It answers only for a binding
         // nothing can reassign: a `mut` slot is released by its FINAL value.
         if literal && !mutable {
             return Some(NotOwned::Static);
-        }
-        if kind == DropKind::FreeStr && self.region_depth > 0 {
-            return Some(NotOwned::Region);
         }
         if lends {
             return Some(NotOwned::Borrow("a view into its argument".into()));
@@ -1737,8 +1714,13 @@ impl<'a> Builder<'a> {
                 // container is a `read` parameter's field or module state
                 // (rows 10, 11, 29). A borrow with no row is a take nobody
                 // judged.
+                // The screen is the core's answer for the BINDING, and a
+                // `Release::early` row is placed for an exit that runs before
+                // the take the answer is about. Nothing in this pass computes
+                // that, so the screen has nothing to say about such a row.
                 Some(n)
-                    if !self.body.names[*n as usize].releases
+                    if !r.early
+                        && !self.body.names[*n as usize].releases
                         && !self.body.names[*n as usize].for_consume => {}
                 Some(n) if keep == Some(*n) => {}
                 Some(n) => {
@@ -1991,13 +1973,7 @@ impl<'a> Builder<'a> {
                 // name for a borrow are.
                 let borrow =
                     !owned && (self.lends(value) || matches!(&rhs, Rhs::Val(v) if self.borrows(v)));
-                let arena = self.region_depth > 0
-                    && !owned
-                    && self.proto.release_kind(&ty) == Some(DropKind::FreeStr);
                 let n = self.name(name, ty, owned, *line);
-                if arena {
-                    self.arena.insert(n);
-                }
                 self.body.names[n as usize].borrow = borrow && self.body.names[n as usize].heap;
                 self.body.names[n as usize].not_owned = reason;
                 self.record_fields(n, value);
@@ -2449,13 +2425,12 @@ impl<'a> Builder<'a> {
                 let Some(n) = self.lookup(name) else {
                     return gap("a `drop` of module state", *line);
                 };
-                // A String bound inside a `region` is the arena's: both
-                // compiling backends emit its release as nothing under
-                // `region_depth`, and this pass states the same thing where
-                // it binds the name ([`Builder::owned_binding`]).
-                if self.arena.contains(&n) {
-                    return Ok(());
-                }
+                // `drop s` inside a `region` used to lower to nothing,
+                // because this pass read the binding as the arena's and the
+                // arena would give the block back at the brace. The arena
+                // answers for its own blocks now — `free` refuses one by its
+                // class word — so a `drop` inside a region is an ordinary
+                // drop.
                 out.push(St::Drop(n, Site::None, *line));
             }
             Stmt::Expr(e) => {
@@ -2474,16 +2449,12 @@ impl<'a> Builder<'a> {
                     }
                 }
             }
-            // The arena owns what is allocated inside it, so a String bound
-            // in here is not this frame's ([`Builder::owned_binding`]). The
-            // body is an ordinary block, and the closing brace is the
-            // runtime's; the depth is what the binding rule reads.
-            Stmt::Region { body, .. } => {
-                self.region_depth += 1;
-                let r = self.block(body, out);
-                self.region_depth -= 1;
-                r?
-            }
+            // The arena owns what IT was handed, which is what
+            // `direct.rs`'s `arena_route` routes into it; every other block
+            // the body mints is the frame's, and the closing brace is the
+            // runtime's. So the body is an ordinary block here and this pass
+            // asks nothing about the depth.
+            Stmt::Region { body, .. } => self.block(body, out)?,
         }
         Ok(())
     }
@@ -5323,13 +5294,6 @@ fn report(
                 "the type has no release rule",
                 true,
             ),
-            // A String the arena owns, and a literal in the data segment:
-            // both are decided at the `let` and neither turns on a take.
-            (Some(NotOwned::Region), _) => leaked(
-                "NOT reclaimed — it is inside a `region` — the arena owns it".to_string(),
-                "inside a `region`",
-                true,
-            ),
             (Some(NotOwned::Borrow(what)), _) => leaked(
                 format!("NOT reclaimed — it is {what}"),
                 "it names somebody else's value",
@@ -5659,6 +5623,7 @@ fn place_frames(
                     line: info.line as u32,
                     full: false,
                     holes: if holes.is_empty() { None } else { Some(holes) },
+                    early: false,
                 },
                 kind,
             ));

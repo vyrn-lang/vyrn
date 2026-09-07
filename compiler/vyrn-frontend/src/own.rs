@@ -125,6 +125,19 @@ pub struct Release {
     /// nothing at: the hole set at that exit is the kernel's state there,
     /// which may differ from the binding's set on another path.
     pub holes: Option<Vec<String>>,
+    /// The row is placed BECAUSE the take is later: an exit that provably runs
+    /// before every write and every take of a binding the analysis otherwise
+    /// reads as moved (the "(taken later)" rows above).
+    ///
+    /// The core screens a placed row against its own answer for the binding,
+    /// and its answer here is "moved" — which is the truth at the take and
+    /// wrong at this exit, because on this path the take has not run. Nothing
+    /// else in the core computes early-exit liveness, so the screen would
+    /// swallow exactly the rows nothing else states: `for x in consume val {
+    /// .. }` under a `return` above it leaked the container on every early
+    /// path (the generated JSON decoder's `Invalid` return, three corpus
+    /// rows).
+    pub early: bool,
 }
 
 /// How a droppable binding is reclaimed at block exit.
@@ -1493,6 +1506,7 @@ fn analyze_now(program: &Program) -> Ownership {
                         line: 0,
                         full: false,
                         holes: None,
+                        early: true,
                     },
                 ));
                 early
@@ -1916,6 +1930,7 @@ impl Place<'_> {
                 line: l.line,
                 full: false,
                 holes: None,
+                early: false,
             })
             .collect();
         self.out.extend(steps);
@@ -2557,12 +2572,17 @@ impl Emit<'_> {
         // defect: `@__vyrn_str_free` reads a `cap` of 0 as "never `realloc`,
         // never free" and returns, and both compiling backends emit a literal
         // that way.
+        //
+        // A `region` says NOTHING here any more. This walk used to refuse a
+        // dynamic String bound inside one, which claimed for the arena every
+        // block the frame minted at that depth — a callee's `String`
+        // included, and the arena never had those
+        // (`examples/matchown.vyrn`, `examples/regionescape.vyrn`). The
+        // ownership test is the block header and it is stated once, in `free`:
+        // an arena block carries a class word of 0 and `free` refuses it in
+        // silence. So the walk asks for every block it holds and the arena
+        // keeps the ones that are its.
         if matches!(value, Expr::Str(_)) && !mutable {
-            return None;
-        }
-        // A dynamic string inside a region is the arena's, and the two
-        // mechanisms partition every allocation — nothing is freed twice.
-        if kind == DropKind::FreeStr && self.region_depth > 0 {
             return None;
         }
         // A `mut` binding is released by its slot's FINAL value in all three
@@ -2743,11 +2763,18 @@ pub(crate) mod tests {
         );
     }
 
+    /// A `region` is not asked here. This walk used to skip a `String` bound
+    /// inside one, on the argument that the arena owned it — which claimed for
+    /// the arena every block the frame minted at that depth, a callee's
+    /// included. The ownership test is the block header and `free` states it
+    /// once: an arena block carries a class word of 0 and is refused in
+    /// silence. So the binding is droppable like any other and the arena keeps
+    /// the ones that are its (RFC-0125 §3 M4, the region triage).
     #[test]
-    fn skips_temporary_inside_region() {
+    fn a_binding_inside_a_region_is_droppable_like_any_other() {
         let src = "fn main() -> Int64 { let a = \"x\"; let b = \"y\"; let mut n = 0; \
                    region { let s = a + b; n = s.length; } return n; }";
-        assert_eq!(drop_count(src, "main"), 0);
+        assert_eq!(drop_count(src, "main"), 1);
     }
 
     /// Census §2c, closed in Phase 4c. `mut` used to mean "who owns the old value

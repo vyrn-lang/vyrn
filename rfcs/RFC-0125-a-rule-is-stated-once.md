@@ -12579,6 +12579,169 @@ LSP's 77, `memory`'s 8, `route`'s 2 (355 s), residue **163 clean / 12 leaking /
 0 double-free on each engine** (306 s), the manifest green with **no byte
 moved**, the docs up to date, and the site's 82 routes and 189 test blocks.
 
+#### The region partition, the map lookup's box, and the exit before the take (2026-09-07)
+
+The previous record left twelve leaking rows and named each one's cause with
+the backtrace that found it. This slice takes nine of them, in three root
+causes. The ratchet reads **172 clean / 3 leaking / 0 double-free** on both
+engines, from 163 / 12 / 0.
+
+**Root cause 1: the region rule claimed blocks the arena never had.** `own.rs`
+answered `Leak::Region` for a dynamic `String` bound inside a `region`, the
+core carried the same answer as `NotOwned::Region` and an `arena` name set,
+and both emission sides stood their releases aside under `region_depth`. The
+routing, though, is LEXICAL: `Fn_::arena_route` raises the runtime's flag
+around exactly the emitter's own allocating calls, so a `String` a USER CALLEE
+mints inside a region comes from `malloc`. The rule claimed it for the arena
+anyway, and the arena never had it — `examples/matchown.vyrn` leaked 200
+blocks a run and `examples/regionescape.vyrn` one.
+
+**The decision, with both options and what each costs.** M4 step 8's record
+and §2.4 keep the arena and the syntax, so one of the two mechanisms has to
+give way at the boundary.
+
+*Option A, route dynamically.* Hold the region depth in the runtime and let
+`malloc` read it, so a callee's allocation inside a region goes to the arena
+too. It costs a load and a branch in `malloc` — the funnel EVERY allocation
+comes through, in every program, region or not — and PLAN-0125-runtime §4.3
+chose the flag precisely so that a program with no region pays nothing. It
+also puts a callee's `String` in a caller's arena, where the escape guard
+never looked: `regionescape` returns one out. Refused on both counts.
+
+*Option B, let the frame ask for every block it holds.* The ownership test is
+already stated once, and it is the block header: a block the arena hands out
+carries a class word of 0, and `free` of one takes the class-out-of-range
+refusal that was already written. So the release walk asks for every block,
+the arena keeps the ones that are its, and nothing is freed twice. It costs
+the instructions of a free call that returns immediately, inside a region
+only, and it deletes a rule from three passes. Taken.
+
+`Leak::Region` and `NotOwned::Region` are gone, with `owned_binding`'s second
+screen, the lowering's `arena` set and its `region_depth` field, the `drop`
+special case, and the emitter's region gates at the release walk, the sum
+payload, the store snapshot, the argument temporary, the map key, the map
+literal, Rule N's edge releases, the interpolation temporary and the entry a
+`remove` drops. **One region test stays, and it is not about ownership:** the
+arena is a bump with no `realloc`, so a `String` it handed out cannot GROW in
+place and the take-ownership append stays refused inside a region. The comment
+at that gate says so.
+
+matchown and regionescape go clean, and `tests/memory.rs`'s `regionRebind` row
+— the one place the rule was recorded as deliberately inexact, which its own
+note said to fix by filtering `Fn_::store_bufs` — is Steady by deleting the
+gate instead.
+
+**Root cause 2: a map lookup is not an element read.** `Fn_::frees_boxes`
+asked whether a `match` consumed its scrutinee and read `m[k]` as a place, so
+`element_path` kept every `@at` out of the free. A map lookup is the one `@at`
+that BUILDS its result: `map_at` boxes the value into a block of its own, so
+the box is the construct's like any temporary's. The comment there said the
+receiver's type was what told the two apart and that asking for it meant
+`Fn_::peek`, which is `&mut` and records an observation — one such call made
+every `std/vyx` generator trap. It does not: the checker already answered, and
+`vyrn_lower::core::node_ty` reads that answer without deriving a second one.
+simdmem2, fieldmut and nestedsum go clean.
+
+**Root cause 3: an exit before the take gives back the whole value.** Round
+twenty-one places a release at an exit that provably runs before every write
+and every take of a binding the analysis reads as moved. Two things then threw
+the row away. The core screened it against its own answer for the BINDING,
+which is "moved" — the truth at the take and wrong at an exit above it — and
+nothing in the core computes early-exit liveness, so the screen swallowed
+exactly the rows nothing else states. The row carries `Release::early` now and
+the screen lets it by. The emitter then registered a place for such a binding
+only where the walk was a buffer free, so an `Array<Int64>` was answered for
+and every container of heap was not; the walk is the type's now, deep
+included, which the placer's own conditions license — the take is later and
+neither it nor the exit is in a loop.
+
+The generated JSON decoder is the shape, and it is Vyrn nobody wrote by hand:
+
+```
+let mut iss: Array<Issue> = []
+let doc = readDoc(src, iss)
+let mut val: Array<T> = []
+for j in consume doc { val = d(j, "", iss) }
+if iss.length > 0 { return Invalid(consume iss) }
+for x in consume val { return Valid(x) }
+return Invalid(consume iss)
+```
+
+`val` is taken by the loop at the bottom and abandoned by both `Invalid`
+returns above it. jsondecbytes, mapdemo and wirekey go clean; clifail comes
+out clean and exits 2 by design, so its row is `other`.
+
+**The kernel sentences that changed.** One, and it is the screen in
+`Builder::drops_at_but`: a placed row for a name this pass reads as moved is
+no longer dropped when the row says it is an early one. Nothing else in the
+kernel moved — the region rule was never a judgment, and rule 3 already says a
+`return` releases what is still the frame's; what was missing was the fact
+that at that return the binding still is.
+
+**The three rows that stand, and what this slice learned about them.**
+
+- `capturefn` **2** and `fnvalstore` **1**: the previous record reads these as
+  the capture block of a lambda written in ARGUMENT position, and that is not
+  where the blocks come from. A lambda handed straight to a `fn` parameter
+  takes RFC-0023's zero-cost path — `lift_lambda` monomorphizes it and passes
+  its captures as ordinary parameters, so no block is minted at the call at
+  all. Three programs bound the shape: `applyAll(xs, twice)` with a lambda
+  bound inside it is clean, `applyAll` with no inner lambda called through a
+  lambda argument is clean, and the two together leak two blocks a call. The
+  blocks are the STORED closure's (RFC-0037) inside the callee, minted per
+  specialization, and the row that reclaims that binding gives back its own
+  block and not the one a `fn`-value capture adds. Making the lambda temporary
+  own itself in the core (`Builder::lambda`'s `releases`) changes nothing and
+  was reverted; the question is what a specialization's capture block holds.
+- `falliblegeneric` **1**: 16 bytes through `runtime$intStr`, and the memory
+  report names no binding for it. The `?` on a generic `Fallible` hands the
+  whole value to the impl's `success`, and the core says `Capability::Consume`
+  at that argument where the protocol declares a bare `self`, which is a
+  `read`. Stating the declared word there (`movecheck::arg_cap`, the rule the
+  argument slice already reads) changes no byte of this program's residue, so
+  it is not the fix and it is not in this slice either.
+
+**Files.** `direct.rs` +84 −95 (16,523 lines to 16,512), `own.rs` +34 −7
+(4,042 to 4,069), `core.rs` +21 −56 (5,677 to 5,642), `tests/memory.rs` +54
+−46. The baseline moves 9 rows; the manifest moves 19 of 176.
+
+**Every manifest row, and why.** Four are the region triage — `matchown`,
+`region`, `regionarena`, `regionescape` — where the release walk, the store
+and the argument temporary stopped asking about the depth. Three are the map
+lookup's box: `fieldmut`, `nestedsum`, `simdmem2`, each of which matches on
+`m[k]`. Twelve are the early exit, and every one of them holds a generated
+decoder or a generated CLI parser with an early `Invalid` return over a later
+`consume`: `clidemo`, `clifail`, `enumarray`, `enumcodec`, `graphql`,
+`jsoncodec`, `jsondecbytes`, `mapdemo`, `rest`, `storage`, `vlog`, `wirekey`.
+**Two censuses moved.** The surface census loses one `Type::Str` in the wasm
+column (the arm that stood aside inside a region) and gains one `Type::Map`
+(the question that tells a map lookup from an element read), and the form
+census gains one `Expr::Call` for the same reader — 1,402 mentions now. The
+coercion, structural, declaration and builtin censuses are untouched: this
+slice states no rung, refuses no form and dispatches on no builtin name.
+
+Gate, in the brief's order, over all five commits together (the manifest is
+one artifact and no single commit can be green on it): `cargo fmt --all
+--check`; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli` (77
+suites, all green); the ignored corpus suites `kernel` (71 s), `coretables`
+(87 s), `typed` (164 s), `effects` (161 s), `fixtures` (64 s) and `testsweep`
+(170 s); `cargo test -p vyrn-frontend` (194 + 34 passed, after `own`'s own
+region test was rewritten to the rule this slice states);
+`cargo test --workspace --exclude vyrn-cli` (17 suites);
+`cargo test --manifest-path vyrn-lsp/Cargo.toml` (77 passed, 5 ignored);
+`cargo test -p vyrn-genwasm`;
+`cargo test -p vyrn-cli --test memory -- --test-threads=1` (8 passed);
+`cargo test --release -p vyrn-cli --test route -- --ignored` (**0 failed**,
+448 s);
+`cargo test --release -p vyrn-cli --test residue -- --ignored` (**172 clean, 3
+leaking, 0 double-free, 0 failed on each engine**, 362 s, and no ratchet nudge
+— every row is exact);
+`VYRN_WASM_MANIFEST=check … --test wasmhash -- --ignored` (15 s, green after
+the 19 rows were written); `--release --test genwasm -- --ignored`;
+`vyrn doc --std -o ../docs/api --verify` (41 files, up to date); the site
+export (6 s, 82 routes and 14 assets) and `vyrn test` per site `.vyrn` file
+(**191 test blocks**, 54 files, 0 failed).
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
