@@ -224,6 +224,14 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
          knows nothing about tables",
         "data/dupe.tbl:4:1: column `id` is declared twice",
     ),
+    (
+        "loopalias.vyrn",
+        "a join arm that hands out a name bound outside an enclosing loop \
+         (RFC-0125 §3 M3, the safety strand) — the arm stands the outer name down \
+         and the `let` owns the result, so the back edge freed one buffer once per \
+         turn and the native binary exited 134 under `VYRN_LEAK_CHECK=1`",
+        "may not be handed out of an arm inside a loop",
+    ),
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser

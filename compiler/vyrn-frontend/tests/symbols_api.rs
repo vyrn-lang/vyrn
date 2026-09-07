@@ -338,14 +338,10 @@ fn main() -> Int64 {
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "s");
     assert_eq!(r.target_line, 2);
-    // RFC-0087 U1: a binding whose type owns heap carries its memory answer on
-    // hover. A String literal is a data-segment pointer, so this one is static —
-    // and saying so is the point, because the next line up could be a concat and
-    // nothing in the source would say which.
-    assert_eq!(
-        r.hover,
-        "let s: String\n\nmemory: static data — nothing reclaims it, and nothing needs to"
-    );
+    // RFC-0125 §3 M3, the report slice: the memory line is the CORE's, and
+    // this crate installs no placer, so the hover here carries the type alone.
+    // `vyrn-lsp`'s own suite pins the memory line through a server that does.
+    assert_eq!(r.hover, "let s: String");
 }
 
 /// A local shadows a same-named top-level symbol: the `area` *call* on line 19
@@ -447,21 +443,23 @@ fn main() -> Int64 {
     assert_eq!(d.end_col, 13);
 }
 
-/// A movecheck rule-2 diagnostic is pinned to the borrowed **identifier** on
-/// the error's line (the movecheck message backtick-quotes the variable name).
+/// A movecheck diagnostic is pinned to the borrowed **identifier** on the
+/// error's line (the movecheck message backtick-quotes the variable name).
 /// Guards that the pinner covers movecheck, not just checker.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06). What the editor shows for a rule the KERNEL states is a separate
-/// question, and the record says the answer is nothing: `vyrn-lsp` is an
-/// adapter over `vyrn_frontend::analyze` and the kernel is in `vyrn-lower`.
+/// row 06), a store until rule 2 left too (rows 01, 02, 03, 27 and 34), and a
+/// `for .. in consume` of a `read` parameter until rows 10, 11 and 29 left. It
+/// asks row 24 now, a closure that outlives the call capturing a borrow, which
+/// the kernel does not state, so `movecheck.rs` keeps it. What the editor
+/// shows for a rule the KERNEL states is a separate question, and the record
+/// says the answer is nothing: `vyrn-lsp` is an adapter over
+/// `vyrn_frontend::analyze` and the kernel is in `vyrn-lower`.
 #[test]
 fn movecheck_rule_two_pinned_to_ident() {
-    let src = "\
-fn borrow(s: read String) -> Int64 {
-    let mut o: Array<String> = [];
-    o.push(s);
-    return o.length;
+    let src = "fn hold(s: String) -> fn() -> Int64 {
+    let g: fn() -> Int64 = () -> s.byteLength;
+    return g;
 }
 fn main() -> Int64 { return 0; }
 ";
@@ -469,12 +467,16 @@ fn main() -> Int64 { return 0; }
     let d = a
         .diagnostics
         .iter()
-        .find(|d| d.stage == "movecheck" && d.message.contains("`read` parameter"))
-        .expect("a movecheck rule-2 diagnostic");
-    // Line 3: `    o.push(s);` — the offending use `s` is at col 12.
-    assert_eq!(d.line, 3);
-    assert_eq!(d.col, 12, "pinned to the `s` use, not col 0 (whole line)");
-    assert_eq!(d.end_col, 13);
+        .find(|d| d.stage == "movecheck" && d.message.contains("may not be captured"))
+        .expect("a movecheck row-24 diagnostic");
+    // Line 2: `    let g: fn() -> Int64 = () -> s.byteLength;` — the captured
+    // `s` is at col 34.
+    assert_eq!(d.line, 2);
+    assert_eq!(
+        d.col, 34,
+        "pinned to the captured `s`, not col 0 (whole line)"
+    );
+    assert_eq!(d.end_col, 35);
 }
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is

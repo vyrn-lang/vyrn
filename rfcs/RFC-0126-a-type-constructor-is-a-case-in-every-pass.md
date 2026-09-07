@@ -101,7 +101,7 @@ the_surface_census_as_a_table` and checked against the code by
 `the_surface_census_is_what_the_rfc_records`.
 
 | constructor | checker | shared | wasm | types | prelude | editor | all six |
-|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|---|
 | `Type::Int` | 68 | 3 | 47 | 10 | 0 | 2 | 130 |
 | `Type::IntN` | 33 | 4 | 13 | 21 | 2 | 2 | 75 |
 | `Type::Float` | 22 | 3 | 20 | 5 | 0 | 2 | 52 |

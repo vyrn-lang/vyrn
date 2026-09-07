@@ -34,9 +34,10 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13, 14 and 26, RFC-0125 §3 M3 — is refused by
-//! the kernel in both runs, and the two must still agree. The row is what stops
-//! the sentence moving after the deletion, so it stays in the census.
+//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27 and 34,
+//! RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two must
+//! still agree. The row is what stops the sentence moving after the deletion,
+//! so it stays in the census.
 //!
 //! A census row is one program with one error in it, which is what makes it a
 //! census and what it cannot see. Accumulation — a file with two kinds of error
@@ -164,16 +165,18 @@ fn census() -> Vec<Row> {
             "r10_consume_module_state.vyrn",
             "module state may not be taken: a prefix `consume`",
             "RFC-0013",
-            "module state `names` may not be consumed by a take — nothing may take ownership of \
-             module state (it lives for the whole module and is never dropped)",
-            Kernel::Other("module state `names` may not be passed to a `consume` parameter"),
+            "module state `names` may not be passed to a `consume` parameter via `take(..)` — \
+             nothing may take ownership of module state (it lives for the whole module and is \
+             never dropped)",
+            Kernel::Same,
         ),
         row(
             "r11_consume_a_read_parameter.vyrn",
             "rule 2: a prefix `consume` of a `read` parameter",
             "RFC-0089",
-            "`ys` may not be consumed — it is a `read` parameter",
-            Kernel::Other("via `take(..)` — it is a `read` parameter"),
+            "`ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
+             parameter",
+            Kernel::Same,
         ),
         row(
             "r12_module_state_to_a_consume_parameter.vyrn",
@@ -310,9 +313,10 @@ fn census() -> Vec<Row> {
             "r29_for_in_consume_module_state.vyrn",
             "module state may not be taken: `for .. in consume`",
             "RFC-0013",
-            "module state `names` may not be consumed by a `for` loop — nothing may take \
-             ownership of module state (it lives for the whole module and is never dropped)",
-            Kernel::Other("module state `names` may not be consumed by a `drop`"),
+            "module state `names` may not be consumed by the `for .. in consume` loop — nothing \
+             may take ownership of module state (it lives for the whole module and is never \
+             dropped)",
+            Kernel::Same,
         ),
         row(
             "r30_stream_never_disposed.vyrn",
@@ -372,9 +376,12 @@ fn refusal(file: &str, kernel_mode: bool) -> (bool, String) {
 }
 
 /// The command's WHOLE standard error, menu and all: what a reader sees.
-fn whole_refusal_in(dir: PathBuf, file: &str) -> (bool, String) {
+fn whole_refusal_in(dir: PathBuf, file: &str, kernel_mode: bool) -> (bool, String) {
     let mut cmd = vyrn();
     cmd.arg("check").arg(dir.join(file));
+    if kernel_mode {
+        cmd.env("VYRN_NO_MOVECHECK", "1");
+    }
     let out = cmd.output().expect("vyrn check");
     (
         out.status.success(),
@@ -915,6 +922,214 @@ fn the_shapes_row_sevens_unit_tests_pinned_are_still_refused() {
     );
 }
 
+/// The shapes rule 2's own unit tests pinned, still refused after the rule left
+/// `movecheck.rs` (RFC-0125 §3 M3, rows 01, 02, 03, 27 and 34).
+///
+/// A borrow may not be put anywhere that outlives the call. The checker stated
+/// it at one helper — `MoveCheck::store` — and the destination is what made the
+/// sentence, so the unit tests that pinned it each named a DESTINATION rather
+/// than the rule: module state under an export, a record literal's field, a
+/// builtin's sink under a loop variable, a loop over an element read, a map key
+/// both ways, a stream producer, and the two menus a projection is offered
+/// either side of its root's ownership. They asked `vyrn_frontend::check`
+/// alone, so they saw the checker's copy and nothing else; they are asked of
+/// the whole compiler here.
+///
+/// The needles carry the `fix:` lines, because the menu is what these tests
+/// were written for, and the licence is measured per program on the WHOLE
+/// standard error: the reader loses no line when the checker stands aside.
+#[test]
+fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
+    const END: &str = " fn main() -> Int64 { return 0 }";
+    const BAG: &str = "type Bag = { a: String } \
+                       fn make() -> Bag { return Bag { a: \"x\" + \"y\" } } ";
+    let cases: &[(&str, Vec<&str>, Vec<&str>, String)] = &[
+        (
+            "an export stores into module state",
+            vec![
+                "`arg` may not be stored into module state `kept` — it is a `read` parameter",
+                "fix: `arg.copy()` — an `export extern fn` may not take ownership",
+            ],
+            // An export may not take a String its JS caller releases, so the
+            // `consume` way out does not exist and is not offered.
+            vec!["consume"],
+            format!("let mut kept = \"x\" export extern fn set(arg: String) {{ kept = arg }}{END}"),
+        ),
+        (
+            "a record literals field",
+            vec![
+                "`x` may not be stored into the field `R.s` — it is a `read` parameter",
+                "fix: declare the parameter `x: consume ..` if this function should own it",
+                "fix: `x.copy()` if both sides need a value",
+            ],
+            vec![],
+            format!(
+                "type R = {{ s: String }} \
+                 fn keep(x: String) -> R {{ return R {{ s: x }} }}{END}"
+            ),
+        ),
+        (
+            "a stored loop variable",
+            vec![
+                "`x` may not be stored into `push(..)` — it is a loop variable",
+                "fix: `for x in consume xs` if the loop should take the elements",
+                "fix: `x.copy()` if both sides need a value",
+            ],
+            vec![],
+            format!(
+                "fn go(xs: Array<String>) -> Int64 {{ let mut out: Array<String> = [] \
+                 for x in xs {{ out.push(x) }} return out.length }}{END}"
+            ),
+        ),
+        (
+            "a loop over an element read",
+            // An element read is not a temporary: the container still owns it,
+            // so the loop borrows and the store is refused.
+            vec![
+                "`x` may not be stored into `push(..)` — it is a loop variable",
+                "fix: `x.copy()` if both sides need a value",
+            ],
+            vec![],
+            format!(
+                "fn go(xs: Array<Array<String>>) -> Int64 {{ let mut out: Array<String> = [] \
+                 for x in xs[0] {{ out.push(x) }} return out.length }}{END}"
+            ),
+        ),
+        (
+            "a map key read inline",
+            vec![
+                "`ks[0]` may not be stored into `m` — it is a `read` parameter",
+                "fix: `ks[0].copy()` if both sides need a value",
+            ],
+            vec![],
+            format!(
+                "fn build(ks: Array<String>) -> Map<String, Int64> \
+                 {{ let mut m: Map<String, Int64> = [:] m[ks[0]] = 1 return m }}{END}"
+            ),
+        ),
+        (
+            "a map key that is a loop variable",
+            vec!["`k` may not be stored into `m` — it is a loop variable"],
+            vec![],
+            format!(
+                "fn build(ks: Array<String>) -> Map<String, Int64> \
+                 {{ let mut m: Map<String, Int64> = [:] \
+                 for k in ks {{ m[k] = 1 }} return m }}{END}"
+            ),
+        ),
+        (
+            "a stream producer",
+            vec!["`xs` may not be stored into `fromArray(..)` — it is a `read` parameter"],
+            vec![],
+            format!("fn mk(xs: Array<Int64>) -> Stream<Int64> {{ return fromArray(xs) }}{END}"),
+        ),
+        (
+            "a projection whose root this frame owns",
+            vec![
+                "`d.a` may not be stored into `push(..)` — it is read out of a place that owns it",
+                "fix: `consume d.a` if `d` should give it up",
+            ],
+            vec![],
+            format!(
+                "{BAG} fn go() -> Int64 {{ let d = make() let mut o: Array<String> = [] \
+                 o.push(d.a) return o.length }}{END}"
+            ),
+        ),
+        (
+            "a projection of a read parameter",
+            vec!["`d.a` may not be stored into `push(..)` — it is a `read` parameter"],
+            // A borrowed root has no take, so the menu must not name one.
+            vec!["`consume d.a`"],
+            format!(
+                "type Bag = {{ a: String }} \
+                 fn go(d: read Bag) -> Int64 {{ let mut o: Array<String> = [] \
+                 o.push(d.a) return o.length }}{END}"
+            ),
+        ),
+    ];
+    let dir = common::scratch("rule-two-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, needles, absent, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = whole_refusal_in(dir.to_path_buf(), &name, false);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+            continue;
+        }
+        for needle in needles {
+            if !text.contains(needle) {
+                bad.push(format!("{what}: wanted `{needle}`, got {text}"));
+            }
+        }
+        for needle in absent {
+            if text.contains(needle) {
+                bad.push(format!("{what}: still offers `{needle}`, got {text}"));
+            }
+        }
+        // The licence, per program: the whole refusal survives the deletion,
+        // menu included.
+        let (kok, ktext) = whole_refusal_in(dir.to_path_buf(), &name, true);
+        if kok || ktext != text {
+            bad.push(format!(
+                "{what}: the kernel said `{}`",
+                if kok { "nothing".to_string() } else { ktext }
+            ));
+        }
+    }
+    // The ways out compile, which is the other half of what these tests asked.
+    let compiles: &[(&str, String)] = &[
+        (
+            "the export copies",
+            format!(
+                "let mut kept = \"x\" export extern fn set(arg: String) \
+                 {{ kept = arg.copy() }}{END}"
+            ),
+        ),
+        (
+            "the consume signature",
+            format!(
+                "type R = {{ s: String }} \
+                 fn keep(x: consume String) -> R {{ return R {{ s: x }} }}{END}"
+            ),
+        ),
+        (
+            "the field copies",
+            format!(
+                "type R = {{ s: String }} \
+                 fn keep(x: String) -> R {{ return R {{ s: x.copy() }} }}{END}"
+            ),
+        ),
+        (
+            "the loop takes its container",
+            format!(
+                "fn go(xs: consume Array<String>) -> Int64 {{ let mut out: Array<String> = [] \
+                 for x in consume xs {{ out.push(x) }} return out.length }}{END}"
+            ),
+        ),
+        (
+            "the map key copies",
+            format!(
+                "fn build(ks: Array<String>) -> Map<String, Int64> \
+                 {{ let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m }}{END}"
+            ),
+        ),
+    ];
+    for (what, src) in compiles {
+        let name = format!("ok_{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = whole_refusal_in(dir.to_path_buf(), &name, false);
+        if !ok {
+            bad.push(format!("{what}: refused, {text}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "rule 2 no longer refuses:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 /// A borrow put into a constructor is refused AT the constructor (RFC-0125 §3
 /// M3, row 19).
 ///
@@ -943,6 +1158,155 @@ fn a_borrow_put_into_a_constructor_is_refused_at_the_constructor() {
     assert!(
         text.contains("may not be put into `Some(..)`"),
         "the borrow is refused at the constructor position: {text}"
+    );
+}
+
+/// The shapes rule 3's own unit tests pinned, still refused after the rule left
+/// `movecheck.rs` (RFC-0125 §3 M3, row 17).
+///
+/// A return is owned. The checker refused one at three exits and worded the
+/// export's own no under all three; the kernel states it at one exit now,
+/// because the core carries the exit into an `if`'s and a `match`'s arms and
+/// does not release the place a returned projection reads out of. The unit
+/// tests that pinned the rule asked `vyrn_frontend::check` alone, and each
+/// named a SHAPE rather than the rule: a whole `read` parameter, a loop
+/// variable, a local name bound to a field, module state and a field of it, a
+/// binder yielded by a `match` arm, and the three spellings an export refuses.
+/// They are asked of the whole compiler here.
+///
+/// The needle is the whole sentence, because the wording is what the deletion
+/// spends: every one of these is byte-identical with the checker standing
+/// aside.
+#[test]
+fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
+    const TAG: &str = "type Tag = | Word(String) | Num(Int64) \
+                       let mut tag = Word(\"w\") ";
+    const END: &str = " fn main() -> Int64 { return 0 }";
+    let cases: &[(&str, &str, String)] = &[
+        (
+            "a whole read parameter",
+            "`s` may not be returned — it is a `read` parameter, and a return is owned",
+            format!("fn id(s: String) -> String {{ return s }}{END}"),
+        ),
+        (
+            "a loop variable",
+            "`x` may not be returned — it is a loop variable, and a return is owned",
+            format!(
+                "fn first(xs: Array<String>) -> String \
+                 {{ for x in xs {{ return x }} return \"\" }}{END}"
+            ),
+        ),
+        (
+            "a name bound to a field",
+            "`t` may not be returned — it is a second name for the `read` parameter `r`, \
+             and a return is owned",
+            format!(
+                "type R = {{ s: String }} \
+                 fn get(r: R) -> String {{ let t = r.s return t }}{END}"
+            ),
+        ),
+        (
+            "module state",
+            "`title` may not be returned — it is module state, which nothing may take, \
+             and a return is owned",
+            format!("let mut title = \"x\" fn get() -> String {{ return title }}{END}"),
+        ),
+        (
+            "a field of module state",
+            "`r.s` may not be returned — it is module state, which nothing may take, \
+             and a return is owned",
+            format!(
+                "type R = {{ s: String }} let mut r = R {{ s: \"x\" }} \
+                 fn get() -> String {{ return r.s }}{END}"
+            ),
+        ),
+        (
+            "a record of module state",
+            "`r` may not be returned — it is module state, which nothing may take, \
+             and a return is owned",
+            format!(
+                "type R = {{ s: String }} let mut r = R {{ s: \"x\" }} \
+                 fn get() -> R {{ return r }}{END}"
+            ),
+        ),
+        (
+            "an arm binder",
+            "`s` may not be returned — it is read out of a place that owns it, \
+             and a return is owned",
+            format!(
+                "{TAG} fn text() -> String \
+                 {{ return match tag {{ Word(s) => s, Num(n) => \"num\", }} }}{END}"
+            ),
+        ),
+        // The three spellings an export refuses, kept in one test for the
+        // reason they were put in one: the `exported` question was asked at one
+        // exit, then at two, and `return q` — the plainest spelling there is —
+        // kept offering ``declare the parameter `q: consume ..` ``, which the
+        // same compiler then refuses at the signature (RFC-0089 M3b).
+        (
+            "an export returns a read parameter",
+            "`q` may not be returned from an exported function — it is a `read` parameter, \
+             and the JS caller releases what it is handed",
+            format!("export extern fn plain(q: String) -> String {{ return q }}{END}"),
+        ),
+        (
+            "an export returns a projection",
+            "`d.s` may not be returned from an exported function — it is read out of a place \
+             that owns it, and the JS caller releases what it is handed",
+            format!(
+                "type D = {{ s: String }} \
+                 export extern fn field(q: String) -> String \
+                 {{ let d = D {{ s: q.copy() }} return d.s }}{END}"
+            ),
+        ),
+        (
+            "an export returns an if arm",
+            "`q` may not be returned from an exported function — it is a `read` parameter, \
+             and the JS caller releases what it is handed",
+            format!(
+                "export extern fn pick(p: String, q: String) -> String \
+                 {{ return if p == \"\" {{ q }} else {{ p }} }}{END}"
+            ),
+        ),
+        (
+            "an export returns a match arm",
+            "`s` may not be returned from an exported function — it is read out of a place \
+             that owns it, and the JS caller releases what it is handed",
+            format!(
+                "{TAG} export extern fn text() -> String \
+                 {{ return match tag {{ Word(s) => s, Num(n) => \"num\", }} }}{END}"
+            ),
+        ),
+    ];
+    let dir = common::scratch("rule-three-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+            continue;
+        }
+        let (_, msg) = split_head(&text);
+        let first = msg.lines().next().unwrap_or_default();
+        if first != *says {
+            bad.push(format!("{what}: said `{first}`"));
+            continue;
+        }
+        // The licence, per program: the whole refusal survives the deletion.
+        let (kok, ktext) = refusal_in(dir.to_path_buf(), &name, true);
+        if kok || ktext != text {
+            bad.push(format!(
+                "{what}: the kernel said `{}`",
+                if kok { "nothing".to_string() } else { ktext }
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "rule 3 no longer refuses:\n  {}",
+        bad.join("\n  ")
     );
 }
 
@@ -1135,7 +1499,7 @@ fn the_shapes_rows_thirteen_and_fourteens_unit_tests_pinned_are_still_refused() 
     for (what, needles, src) in &cases {
         let name = format!("{}.vyrn", what.replace(' ', "_"));
         std::fs::write(dir.join(&name), src).expect("write the program");
-        let (ok, text) = whole_refusal_in(dir.to_path_buf(), &name);
+        let (ok, text) = whole_refusal_in(dir.to_path_buf(), &name, false);
         if ok {
             bad.push(format!("{what}: accepted"));
             continue;
@@ -1179,6 +1543,229 @@ fn the_shapes_rows_thirteen_and_fourteens_unit_tests_pinned_are_still_refused() 
     assert!(
         bad.is_empty(),
         "rule 2 at the third exit has moved:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// The shapes rows 10, 11 and 29's own unit tests pinned, still refused after
+/// the rule left `movecheck.rs` (RFC-0125 §3 M3, rows 10, 11 and 29).
+///
+/// The prefix `consume` form. The pass named the FORM a reader wrote — "a
+/// take", "a `for` loop" — and the kernel names the TAKER the value reaches:
+/// the `consume` parameter a call hands it to, or the loop that took the
+/// container. Both are true and the kernel's is the more exact of the two,
+/// because it says which taker, so the checker's copy went.
+///
+/// One case moved as text and it is the third here: `for x in consume r.xs`
+/// on a record this frame owns. The unit test asserted it COMPILES, and it
+/// does not — it asked `vyrn_frontend::check`, which is the checker alone, and
+/// the whole compiler has refused that program since the kernel came in. The
+/// pin says what the compiler says.
+#[test]
+fn the_shapes_rows_ten_eleven_and_twenty_nines_unit_tests_pinned_are_still_refused() {
+    const DECLS: &str = "type Bag = { a: String } \
+                         type R = { xs: Array<String> } \
+                         let g: String = \"m\" \
+                         let gs: Array<String> = [] \
+                         fn make() -> R { return R { xs: [\"a\"] } } \
+                         fn take(xs: consume Array<String>) -> Int64 { return xs.length } ";
+    let go = |sig: &str, body: &str| {
+        format!(
+            "{DECLS} fn go({sig}) -> Int64 {{ let mut o: Array<String> = [] {body} \
+             return o.length }} fn main() -> Int64 {{ return 0 }}"
+        )
+    };
+    let cases: Vec<(&str, Vec<&str>, String)> = vec![
+        (
+            "a consuming loop over a read parameter",
+            vec![
+                "`xs` may not be stored into the `for .. in consume` loop — it is a `read` \
+                 parameter",
+                "fix: declare the parameter `xs: consume ..`",
+            ],
+            go(
+                "xs: read Array<String>",
+                "for x in consume xs { o.push(x) }",
+            ),
+        ),
+        (
+            "a consuming loop over a field of a read parameter",
+            vec![
+                "`r.xs` may not be stored into the `for .. in consume` loop — it is a `read` \
+                 parameter",
+                "fix: declare the parameter `r: consume ..`",
+            ],
+            go("r: read R", "for x in consume r.xs { o.push(x) }"),
+        ),
+        (
+            "a consuming loop over a field this frame owns",
+            vec![
+                "`r.xs` may not be stored into the `for .. in consume` loop — it is read out of \
+                 a place that owns it",
+                "fix: `consume r.xs`",
+            ],
+            go("", "let r = make() for x in consume r.xs { o.push(x) }"),
+        ),
+        (
+            "a consuming loop over module state",
+            vec![
+                "module state `gs` may not be consumed by the `for .. in consume` loop",
+                "nothing may take ownership of module state",
+            ],
+            go("", "for x in consume gs { o.push(x) }"),
+        ),
+        (
+            "a prefix take of a field of a read parameter",
+            vec![
+                "`d` may not be consumed — it is a `read` parameter",
+                "fix: `d.a.copy()`",
+            ],
+            go("d: read Bag", "o.push(consume d.a)"),
+        ),
+        (
+            "a prefix take of module state",
+            vec![
+                "module state `g` may not be passed to a `consume` parameter via `push(..)`",
+                "nothing may take ownership of module state",
+            ],
+            go("", "o.push(consume g)"),
+        ),
+        (
+            "a prefix take of module state at a call",
+            vec!["module state `gs` may not be passed to a `consume` parameter via `take(..)`"],
+            go("", "let n = take(consume gs) o.push(\"x\")"),
+        ),
+    ];
+    let dir = common::scratch("prefix-consume-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, needles, src) in &cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = whole_refusal_in(dir.to_path_buf(), &name, false);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+            continue;
+        }
+        for needle in needles {
+            if !text.contains(needle) {
+                bad.push(format!("{what}: wanted `{needle}`, got {text}"));
+            }
+        }
+    }
+    // The ways out compile, and a container this frame owns is still the
+    // loop's to take.
+    let compiles: &[(&str, String)] = &[
+        (
+            "the consume signature",
+            go(
+                "xs: consume Array<String>",
+                "for x in consume xs { o.push(x) }",
+            ),
+        ),
+        (
+            "a container this frame owns",
+            go(
+                "",
+                "let xs: Array<String> = [\"a\" + \"b\"] for x in consume xs { o.push(x) }",
+            ),
+        ),
+        (
+            "the take at the place the field is bound",
+            go(
+                "",
+                "let r = make() let ys = consume r.xs for x in consume ys { o.push(x) }",
+            ),
+        ),
+    ];
+    for (what, src) in compiles {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if !ok {
+            bad.push(format!("{what}: refused: {text}"));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "the prefix `consume` form has moved:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// A record literal's part names the FIELD it goes into, at both doors a
+/// literal is bound through (RFC-0125 §3 M3, row 07).
+///
+/// `let r = R { s: x }` and `return R { s: x }` are one literal written twice.
+/// The core wrote the field names on the binding a reader's `let` makes and
+/// not on the temporary an inline literal gets, so the second was told the
+/// value went into "the literal" — a word for the machinery, where the first
+/// was told the field. No program of the corpus spells the second with a
+/// borrow in it, which is why this is a pin and not a fixture: the licence
+/// could not see the difference, and the next reader would meet it.
+///
+/// Both passes are asked, because both state the sentence today.
+#[test]
+fn a_record_literals_part_names_its_field_at_both_doors() {
+    const DECLS: &str = "type R = { s: String } \
+                         fn mk() -> String { return \"a\" + \"b\" } \
+                         fn take(r: consume R) -> Int64 { return r.s.byteLength } ";
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "a borrow into a let's literal",
+            "the field `R.s`",
+            "fn go(x: read String) -> Int64 { let r = R { s: x } return r.s.byteLength } \
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a borrow into an inline literal",
+            "the field `R.s`",
+            "fn go(x: read String) -> R { return R { s: x } } \
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a move into a let's literal",
+            "the field `R.s`",
+            "fn go() -> Int64 { let d = mk() let r = R { s: d } \
+             return r.s.byteLength + d.byteLength } fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a move into an inline literal",
+            "the field `R.s`",
+            "fn go() -> Int64 { let d = mk() let n = take(R { s: d }) \
+             return n + d.byteLength } fn main() -> Int64 { return 0 }",
+        ),
+        // An array has no field names, so neither pass invents one. The two
+        // still spell the literal differently — "the array literal" and "the
+        // literal" — and that is the store rule's wording, not this row's.
+        (
+            "an array literal, which has no field to name",
+            "literal",
+            "fn go(x: read String) -> Int64 { let a: Array<String> = [x] return a.length } \
+             fn main() -> Int64 { return 0 }",
+        ),
+    ];
+    let dir = common::scratch("literal-parts");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, needle, body) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), format!("{DECLS} {body}")).expect("write the program");
+        for kernel_mode in [false, true] {
+            let (ok, text) = refusal_in(dir.to_path_buf(), &name, kernel_mode);
+            let pass = if kernel_mode {
+                "the kernel"
+            } else {
+                "the checker"
+            };
+            if ok {
+                bad.push(format!("{what}: {pass} accepted it"));
+            } else if !text.contains(needle) {
+                bad.push(format!("{what}: {pass} wanted `{needle}`, got {text}"));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a literal's part has lost its field:\n  {}",
         bad.join("\n  ")
     );
 }
@@ -1247,6 +1834,324 @@ fn a_nullary_constructor_is_a_value_and_not_a_name() {
     assert!(
         bad.is_empty(),
         "a nullary constructor is read as a name:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
+/// The programs the pass's own unit tests read as ACCEPTED, asked of the whole
+/// compiler (RFC-0125 §3 M3, the safety slice).
+///
+/// They asserted `movecheck::check(..).is_ok()`, and this pass going quiet is
+/// not acceptance: the kernel states ownership rules the pass does not, and
+/// `vyrn-frontend` does not link the kernel, so the pass's own unit tests never
+/// ask it. Thirty-six readings of "this program compiles" were readings of "the
+/// checker has nothing to say". Thirty-five were right anyway. The thirty-sixth
+/// is the row that carries a sentence: the compiler refuses that program, and
+/// has refused it since the kernel came in.
+///
+/// A row with no sentence compiles. A row with one is refused, and the sentence
+/// is what a reader gets.
+#[test]
+fn the_programs_the_passs_unit_tests_read_as_accepted() {
+    let cases: &[(&str, Option<&str>, &str)] = &[
+        (
+            "a payload binding from module state",
+            None,
+            "type E = | Tag(Array<Int64>) | Blank\n\
+             let mut g: E = Blank\n\
+             fn main() -> Int64 {\n\
+                 let Tag(xs) = g\n\
+                 return xs.length\n\
+             }",
+        ),
+        (
+            "a read parameter read twice",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 } return peek(x) + peek(x) }",
+        ),
+        (
+            "a consume with no reuse",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 } return take(x) }",
+        ),
+        (
+            "a reassignment revives",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let mut x = T { id: 1 } let a = take(x) x = T { id: 2 } return a + take(x) }",
+        ),
+        (
+            "a partial take of the loop variable",
+            None,
+            "type E = { name: String, id: Int64 }\n\
+             fn main() -> Int64 { let mut out = 0\n\
+              let xs = [E { name: \"a\", id: 1 }, E { name: \"b\", id: 2 }]\n\
+              for u in consume xs { consume u.name } return out }",
+        ),
+        (
+            "a local shadowing a global",
+            None,
+            "type T = { id: Int64 }\n\
+             let g = T { id: 1 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn useIt() -> Int64 { let g = T { id: 2 } return take(g) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a consume on the break branch",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 } let mut s = 0\n\
+              for i in [0, 1, 2] { if i == 2 { let a = take(x) break }\n\
+              s = s + peek(x) }\n\
+              return s }",
+        ),
+        (
+            "a use after an unconditional break",
+            None,
+            "type T = { id: Int64 }\n\
+             fn take(t: consume T) -> Int64 { return t.id }\n\
+             fn peek(t: read T) -> Int64 { return t.id }\n\
+             fn main() -> Int64 { let x = T { id: 1 }\n\
+              while true { break let a = take(x) let b = take(x) }\n\
+              return 0 }",
+        ),
+        (
+            "a last use of a string moves",
+            None,
+            "fn main() -> Int64 { let s = \"a\" + \"b\" let t = s return t.byteLength }",
+        ),
+        (
+            "a scalar alias never moves",
+            None,
+            "fn main() -> Int64 { let a = 1 let b = a return a + b }",
+        ),
+        (
+            "the consume fix for a returned borrow",
+            None,
+            "fn id(s: consume String) -> String { return s }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix for a returned borrow",
+            None,
+            "fn id(s: String) -> String { return s.copy() }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a wrapped borrows copy is owned",
+            None,
+            "type M = { name: String }\n\
+             type C = { members: Array<M> }\n\
+             fn openRule(c: C) -> Option<M> { for m in c.members { return Some(m.copy()) }\n\
+             return None }\n\
+             fn main() -> Int64 { let c = C { members: [] }\n\
+             if let Some(r) = openRule(c) { return r.name.byteLength } return 0 }",
+        ),
+        (
+            "an if let over a parameter",
+            None,
+            "fn show(v: Option<String>) -> Int64 {\n\
+             if let Some(s) = v { return s.byteLength } return 0 }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a returned scalar parameter",
+            None,
+            "fn id(n: Int64) -> Int64 { return n }\n\
+             fn main() -> Int64 { return id(1) }",
+        ),
+        (
+            "a loop variable copied out",
+            None,
+            "fn first(xs: Array<String>) -> String { for x in xs { return x.copy() }\n\
+             return \"\" }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "two fields read out of one record",
+            None,
+            "type R = { a: String, b: String }\n\
+             fn use2(r: R) -> Int64 { let x = r.a let y = r.b\n\
+             return x.byteLength + y.byteLength }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "module state copied out",
+            None,
+            "let mut title = \"x\"\n\
+             fn get() -> String { return title.copy() }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a record of scalars returned",
+            None,
+            "type R = { n: Int64 }\n\
+             let mut r = R { n: 1 }\n\
+             fn get() -> R { return r }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix in a match arm",
+            None,
+            "type Tag = | Word(String) | Num(Int64)\n\
+             let mut tag: Tag = Num(1)\n\
+             fn text() -> String { return match tag { Word(s) => s.copy(), Num(n) => \"num\", } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix in an exports match arm",
+            None,
+            "type Tag = | Word(String) | Num(Int64)\n\
+             let mut tag: Tag = Num(1)\n\
+             export extern fn text() -> String { return match tag { Word(s) => s.copy(), Num(n) => \"num\", } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "an export stores a copy into module state",
+            None,
+            "let mut kept = \"x\"\n\
+             export extern fn set(arg: String) { kept = arg.copy() }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the consume fix for a stored borrow",
+            None,
+            "type R = { s: String }\n\
+             fn keep(x: consume String) -> R { return R { s: x } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "the copy fix for a stored borrow",
+            None,
+            "type R = { s: String }\n\
+             fn keep(x: String) -> R { return R { s: x.copy() } }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a consuming loop stores its element",
+            None,
+            "fn go() -> Int64 { let xs: Array<String> = [\"a\" + \"b\"]\n\
+             let mut out: Array<String> = []\n\
+             for x in consume xs { out.push(x) } return out.length }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a loop over a temporary stores its element",
+            None,
+            "fn make() -> Array<String> { return [\"a\" + \"b\"] }\n\
+             fn go() -> Int64 { let mut out: Array<String> = []\n\
+             for x in make() { out.push(x) } return out.length }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a function called consume",
+            None,
+            "fn consume(n: Int64) -> Array<Int64> { return [n] }\n\
+             fn main() -> Int64 { let mut t = 0 for x in consume(1) { t = t + x }\n\
+             return t }",
+        ),
+        (
+            "a call to consume in an argument",
+            None,
+            "fn consume(n: Int64) -> Array<Int64> { return [n] }\n\
+             fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }\n\
+             fn main() -> Int64 { return take(consume(1)) }",
+        ),
+        (
+            "a sibling field survives a take",
+            None,
+            "type Bag = { a: String, b: String }\n\
+             fn make() -> Bag { return Bag { a: \"x\" + \"y\", b: \"p\" + \"q\" } }\n\
+             fn go() -> Int64 { let d = make() let mut o: Array<String> = [] o.push(consume d.a) o.push(consume d.b) return o.length }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a write fills the hole",
+            None,
+            "type Bag = { a: String, b: String }\n\
+             fn make() -> Bag { return Bag { a: \"x\" + \"y\", b: \"p\" + \"q\" } }\n\
+             fn go() -> Int64 { let mut d = make() let mut o: Array<String> = [] o.push(consume d.a) d.a = \"z\" return d.a.byteLength }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "an owned capture at a consume fn parameter",
+            None,
+            "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) }\n\
+             fn go() -> Int64 { let s = \"a\" + \"b\" return reg(n -> n + s.byteLength) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a borrowing capture at a plain fn parameter",
+            None,
+            "fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(0) }\n\
+             fn go(q: read String) -> Int64 { return apply(n -> n + q.byteLength) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a lender forwarded through an aggregate",
+            // Row 17's slice carried the exit into the arm, so the kernel
+            // names the loop variable the reader wrote and not the
+            // temporary the core minted.
+            Some("`x` may not be returned — it is a loop variable, and a return is owned"),
+            "type R = { name: String }\n\
+             fn pick(xs: Array<String>) -> String\n\
+             { for x in xs { return if true { x } else { \"\" } } return \"\" }\n\
+             fn g(a: Array<String>) -> R { return R { name: pick(a) } }\n\
+             fn h(a: Array<String>) -> Array<String> { return [pick(a)] }\n\
+             fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]\n\
+             let r = g(arr) let s2 = h(arr)\n\
+             return r.name.byteLength + s2[0].byteLength }",
+        ),
+        (
+            "a copied map key",
+            None,
+            "fn build(ks: Array<String>) -> Map<String, Int64>\n\
+             { let mut m: Map<String, Int64> = [:] m[ks[0].copy()] = 1 return m }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+        (
+            "a fresh map key",
+            None,
+            "fn main() -> Int64 { let mut m: Map<String, Int64> = [:]\n\
+             m[\"a\" + \"b\"] = 1 return 0 }",
+        ),
+        (
+            "a capture in a lambda the callee borrows",
+            None,
+            "fn apply(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
+             fn go(s: String) -> Int64 { return apply(n -> n + s.byteLength) }\n\
+             fn main() -> Int64 { return 0 }",
+        ),
+    ];
+    let dir = common::scratch("read-as-accepted");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, refused, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        match refused {
+            None if !ok => bad.push(format!("{what}: refused — {text}")),
+            Some(sentence) if ok => bad.push(format!("{what}: accepted, wanted `{sentence}`")),
+            Some(sentence) if !text.contains(sentence) => {
+                bad.push(format!("{what}: wanted `{sentence}`, got {text}"))
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a program the pass's unit tests read as accepted no longer reads that way:\n  {}",
         bad.join("\n  ")
     );
 }
@@ -1395,6 +2300,11 @@ fn the_kernel_does_not_say_again_what_the_checker_said_about_the_same_binding() 
 enum Kind {
     /// A refusal rule the kernel gives today, in the same sentence: the census
     /// above says `Same` for it. The checker's copy is what the deletion takes.
+    ///
+    /// **The column is empty** (RFC-0125 §3 M3). Rule 2 at a store was the last
+    /// of it, and it left with rows 01, 02, 03, 27 and 34. What still refuses
+    /// in this file is either the checker's own or an arm of the walk, and the
+    /// kind stays so a duplicate that reappears is classified rather than lost.
     Kernel,
     /// A refusal rule only the checker gives. The census above says `nothing`
     /// or `its own words`, so nothing may take this yet.
@@ -1498,9 +2408,10 @@ fn sections() -> Vec<Section> {
              stamps",
         ),
         sec(
-            "pub fn check(program: &Program) -> Result<(), String> {",
+            "pub fn refusal(program: &Program) -> String {",
             Shared,
-            "the historical string shim",
+            "the historical string shim, and the door that has no acceptance \
+             answer in it",
         ),
         sec(
             "struct MoveCheck<'a> {",
@@ -1509,19 +2420,16 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "enum Borrow {",
-            Kernel,
-            "what a borrow is, in words — `core::BorrowKind::what` is this \
-             sentence",
+            Checker,
+            "what a borrow is, in words. `core::BorrowKind::what` is the same \
+             sentence, so nothing here is owed; what reads this one now is \
+             `check_take` and the two closure rules, which the kernel does \
+             not give",
         ),
         sec(
             "    fn fixes(&self, root: &str, path: &str) -> Vec<String> {",
             Menu,
             "the named ways out of a borrow error",
-        ),
-        sec(
-            "enum TakeForm {",
-            Kernel,
-            "which form wrote the `consume`, and how a refusal names it",
         ),
         sec(
             "pub fn root_of(path: &str) -> &str {",
@@ -1556,9 +2464,10 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "    fn names_a_place(&self, value: &Expr) -> Option<&'static str> {",
-            Kernel,
-            "whether a value reads a place that owns it — the kernel's alias \
-             table",
+            Rows,
+            "whether a value reads a place that owns it. No refusal exit reads \
+             it: every caller writes a row — `Gone::Borrowed`, a temporary's \
+             owning flag, an arm's slot, a loop's",
         ),
         sec(
             "    fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String> {",
@@ -1572,20 +2481,22 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "    fn sinks(&self, name: &str, i: usize) -> bool {",
-            Kernel,
-            "a rebuilding builtin takes its receiver, and the write-back \
-             statement excepted (row 26)",
+            Shared,
+            "a rebuilding builtin takes its receiver — a delegation to the free \
+             `sinks` below, which reads the declaration",
         ),
         sec(
             "    fn store(",
-            Kernel,
-            "rule 1's move and rule 2's refusal at a store (rows 01, 02, 03, 27, \
-             34)",
+            Rows,
+            "what a store still records once rule 2 is the kernel's (rows 01, \
+             02, 03, 27, 34): `Gone::Moved`'s row, the consumed entry, the \
+             projection instrument and the retention record",
         ),
         sec(
             "    fn borrow_from(&self, value: &Expr) -> Option<Borrow> {",
-            Kernel,
-            "the borrow status a `let` of a value gives its binding",
+            Shared,
+            "the borrow status a `let` of a value gives its binding — the \
+             borrow table's producer, and no refusal of its own",
         ),
         sec(
             "    fn payload_binding(",
@@ -1593,27 +2504,14 @@ fn sections() -> Vec<Section> {
             "what a pattern's binders name, and whether an iterable is a place",
         ),
         sec(
-            "    fn check_take(",
-            Kernel,
-            "a take's refusals: an element, and nothing to take — \
-             `core::take_prefix` states both (rows 08, 09)",
-        ),
-        sec(
             "    fn callee_keeps(&self, callee: &str, i: usize) -> bool {",
             Shared,
             "whether a callee keeps a `fn` value",
         ),
         sec(
-            "    fn check_return(&self, e: &Expr, line: usize) -> Result<(), Diagnostic> {",
-            Kernel,
-            "rule 3: a return is owned (rows 15, 16, 18, 28)",
-        ),
-        sec(
-            "    fn refuse_return(&self, b: &Borrow, root: &str, path: &str, line: usize) \
-             -> Diagnostic {",
-            Kernel,
-            "the one exit every returned borrow leaves by, the exported \
-             function's own sentence with it (row 17)",
+            "    fn note_return(&self, e: &Expr, line: usize) {",
+            Rows,
+            "what a `return` still records once rule 3 is the kernel's: the              projection instrument, and the lend the call graph is closed over              (rows 15, 16, 17, 18)",
         ),
         sec(
             "    fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize) {",
@@ -1637,8 +2535,10 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {",
-            Kernel,
-            "the first borrow a returned expression yields",
+            Rows,
+            "the first borrow a returned expression yields. Rule 3 left with \
+             row 17, so the readers are RFC-0092's instrument and the lend the \
+             call graph is closed over",
         ),
         sec(
             "    fn note_returned_projection(&self, e: &Expr, line: usize) {",
@@ -1706,8 +2606,10 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn sinks(decl: &Declared, name: &str, i: usize) -> bool {",
-            Kernel,
-            "whether a builtin's parameter takes its argument for good",
+            Shared,
+            "whether a builtin's parameter takes its argument for good — read \
+             off `prelude::signature` and `prelude::rebuilds`, where the rule \
+             is stated once for this pass and the core alike",
         ),
         sec(
             "fn reads(e: &Expr) -> Vec<String> {",
@@ -1839,12 +2741,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| (k.label(), by_kind.get(&(*k as usize)).copied().unwrap_or(0)))
     .collect();
     let want = vec![
-        ("a rule the kernel now gives", 651),
-        ("a rule only the checker gives", 78),
-        ("placement rows for the engines", 1539),
+        ("a rule the kernel now gives", 0),
+        ("a rule only the checker gives", 126),
+        ("placement rows for the engines", 1786),
         ("a fix menu", 73),
-        ("shared machinery", 3628),
-        ("tests", 1264),
+        ("shared machinery", 3765),
+        ("tests", 703),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

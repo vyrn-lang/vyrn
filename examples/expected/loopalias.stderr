@@ -1,0 +1,2 @@
+loopalias.vyrn:21:0: `names` may not be handed out of an arm inside a loop — the result is released on every turn, and `names` is bound outside the loop
+  fix: `names.copy()` if the arm should hand out a value of its own
