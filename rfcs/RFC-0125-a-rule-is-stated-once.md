@@ -17030,7 +17030,7 @@ the result for the reason `@reserve`'s record gives.
 |---|---|---|
 | `checker.rs` | 15,925 | 15,833 |
 | `Checker::call` | 1,677 lines, 116 refusals | 1,527, 99 |
-| guarded blocks naming a builtin | 23 | 19 |
+| guarded blocks naming a builtin | 23 | 19 (the block census's count, less this slice's four) |
 | builtin names typed by a row alone | 28 | 32 |
 | refusals in `checker.rs` | 418 | 402 |
 | the census's `Surface` kind | 3,581 lines, 174 refusals | 3,435, 157 |
