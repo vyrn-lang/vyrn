@@ -7946,13 +7946,13 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 5,764 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 5,736 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,211 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
-| shared machinery | 2,339 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
-| tests | 328 | 0 | the file's own unit tests |
+| shared machinery | 2,335 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
+| tests | 327 | 0 | the file's own unit tests |
 
 The whole table, section by section, is what
 `the_emitter_census_as_a_table` prints:
@@ -13304,6 +13304,121 @@ core's own answer stands between it and the delete key.
 
 Nothing moved in this slice: it is a reading of the two files, and the numbers
 it quotes are the ones the two censuses already pin.
+
+#### Walk order goes, because the graph is next door (2026-09-08, `track-dd`)
+
+The census's first row is taken. `movecheck` kept a write/take/exit EVENT
+STREAM in walk order, with a stack of loop ids and a stack of branch ids, and
+`own.rs` folded it twice: once for the early releases (rounds twenty-one,
+thirty-eight, forty-two, forty-four and fifty-two) and once for the untake set
+(RFC-0114's revived bindings). Walk order plus a loop stack is a surrogate for
+a control-flow graph. The kernel has the graph. Both folds are deleted, and so
+is everything that fed them.
+
+**What each fold claimed, and what states it now.**
+
+| the fold | its claim | who says it now |
+|---|---|---|
+| the early releases | a binding whose row says `Moved` still HOLDS its value at every clean `return`/`?` whose walk order sits between the one initialising write and the first take, all in one loop context | the kernel, at the exit. A name held at an exit is a `MissingKind::Exit`, and the placer writes the row. The graph orders across a back edge, which is exactly what round forty-two reverted a widening for |
+| round fifty-two's `full` flag | at THIS exit the holes are not taken yet, so the release walks the whole value | `place_frames` already states it as `holes: Some(..)` — the kernel's set at that exit, empty included (the walk's deletion slice) |
+| the untake set | the value was taken and then provably re-established, so block exit releases the FINAL value | the kernel. A store that re-establishes an owned name makes it held again, and held at an exit is a row |
+
+**The deletion, measured in three steps.** Each step was gated on its own
+before the next, so a failure would name its cause:
+
+| step | kernel corpus | the residue ratchet |
+|---|---|---|
+| the early fold and round fifty-two's `full` | 24,775 accepted, 0 refused, 0 unlowered | engine 172 clean, 3 leaking; route 172 clean, 3 leaking |
+| the untake fold beside it | 24,775 accepted, 0 refused, 0 unlowered | engine 172 clean, 3 leaking; route 172 clean, 3 leaking |
+| the event records in `movecheck` | 24,775 accepted, 0 refused, 0 unlowered | engine 172 clean, 3 leaking; route 172 clean, 3 leaking |
+
+The baseline on this line is 172 clean, 3 leaking, 0 double-free on each
+engine. It did not move at any step.
+
+**What went.** In `movecheck.rs`: `ExitEv`, `StoreEv`, `EvKind`, the three
+`Facts` fields, and every recorder behind them — `store_ev`, `mention_ev`,
+`exit_site`, `exit_ev`, `enter_branch`, `leave_branch`, the seven state cells
+(`ev_order`, `loop_ids`, `next_loop`, `branch_ids`, `next_branch`,
+`walk_region`, `exit_orders`) and the fifteen call sites that stamped a loop,
+a branch or a region on the walk. In `own.rs`: the early fold, the `full`
+fold, `fold_revived`, `Emit::revived`, `Ownership::early`, `Release::early`
+and `Release::full`. In `core.rs`, inside the placement region alone
+(`Builder::drops_at` and `place_frames`): the `!r.early` screen and the
+`r.full` branch, both of which had become "always". In `direct.rs`: `Cx::early`,
+`Fn_::early` and the slot the `!owns` branch registered from it.
+
+**Two flags that had become constants.** `Release::early` and `Release::full`
+were written by the two folds and by nothing else. With the folds gone every
+row reads `false` for both, so `drops_at`'s screen and `own::placed`'s hole
+choice each had one live arm. Deleting the fields is what proves it: a reader
+that still needed the distinction would not compile.
+
+**The bytes, read at the source.** `VYRN_WASM_MANIFEST=check` moves **16 of
+176** examples, and every one of them moves the same way. Each loses exactly
+two `free` calls, and both are in `std/jsonread.vyrn`:
+
+| what moved | read at | why |
+|---|---|---|
+| two releases of a `let mut … = ""` accumulator at an early `return` | `parseArray`'s `failMsg` (line 361) and `parseObject`'s (line 496) | the fold placed a release at EVERY clean early `return` between the write and the take. The kernel places one where the name is held on that path, and at these two exits the slot still holds the data-segment literal it was initialised with, whose `free` reads a class word of nothing and returns |
+| frame locals renumbered around the two | `clidemo`, `clifail`, `graphql` | the slots follow the releases |
+
+The other 160 examples are byte-identical: they do not import `std/jsonread`.
+No example gained or lost a function, and no example lost a release the
+ratchet can see — the kernel places MORE rows in these two functions than the
+fold did (thirteen against seven in `parseObject`, eight against five in
+`parseArray`), and the rows the fold placed that the kernel also names are the
+same rows.
+
+**The censuses.** `movecheck.rs`'s structural census
+(`compiler/vyrn-cli/tests/refusals.rs`): `Kind::Rows` **1,748 to 1,608**,
+shared machinery **3,671 to 3,564**; the `Kernel`, `Checker`, `Menu` and
+`Tests` columns do not move. The `pub struct ExitEv {` section is gone
+outright and `pub struct Facts {` takes its place at the head of the file's
+one remaining fact record. The emitter census
+(`compiler/vyrn-cli/tests/emitter_census.rs` and the table above): the mapping
+**5,764 to 5,736**, shared machinery **2,339 to 2,335**, tests **328 to 327**.
+RFC-0127 §3's form census does not move: nothing deleted here mentions a
+surface form.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 6,321 to **6,074**;
+`compiler/vyrn-frontend/src/own.rs` 3,497 to **3,103**;
+`compiler/vyrn-lower/src/core.rs` 5,732 to **5,719**;
+`compiler/vyrn-codegen/src/direct.rs` 16,408 to **16,375**. 641 lines, and the
+census's first row is empty.
+
+**What `own.rs` still asks `movecheck`.** Nine sites, three items:
+`LetOwnership` (its `ty`, its `gone`, its `elem_only`), the `facts` call that
+builds it, and `arg_caps`. The census's rows 2 and 3 are what stands, with the
+blocker each names.
+
+#### Gates (2026-09-08, the event stream's deletion)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok, and the two pre-existing warnings unchanged |
+| `cargo test -p vyrn-cli`, no filter | 79 suites, all green |
+| `kernel` `--ignored`, release | 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — 30,197 functions judged, 0 unlowered |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1 |
+| `cargo test -p vyrn-frontend` | 12 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 21 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 386 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, on a manifest regenerated with `write`: 16 of 176 rows moved, each read above |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
 
 ### M6 — the other two judgments
 

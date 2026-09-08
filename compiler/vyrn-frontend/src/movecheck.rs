@@ -283,35 +283,9 @@ pub enum ArgVerdict {
 
 /// Everything one `Want::Lets` walk answers. Two facts out of one walk, because
 /// [`crate::own::analyze`] needs both and the walk is not cheap.
-/// One function exit the walk met (round twenty-one): a `return` or a
-/// propagating `?`, with the walk order it happened at, the loop context it
-/// sits in, and whether it is CLEAN — outside every `region` and every lambda
-/// body, the two frames an early release must never be placed into (arena
-/// memory is not this walk's, and a lambda's exit is a different runtime
-/// frame).
-#[derive(Clone, Debug)]
-pub struct ExitEv {
-    pub order: u32,
-    pub site: usize,
-    pub is_try: bool,
-    pub fn_name: String,
-    pub loops: Vec<u32>,
-    pub clean: bool,
-}
-
 pub struct Facts {
     /// What every `let` owns at the end of its block — see [`ownership`].
     pub lets: HashMap<usize, LetOwnership>,
-    /// The per-binding write/take event stream, in walk order (RFC-0114 M2).
-    /// `own::analyze` folds it into the store-ownedness set; nothing else
-    /// reads it.
-    pub store_events: Vec<StoreEv>,
-    /// The walk-order positions of every early exit — see [`fold context`] in
-    /// `own::fold_revived`, its only reader.
-    pub exit_orders: Vec<u32>,
-    /// Round twenty-one: every `return` and `?` the walk met, with enough
-    /// context to place an early release — see `own::fold_early_releases`.
-    pub exit_sites: Vec<ExitEv>,
     /// The two closures over the call graph, kept so a reader can ask whether
     /// either says anything (RFC-0125 §3 M3, the checker's deletion path).
     ///
@@ -352,36 +326,6 @@ pub struct Facts {
     /// a signature the meet cleared, and the core reads it at the position
     /// ([`fn_sig_key`]) the way it reads `lending` and `retains`.
     pub fnval_clear: HashSet<String>,
-}
-
-/// One ownership-relevant event on one binding (RFC-0114 M2).
-///
-/// `key` is the binding's `Stmt::Let` address — the same key everything else
-/// here uses. `loops` is the stack of loop ids the event sits inside, because
-/// a back edge makes walk order meaningless between two events that share a
-/// loop, and the fold refuses rather than guesses there.
-pub struct StoreEv {
-    pub key: usize,
-    pub order: u32,
-    pub loops: Vec<u32>,
-    /// The stack of `if`/`match` branch ids the event sits inside — an event
-    /// with the same branch path as the binding's `let` runs whenever the
-    /// `let` did (modulo the exits `exit_orders` records), which is what the
-    /// untake fold needs: a CONDITIONAL revive must not qualify.
-    pub branch: Vec<u32>,
-    pub kind: EvKind,
-}
-
-pub enum EvKind {
-    /// A write into the binding: its `let` initializer (`id` 0) or an assign
-    /// (`id` = the `Stmt::Assign` address). `owning` is false when the value
-    /// is a projection of a place — the binding then HOLDS a borrow, and the
-    /// next store over it must not release.
-    Write { id: usize, owning: bool },
-    /// The value left or was compromised: moved, dropped, returned, captured,
-    /// lent, or a field taken out (a hole). One kind, because the fold only
-    /// asks "may the value still be released", and every answer here is no.
-    Take,
 }
 
 /// What every `let` in `program` owns at the end of its block, keyed by the
@@ -468,9 +412,6 @@ pub fn facts(program: &Program) -> Facts {
     }
     Facts {
         lets,
-        store_events: r.store_events,
-        exit_orders: r.exit_orders,
-        exit_sites: r.exit_sites,
         lending: r.lending,
         retains: r.retains,
         escapers: r.param_escapers,
@@ -505,10 +446,7 @@ struct Run {
     lending: HashSet<String>,
     retains: HashSet<(String, usize)>,
     projections: Vec<ProjectionSite>,
-    store_events: Vec<StoreEv>,
-    exit_orders: Vec<u32>,
     param_escapers: HashSet<String>,
-    exit_sites: Vec<ExitEv>,
     fnval_clear: HashSet<String>,
 }
 
@@ -1218,20 +1156,11 @@ fn run(program: &Program, want: Want) -> Run {
         retains: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         handed_on: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         param_ix: RefCell::new(HashMap::new()),
-        store_events: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         carrying_locals: RefCell::new(HashSet::new()),
-        exit_sites: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
-        walk_region: std::cell::Cell::new(0),
-        ev_order: std::cell::Cell::new(0),
-        loop_ids: RefCell::new(Vec::new()),
-        next_loop: std::cell::Cell::new(0),
-        branch_ids: RefCell::new(Vec::new()),
-        next_branch: std::cell::Cell::new(0),
-        exit_orders: (want == Want::Lets).then(|| RefCell::new(Vec::new())),
         projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
     };
     let mut out = Vec::new();
@@ -1391,13 +1320,10 @@ fn run(program: &Program, want: Want) -> Run {
         lending,
         retains,
         projections,
-        store_events: mc.store_events.map(RefCell::into_inner).unwrap_or_default(),
-        exit_orders: mc.exit_orders.map(RefCell::into_inner).unwrap_or_default(),
         param_escapers: mc
             .param_escapers
             .map(RefCell::into_inner)
             .unwrap_or_default(),
-        exit_sites: mc.exit_sites.map(RefCell::into_inner).unwrap_or_default(),
         fnval_clear,
     }
 }
@@ -1530,16 +1456,12 @@ struct MoveCheck<'a> {
     handed_on: Option<RefCell<HashMap<(String, usize), Vec<(String, usize)>>>>,
     /// The index of each parameter of the function under check.
     param_ix: RefCell<HashMap<String, usize>>,
-    /// RFC-0114 M2: the write/take event stream (see [`StoreEv`]), and the
-    /// assigns to module state, which are owned unconditionally.
-    store_events: Option<RefCell<Vec<StoreEv>>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
     /// Round fifty-six: per-body provenance for the escape screen — locals
     /// whose value may HOLD a borrowed parameter's storage (`let r =
     /// a.push(v)`), so a later `return r` reads as the escape it is. Cleared
     /// per body; consulted only where `param_escapers` records.
     carrying_locals: RefCell<HashSet<String>>,
-    exit_sites: Option<RefCell<Vec<ExitEv>>>,
     /// Round forty-six: the arity of every lambda the walk met. A lambda has
     /// no capability rows and no retention rows, so a signature any lambda
     /// could inhabit (matched by arity — the declared reading does not type
@@ -1551,19 +1473,6 @@ struct MoveCheck<'a> {
     typed_lambdas: Option<RefCell<std::collections::HashSet<usize>>>,
     /// The signature keys those typed lambdas inhabit.
     lambda_sigs: Option<RefCell<std::collections::HashSet<String>>>,
-    walk_region: std::cell::Cell<u32>,
-    ev_order: std::cell::Cell<u32>,
-    /// The stack of loop ids the walk is inside — pushed by `while`/`for`,
-    /// stamped onto every event, so the fold can see which pairs of events a
-    /// back edge could reorder.
-    loop_ids: RefCell<Vec<u32>>,
-    next_loop: std::cell::Cell<u32>,
-    /// The stack of branch ids (`if`/`match` arms) the walk is inside, and the
-    /// walk-order positions of every early exit (`return`, `?`, `break`,
-    /// `continue`) — both feed the untake fold and nothing else.
-    branch_ids: RefCell<Vec<u32>>,
-    next_branch: std::cell::Cell<u32>,
-    exit_orders: Option<RefCell<Vec<u32>>>,
     /// Where RFC-0092 M0's projection sites go, or `None` everywhere else. The
     /// measurement is a mode, not a second walk: the two places that would refuse
     /// are the two places that record.
@@ -1866,13 +1775,6 @@ impl MoveCheck<'_> {
                             },
                         );
                     }
-                    self.store_ev(
-                        key,
-                        EvKind::Write {
-                            id: 0,
-                            owning: true,
-                        },
-                    );
                 } else {
                     n.bind(&p.name, 0);
                 }
@@ -1991,89 +1893,11 @@ impl MoveCheck<'_> {
         key
     }
 
-    /// Record one RFC-0114 M2 event for `key` (0 = untracked, dropped).
-    fn store_ev(&self, key: usize, kind: EvKind) {
-        if key == 0 {
-            return;
-        }
-        let Some(sink) = &self.store_events else {
-            return;
-        };
-        let order = self.ev_order.get();
-        self.ev_order.set(order + 1);
-        sink.borrow_mut().push(StoreEv {
-            key,
-            order,
-            loops: self.loop_ids.borrow().clone(),
-            branch: self.branch_ids.borrow().clone(),
-            kind,
-        });
-    }
-
-    fn enter_branch(&self) {
-        let b = self.next_branch.get();
-        self.next_branch.set(b + 1);
-        self.branch_ids.borrow_mut().push(b);
-    }
-
-    fn leave_branch(&self) {
-        self.branch_ids.borrow_mut().pop();
-    }
-
-    /// An early exit passed this point in walk order (`return`, `?`, `break`,
-    /// `continue`). The untake fold refuses any binding whose take-to-revive
-    /// window contains one: on that exit the binding still holds the taken
-    /// state, and the exit path's releases must not touch it.
-    /// Round twenty-seven: one READ of a tracked binding advances the event
-    /// order, so a read is strictly ordered against the writes, takes and
-    /// exits around it and every fold that compares orders sees the numbers
-    /// it saw before.
-    ///
-    /// The reads themselves are nobody's since RFC-0125 §3 M3's third
-    /// derivation slice: the core counts the reads of a name over its own
-    /// statements, where a payload binder is a name of its own.
-    fn mention_ev(&self, name: &str) {
-        if self.lets.is_none() || self.nodes.borrow().get(name).copied().unwrap_or(0) == 0 {
-            return;
-        }
-        self.ev_order.set(self.ev_order.get() + 1);
-    }
-
-    /// Round twenty-one: record a `return`/`?` with its placement context.
-    /// Called BEFORE `exit_ev`, so the two share the order the exit runs at.
-    fn exit_site(&self, site: usize, is_try: bool) {
-        let Some(sink) = &self.exit_sites else { return };
-        sink.borrow_mut().push(ExitEv {
-            order: self.ev_order.get(),
-            site,
-            is_try,
-            fn_name: self.cur_fn.borrow().clone(),
-            loops: self.loop_ids.borrow().clone(),
-            clean: self.walk_region.get() == 0 && self.lambda_base.borrow().is_empty(),
-        });
-    }
-
-    fn exit_ev(&self) {
-        if let Some(x) = &self.exit_orders {
-            let o = self.ev_order.get();
-            self.ev_order.set(o + 1);
-            x.borrow_mut().push(o);
-        }
-    }
-
     fn took(&self, name: &str, gone: Gone) {
-        self.mention_ev(name);
         let Some(sink) = &self.lets else { return };
         let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
         if key == 0 {
             return;
-        }
-        // RFC-0114 M2: everything reaching here except a borrow-rebind means
-        // the value left or is compromised, and a later store must not release
-        // what is no longer there. A `Borrowed` row is the WRITE's property —
-        // its event was already pushed with `owning: false`.
-        if !matches!(gone, Gone::Borrowed(_)) {
-            self.store_ev(key, EvKind::Take);
         }
         if let Some(row) = sink.borrow_mut().get_mut(&key) {
             // Which-take attribution (round sixteen): a take through the loop
@@ -2108,9 +1932,6 @@ impl MoveCheck<'_> {
         if key == 0 {
             return;
         }
-        // RFC-0114 M2: a hole compromises the whole value for release purposes
-        // — freeing around it is RFC-0093's job at block exit, not a store's.
-        self.store_ev(key, EvKind::Take);
         if let Some(row) = sink.borrow_mut().get_mut(&key) {
             // A hole taken out of the loop element still leaves through the
             // element — the payload was copied out (round sixteen).
@@ -3575,16 +3396,6 @@ impl MoveCheck<'_> {
                     self.reads.borrow_mut().bind(name, read);
                 }
                 self.nodes.borrow_mut().bind(name, let_id(s));
-                // RFC-0114 M2: the initializer is the binding's first write.
-                // `id` 0 because a `let` is never itself a release site — it is
-                // only the store before the first assign.
-                self.store_ev(
-                    let_id(s),
-                    EvKind::Write {
-                        id: 0,
-                        owning: place.is_none(),
-                    },
-                );
                 revive(consumed, name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
                 Ok(false)
@@ -3595,22 +3406,6 @@ impl MoveCheck<'_> {
                 // revives the binding, so its take is not recorded.
                 let walked = self.walk_writeback(name, value, consumed, scope);
                 walked?;
-                // RFC-0114 M2: the write event, BEFORE the store's own effects
-                // (`took(Borrowed)`, revive) so a reader sees the state the
-                // store finds.
-                {
-                    let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
-                    let sid = s as *const Stmt as usize;
-                    if key != 0 {
-                        self.store_ev(
-                            key,
-                            EvKind::Write {
-                                id: sid,
-                                owning: self.names_a_place(value).is_none(),
-                            },
-                        );
-                    }
-                }
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
                 // so 4b treats a store into it differently from a local's.
                 let global = self.globals.contains(name) && !Self::in_scope(scope, name);
@@ -3793,28 +3588,16 @@ impl MoveCheck<'_> {
                         }
                     }
                 }
-                // AFTER the value walk, matching the runtime: the returned
-                // expression evaluates first, and only then does the exit
-                // release anything. Recorded first, a `return Parser { src:
-                // ba, .. }` read as "an exit before `ba`'s take" and round
-                // twenty-one's fold freed `ba` at the very return that embeds
-                // it (parity's audit caught it on `{\"a\":1}`).
-                self.exit_site(s as *const Stmt as usize, false);
-                self.exit_ev();
                 Ok(true)
             }
             // `break`/`continue` (RFC-0060) consume nothing but terminate the
             // path — code after them in the same block is unreachable.
-            Stmt::Break { .. } => {
-                self.exit_ev();
-                Ok(true)
-            }
+            Stmt::Break { .. } => Ok(true),
             // A `continue` also diverges here, but it jumps to the NEXT
             // iteration: the loop body re-runs. Marking it is what stops the
             // loop arms from counting it as the "runs at most once"
             // divergence that skips the next-iteration reuse check.
             Stmt::Continue { .. } => {
-                self.exit_ev();
                 self.continue_seen.set(true);
                 Ok(true)
             }
@@ -3826,11 +3609,8 @@ impl MoveCheck<'_> {
             } => {
                 self.expr(cond, consumed, scope)?;
                 let mut then_c = consumed.clone();
-                self.enter_branch();
                 let then_div = self.block(then_block, &mut then_c, scope);
-                self.leave_branch();
                 let mut else_c = consumed.clone();
-                self.enter_branch();
                 let else_div = match else_block {
                     Some(eb) => self.block(eb, &mut else_c, scope),
                     None => false,
@@ -3931,19 +3711,15 @@ impl MoveCheck<'_> {
                     .map(str::to_string)
                     .collect();
                 self.arm_binders.borrow_mut().push(binders);
-                self.enter_branch();
                 let then_div = self.block(then_block, &mut then_c, scope);
-                self.leave_branch();
                 self.arm_binders.borrow_mut().pop();
                 self.exit();
                 scope.pop();
                 let mut else_c = consumed.clone();
-                self.enter_branch();
                 let else_div = match else_block {
                     Some(eb) => self.block(eb, &mut else_c, scope),
                     None => false,
                 };
-                self.leave_branch();
                 if !then_div {
                     for (k, v) in then_c {
                         consumed.or_insert(k, v);
@@ -3957,11 +3733,6 @@ impl MoveCheck<'_> {
                 Ok(then_div && else_div)
             }
             Stmt::While { cond, body, .. } => {
-                // RFC-0114 M2: everything inside carries this loop's id, so the
-                // fold can refuse to order two events a back edge could swap.
-                let lid = self.next_loop.get();
-                self.next_loop.set(lid + 1);
-                self.loop_ids.borrow_mut().push(lid);
                 // The condition re-runs on every iteration, so consumption in it
                 // is loop-consumption exactly like the body's (`while take(x)`
                 // would use `x` again next time around) — track both in the
@@ -3971,7 +3742,6 @@ impl MoveCheck<'_> {
                 let outer_continue = self.continue_seen.replace(false);
                 let _ = self.block(body, &mut body_c, scope);
                 self.continue_seen.set(outer_continue);
-                self.loop_ids.borrow_mut().pop();
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
                 }
@@ -3986,10 +3756,6 @@ impl MoveCheck<'_> {
                 line,
                 consuming,
             } => {
-                // RFC-0114 M2: same loop stamp as `while` — see there.
-                let m2_lid = self.next_loop.get();
-                self.next_loop.set(m2_lid + 1);
-                self.loop_ids.borrow_mut().push(m2_lid);
                 self.expr(iter, consumed, scope)?;
                 self.site("iterate", *line, iter, None);
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
@@ -4080,7 +3846,6 @@ impl MoveCheck<'_> {
                 // The loop variable is fresh on every iteration, so a move of it
                 // is not a move of anything the enclosing scope can still name.
                 body_c.remove(var);
-                self.loop_ids.borrow_mut().pop(); // RFC-0114 M2: for-loop extent ends
                 self.continue_seen.set(outer_continue);
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
@@ -4141,9 +3906,7 @@ impl MoveCheck<'_> {
             // record — a use-after-move after the region then compiled.
             Stmt::Region { body, .. } => {
                 let mut inner = consumed.clone();
-                self.walk_region.set(self.walk_region.get() + 1);
                 let div = self.block(body, &mut inner, scope);
-                self.walk_region.set(self.walk_region.get() - 1);
                 // Consumption of an OUTER binding inside the region survives
                 // it — that is the use-after-move the propagation exists for.
                 // A binding the region DECLARES dies with the region, and its
@@ -4376,7 +4139,6 @@ impl MoveCheck<'_> {
         match e {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
             Expr::Var { name, line } => {
-                self.mention_ev(name);
                 self.capture_site(name, *line);
                 self.check_capture(name, *line)?;
                 self.note_capture(name, *line);
@@ -4399,7 +4161,6 @@ impl MoveCheck<'_> {
             Expr::Field { expr, .. } => match place_path(e) {
                 Some(_) => {
                     let (root, rline) = root_var(e);
-                    self.mention_ev(root);
                     self.capture_site(root, rline);
                     self.check_capture(root, rline)?;
                     self.note_capture(root, rline);
@@ -4476,8 +4237,6 @@ impl MoveCheck<'_> {
                         sink.borrow_mut().insert(self.cur_fn.borrow().clone());
                     }
                 }
-                self.exit_site(e as *const Expr as usize, true);
-                self.exit_ev();
                 r
             }
             // A literal's operands are places too: `Ring { slots: xs }` puts `xs`
@@ -4591,7 +4350,6 @@ impl MoveCheck<'_> {
                     self.arm_binders
                         .borrow_mut()
                         .push(binders.iter().map(|b| b.to_string()).collect());
-                    self.enter_branch();
                     let r = match &arm.body {
                         ArmBody::Expr(body) => self.expr(body, &mut c, scope),
                         // The statements walk as statements, inside the same
@@ -4601,7 +4359,6 @@ impl MoveCheck<'_> {
                             Ok(())
                         }
                     };
-                    self.leave_branch();
                     self.arm_binders.borrow_mut().pop();
                     // Round forty's other half: which arm MOVED the temp
                     // scrutinee, which is what the row below writes back.
@@ -4678,15 +4435,11 @@ impl MoveCheck<'_> {
                 self.note_arm_aliases(e, *line, &[]);
                 let base = consumed.clone();
                 let mut then_c = base.clone();
-                self.enter_branch();
                 let r = self.expr(then_branch, &mut then_c, scope);
-                self.leave_branch();
                 r?;
                 let mut else_c = base.clone();
                 if let Some(eb) = else_branch {
-                    self.enter_branch();
                     let r = self.expr(eb, &mut else_c, scope);
-                    self.leave_branch();
                     r?;
                 }
                 // RFC-0114 Rule N at an `if`-expression join — the statement

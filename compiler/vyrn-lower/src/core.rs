@@ -1760,21 +1760,13 @@ impl<'a> Builder<'a> {
                 // container is a `read` parameter's field or module state
                 // (rows 10, 11, 29). A borrow with no row is a take nobody
                 // judged.
-                // The screen is the core's answer for the BINDING, and a
-                // `Release::early` row is placed for an exit that runs before
-                // the take the answer is about. Nothing in this pass computes
-                // that, so the screen has nothing to say about such a row.
                 Some(n)
-                    if !r.early
-                        && !self.body.names[*n as usize].releases
+                    if !self.body.names[*n as usize].releases
                         && !self.body.names[*n as usize].for_consume => {}
                 Some(n) if keep == Some(*n) => {}
                 Some(n) => {
-                    // The row's own set (a placer row, or round fifty-two's
-                    // whole walk), else the binding's.
-                    let holes = if r.full {
-                        Vec::new()
-                    } else if let Some(h) = &r.holes {
+                    // The row's own set (a placer row), else the binding's.
+                    let holes = if let Some(h) = &r.holes {
                         h.iter().map(|h| format!(".{h}")).collect()
                     } else {
                         self.body.names[*n as usize].holes.clone()
@@ -5690,7 +5682,6 @@ fn place_frames(
                         owner, info.source, m.exit, holes
                     );
                 }
-                r.full = false;
                 r.holes = Some(holes);
                 touched.insert(owner.to_string());
                 continue;
@@ -5710,7 +5701,6 @@ fn place_frames(
                     kind: kind.clone(),
                     exit: m.exit,
                     line: info.line as u32,
-                    full: false,
                     // The kernel's set at THIS exit, empty included: a row
                     // with no set falls back to the binding's own, which is
                     // per binding and not per path. `regexredux`'s `compile`
@@ -5719,11 +5709,8 @@ fn place_frames(
                     // walks the whole record — the answer round fifty-two's
                     // `full` flag reconstructed from walk order, stated here
                     // by the pass that judged the path (RFC-0125 §3 M3, the
-                    // walk's deletion). The rewrite branch above always said
-                    // it; only a row this pass ADDS could lose it, which no
-                    // reader saw while the walk placed a row to rewrite.
+                    // walk's deletion).
                     holes: Some(holes),
-                    early: false,
                 },
                 kind,
             ));

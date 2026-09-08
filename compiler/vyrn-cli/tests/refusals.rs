@@ -2371,10 +2371,10 @@ fn sections() -> Vec<Section> {
             "what a callee does with the temporary at a call-argument position",
         ),
         sec(
-            "pub struct ExitEv {",
+            "pub struct Facts {",
             Rows,
-            "the event records: exits, reads, consuming matches, \
-             stores, Rule N edges, place stores",
+            "what one walk answers, and the closures over the call graph the \
+             core reads at a call",
         ),
         sec(
             "pub fn facts(program: &Program) -> Facts {",
@@ -2746,9 +2746,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 0),
         ("a rule only the checker gives", 126),
-        ("placement rows for the engines", 1748),
+        ("placement rows for the engines", 1608),
         ("a fix menu", 73),
-        ("shared machinery", 3671),
+        ("shared machinery", 3564),
         ("tests", 703),
     ];
     assert_eq!(got, want, "the structural census has moved");
