@@ -26,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use vyrn_frontend::ast::Program;
-use vyrn_lower::core::{Rhs, St};
+use vyrn_lower::core::{Ctor, Lit, Rhs, St, Val};
 
 struct Fs;
 
@@ -130,33 +130,94 @@ fn corpus() -> Vec<PathBuf> {
 /// `out` counts one row per right-hand side — the variant's name, and whether
 /// it named a type — so the pin below is a diff over the corpus rather than a
 /// claim about one program.
-fn producers(stmts: &[St], out: &mut BTreeMap<(&'static str, bool), usize>) {
+fn producers(
+    stmts: &[St],
+    out: &mut BTreeMap<(&'static str, bool), usize>,
+    ops: &mut BTreeMap<String, usize>,
+) {
     for s in stmts {
         match s {
             St::Let(_, rhs) => {
                 let row = match rhs {
-                    Rhs::Prim(_, t) => ("prim", t.is_some()),
+                    Rhs::Prim(_, _, t) => ("prim", t.is_some()),
                     Rhs::Call { ret, .. } => ("call", ret.is_some()),
                     Rhs::Val(_) => ("val", true),
                     Rhs::Read(_) => ("read", true),
                     Rhs::Take(_) => ("take", true),
-                    Rhs::Make(_) => ("make", true),
+                    Rhs::Make(..) => ("make", true),
                 };
                 *out.entry(row).or_default() += 1;
+                operation(rhs, ops);
             }
-            St::If { then, els, .. } => {
-                producers(then, out);
-                producers(els, out);
-            }
-            St::Loop(b) | St::Block { body: b, .. } => producers(b, out),
-            St::Switch { arms, .. } => {
+            St::Do(rhs, _) => operation(rhs, ops),
+            St::Store { value, .. } => literal(value, ops),
+            St::Return { value: Some(v), .. } => literal(v, ops),
+            St::Switch { on, arms, .. } => {
+                literal(on, ops);
                 for a in arms {
-                    producers(&a.body, out);
+                    producers(&a.body, out, ops);
                 }
             }
+            St::If { then, els, .. } => {
+                producers(then, out, ops);
+                producers(els, out, ops);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => producers(b, out, ops),
             _ => {}
         }
     }
+}
+
+/// What each row SAYS IS COMPUTED, counted the same way (RFC-0125 §3 M3, the
+/// operation slice).
+///
+/// The core stated who owns what and where control goes, and not what is
+/// computed: `a + b` and `a - b` were one `prim` row, four literal forms were
+/// one `make`, and `5` and `7` were one `lit`. These three columns are what
+/// the rows gained, and a column that stops being filled is a row that
+/// stopped stating its operation — the census reads the totals, exactly as it
+/// reads the placement ones above.
+fn operation(rhs: &Rhs, ops: &mut BTreeMap<String, usize>) {
+    match rhs {
+        Rhs::Prim(op, vs, _) => {
+            *ops.entry(format!("prim {op:?}")).or_default() += 1;
+            for v in vs {
+                literal(v, ops);
+            }
+        }
+        Rhs::Make(c, vs) => {
+            let what = match c {
+                Ctor::Record(..) => "record",
+                Ctor::Array => "array",
+                Ctor::Map => "map",
+                Ctor::Try(_) => "try",
+            };
+            *ops.entry(format!("make {what}")).or_default() += 1;
+            for v in vs {
+                literal(v, ops);
+            }
+        }
+        Rhs::Val(v) => literal(v, ops),
+        Rhs::Call { args, .. } => {
+            for (v, _) in args {
+                literal(v, ops);
+            }
+        }
+        Rhs::Read(_) | Rhs::Take(_) => {}
+    }
+}
+
+fn literal(v: &Val, ops: &mut BTreeMap<String, usize>) {
+    let Val::Lit(l) = v else { return };
+    let what = match l {
+        Lit::Int(_) => "int",
+        Lit::Byte(_) => "byte",
+        Lit::Float(_) => "float",
+        Lit::Bool(_) => "bool",
+        Lit::Str(_) => "string",
+        Lit::Opaque => "opaque",
+    };
+    *ops.entry(format!("lit {what}")).or_default() += 1;
 }
 
 #[test]
@@ -181,6 +242,7 @@ fn run() {
     vyrn_lower::install();
     let mut counted: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut produced: BTreeMap<(&'static str, bool), usize> = BTreeMap::new();
+    let mut ops: BTreeMap<String, usize> = BTreeMap::new();
     let mut programs = 0usize;
     for path in corpus() {
         let Ok(program) = load(&path) else { continue };
@@ -270,7 +332,7 @@ fn run() {
                 continue;
             };
             for body in top.frames() {
-                producers(&body.stmts, &mut produced);
+                producers(&body.stmts, &mut produced, &mut ops);
                 // RFC-0125 §3 M3, the input-circle slice: the holes a
                 // binding's release walks around are the core's own answer,
                 // stated where the `consume` is written. `own.rs` kept a
@@ -291,6 +353,31 @@ fn run() {
         eprintln!(
             "  {n:6} {what}  {}",
             if *typed { "typed" } else { "UNTYPED" }
+        );
+    }
+    eprintln!("what the rows say is computed, over the corpus:");
+    for (what, n) in &ops {
+        eprintln!("  {n:6} {what}");
+    }
+    // Every operation column is filled (RFC-0125 §3 M3, the operation
+    // slice). A `prim` names its operator, a `make` names its constructor and
+    // a literal names its value, so an emitter can map a row to an
+    // instruction without reading the source beside it. The assertion is that
+    // the columns EXIST over the corpus rather than a number: a count is what
+    // a later slice reads to see a row appear or vanish, and what a wrong
+    // value fails is the recorded wasm hashes, which move when an emitted
+    // byte does.
+    for column in [
+        "prim Bin",
+        "prim Un",
+        "prim Closure",
+        "make record",
+        "lit int",
+        "lit string",
+    ] {
+        assert!(
+            ops.keys().any(|k| k.starts_with(column)),
+            "no `{column}` row over the corpus"
         );
     }
     // The producer-type pin (RFC-0125 §3 M6, the third judgment's third

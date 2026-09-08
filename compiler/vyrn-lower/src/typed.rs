@@ -206,8 +206,8 @@ impl<'a> Walk<'a, '_> {
                                 &outside
                             }
                         },
-                        Val::Lit => {
-                            outside = Rhs::Val(Val::Lit);
+                        Val::Lit(_) => {
+                            outside = Rhs::Val(Val::Lit(crate::core::Lit::Opaque));
                             &outside
                         }
                     };
@@ -248,7 +248,7 @@ impl<'a> Walk<'a, '_> {
         if from.is_none()
             && matches!(to, Type::IntN { .. })
             && !ctor
-            && !matches!(rhs, Rhs::Val(Val::Lit))
+            && !matches!(rhs, Rhs::Val(Val::Lit(_)))
         {
             self.out.unjudged += 1;
             return;
@@ -258,13 +258,13 @@ impl<'a> Walk<'a, '_> {
         };
         let how = match rhs {
             _ if ctor => How::Constructor,
-            Rhs::Val(Val::Lit) => How::Literal,
+            Rhs::Val(Val::Lit(_)) => How::Literal,
             // A constant into a sized integer, and only there: a named type's
             // predicate still owes a producer whatever the operands are.
-            Rhs::Prim(vs, _)
+            Rhs::Prim(_, vs, _)
                 if matches!(to, Type::IntN { .. })
                     && !vs.is_empty()
-                    && vs.iter().all(|v| matches!(v, Val::Lit)) =>
+                    && vs.iter().all(|v| matches!(v, Val::Lit(_))) =>
             {
                 How::Constant
             }
@@ -282,7 +282,7 @@ impl<'a> Walk<'a, '_> {
             }
             // A record literal of a validated record type: the type's other
             // producer, and the one the `where-record` row exists for.
-            Rhs::Make(_) => How::Constructor,
+            Rhs::Make(..) => How::Constructor,
             Rhs::Call { .. } => How::Finding("other-call"),
             Rhs::Prim(..) => How::Finding("primitive"),
             Rhs::Read(_) | Rhs::Take(_) => How::Finding("read-of-place"),
@@ -295,10 +295,10 @@ impl<'a> Walk<'a, '_> {
             producer: match rhs {
                 Rhs::Call { callee, .. } => callee.clone(),
                 Rhs::Prim(..) => "@prim".into(),
-                Rhs::Make(_) => "@make".into(),
+                Rhs::Make(..) => "@make".into(),
                 Rhs::Read(p) | Rhs::Take(p) => self.spell(p),
                 Rhs::Val(Val::Name(n)) => self.body.names[*n as usize].source.clone(),
-                Rhs::Val(Val::Lit) => "@lit".into(),
+                Rhs::Val(Val::Lit(_)) => "@lit".into(),
             },
             line,
             how,
@@ -314,8 +314,8 @@ impl<'a> Walk<'a, '_> {
             Rhs::Val(Val::Name(n)) => Some(self.body.names[*n as usize].ty.clone()),
             Rhs::Read(p) | Rhs::Take(p) => self.place_ty(p),
             Rhs::Call { ret, .. } => ret.clone(),
-            Rhs::Prim(_, ty) => ty.clone(),
-            Rhs::Make(_) | Rhs::Val(Val::Lit) => None,
+            Rhs::Prim(_, _, ty) => ty.clone(),
+            Rhs::Make(..) | Rhs::Val(Val::Lit(_)) => None,
         }
     }
 

@@ -27,7 +27,7 @@ use std::collections::HashMap;
 
 use vyrn_frontend::ast::{
     ArmBody, BinOp, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program,
-    Stmt, Type,
+    Stmt, Type, UnOp,
 };
 use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Owned, Ownership, Release};
 use vyrn_frontend::prelude;
@@ -329,12 +329,68 @@ pub enum Site {
     Edge(usize, u32),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// WHAT a literal is (RFC-0125 §3 M3, the operation slice).
+///
+/// The core stated WHO OWNS WHAT and WHERE CONTROL GOES, and never WHAT IS
+/// COMPUTED: `let x = 5` and `let x = 7` were one statement, so an emitter
+/// read the value off the source. §2.3's emitter "maps `prim` rows to wasm
+/// instructions", and it cannot while the instruction's operand is missing
+/// from the row.
+///
+/// The WIDTH is not here, and that is the granularity the census argued for.
+/// An integer literal's type is its destination's (RFC-0058's sized
+/// integers), which is the checker's answer at the node and
+/// [`crate::Row::ty`]'s to hand out. A width in the row would be a second
+/// statement of the same rule, which is the thing this RFC is about.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lit {
+    Int(i64),
+    /// A byte literal `'c'` (RFC-0057) — an integer literal whose value is
+    /// the byte.
+    Byte(u8),
+    Float(f64),
+    Bool(bool),
+    /// A string literal, decoded. The row names the BYTES and not a data
+    /// segment: where they land is the emitter's question, and the two
+    /// compiled backends answer it differently.
+    Str(String),
+    /// Not a value a reader wrote, and nothing an emitter loads. A function's
+    /// name, a type's name and a nullary constructor used as a value are
+    /// static and the checker types none of them as an expression; and this
+    /// pass writes the same word where it needs a value and reads none — a
+    /// loop's exit condition, the index of the element read that walks a
+    /// container, the result of a `?` whose ok arm binds nothing.
+    Opaque,
+}
+
+/// The literal a literal expression IS, and `None` for every other
+/// expression.
+///
+/// WHICH expression forms are literals is stated here and nowhere else. It
+/// was stated twice before this row existed — [`Builder::val`] and
+/// [`Builder::rhs_inner`] each named the same five `Expr` variants to answer
+/// "nothing to own" — and the row would have made it three.
+/// [`Builder::val`] asks this instead of naming them. [`Builder::rhs_inner`]
+/// still names the five, because its match is exhaustive on purpose and a
+/// form with no arm must fail to compile; it names them and asks here for the
+/// answer (RFC-0125 §3 M3, the operation slice).
+fn lit_of(e: &Expr) -> Option<Lit> {
+    Some(match e {
+        Expr::Int(v) => Lit::Int(*v),
+        Expr::Byte(v) => Lit::Byte(*v),
+        Expr::Float(v) => Lit::Float(*v),
+        Expr::Bool(v) => Lit::Bool(*v),
+        Expr::Str(s) => Lit::Str(s.clone()),
+        _ => return None,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Val {
     Name(Name),
     /// A literal: nothing to own. A string literal is static data
     /// ([`NotOwned::Static`]).
-    Lit,
+    Lit(Lit),
 }
 
 #[derive(Debug, Clone)]
@@ -418,11 +474,71 @@ pub enum Rhs {
         ret: Option<Type>,
     },
     /// Arithmetic, comparison, interpolation, conversion: reads its operands.
-    /// The second field is the producer type — the operator's own result,
-    /// which is what `binop_type` decided and the destination did not.
-    Prim(Vec<Val>, Option<Type>),
-    /// A record, array, map or variant literal: takes its parts.
-    Make(Vec<Val>),
+    /// The first field is WHAT it computes; the last is the producer type —
+    /// the operator's own result, which is what `binop_type` decided and the
+    /// destination did not.
+    Prim(Op, Vec<Val>, Option<Type>),
+    /// A record, array, map or variant literal: takes its parts. The first
+    /// field is WHAT it constructs.
+    Make(Ctor, Vec<Val>),
+}
+
+/// The operation a [`Rhs::Prim`] row performs (RFC-0125 §3 M3, the operation
+/// slice).
+///
+/// §2.3 says the emitter "maps `prim` rows to wasm instructions". A row that
+/// carries operands alone maps to nothing: `a + b` and `a - b` were the same
+/// row, and no emitter could tell them apart.
+///
+/// It names the SOURCE's operator and not an opcode, and that is the
+/// granularity the census argued for. One operator is many instructions —
+/// `i32.add`, `i64.add`, `f64.add`, `i32x4.add` — and what chooses among them
+/// is the OPERAND's type, which the checker states at the operand's own node.
+/// An opcode in the row would restate the checker there, and RFC-0083's lane
+/// counts would arrive as a second table.
+///
+/// Two of these are not arithmetic and a reader has to know: `&&` and `||`
+/// SHORT-CIRCUIT, so an emitter runs the right operand under a branch. This
+/// pass reads both operands into the row because a read of either owns
+/// nothing and the linear judgment is the same either way, and the operator
+/// is what tells a later reader that the second read may not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Un(UnOp),
+    Bin(BinOp),
+    /// RFC-0023: a lambda literal. Its operands are the captures the closure
+    /// snapshots and its result is the closure value, which is why it is a
+    /// prim and not a [`Ctor`] — the parts are READ, where a constructor's
+    /// are taken.
+    Closure,
+}
+
+/// What a [`Rhs::Make`] row constructs (RFC-0125 §3 M3, the operation slice).
+///
+/// `Make(vs)` was a list of values with no name on it, so a record literal,
+/// an array literal, a map literal and a `where`-checked constructor were one
+/// row and an emitter read the constructor off the source. `layout.rs` needs
+/// the TYPE to place the value and the FIELD each part fills to place its
+/// parts, and the row carried neither.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ctor {
+    /// A record literal `T { f: .. }`: the named type, and the field each
+    /// part goes into — one name per value, in the order the reader WROTE
+    /// them, which is the order the values are in.
+    ///
+    /// The DECLARATION's order is the layout's, and it is not restated here:
+    /// an emitter joins the two by name, which is what it does off the source
+    /// today. A row that carried the declaration's order would go stale the
+    /// day a field moves.
+    Record(String, Vec<String>),
+    /// An array literal `[a, b]`: its elements, in order.
+    Array,
+    /// A map literal `{k: v}`: key then value, one pair per entry, in the
+    /// order they were written (RFC-0028 keeps insertion order).
+    Map,
+    /// `T?(v)` (RFC-0079): the constructor of a `where`-checked type, which
+    /// answers an `Option<T>` rather than a `T`.
+    Try(String),
 }
 
 /// What a store displaces.
@@ -687,7 +803,14 @@ impl Body {
     fn val(&self, v: &Val) -> String {
         match v {
             Val::Name(n) => self.spell(*n),
-            Val::Lit => "lit".into(),
+            Val::Lit(l) => match l {
+                Lit::Int(v) => format!("lit {v}"),
+                Lit::Byte(v) => format!("lit byte {v}"),
+                Lit::Float(v) => format!("lit {v:?}"),
+                Lit::Bool(v) => format!("lit {v}"),
+                Lit::Str(s) => format!("lit {s:?}"),
+                Lit::Opaque => "lit".into(),
+            },
         }
     }
 
@@ -719,15 +842,26 @@ impl Body {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Rhs::Prim(vs, _) => format!(
-                "prim({})",
+            Rhs::Prim(op, vs, _) => format!(
+                "prim {}({})",
+                match op {
+                    Op::Un(o) => format!("{o:?}").to_lowercase(),
+                    Op::Bin(o) => format!("{o:?}").to_lowercase(),
+                    Op::Closure => "closure".into(),
+                },
                 vs.iter()
                     .map(|v| self.val(v))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            Rhs::Make(vs) => format!(
-                "make({})",
+            Rhs::Make(c, vs) => format!(
+                "make {}({})",
+                match c {
+                    Ctor::Record(t, fs) => format!("{t} {{{}}}", fs.join(", ")),
+                    Ctor::Array => "array".into(),
+                    Ctor::Map => "map".into(),
+                    Ctor::Try(t) => format!("{t}?"),
+                },
                 vs.iter()
                     .map(|v| self.val(v))
                     .collect::<Vec<_>>()
@@ -1057,12 +1191,12 @@ impl Reads {
                     }
                 }
             }
-            Rhs::Prim(vs, _) => {
+            Rhs::Prim(_, vs, _) => {
                 for v in vs {
                     self.val(v);
                 }
             }
-            Rhs::Make(vs) => {
+            Rhs::Make(_, vs) => {
                 for v in vs {
                     self.hand(v);
                 }
@@ -1721,7 +1855,7 @@ impl<'a> Builder<'a> {
     fn borrows(&self, v: &Val) -> bool {
         match v {
             Val::Name(n) => self.body.names[*n as usize].borrow,
-            Val::Lit => false,
+            Val::Lit(_) => false,
         }
     }
 
@@ -2468,7 +2602,7 @@ impl<'a> Builder<'a> {
                 // walked a field the dead edge had taken (`std/vyx`'s
                 // `vyxMergeImports`, found by the cross-engine generator gate).
                 l.push(St::If {
-                    cond: Val::Lit,
+                    cond: Val::Lit(Lit::Opaque),
                     then: Vec::new(),
                     els: vec![St::Break { site: 0 }],
                     site: 0,
@@ -2519,7 +2653,10 @@ impl<'a> Builder<'a> {
                 self.keyed(x, vyrn_frontend::own::for_var_key(var));
                 let head = vec![St::Let(
                     x,
-                    Rhs::Read(Place::Elem(Box::new(Place::Name(it)), Val::Lit)),
+                    Rhs::Read(Place::Elem(
+                        Box::new(Place::Name(it)),
+                        Val::Lit(Lit::Opaque),
+                    )),
                 )];
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), x));
@@ -2962,7 +3099,7 @@ impl<'a> Builder<'a> {
                         self.keyed(t, construct);
                         Ok((Val::Name(t), self.taken_by(t, construct)))
                     }
-                    Val::Lit => Ok((Val::Lit, false)),
+                    Val::Lit(l) => Ok((Val::Lit(l), false)),
                 }
             }
         }
@@ -3547,10 +3684,10 @@ impl<'a> Builder<'a> {
         // inside it: `n = n + size(if c { names } else { .. })` stores an
         // Int64 and the join still binds an owning temporary.
         let rebinding = std::mem::take(&mut self.rebinding);
+        if let Some(l) = lit_of(e) {
+            return Ok(Val::Lit(l));
+        }
         match e {
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
-                Ok(Val::Lit)
-            }
             Expr::Var { name, line } => match self.lookup(name) {
                 Some(n) => Ok(Val::Name(n)),
                 // A function's name as a value (`sortWith(es, byCount)`), or
@@ -3565,7 +3702,7 @@ impl<'a> Builder<'a> {
                     || name == "None"
                     || self.is_variant(name) =>
                 {
-                    Ok(Val::Lit)
+                    Ok(Val::Lit(Lit::Opaque))
                 }
                 // Module state lives for the whole module and nothing
                 // may take it (RFC-0013): `movecheck` refuses passing it
@@ -3637,7 +3774,7 @@ impl<'a> Builder<'a> {
         let caps = self.captures(e);
         let ty = self.ty_of(e).unwrap_or(Type::Unit);
         let t = self.name("@lambda", ty.clone(), false, e.line());
-        out.push(St::Let(t, Rhs::Prim(caps.clone(), Some(ty))));
+        out.push(St::Let(t, Rhs::Prim(Op::Closure, caps.clone(), Some(ty))));
         self.lambda_frame(e, &caps)?;
         Ok(Val::Name(t))
     }
@@ -3964,13 +4101,19 @@ impl<'a> Builder<'a> {
 
     fn rhs_inner(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Rhs, Gap> {
         match e {
+            // The five forms are named again here, and only here, because the
+            // match below is EXHAUSTIVE on purpose: a new `Expr` variant must
+            // fail to compile rather than fall into a catch-all. WHAT each one
+            // is stays `lit_of`'s answer alone.
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
-                Ok(Rhs::Val(Val::Lit))
+                Ok(Rhs::Val(Val::Lit(lit_of(e).unwrap_or(Lit::Opaque))))
             }
             Expr::Var { .. } | Expr::Consume { .. } => Ok(Rhs::Val(self.val(e, out)?)),
-            Expr::Unary { expr, .. } => {
-                Ok(Rhs::Prim(vec![self.read_val(expr, out)?], self.produced(e)))
-            }
+            Expr::Unary { op, expr, .. } => Ok(Rhs::Prim(
+                Op::Un(*op),
+                vec![self.read_val(expr, out)?],
+                self.produced(e),
+            )),
             Expr::Binary { op, lhs, rhs, .. } => {
                 // An operator drains its operands' temporaries in both
                 // compiled backends (`binary`, `gen_binary`).
@@ -4003,7 +4146,7 @@ impl<'a> Builder<'a> {
                     self.read_val(rhs, out)?
                 };
                 self.drain -= 1;
-                Ok(Rhs::Prim(vec![a, b], self.produced(e)))
+                Ok(Rhs::Prim(Op::Bin(*op), vec![a, b], self.produced(e)))
             }
             Expr::Field { expr, field, .. } => {
                 let fty = self.ty_of(e)?;
@@ -4025,22 +4168,35 @@ impl<'a> Builder<'a> {
                 let r = self.call(name, args, *line, self.produced(e), out)?;
                 out.push(St::Do(r, *line));
                 out.push(St::Trap);
-                Ok(Rhs::Val(Val::Lit))
+                Ok(Rhs::Val(Val::Lit(Lit::Opaque)))
             }
             Expr::Call { name, args, line } => self.call(name, args, *line, self.produced(e), out),
-            Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
+            Expr::TryConstruct { name, args, .. } => {
                 let mut vs = Vec::new();
                 for a in args {
                     vs.push(self.val(a, out)?);
                 }
-                Ok(Rhs::Make(vs))
+                Ok(Rhs::Make(Ctor::Try(name.clone()), vs))
             }
-            Expr::StructLit { fields, .. } => {
+            Expr::ArrayLit { elems, .. } => {
+                let mut vs = Vec::new();
+                for a in elems {
+                    vs.push(self.val(a, out)?);
+                }
+                Ok(Rhs::Make(Ctor::Array, vs))
+            }
+            Expr::StructLit { name, fields, .. } => {
                 let mut vs = Vec::new();
                 for (_, a) in fields {
                     vs.push(self.val(a, out)?);
                 }
-                Ok(Rhs::Make(vs))
+                Ok(Rhs::Make(
+                    Ctor::Record(
+                        name.clone(),
+                        fields.iter().map(|(f, _)| f.clone()).collect(),
+                    ),
+                    vs,
+                ))
             }
             Expr::MapLit { entries, .. } => {
                 let mut vs = Vec::new();
@@ -4048,7 +4204,7 @@ impl<'a> Builder<'a> {
                     vs.push(self.val(k, out)?);
                     vs.push(self.val(v, out)?);
                 }
-                Ok(Rhs::Make(vs))
+                Ok(Rhs::Make(Ctor::Map, vs))
             }
             // A `spawn` is a call that runs as a task, so its arguments are
             // the callee's parameters: a `read` parameter is read, and only a
@@ -4248,7 +4404,10 @@ impl<'a> Builder<'a> {
                 )?;
                 ok.push(St::Store {
                     place: Place::Name(res),
-                    value: ob.first().map(|n| Val::Name(*n)).unwrap_or(Val::Lit),
+                    value: ob
+                        .first()
+                        .map(|n| Val::Name(*n))
+                        .unwrap_or(Val::Lit(Lit::Opaque)),
                     old: Old::Nothing,
                     line: *line,
                     site: Site::None,
@@ -4285,7 +4444,7 @@ impl<'a> Builder<'a> {
             Expr::Lambda { .. } => {
                 let caps = self.captures(e);
                 self.lambda_frame(e, &caps)?;
-                Ok(Rhs::Prim(caps, self.produced(e)))
+                Ok(Rhs::Prim(Op::Closure, caps, self.produced(e)))
             }
         }
     }
@@ -4416,10 +4575,10 @@ impl<'a> Builder<'a> {
                     // corpus writes only inside a `test` body. The place is a
                     // temporary the site owns, named here so the chain above
                     // has a base (RFC-0125 §3 M6, seventh slice).
-                    Val::Lit => {
+                    Val::Lit(_) => {
                         let ty = self.ty_of(e)?;
                         let t = self.temp(ty, e.line());
-                        out.push(St::Let(t, Rhs::Val(Val::Lit)));
+                        out.push(St::Let(t, Rhs::Val(Val::Lit(Lit::Opaque))));
                         Ok(Place::Name(t))
                     }
                 }
