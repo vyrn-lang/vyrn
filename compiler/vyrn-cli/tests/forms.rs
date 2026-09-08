@@ -719,3 +719,458 @@ fn the_form_census_as_a_table() {
         &none,
     );
 }
+
+// ---------------------------------------------------------------------------
+// What the corpus actually writes — RFC-0125 §3 M6, the language-debloat strand.
+//
+// §3 above prices a form in COMPILER lines. It says nothing about whether anyone
+// writes it. A form nobody writes costs its whole price for nothing, and the two
+// numbers together are what a removal decision needs.
+//
+// The count is by parsing, never by grepping. A code quote is a string literal
+// to the lexer, a comment is not a token at all, and a form's name in a doc
+// comment is prose — so a scan of the source text would count all three and a
+// scan of the token stream and the tree counts none of them.
+// ---------------------------------------------------------------------------
+
+/// The corpus, in the order the table prints it. The three roots are the ones
+/// `the_pinned_columns_over_the_corpus` walks; the fourth bucket is the fenced
+/// Vyrn in the committed API docs and is built separately.
+const CORPUS: &[(&str, &[&str])] = &[
+    ("std", &["std"]),
+    ("examples+site", &["examples", "site"]),
+    ("tests", &["compiler/vyrn-cli/tests"]),
+];
+
+/// Every `.vyrn` file under `dirs`, sorted.
+fn vyrn_files(dirs: &[&str]) -> Vec<PathBuf> {
+    let root = repo_root();
+    let mut out = Vec::new();
+    for d in dirs {
+        let mut stack = vec![root.join(d)];
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("vyrn") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Every fenced Vyrn block in the committed docs, as one source string each.
+fn doc_fences() -> Vec<String> {
+    let mut files = Vec::new();
+    let mut stack = vec![repo_root().join("docs")];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.extension().and_then(|s| s.to_str()) == Some("md") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    let open = "```vyrn\n";
+    let close = "\n```";
+    let mut out = Vec::new();
+    for f in files {
+        let Ok(src) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let mut rest = src.as_str();
+        while let Some(a) = rest.find(open) {
+            let body = &rest[a + open.len()..];
+            let Some(b) = body.find(close) else { break };
+            out.push(body[..b].to_string());
+            rest = &body[b + close.len()..];
+        }
+    }
+    out
+}
+
+/// A constructor's own name, without a match over every constructor.
+///
+/// `Debug` writes the variant's name first and this writer refuses the byte
+/// after it, which aborts the formatting there. The obvious spelling —
+/// `format!("{e:?}")` and take the first word — formats the whole subtree at
+/// every node, and the corpus holds a 35 KB expression tree.
+struct Head(String);
+
+impl std::fmt::Write for Head {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for c in s.chars() {
+            if c.is_ascii_alphanumeric() {
+                self.0.push(c);
+            } else {
+                return Err(std::fmt::Error);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn head(v: &dyn std::fmt::Debug) -> String {
+    let mut h = Head(String::new());
+    let _ = std::fmt::write(&mut h, format_args!("{v:?}"));
+    h.0
+}
+
+vyrn_frontend::body_scope_descent!(FormUse, form_block, form_stmt, form_expr);
+
+struct Counter<'c>(&'c mut std::collections::BTreeMap<String, usize>);
+
+impl Counter<'_> {
+    fn bump(&mut self, owner: &str, node: &dyn std::fmt::Debug) {
+        let h = head(node);
+        if !h.is_empty() {
+            *self.0.entry(format!("{owner}::{h}")).or_insert(0) += 1;
+        }
+    }
+}
+
+impl<'a> FormUse<'a> for Counter<'_> {
+    fn stmt(&mut self, s: &'a vyrn_frontend::ast::Stmt, _: &std::collections::HashSet<String>) {
+        self.bump("Stmt", s);
+    }
+
+    fn expr(
+        &mut self,
+        e: &'a vyrn_frontend::ast::Expr,
+        _: &std::collections::HashSet<String>,
+    ) -> bool {
+        self.bump("Expr", e);
+        true
+    }
+
+    fn arm_pattern(
+        &mut self,
+        p: &'a vyrn_frontend::ast::Pattern,
+        _: usize,
+        _: &std::collections::HashSet<String>,
+    ) {
+        self.bump("Pattern", p);
+    }
+}
+
+/// Every keyword, operator and surface desugar one source file writes, counted
+/// into `into` off the token stream.
+fn count_tokens(tokens: &[vyrn_frontend::lexer::Token], into: &mut Uses) {
+    use vyrn_frontend::lexer::{token_name_and_text, Tok};
+    for (i, t) in tokens.iter().enumerate() {
+        let (kind, text) = token_name_and_text(&t.tok);
+        if kind == "keyword" || kind == "punct" {
+            *into.entry(format!("tok {text}")).or_insert(0) += 1;
+        }
+        let next = tokens.get(i + 1);
+        let after = next.map(|n| &n.tok);
+        let same_line = next.map(|n| n.line == t.line).unwrap_or(false);
+        let mut surface = |what: &str| *into.entry(format!("surface {what}")).or_insert(0) += 1;
+        match (&t.tok, after) {
+            // A tag is an identifier with a string literal against it on the
+            // same line — `primary`'s own test, so a tag is counted where the
+            // parser takes one and nowhere else.
+            (Tok::Ident(n), Some(Tok::Str(_) | Tok::TemplateStr { .. })) if same_line => {
+                surface(if n == "vyrn" {
+                    "a code quote"
+                } else {
+                    "a tagged template"
+                });
+            }
+            (Tok::Else, Some(Tok::If)) => surface("else if"),
+            (Tok::While, Some(Tok::Let)) => surface("while let"),
+            (Tok::Let | Tok::Mut, Some(Tok::Ident(_))) => {
+                if matches!(tokens.get(i + 2).map(|n| &n.tok), Some(Tok::LParen)) {
+                    surface("a refutable let");
+                }
+            }
+            _ => {}
+        }
+        let tagged =
+            i > 0 && tokens[i - 1].line == t.line && matches!(tokens[i - 1].tok, Tok::Ident(_));
+        if matches!(t.tok, Tok::TemplateStr { .. }) && !tagged {
+            surface("an interpolated string");
+        }
+        if let Tok::Ident(w) = &t.tok {
+            // Each word in the position the parser reads it in, and no other:
+            // a binding named `read` is a name, not the capability.
+            let contextual = match w.as_str() {
+                "read" | "modify" | "consume" | "share" => {
+                    matches!(after, Some(Tok::Ident(_) | Tok::Vself | Tok::Fn))
+                }
+                "gen" | "extern" => matches!(after, Some(Tok::Fn)),
+                "test" | "bench" => matches!(after, Some(Tok::Str(_))),
+                "contract" => {
+                    matches!(after, Some(Tok::Ident(_)))
+                        && matches!(tokens.get(i + 2).map(|n| &n.tok), Some(Tok::LBrace))
+                }
+                "logging" => matches!(after, Some(Tok::LBrace)),
+                "lazy" | "place" => matches!(after, Some(Tok::Ident(_))),
+                "from" => i > 0 && matches!(after, Some(Tok::Str(_) | Tok::Ident(_))),
+                "as" => i > 0 && matches!(after, Some(Tok::Ident(_))),
+                "panic" => matches!(after, Some(Tok::LParen)),
+                _ => false,
+            };
+            if contextual {
+                *into.entry(format!("word {w}")).or_insert(0) += 1;
+            }
+        }
+    }
+}
+
+/// One source file's whole contribution. `false` when the file does not lex or
+/// does not parse, in which case nothing of it is counted.
+///
+/// `impls` is deliberately not walked: `parse_accum` flattens every impl method
+/// into `functions` under its mangled name, so walking both would count each
+/// method's body twice. A declaration whose `line` is 0 is one the parser
+/// injects into every file (`loader::is_injected`'s rule), and is not something
+/// the file wrote.
+fn count_source(src: &str, into: &mut Uses) -> bool {
+    let Ok(tokens) = vyrn_frontend::lexer::lex(src) else {
+        return false;
+    };
+    count_tokens(&tokens, into);
+    let (program, errors) = vyrn_frontend::parser::parse_accum(tokens);
+    if !errors.is_empty() {
+        return false;
+    }
+    let written: Vec<(&str, usize)> = vec![
+        ("imports", program.imports.len()),
+        (
+            "type_decls",
+            program.type_decls.iter().filter(|t| t.line != 0).count(),
+        ),
+        ("functions", program.functions.len()),
+        ("protocols", program.protocols.len()),
+        ("contracts", program.contracts.len()),
+        ("impls", program.impls.len()),
+        ("globals", program.globals.len()),
+        ("tests", program.tests.len()),
+        ("benches", program.benches.len()),
+    ];
+    for (field, n) in written {
+        if n > 0 {
+            *into.entry(format!("decl {field}")).or_insert(0) += n;
+        }
+    }
+    let mut c = Counter(into);
+    let mut locals = std::collections::HashSet::new();
+    for f in &program.functions {
+        form_block(&f.body, &mut locals, &mut c);
+    }
+    for t in &program.tests {
+        form_block(&t.body, &mut locals, &mut c);
+    }
+    for b in &program.benches {
+        form_block(&b.body, &mut locals, &mut c);
+    }
+    for g in &program.globals {
+        form_expr(&g.init, &locals, &mut c);
+    }
+    for t in &program.type_decls {
+        if t.line != 0 {
+            if let Some(p) = &t.predicate {
+                form_expr(p, &locals, &mut c);
+            }
+        }
+    }
+    true
+}
+
+/// How many times each thing is written, by its census label.
+type Uses = std::collections::BTreeMap<String, usize>;
+
+/// One `Uses` per bucket, plus how many files each bucket counted.
+fn corpus_uses() -> (Vec<(&'static str, Uses)>, Vec<(usize, usize)>) {
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for (label, dirs) in CORPUS {
+        let mut uses = Uses::new();
+        let files = vyrn_files(dirs);
+        let mut ok = 0usize;
+        for p in &files {
+            let Ok(src) = std::fs::read_to_string(p) else {
+                continue;
+            };
+            if count_source(&src, &mut uses) {
+                ok += 1;
+            }
+        }
+        seen.push((ok, files.len()));
+        out.push((*label, uses));
+    }
+    let fences = doc_fences();
+    let mut uses = Uses::new();
+    let mut ok = 0usize;
+    for f in &fences {
+        // A fence is usually a declaration or two, but the generated API docs
+        // also show a call on its own. A body is what a bare statement needs.
+        if count_source(f, &mut uses) || count_source(&format!("fn __d() {{\n{f}\n}}"), &mut uses) {
+            ok += 1;
+        }
+    }
+    seen.push((ok, fences.len()));
+    out.push(("docs", uses));
+    (out, seen)
+}
+
+/// Every label the use table has a row for, in the order it prints them.
+fn use_labels() -> Vec<String> {
+    let mut out = forms();
+    out.extend(declarations().iter().map(|d| format!("decl {d}")));
+    out.extend(keywords().iter().map(|(w, _)| format!("tok {w}")));
+    let mut puncts: Vec<String> = punct_spellings()
+        .iter()
+        .map(|p| format!("tok {p}"))
+        .collect();
+    puncts.sort();
+    puncts.dedup();
+    out.extend(puncts);
+    out.extend(CONTEXTUAL_WORDS.iter().map(|w| format!("word {w}")));
+    out.extend(SURFACE_DESUGARS.iter().map(|w| format!("surface {w}")));
+    out
+}
+
+/// Every punctuation spelling the lexer's `token_name_and_text` names.
+fn punct_spellings() -> Vec<String> {
+    let src = compiler_file("vyrn-frontend/src/lexer.rs");
+    let at = src
+        .find("pub fn token_name_and_text(")
+        .expect("`token_name_and_text` is gone — this test needs a new anchor");
+    let body = &src[at..];
+    let end = body.find("\n}\n").expect("the end of token_name_and_text");
+    let mut out = Vec::new();
+    for line in body[..end].lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("Tok::") else {
+            continue;
+        };
+        let Some(arg) = rest.split("=> p(\"").nth(1) else {
+            continue;
+        };
+        let Some((spelling, _)) = arg.split_once('"') else {
+            continue;
+        };
+        out.push(spelling.to_string());
+    }
+    assert!(out.len() > 30, "only {} punctuation rows", out.len());
+    out
+}
+
+/// The surface forms that leave no node of their own: the parser rewrites each
+/// one into something else, so the tree cannot be asked how often it is written
+/// and the token stream is what answers. Each is spelled as `count_tokens`
+/// labels it.
+const SURFACE_DESUGARS: &[&str] = &[
+    "an interpolated string",
+    "a tagged template",
+    "a code quote",
+    "else if",
+    "while let",
+    "a refutable let",
+];
+
+/// The forms, keywords, operators and words NOTHING in the corpus writes, and
+/// the ones only a compiler test writes.
+///
+/// Two sets, and they are the whole point of the count: a form in the first
+/// costs its price in §3.1 for nobody, and a form in the second is kept alive
+/// by the suite that tests it. Both are pinned rather than printed, because
+/// RFC-0125 §3 M6's record ranks them and a row that quietly gains its first
+/// use has to move the record with it.
+#[test]
+fn nothing_in_the_corpus_writes_these() {
+    let (uses, seen) = corpus_uses();
+    // The three source buckets are whole programs and every one of them parses.
+    // The docs bucket is not: `vyrn doc` prints a declaration's SIGNATURE, and a
+    // `fn` with no body is not a program. What parses of it is counted and the
+    // rest is not, which is why a docs-only row is a weak claim and the record
+    // says so.
+    for (i, (ok, all)) in seen.iter().take(CORPUS.len()).enumerate() {
+        assert_eq!(ok, all, "a file in the {} bucket did not parse", uses[i].0);
+    }
+    let total = |label: &str| -> usize {
+        uses.iter()
+            .map(|(_, u)| u.get(label).copied().unwrap_or(0))
+            .sum()
+    };
+    let outside_tests = |label: &str| -> usize {
+        uses.iter()
+            .filter(|(b, _)| *b != "tests")
+            .map(|(_, u)| u.get(label).copied().unwrap_or(0))
+            .sum()
+    };
+    let mut zero = Vec::new();
+    let mut tests_only = Vec::new();
+    for l in use_labels() {
+        if total(&l) == 0 {
+            zero.push(l);
+        } else if outside_tests(&l) == 0 {
+            tests_only.push(l);
+        }
+    }
+    assert_eq!(
+        (zero.clone(), tests_only.clone()),
+        (
+            ZERO_IN_THE_CORPUS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            ONLY_A_TEST_WRITES_THESE
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        ),
+        "the corpus's use of the surface has moved — RFC-0125 §3 M6's table with it"
+    );
+}
+
+/// Nothing in `std/`, `examples/`, `site/`, the CLI's fixtures or the docs
+/// writes these.
+///
+/// One row, and it is a retirement working: RFC-0120 replaced `place at(..)`
+/// with `-> read T`, and what is left of the word is the migration refusal
+/// RFC-0094 calls a teaching hint (RFC-0127 §3.4 counts that one parser
+/// mention). Nothing else the language spells is unwritten.
+const ZERO_IN_THE_CORPUS: &[&str] = &["word place"];
+
+/// Only a compiler test writes these; no program does. Empty, and that is the
+/// measurement: no form is kept alive by its own fixture.
+const ONLY_A_TEST_WRITES_THESE: &[&str] = &[];
+
+/// The use table for RFC-0125 §3 M6:
+/// `cargo test -p vyrn-cli --test forms -- --ignored --nocapture
+/// what_the_corpus_writes`.
+#[test]
+#[ignore]
+fn what_the_corpus_writes() {
+    let (uses, seen) = corpus_uses();
+    for (i, (ok, all)) in seen.iter().enumerate() {
+        println!("{}: {ok} of {all} files counted", uses[i].0);
+    }
+    println!("\n| what | std | examples+site | tests | docs | all four |");
+    println!("|---|---|---|---|---|---|");
+    for l in use_labels() {
+        let counts: Vec<usize> = uses
+            .iter()
+            .map(|(_, u)| u.get(&l).copied().unwrap_or(0))
+            .collect();
+        let sum: usize = counts.iter().sum();
+        let cells: Vec<String> = counts.iter().map(|c| c.to_string()).collect();
+        println!("| `{l}` | {} | {sum} |", cells.join(" | "));
+    }
+}
