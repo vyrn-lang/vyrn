@@ -13240,6 +13240,71 @@ pointed at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
 
+#### The census of what `own.rs` still asks `movecheck` (2026-09-08, `track-dd`)
+
+The walk is gone and the exit rule is the core's. What is left of the old
+pipeline is two files: `movecheck.rs` at **6,321** lines and `own.rs` at
+**3,497**. §2.7 deletes both. This is the census of the join between them, so
+the next deletion is picked by a number rather than by an impression.
+
+**The sites.** `own.rs` names `crate::movecheck::` at **24** places. Nine are
+doc links. Fifteen are code, and they read **seven** items:
+
+| item | the fact it is | does the core state the same fact | what a reader would need |
+|---|---|---|---|
+| `movecheck::facts` (1 call) | the whole-program walk, run once for `own::analyze` | no — it is the walk itself, not a fact | it goes when its last field goes |
+| `LetOwnership::ty` | the type a `let` binds | **yes** — `Builder::ty_of` types the value and `NameInfo::ty` holds it | nothing; the reader is `Emit::kept`, which asks the same `Owned` table |
+| `LetOwnership::gone` (`Moved`, `Dropped`, `Captured`, `Hole`, `Lent`, `Borrowed`) | something took the value before its block ended | **yes** — the kernel says whether a name is HELD at an exit, per path; `NameInfo::not_owned` says why a `let` is nobody's | the two tables `Emit` writes, `own.droppable` and `own.holes`, are an INPUT to the core (`Builder::keyed`'s `plan_holes`, the `for` loop's `handed_over`). The circle is the blocker |
+| `LetOwnership::elem_only` | every value that left a `for`'s container left through the loop variable, so the buffer alone is the loop's (round sixteen) | **no** | the core would have to say that a loop variable is the only taker of its container's elements |
+| `Facts::store_events`, `Facts::exit_orders`, `Facts::exit_sites` | the write/take/exit event stream in WALK order, with a loop stack and a branch stack | **yes** — the kernel walks the core's control flow, where a back edge is an edge and not a guess | nothing. `own.rs` is the only reader (`Facts` says so itself) |
+| `Facts::lending`, `retains`, `escapers`, `fnval_clear` | four closures over the CALL GRAPH | no, and no body states them | they are handed straight through to the core, which reads them at a call. Not `own.rs`'s to delete |
+| `movecheck::arg_caps` (1 call) | the capability of every declared position | no — it reads DECLARATIONS | the same: handed through, read by the core at an argument position |
+
+**The sections those sites reach.** `movecheck.rs`'s structural census
+(`tests/refusals.rs`) gives `Kind::Rows` **1,748** lines in nineteen sections.
+Only four of them answer an `own.rs` site directly; the rest produce the two
+tables:
+
+| section | lines | who reads it |
+|---|---|---|
+| `pub enum Gone {` | 130 | `own.rs`'s `Emit::kept`, the untake fold, the `consume` parameter loop |
+| `pub enum ArgVerdict {` | 24 | the CORE, at an argument position (`arg_verdict`) |
+| `pub struct ExitEv {` | 113 | `own.rs` alone — the event records and the three `Facts` fields |
+| `pub fn facts(..)` | 92 | `own.rs`'s one call, and `tests/kernel.rs` |
+| `pub fn arg_caps(..)` | 163 | the CORE, through `Ownership::arg_caps` |
+| `fn let_id`, `fn place_key` | 83 | the key the plan and the core share |
+| `fn note_temporary`, `fn store`, `fn is_bound_name`, `fn names_a_place` | 599 | they WRITE the `lets` table |
+| `fn note_return`, `fn note_handover`, `fn note_arm_aliases`, `fn carries_param_storage`, `fn lends`, `fn returned_borrow`, `fn lends_through_a_wrapper`, `fn capture_site` | 519 | they write the four call-graph closures and the lend records |
+
+**The ranked deletion list.** A row is above another when nothing but the
+core's own answer stands between it and the delete key.
+
+1. **The event records.** `ExitEv`, `StoreEv`, `EvKind` and the three `Facts`
+   fields, with the recorders that fill them (`store_ev`, `mention_ev`,
+   `exit_site`, `exit_ev`, `enter_branch`, `leave_branch`, the loop stamps and
+   the region stamp) and the two folds in `own.rs` that read them — the early
+   fold and the untake fold. Walk order with a loop stack is a surrogate for a
+   control-flow graph, and the kernel has the graph. Nothing outside `own.rs`
+   reads a byte of it. **Taken by the next slice.**
+2. **`Gone` as `Emit::kept` reads it.** The kernel says which name is held at
+   which exit, and it says it per path. What stands in the way is not the fact
+   but the direction: `own.droppable` and `own.holes` are read by the core
+   while it BUILDS the body the kernel then judges. The core must state a
+   binding's holes and a `for`'s element handover from its own body before the
+   walk that writes them can go.
+3. **`LetOwnership::elem_only`.** One bit, one reader, and no core statement
+   at all. It decides whether a consuming `for` frees its container deep or
+   frees the buffer alone, and round fourteen's fourteen divergences are what
+   a wrong answer costs.
+4. **`let_id`, `place_key`, `note_temporary` and the three writers beside
+   it.** They exist to fill the `lets` table; they leave with row 2.
+5. **The four call-graph closures, `arg_caps` and `ArgVerdict`.** They are not
+   `own.rs`'s at all — the CORE reads them, at a call. They leave when rule 3
+   covers an element, which `Facts::lending` states in its own words.
+
+Nothing moved in this slice: it is a reading of the two files, and the numbers
+it quotes are the ones the two censuses already pin.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
