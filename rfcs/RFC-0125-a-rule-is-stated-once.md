@@ -13703,6 +13703,102 @@ other file unmoved. The core grew by 72 for a walk it used to look up.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
 
+#### The capability of a position is a declaration, so it leaves the pass (2026-09-08, `track-dh`)
+
+The census's slice 5 asks whether `vyrn-lower` can state the four call-graph
+closures and `arg_caps` itself. The answer differs per item, and one of them
+moves today.
+
+**`arg_caps` needs no analysis at all.** It reads
+`program.functions[..].params[..].capability` and every protocol method's
+`recv` plus `param_caps`, and builds a map. `arg_cap` looks a position up in
+it and falls back to `prelude::capability`. Neither walks a body, and
+`declared.rs`'s own first paragraph is the rule they belong under: "Each is
+a reading of a DECLARATION, and none of them is a question about an
+expression." Both are in `declared.rs` now. `own::analyze` and the core read
+them there; `movecheck::arg_verdict` reads them there too, which is the
+point — the pass that used to own the map is now one of its readers.
+
+**The licence.** A move with no rewrite: kernel corpus 24,775 accepted, 0
+refused, 0 unlowered; `VYRN_WASM_MANIFEST=check` green with no manifest
+change; residue 172 clean, 3 leaking, 0 double-free on each engine.
+`movecheck.rs` 6,074 to **6,031**, `declared.rs` 342 to **387**. The
+structural census moves with it: `Kind::Rows` **1,608 to 1,565**, the
+section's anchor is `pub fn hands_back` now and what it names is the
+producer screens and the verdict alone.
+
+**The four closures, measured over the corpus.** `VYRN_LEND_DUMP=1` and
+`VYRN_MEET_DUMP=1` over all 190 corpus programs:
+
+| closure | over the corpus | what it needs |
+|---|---|---|
+| `lending` | EMPTY in every one of the 190 | seeded by `MoveCheck::lends`, which fires where a body RETURNS a borrow that is not a plain place, or lends through a wrapper |
+| `retains` | EMPTY in every one of the 190 | the same recording path, closed backwards through `handed_on` |
+| `escapers` (`param_escapers`) | NOT empty — up to 123 rows in one program | `carries_param_storage` over a returned expression: a walk |
+| `fnval_clear` | NOT empty — up to 1,154 cleared signature keys | the two closures above, `arg_caps`, and a census of every LAMBDA's arity and signature: a walk |
+
+**A finding about the two empty ones.** The record that kept them said they
+are "the shadow of a rule that is enforced now" with ONE exception: "Rule 3
+does not refuse a `Borrow::Element`… so `fn pick(xs: Array<String>) ->
+String { for x in xs { return x } .. }` is ACCEPTED and seeds `lending`."
+That is no longer true on this line. Both spellings of `pick` — the bare
+`return x` and the `return if true { x } else { "" }` the unit test uses —
+are refused: "`x` may not be returned — it is a loop variable, and a return
+is owned". So is `fn at0(xs: Array<String>) -> String { return xs[0] }`,
+which seeds `lending` with `at0` and is refused with "`xs[0]` may not be
+returned — it is a `read` parameter". Every witness tried seeds the set and
+is refused.
+
+**Why that is still not a licence to delete them.** "Every witness tried"
+is not "every witness". `note_wrapped_lend` records without refusing, and
+says so in its own words — refusing `found = match a { Key(k) => Some(k) }`
+would refuse most of `std/html` — so the wrapped shape is a lend nothing
+states a refusal for, and it is only silent over the corpus because
+`lends_through_a_wrapper` finds no inner lender there. The deletion needs
+one of two things, and both are a slice of their own: a proof that a
+function whose result the caller must not release is refused whatever
+wrapper it hides behind, or a corpus pin that turns "empty over 190
+programs" into a gate and a rule that a non-empty set is a REFUSAL rather
+than a recording. Until then, deleting them frees storage the caller's
+caller still owns, which is what the round-fourteen note is about.
+
+**Slice 4 is blocked by slice 3's other half, not by its own reader.**
+`let_id`, `place_key`, `note_temporary` and the three writers beside them
+exist to fill `Facts::lets`, and `own.rs`'s `Emit::kept` still reads `ty`
+and `gone` off it to write `own.droppable` — which the EMITTER reads, at a
+`let`, at a `for` and at a `match` temporary. So they leave when
+`own.droppable` does, and `own.droppable` leaves when the core states a
+container's release at the loop, which is the blocker the element slice
+already named.
+
+#### Gates (2026-09-08, the capability map)
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 79 suites, all green |
+| `kernel` `--ignored`, release | 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — 30,197 functions judged, 0 unlowered |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1 |
+| `refusals` | 19, the structural census re-pinned at 1,565 |
+| `emitter_census`, `forms`, `surface`, `checker_census` | unmoved |
+| `cargo test -p vyrn-frontend` | 10 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 17 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 268 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

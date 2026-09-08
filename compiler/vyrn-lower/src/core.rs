@@ -3318,7 +3318,7 @@ impl<'a> Builder<'a> {
         };
         let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
             || self.is_variant(callee);
-        let cap = mc::arg_cap(&self.own.arg_caps, callee, ix);
+        let cap = vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix);
         if mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
             == mc::ArgVerdict::Released
         {

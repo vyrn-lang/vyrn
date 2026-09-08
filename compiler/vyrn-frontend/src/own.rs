@@ -1123,7 +1123,7 @@ pub struct Ownership {
     /// through a fn value, where no capability row answers.
     pub fnval_clear: std::collections::HashSet<String>,
     /// The capability of every declared position, by callee name — see
-    /// [`crate::movecheck::arg_caps`].
+    /// [`crate::declared::arg_caps`].
     ///
     /// It is a read of the DECLARATIONS and says nothing about a body, so it
     /// is the same table for every body of the program. The core used to build
@@ -1358,7 +1358,7 @@ fn analyze_now(program: &Program) -> Ownership {
         retains: facts.retains.clone(),
         escapers: facts.escapers.clone(),
         fnval_clear: facts.fnval_clear.clone(),
-        arg_caps: crate::movecheck::arg_caps(program),
+        arg_caps: crate::declared::arg_caps(program),
     };
     // RFC-0125 M3: the placer, when one is installed, adds the release rows
     // this analysis owes and did not place. It runs the lowering, which runs
