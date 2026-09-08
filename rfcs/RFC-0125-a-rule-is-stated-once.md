@@ -7947,7 +7947,7 @@ where it is, which is what catches a deletion that deleted prose.
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
 | the mapping §2.3 names | 5,764 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
-| a decision §2.3 says it must not make | 2,211 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
+| a decision §2.3 says it must not make | 2,125 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |

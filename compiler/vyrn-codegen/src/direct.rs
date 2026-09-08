@@ -15110,130 +15110,44 @@ fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
     }
 }
 
-/// Every expression under `e`, pre-order, `e` itself first, and every
-/// statement under it through `fs`. A lambda is a leaf: its body is lowered as
-/// its own function, so nothing inside it is this loop's to hoist, and
-/// `header_invariant` refuses a lambda that so much as mentions the binding.
-fn each_expr(e: &Expr, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
-    fe(e);
-    match e {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. }
-        | Expr::Lambda { .. } => {}
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            each_expr(expr, fe, fs)
-        }
-        Expr::Consume { place, .. } => each_expr(place, fe, fs),
-        Expr::Binary { lhs, rhs, .. } => {
-            each_expr(lhs, fe, fs);
-            each_expr(rhs, fe, fs);
-        }
-        Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                each_expr(a, fe, fs);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                each_expr(k, fe, fs);
-                each_expr(v, fe, fs);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                each_expr(v, fe, fs);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            each_expr(scrutinee, fe, fs);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => each_expr(e, fe, fs),
-                    ArmBody::Block(blk) => each_block(blk, fe, fs),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            each_expr(cond, fe, fs);
-            each_expr(then_branch, fe, fs);
-            if let Some(e) = else_branch {
-                each_expr(e, fe, fs);
-            }
-        }
+vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);
+
+/// The one line the hoist writes at a node: hand it to `fe` or `fs`, and stop
+/// at a lambda. Nothing here asks what is in scope.
+struct Hoist<'e, 's> {
+    fe: &'e mut dyn FnMut(&Expr),
+    fs: &'s mut dyn FnMut(&Stmt),
+}
+
+impl HoistVisit<'_> for Hoist<'_, '_> {
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+        (self.fs)(s)
     }
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        (self.fe)(e);
+        // A lambda is a leaf: its body is lowered as its own function, so
+        // nothing inside it is this loop's to hoist, and `header_invariant`
+        // refuses a lambda that so much as mentions the binding.
+        !matches!(e, Expr::Lambda { .. })
+    }
+}
+
+/// Every expression under `e`, pre-order, `e` itself first, and every
+/// statement under it through `fs` — `ast::body_scope_descent!`'s descent
+/// since RFC-0125 §3 M6, where this file wrote the arms out itself.
+fn each_expr(e: &Expr, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
+    hoist_expr(e, &std::collections::HashSet::new(), &mut Hoist { fe, fs });
 }
 
 fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
-    for s in &blk.stmts {
-        each_stmt(s, fe, fs);
-    }
-}
-
-fn each_stmt(s: &Stmt, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
-    fs(s);
-    match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => each_expr(value, fe, fs),
-        Stmt::IndexSet { index, value, .. } => {
-            each_expr(index, fe, fs);
-            each_expr(value, fe, fs);
-        }
-        Stmt::Return { value, .. } => {
-            if let Some(v) = value {
-                each_expr(v, fe, fs);
-            }
-        }
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            each_expr(cond, fe, fs);
-            each_block(then_block, fe, fs);
-            if let Some(blk) = else_block {
-                each_block(blk, fe, fs);
-            }
-        }
-        Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            each_expr(scrutinee, fe, fs);
-            each_block(then_block, fe, fs);
-            if let Some(blk) = else_block {
-                each_block(blk, fe, fs);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            each_expr(cond, fe, fs);
-            each_block(body, fe, fs);
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            each_expr(iter, fe, fs);
-            each_block(body, fe, fs);
-        }
-        Stmt::Region { body, .. } => each_block(body, fe, fs),
-    }
+    hoist_block(
+        blk,
+        &mut std::collections::HashSet::new(),
+        &mut Hoist { fe, fs },
+    );
 }
 
 /// Could evaluating `e` read the binding `name`, or run code that might

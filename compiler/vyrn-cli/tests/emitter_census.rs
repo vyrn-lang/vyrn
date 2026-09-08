@@ -501,11 +501,14 @@ fn sections() -> Vec<Section> {
             "the typed load, by the low-level type name",
         ),
         sec(
-            "fn each_expr(e: &Expr, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {",
+            "vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);",
             Decision,
             "the AST walks the hoist above needs, and the header-invariance \
              proof it runs: does the loop body write the name, rebind it, or \
-             call anything that could. An optimizer's analysis, in the emitter",
+             call anything that could. An optimizer's analysis, in the emitter. \
+             The walks READ `ast::body_scope_descent!` since RFC-0125 §3 M6's \
+             second body slice; what is left is the one line this reader writes \
+             at a node — hand it over, and stop at a lambda",
         ),
         sec(
             "fn store_of(ll: &str) -> Instruction<'static> {",
@@ -683,7 +686,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("the mapping §2.3 names", 5764, 573),
-        ("a decision §2.3 says it must not make", 2211, 352),
+        ("a decision §2.3 says it must not make", 2125, 352),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
         ("the wasm format", 334, 0),
