@@ -68,14 +68,13 @@ fn corpus() -> Vec<PathBuf> {
 ///
 /// A body's class is the HARDEST thing in it, so the counts partition the
 /// corpus and the ranked list in §3 M3 reads straight off them.
-const CLASSES: [&str; 9] = [
+const CLASSES: [&str; 8] = [
     "the row names no value (`Val::Lit(Opaque)`)",
     "a lambda body the row does not carry (`Op::Closure`)",
     "a tag the arm does not carry (`St::Switch`)",
     "a layout: an aggregate made, read or taken",
     "a callee that is no declared function of the program (`Rhs::Call`)",
     "a release the driver must place (`St::Drop`, `St::Row`)",
-    "a loop, whose exit the row states as a branch the AST walk folds",
     "an `&&` or `||`: a prim row for a branch the emitter writes",
     "nothing: the rows carry it",
 ];
@@ -103,10 +102,10 @@ fn walk(ss: &[St], note: &mut impl FnMut(usize)) {
                 walk(then, note);
                 walk(els, note);
             }
-            St::Loop(b) => {
-                note(6);
-                walk(b, note);
-            }
+            // Since the loop slice the exit is the row's: the pass makes up
+            // the two-way branch and the `break` at the head of the loop it
+            // desugared, and the walk emits wasm's conditional branch for it.
+            St::Loop(b) => walk(b, note),
             St::Block { body, .. } => walk(body, note),
             St::Break { .. } | St::Continue { .. } | St::Trap => {}
             St::Return { value, .. } => {
@@ -156,7 +155,7 @@ fn rhs(r: &Rhs, note: &mut impl FnMut(usize)) {
             vs,
             _,
         ) => {
-            note(7);
+            note(6);
             for v in vs {
                 val(v, note);
             }

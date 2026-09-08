@@ -7946,7 +7946,7 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 6,360 | 588 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 6,421 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
@@ -9267,6 +9267,129 @@ pointed at a shallow scratch directory outside the checkout.
 | `route` `--ignored`, release | 2, 259 s |
 | the residue ratchet `--ignored`, release | 1, 295 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 16 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+**The loop's exit is the row's, and the emitter writes the one instruction
+wasm has for it (2026-09-08, `track-ds`).** The callee slice's table put the
+loop second at 915 bodies, and the driver slice had ranked it "a shape rather
+than a row: `br_if` against `if { } else { break }`". Read again, it is not a
+shape the emitter recognizes; it is a row the pass STATES, and the two
+sentences are what this slice separates.
+
+**What the core says.** `St::Loop` is an infinite loop. A reader's `while c {
+.. }` is lowered to `Loop([ If { cond: c, then: [], els: [Break] }, ..body ])`,
+and a reader's `for x in xs { .. }` to the same head with the element read
+after it. The `break` in that head is `St::Break { site: 0 }`, which the row's
+own doc defines as "a break this pass made up" — the reader wrote no such
+statement and no refusal may name a line for it. There are exactly two
+producers of one in the whole pass, and both are that head.
+
+So the driver reads it: a two-way branch the pass made up, with an empty
+then-arm and a made-up `break` for its else, IS the loop's exit, and wasm's
+conditional branch out of the enclosing block is the whole of its emission.
+The reader's own `if c { break }` carries the reader's site and is emitted as
+the two-way branch it is, so this is a row read and not a peephole matched: the
+two shapes are identical in the source and different in the row, and the row is
+what decides.
+
+The rest is the pair `St::Break` and `St::Continue` already name. `block {
+loop { .. br 0 } }` — the block is where a `break` goes and the loop is where a
+`continue` goes — and the back edge is unconditional because `St::Loop` is
+unconditional. The region depth at each exit is the emitter's, as it is at
+`St::Block`: `exit_regions_above` closes what the branch leaves, and it counts
+the code being written rather than stating a fact about the loop.
+
+**The count.** **986 of 21,720 bodies** from the core, against 810 after the
+callee slice and 629 after the driver slice. Every emitted byte identical:
+`VYRN_WASM_MANIFEST=check` green with `rfcs/census/wasm-sha256.tsv` untouched,
+and `coredrive`'s three differing programs still the three the driver slice
+explained, at the same byte counts. `coredrive`'s class list loses a row — the
+loop is not a blocker any more — and falls from nine classes to eight.
+
+| what a body waits on | after the callee slice | after this one |
+|---|---|---|
+| the row names no value (`Val::Lit(Opaque)`) | 3,468 | 3,468 |
+| a callee that is no declared function of the program | 10,842 | 10,842 |
+| a layout: an aggregate made, read or taken | 3,124 | 3,124 |
+| **nothing: the rows carry it** | **2,205** | **3,106** |
+| a tag the arm does not carry (`St::Switch`) | 792 | 792 |
+| an `&&` or `||` | 257 | 271 |
+| a release the driver must place | 131 | 131 |
+| a lambda body the row does not carry (`Op::Closure`) | 30 | 30 |
+| a loop, whose exit the row states | 915 | — |
+
+**The finding, and it changes the ranked list.** The rows carry 3,106 bodies
+and the driver takes 986. The 2,120 in between are refused by the emitter's OWN
+screen, and the screen has one clause that does all of it: every name in the
+body must be a scalar this walk reads — `Int64`, a sized integer, a float, a
+`Bool`. So the next thing worth taking is not a row. It is that clause.
+
+It was measured rather than assumed. The clause was widened to admit
+`Type::Str` and the corpus run: `vlog.vyrn` refuses with "no lowering for `Add`
+on `String`", and `threeengines.vyrn` emits 12,102 bytes from the core against
+12,115 from the AST. Both are the same sentence the operation slice already
+wrote: what did NOT move into `Fn_::bin_ins` is "the families that interleave
+the operands with something else ... a `String` or a `Code` operator releases
+what each operand allocated between the two evaluations". A `String` name is
+not one more scalar; it is a value with a release between two reads, and the
+operator table has no row for it because the row would not be an instruction.
+So the screen's clause is load-bearing and the widening is its own slice, with
+the `&&`/`||` row (271 bodies, and it moves bytes) as its neighbour.
+
+Against that, the two rows still on the list buy less than their counts
+suggest. A tag on `Arm` is 792 bodies whose scrutinee is an enum or an
+`Option`, and every one of those names fails the same scalar clause; so does
+`Val::Lit(Opaque)`'s largest producer, the element read at the head of a `for`.
+Neither is worth writing before the emitter's own screen moves, and the order
+in §3 M3's list is now: the screen, `&&` and `||`, then the tag, then the
+layout the two of them wait behind.
+
+**The censuses.** `direct.rs` is **17,056 lines before and 17,117 after** — 61
+added, all in the driver's one section. `core.rs` does not move: the loop's
+exit was already stated, which is the whole of this slice's argument.
+RFC-0126 §3's surface census rises **1,450 to 1,451**: the exit test names
+`Type::Bool` for its condition, `Type::Bool` in `wasm` 31 to 32. The emitter
+census's mapping kind moves **6,360 to 6,421 lines and 588 to 596
+instructions**, and the read class `the core's rows` **2,634 to 2,695 lines**
+with its row count **82 to 91**. RFC-0127 §3's form census, `coretables`,
+`refusals`, `checker_census`, `lowered` and `lowered_dump` are unmoved.
+
+**No arm is deleted.** `Stmt::While`, `Stmt::ForIn`, `Stmt::Break` and
+`Stmt::Continue` each keep a reader: the driver covers 4.5 per cent of the
+corpus's bodies against 3.7, and an arm goes when its last reader goes.
+
+#### The loop slice's gates (2026-09-08)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 17 s |
+| `cargo test -p vyrn-cli`, no filter | 637 passed, 41 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 48 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 43 s — 12,572 switch sites, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 55 s |
+| `effects` `--ignored`, release | 2, 47 s — 30,197 functions judged, 0 unattributed |
+| `fixtures` `--ignored`, release | 1, 29 s |
+| `testsweep` `--ignored`, release | 1, 64 s |
+| `coredrive` `--ignored`, release | 1, 40 s — 986 of 21,720 bodies from the core, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 3 and 1 — both tables re-pinned |
+| `forms` and `surface`, plain and `--ignored` | 7 and 1, 3 and 1 — `forms` unmoved, `surface` re-pinned at one row |
+| `checker_census`, `refusals`, `lowered` plain and `--ignored` | 2 and 1, 19 and 3, 3 and 1 — all unmoved |
+| `lowered_dump`, plain and `--ignored` | 6 and 1 — the five snapshots do not move |
+| `vyrn-frontend` | 1,120 passed, 6 ignored |
+| the workspace less `vyrn-cli` | 1,167 passed, 13 ignored |
+| `vyrn-lsp`'s own manifest | 100 passed, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 301 s |
+| the residue ratchet `--ignored`, release | 1, 373 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 29 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |

@@ -16278,6 +16278,65 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&Instruction::LocalSet(l));
                 }
+                // A LOOP'S EXIT, which the core states and wasm has one
+                // instruction for. The pass makes up exactly one `break`
+                // (`site: 0`, "a break this pass made up") and puts it in the
+                // else arm of a two-way branch it also made up, at the head
+                // of the loop it desugared: that row is a conditional branch
+                // out of the loop's block and nothing else. The reader's own
+                // `if c { break }` carries the reader's site and is emitted
+                // as the two-way branch it is, so this reads the row rather
+                // than recognizing a shape.
+                St::If {
+                    cond,
+                    then,
+                    els,
+                    site: 0,
+                } if then.is_empty()
+                    && matches!(els.as_slice(), [St::Break { site: 0 }])
+                    && !self.loops.is_empty() =>
+                {
+                    self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
+                    b.ins(&Instruction::I32Eqz);
+                    let brk = self.loops.last().expect("a loop is open").0;
+                    let out = self.br_to(brk);
+                    b.ins(&Instruction::BrIf(out));
+                }
+                // `block { loop { .. br 0 } }` — the block is where a `break`
+                // goes and the loop is where a `continue` goes, which is the
+                // pair `St::Break` and `St::Continue` name. `St::Loop` is the
+                // infinite loop the row states, so the back edge is this
+                // walk's and unconditional.
+                St::Loop(inner) => {
+                    let brk = self.depth;
+                    b.ins(&Instruction::Block(BlockType::Empty));
+                    self.depth += 1;
+                    let cont = self.depth;
+                    b.ins(&Instruction::Loop(BlockType::Empty));
+                    self.depth += 1;
+                    self.loops.push((brk, cont, self.region_depth));
+                    let r = self.core_stmts(m, b, body, w, inner);
+                    self.loops.pop();
+                    r?;
+                    let back = self.br_to(cont);
+                    b.ins(&Instruction::Br(back));
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                St::Break { .. } | St::Continue { .. } => {
+                    let Some(&(brk, cont, regions)) = self.loops.last() else {
+                        return unsupported("a core exit outside a loop", 0);
+                    };
+                    self.exit_regions_above(b, regions, true);
+                    let to = match s {
+                        St::Break { .. } => brk,
+                        _ => cont,
+                    };
+                    let d = self.br_to(to);
+                    b.ins(&Instruction::Br(d));
+                }
                 St::If {
                     cond, then, els, ..
                 } => {
@@ -16623,6 +16682,8 @@ impl<'p> Fn_<'_, 'p> {
                     && self.core_readable(body, els, reads)
             }
             St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
+            St::Loop(inner) => self.core_readable(body, inner, reads),
+            St::Break { .. } | St::Continue { .. } => true,
             St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
             St::Do(rhs, _) => self.core_rhs_readable(rhs),
             St::Trap => true,
