@@ -113,11 +113,6 @@ pub struct Release {
     pub kind: DropKind,
     pub exit: Exit,
     pub line: u32,
-    /// Round fifty-two: at this exit the binding's holes have NOT been taken
-    /// yet — every take is later and outside loops — so the release walks the
-    /// WHOLE value, hole fields included. False everywhere else, and the
-    /// emission skips the holes as it always has.
-    pub full: bool,
     /// RFC-0125 M3: the holes THIS row walks around, when the placer decided
     /// them for this exit rather than the analysis for the binding. `None`
     /// means the binding's own set (the `holes` table). The placer sets it
@@ -125,19 +120,6 @@ pub struct Release {
     /// nothing at: the hole set at that exit is the kernel's state there,
     /// which may differ from the binding's set on another path.
     pub holes: Option<Vec<String>>,
-    /// The row is placed BECAUSE the take is later: an exit that provably runs
-    /// before every write and every take of a binding the analysis otherwise
-    /// reads as moved (the "(taken later)" rows above).
-    ///
-    /// The core screens a placed row against its own answer for the binding,
-    /// and its answer here is "moved" — which is the truth at the take and
-    /// wrong at this exit, because on this path the take has not run. Nothing
-    /// else in the core computes early-exit liveness, so the screen would
-    /// swallow exactly the rows nothing else states: `for x in consume val {
-    /// .. }` under a `return` above it leaked the container on every early
-    /// path (the generated JSON decoder's `Invalid` return, three corpus
-    /// rows).
-    pub early: bool,
 }
 
 /// How a droppable binding is reclaimed at block exit.
@@ -1062,10 +1044,6 @@ pub struct Ownership {
     pub owned_fns: HashMap<String, DropKind>,
     /// Per function: identity of each droppable `let` and how to reclaim it.
     pub droppable: HashMap<String, HashMap<usize, DropKind>>,
-    /// Round twenty-one: per function, the MOVED bindings that still need a
-    /// slot registered — their releases are placed only at the early exits
-    /// that run before the take (`fold` in `analyze`), never at block exit.
-    pub early: HashMap<String, HashMap<usize, DropKind>>,
     /// Per function: the places a `consume` took out of a droppable `let`
     /// (RFC-0093 M2), keyed the same way and relative to the binding. A `let`
     /// with no row here has no hole, which is nearly all of them.
@@ -1272,16 +1250,13 @@ fn analyze_now(program: &Program) -> Ownership {
     // by the pass that enforces the rules. One walk, one answer, no second
     // opinion (RFC-0087 records three defects that were two walkers disagreeing).
     let fs = crate::prof::phase("own: movecheck::facts");
-    let mut facts = crate::movecheck::facts(program);
+    let facts = crate::movecheck::facts(program);
     drop(fs);
     let fold = crate::prof::phase("own: the fold");
-    let revived = fold_revived(&facts);
-    let exit_sites = std::mem::take(&mut facts.exit_sites);
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
     let mut holes = HashMap::new();
-    let mut releases: HashMap<String, Vec<Release>> = HashMap::new();
     // Variant constructor names, the builtins included — see `Emit::constructs`.
     let mut constructs: std::collections::HashSet<String> = ["Some", "None", "Ok", "Err"]
         .iter()
@@ -1293,11 +1268,10 @@ fn analyze_now(program: &Program) -> Ownership {
         }
     }
     let mut emit = |name: String, params: &[crate::ast::Param], body: &Block| {
-        let mut r = emit_body(body, &lets, &proto, &revived, &constructs);
+        let mut r = emit_body(body, &lets, &proto, &constructs);
         // RFC-0114: a `consume` parameter whose row says nothing took its
-        // value (or whose take was provably revived) is the callee's to
-        // release at exit — the same decision a `let` gets, minus the
-        // initializer cases a parameter cannot have.
+        // value is the callee's to release at exit — the same decision a
+        // `let` gets, minus the initializer cases a parameter cannot have.
         // A declared `release(consume self)` is excluded outright: the release
         // IS the release, and a row for its `self` would place a second one —
         // a self-recursive call, which the trace gate caught on its fixture
@@ -1311,14 +1285,7 @@ fn analyze_now(program: &Program) -> Ownership {
             let Some(kind) = proto.release_kind(&p.ty) else {
                 continue;
             };
-            let taken = lets.get(&key).and_then(|r| r.gone.as_ref());
-            let ours = match taken {
-                None => true,
-                Some(crate::movecheck::Gone::Moved { .. })
-                | Some(crate::movecheck::Gone::Dropped { .. }) => revived.contains(&key),
-                _ => false,
-            };
-            if ours {
+            if lets.get(&key).and_then(|r| r.gone.as_ref()).is_none() {
                 r.droppable.insert(key, kind);
             }
         }
@@ -1339,261 +1306,6 @@ fn analyze_now(program: &Program) -> Ownership {
     for (i, b) in program.benches.iter().enumerate() {
         emit(format!("bench@{i}"), &[], &b.body);
     }
-    // Round twenty-one: a binding whose row says `Moved` is still LIVE at
-    // every function exit that runs before its take — `let key =
-    // parseString(p)?` two statements above the `fields.push` that takes it,
-    // with a `?` between, leaked one key per unwound frame (jsondepth's 128).
-    // For each such binding, place a release at every clean `return`/`?`
-    // whose walk order sits strictly between the binding's one initializing
-    // write and its first take, all three sharing one loop context — a back
-    // edge makes the order meaningless otherwise. Silent kinds only: the
-    // interpreter reference-counts and runs no placed row, so a declared
-    // `release` (or a `Deep` walk that may reach one) fired here would print
-    // in two engines and not the third.
-    let early: HashMap<String, HashMap<usize, DropKind>> = {
-        use crate::movecheck::EvKind;
-        struct Per<'a> {
-            first_write: Option<&'a crate::movecheck::StoreEv>,
-            first_take: Option<&'a crate::movecheck::StoreEv>,
-            writes: usize,
-            all_owning: bool,
-            write_sites: Vec<(u32, &'a Vec<u32>)>,
-        }
-        let mut per: HashMap<usize, Per> = HashMap::new();
-        for ev in &facts.store_events {
-            let e = per.entry(ev.key).or_insert(Per {
-                first_write: None,
-                first_take: None,
-                writes: 0,
-                all_owning: true,
-                write_sites: Vec::new(),
-            });
-            match ev.kind {
-                EvKind::Write { owning, .. } => {
-                    e.writes += 1;
-                    e.all_owning &= owning;
-                    e.write_sites.push((ev.order, &ev.loops));
-                    if e.first_write.is_none() {
-                        e.first_write = Some(ev);
-                    }
-                }
-                EvKind::Take => {
-                    if e.first_take.is_none() {
-                        e.first_take = Some(ev);
-                    }
-                }
-            }
-        }
-        let mut early: HashMap<String, HashMap<usize, DropKind>> = HashMap::new();
-        let mut extra: Vec<(String, Release)> = Vec::new();
-        let dbg = std::env::var_os("VYRN_EARLY_WHY").is_some();
-        for (key, row) in &lets {
-            let why = |m: &str| {
-                if dbg {
-                    eprintln!("early-why: key={key:x} gone={:?} -> {m}", row.gone);
-                }
-            };
-            // Moved rows ONLY. Round forty-four admitted Hole rows here and
-            // round fifty-one took them back out: a partially-taken binding
-            // is DROPPABLE — it already releases (minus its holes) at every
-            // structural exit — so an early row for it was a SECOND release
-            // at the same return, and the audit caught the double the moment
-            // the return-marking stopped hiding these rows. What a holed
-            // binding is still owed is its HOLE FIELDS at pre-take exits,
-            // which is field-level machinery this fold does not have.
-            if !matches!(row.gone, Some(crate::movecheck::Gone::Moved { .. }))
-                || revived.contains(key)
-            {
-                why("gone/revived");
-                continue;
-            }
-            let Some(kind) = row.ty.as_ref().and_then(|t| proto.release_kind(t)) else {
-                why("no kind");
-                continue;
-            };
-            // The four buffer kinds are silent by construction; a `Deep` walk
-            // is silent exactly when it cannot reach a declared release —
-            // round thirty-eight widened the gate through
-            // [`Owned::reaches_declared`] for the decode wrappers, whose
-            // abandoned value is an `Array<Map<..>>` nothing declares for.
-            let silent = matches!(
-                kind,
-                DropKind::FreeStr | DropKind::FreeArr | DropKind::FreeSmallArr | DropKind::FreeMap
-            ) || matches!(&kind, DropKind::Deep(t) if !proto.reaches_declared(t));
-            if !silent {
-                why("not silent");
-                continue;
-            }
-            let Some(p) = per.get(key) else {
-                why("no events");
-                continue;
-            };
-            let (Some(w), Some(t)) = (p.first_write, p.first_take) else {
-                why("no write/take");
-                continue;
-            };
-            // Two admissions. The single-write rule is round twenty-one's:
-            // write, exit and take share one loop context. Round thirty-eight
-            // adds the loop-written binding taken after its loop (`for j in
-            // consume doc { val = dec(j, ..) } .. return Invalid(..) .. for x
-            // in consume val`): at a FUNCTION-LEVEL exit — one that no loop
-            // repeats — the binding holds its last owning write, not yet
-            // taken, and the path ends, so one deep free is sound. Every
-            // write must be owning (the displaced-value stores answered for
-            // themselves), and both the exit and the take must sit outside
-            // every loop, or a second turn of an enclosing loop would free
-            // the same value twice.
-            let single = p.writes == 1 && t.loops == w.loops;
-            let hoisted = p.all_owning && t.loops.is_empty();
-            if !single && !hoisted {
-                why("neither single nor hoisted");
-                continue;
-            }
-            for ex in &exit_sites {
-                if !ex.clean || ex.order <= w.order || ex.order >= t.order {
-                    continue;
-                }
-                // The single-write rule keeps round twenty-one's loop-context
-                // equality; the hoisted rule keeps round thirty-eight's
-                // function-level exits. Round forty-two tried relaxing the
-                // hoisted exit into loops — a return runs once per call — and
-                // the corpus double-freed: an in-loop `?` whose walk order
-                // sits between the init and the take is NOT ordered against
-                // the loop's own later writes at runtime, and the placed free
-                // met the append machinery's. Reverted; the in-loop exits
-                // keep their leak until the fold can order across a back
-                // edge.
-                // The single-write rule keeps round twenty-one's loop-context
-                // equality. The hoisted rule takes a function-level exit
-                // (round thirty-eight) or — round forty-four — an exit in the
-                // EXACT loop context of an earlier write: within one
-                // iteration the walk order is the runtime order, so the
-                // binding holds that write's owned value and the take (after
-                // every loop) has not run. An exit in a loop none of the
-                // writes share is refused — the wrapper's `for x in consume
-                // val { return Valid(x) }` puts a clean return INSIDE the
-                // loop whose entry already took `val`, and the first cut of
-                // this widening freed the taken buffer under the returned
-                // payload (the audit's rva line named it in one build).
-                let fits = if single {
-                    ex.loops == w.loops
-                } else {
-                    ex.loops.is_empty()
-                        || p.write_sites
-                            .iter()
-                            .any(|(o, ls)| *o < ex.order && **ls == ex.loops)
-                };
-                if !fits {
-                    continue;
-                }
-                if std::env::var_os("VYRN_EARLY_DUMP").is_some() {
-                    eprintln!(
-                        "early: fn={} site={:x} try={} kind={:?} w={} t={} e={}",
-                        ex.fn_name, ex.site, ex.is_try, kind, w.order, t.order, ex.order
-                    );
-                }
-                extra.push((
-                    ex.fn_name.clone(),
-                    Release {
-                        site: ex.site,
-                        binding: *key,
-                        name: "(taken later)".into(),
-                        kind: kind.clone(),
-                        exit: if ex.is_try { Exit::Try } else { Exit::Return },
-                        line: 0,
-                        full: false,
-                        holes: None,
-                        early: true,
-                    },
-                ));
-                early
-                    .entry(ex.fn_name.clone())
-                    .or_default()
-                    .insert(*key, kind.clone());
-            }
-        }
-        // Round fifty-two: a holed binding releases MINUS its holes everywhere,
-        // which is right wherever the take may already have run — and blind at a
-        // `return`/`?` that provably precedes EVERY take: on that path nothing
-        // left, the binding owns itself whole, and the walk may take the hole
-        // fields with it (regexredux's `compile`, whose early `Err` returns each
-        // abandoned four consumed-later Builder arrays). Sound only when every
-        // take and the exit sit outside loops — a loop makes walk order lie
-        // about runtime order, which is round forty-two's lesson.
-        {
-            use crate::movecheck::EvKind;
-            let mut takes: HashMap<usize, (u32, bool)> = HashMap::new();
-            for ev in &facts.store_events {
-                if matches!(ev.kind, EvKind::Take) {
-                    let e = takes.entry(ev.key).or_insert((u32::MAX, true));
-                    e.0 = e.0.min(ev.order);
-                    e.1 &= ev.loops.is_empty();
-                }
-            }
-            let exits2: HashMap<usize, (u32, bool)> = exit_sites
-                .iter()
-                .map(|x| (x.site, (x.order, x.loops.is_empty() && x.clean)))
-                .collect();
-            let dbg52 = std::env::var_os("VYRN_PLACED_DUMP").is_some();
-            for (f, rs) in releases.iter_mut() {
-                let Some(hs) = holes.get(f) else {
-                    if dbg52 {
-                        eprintln!("full-skip: fn={f} no holes map");
-                    }
-                    continue;
-                };
-                for r in rs.iter_mut() {
-                    if !matches!(r.exit, Exit::Return | Exit::Try) {
-                        continue;
-                    }
-                    if !hs.contains_key(&r.binding) {
-                        if dbg52 {
-                            eprintln!("full-skip: fn={f} binding={:x} not holed", r.binding);
-                        }
-                        continue;
-                    }
-                    let Some(&(t_order, t_free)) = takes.get(&r.binding) else {
-                        if dbg52 {
-                            eprintln!("full-skip: fn={f} binding={:x} no takes", r.binding);
-                        }
-                        continue;
-                    };
-                    let Some(&(e_order, e_ok)) = exits2.get(&r.site) else {
-                        if dbg52 {
-                            eprintln!("full-skip: fn={f} site={:x} no exit ev", r.site);
-                        }
-                        continue;
-                    };
-                    if std::env::var_os("VYRN_PLACED_DUMP").is_some() {
-                        eprintln!(
-                            "full?: fn={f} site={:x} t=({t_order},{t_free}) e=({e_order},{e_ok})",
-                            r.site
-                        );
-                    }
-                    if t_free && e_ok && e_order < t_order {
-                        r.full = true;
-                    }
-                }
-            }
-        }
-        if std::env::var_os("VYRN_PLACED_DUMP").is_some() {
-            for (f, rs) in &releases {
-                for r in rs {
-                    eprintln!(
-                        "placed: fn={f} exit={:?} site={:x} binding={:x} name={} kind={:?}",
-                        r.exit, r.site, r.binding, r.name, r.kind
-                    );
-                }
-            }
-        }
-        // The lets iteration is hash-ordered; the emitted IR must not be, so
-        // the injected rows are sorted.
-        extra.sort_by(|a, b| (&a.0, a.1.site, a.1.binding).cmp(&(&b.0, b.1.site, b.1.binding)));
-        for (f, r) in extra {
-            releases.entry(f).or_default().push(r);
-        }
-        early
-    };
     // Rule 3: a return is owned. The return type is the whole answer.
     let owned_fns: HashMap<String, DropKind> = program
         .functions
@@ -1606,11 +1318,12 @@ fn analyze_now(program: &Program) -> Ownership {
         plan,
         owned_fns,
         droppable,
-        early,
         holes,
         memory: HashMap::new(),
         proto,
-        releases,
+        // Every row in this table is the placer's now: the analysis injects
+        // none, and the fold that did is deleted (RFC-0125 §3 M3).
+        releases: HashMap::new(),
         lending: facts.lending.clone(),
         retains: facts.retains.clone(),
         escapers: facts.escapers.clone(),
@@ -1723,95 +1436,6 @@ pub fn must_use_refusals(program: &Program) -> Vec<crate::diagnostics::Diagnosti
     MUST_USE.get().map(|f| f(program)).unwrap_or_default()
 }
 
-/// RFC-0114 untake: the bindings whose value was taken and then provably
-/// re-established, so block exit releases the FINAL value. The rules, all
-/// refusing toward the leak:
-///
-/// - the last event is an OWNING write whose loop set and branch path equal
-///   the `let`'s own — a revive inside a loop that may not run, or on one arm
-///   of a branch, does not dominate the exit;
-/// - every take precedes that write in walk order;
-/// - no early exit (`return`, `?`, `break`, `continue`) sits between the
-///   first take and the write — on such an exit the binding still holds the
-///   taken state, and the exit path's releases run from the same `droppable`
-///   table this fold feeds.
-fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<usize> {
-    use crate::movecheck::{EvKind, Gone};
-    let mut per: HashMap<usize, Vec<&crate::movecheck::StoreEv>> = HashMap::new();
-    for ev in &facts.store_events {
-        per.entry(ev.key).or_default().push(ev);
-    }
-    let mut out = std::collections::HashSet::new();
-    for (key, row) in &facts.lets {
-        if !matches!(
-            row.gone,
-            Some(Gone::Moved { .. }) | Some(Gone::Dropped { .. })
-        ) {
-            continue;
-        }
-        let Some(evs) = per.get(key) else { continue };
-        let (Some(first), Some(last)) = (evs.first(), evs.last()) else {
-            continue;
-        };
-        if !matches!(first.kind, EvKind::Write { id: 0, .. })
-            || !matches!(last.kind, EvKind::Write { owning: true, .. })
-        {
-            continue;
-        }
-        // Round twenty-nine: the SELF-STORE pattern. A take that is part of
-        // the value of a store re-establishing the same binding — `head =
-        // Some(insert(s, Node { next: head }))` — never leaves the binding
-        // un-owned across a statement boundary, whatever loop it sits in: if
-        // the take ran, so did the write, in the same iteration. Every take
-        // paired with an immediately-following owning write in the same loop
-        // context revives the row without the let-level loop test; anything
-        // unpaired falls back to the original rule.
-        let paired = |t: &&crate::movecheck::StoreEv| {
-            evs.iter().any(|w| {
-                matches!(w.kind, EvKind::Write { owning: true, .. })
-                    && w.order > t.order
-                    && w.loops == t.loops
-                    && !evs.iter().any(|x| {
-                        matches!(x.kind, EvKind::Take) && x.order > t.order && x.order < w.order
-                    })
-                    && !facts
-                        .exit_orders
-                        .iter()
-                        .any(|&o| o > t.order && o < w.order)
-            })
-        };
-        let all_paired = evs
-            .iter()
-            .filter(|e| matches!(e.kind, EvKind::Take))
-            .all(paired);
-        let takes: Vec<u32> = evs
-            .iter()
-            .filter(|e| matches!(e.kind, EvKind::Take))
-            .map(|e| e.order)
-            .collect();
-        if takes.is_empty() || takes.iter().any(|&t| t >= last.order) {
-            continue;
-        }
-        if all_paired && std::env::var_os("VYRN_NO_SELFSTORE").is_none() {
-            out.insert(*key);
-            continue;
-        }
-        if last.loops != first.loops || last.branch != first.branch {
-            continue;
-        }
-        let first_take = *takes.iter().min().expect("nonempty");
-        if facts
-            .exit_orders
-            .iter()
-            .any(|&o| o >= first_take && o <= last.order)
-        {
-            continue;
-        }
-        out.insert(*key);
-    }
-    out
-}
-
 /// The placement as a consumer reads it: `(exit, the node the exit is AT)` maps
 /// to the bindings released there, in the order they run.
 ///
@@ -1822,20 +1446,14 @@ fn fold_revived(facts: &crate::movecheck::Facts) -> std::collections::HashSet<us
 /// frames stop.
 ///
 /// The second element is the hole set the step walks around, when the row
-/// carries its own: round fifty-two's `full` is the empty set, and the
-/// placer's rows (RFC-0125 M3) carry the kernel's set at that exit. `None`
-/// leaves the binding's own set in force.
+/// carries its own: the placer's rows (RFC-0125 M3) carry the kernel's set at
+/// that exit. `None` leaves the binding's own set in force.
 pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> {
     let mut out: HashMap<(Exit, usize), Vec<(usize, Option<Vec<String>>)>> = HashMap::new();
     for r in steps {
-        let holes = if r.full {
-            Some(Vec::new())
-        } else {
-            r.holes.clone()
-        };
         out.entry((r.exit, r.site))
             .or_default()
-            .push((r.binding, holes));
+            .push((r.binding, r.holes.clone()));
     }
     out
 }
@@ -1850,13 +1468,11 @@ fn emit_body(
     body: &Block,
     lets: &HashMap<usize, LetOwnership>,
     proto: &Owned,
-    revived: &std::collections::HashSet<usize>,
     constructs: &std::collections::HashSet<String>,
 ) -> FnResult {
     let mut e = Emit {
         droppable: HashMap::new(),
         constructs,
-        revived,
         holes: HashMap::new(),
         region_depth: 0,
         lets,
@@ -1886,9 +1502,6 @@ struct Emit<'a> {
     /// malloc-side by itself (regionescape's payload route double-freed on
     /// the first version of round twenty-seven).
     constructs: &'a std::collections::HashSet<String>,
-    /// RFC-0114 untake: bindings whose taken value was provably re-established
-    /// — their FINAL value is this block's to release. See [`fold_revived`].
-    revived: &'a std::collections::HashSet<usize>,
     /// The places a take took out of a droppable `let` (RFC-0093 M2).
     holes: HashMap<usize, Vec<String>>,
     region_depth: usize,
@@ -2275,13 +1888,6 @@ impl Emit<'_> {
                 && matches!(kind, DropKind::Deep(_))
                 && bty.is_some_and(|t| self.skippable(t, paths)))
             .then(|| (kind, paths.clone())),
-            // RFC-0114 untake: the take is real, but the binding was provably
-            // re-established afterwards, so what the block exits with is this
-            // frame's — the same per-slot final value all three engines already
-            // release for a reassigned `mut` binding.
-            Some(Gone::Dropped { .. } | Gone::Moved { .. }) if self.revived.contains(&key) => {
-                Some((kind, Vec::new()))
-            }
             _ => None,
         }
     }

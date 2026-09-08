@@ -684,13 +684,13 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 5765, 573),
+        ("the mapping §2.3 names", 5749, 573),
         ("a decision §2.3 says it must not make", 2289, 356),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
         ("the wasm format", 334, 0),
-        ("shared machinery", 2415, 77),
-        ("tests", 329, 0),
+        ("shared machinery", 2411, 77),
+        ("tests", 328, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
     assert_eq!(

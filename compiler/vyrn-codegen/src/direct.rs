@@ -486,7 +486,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         facts: vyrn_lower::core::facts(),
         releases: ownership.releases,
         droppable: ownership.droppable,
-        early: ownership.early,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
         // address, which is unique in the program.
         holes: ownership
@@ -1350,7 +1349,6 @@ struct Cx<'a> {
     /// — but the map's membership is `own`'s answer and stays authoritative about
     /// WHICH `let`s own their value.
     droppable: HashMap<String, HashMap<usize, DropKind>>,
-    early: HashMap<String, HashMap<usize, DropKind>>,
     /// Per function: [`droppable`](Cx::droppable)'s rows PLACED — every step, at
     /// the exit that runs it, in the order it runs (RFC-0101 M4). One order for
     /// three engines, read at the exit instead of derived from a frame stack.
@@ -1454,6 +1452,16 @@ impl<'a> Cx<'a> {
         self.facts
             .as_ref()
             .is_some_and(|f| f.discarded.contains(&self.plan.key_of(node)))
+    }
+
+    /// Does this `for` give its container back where it ends? The core states
+    /// it at the loop ([`vyrn_lower::core::Facts::loop_gives_back`]); this
+    /// emitter read the word `consume` off the source until RFC-0125 §3 M3's
+    /// event-stream slice.
+    fn loop_gives_back(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.loop_gives_back.contains(&self.plan.key_of(node)))
     }
 
     /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
@@ -2113,7 +2121,6 @@ struct Fn_<'a, 'p> {
     region_marks: Vec<u32>,
     /// [`Cx::droppable`] for the function being lowered.
     drops: HashMap<usize, DropKind>,
-    early: HashMap<usize, DropKind>,
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
     /// call ends — see [`Fn_::call`].
@@ -2187,7 +2194,6 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         region_depth: 0,
         region_marks: Vec::new(),
         drops: HashMap::new(),
-        early: HashMap::new(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -2344,7 +2350,6 @@ fn lower_body(
         region_depth: 0,
         region_marks: Vec::new(),
         drops: cx.droppable.get(&owner).cloned().unwrap_or_default(),
-        early: cx.early.get(&owner).cloned().unwrap_or_default(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -4415,33 +4420,6 @@ impl<'p> Fn_<'_, 'p> {
                 // the same key, so the two cannot disagree about which `let` owns
                 // what.
                 self.scope.push((name.clone(), place, bound.clone()));
-                // Round twenty-one, the textual backend's twin: a MOVED
-                // binding whose take runs later than some early exit gets a
-                // registered place so the placed rows can free it there — no
-                // Block row exists for it, so nothing runs at fall-through.
-                //
-                // The walk is the one the TYPE asks for, deep included. It was
-                // narrowed to a buffer free (`Rel::Buffers`), which answered
-                // for an `Array<Int64>` and left every container of heap
-                // behind: the generated JSON decoder's `let mut val:
-                // Array<T> = []` is taken by `for x in consume val` under two
-                // early `Invalid` returns, and each one abandoned the buffer
-                // (`jsondecbytes`, `mapdemo`, `wirekey`). The placer has
-                // already proved the take is later and that neither the take
-                // nor the exit is inside a loop, so the value at this exit is
-                // whole and the deep walk is what gives it back.
-                if !owns {
-                    if let Some(kind) = self.early.get(&(s as *const Stmt as usize)) {
-                        let r = match kind {
-                            vyrn_frontend::own::DropKind::FreeStr => Some(Rel::Str),
-                            vyrn_frontend::own::DropKind::FreeArr => Some(Rel::Buffers(vec![0])),
-                            _ => self.rel_for(&bound, *line)?,
-                        };
-                        if let Some(r) = r {
-                            self.register_rel(b, s as *const Stmt as usize, place, r);
-                        }
-                    }
-                }
                 if owns {
                     if let Some(mut r) = self.rel_for(&bound, *line)? {
                         // RFC-0093 M2: a take gave one of this binding's places
@@ -4810,7 +4788,6 @@ impl<'p> Fn_<'_, 'p> {
                 iter,
                 body,
                 line,
-                consuming,
                 ..
             } => {
                 // RFC-0091 M3: a user container declares how it is iterated. The
@@ -4984,8 +4961,11 @@ impl<'p> Fn_<'_, 'p> {
                 // or over module state is refused (the census, rows 10, 11 and
                 // 29), so the core cannot leave it to an exit row — and a
                 // release only the core states is one no row names, which is
-                // why the two are exclusive here.
-                if *consuming && !self.releases_whole(key) {
+                // why the two are exclusive here. The core says WHICH loop
+                // gives one back; this pass no longer reads `consume` off the
+                // statement to guess (RFC-0125 §3 M3, the event stream's
+                // slice).
+                if self.cx.loop_gives_back(key) && !self.releases_whole(key) {
                     if let Some(r) = self.rel_slots.get(&key).cloned() {
                         self.emit_rel(m, b, r.place, &r.rel, *line)?;
                         self.rel_slots.remove(&key);
@@ -16317,7 +16297,6 @@ mod tests {
             shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
             gappend: HashMap::new(),
-            early: HashMap::new(),
             externs: HashMap::new(),
             droppable: HashMap::new(),
             releases: HashMap::new(),
