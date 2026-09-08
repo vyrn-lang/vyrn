@@ -45,6 +45,10 @@ use vyrn_frontend::own::DropKind;
 use vyrn_frontend::own::Exit as ExitKind;
 use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
+/// RFC-0125 §2.3's own vocabulary: the statements the emitter walks, what each
+/// one computes, and the values it computes it from. `Body` is spelled out at
+/// each use, because this file's own `Body` is the AST's.
+use vyrn_lower::core::{Lit, Op, Rhs, St, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
@@ -2460,9 +2464,24 @@ fn lower_body(
     // obeys that: the first cut returned from inside and leaked the frame.
     b.ins(&Instruction::Block(BlockType::Empty));
     cx_fn.depth += 1;
-    match stmts {
-        Some(blk) => cx_fn.block(m, &mut b, blk)?,
-        None => match body {
+    // RFC-0125 §2.3: "the emitter reads the core and writes wasm". Where the
+    // core's rows carry the whole body, its statements are what this walks;
+    // everywhere else the AST dispatch below is what it always was, and the
+    // residue table in §3 M3 names the row each remaining form waits on.
+    // `VYRN_NO_CORE_WALK=1` takes the AST walk back, which is how the two are
+    // compared (`compiler/vyrn-cli/tests/coredrive.rs`).
+    let from_core = (!core_walk_off())
+        .then(|| vyrn_lower::core::body_of(&f.name))
+        .flatten()
+        .filter(|core| cx_fn.core_walkable(core));
+    WALKS.with(|w| {
+        let (from, all) = w.get();
+        w.set((from + usize::from(from_core.is_some()), all + 1));
+    });
+    match (from_core, stmts) {
+        (Some(core), _) => cx_fn.core_body(m, &mut b, &core)?,
+        (None, Some(blk)) => cx_fn.block(m, &mut b, blk)?,
+        (None, None) => match body {
             Body::Value(e) => cx_fn.lambda_value(m, &mut b, e)?,
             _ => unreachable!("only a lambda's expression has no statements"),
         },
@@ -6075,67 +6094,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             Expr::Unary { op, expr, line } => {
                 let t = self.expr(m, b, expr)?;
-                let rt = self.cx.resolve(&t);
-                match (op, Num::of(&rt)) {
-                    // `x * -1`, which is also what makes the width's minimum
-                    // negate to itself — the wrapping the interpreter does, for
-                    // free. `~x` is `x ^ -1`, and both then renormalize because a
-                    // narrow carrier holds more bits than the width.
-                    (UnOp::Neg | UnOp::BitNot, Some(n)) => {
-                        if n.wide() {
-                            b.ins(&Instruction::I64Const(-1));
-                            b.ins(if *op == UnOp::Neg {
-                                &Instruction::I64Mul
-                            } else {
-                                &Instruction::I64Xor
-                            });
-                        } else {
-                            b.ins(&Instruction::I32Const(-1));
-                            b.ins(if *op == UnOp::Neg {
-                                &Instruction::I32Mul
-                            } else {
-                                &Instruction::I32Xor
-                            });
-                        }
-                        renorm(b, n);
-                    }
-                    (UnOp::Neg, None) if matches!(rt, Type::Float | Type::Float32) => {
-                        b.ins(if rt == Type::Float32 {
-                            &Instruction::F32Neg
-                        } else {
-                            &Instruction::F64Neg
-                        });
-                    }
-                    // `-v` (RFC-0083 M2) is the sign-bit flip, not a subtraction
-                    // from zero — `f32x4.neg` keeps the sign of a zero where
-                    // `splat(0.0) - v` does not.
-                    (UnOp::Neg, None) if rt == Type::F32x4 => {
-                        b.ins(&Instruction::F32x4Neg);
-                    }
-                    (UnOp::Neg, None) if rt == Type::F64x2 => {
-                        b.ins(&Instruction::F64x2Neg);
-                    }
-                    // Two's-complement negation, four lanes (RFC-0083 M3):
-                    // `-Int32.min` is `Int32.min`, the same wrap `i32.sub` from
-                    // zero has at scalar width.
-                    (UnOp::Neg, None) if rt == Type::I32x4 => {
-                        b.ins(&Instruction::I32x4Neg);
-                    }
-                    // `~m` complements all 128 bits, which is the lane-wise
-                    // complement because a mask lane is all-ones or all-zeros —
-                    // and the lane-wise complement of an `I32x4` for the simpler
-                    // reason that `v128.not` has no lane width to get wrong.
-                    (UnOp::BitNot, None)
-                        if matches!(rt, Type::Mask32x4 | Type::Mask64x2 | Type::I32x4) =>
-                    {
-                        b.ins(&Instruction::V128Not);
-                    }
-                    (UnOp::Not, _) if rt == Type::Bool => {
-                        b.ins(&Instruction::I32Eqz);
-                    }
-                    _ => return unsupported("a unary operator on this type", *line),
-                }
-                t
+                self.un_ins(b, *op, &t, *line)?
             }
             Expr::ArrayLit { elems, line } => self.array_lit(m, b, hint, elems, *line)?,
             Expr::MapLit { entries, line } => self.map_lit(m, b, entries, *line)?,
@@ -6807,8 +6766,151 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(l);
             }
         }
+        // The width the operator RUNS at, which may be the right operand's
+        // (`op_width`), and the left operand already on the stack moving to it
+        // through the M2d seam like any other flow.
+        let opty = match Num::of(&lt) {
+            // A LITERAL is not the sibling the rule means, and `peek` is the
+            // checker's answer for every other right operand.
+            Some(n) if n == Num::PLAIN && !matches!(rhs, Expr::Int(_) | Expr::Byte(_)) => {
+                let rt = self.peek(rhs, line).ok();
+                self.op_width(&lt, rt.as_ref())
+            }
+            _ => lt.clone(),
+        };
+        if opty != lt {
+            self.coerce(m, b, None, &lt, &opty, line)?;
+        }
+        // The RESOLVED operand type — arithmetic runs on the base
+        // representation, so `age + 1` must not validate `1` against `Age`'s
+        // predicate. It is the *assignment* that re-validates the sum, which is
+        // why the LLVM emitter returns its `numty` rather than `lty`.
+        self.expr_as(m, b, rhs, &opty)?;
+        self.bin_ins(b, op, &opty, &l, line)
+    }
+
+    /// The instruction a unary operator IS, once its operand stands on the
+    /// stack — RFC-0125 §2.3's "maps `prim` rows to wasm instructions".
+    ///
+    /// Stated once, for the two walks that reach it: [`Fn_::expr`], which
+    /// reads an `Expr::Unary`, and [`Fn_::core_prim`], which reads the
+    /// operator off [`vyrn_lower::core::Op`]. Nothing here interleaves the
+    /// operand with anything, so unlike the binary table this one has no
+    /// family left behind at its caller.
+    fn un_ins(&mut self, b: &mut Frame, op: UnOp, t: &Type, line: usize) -> Result<Type, String> {
+        let rt = self.cx.resolve(t);
+        match (op, Num::of(&rt)) {
+            // `x * -1`, which is also what makes the width's minimum
+            // negate to itself — the wrapping the interpreter does, for
+            // free. `~x` is `x ^ -1`, and both then renormalize because a
+            // narrow carrier holds more bits than the width.
+            (UnOp::Neg | UnOp::BitNot, Some(n)) => {
+                if n.wide() {
+                    b.ins(&Instruction::I64Const(-1));
+                    b.ins(if op == UnOp::Neg {
+                        &Instruction::I64Mul
+                    } else {
+                        &Instruction::I64Xor
+                    });
+                } else {
+                    b.ins(&Instruction::I32Const(-1));
+                    b.ins(if op == UnOp::Neg {
+                        &Instruction::I32Mul
+                    } else {
+                        &Instruction::I32Xor
+                    });
+                }
+                renorm(b, n);
+            }
+            (UnOp::Neg, None) if matches!(rt, Type::Float | Type::Float32) => {
+                b.ins(if rt == Type::Float32 {
+                    &Instruction::F32Neg
+                } else {
+                    &Instruction::F64Neg
+                });
+            }
+            // `-v` (RFC-0083 M2) is the sign-bit flip, not a subtraction
+            // from zero — `f32x4.neg` keeps the sign of a zero where
+            // `splat(0.0) - v` does not.
+            (UnOp::Neg, None) if rt == Type::F32x4 => {
+                b.ins(&Instruction::F32x4Neg);
+            }
+            (UnOp::Neg, None) if rt == Type::F64x2 => {
+                b.ins(&Instruction::F64x2Neg);
+            }
+            // Two's-complement negation, four lanes (RFC-0083 M3):
+            // `-Int32.min` is `Int32.min`, the same wrap `i32.sub` from
+            // zero has at scalar width.
+            (UnOp::Neg, None) if rt == Type::I32x4 => {
+                b.ins(&Instruction::I32x4Neg);
+            }
+            // `~m` complements all 128 bits, which is the lane-wise
+            // complement because a mask lane is all-ones or all-zeros —
+            // and the lane-wise complement of an `I32x4` for the simpler
+            // reason that `v128.not` has no lane width to get wrong.
+            (UnOp::BitNot, None) if matches!(rt, Type::Mask32x4 | Type::Mask64x2 | Type::I32x4) => {
+                b.ins(&Instruction::V128Not);
+            }
+            (UnOp::Not, _) if rt == Type::Bool => {
+                b.ins(&Instruction::I32Eqz);
+            }
+            _ => return unsupported("a unary operator on this type", line),
+        }
+        Ok(t.clone())
+    }
+
+    /// The width an integer operator runs at: EITHER operand's.
+    ///
+    /// A plain-`Int` operand adopts a sized sibling's width, which is the
+    /// textual backend's `numty` rule. Taking it from the left alone would
+    /// compute `0 - eight` (an `Int32`) in 64 bits — the same answer for
+    /// `+`/`-`/`*` and a different one for `/`, `>>` and every comparison.
+    ///
+    /// `rt` is the right operand's type where the right operand is a VALUE,
+    /// and `None` where it is a literal: a byte literal adapts to the position
+    /// it is in, the checker types `'A' - 'a'` `Int64`, and computing it at
+    /// eight bits makes it 224 where the other two engines say -32. The same
+    /// is true of `b >= 'a'`, a signed 64-bit comparison in all three engines
+    /// that would become an unsigned byte one here.
+    ///
+    /// Stated once for the two walks that ask it (RFC-0125 §3 M3, the driver
+    /// slice): the AST walk peeks the right operand's node, and the core walk
+    /// reads the type off the name the row carries.
+    fn op_width(&self, lt: &Type, rt: Option<&Type>) -> Type {
+        let Some(rt) = rt else { return lt.clone() };
+        let rt = self.cx.resolve(rt);
+        match Num::of(&rt) {
+            Some(rn) if rn != Num::PLAIN => rt,
+            _ => lt.clone(),
+        }
+    }
+
+    /// The instruction an operator IS, once both its operands stand on the
+    /// stack at `opty` — RFC-0125 §2.3's "maps `prim` rows to wasm
+    /// instructions".
+    ///
+    /// Stated once, for the two walks that reach it: [`Fn_::binary_inner`],
+    /// which reads an `Expr::Binary`, and [`Fn_::core_prim`], which reads the
+    /// operator off [`vyrn_lower::core::Op`] and never looks at the source.
+    /// The families NOT here are the ones that interleave the operands with
+    /// something else, so an operand-first seam cannot hold them: `&&` and
+    /// `||` branch, `=~` compiles its right operand to a DFA rather than
+    /// evaluating it, and a `String` or a `Code` operator releases what each
+    /// operand allocated between the two evaluations.
+    ///
+    /// `spell` is the left operand's type AS WRITTEN, which is what a gap's
+    /// wording names; `opty` is the resolved type the operator runs at.
+    fn bin_ins(
+        &mut self,
+        b: &mut Frame,
+        op: BinOp,
+        opty: &Type,
+        spell: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let lt = opty.clone();
+        let l = spell;
         if lt == Type::Bool {
-            self.expr_as(m, b, rhs, &Type::Bool)?;
             b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on booleans"), line))?);
             return Ok(Type::Bool);
         }
@@ -6828,7 +6930,6 @@ impl<'p> Fn_<'_, 'p> {
         // backend's `fcmp olt`/`fcmp une` makes, which is what RFC-0081 had to
         // correct at scalar width and is written down here for that reason.
         if lt == Type::F32x4 {
-            self.expr_as(m, b, rhs, &lt)?;
             let mask = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
             b.ins(&match op {
                 BinOp::Add => Instruction::F32x4Add,
@@ -6850,7 +6951,6 @@ impl<'p> Fn_<'_, 'p> {
         // The comparisons are wasm's ORDERED ones with `ne` unordered, the same
         // pairing the narrow width states above.
         if lt == Type::F64x2 {
-            self.expr_as(m, b, rhs, &lt)?;
             let mask = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
             b.ins(&match op {
                 BinOp::Add => Instruction::F64x2Add,
@@ -6874,7 +6974,6 @@ impl<'p> Fn_<'_, 'p> {
         // already leans on. `v128.andnot` exists and has no Vyrn spelling: `a & ~b`
         // is one instruction more and nothing measured wanted it.
         if matches!(lt, Type::Mask32x4 | Type::Mask64x2) {
-            self.expr_as(m, b, rhs, &lt)?;
             b.ins(&match op {
                 BinOp::BitAnd => Instruction::V128And,
                 BinOp::BitOr => Instruction::V128Or,
@@ -6895,7 +6994,6 @@ impl<'p> Fn_<'_, 'p> {
         // wasm has saturating adds only at i8 and i16, so there is nothing here to
         // pick wrongly.
         if lt == Type::I32x4 {
-            self.expr_as(m, b, rhs, &lt)?;
             let mask = matches!(
                 op,
                 BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq
@@ -6918,7 +7016,6 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(if mask { Type::Mask32x4 } else { lt });
         }
         if matches!(lt, Type::Float | Type::Float32) {
-            self.expr_as(m, b, rhs, &lt)?;
             let wide = lt == Type::Float;
             let ins = match (op, wide) {
                 (BinOp::Add, true) => Instruction::F64Add,
@@ -6951,42 +7048,9 @@ impl<'p> Fn_<'_, 'p> {
                 _ => Type::Bool,
             });
         }
-        let Some(mut n) = Num::of(&lt) else {
+        let Some(n) = Num::of(opty) else {
             return unsupported(&format!("`{op:?}` on `{l}`"), line);
         };
-        // The op width comes from EITHER operand: a plain-`Int` literal sibling
-        // adopts a sized one's width, which is the textual backend's `numty`
-        // rule. Taking it from the left alone would compute `0 - eight` (an
-        // `Int32`) in 64 bits — the same answer for `+`/`-`/`*` and a different
-        // one for `/`, `>>` and every comparison. `peek` is allowed to fail here:
-        // "not obviously sized" is the answer the left operand already gave.
-        let mut opty = lt.clone();
-        // A LITERAL is not the sibling this rule means, and saying so is
-        // RFC-0125 §3 M5's one-reader slice: `peek` used to answer `Int` for
-        // every literal, which hid the distinction, and it answers the
-        // checker's own type now. `0 - eight` takes its width from `eight`, a
-        // sized VALUE. `c - 'a'` must not take one from `'a'`: a byte literal
-        // adapts to the position it is in, the checker types the whole
-        // expression `Int64`, and computing it at eight bits makes
-        // `'A' - 'a'` 224 where the other two engines say -32. The same is
-        // true of `b >= 'a'`, which is a signed 64-bit comparison in all three
-        // engines and would become an unsigned byte one here.
-        if n == Num::PLAIN && !matches!(rhs, Expr::Int(_) | Expr::Byte(_)) {
-            if let Ok(rt) = self.peek(rhs, line) {
-                let rt = self.cx.resolve(&rt);
-                if let Some(rn) = Num::of(&rt).filter(|rn| *rn != Num::PLAIN) {
-                    // The left operand is already on the stack. It moves to the
-                    // narrower width through the M2d seam, like any other flow.
-                    self.coerce(m, b, None, &lt, &rt, line)?;
-                    (opty, n) = (rt, rn);
-                }
-            }
-        }
-        // The RESOLVED operand type — arithmetic runs on the base representation,
-        // so `age + 1` must not validate `1` against `Age`'s predicate. It is the
-        // *assignment* that re-validates the sum, which is why the LLVM emitter
-        // returns its `numty` rather than `lty`.
-        self.expr_as(m, b, rhs, &opty)?;
         // Division and the shifts are the operators with control flow in them.
         // Both operands come off the stack into scratch first, because the checks
         // have to look at them and then hand them back; and every case is checked
@@ -7070,7 +7134,7 @@ impl<'p> Fn_<'_, 'p> {
             | BinOp::Shl
             | BinOp::Shr => {
                 renorm(b, n);
-                opty
+                lt
             }
             _ => Type::Bool,
         })
@@ -16082,6 +16146,482 @@ fn expr_name(e: &Expr) -> String {
         _ => "this expression",
     }
     .to_string()
+}
+
+/// Whether the AST walk is asked for even where the core's rows carry the body
+/// — RFC-0125 §3 M3, the driver slice.
+///
+/// The two walks are compared by emitting the same corpus twice, so the switch
+/// exists for the comparison and for nothing else: a build that sets it gets
+/// the emission it had before the driver landed.
+fn core_walk_off() -> bool {
+    std::env::var_os("VYRN_NO_CORE_WALK").is_some()
+}
+
+thread_local! {
+    /// How many bodies this thread emitted from the core's statements, and how
+    /// many it emitted at all — RFC-0125 §3 M3, the driver slice's own count.
+    ///
+    /// The count is the measurement §2.3 is judged by: it rises as the core
+    /// carries more rows, and every body it does not hold is a line of the
+    /// residue table with the row it waits on.
+    static WALKS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// How many bodies came from the core, and how many were emitted, since
+/// [`forget_walks`].
+pub fn walks() -> (usize, usize) {
+    WALKS.with(std::cell::Cell::get)
+}
+
+/// Start the count again.
+pub fn forget_walks() {
+    WALKS.with(|w| w.set((0, 0)));
+}
+
+/// Where the core's names live while one body is walked, and what the wasm
+/// operand stack is holding — RFC-0125 §3 M3, the driver slice.
+///
+/// The core names EVERY value (§2.1) and wasm has an operand stack, so a walk
+/// that gave each name a local would emit a `local.set`/`local.get` pair the
+/// AST walk does not. `held` is the one name the stack is carrying: a value
+/// bound by the statement just walked and read by this one. Where a name is
+/// not stack-shaped it gets a local, in the order the AST walk allocates one.
+struct Walked {
+    /// The wasm place of each of the core's names, by [`vyrn_lower::core::Name`].
+    at: Vec<Option<(Place, Type)>>,
+    /// How many times each name is READ over the whole body.
+    reads: Vec<u32>,
+    /// The name the operand stack is holding, if any.
+    held: Option<vyrn_lower::core::Name>,
+}
+
+impl<'p> Fn_<'_, 'p> {
+    /// One function body, emitted from the core's own statements — RFC-0125
+    /// §2.3: "the emitter reads the core and writes wasm ... it decides
+    /// nothing".
+    ///
+    /// This is the walk the AST dispatch (`Fn_::stmt`, `Fn_::expr`) is beside.
+    /// It reads [`vyrn_lower::core::Body`] and nothing else: a statement is a
+    /// [`St`], what it computes is the [`Op`], the [`Ctor`] and the [`Lit`] the
+    /// operation slice put on the rows, and the type of every operand is the
+    /// checker's, carried on [`vyrn_lower::core::NameInfo`].
+    ///
+    /// It runs only where [`Fn_::core_walkable`] says the rows carry the whole
+    /// body. What that leaves out is the ranked list in §3 M3 and not a
+    /// judgement of this walk's: each form it stands down at names the row the
+    /// core still lacks.
+    fn core_body(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+    ) -> Result<(), String> {
+        let mut w = Walked {
+            at: vec![None; body.names.len()],
+            reads: core_reads(body),
+            held: None,
+        };
+        // The parameters are bound already: the prologue put each one where it
+        // lives, and the core's `params` are the declaration's in order.
+        for (i, n) in body.params.iter().enumerate() {
+            let Some((_, place, ty)) = self.scope.get(i) else {
+                return unsupported("a core body whose parameters are not the frame's", 0);
+            };
+            w.at[*n as usize] = Some((*place, ty.clone()));
+        }
+        self.core_stmts(m, b, body, &mut w, &body.stmts)
+    }
+
+    fn core_stmts(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        ss: &[St],
+    ) -> Result<(), String> {
+        for (i, s) in ss.iter().enumerate() {
+            match s {
+                St::Let(n, rhs) => {
+                    let info = &body.names[*n as usize];
+                    let line = info.line;
+                    self.core_rhs(m, b, body, w, rhs, &info.ty, line)?;
+                    // A value the next statement reads once, first, and
+                    // nothing else reads: wasm's operand stack is where it
+                    // lives, and no local is taken for it. Every other name
+                    // gets one, in the order the AST walk takes them.
+                    if info.binding.is_none()
+                        && w.reads[*n as usize] == 1
+                        && ss.get(i + 1).and_then(first_read) == Some(*n)
+                    {
+                        w.held = Some(*n);
+                        continue;
+                    }
+                    let r = self.cx.repr(&info.ty, line)?;
+                    let place = self.place_for(b, &r, line)?;
+                    let Place::Local(l) = place else {
+                        return unsupported("a core `let` of an aggregate", line);
+                    };
+                    b.ins(&Instruction::LocalSet(l));
+                    w.at[*n as usize] = Some((place, info.ty.clone()));
+                }
+                St::Store {
+                    place: vyrn_lower::core::Place::Name(n),
+                    value,
+                    line,
+                    ..
+                } => {
+                    let Some((Place::Local(l), ty)) = w.at[*n as usize].clone() else {
+                        return unsupported("a core store into a place with no local", *line);
+                    };
+                    self.core_val(m, b, body, w, value, &ty, *line)?;
+                    b.ins(&Instruction::LocalSet(l));
+                }
+                St::If {
+                    cond, then, els, ..
+                } => {
+                    self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    self.core_stmts(m, b, body, w, then)?;
+                    if !els.is_empty() {
+                        b.ins(&Instruction::Else);
+                        self.core_stmts(m, b, body, w, els)?;
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                // `region { .. }` (RFC-0004 §4) is the same block with an arena
+                // scope around it, which is the row the driver slice added:
+                // this walk emitted neither the mark nor the hand-back while
+                // the two blocks were one row, and 65 nested regions ran
+                // without reaching their limit. The DEPTH is still counted
+                // here, because it is a fact about the code being written.
+                St::Block {
+                    body: inner,
+                    region,
+                    ..
+                } => {
+                    if *region {
+                        self.region_enter(b);
+                        self.region_depth += 1;
+                        let r = self.core_stmts(m, b, body, w, inner);
+                        self.region_depth -= 1;
+                        let mark = self.region_marks.pop().expect("one mark per open region");
+                        r?;
+                        self.region_exit(b, mark);
+                    } else {
+                        self.core_stmts(m, b, body, w, inner)?;
+                    }
+                }
+                St::Return { value, line, .. } => {
+                    match value {
+                        Some(v) => {
+                            let want = self.ret_ty.clone();
+                            self.core_val(m, b, body, w, v, &want, *line)?;
+                        }
+                        None if matches!(self.ret, Repr::Unit) => {}
+                        None => {
+                            return unsupported(
+                                "a return whose value does not match the signature",
+                                *line,
+                            )
+                        }
+                    }
+                    b.ins(&Instruction::Br(self.depth));
+                }
+                St::Trap => {
+                    b.ins(&Instruction::Unreachable);
+                }
+                _ => return unsupported("a core statement this walk does not read", 0),
+            }
+        }
+        Ok(())
+    }
+
+    /// What produced the value a `let` binds, in `want`.
+    fn core_rhs(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        rhs: &Rhs,
+        want: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match rhs {
+            Rhs::Val(v) => self.core_val(m, b, body, w, v, want, line),
+            Rhs::Prim(op, vs, ret) => {
+                let got = self.core_prim(m, b, body, w, *op, vs, line)?;
+                let got = ret.clone().unwrap_or(got);
+                self.coerce(m, b, None, &got, want, line)
+            }
+            _ => unsupported("a core right-hand side this walk does not read", line),
+        }
+    }
+
+    /// An operator, its operands read off the row — RFC-0125 §3 M3, the
+    /// operation slice's own reader.
+    ///
+    /// The instruction is [`Fn_::bin_ins`]'s and [`Fn_::un_ins`]'s: the same
+    /// table the AST walk maps to, asked once. What this adds is where the
+    /// operands come from — a name the core carries a type for, or a literal
+    /// the row names.
+    fn core_prim(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        op: Op,
+        vs: &[Val],
+        line: usize,
+    ) -> Result<Type, String> {
+        match (op, vs) {
+            (Op::Un(u), [v]) => {
+                let t = self.core_ty(body, v, &Type::Int);
+                self.core_val(m, b, body, w, v, &t, line)?;
+                self.un_ins(b, u, &t, line)
+            }
+            // `&&` and `||` short-circuit, and the row states them as prims
+            // that read both operands — the linear judgment is the same either
+            // way and the operator is what tells a reader the second read may
+            // not happen (the operation slice's first finding). An honest row
+            // is control flow, which is `St::If` over a temporary and moves
+            // bytes; until it exists this walk stands down rather than
+            // evaluating an operand the AST walk does not.
+            (Op::Bin(BinOp::And | BinOp::Or), _) => unsupported(
+                "`&&` or `||` from the core's row, which states no branch",
+                line,
+            ),
+            (Op::Bin(o), [l, r]) => {
+                let lt = self.core_ty(body, l, &Type::Int);
+                let lt = self.cx.resolve(&lt);
+                self.core_val(m, b, body, w, l, &lt, line)?;
+                let opty = match Num::of(&lt) {
+                    Some(n) if n == Num::PLAIN && matches!(r, Val::Name(_)) => {
+                        let rt = self.core_ty(body, r, &lt);
+                        self.op_width(&lt, Some(&rt))
+                    }
+                    _ => lt.clone(),
+                };
+                if opty != lt {
+                    self.coerce(m, b, None, &lt, &opty, line)?;
+                }
+                self.core_val(m, b, body, w, r, &opty, line)?;
+                self.bin_ins(b, o, &opty, &lt, line)
+            }
+            _ => unsupported("an operator of this arity", line),
+        }
+    }
+
+    /// One value: the name's own place, or the literal the row names.
+    fn core_val(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        v: &Val,
+        want: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        let got = match v {
+            Val::Name(n) => {
+                let (place, ty) = match w.at[*n as usize].clone() {
+                    Some(p) => p,
+                    // Not a place: the stack is already holding it.
+                    None if w.held == Some(*n) => {
+                        w.held = None;
+                        let ty = body.names[*n as usize].ty.clone();
+                        return self.coerce(m, b, None, &ty, want, line);
+                    }
+                    None => return unsupported("a core name with no place", line),
+                };
+                let Place::Local(l) = place else {
+                    return unsupported("a core name that is not a local", line);
+                };
+                b.ins(&Instruction::LocalGet(l));
+                ty
+            }
+            // A literal is emitted at the type the AST walk gives one and
+            // reconciled by the same seam: an integer literal is an `Int64`
+            // that its destination narrows (RFC-0058), not a constant this
+            // walk sizes itself.
+            Val::Lit(l) => match l {
+                Lit::Int(n) => {
+                    b.ins(&Instruction::I64Const(*n));
+                    Type::Int
+                }
+                Lit::Byte(n) => {
+                    b.ins(&Instruction::I64Const(i64::from(*n)));
+                    Type::Int
+                }
+                Lit::Bool(v) => {
+                    b.ins(&Instruction::I32Const(i32::from(*v)));
+                    Type::Bool
+                }
+                Lit::Float(f) => {
+                    b.ins(&Instruction::F64Const((*f).into()));
+                    Type::Float
+                }
+                Lit::Str(s) => {
+                    let at = self.cx.rt.intern(m, s);
+                    b.ins(&Instruction::I32Const(at as i32));
+                    Type::Str
+                }
+                Lit::Opaque => return unsupported("a value the row does not name", line),
+            },
+        };
+        self.coerce(m, b, None, &got, want, line)
+    }
+
+    /// The type of one value: the checker's, off the name the row carries.
+    fn core_ty(&self, body: &vyrn_lower::core::Body, v: &Val, lit: &Type) -> Type {
+        match v {
+            Val::Name(n) => body.names[*n as usize].ty.clone(),
+            Val::Lit(Lit::Bool(_)) => Type::Bool,
+            Val::Lit(Lit::Float(_)) => Type::Float,
+            Val::Lit(Lit::Str(_)) => Type::Str,
+            Val::Lit(_) => lit.clone(),
+        }
+    }
+
+    /// Whether the core's rows carry this whole body, so the walk above may
+    /// have it — RFC-0125 §3 M3, the driver slice.
+    ///
+    /// Everything this refuses is a row the core lacks or a shape the two
+    /// walks do not agree on yet, and §3 M3's residue table names each one
+    /// with what it waits on. It is a screen and not a judgement: a body it
+    /// stands down at is emitted from the AST exactly as before.
+    fn core_walkable(&self, body: &vyrn_lower::core::Body) -> bool {
+        // A frame with a release row, a region, an aggregate return or a
+        // hoisted walk is one whose emission is more than its statements.
+        if !self.placed.is_empty() || self.dest.is_some() || !body.lambdas.is_empty() {
+            return false;
+        }
+        if !matches!(self.ret, Repr::Scalar(_) | Repr::Unit) {
+            return false;
+        }
+        for info in &body.names {
+            // A scalar of a type that needs no validation: a `where` type
+            // (RFC-0079) is a `check` row the core does not carry, which is
+            // the census's row 7.
+            if !matches!(
+                info.ty,
+                Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool
+            ) {
+                return false;
+            }
+        }
+        let reads = core_reads(body);
+        core_readable(body, &body.stmts, &reads)
+    }
+}
+
+/// How many times each of a body's names is read.
+fn core_reads(body: &vyrn_lower::core::Body) -> Vec<u32> {
+    let mut out = vec![0u32; body.names.len()];
+    count_reads(&body.stmts, &mut out);
+    out
+}
+
+fn count_reads(ss: &[St], out: &mut [u32]) {
+    fn hit(v: &Val, out: &mut [u32]) {
+        if let Val::Name(n) = v {
+            out[*n as usize] += 1;
+        }
+    }
+    for s in ss {
+        match s {
+            St::Let(_, rhs) | St::Do(rhs, _) => match rhs {
+                Rhs::Val(v) => hit(v, out),
+                Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
+                    vs.iter().for_each(|v| hit(v, out));
+                }
+                Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| hit(v, out)),
+                Rhs::Read(_) | Rhs::Take(_) => {}
+            },
+            St::Store { value, .. } => hit(value, out),
+            St::Return { value: Some(v), .. } => hit(v, out),
+            St::If { cond, .. } => hit(cond, out),
+            St::Switch { on, .. } => hit(on, out),
+            _ => {}
+        }
+        match s {
+            St::If { then, els, .. } => {
+                count_reads(then, out);
+                count_reads(els, out);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => count_reads(b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    count_reads(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The first name a statement READS, which is the only one the operand stack
+/// can be carrying for it.
+fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
+    let name = |v: &Val| match v {
+        Val::Name(n) => Some(*n),
+        Val::Lit(_) => None,
+    };
+    match s {
+        St::Let(_, Rhs::Val(v)) | St::Store { value: v, .. } => name(v),
+        St::Let(_, Rhs::Prim(_, vs, _)) => vs.first().and_then(name),
+        St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
+        _ => None,
+    }
+}
+
+/// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
+fn core_readable(body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
+    ss.iter().enumerate().all(|(i, s)| match s {
+        St::Let(n, rhs) => {
+            let held = body.names[*n as usize].binding.is_none()
+                && reads[*n as usize] == 1
+                && ss.get(i + 1).and_then(first_read) == Some(*n);
+            // A temporary the stack cannot carry needs a local the AST walk
+            // never takes, so the two would emit different locals.
+            (held || body.names[*n as usize].binding.is_some()) && core_rhs_readable(rhs)
+        }
+        St::Store { place, value, .. } => {
+            matches!(place, vyrn_lower::core::Place::Name(_)) && core_val_readable(value)
+        }
+        St::If {
+            cond, then, els, ..
+        } => {
+            core_val_readable(cond)
+                && core_readable(body, then, reads)
+                && core_readable(body, els, reads)
+        }
+        St::Block { body: inner, .. } => core_readable(body, inner, reads),
+        St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
+        St::Trap => true,
+        _ => false,
+    })
+}
+
+fn core_rhs_readable(rhs: &Rhs) -> bool {
+    match rhs {
+        Rhs::Val(v) => core_val_readable(v),
+        // `&&` and `||` are stated as prims and emit a branch; the row states
+        // no branch, so the walk stands down at them.
+        Rhs::Prim(Op::Bin(BinOp::And | BinOp::Or), ..) | Rhs::Prim(Op::Closure, ..) => false,
+        Rhs::Prim(_, vs, _) => vs.iter().all(core_val_readable),
+        _ => false,
+    }
+}
+
+fn core_val_readable(v: &Val) -> bool {
+    !matches!(v, Val::Lit(Lit::Opaque))
 }
 
 #[cfg(test)]
