@@ -5370,6 +5370,27 @@ fn reads(e: &Expr) -> Vec<String> {
     out
 }
 
+/// The collector's line at each site: a call names what it reaches, and a
+/// lambda's body is not this expression's result.
+struct CallsIn<'a>(&'a mut Vec<String>);
+
+impl BodyVisit<'_> for CallsIn<'_> {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        match e {
+            Expr::Call { name, .. } => {
+                self.0.push(name.clone());
+                true
+            }
+            // A lambda literal forwards nothing: its body runs at the call the
+            // stored closure is applied at, not at this return.
+            Expr::Lambda { .. } => false,
+            _ => true,
+        }
+    }
+}
+
 /// Every function name called anywhere in `e`.
 ///
 /// The walk is what marks a lender's FORWARDERS: a call nested inside an
@@ -5377,65 +5398,14 @@ fn reads(e: &Expr) -> Vec<String> {
 /// lender's result exactly as a bare `return pick(a)` does, so the literal,
 /// constructor, take, spawn and operator forms descend like the call arm. A
 /// form missed here leaves its wrapper unmarked, and the wrapper's caller then
-/// releases storage the lender's own caller still owns.
+/// releases storage the lender's own caller still owns. That is the shared
+/// walk's promise: a form added to the AST reaches this reader or none.
+///
+/// A `match` block arm (RFC-0118) is never a return value, so the shared walk's
+/// arm for it is unreachable from here.
 fn calls_in(e: &Expr, out: &mut Vec<String>) {
-    if let Expr::Call { name, .. } = e {
-        out.push(name.clone());
-    }
-    match e {
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            calls_in(scrutinee, out);
-            for a in arms {
-                // A block arm (RFC-0118) is never a return value, so it can
-                // forward no lender.
-                if let ArmBody::Expr(e) = &a.body {
-                    calls_in(e, out);
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            calls_in(cond, out);
-            calls_in(then_branch, out);
-            if let Some(b) = else_branch {
-                calls_in(b, out);
-            }
-        }
-        Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                calls_in(a, out);
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            calls_in(expr, out)
-        }
-        Expr::Consume { place, .. } => calls_in(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            calls_in(lhs, out);
-            calls_in(rhs, out);
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                calls_in(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                calls_in(k, out);
-                calls_in(v, out);
-            }
-        }
-        _ => {}
-    }
+    let locals = HashSet::new();
+    body_expr(e, &locals, &mut CallsIn(out));
 }
 
 /// The place `e` reads, as `(root name, whole path)`.
