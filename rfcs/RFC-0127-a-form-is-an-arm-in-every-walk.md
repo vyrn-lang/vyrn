@@ -160,8 +160,8 @@ the_form_census_as_a_table` and checked against the code by
 | `Expr::Spawn` | 1 | 7 | 5 | 1 | 7 | 3 | 5 | 1 | 30 |
 | `Expr::Lambda` | 1 | 10 | 6 | 2 | 9 | 2 | 8 | 1 | 39 |
 | `Expr::Consume` | 1 | 5 | 10 | 1 | 11 | 2 | 6 | 1 | 37 |
-| `Pattern::Variant` | 11 | 5 | 2 | 0 | 1 | 1 | 7 | 1 | 28 |
-| `Pattern::Success` | 1 | 5 | 3 | 0 | 3 | 1 | 6 | 1 | 20 |
+| `Pattern::Variant` | 11 | 5 | 2 | 0 | 1 | 1 | 6 | 1 | 27 |
+| `Pattern::Success` | 1 | 5 | 3 | 0 | 3 | 1 | 7 | 1 | 21 |
 | `Pattern::Failure` | 1 | 4 | 2 | 0 | 2 | 1 | 4 | 1 | 15 |
 | `Pattern::Other` | 1 | 3 | 1 | 0 | 1 | 1 | 5 | 1 | 13 |
 
@@ -191,7 +191,7 @@ An expression's floor is 27 (`Expr::TryConstruct`), and it is higher for the
 same reason a `Stmt` floor exists: an expression is walked by more collectors
 than a statement is. A pattern is walked by fewer than either, and its three
 lowest rows — `Pattern::Other` at 13, `Pattern::Failure` at 15,
-`Pattern::Success` at 20 — are the only rows under the statement floor.
+`Pattern::Success` at 21 — are the only rows under the statement floor.
 
 **Where the floor comes from.** It is not the deciders. Taking `Stmt::Region`'s
 29 apart: one mention is the parser building it; the

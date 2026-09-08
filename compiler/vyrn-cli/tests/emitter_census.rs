@@ -464,9 +464,34 @@ fn sections() -> Vec<Section> {
         sec(
             "fn try_(",
             Decision,
-            "the emitter REWRITES `?`, `??` and the optional `if let` again. \
-             RFC-0121 and RFC-0126 §8 state these once; a rewrite belongs before \
-             the emitter, in the parser or the core, not in a third place",
+            "the emitter states the `?` rewrite a second time — the tag test, \
+             the whole sum copied out through the function's own destination, \
+             and the payload read on the fall-through — for the built-in sums \
+             and for `Fallible` (RFC-0080 M3) beside it. `core.rs`'s `Expr::Try` \
+             arm states the same rewrite, as a two-arm switch and a `return` \
+             row; RFC-0127 §4 refuses the parser for it, because an \
+             expression-position `?` has no statement to put a `return` in. It \
+             leaves when the emitter reads the core",
+        ),
+        sec(
+            "fn try_construct(",
+            Decision,
+            "`Age?(n)` (RFC-0003): the argument is evaluated at the refinement's \
+             BASE type and the predicate's own answer becomes the tag, which is \
+             §2.3's \"does not know what a validated type is\" — the same row as \
+             `emit_validation`, waiting on the same `check` row. RFC-0127 §5.3 \
+             refuses folding the node into `Expr::Call`",
+        ),
+        sec(
+            "fn optional_if_let(",
+            Decision,
+            "an OPTIONAL projection tested by `if let` (RFC-0122). The expansion \
+             is `project::optional_site`'s and is shared with the checker and \
+             the lowering, but the binding is this file's: a synthetic `let` \
+             with no analysis row, and the guard that a declared function of the \
+             name wins over a projection. `core.rs`'s `Stmt::IfLet` arm lowers \
+             the ordinary switch and knows nothing of this form, so there is no \
+             row to read yet",
         ),
         sec(
             "fn tag_test(",
@@ -685,7 +710,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("the mapping §2.3 names", 5749, 573),
-        ("a decision §2.3 says it must not make", 2289, 356),
+        ("a decision §2.3 says it must not make", 2298, 356),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
         ("the wasm format", 334, 0),
