@@ -10502,143 +10502,91 @@ fn pattern_binders(p: &Pattern) -> Vec<String> {
     }
 }
 
-/// `local` extended with what `p` binds — the scope of one arm.
-fn locals_with(
-    local: &std::collections::HashSet<String>,
-    p: &Pattern,
-) -> std::collections::HashSet<String> {
-    let mut out = local.clone();
-    out.extend(pattern_binders(p));
-    out
+/// The purity walk's line at each site: a name that a global answers to and no
+/// local shadows is a reference, whether it is read, written, dropped or called.
+struct GlobalRef<'a> {
+    globals: &'a HashSet<String>,
+    found: bool,
+}
+
+impl GlobalRef<'_> {
+    fn hit(&mut self, n: &str, locals: &HashSet<String>) {
+        if self.globals.contains(n) && !locals.contains(n) {
+            self.found = true;
+        }
+    }
+}
+
+impl BodyVisit<'_> for GlobalRef<'_> {
+    fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
+        match s {
+            Stmt::Assign { name, .. }
+            | Stmt::SetField { name, .. }
+            | Stmt::IndexSet { name, .. }
+            | Stmt::Drop { name, .. } => self.hit(name, locals),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+        if self.found {
+            return false;
+        }
+        match e {
+            Expr::Var { name, .. } => self.hit(name, locals),
+            // Calling a fn-typed module global READS it (`g(x)` dispatches
+            // through the stored value, exactly like any other use), so the
+            // callee name is a reference too — a generator that only ever
+            // called such a global used to pass the purity walk. A declared
+            // function never collides: functions and module state share one
+            // namespace.
+            //
+            // A lambda body (RFC-0023) that reads module state makes the
+            // enclosing call chain non-spawn-safe, and the walk descends into
+            // one, so the effect is attributed to the instantiation site.
+            Expr::Call { name, .. } => self.hit(name, locals),
+            _ => {}
+        }
+        !self.found
+    }
 }
 
 /// Whether a block references a global (reads it via `Var`, or writes it via
 /// `Assign`/`SetField`/`IndexSet`) that no local of the same name shadows.
+///
+/// The descent and the scope stack are `ast::body_scope_descent!`'s since
+/// RFC-0125 §3 M6. The shadow set this pass carried was NOT the walk's: it was
+/// one flat set for the whole function, from [`collect_binders_block`], plus a
+/// per-arm extension for a pattern's binders. The caller still seeds that flat
+/// set, so a name read ABOVE its own `let` is answered as it always was; what
+/// the walk adds is the two shadows the flat set never held — a lambda's own
+/// parameters, and a `let` inside a lambda body or a `match` block arm.
 fn global_ref_block(
     b: &Block,
     globals: &std::collections::HashSet<String>,
     local: &std::collections::HashSet<String>,
 ) -> bool {
-    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
-    b.stmts.iter().any(|s| match s {
-        Stmt::Let { value, .. } | Stmt::Expr(value) => global_ref_expr(value, globals, local),
-        Stmt::Assign { name, value, .. } | Stmt::SetField { name, value, .. } => {
-            is_global(name) || global_ref_expr(value, globals, local)
-        }
-        Stmt::IndexSet {
-            name, index, value, ..
-        } => {
-            is_global(name)
-                || global_ref_expr(index, globals, local)
-                || global_ref_expr(value, globals, local)
-        }
-        Stmt::Return { value: Some(e), .. } => global_ref_expr(e, globals, local),
-        Stmt::Return { value: None, .. } => false,
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            global_ref_expr(cond, globals, local)
-                || global_ref_block(then_block, globals, local)
-                || else_block
-                    .as_ref()
-                    .is_some_and(|eb| global_ref_block(eb, globals, local))
-        }
-        Stmt::IfLet {
-            pattern,
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            global_ref_expr(scrutinee, globals, local)
-                || global_ref_block(then_block, globals, &locals_with(local, pattern))
-                || else_block
-                    .as_ref()
-                    .is_some_and(|eb| global_ref_block(eb, globals, local))
-        }
-        Stmt::While { cond, body, .. } => {
-            global_ref_expr(cond, globals, local) || global_ref_block(body, globals, local)
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            global_ref_expr(iter, globals, local) || global_ref_block(body, globals, local)
-        }
-        Stmt::Drop { name, .. } => is_global(name),
-        Stmt::Region { body, .. } => global_ref_block(body, globals, local),
-        Stmt::Break { .. } | Stmt::Continue { .. } => false,
-    })
+    let mut locals = local.clone();
+    let mut v = GlobalRef {
+        globals,
+        found: false,
+    };
+    body_block(b, &mut locals, &mut v);
+    v.found
 }
 
+/// The same question of one expression.
 fn global_ref_expr(
     e: &Expr,
     globals: &std::collections::HashSet<String>,
     local: &std::collections::HashSet<String>,
 ) -> bool {
-    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
-    match e {
-        Expr::Var { name, .. } => is_global(name),
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            global_ref_expr(expr, globals, local)
-        }
-        Expr::Consume { place, .. } => global_ref_expr(place, globals, local),
-        Expr::Binary { lhs, rhs, .. } => {
-            global_ref_expr(lhs, globals, local) || global_ref_expr(rhs, globals, local)
-        }
-        // Calling a fn-typed module global READS it (`g(x)` dispatches
-        // through the stored value, exactly like any other use), so the
-        // callee name is a reference too — a generator that only ever
-        // called such a global used to pass the purity walk. A declared
-        // function never collides: functions and module state share one
-        // namespace.
-        Expr::Call { name, args, .. } => {
-            is_global(name) || args.iter().any(|a| global_ref_expr(a, globals, local))
-        }
-        Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
-            args.iter().any(|a| global_ref_expr(a, globals, local))
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            global_ref_expr(scrutinee, globals, local)
-                || arms.iter().any(|a| match &a.body {
-                    ArmBody::Expr(e) => {
-                        global_ref_expr(e, globals, &locals_with(local, &a.pattern))
-                    }
-                    ArmBody::Block(b) => {
-                        global_ref_block(b, globals, &locals_with(local, &a.pattern))
-                    }
-                })
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            global_ref_expr(cond, globals, local)
-                || global_ref_expr(then_branch, globals, local)
-                || else_branch
-                    .as_ref()
-                    .is_some_and(|e| global_ref_expr(e, globals, local))
-        }
-        Expr::StructLit { fields, .. } => fields
-            .iter()
-            .any(|(_, v)| global_ref_expr(v, globals, local)),
-        Expr::ArrayLit { elems, .. } => elems.iter().any(|v| global_ref_expr(v, globals, local)),
-        Expr::MapLit { entries, .. } => entries
-            .iter()
-            .any(|(k, v)| global_ref_expr(k, globals, local) || global_ref_expr(v, globals, local)),
-        // A lambda body (RFC-0023) that reads module state makes the enclosing
-        // call chain non-spawn-safe — the effect is attributed to the
-        // instantiation site (this function).
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => global_ref_expr(e2, globals, local),
-            LambdaBody::Block(b) => global_ref_block(b, globals, local),
-        },
-    }
+    let mut v = GlobalRef {
+        globals,
+        found: false,
+    };
+    body_expr(e, local, &mut v);
+    v.found
 }
 
 /// Enforce a module-state initializer's restrictions (RFC-0013, RFC-0029): it

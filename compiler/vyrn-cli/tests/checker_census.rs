@@ -600,12 +600,15 @@ fn sections() -> Vec<Section> {
         sec(
             "fn pattern_binders(p: &Pattern) -> Vec<String> {",
             Shared,
-            "what a pattern binds, and one arm's scope",
+            "what a pattern binds",
         ),
         sec(
-            "fn global_ref_block(",
-            Surface,
-            "one arm per form, deciding whether a body reads or writes a global",
+            "struct GlobalRef<'a> {",
+            Shared,
+            "whether a body reads or writes a global: the purity walk's line at \
+             each site, over `ast::body_scope_descent!` since RFC-0125 §3 M6. \
+             It was one arm per form, with a shadow set the caller flattened \
+             ahead of the walk",
         ),
         sec(
             "fn init_restrictions(",
@@ -756,8 +759,8 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("the typing judgment", 3418, 141),
         ("a rule the checker states", 1576, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 3086, 157),
-        ("shared machinery", 2297, 30),
+        ("one arm per form, type constructor or builtin", 2957, 157),
+        ("shared machinery", 2374, 30),
         ("tests", 4819, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
