@@ -869,9 +869,7 @@ fn run(program: &Program, want: Want) -> Run {
         ret: RefCell::new(Type::Unit),
         reads: RefCell::new(Scopes::new(HashMap::new())),
         lambda_base: RefCell::new(Vec::new()),
-        lambda_escapes: RefCell::new(Vec::new()),
         arm_binders: RefCell::new(Vec::new()),
-        call_keeps: std::cell::Cell::new(None),
         continue_seen: std::cell::Cell::new(false),
         sites: (want == Want::Sites).then(|| RefCell::new(Vec::new())),
         cur_fn: RefCell::new(String::new()),
@@ -1070,10 +1068,6 @@ struct MoveCheck<'a> {
     /// The frame depth at each enclosing lambda's parameter frame. A name that
     /// resolves BELOW the innermost of these is a capture, not a local.
     lambda_base: RefCell<Vec<usize>>,
-    /// Whether each enclosing lambda ESCAPES — RFC-0089 says a non-escaping
-    /// lambda (a `map`/`filter` argument) borrows freely and a stored one may
-    /// not. Parallel to `lambda_base`.
-    lambda_escapes: RefCell<Vec<bool>>,
     /// The pattern binders of each open `match`/`if let` arm, innermost last.
     /// A binder over an owned scrutinee binds a [`Borrow::Projection`], but the
     /// fact it names is not "this frame still owns the aggregate" — the
@@ -1081,12 +1075,6 @@ struct MoveCheck<'a> {
     /// `let t = d.title` binds the same row with the dangerous meaning, so
     /// [`MoveCheck::check_handover`] tells them apart by this mark.
     arm_binders: RefCell<Vec<HashSet<String>>>,
-    /// Set while one call argument is being walked, to whether the callee may
-    /// KEEP a `fn` value it is handed. A lambda anywhere but a call argument
-    /// can be stored and outlive the frame; one at a call argument still
-    /// escapes when the parameter is `consume`, because a kept closure's
-    /// captures leave the frame with it (RFC-0037).
-    call_keeps: std::cell::Cell<Option<bool>>,
     /// Set when the walk under a loop body reached a `continue`. `continue`
     /// starts the NEXT iteration rather than leaving the loop, so it must not
     /// count as the divergence [`MoveCheck::check_loop_reuse`] may skip on —
@@ -1166,53 +1154,6 @@ enum Borrow {
     Projection,
 }
 
-impl Borrow {
-    /// What this borrow is, in words, for the message.
-    ///
-    /// `at` is the name the message is about. It is not always the parameter:
-    /// `let t = s` gives `t` the borrow `s` carries, and calling `t` a parameter
-    /// is the wording defect Phase 9 recorded on the fix menu. Both halves say
-    /// the same thing now.
-    fn what(&self, at: &str) -> String {
-        let of = |kind: &str, p: &String| {
-            if root_of(at) == *p {
-                format!("a `{kind}` parameter")
-            } else {
-                format!("a second name for the `{kind}` parameter `{p}`")
-            }
-        };
-        match self {
-            Borrow::Read(p) => of("read", p),
-            Borrow::Modify(p) => of("modify", p),
-            Borrow::Element(_) => "a loop variable".to_string(),
-            Borrow::Projection => "read out of a place that owns it".to_string(),
-        }
-    }
-
-    /// The named ways out (RFC-0087 U2). The order is the order a reader should
-    /// try them: take ownership if the callee should have it, copy if both sides
-    /// genuinely need a value. `root` is the binding, `path` what was read out
-    /// of it — a `consume` goes on the binding, a `.copy()` on the path.
-    fn fixes(&self, root: &str, path: &str) -> Vec<String> {
-        let copy = format!("`{path}.copy()` if both sides need a value");
-        match self {
-            Borrow::Read(p) | Borrow::Modify(p) => vec![
-                format!("declare the parameter `{p}: consume ..` if this function should own it"),
-                copy,
-            ],
-            // A loop variable has a second way out: let the loop take the
-            // container. It only works when the whole element is stored — a
-            // stored field of it is a partial move — so `copy` stays first when
-            // the two differ.
-            Borrow::Element(c) if root == path => vec![
-                format!("`for {root} in consume {c}` if the loop should take the elements"),
-                copy,
-            ],
-            Borrow::Element(_) | Borrow::Projection => vec![copy],
-        }
-    }
-}
-
 /// The base name of a place path: `r.a[0]` is `r`.
 ///
 /// A message names a PATH and a borrow names the PARAMETER it came from, so the
@@ -1224,20 +1165,14 @@ pub fn root_of(path: &str) -> &str {
     }
 }
 
-/// A name that has been moved out of, and the menu its later use prints.
+/// A name that has been moved out of.
+///
+/// It carried the line and the hole flag until the `drop`-with-a-hole refusal
+/// left for the kernel (RFC-0125 §3 M3, row 22), and nothing reads either now.
+/// The table below is a set of consumed paths, and nothing reads THAT: it is
+/// the next deletion, and it takes the `consumed` parameter with it.
 #[derive(Clone)]
-struct Consumption {
-    /// Where the move happened.
-    line: usize,
-    /// Whether this consumption left a HOLE — a take of a projection, and the
-    /// only thing that makes reading the root as a whole an error (RFC-0093).
-    ///
-    /// It is a flag and not a test on the key, because RFC-0082's place desugar
-    /// names its temporaries after the paths they took: `o.i[].xs[]` is one
-    /// binding, moved whole, and reading `o.i[]` afterwards is not a hole. The
-    /// take is the one thing that can make one.
-    hole: bool,
-}
+struct Consumption;
 
 /// Consumed places: PATH -> what took it (RFC-0093), bucketed by ROOT.
 ///
@@ -1297,19 +1232,6 @@ impl Consumed {
         }
     }
 
-    /// Every recorded path that names storage overlapping `path`. The one bucket
-    /// the roots can agree on, which is the whole of the fix.
-    fn overlapping<'a>(
-        &'a self,
-        path: &'a str,
-    ) -> impl Iterator<Item = (&'a String, &'a Consumption)> {
-        self.0
-            .get(root_of(path))
-            .into_iter()
-            .flat_map(|b| b.iter())
-            .filter(move |(k, _)| overlaps(k, path))
-    }
-
     fn iter(&self) -> impl Iterator<Item = (&String, &Consumption)> {
         self.0.values().flat_map(|b| b.iter())
     }
@@ -1333,17 +1255,6 @@ impl<'a> IntoIterator for &'a Consumed {
     fn into_iter(self) -> Self::IntoIter {
         Box::new(self.iter())
     }
-}
-
-/// Whether two place paths name overlapping storage: equal, or one a prefix of
-/// the other at a `.`/`[` boundary.
-///
-/// This is the whole of the path rule. Reading `er.node` after taking `er` is
-/// the prefix direction; reading `er` whole after taking `er.node` is the other
-/// one, and both are refused for the same reason — the storage they name is not
-/// all there.
-fn overlaps(a: &str, b: &str) -> bool {
-    a == b || under(a, b) || under(b, a)
 }
 
 /// Whether `long` names storage inside `short`: `er.node` is under `er`.
@@ -1423,7 +1334,6 @@ impl MoveCheck<'_> {
         }
         *self.ret.borrow_mut() = ret.clone();
         self.lambda_base.borrow_mut().clear();
-        self.lambda_escapes.borrow_mut().clear();
         self.carrying_locals.borrow_mut().clear();
         self.block(body, &mut consumed, &mut scope);
     }
@@ -1660,7 +1570,7 @@ impl MoveCheck<'_> {
             return false;
         }
         let _ = into;
-        consumed.insert(root, Consumption { line, hole: false });
+        consumed.insert(root, Consumption);
         true
     }
 
@@ -1802,22 +1712,6 @@ impl MoveCheck<'_> {
                 args.first().is_some_and(|a| self.iterable_is_a_place(a))
             }
             _ => false,
-        }
-    }
-
-    /// Whether the callee may KEEP a `fn` value passed as argument `i` — the
-    /// question a lambda written at a call argument has to answer, because a
-    /// kept closure outlives the call and its captures leave the frame with it.
-    ///
-    /// A declared capability answers for a program function, a seeded row for a
-    /// builtin. Facts unknown (no declaration, no row) answer YES: the safe
-    /// direction is refusing an author once, never dangling a capture.
-    fn callee_keeps(&self, callee: &str, i: usize) -> bool {
-        match self.caps.get(callee).and_then(|c| c.get(i)) {
-            Some(cap) => *cap == Capability::Consume,
-            None => {
-                crate::prelude::capability(callee, i).map_or(true, |cap| cap == Capability::Consume)
-            }
         }
     }
 
@@ -2626,14 +2520,8 @@ impl MoveCheck<'_> {
                     // b.tags` empties that field and leaves the rest of `b`
                     // readable — the same hole the prefix makes, recorded the
                     // same way and handed to the same walk (M2).
-                    if let Some((root, path)) = place_path(iter) {
-                        consumed.insert(
-                            path.clone(),
-                            Consumption {
-                                line: *line,
-                                hole: root != path,
-                            },
-                        );
+                    if let Some((_, path)) = place_path(iter) {
+                        consumed.insert(path.clone(), Consumption);
                     }
                 }
                 Ok(false)
@@ -2678,7 +2566,7 @@ impl MoveCheck<'_> {
             }
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
-            Stmt::Drop { name, line } => {
+            Stmt::Drop { name, line: _ } => {
                 // All THREE of this statement's refusals have left (RFC-0125
                 // §3 M3, rows 20, 21 and 22): a `drop` of what a take already
                 // took, a `drop` of a borrow, and a `drop` of a binding a take
@@ -2691,13 +2579,7 @@ impl MoveCheck<'_> {
                 // obligation as well. What is left here is the record: a
                 // `drop` consumes the binding, so a use after it is a
                 // use-after-drop for the walk's own table.
-                consumed.insert(
-                    name.clone(),
-                    Consumption {
-                        line: *line,
-                        hole: false,
-                    },
-                );
+                consumed.insert(name.clone(), Consumption);
                 Ok(false)
             }
         }
@@ -2730,45 +2612,6 @@ impl MoveCheck<'_> {
                 },
                 ty.as_ref(),
             );
-        }
-    }
-
-    /// A lambda reads a name from an enclosing frame, so the enclosing block
-    /// gives it up (census §16).
-    ///
-    /// Every lambda, not only an escaping one. RFC-0037 puts a capture in the
-    /// closure's payload by value; a non-escaping lambda does not outlive the
-    /// call, but its captures are still a second word pointing at one buffer,
-    /// and Phase 5 is where a closure releases what it holds. Until then the
-    /// honest answer is that this block does not own it.
-    fn note_capture(&self, name: &str, line: usize) {
-        if !self.lets {
-            return;
-        }
-        let Some(&inside) = self.lambda_base.borrow().last() else {
-            return;
-        };
-        // A lambda whose callee provably only borrows it cannot outlive the
-        // call, so it borrows and this block keeps the value — the same
-        // condition `check_capture` applies to rule 2. A STORED one, and one
-        // handed to a callee that may keep it, is a value under RFC-0037 and
-        // can outlive the frame.
-        if !self
-            .lambda_escapes
-            .borrow()
-            .last()
-            .copied()
-            .unwrap_or(false)
-        {
-            return;
-        }
-        if self
-            .vars
-            .borrow()
-            .frame_of(name)
-            .is_some_and(|f| f < inside)
-        {
-            let _ = line;
         }
     }
 
@@ -2807,49 +2650,6 @@ impl MoveCheck<'_> {
         Ok(())
     }
 
-    /// RFC-0089 rule 2 at a capture: an ESCAPING closure may not hold a borrow.
-    ///
-    /// A lambda whose callee provably only borrows it (`map(xs, |x| ..)`, where
-    /// `map`'s parameter is a plain borrow) does not outlive the call, so it
-    /// borrows freely — that is the common case and the rule leaves it alone.
-    /// A lambda that is stored, or handed to a callee that may KEEP it (a
-    /// `consume fn` parameter can store what it owns), is a value under
-    /// RFC-0037's defunctionalization, and a borrow inside one has no lifetime
-    /// to stand on.
-    fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
-        let Some(&inside) = self.lambda_base.borrow().last() else {
-            return Ok(());
-        };
-        if !self
-            .lambda_escapes
-            .borrow()
-            .last()
-            .copied()
-            .unwrap_or(false)
-        {
-            return Ok(());
-        }
-        if !self
-            .vars
-            .borrow()
-            .frame_of(name)
-            .is_some_and(|f| f < inside)
-        {
-            return Ok(());
-        }
-        let Some(b) = self.borrow_of(name) else {
-            return Ok(());
-        };
-        Err(menu(
-            line,
-            format!(
-                "`{name}` may not be captured by a closure that outlives this call — it is {}",
-                b.what(name)
-            ),
-            b.fixes(name, name),
-        ))
-    }
-
     fn expr(
         &self,
         e: &Expr,
@@ -2860,8 +2660,6 @@ impl MoveCheck<'_> {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
             Expr::Var { name, line } => {
                 self.capture_site(name, *line);
-                self.check_capture(name, *line)?;
-                self.note_capture(name, *line);
                 Ok(())
             }
             Expr::Unary { expr, .. } => self.expr(expr, consumed, scope),
@@ -2882,8 +2680,6 @@ impl MoveCheck<'_> {
                 Some(_) => {
                     let (root, rline) = root_var(e);
                     self.capture_site(root, rline);
-                    self.check_capture(root, rline)?;
-                    self.note_capture(root, rline);
                     Ok(())
                 }
                 None => {
@@ -2900,11 +2696,11 @@ impl MoveCheck<'_> {
             },
             // RFC-0093 — the take. The record below is what makes a later read
             // of this place, or of anything overlapping it, a rule-1 error.
-            Expr::Consume { place, line } => {
+            Expr::Consume { place, line: _ } => {
                 self.expr(place, consumed, scope)?;
                 // A `consume` of what names no place is the desugar's refusal
                 // now (rows 08 and 09), so this walk records nothing for it.
-                let Some((root, path)) = place_path(place) else {
+                let Some((_, path)) = place_path(place) else {
                     return Ok(());
                 };
                 // A whole binding writes the same `Gone::Moved` the consuming
@@ -2917,13 +2713,7 @@ impl MoveCheck<'_> {
                 // binding is reclaimed MINUS these places. Every take of the same
                 // root joins the set, because a record is drained a field at a
                 // time.
-                consumed.insert(
-                    path.clone(),
-                    Consumption {
-                        line: *line,
-                        hole: root != path,
-                    },
-                );
+                consumed.insert(path.clone(), Consumption);
                 Ok(())
             }
             Expr::Try { expr, .. } => {
@@ -2941,9 +2731,6 @@ impl MoveCheck<'_> {
             // A literal's operands are places too: `Ring { slots: xs }` puts `xs`
             // where the record owns it, exactly as an argument does.
             Expr::StructLit { name, fields, line } => {
-                // A literal RETAINS what it is given, so a lambda inside one
-                // escapes whatever the enclosing call would have done with it.
-                let outer = self.call_keeps.replace(Some(true));
                 for (f, v) in fields {
                     self.site("literal", *line, v, None);
                     self.expr(v, consumed, scope)?;
@@ -2955,17 +2742,14 @@ impl MoveCheck<'_> {
                         consumed,
                     );
                 }
-                self.call_keeps.set(outer);
                 Ok(())
             }
             Expr::TryConstruct { name, args, line } => {
-                let outer = self.call_keeps.replace(Some(true));
                 for a in args {
                     self.site("literal", *line, a, None);
                     self.expr(a, consumed, scope)?;
                     self.store(a, &|| format!("`{name}`"), *line, true, consumed);
                 }
-                self.call_keeps.set(outer);
                 Ok(())
             }
             Expr::Match {
@@ -3099,10 +2883,7 @@ impl MoveCheck<'_> {
                         }
                     }
                     self.site("arg", *line, arg, None);
-                    self.call_keeps.set(Some(self.callee_keeps(name, i)));
-                    let r = self.expr(arg, consumed, scope);
-                    self.call_keeps.set(None);
-                    r?;
+                    self.expr(arg, consumed, scope)?;
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         // A NULLARY constructor is a value with no owner, not a
                         // name (RFC-0126 §8.8): `take(None)` twice hands the
@@ -3110,13 +2891,7 @@ impl MoveCheck<'_> {
                         // the first refused a program every engine runs.
                         if let Expr::Var { name: v, .. } = arg {
                             if !self.names_a_constructor(v) {
-                                consumed.or_insert(
-                                    v.clone(),
-                                    Consumption {
-                                        line: *line,
-                                        hole: false,
-                                    },
-                                );
+                                consumed.or_insert(v.clone(), Consumption);
                             }
                         }
                     } else if self.decl.constructs(name) {
@@ -3163,13 +2938,7 @@ impl MoveCheck<'_> {
                                 {
                                     continue;
                                 }
-                                consumed.or_insert(
-                                    root.clone(),
-                                    Consumption {
-                                        line: *line,
-                                        hole: false,
-                                    },
-                                );
+                                consumed.or_insert(root.clone(), Consumption);
                             }
                         }
                     } else if self.sinks(name, i)
@@ -3201,9 +2970,6 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Expr::ArrayLit { elems, line } => {
-                // A literal RETAINS what it is given, so a lambda inside one
-                // escapes whatever the enclosing call would have done with it.
-                let outer = self.call_keeps.replace(Some(true));
                 for e in elems {
                     self.site("literal", *line, e, None);
                     self.expr(e, consumed, scope)?;
@@ -3215,11 +2981,9 @@ impl MoveCheck<'_> {
                         consumed,
                     );
                 }
-                self.call_keeps.set(outer);
                 Ok(())
             }
             Expr::MapLit { entries, line } => {
-                let outer = self.call_keeps.replace(Some(true));
                 for (k, v) in entries {
                     self.expr(k, consumed, scope)?;
                     self.site("literal", *line, v, None);
@@ -3227,7 +2991,6 @@ impl MoveCheck<'_> {
                     self.store(k, &|| "the map literal".to_string(), *line, true, consumed);
                     self.store(v, &|| "the map literal".to_string(), *line, true, consumed);
                 }
-                self.call_keeps.set(outer);
                 Ok(())
             }
             // A lambda body (RFC-0023): its untyped params are fresh locals; walk
@@ -3245,15 +3008,6 @@ impl MoveCheck<'_> {
                         la.borrow_mut().insert(params.len());
                     }
                 }
-                // A lambda that is not a call argument can be stored and
-                // outlive the frame. One written AT a call argument still
-                // escapes when the callee may keep it: a `consume fn`
-                // parameter owns what it is handed and can store it, and a
-                // stored closure's captures leave the frame with it. Only a
-                // parameter that provably borrows keeps the old fast path.
-                let outer_keeps = self.call_keeps.replace(None);
-                let escapes = outer_keeps.unwrap_or(true);
-                self.lambda_escapes.borrow_mut().push(escapes);
                 scope.push(HashSet::new());
                 self.enter();
                 for p in params {
@@ -3300,12 +3054,6 @@ impl MoveCheck<'_> {
                     }
                 };
                 self.lambda_base.borrow_mut().pop();
-                self.lambda_escapes.borrow_mut().pop();
-                // Whatever the body's nested walks left in the cell, the
-                // enclosing context's answer is restored: a lambda walked as
-                // one argument must not decide whether a SIBLING lambda in a
-                // later argument of the same call escapes.
-                self.call_keeps.set(outer_keeps);
                 self.exit();
                 scope.pop();
                 r
@@ -3323,13 +3071,7 @@ impl MoveCheck<'_> {
                         // ordinary call above (RFC-0126 §8.8).
                         if let Expr::Var { name: v, .. } = arg {
                             if !self.names_a_constructor(v) {
-                                consumed.or_insert(
-                                    v.clone(),
-                                    Consumption {
-                                        line: *line,
-                                        hole: false,
-                                    },
-                                );
+                                consumed.or_insert(v.clone(), Consumption);
                             }
                         }
                     }

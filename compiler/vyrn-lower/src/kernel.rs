@@ -1379,6 +1379,50 @@ impl<'b> Kernel<'b> {
         Ok(())
     }
 
+    /// RFC-0037's capture rule: a closure that outlives the call it is
+    /// written at may not capture a borrow, because the borrow's owner is
+    /// this frame and the closure leaves it (RFC-0125 §3 M3, row 24).
+    ///
+    /// What the borrow IS comes from the same two places every other refusal
+    /// reads it from: the kind the core minted where it has one, and the
+    /// alias table's place where it does not — the reading `alias_take`'s
+    /// `drop` branch makes, one rule over.
+    fn escaping_capture(&self, st: &State, caps: &[Name], line: usize) -> Result<(), Refusal> {
+        for c in caps {
+            if !self.borrowed(*c) {
+                continue;
+            }
+            let s = self.src(*c);
+            let (what, fixes) = match &self.body.names[*c as usize].borrow_kind {
+                Some(b) => (b.what(s), b.fixes(s)),
+                None => (
+                    match &st.alias[*c as usize] {
+                        Some(Alias {
+                            root: Root::N(m), ..
+                        }) => self.body.names[*m as usize]
+                            .borrow_kind
+                            .as_ref()
+                            .map(|b| b.what(s)),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| "read out of a place that owns it".to_string()),
+                    Vec::new(),
+                ),
+            };
+            return self.refuse_at(
+                line,
+                menu(
+                    format!(
+                        "`{s}` may not be captured by a closure that outlives this call \
+                         — it is {what}"
+                    ),
+                    fixes,
+                ),
+            );
+        }
+        Ok(())
+    }
+
     /// A take of a `read` or `modify` parameter, of a second name for one,
     /// or of a lambda frame's capture: refused, because somebody else owns
     /// it (RFC-0089 rule 2, RFC-0037). Neither has a place to be an alias
@@ -1909,6 +1953,21 @@ impl<'b> Kernel<'b> {
                 // `r22_drop_with_a_hole`'s `drop p` after a take of `p.name`
                 // — and the census records it there.
                 let is_static = self.releases(*n) && matches!(rhs, Rhs::Val(Val::Lit(_)));
+                // RFC-0037 at a capture: a closure that OUTLIVES the call it
+                // is written at may not hold a borrow. A lambda whose
+                // parameter provably only borrows it dies with the call and
+                // captures freely — that is the common case and the core says
+                // which ([`crate::core::NameInfo::closure_escapes`]). One that
+                // is stored, returned, or handed to a parameter that may keep
+                // it is a value under RFC-0037's defunctionalization, and a
+                // borrow inside one has no lifetime to stand on (RFC-0125 §3
+                // M3, row 24).
+                if matches!(rhs, Rhs::Prim(crate::core::Op::Closure, ..)) {
+                    let i = &self.body.names[*n as usize];
+                    if let Some(reads) = i.closure_reads.clone() {
+                        self.escaping_capture(st, &reads, i.line)?;
+                    }
+                }
                 // An alias: a borrow read out of a place, or a second name
                 // for a borrow. What it reads is kept, and a second name for
                 // a borrow is not a take of it.

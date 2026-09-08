@@ -15390,6 +15390,91 @@ and `cli_census` are unmoved.
 `compiler/vyrn-lower/src/kernel.rs` 2,591 to **2,617**. Net 0, and the rule is
 stated once.
 
+#### The escaping closure's capture is the kernel's rule (2026-09-09, `track-dt`)
+
+The census's second row. RFC-0037: a closure that outlives the call it is
+written at may not capture a borrow, because the borrow's owner is the frame
+the closure leaves. `movecheck::check_capture` was the only pass that said so,
+and `VYRN_NO_MOVECHECK=1` accepted every program that broke it.
+
+**Two facts and one rule.** The rule is the kernel's and it needs two facts
+about a lambda LITERAL, both about where it is written, so the core states
+them on the name the literal binds
+([`crate::core::NameInfo::closure_reads`]):
+
+| the fact | what the checker read it off | what the core reads it off |
+|---|---|---|
+| does the closure outlive the call it is written at | `call_keeps`, a cell set per call argument to `callee_keeps` — the declared capability, else the seeded row, else "it may keep it" | the same question at the same door: `declared::arg_cap` in `Builder::call`'s argument loop, `Consume` or unanswered means the position may keep it. Every other position, and every lambda that is not an argument, escapes |
+| which captures does the body READ | nothing: the rule fired at an `Expr::Var` the walk reached inside the lambda, so a capture the body only CALLS was never asked about | the `vars` half of `mentions_in_lambda`, which `Builder::captures` already collects beside the `calls` half it adds to the capture set |
+
+The second fact is the one a corpus run found, and it is not a detail: three
+corpus programs capture a `fn`-valued `read` parameter and call it —
+`examples/capturefn.vyrn`'s `applyAll`, `std/stream.vyrn`'s `unfold` and its
+`map` — and all three compile. A call reaches the same body whoever holds the
+name; a captured BUFFER is one block with one owner. Stating the rule over
+the whole capture set refused all three, which is how the distinction was
+found rather than assumed.
+
+**One more door the checker had and the core did not.** A lambda inside an
+array, map, record or `try` literal escapes whatever the call around the
+literal would have done — the checker set its cell to `true` at all four
+arms. The core answers the position for a lambda written AT it and `None`
+for one deeper inside the argument, which is the same answer with one screen
+instead of five: `matches!(a, Expr::Lambda { .. })`.
+
+**The licence.** Measured at each step, and the reads filter is the step the
+corpus paid for:
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over the 280 corpus roots | byte-identical, **0 lost / 0 gained** |
+| the same, before the reads filter | **12 lines gained** in 2 files — `examples/capturefn.vyrn` and `std/stream.vyrn`, three functions, each a called capture |
+| `tests/refusals` and `tests/unlicensed`, `vyrn check` | byte-identical |
+| the same with `VYRN_NO_MOVECHECK=1` | **three lines gained**: `r24`'s sentence and its two `fix:` lines, byte for byte the checker's |
+
+**What went.** In `movecheck.rs`: `check_capture` and its two call sites,
+`note_capture` — which recorded nothing, its body ending at `let _ = line`
+— `callee_keeps`, `MoveCheck::lambda_escapes`, `MoveCheck::call_keeps` and the
+six sites that set them, and the four literal arms' overrides. With the rule
+gone, `Borrow::what` and `Borrow::fixes` had no reader: `core::BorrowKind`'s
+two methods are the same two sentences, and nothing outside the kernel words a
+borrow now. `Consumption::line` and `Consumption::hole` had none either — the
+`drop`-with-a-hole slice above was the last reader of both — and with them
+went `Consumed::overlapping` and the free `overlaps`.
+
+**A finding the deletion leaves standing.** `Consumed` is now WRITE-ONLY: four
+`insert`s, twelve `or_insert`s, ten `clone`s, one `revive`, and no read at all.
+The table is a set of consumed paths that nothing asks about, and the
+`consumed: &mut Consumed` parameter threads through `block`, `stmt`, `expr`,
+`store` and `walk_writeback` — 92 mentions. It is the next deletion and it is
+`Kind::Shared`, not a rule.
+
+**In `core.rs`, and where.** `NameInfo::closure_reads` (the facts region),
+`Builder::call_keeps` and `Builder::pending_closure` (two new cells),
+`Builder::closure_reads` (a new reader of `mentions_in_lambda`), and three
+one-site edits: the capability screen in `Builder::call`'s argument loop,
+`Builder::lambda`, and `Builder::rhs`'s `Expr::Lambda` arm — which has no name
+to write to, so `Builder::bind` hands the fact on. In `kernel.rs`:
+`Kernel::escaping_capture`, and four lines in `Kernel::stmt`'s `St::Let` arm.
+
+**The censuses.** The structural census
+(`compiler/vyrn-cli/tests/refusals.rs`): `Kind::Checker` **126 to 35** —
+`check_exclusive` alone — `Kind::Menu` **37 to 13**, `Kind::Rows` **533 to
+494**, shared machinery **3,096 to 2,992**; `Kernel` and `Tests` do not move.
+Three anchors go with their sections (`fn check_capture`, `fn callee_keeps`,
+`fn fixes`) and `enum Borrow` is re-kinded `Shared`: what it holds is a
+reading of a place for the walk, and the words it used to carry are the
+kernel's. Row 24's kernel column `No` to **`Same`**, and the doc comment's
+list of rows whose site has left the file gains 24. RFC-0127 §3's form census
+moves at two forms, **1,202 mentions to 1,205**: `Expr::Var` gains one `lower`
+mention and `Expr::Lambda` two, all three in the new core reader. The other
+censuses do not move.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,385 to **4,127**;
+`compiler/vyrn-lower/src/kernel.rs` 2,617 to **2,676**;
+`compiler/vyrn-lower/src/core.rs` 6,109 to **6,207**. 258 lines out of the
+pass, 157 into the two that outlive it, and the rule is stated once.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

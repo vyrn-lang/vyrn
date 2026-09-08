@@ -34,8 +34,9 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27, 34 and
-//! 22, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two must
+//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27, 34, 22
+//! and 24, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two
+//! must
 //! still agree. The row is what stops the sentence moving after the deletion,
 //! so it stays in the census.
 //!
@@ -279,9 +280,13 @@ fn census() -> Vec<Row> {
             "r24_capture_that_outlives_the_call.vyrn",
             "a closure that outlives the call may not capture a borrow",
             "RFC-0037",
+            // The kernel gives it since the capture slice: the core says
+            // where a lambda literal is written and which captures its body
+            // READS (`NameInfo::closure_reads`), and the kernel states
+            // RFC-0037 over the two.
             "`s` may not be captured by a closure that outlives this call — it is a `read` \
              parameter",
-            Kernel::No,
+            Kernel::Same,
         ),
         row(
             "r25_consume_inside_a_loop.vyrn",
@@ -2666,16 +2671,11 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "enum Borrow {",
-            Checker,
-            "what a borrow is, in words. `core::BorrowKind::what` is the same \
-             sentence, so nothing here is owed; what reads this one now is \
-             `check_take` and the two closure rules, which the kernel does \
-             not give",
-        ),
-        sec(
-            "    fn fixes(&self, root: &str, path: &str) -> Vec<String> {",
-            Menu,
-            "the named ways out of a borrow error",
+            Shared,
+            "what a borrow is, for the walk's own reading of a place. The two \
+             SENTENCES left with the capture rule (row 24): \
+             `core::BorrowKind::what` and `::fixes` are the statement, and \
+             nothing outside the kernel words a borrow now",
         ),
         sec(
             "pub fn root_of(path: &str) -> &str {",
@@ -2728,11 +2728,6 @@ fn sections() -> Vec<Section> {
             "what a pattern's binders name, and whether an iterable is a place",
         ),
         sec(
-            "    fn callee_keeps(&self, callee: &str, i: usize) -> bool {",
-            Shared,
-            "whether a callee keeps a `fn` value",
-        ),
-        sec(
             "    fn carries_param_storage(&self, e: &Expr) -> bool {",
             Rows,
             "the escape screen: storage flow rather than mention",
@@ -2775,11 +2770,6 @@ fn sections() -> Vec<Section> {
              -> Result<(), Diagnostic> {",
             Checker,
             "a `modify` borrow is exclusive (row 23)",
-        ),
-        sec(
-            "    fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic> {",
-            Checker,
-            "a closure that outlives the call may not capture a borrow (row 24)",
         ),
         sec(
             "    fn expr(",
@@ -2935,10 +2925,10 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("a rule the kernel now gives", 0),
-        ("a rule only the checker gives", 126),
-        ("placement rows for the engines", 533),
-        ("a fix menu", 37),
-        ("shared machinery", 3096),
+        ("a rule only the checker gives", 35),
+        ("placement rows for the engines", 494),
+        ("a fix menu", 13),
+        ("shared machinery", 2992),
         ("tests", 593),
     ];
     assert_eq!(got, want, "the structural census has moved");
