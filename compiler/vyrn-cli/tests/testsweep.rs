@@ -238,6 +238,14 @@ const LEFT_THE_CHECKER: &[(&str, &str)] = &[
         "the `for .. in consume` loop",
         "rows 10, 11 and 29, the take a loop writes",
     ),
+    (
+        "may not be dropped — `",
+        "row 22, a `drop` of a binding a take left a hole in",
+    ),
+    (
+        "may not be captured by a closure that outlives this call",
+        "row 24, RFC-0037 at a capture",
+    ),
     // Not a rule that left: a rule the checker never had. `@borrow` is a name
     // the core mints and no program contains, so a refusal that quotes it is
     // the kernel's alone. Row 17's other half — a borrow an arm yields, which

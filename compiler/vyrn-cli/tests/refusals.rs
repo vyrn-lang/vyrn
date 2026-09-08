@@ -2535,6 +2535,103 @@ fn a_lend_through_a_wrapper_is_refused_and_the_kernel_is_what_refuses_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The three rules `movecheck.rs` stated last, as its own unit tests wrote
+/// them: they moved out of the file in one track (RFC-0125 §3 M3, rows 22, 23
+/// and 24), so the shapes move here.
+///
+/// Two runs each, as every row of the census above: `vyrn check`, and with the
+/// move check stood aside. All five must be refused in the same words by both,
+/// because none of the three rules is the move check's any more — two are the
+/// kernel's and one is the checker's.
+#[test]
+fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
+    const END: &str = " fn main() -> Int64 { return 0 }";
+    let cases: &[(&str, &str, String)] = &[
+        (
+            "a drop after a partial take",
+            "`t` may not be dropped — `t.name` was taken out of it on line 1, and `drop` \
+             releases the whole binding",
+            format!(
+                "type T = {{ id: Int64, name: String }} \
+                 impl Owned for T {{ fn release(consume self) \
+                 {{ let a = consume self.name drop a }} }} \
+                 fn go() -> Int64 {{ let t = T {{ id: 1, name: \"n\" }} \
+                 let n = consume t.name drop n drop t return 0 }}{END}"
+            ),
+        ),
+        (
+            "a modify borrow read again in the same call",
+            "`xs` is passed to `f` as `modify` and read again in the same call — a `modify` \
+             borrow is exclusive",
+            format!(
+                "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 {{ return a.length }} \
+                 fn go() -> Int64 {{ let mut xs: Array<Int64> = [] return f(xs, xs) }}{END}"
+            ),
+        ),
+        (
+            "a modify receiver read again in the same call",
+            "`t` is passed to `merge` as `modify` and read again in the same call — a `modify` \
+             borrow is exclusive",
+            format!(
+                "type T = {{ n: Int64 }} \
+                 protocol Merging {{ fn merge(modify self, other: T) -> Unit }} \
+                 impl Merging for T {{ fn merge(modify self, other: T) -> Unit \
+                 {{ self.n = self.n + other.n }} }} \
+                 fn go() -> Int64 {{ let mut t = T {{ n: 1 }} t.merge(t) return 0 }}{END}"
+            ),
+        ),
+        (
+            "a stored closure captures a borrow",
+            "`s` may not be captured by a closure that outlives this call — it is a `read` \
+             parameter",
+            format!(
+                "fn go(s: String) -> Int64 \
+                 {{ let f: fn(Int64) -> Int64 = n -> n + s.byteLength \
+                 return f(1) }}{END}"
+            ),
+        ),
+        (
+            "a closure at a consume fn parameter captures a borrow",
+            "`q` may not be captured by a closure that outlives this call — it is a `read` \
+             parameter",
+            format!(
+                "fn reg(f: consume fn(Int64) -> Int64) -> Int64 {{ return f(0) }} \
+                 fn go(q: read String) -> Int64 {{ return reg(n -> n + q.byteLength) }}{END}"
+            ),
+        ),
+    ];
+    let dir = common::scratch("last-three-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+            continue;
+        }
+        let (_, msg) = split_head(&text);
+        let first = msg.lines().next().unwrap_or_default();
+        if first != *says {
+            bad.push(format!("{what}: said `{first}`"));
+            continue;
+        }
+        // The licence, per program: the whole refusal survives the deletion.
+        let (kok, ktext) = refusal_in(dir.to_path_buf(), &name, true);
+        if kok || ktext != text {
+            bad.push(format!(
+                "{what}: without the move check it said `{}`",
+                if kok { "nothing".to_string() } else { ktext }
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a rule the last three shapes pin no longer refuses:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The structural census of `movecheck.rs` (RFC-0125 §3 M3, the checker's
 // deletion path).
@@ -2932,7 +3029,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("placement rows for the engines", 494),
         ("a fix menu", 0),
         ("shared machinery", 2990),
-        ("tests", 593),
+        ("tests", 519),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

@@ -3570,85 +3570,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rejects_drop_after_a_partial_take() {
-        // F2-049: the taken field belongs to whoever received it, and `drop`
-        // reclaims storage by TYPE — freeing the whole binding here frees
-        // what the receiver still holds.
-        let src = "type T = { id: Int64, name: String }; \
-                   fn main() -> Int64 { let t = T { id: 1, name: \"n\" }; \
-                                      consume t.name; drop t; return 0; }";
-        let e = run(src);
-        assert!(e.contains("may not be dropped"), "{e}");
-    }
-
     // ---- RFC-0089 Phase 4b: rules 1 and 3 --------------------------------
 
     // ---- RFC-0093: the take ---------------------------------------------
 
     // ---- rule 2 at the third exit: a borrow may not be consumed -----------
-
-    /// A lambda handed to a callee that may KEEP it escapes, so its captures
-    /// are checked like a stored closure's (RFC-0037). A `consume fn`
-    /// parameter owns what it is handed and can store it; storing one whose
-    /// capture borrows the frame leaves the capture dangling.
-    #[test]
-    fn a_lambda_at_a_consume_parameter_escapes() {
-        let e = run(
-            "fn reg(f: consume fn(Int64) -> Int64) -> Int64 { return f(0) } \
-             fn go(q: read String) -> Int64 { return reg(n -> n + q.byteLength) } \
-             fn main() -> Int64 { return 0 }",
-        );
-        assert!(
-            e.contains("may not be captured by a closure that outlives this call"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn a_modify_borrow_is_exclusive() {
-        let src = "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 { return a.length } \
-                   fn main() -> Int64 { let mut xs: Array<Int64> = [] return f(xs, xs) }";
-        let e = run(src);
-        assert!(
-            e.contains("as `modify` and read again in the same call"),
-            "{e}"
-        );
-        assert!(e.contains("fix: `xs.copy()`"), "{e}");
-    }
-
-    #[test]
-    fn a_modify_receiver_is_exclusive_too() {
-        // The receiver form of the rule above. It falls out of one check, but
-        // only because the PROTOCOL carries the capability: a method call
-        // reaches this pass under its surface name (`merge`), and the impl it
-        // will dispatch to is flattened under a mangled one this pass never
-        // sees. Without the protocol's declaration there is nothing under
-        // `merge` and the rule goes silent.
-        let src = "type T = { n: Int64 } \
-                   protocol Merging { fn merge(modify self, other: T) -> Unit } \
-                   impl Merging for T { fn merge(modify self, other: T) -> Unit \
-                   { self.n = self.n + other.n } } \
-                   fn main() -> Int64 { let mut t = T { n: 1 } t.merge(t) return 0 }";
-        let e = run(src);
-        assert!(
-            e.contains("as `modify` and read again in the same call"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn an_escaping_closure_may_not_capture_a_borrow() {
-        // A lambda that is stored, or handed to a `consume fn` parameter that
-        // may keep it, is a value and may not capture a borrow.
-        let src = "fn go(s: String) -> Int64 { let f = n -> n + s.byteLength return f(1) } \
-                   fn main() -> Int64 { return 0 }";
-        let e = run(src);
-        assert!(
-            e.contains("may not be captured by a closure that outlives this call"),
-            "{e}"
-        );
-    }
 
     // ---- RFC-0075: what a stream producer TAKES --------------------------
     //

@@ -445,39 +445,20 @@ fn main() -> Int64 {
 
 /// A movecheck diagnostic is pinned to the borrowed **identifier** on the
 /// error's line (the movecheck message backtick-quotes the variable name).
-/// Guards that the pinner covers movecheck, not just checker.
+/// The pinner used to be guarded over `movecheck` as well as the checker.
 ///
 /// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
-/// row 06), a store until rule 2 left too (rows 01, 02, 03, 27 and 34), and a
-/// `for .. in consume` of a `read` parameter until rows 10, 11 and 29 left. It
-/// asks row 24 now, a closure that outlives the call capturing a borrow, which
-/// the kernel does not state, so `movecheck.rs` keeps it. What the editor
-/// shows for a rule the KERNEL states is a separate question, and the record
-/// says the answer is nothing: `vyrn-lsp` is an adapter over
-/// `vyrn_frontend::analyze` and the kernel is in `vyrn-lower`.
-#[test]
-fn movecheck_rule_two_pinned_to_ident() {
-    let src = "fn hold(s: String) -> fn() -> Int64 {
-    let g: fn() -> Int64 = () -> s.byteLength;
-    return g;
-}
-fn main() -> Int64 { return 0; }
-";
-    let a = analyze(src);
-    let d = a
-        .diagnostics
-        .iter()
-        .find(|d| d.stage == "movecheck" && d.message.contains("may not be captured"))
-        .expect("a movecheck row-24 diagnostic");
-    // Line 2: `    let g: fn() -> Int64 = () -> s.byteLength;` — the captured
-    // `s` is at col 34.
-    assert_eq!(d.line, 2);
-    assert_eq!(
-        d.col, 34,
-        "pinned to the captured `s`, not col 0 (whole line)"
-    );
-    assert_eq!(d.end_col, 35);
-}
+/// row 06), a store until rule 2 left too (rows 01, 02, 03, 27 and 34), a
+/// `for .. in consume` of a `read` parameter until rows 10, 11 and 29 left,
+/// and last a closure that outlives the call capturing a borrow, until row 24
+/// left. `movecheck.rs` states NO refusal now, so there is nothing of that
+/// stage left to pin and the guard goes with the rule.
+///
+/// What the editor shows for a rule the KERNEL states is the standing gap this
+/// arc has recorded since the first row moved: `vyrn-lsp` installs the
+/// lowering, so the sentence reaches a reader, but the kernel refuses at a
+/// LINE and the pinner works from a column. Every rule above is in the same
+/// position, and the answer is one slice about `Refusal`, not one test.
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is
 /// pinned to the type **identifier** in the annotation. Guards the identifier
