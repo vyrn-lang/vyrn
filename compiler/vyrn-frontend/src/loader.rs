@@ -3075,7 +3075,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 .map(|(n, _)| n.clone())
                 .collect();
             // This module's own variants guard the rewrite (see
-            // [`RW_VARIANTS`]): an alias local or injected spelling that
+            // [`Renamer::variants`]): an alias local or injected spelling that
             // collides with one must not fold the constructor sites.
             let variants = own_variant_names(&m.program);
             rewrite_module_refs(&mut m.program, map, &ns_names, &variants);
@@ -3186,6 +3186,234 @@ macro_rules! type_head_descent {
 type_head_descent!(type_heads);
 type_head_descent!(type_heads_mut, mut);
 
+/// Every statement and every expression a body holds, in source order, with the
+/// local names in scope at each one — the ONE scope-aware descent this file
+/// makes over a `Block`.
+///
+/// Three readers ask the same question and used to write the same thirty-five
+/// arms out to ask it (RFC-0125 §3 M6): [`fn_body_ref_names`] collects the names
+/// a body references that could name a declaration, [`rewrite_module_refs`]
+/// renames each of them through a map, and [`NsResolver`] resolves the
+/// namespace-qualified ones. `rewrite_module_refs`'s own comment said so — "the
+/// same walk `fn_body_ref_names` uses" — and the three had already drifted: two
+/// of them put an `Ok(x) =>` arm's binding in scope and the renamer did not.
+///
+/// What differs between them is one line at a SITE, never the traversal. The
+/// collector records a namespace-sugar call under its DOTTED spelling and counts
+/// the occurrence; the renamer SKIPS a namespace receiver and an own-enum
+/// constructor; the namespace resolver DELETES the receiver argument. So the
+/// visitor is handed the node and the scope and writes its own line, and the
+/// walk owns the descent and the scope stack and nothing else.
+///
+/// It is a macro for [`type_head_descent`]'s reason, one binding form up: the
+/// collector reads through a shared borrow and the other two assign through a
+/// unique one, and no other mechanism in Rust states a descent once across both.
+/// Each expansion defines its own trait, so the two borrows are two spellings of
+/// one arm list.
+macro_rules! body_scope_descent {
+    ($visit:ident, $blk:ident, $st:ident, $ex:ident $(, $mut_:tt)?) => {
+        trait $visit {
+            /// One statement, before its children. `locals` is what is bound
+            /// where the statement starts; a `let`'s own name joins after it.
+            fn stmt(&mut self, s: &$($mut_)? Stmt, locals: &HashSet<String>) {
+                let _ = (s, locals);
+            }
+            /// One expression, before its children. `false` skips them — the
+            /// answer a reader that replaced the node itself gives.
+            fn expr(&mut self, e: &$($mut_)? Expr, locals: &HashSet<String>) -> bool {
+                let _ = (e, locals);
+                true
+            }
+            /// One `match` arm's pattern, at the `match`'s line, before that
+            /// arm's own bindings join the scope.
+            fn arm_pattern(
+                &mut self,
+                p: &$($mut_)? Pattern,
+                line: usize,
+                locals: &HashSet<String>,
+            ) {
+                let _ = (p, line, locals);
+            }
+        }
+
+        fn $blk<V: $visit + ?Sized>(b: &$($mut_)? Block, locals: &mut HashSet<String>, v: &mut V) {
+            for s in &$($mut_)? b.stmts {
+                $st(s, locals, v);
+            }
+        }
+
+        fn $st<V: $visit + ?Sized>(s: &$($mut_)? Stmt, locals: &mut HashSet<String>, v: &mut V) {
+            v.stmt(&$($mut_)? *s, locals);
+            match s {
+                Stmt::Let { name, value, .. } => {
+                    $ex(value, locals, v);
+                    // In scope for subsequent statements (and shadows a
+                    // like-named export, namespace or renamed decl from here on).
+                    locals.insert(name.clone());
+                }
+                Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => $ex(value, locals, v),
+                Stmt::IndexSet { index, value, .. } => {
+                    $ex(index, locals, v);
+                    $ex(value, locals, v);
+                }
+                Stmt::Return { value: Some(e), .. } => $ex(e, locals, v),
+                Stmt::Return { value: None, .. } => {}
+                Stmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    $ex(cond, locals, v);
+                    let mut inner = locals.clone();
+                    $blk(then_block, &mut inner, v);
+                    if let Some(eb) = else_block {
+                        let mut inner2 = locals.clone();
+                        $blk(eb, &mut inner2, v);
+                    }
+                }
+                Stmt::IfLet {
+                    scrutinee,
+                    then_block,
+                    else_block,
+                    pattern,
+                    ..
+                } => {
+                    $ex(scrutinee, locals, v);
+                    let mut inner = locals.clone();
+                    for b in crate::movecheck::pattern_bindings(pattern) {
+                        inner.insert(b.to_string());
+                    }
+                    $blk(then_block, &mut inner, v);
+                    if let Some(eb) = else_block {
+                        let mut inner2 = locals.clone();
+                        $blk(eb, &mut inner2, v);
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    $ex(cond, locals, v);
+                    let mut inner = locals.clone();
+                    $blk(body, &mut inner, v);
+                }
+                Stmt::ForIn {
+                    var, iter, body, ..
+                } => {
+                    $ex(iter, locals, v);
+                    let mut inner = locals.clone();
+                    inner.insert(var.clone());
+                    $blk(body, &mut inner, v);
+                }
+                Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+                Stmt::Expr(e) => $ex(e, locals, v),
+                Stmt::Region { body, .. } => {
+                    let mut inner = locals.clone();
+                    $blk(body, &mut inner, v);
+                }
+            }
+        }
+
+        fn $ex<V: $visit + ?Sized>(e: &$($mut_)? Expr, locals: &HashSet<String>, v: &mut V) {
+            if !v.expr(&$($mut_)? *e, locals) {
+                return;
+            }
+            match e {
+                // A call's args are walked whatever the visitor made of the
+                // callee — including one the namespace pass just removed.
+                Expr::Call { args, .. }
+                | Expr::Spawn { args, .. }
+                | Expr::TryConstruct { args, .. } => {
+                    for a in args {
+                        $ex(a, locals, v);
+                    }
+                }
+                Expr::StructLit { fields, .. } => {
+                    for (_, val) in fields {
+                        $ex(val, locals, v);
+                    }
+                }
+                Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                    $ex(expr, locals, v)
+                }
+                Expr::Consume { place, .. } => $ex(place, locals, v),
+                Expr::Binary { lhs, rhs, .. } => {
+                    $ex(lhs, locals, v);
+                    $ex(rhs, locals, v);
+                }
+                Expr::Match {
+                    scrutinee,
+                    arms,
+                    line,
+                    ..
+                } => {
+                    let l = *line;
+                    $ex(scrutinee, locals, v);
+                    for arm in arms {
+                        let mut inner = locals.clone();
+                        v.arm_pattern(&$($mut_)? arm.pattern, l, &inner);
+                        for b in crate::movecheck::pattern_bindings(&arm.pattern) {
+                            inner.insert(b.to_string());
+                        }
+                        match &$($mut_)? arm.body {
+                            ArmBody::Expr(e2) => $ex(e2, &inner, v),
+                            ArmBody::Block(b2) => $blk(b2, &mut inner, v),
+                        }
+                    }
+                }
+                Expr::IfExpr {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    $ex(cond, locals, v);
+                    $ex(then_branch, locals, v);
+                    if let Some(eb) = else_branch {
+                        $ex(eb, locals, v);
+                    }
+                }
+                Expr::ArrayLit { elems, .. } => {
+                    for e2 in elems {
+                        $ex(e2, locals, v);
+                    }
+                }
+                Expr::MapLit { entries, .. } => {
+                    for (k, val) in entries {
+                        $ex(k, locals, v);
+                        $ex(val, locals, v);
+                    }
+                }
+                // A lambda's params are new locals: they shadow a decl exactly
+                // as a `let` does (RFC-0023).
+                Expr::Lambda { params, body, .. } => {
+                    let mut inner = locals.clone();
+                    for p in params {
+                        inner.insert(p.clone());
+                    }
+                    match body {
+                        LambdaBody::Expr(e2) => $ex(e2, &inner, v),
+                        LambdaBody::Block(b2) => $blk(b2, &mut inner, v),
+                    }
+                }
+                Expr::Var { .. }
+                | Expr::Int(_)
+                | Expr::Byte(_)
+                | Expr::Float(_)
+                | Expr::Bool(_)
+                | Expr::Str(_) => {}
+            }
+        }
+    };
+}
+
+body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+body_scope_descent!(
+    BodyVisitMut,
+    body_block_mut,
+    body_stmt_mut,
+    body_expr_mut,
+    mut
+);
+
 /// Reinterprets namespace-qualified references (`ns.member`, RFC-0027) inside one
 /// importing module into the resolved program-wide decl symbols. A namespace is a
 /// compile-time name, not a value: any surviving bare use of it is an error.
@@ -3242,7 +3470,7 @@ impl NsResolver<'_> {
         for f in &mut p.functions {
             let mut locals: HashSet<String> = f.params.iter().map(|pm| pm.name.clone()).collect();
             self.walk_type_positions_fn(f, &locals.clone());
-            self.walk_block(&mut f.body, &mut locals);
+            body_block_mut(&mut f.body, &mut locals, self);
         }
         for im in &mut p.impls {
             self.rewrite_type(&mut im.ty);
@@ -3250,7 +3478,7 @@ impl NsResolver<'_> {
                 let mut locals: HashSet<String> =
                     m.params.iter().map(|pm| pm.name.clone()).collect();
                 self.walk_type_positions_fn(m, &locals.clone());
-                self.walk_block(&mut m.body, &mut locals);
+                body_block_mut(&mut m.body, &mut locals, self);
             }
             // `ns.member` uses inside a place projection resolve like any
             // other reference (RFC-0091 M2: a projection is an ordinary body
@@ -3259,7 +3487,7 @@ impl NsResolver<'_> {
                 let mut locals: HashSet<String> =
                     pl.params.iter().map(|pm| pm.name.clone()).collect();
                 self.walk_type_positions_fn(pl, &locals.clone());
-                self.walk_block(&mut pl.body, &mut locals);
+                body_block_mut(&mut pl.body, &mut locals, self);
             }
         }
         for t in &mut p.type_decls {
@@ -3268,24 +3496,24 @@ impl NsResolver<'_> {
             }
             self.rewrite_type(&mut t.base);
             if let Some(pred) = &mut t.predicate {
-                let mut locals: HashSet<String> = std::iter::once("value".to_string()).collect();
-                self.walk_expr(pred, &mut locals);
+                let locals: HashSet<String> = std::iter::once("value".to_string()).collect();
+                body_expr_mut(pred, &locals, self);
             }
         }
         for g in &mut p.globals {
             if let Some(ty) = &mut g.ty {
                 self.rewrite_type(ty);
             }
-            let mut locals = HashSet::new();
-            self.walk_expr(&mut g.init, &mut locals);
+            let locals = HashSet::new();
+            body_expr_mut(&mut g.init, &locals, self);
         }
         for t in &mut p.tests {
             let mut locals = HashSet::new();
-            self.walk_block(&mut t.body, &mut locals);
+            body_block_mut(&mut t.body, &mut locals, self);
         }
         for b in &mut p.benches {
             let mut locals = HashSet::new();
-            self.walk_block(&mut b.body, &mut locals);
+            body_block_mut(&mut b.body, &mut locals, self);
         }
     }
 
@@ -3337,93 +3565,22 @@ impl NsResolver<'_> {
     fn is_ns(&self, ns: &str, locals: &HashSet<String>) -> bool {
         self.ns.contains_key(ns) && !locals.contains(ns)
     }
+}
 
-    fn walk_block(&mut self, b: &mut Block, locals: &mut HashSet<String>) {
-        for s in &mut b.stmts {
-            self.walk_stmt(s, locals);
+/// The namespace pass's line at each site. The descent and the scope stack are
+/// [`body_scope_descent`]'s; what is this pass's own is the receiver it deletes.
+impl BodyVisitMut for NsResolver<'_> {
+    fn stmt(&mut self, s: &mut Stmt, _locals: &HashSet<String>) {
+        if let Stmt::Let { ty: Some(t), .. } = s {
+            self.rewrite_type(t);
         }
     }
 
-    fn walk_stmt(&mut self, s: &mut Stmt, locals: &mut HashSet<String>) {
-        match s {
-            Stmt::Let {
-                name, value, ty, ..
-            } => {
-                if let Some(t) = ty {
-                    self.rewrite_type(t);
-                }
-                self.walk_expr(value, locals);
-                // The binding is in scope for subsequent statements (and shadows a
-                // like-named namespace from here on).
-                locals.insert(name.clone());
-            }
-            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
-                self.walk_expr(value, locals)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                self.walk_expr(index, locals);
-                self.walk_expr(value, locals);
-            }
-            Stmt::Return { value: Some(e), .. } => self.walk_expr(e, locals),
-            Stmt::Return { value: None, .. } => {}
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.walk_expr(cond, locals);
-                let mut inner = locals.clone();
-                self.walk_block(then_block, &mut inner);
-                if let Some(eb) = else_block {
-                    let mut inner2 = locals.clone();
-                    self.walk_block(eb, &mut inner2);
-                }
-            }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                pattern,
-                ..
-            } => {
-                self.walk_expr(scrutinee, locals);
-                let mut inner = locals.clone();
-                for b in crate::movecheck::pattern_bindings(pattern) {
-                    inner.insert(b.to_string());
-                }
-                self.walk_block(then_block, &mut inner);
-                if let Some(eb) = else_block {
-                    let mut inner2 = locals.clone();
-                    self.walk_block(eb, &mut inner2);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                self.walk_expr(cond, locals);
-                let mut inner = locals.clone();
-                self.walk_block(body, &mut inner);
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                self.walk_expr(iter, locals);
-                let mut inner = locals.clone();
-                inner.insert(var.clone());
-                self.walk_block(body, &mut inner);
-            }
-            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-            Stmt::Expr(e) => self.walk_expr(e, locals),
-            Stmt::Region { body, .. } => {
-                let mut inner = locals.clone();
-                self.walk_block(body, &mut inner);
-            }
-        }
-    }
-
-    fn walk_expr(&mut self, e: &mut Expr, locals: &HashSet<String>) {
+    fn expr(&mut self, e: &mut Expr, locals: &HashSet<String>) -> bool {
         match e {
             // `ns.fn(args)` and `ns.Enum.Variant(payload)` both arrive as method
-            // sugar — the receiver is the first argument.
+            // sugar — the receiver is the first argument. Either way the
+            // receiver goes and the walk carries on into what is left.
             Expr::Call { name, args, line } => {
                 let l = *line;
                 // `ns.member(rest)` — first arg is the bare namespace.
@@ -3434,10 +3591,7 @@ impl NsResolver<'_> {
                             *name = sym;
                         }
                         args.remove(0);
-                        for a in args.iter_mut() {
-                            self.walk_expr(a, locals);
-                        }
-                        return;
+                        return true;
                     }
                 }
                 // `ns.Enum.Variant(payload)` — first arg is `ns.Enum` field access
@@ -3457,25 +3611,13 @@ impl NsResolver<'_> {
                             // The variant name is global (variants are not renamed);
                             // drop the qualifier receiver and keep the call name.
                             args.remove(0);
-                            for a in args.iter_mut() {
-                                self.walk_expr(a, locals);
-                            }
-                            return;
                         }
                     }
                 }
-                for a in args.iter_mut() {
-                    self.walk_expr(a, locals);
-                }
             }
-            Expr::Spawn { args, .. } => {
-                for a in args.iter_mut() {
-                    self.walk_expr(a, locals);
-                }
-            }
-            Expr::TryConstruct { name, args, line } => {
-                // `ns.Type?(..)` — the parser folds the qualifier into the name,
-                // exactly as it does for a struct literal's `ns.Type { .. }`.
+            Expr::TryConstruct { name, line, .. } | Expr::StructLit { name, line, .. } => {
+                // `ns.Type?(..)` and `ns.Type { .. }` — the parser folds the
+                // qualifier into the name.
                 if let Some((ns, member)) = name.clone().split_once('.') {
                     if self.is_ns(ns, locals) {
                         if let Some(sym) = self.resolve_member(ns, member, *line) {
@@ -3485,25 +3627,6 @@ impl NsResolver<'_> {
                         let (ns, line) = (ns.to_string(), *line);
                         self.err(line, format!("`{ns}` is not an in-scope namespace"));
                     }
-                }
-                for a in args.iter_mut() {
-                    self.walk_expr(a, locals);
-                }
-            }
-            Expr::StructLit { name, fields, line } => {
-                // `ns.Type { .. }` — the parser encoded the qualifier as `ns.Type`.
-                if let Some((ns, member)) = name.clone().split_once('.') {
-                    if self.is_ns(ns, locals) {
-                        if let Some(sym) = self.resolve_member(ns, member, *line) {
-                            *name = sym;
-                        }
-                    } else {
-                        let (ns, line) = (ns.to_string(), *line);
-                        self.err(line, format!("`{ns}` is not an in-scope namespace"));
-                    }
-                }
-                for (_, v) in fields.iter_mut() {
-                    self.walk_expr(v, locals);
                 }
             }
             Expr::Field { expr, field, line } => {
@@ -3515,7 +3638,7 @@ impl NsResolver<'_> {
                         if let Some(sym) = self.resolve_member(&head, field, l) {
                             *e = Expr::Var { name: sym, line: l };
                         }
-                        return;
+                        return false;
                     }
                 }
                 // `ns.Enum.Variant` (nullary variant) — `ns.Enum` is the inner field.
@@ -3549,11 +3672,10 @@ impl NsResolver<'_> {
                                     ),
                                 );
                             }
-                            return;
+                            return false;
                         }
                     }
                 }
-                self.walk_expr(expr, locals);
             }
             Expr::Var { name, line } => {
                 if self.is_ns(name, locals) {
@@ -3561,86 +3683,26 @@ impl NsResolver<'_> {
                     self.err(line, format!("namespace `{name}` is not a value"));
                 }
             }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } => self.walk_expr(expr, locals),
-            Expr::Consume { place, .. } => self.walk_expr(place, locals),
-            Expr::Binary { lhs, rhs, .. } => {
-                self.walk_expr(lhs, locals);
-                self.walk_expr(rhs, locals);
-            }
-            Expr::Match {
-                scrutinee,
-                arms,
-                line,
-                ..
-            } => {
-                let l = *line;
-                self.walk_expr(scrutinee, locals);
-                for arm in arms.iter_mut() {
-                    let mut inner = locals.clone();
-                    match &mut arm.pattern {
-                        Pattern::Variant(v, binds) => {
-                            // `ns.Enum.Variant` pattern — reduce the dotted path to
-                            // the bare variant (variants are global; the enum need
-                            // only be an exported member of the namespace).
-                            if let Some(idx) = v.find('.') {
-                                let ns = v[..idx].to_string();
-                                let rest = &v[idx + 1..];
-                                let variant = rest.rsplit('.').next().unwrap_or(rest).to_string();
-                                let enum_name = rest.split('.').next().unwrap_or(rest).to_string();
-                                if self.ns.contains_key(&ns) {
-                                    let _ = self.resolve_member(&ns, &enum_name, l);
-                                    *v = variant;
-                                }
-                            }
-                            for b in binds.iter() {
-                                inner.insert(b.clone());
-                            }
-                        }
-                        Pattern::Success(b) | Pattern::Failure(b) => {
-                            inner.insert(b.clone());
-                        }
-                        Pattern::Other => {}
-                    }
-                    match &mut arm.body {
-                        ArmBody::Expr(e) => self.walk_expr(e, &mut inner),
-                        ArmBody::Block(b) => self.walk_block(b, &mut inner),
-                    }
+            _ => {}
+        }
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &mut Pattern, line: usize, _locals: &HashSet<String>) {
+        // `ns.Enum.Variant` pattern — reduce the dotted path to the bare variant
+        // (variants are global; the enum need only be an exported member of the
+        // namespace).
+        if let Pattern::Variant(v, _) = p {
+            if let Some(idx) = v.find('.') {
+                let ns = v[..idx].to_string();
+                let rest = &v[idx + 1..];
+                let variant = rest.rsplit('.').next().unwrap_or(rest).to_string();
+                let enum_name = rest.split('.').next().unwrap_or(rest).to_string();
+                if self.ns.contains_key(&ns) {
+                    let _ = self.resolve_member(&ns, &enum_name, line);
+                    *v = variant;
                 }
             }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.walk_expr(cond, locals);
-                self.walk_expr(then_branch, locals);
-                if let Some(eb) = else_branch {
-                    self.walk_expr(eb, locals);
-                }
-            }
-            Expr::ArrayLit { elems, .. } => {
-                for e2 in elems.iter_mut() {
-                    self.walk_expr(e2, locals);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries.iter_mut() {
-                    self.walk_expr(k, locals);
-                    self.walk_expr(v, locals);
-                }
-            }
-            Expr::Lambda { params, body, .. } => {
-                let mut inner = locals.clone();
-                for p in params.iter() {
-                    inner.insert(p.clone());
-                }
-                match body {
-                    LambdaBody::Expr(e2) => self.walk_expr(e2, &inner),
-                    LambdaBody::Block(b2) => self.walk_block(b2, &mut inner),
-                }
-            }
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
         }
     }
 }
@@ -4288,107 +4350,10 @@ fn clash_diagnostics(
 /// params, so a param that shadows a foreign export is
 /// not mistaken for an un-imported reference.
 fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
+    let mut v = RefNames { out: Vec::new() };
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    scope_block(&f.body, &mut locals, &mut out);
-    out
-}
-
-fn scope_block(b: &Block, locals: &mut HashSet<String>, out: &mut Vec<(String, usize)>) {
-    for s in &b.stmts {
-        scope_stmt(s, locals, out);
-    }
-}
-
-fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usize)>) {
-    match s {
-        Stmt::Let {
-            name,
-            value,
-            ty,
-            line,
-            ..
-        } => {
-            if let Some(t) = ty {
-                for n in type_names(t) {
-                    out.push((n, *line));
-                }
-            }
-            scope_expr(value, *line, locals, out);
-            // In scope for subsequent statements (and shadows a like-named export
-            // from here on).
-            locals.insert(name.clone());
-        }
-        Stmt::Assign { value, line, .. } | Stmt::SetField { value, line, .. } => {
-            scope_expr(value, *line, locals, out)
-        }
-        Stmt::IndexSet {
-            index, value, line, ..
-        } => {
-            scope_expr(index, *line, locals, out);
-            scope_expr(value, *line, locals, out);
-        }
-        Stmt::Return {
-            value: Some(e),
-            line,
-        } => scope_expr(e, *line, locals, out),
-        Stmt::Return { value: None, .. } => {}
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            line,
-        } => {
-            scope_expr(cond, *line, locals, out);
-            let mut inner = locals.clone();
-            scope_block(then_block, &mut inner, out);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                scope_block(eb, &mut inner2, out);
-            }
-        }
-        Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            pattern,
-            line,
-        } => {
-            scope_expr(scrutinee, *line, locals, out);
-            let mut inner = locals.clone();
-            for b in crate::movecheck::pattern_bindings(pattern) {
-                inner.insert(b.to_string());
-            }
-            scope_block(then_block, &mut inner, out);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                scope_block(eb, &mut inner2, out);
-            }
-        }
-        Stmt::While { cond, body, line } => {
-            scope_expr(cond, *line, locals, out);
-            let mut inner = locals.clone();
-            scope_block(body, &mut inner, out);
-        }
-        Stmt::ForIn {
-            var,
-            iter,
-            body,
-            line,
-            ..
-        } => {
-            scope_expr(iter, *line, locals, out);
-            let mut inner = locals.clone();
-            inner.insert(var.clone());
-            scope_block(body, &mut inner, out);
-        }
-        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Expr(e) => scope_expr(e, e.line(), locals, out),
-        Stmt::Region { body, .. } => {
-            let mut inner = locals.clone();
-            scope_block(body, &mut inner, out);
-        }
-    }
+    body_block(&f.body, &mut locals, &mut v);
+    v.out
 }
 
 /// The four variant names the built-in sums answer to. They are patterns like
@@ -4398,140 +4363,80 @@ fn is_sum_arm(name: &str) -> bool {
     matches!(name, "Some" | "None" | "Ok" | "Err")
 }
 
-fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(String, usize)>) {
-    match e {
-        Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+/// The collector's line at each site. The descent and the scope stack are
+/// [`body_scope_descent`]'s; what is this reader's own is the name it records.
+struct RefNames {
+    out: Vec<(String, usize)>,
+}
+
+impl BodyVisit for RefNames {
+    fn stmt(&mut self, s: &Stmt, _locals: &HashSet<String>) {
+        // A `let x: T` annotation is a reference wherever it stands: a value
+        // local never shadows a type.
+        if let Stmt::Let {
+            ty: Some(t), line, ..
+        } = s
+        {
+            for n in type_names(t) {
+                self.out.push((n, *line));
+            }
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+        match e {
             // Method sugar `ns.f(x)` parses as callee `f` with the namespace as
             // its first argument. When that receiver names one of the module's
             // namespaces, the use is QUALIFIED — another module's member — and
             // is recorded under its dotted spelling, never as a bare `f` that
             // would read as this module's flat name. A flat call with a like-
             // shaped argument keeps the bare spelling.
-            let mut sugar = false;
-            if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
-            }
-            if sugar {
+            Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+                let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                    out.push((format!("{recv}.{name}"), *line));
+                    sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
                 }
-            } else if !locals.contains(name) {
-                out.push((name.clone(), *line));
-                // `f(x)` is also exactly what method sugar `x.f()` arrives
-                // as. When the caller asked for it (`program_ref_kinds`),
-                // count this occurrence so a name seen ONLY here can be told
-                // apart from one that also appears as a variable, a type, or
-                // a zero-argument call — those cannot be method dispatch.
-                if !args.is_empty() {
-                    SCOPE_AMB.with(|a| {
-                        if let Some(amb) = a.borrow_mut().as_mut() {
-                            *amb.entry(name.clone()).or_default() += 1;
-                        }
-                    });
-                }
-            }
-            for a in args {
-                scope_expr(a, *line, locals, out);
-            }
-        }
-        Expr::StructLit { name, fields, line } => {
-            if !locals.contains(name) {
-                out.push((name.clone(), *line));
-            }
-            for (_, v) in fields {
-                scope_expr(v, *line, locals, out);
-            }
-        }
-        Expr::TryConstruct { name, args, line } => {
-            if !locals.contains(name) {
-                out.push((name.clone(), *line));
-            }
-            for a in args {
-                scope_expr(a, *line, locals, out);
-            }
-        }
-        Expr::Var { name, line } => {
-            if !locals.contains(name) {
-                out.push((name.clone(), *line));
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            scope_expr(expr, line, locals, out)
-        }
-        Expr::Consume { place, .. } => scope_expr(place, line, locals, out),
-        Expr::Binary { lhs, rhs, line, .. } => {
-            scope_expr(lhs, *line, locals, out);
-            scope_expr(rhs, *line, locals, out);
-        }
-        Expr::Match {
-            scrutinee,
-            arms,
-            line,
-            ..
-        } => {
-            scope_expr(scrutinee, *line, locals, out);
-            for arm in arms {
-                let mut inner = locals.clone();
-                match &arm.pattern {
-                    Pattern::Variant(v, binds) => {
-                        // The variant constructor is a reference; its binds are
-                        // new locals. The four built-in sum names are not: they
-                        // have no declaration to refer to (RFC-0126 §8).
-                        if !inner.contains(v) && !is_sum_arm(v) {
-                            out.push((v.clone(), *line));
-                        }
-                        for b in binds {
-                            inner.insert(b.clone());
-                        }
+                if sugar {
+                    if let Some(Expr::Var { name: recv, .. }) = args.first() {
+                        self.out.push((format!("{recv}.{name}"), *line));
                     }
-                    Pattern::Success(b) | Pattern::Failure(b) => {
-                        inner.insert(b.clone());
-                    }
-                    Pattern::Other => {}
-                }
-                match &arm.body {
-                    ArmBody::Expr(e) => scope_expr(e, *line, &inner, out),
-                    ArmBody::Block(b) => {
-                        let mut binner = inner.clone();
-                        scope_block(b, &mut binner, out);
+                } else if !locals.contains(name) {
+                    self.out.push((name.clone(), *line));
+                    // `f(x)` is also exactly what method sugar `x.f()` arrives
+                    // as. When the caller asked for it (`program_ref_kinds`),
+                    // count this occurrence so a name seen ONLY here can be told
+                    // apart from one that also appears as a variable, a type, or
+                    // a zero-argument call — those cannot be method dispatch.
+                    if !args.is_empty() {
+                        SCOPE_AMB.with(|a| {
+                            if let Some(amb) = a.borrow_mut().as_mut() {
+                                *amb.entry(name.clone()).or_default() += 1;
+                            }
+                        });
                     }
                 }
             }
+            Expr::StructLit { name, line, .. }
+            | Expr::TryConstruct { name, line, .. }
+            | Expr::Var { name, line } => {
+                if !locals.contains(name) {
+                    self.out.push((name.clone(), *line));
+                }
+            }
+            _ => {}
         }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            line,
-        } => {
-            scope_expr(cond, *line, locals, out);
-            scope_expr(then_branch, *line, locals, out);
-            if let Some(eb) = else_branch {
-                scope_expr(eb, *line, locals, out);
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &Pattern, line: usize, locals: &HashSet<String>) {
+        // The variant constructor is a reference; its binds are new locals. The
+        // four built-in sum names are not: they have no declaration to refer to
+        // (RFC-0126 §8).
+        if let Pattern::Variant(v, _) = p {
+            if !locals.contains(v) && !is_sum_arm(v) {
+                self.out.push((v.clone(), line));
             }
         }
-        Expr::ArrayLit { elems, line } => {
-            for e2 in elems {
-                scope_expr(e2, *line, locals, out);
-            }
-        }
-        Expr::MapLit { entries, line } => {
-            for (k, v) in entries {
-                scope_expr(k, *line, locals, out);
-                scope_expr(v, *line, locals, out);
-            }
-        }
-        Expr::Lambda { params, body, line } => {
-            let mut inner = locals.clone();
-            for p in params {
-                inner.insert(p.clone());
-            }
-            match body {
-                LambdaBody::Expr(e2) => scope_expr(e2, *line, &inner, out),
-                LambdaBody::Block(b2) => scope_block(b2, &mut inner, out),
-            }
-        }
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
     }
 }
 
@@ -4559,19 +4464,6 @@ fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {
     map.get(n).cloned().unwrap_or_else(|| n.to_string())
 }
 
-thread_local! {
-    /// The enum variant names the module a [`rewrite_module_refs`] call is
-    /// currently walking declares itself. A call spelled `V(x)` or a `match`
-    /// pattern `V(..)` whose `V` is one of these CONSTRUCTS the module's own
-    /// enum — it is not a reference to a same-spelled declaration, and
-    /// renaming it there corrupted variant constructions inside the renamed
-    /// module (a global/protocol may share a variant's spelling; a fn or type
-    /// cannot). Carried in a thread-local so the recursive rewrite family
-    /// keeps its signatures; set by [`rewrite_module_refs`], read by
-    /// [`rewrite_expr`].
-    static RW_VARIANTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
-}
-
 /// Every enum variant name `p` declares itself.
 fn own_variant_names(p: &Program) -> HashSet<String> {
     let mut out = HashSet::new();
@@ -4591,20 +4483,9 @@ fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
     type_heads_mut(ty, &mut |n| *n = ren(map, n));
 }
 
-/// Rewrite every referenced name in `e` (call/spawn/struct-lit/try-construct
-/// callees, bare variables, and match-variant constructors) through `map`.
-///
-/// `ns` holds the module's namespace-binding names (RFC-0027): a method-sugar
-/// call whose receiver is a bare namespace (`ns.member(..)` arrives as
-/// `Call { member, args: [Var(ns), ..] }`) is a NAMESPACE member reference that
-/// pass 5 (the `NsResolver`) owns — the plain-name rewrite must leave its call
-/// name alone, or a co-naming rename of a like-named local decl would corrupt
-/// `ns.member` into `ns.renamed` before pass 5 can resolve it (RFC-0031 found
-/// this via a thin contract delegating `store.getItem(..)` while a generated
-/// module co-named `getItem`).
 /// Rewrite every reference to a declaration name in `p` through `map`.
 ///
-/// The plain-name half of the machinery above, exposed for [`crate::jsonenc`]:
+/// The plain-name half of the machinery below, exposed for [`crate::jsonenc`]:
 /// generated encoder source spells the injected module's reserved names as
 /// `VyrnRt_` placeholders (a `$` is unlexable, which is the point of it), and this
 /// is the pass that folds them back. One rewriter, so a generated program and an
@@ -4613,243 +4494,92 @@ pub(crate) fn rewrite_names(p: &mut Program, map: &HashMap<String, String>) {
     rewrite_module_refs(p, map, &HashSet::new(), &HashSet::new());
 }
 
-fn rewrite_expr(
-    e: &mut Expr,
-    map: &HashMap<String, String>,
-    ns: &HashSet<String>,
-    locals: &HashSet<String>,
-) {
-    match e {
-        Expr::Call { name, args, .. } => {
-            let ns_receiver =
-                matches!(args.first(), Some(Expr::Var { name: h, .. }) if ns.contains(h));
-            let shadowed = locals.contains(name);
-            // A constructor of THIS module's own enum (see [`RW_VARIANTS`])
-            // is reached by this spelling, not by any declaration's name.
-            let ctor = RW_VARIANTS.with(|v| v.borrow().contains(name.as_str()));
-            if !ns_receiver && !shadowed && !ctor {
-                *name = ren(map, name);
-            }
-            for a in args {
-                rewrite_expr(a, map, ns, locals);
-            }
-        }
-        Expr::Spawn { name, args, .. } | Expr::TryConstruct { name, args, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            for a in args {
-                rewrite_expr(a, map, ns, locals);
-            }
-        }
-        Expr::StructLit { name, fields, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            for (_, v) in fields {
-                rewrite_expr(v, map, ns, locals);
-            }
-        }
-        Expr::Var { name, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            rewrite_expr(expr, map, ns, locals)
-        }
-        Expr::Consume { place, .. } => rewrite_expr(place, map, ns, locals),
-        Expr::Binary { lhs, rhs, .. } => {
-            rewrite_expr(lhs, map, ns, locals);
-            rewrite_expr(rhs, map, ns, locals);
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            rewrite_expr(scrutinee, map, ns, locals);
-            for arm in arms {
-                let mut inner = locals.clone();
-                if let Pattern::Variant(v, binds) = &mut arm.pattern {
-                    // A `match` arm always constructs — never a declaration
-                    // reference (see [`RW_VARIANTS`]).
-                    let ctor = RW_VARIANTS.with(|w| w.borrow().contains(v.as_str()));
-                    if !ctor {
-                        *v = ren(map, v);
-                    }
-                    for b in binds {
-                        inner.insert(b.clone());
-                    }
-                }
-                match &mut arm.body {
-                    ArmBody::Expr(e) => rewrite_expr(e, map, ns, &inner),
-                    ArmBody::Block(b) => {
-                        let mut binner = inner.clone();
-                        rewrite_block(b, map, ns, &mut binner);
-                    }
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            rewrite_expr(cond, map, ns, locals);
-            rewrite_expr(then_branch, map, ns, locals);
-            if let Some(eb) = else_branch {
-                rewrite_expr(eb, map, ns, locals);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for e2 in elems {
-                rewrite_expr(e2, map, ns, locals);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                rewrite_expr(k, map, ns, locals);
-                rewrite_expr(v, map, ns, locals);
-            }
-        }
-        // A lambda body (RFC-0023): rewrite referenced names inside it. Its
-        // params are new locals — they shadow a renamed decl exactly like a
-        // `let` does, so they join the scope rather than trusting that no map
-        // key ever spells them.
-        Expr::Lambda { params, body, .. } => {
-            let mut inner = locals.clone();
-            for p in params {
-                inner.insert(p.clone());
-            }
-            match body {
-                LambdaBody::Expr(e2) => rewrite_expr(e2, map, ns, &inner),
-                LambdaBody::Block(b2) => rewrite_block(b2, map, ns, &mut inner),
-            }
-        }
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-    }
+/// The renamer's line at each site. The descent and the scope stack are
+/// [`body_scope_descent`]'s; what is this reader's own is the substitution.
+struct Renamer<'a> {
+    map: &'a HashMap<String, String>,
+    /// The module's namespace-binding names (RFC-0027): a method-sugar call
+    /// whose receiver is a bare namespace (`ns.member(..)` arrives as
+    /// `Call { member, args: [Var(ns), ..] }`) is a NAMESPACE member reference
+    /// that pass 5 (the [`NsResolver`]) owns — the plain-name rewrite must leave
+    /// its call name alone, or a co-naming rename of a like-named local decl
+    /// would corrupt `ns.member` into `ns.renamed` before pass 5 can resolve it
+    /// (RFC-0031 found this via a thin contract delegating `store.getItem(..)`
+    /// while a generated module co-named `getItem`).
+    ns: &'a HashSet<String>,
+    /// The enum variant names the module being walked declares itself. A call
+    /// spelled `V(x)` or a pattern `V(..)` whose `V` is one of these CONSTRUCTS
+    /// the module's own enum — it is not a reference to a same-spelled
+    /// declaration, and renaming it there corrupted variant constructions inside
+    /// the renamed module (a global or protocol may share a variant's spelling;
+    /// a fn or type cannot).
+    variants: &'a HashSet<String>,
 }
 
-fn rewrite_block(
-    b: &mut Block,
-    map: &HashMap<String, String>,
-    ns: &HashSet<String>,
-    locals: &mut HashSet<String>,
-) {
-    for s in &mut b.stmts {
-        rewrite_stmt(s, map, ns, locals);
-    }
-}
-
-fn rewrite_stmt(
-    s: &mut Stmt,
-    map: &HashMap<String, String>,
-    ns: &HashSet<String>,
-    locals: &mut HashSet<String>,
-) {
-    match s {
-        Stmt::Let {
-            name, value, ty, ..
-        } => {
-            if let Some(t) = ty {
-                rewrite_type(t, map);
+impl BodyVisitMut for Renamer<'_> {
+    fn stmt(&mut self, s: &mut Stmt, locals: &HashSet<String>) {
+        match s {
+            Stmt::Let { ty: Some(t), .. } => rewrite_type(t, self.map),
+            // The assignment TARGET is a reference too, not a declaration:
+            // module state (RFC-0029) is a top-level decl, so a rename must
+            // reach `g = v` exactly as it reaches the `g` reads. Missing these
+            // left the write side naming a decl that no longer exists
+            // ("assignment to unknown variable `filter`" once std/arrays'
+            // `filter` forced the name-privacy rename of a same-named global).
+            // A LOCAL of the same name is not that decl, though: `let flag = ..;
+            // flag = x` writes the local. `drop g` names a binding the same way.
+            Stmt::Assign { name, .. }
+            | Stmt::SetField { name, .. }
+            | Stmt::IndexSet { name, .. }
+            | Stmt::Drop { name, .. } => {
+                if !locals.contains(name) {
+                    *name = ren(self.map, name);
+                }
             }
-            rewrite_expr(value, map, ns, locals);
-            // In scope for everything after it — a local shadows a renamed
-            // decl exactly as it shadows the original.
-            locals.insert(name.clone());
-        }
-        // The assignment TARGET is a reference too, not a declaration: module
-        // state (RFC-0029) is a top-level decl, so a rename must reach `g = v`
-        // exactly as it reaches the `g` reads (`Expr::Var` below). Missing these
-        // left the write side naming a decl that no longer exists ("assignment
-        // to unknown variable `filter`" once std/arrays' `filter` forced the
-        // name-privacy rename of a same-named global). A LOCAL of the same name
-        // is not that decl, though: `let flag = ..; flag = x` writes the local,
-        // and rewriting the target rebound the write to the global.
-        Stmt::Assign { name, value, .. } | Stmt::SetField { name, value, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            rewrite_expr(value, map, ns, locals);
-        }
-        Stmt::IndexSet {
-            name, index, value, ..
-        } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            rewrite_expr(index, map, ns, locals);
-            rewrite_expr(value, map, ns, locals);
-        }
-        Stmt::Return { value: Some(e), .. } => rewrite_expr(e, map, ns, locals),
-        Stmt::Return { value: None, .. } => {}
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            rewrite_expr(cond, map, ns, locals);
-            let mut inner = locals.clone();
-            rewrite_block(then_block, map, ns, &mut inner);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                rewrite_block(eb, map, ns, &mut inner2);
-            }
-        }
-        Stmt::IfLet {
-            pattern,
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            rewrite_expr(scrutinee, map, ns, locals);
             // The variant NAME follows the same rename a `match` arm's does —
-            // this walk missed it until RFC-0121 made `if let` over an
-            // imported enum's variants a written shape (the corpus never had
-            // one; `match` always renamed).
-            if let Pattern::Variant(v, _) = &mut *pattern {
-                let ctor = RW_VARIANTS.with(|w| w.borrow().contains(v.as_str()));
-                if !ctor {
-                    *v = ren(map, v);
+            // this walk missed it until RFC-0121 made `if let` over an imported
+            // enum's variants a written shape (the corpus never had one; `match`
+            // always renamed).
+            Stmt::IfLet { pattern, .. } => self.rename_variant(pattern),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &mut Expr, locals: &HashSet<String>) -> bool {
+        match e {
+            Expr::Call { name, args, .. } => {
+                let ns_receiver =
+                    matches!(args.first(), Some(Expr::Var { name: h, .. }) if self.ns.contains(h));
+                let ctor = self.variants.contains(name.as_str());
+                if !ns_receiver && !locals.contains(name) && !ctor {
+                    *name = ren(self.map, name);
                 }
             }
-            let mut inner = locals.clone();
-            for b in crate::movecheck::pattern_bindings(pattern) {
-                inner.insert(b.to_string());
+            Expr::Spawn { name, .. }
+            | Expr::TryConstruct { name, .. }
+            | Expr::StructLit { name, .. }
+            | Expr::Var { name, .. } => {
+                if !locals.contains(name) {
+                    *name = ren(self.map, name);
+                }
             }
-            rewrite_block(then_block, map, ns, &mut inner);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                rewrite_block(eb, map, ns, &mut inner2);
+            _ => {}
+        }
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &mut Pattern, _line: usize, _locals: &HashSet<String>) {
+        // A `match` arm always constructs — never a declaration reference.
+        self.rename_variant(p);
+    }
+}
+
+impl Renamer<'_> {
+    fn rename_variant(&self, p: &mut Pattern) {
+        if let Pattern::Variant(v, _) = p {
+            if !self.variants.contains(v.as_str()) {
+                *v = ren(self.map, v);
             }
-        }
-        Stmt::While { cond, body, .. } => {
-            rewrite_expr(cond, map, ns, locals);
-            let mut inner = locals.clone();
-            rewrite_block(body, map, ns, &mut inner);
-        }
-        Stmt::ForIn {
-            var, iter, body, ..
-        } => {
-            rewrite_expr(iter, map, ns, locals);
-            let mut inner = locals.clone();
-            inner.insert(var.clone());
-            rewrite_block(body, map, ns, &mut inner);
-        }
-        // `drop g` names a binding the same way — same rule as the target above.
-        Stmt::Drop { name, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-        }
-        Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Expr(e) => rewrite_expr(e, map, ns, locals),
-        Stmt::Region { body, .. } => {
-            let mut inner = locals.clone();
-            rewrite_block(body, map, ns, &mut inner);
         }
     }
 }
@@ -4858,25 +4588,25 @@ fn rewrite_stmt(
 ///
 /// The body is walked scope-aware: the params seed the local set, so a param or
 /// a `let` that shadows a renamed decl keeps naming the local.
-fn rewrite_function(f: &mut Function, map: &HashMap<String, String>, ns: &HashSet<String>) {
+fn rewrite_function(f: &mut Function, rn: &mut Renamer) {
     for p in &mut f.params {
-        rewrite_type(&mut p.ty, map);
+        rewrite_type(&mut p.ty, rn.map);
     }
-    rewrite_type(&mut f.ret, map);
+    rewrite_type(&mut f.ret, rn.map);
     // A `<T: P>` bound naming an aliased protocol resolves through `map` too.
     for bounds in f.type_bounds.values_mut() {
         for b in bounds.iter_mut() {
-            *b = ren(map, b);
+            *b = ren(rn.map, b);
         }
     }
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    rewrite_block(&mut f.body, map, ns, &mut locals);
+    body_block_mut(&mut f.body, &mut locals, rn);
 }
 
 /// Rewrite every *reference* (types, calls, variables, bounds) in one module's
 /// program through `map`. Declaration names are left alone — a separate step
 /// renames a decl when a foreign name must be freed for a co-named local stub.
-/// `ns` is the module's namespace-binding names (see [`rewrite_expr`]).
+/// `ns` is the module's namespace-binding names (see [`Renamer`]).
 fn rewrite_module_refs(
     p: &mut Program,
     map: &HashMap<String, String>,
@@ -4886,17 +4616,15 @@ fn rewrite_module_refs(
     if map.is_empty() {
         return;
     }
-    // The variant guard rides a thread-local so the recursive rewrite family
-    // keeps its signatures (see [`RW_VARIANTS`]).
-    RW_VARIANTS.with(|v| *v.borrow_mut() = variants.clone());
+    let rn = &mut Renamer { map, ns, variants };
     for f in &mut p.functions {
-        rewrite_function(f, map, ns);
+        rewrite_function(f, rn);
     }
     for im in &mut p.impls {
         im.protocol = ren(map, &im.protocol);
         rewrite_type(&mut im.ty, map);
         for m in &mut im.methods {
-            rewrite_function(m, map, ns);
+            rewrite_function(m, rn);
         }
         // A `place` projection is never flattened into `Program::functions`
         // (RFC-0091 M2), so without this walk a rename never reached its
@@ -4904,14 +4632,14 @@ fn rewrite_module_refs(
         // `clamp` after clamp was renamed, and an alias folding skipped the
         // projection's prologue entirely.
         for pl in &mut im.places {
-            rewrite_function(pl, map, ns);
+            rewrite_function(pl, rn);
         }
     }
     for t in &mut p.type_decls {
         rewrite_type(&mut t.base, map);
         if let Some(pred) = &mut t.predicate {
             // A refinement predicate has no locals of its own.
-            rewrite_expr(pred, map, ns, &HashSet::new());
+            body_expr_mut(pred, &HashSet::new(), rn);
         }
     }
     for g in &mut p.globals {
@@ -4919,7 +4647,7 @@ fn rewrite_module_refs(
             rewrite_type(t, map);
         }
         // A global initializer runs at module-state init: no locals in scope.
-        rewrite_expr(&mut g.init, map, ns, &HashSet::new());
+        body_expr_mut(&mut g.init, &HashSet::new(), rn);
     }
     for pr in &mut p.protocols {
         for m in &mut pr.methods {
@@ -4937,7 +4665,7 @@ fn rewrite_module_refs(
                 crate::ast::ContractMemberKind::Value { ty, default } => {
                     rewrite_type(ty, map);
                     if let Some(d) = default {
-                        rewrite_expr(d, map, ns, &HashSet::new());
+                        body_expr_mut(d, &HashSet::new(), rn);
                     }
                 }
                 crate::ast::ContractMemberKind::Fn {
@@ -4951,21 +4679,18 @@ fn rewrite_module_refs(
                     }
                     rewrite_type(ret, map);
                     if let Some(d) = default {
-                        rewrite_expr(d, map, ns, &HashSet::new());
+                        body_expr_mut(d, &HashSet::new(), rn);
                     }
                 }
             }
         }
     }
     for t in &mut p.tests {
-        rewrite_block(&mut t.body, map, ns, &mut HashSet::new());
+        body_block_mut(&mut t.body, &mut HashSet::new(), rn);
     }
     for b in &mut p.benches {
-        rewrite_block(&mut b.body, map, ns, &mut HashSet::new());
+        body_block_mut(&mut b.body, &mut HashSet::new(), rn);
     }
-    RW_VARIANTS.with(|v| {
-        v.borrow_mut().clear();
-    });
 }
 
 // Every reference name (types and expression callees/variables/variants) used
@@ -5022,9 +4747,9 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
         totals: &mut HashMap<String, usize>,
     ) {
         let mut locals: HashSet<String> = params.collect();
-        let mut refs = Vec::new();
-        scope_block(b, &mut locals, &mut refs);
-        for (n, _) in refs {
+        let mut v = RefNames { out: Vec::new() };
+        body_block(b, &mut locals, &mut v);
+        for (n, _) in v.out {
             *totals.entry(n.clone()).or_default() += 1;
             out.insert(n);
         }
