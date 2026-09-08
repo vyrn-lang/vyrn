@@ -7946,7 +7946,7 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 5,751 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 5,750 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,211 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
@@ -13905,7 +13905,7 @@ and four are re-aimed at what is left — `fn views` for the lending builtins,
 for what an arm's value carries, `fn calls_in` for the calls in an
 expression. The emitter census
 (`compiler/vyrn-cli/tests/emitter_census.rs` and M3's kind table): the
-mapping **5,736 to 5,751**, shared machinery **2,326 to 2,312**, tests **326
+mapping **5,736 to 5,750**, shared machinery **2,326 to 2,312**, tests **326
 to 325**. RFC-0127 §3's form census moves for the first time in this arc:
 `own` drops to 0 mentions at every statement form and `movecheck` drops at
 fourteen expression forms, **1,347 mentions to 1,262**.
@@ -13944,6 +13944,79 @@ pointed at a shallow scratch directory outside the checkout.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
+
+#### Two modules that did not lower to the same bytes twice (2026-09-08, `track-dm`)
+
+`track-dk`'s corpus pin
+(`compiler/vyrn-cli/tests/lowered_dump.rs::the_pinned_lowering_over_the_corpus`)
+records `std/von.vyrn` and `std/vyx.vyrn` as `unstable`: five runs of one
+binary give five hashes, and the `release (taken later)` lines of
+`vyrn emit-lowered` come out in a different order every time. This is the
+root cause, and the reason nothing here has to be fixed.
+
+**Where the order came from.** `own.rs`'s EARLY FOLD — round twenty-one's
+"a binding whose row says `Moved` is still live at every exit before its
+take" — walks `lets`, which is a `HashMap` keyed by the `Stmt::Let`'s node
+ADDRESS, and pushes one `Release` per admitted exit into `extra`. Rust seeds
+a `RandomState` per process, so that walk is a different order in every
+process. A `sort_by` was added to tame it, and its key is
+`(fn_name, site, binding)` — where `site` and `binding` are node addresses
+too. So the rows are ordered by the heap, not by the source, and the heap
+moves between processes. `render.rs` prints `Instance::releases` in the
+vector's own order, so the rows print in the heap's order and the dump's
+hash changes. Only a function with more than one early row can show it,
+which is why two modules of the corpus do and the other 188 do not.
+
+**Measured at three commits.** `vyrn emit-lowered std/von.vyrn`, hashed:
+
+| commit | runs | hashes |
+|---|---|---|
+| `fc27a3de`, `track-dk`'s tip | 5 | **5** — and a `diff` of two runs shows one `release (taken later) : Deep<Array<VonImport>> exit=try` line moving three places inside the block of four |
+| `ad4e3cec`, this branch's parent | 5 | 1 |
+| `7d62cb9d`, the container slice | 10 | 1 |
+
+`std/vyx.vyrn` reads the same way, and so does every other root: two runs of
+`vyrn emit-lowered` over all 190 `.vyrn` files under `examples/`, `std/`,
+`site/` and `site/app/` give one hash each on this line.
+
+**Why it is already fixed here, and by what.** The early fold is deleted.
+`track-dd`'s walk-order slice (`fe4cd7d0`) took it out with the event stream
+it read, `Release::early` and `Release::full` with it, because the kernel
+places those rows from the control-flow graph instead — the record for that
+slice is above. `track-dk` branched before it. So the fix is not a sort: it
+is that the pass whose order was the heap's has no rows left to order.
+
+**What the pin should say now.** `the_pinned_lowering_over_the_corpus` hashes
+every `.vyrn` root under `examples/`, `site/`, `std/` and
+`compiler/vyrn-cli/tests/`, so `std/` and `site/` are covered by it already
+and `rfcs/census/wasm-sha256.tsv` needs no change — the manifest hashes a
+different artifact (`examples/` compiled to wasm) and would not have seen
+this in any case. When the two lines merge, the two `unstable` rows become
+hashes.
+
+**What this slice adds instead.** A gate rather than a hash:
+`the_lowering_is_the_same_bytes_on_every_run` dumps `std/von.vyrn`,
+`std/vyx.vyrn`, `site/app/docs.vyrn` and `examples/regexredux.vyrn` ten times
+each and fails on the first run that differs, naming the line. It asserts
+each root places at least one release, so a root that stops gating says so
+rather than passing empty. Six seconds, not `#[ignore]`d, and it is the
+thing that answers the question a blessed snapshot cannot: a snapshot pins
+ONE order, and an order that changes every run fails it for the wrong
+reason.
+
+#### Gates (2026-09-08, the determinism gate)
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 80 suites, all green — `lowered_dump` is 6 tests now |
+| `kernel` `--ignored`, release | 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `route` `--ignored`, release | 2 |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move |
+| the five censuses | unmoved: nothing here touches a pass |
 
 
 ### M6 — the other two judgments

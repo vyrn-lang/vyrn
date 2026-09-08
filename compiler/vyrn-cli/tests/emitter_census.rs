@@ -682,7 +682,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 5751, 573),
+        ("the mapping §2.3 names", 5750, 573),
         ("a decision §2.3 says it must not make", 2211, 352),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
