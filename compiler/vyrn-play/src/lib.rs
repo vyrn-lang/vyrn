@@ -310,23 +310,15 @@ fn compile_result(src: &str) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// `s` as a JSON string literal, quotes included.
+///
+/// The BODY is [`vyrn_frontend::codec::escape_into`], RFC-0018's canonical
+/// table, which both wasm backends must produce byte for byte. This file used to
+/// write the table out again — the third copy of it — and a copy of an escape
+/// rule is how a page renders a diagnostic the compiler never wrote.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            // Every other control character, and nothing else: a JSON string may
-            // carry any other codepoint literally, and escaping them all would
-            // quadruple a page of program output.
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
+    vyrn_frontend::codec::escape_into(s, &mut out);
     out.push('"');
     out
 }
