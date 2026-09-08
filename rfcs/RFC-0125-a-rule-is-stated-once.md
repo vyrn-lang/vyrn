@@ -17570,6 +17570,212 @@ dead helper, a table read from one place instead of two, and a descent written
 once.
 
 
+#### The body walk, stated once — the census's rank 1 (2026-09-08)
+
+The record above ranked five items and put the scope-aware body walk first, at
+about 946 lines, with a licence it said had to be measured before and after. This
+is that slice. `loader.rs` is 5,296 lines before it and 5,021 after, and the
+census's `Twice` kind over the three files goes 1,455 to 360 — every line of it
+that was the loader's.
+
+**What was stated three times.** `scope_block`/`scope_stmt`/`scope_expr` collect
+the free names a body references, `rewrite_block`/`rewrite_stmt`/`rewrite_expr`
+rename them through a map, and `NsResolver::walk_block`/`walk_stmt`/`walk_expr`
+resolve the namespace-qualified ones. Thirty-five arms each — fifteen statement
+forms and twenty expression forms — and the same scope stack in all three: a
+`let`'s name joins after its value, a block clones its parent's set, a `for`
+variable and a lambda's params and a pattern's binds join the clone.
+
+**Why nobody had merged them, and what the answer is.** The collector reads
+through a shared borrow and the two rewriters assign through a unique one, and
+the three do different things at a call site: one records a namespace-sugar call
+under its DOTTED spelling and counts the occurrence for RFC-0022's ambiguity
+rule, one SKIPS a namespace receiver and an own-enum constructor, one DELETES the
+receiver argument and keeps the call. So the shared thing is the traversal and
+the scope stack, and each reader's line belongs at a SITE. `macro_rules!
+body_scope_descent` states the arm list once and expands twice — `BodyVisit` and
+`body_block`/`body_stmt`/`body_expr` through a shared borrow, `BodyVisitMut` and
+`body_block_mut`/`body_stmt_mut`/`body_expr_mut` through a unique one — for the
+reason `type_head_descent` is a macro one binding form up. Each expansion carries
+its own trait, so the two borrows are two spellings of one arm list.
+
+The trait is three methods and every one has a default. `stmt` sees a statement
+before its children, `expr` sees an expression before its children and returns
+`false` to skip them, `arm_pattern` sees a `match` arm's pattern at the `match`'s
+line before that arm's bindings join the scope. The three readers are then
+`RefNames` (78 lines with its struct), `Renamer` (91 with its struct and the one
+helper both its hooks call) and `impl BodyVisitMut for NsResolver` (137): each
+names only the sites it acts on and nothing else.
+
+The pre-order hook plus a `false` for "I replaced this node" is what the
+namespace pass needed and the other two did not. It resolves `ns.member(rest)` by
+deleting the receiver argument and letting the walk carry on into what is left,
+and it rewrites `ns.Enum.Variant` into a bare `Var` and stops, because descending
+into a node it has already replaced would resolve the same member a second time
+and state the diagnostic twice.
+
+**`ast.rs` was read first, and it holds no walker to read.** The brief asked
+whether the traversal is already stated there. It is stated there three times, and
+none of the three is general: `ast::lambdas` collects lambda bodies by line
+(137 lines), `ast::node_addrs` collects node addresses (137), and
+`ast::alias_embedded` pairs an expanded tree against its original (127). Every one
+is a shared borrow with one fixed purpose and no scope stack.
+`project::walk_block` is the file's one shared MUTABLE walk, and it hands the
+visitor an expression and nothing else — no statement, no scope, and no shared
+form. `direct.rs::each_expr`/`each_stmt` is a fifth, also fixed-purpose. So the
+macro is `loader.rs`'s for now, and where it should live is the next slice's
+question rather than this one's.
+
+**The three had drifted, and the drift is the finding.** Two of them put an
+`Ok(x) =>` arm's binding in scope and the renamer did not: `rewrite_expr`'s match
+arm inserted a `Pattern::Variant`'s binds and ignored `Pattern::Success` and
+`Pattern::Failure`. A rename map spelling a success binder would have folded that
+binding into a declaration reference. The shared walk uses
+`movecheck::pattern_bindings` for all three pattern forms, which is what two of
+the three already did. Over the corpus it moves nothing — no rename map in 419
+programs spells a name a `?`-arm binds — so the hole was real and unreached, which
+is the shape a rule stated three times fails in.
+
+##### The licence, and the pin it needed
+
+The failure mode is a silent name-resolution change: a call that resolves to
+another module's like-named export, an argument the namespace pass forgets to
+drop, a local that stops shadowing a renamed decl. None of those need be a
+diagnostic, so the whole-stderr `vyrn check` diff can be byte-identical while the
+linked program is different. `the_pinned_columns_over_the_corpus` records
+`analyze`'s diagnostics and is blind to the same thing.
+
+So a second pin was written first, from the answers as they stood.
+`lowered_dump::the_pinned_lowering_over_the_corpus` runs `vyrn emit-lowered` over
+every `.vyrn` file in `examples/`, `site/`, `std/` and `compiler/vyrn-cli/tests/`
+— each of them as a ROOT, so a module that is only ever imported is still hashed
+once as itself — and prints one sha256 a line. `emit-lowered` prints the root
+module's lowered body with every name RESOLVED, so a hash of it moves the moment
+any of the three failure modes does.
+
+| the measurement | count |
+|---|---|
+| programs | 419 |
+| lowered | 341 |
+| refused, and the same rows refused after | 78 |
+| hashes identical before and after | 339 |
+| hashes that do not reproduce under EITHER binary | 2 |
+
+**The pin's first run found a defect that is not this slice's.**
+`std/von.vyrn` and `std/vyx.vyrn` do not lower to the same bytes twice. Five runs
+of the UNCHANGED release binary gave five different hashes: the
+`release (taken later)` lines come out in a different ORDER on every run — two
+swapped in `von`, four moved in `vyx` — while the set of them is the same. That is
+the release placement's, not the loader's, and `VYRN_WASM_MANIFEST=check` had not
+caught it because the manifest hashes `examples/` and neither of these two is one.
+The pin records those rows as `unstable` rather than pretending to speak for
+them: it lowers every program twice and prints a hash only when the two agree.
+
+The rest of the licence, over the same 419 programs.
+
+| the measurement | count |
+|---|---|
+| `vyrn check` stderr, byte-identical | 419 of 419 |
+| accepted under both binaries | 340 |
+| refused under both binaries | 79 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+| `the_pinned_columns_over_the_corpus`, diagnostics | 3,249 |
+| `the_pinned_columns_over_the_corpus`, lines differing | 0 |
+| `VYRN_WASM_MANIFEST=check`, examples hashed | 176 |
+| a wasm byte moved | 0 |
+
+##### The numbers
+
+| the section | before | after |
+|---|---|---|
+| `struct NsResolver<'a>` | 459 | 293 |
+| `fn fn_body_ref_names` | 258 | 101 |
+| `fn ren<'a>` | 29 | 16 |
+| `fn rewrite_type` | 30 | 8 |
+| `fn rewrite_expr`, now `fn rewrite_names` | 378 | 233 |
+| `macro_rules! body_scope_descent` | — | 228 |
+| **the six** | **1,154** | **879** |
+
+| measure | at `993837d1` | after this slice |
+|---|---|---|
+| `loader.rs` | 5,296 | 5,021 |
+| the three census files together | 11,868 | 11,593 |
+| the census's `Twice` kind | 1,455 | 360 |
+| of which `loader.rs`'s | 1,095 | 0 |
+| the census's `Job` kind in `loader.rs` | 3,587 | 4,192 |
+| the census's `Shared` kind in `loader.rs` | 462 | 677 |
+| scope-aware body walks in `loader.rs` | 3 | 1 |
+| thread-locals the walks needed | 3 | 2 |
+
+Two hundred and seventy-five lines. The macro is 228 of the 879 that remain,
+which is the price of saying it once, and it buys the invariant the type descent
+bought one form down: a statement or an expression added to the AST now reaches
+all three readers or none. `RW_VARIANTS` — the renamer's own-enum guard, a
+thread-local only because "the recursive rewrite family keeps its signatures" —
+goes with the family; a visitor has fields. `SCOPE_NS` and `SCOPE_AMB` stay,
+because the collector's two callers set them around the walk and `link`'s two
+calls read them empty, which was checked rather than assumed.
+
+##### What is left of the ranked list
+
+Rank 1 is done and rank 2 to rank 5 are unchanged: `symbols::index_locals` (360
+lines) waits on a binder's COLUMN, which is a parser question;
+`symbols::BuiltinMethod` (156) waits on a doc on a seeded row;
+`symbols::MACRO_BUILTINS` (42) waits on a column on `checker::RESERVED`; and
+`loader::builtin_alias_exports` (45) is a table and a test. `Twice` is 360 lines
+now and all of them are rank 2.
+
+The list gains one item this slice put a number on. The traversal over `Stmt` and
+`Expr` is stated five more times outside the loader — three in `ast.rs`
+(`lambdas`, `node_addrs`, `alias_embedded`, 401 lines together), one in
+`project::walk_block` (177, the only mutable one and the only one with readers
+outside its file), one in `direct.rs::each_expr`/`each_stmt` (121). None is
+scope-aware, so none of them wants the scope stack; what they all want is the arm
+list. Moving `body_scope_descent` to `ast.rs`, where the AST is declared, and
+having those five read it is about 700 lines and it is the same measurement this
+slice just made, one crate wider. It is not taken here because it edits three
+files two other tracks are in.
+
+##### Gates (2026-09-08, the body walk)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 590 passed, no failure |
+| `kernel` `--ignored` | 1, 16 s |
+| `coretables` `--ignored` | 1, 14 s |
+| `typed` `--ignored` | 1, 26 s |
+| `effects` `--ignored` | 2, 49 s |
+| `fixtures` `--ignored` | 1, 23 s |
+| `testsweep` `--ignored` | 1, 37 s |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 302 s |
+| the residue ratchet | 1, 342 s — engine 172 clean and 3 leaking, route the same, 0 failed |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, the walk moves no byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 9 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files |
+| `frontend_census` | 2 passed, 1 ignored |
+| `forms` | 7 passed, 1 ignored — the loader column of every form row unmoved |
+| `the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics, unmoved |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 2 unstable, 339 hashes unmoved |
+
+No red in the first pass. Three warnings stand at the branch point and none is
+this slice's: two dead members of `movecheck::MoveCheck` and one unreachable
+pattern in `vyrn-lower`'s kernel.
+
+
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
