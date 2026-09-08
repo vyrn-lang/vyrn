@@ -14540,6 +14540,142 @@ unchanged, each with a reader against every part. The crate is 8,985 lines,
 which §2.7 counts whole.
 
 #### Gates (2026-09-08, the driver's census)
+#### The driver's ranked list, four taken and one refused (2026-09-09, `track-du`)
+
+`track-dg` counted the driver and ranked five candidates. This is that list,
+worked. Four are done. The first is refused, and the refusal is the finding.
+
+That census and its test (`compiler/vyrn-cli/tests/cli_census.rs`) are on
+`track-dg`'s branch and not on this one, so this record names the census rows
+that move rather than re-pinning them; the integrator re-pins the driver's
+column when the two lines meet. The two censuses that ARE on this line moved
+and are re-pinned in the commits below: `tests/frontend_census.rs` (`loader.rs`,
+shared machinery, 462 to 518) and `tests/refusals.rs` (`movecheck.rs`, tests,
+703 to 674).
+
+**1. The import-graph walk cannot read the loader's edges.** The rank-1 item
+asked `vyrn why` to stop walking the project's sources and to read the loader's
+edge set instead. It cannot, and three measurements say why.
+
+| the reading | the measurement |
+|---|---|
+| The loader has no `.vyx` module. A `.vyx` reaches it only as a generator INPUT, which `std/vyx` compiles; the graph's keys are `.vyrn` files and generator banners | 375 of the 392 corpus files that `why` answers "imported by" for have at least one chain that names a `.vyx`. 54 have no other kind of chain, and 46 of the queried files are themselves `.vyx` |
+| The loader walks FORWARD from one root. `why` answers about the whole directory, and that includes the files no root reaches | `project_sources` walks the tree; `module_graph` takes a root and returns its closure |
+| The loader's graph needs a load that SUCCEEDED, and `why` is asked about the tree that was just refused | Measured on a copy of `examples/fullstack` with one widening import added (`client/boot.vyrn` imports `server/api/users`): `vyrn deps client` prints the audience refusal and no graph, while `vyrn why server/api/users.vyrn` prints the offending edge `client/boot.vyrn -> server/api/users.vyrn`, which is the one line the refusal is about. A type error does NOT block the graph — `module_graph` links, it does not check — so this blocker is narrower than the ranking said, and it is still real |
+
+The walk is also not a second STATEMENT of the loader's rule. It CALLS
+`loader::resolve_spec` for a path import, `audience::generator_input` for a
+generator call and `vyx::script_body` for a `.vyx`. What it holds of its own is
+the question `why` asks: which file a generator was POINTED AT, rather than the
+banner key the loader mints by running it. Moving that into `loader.rs` would
+put a reporting rule inside the loading pass, and it would still be one
+statement, one file over.
+
+**What the walk did hold twice, and now states once.** `contract_roots` — the
+manifest's `main`, `server` and `client`, plus every `.vyrn` directly in the app
+directory, sorted and deduplicated — stood in the driver AND in
+`vyrn-lsp/src/contracts.rs` as `role_roots`. The declared-else-discovered rule
+beside it stood twice as well. The driver's own doc comment names the danger a
+second reader is: it answers "this project declares no entry points" about a
+file the first reader refused. The copy did that, because it re-read
+`vyrn.json` for itself. The scan is `manifest::role_roots` now and the fallback
+is `contracts::roles_for_project`, and each takes the manifest document its
+caller already read — the one half that legitimately differs between a command
+and an editor.
+
+**2. One filesystem resolver.** `DiskResolver` is `loader.rs`'s, beside the
+trait it implements and beside `MapResolver`. Eleven copies go: the driver's
+`FsResolver`, seven CLI suites (`coretables`, `kernel`, `typed`, `effects`,
+`stores`, `lowered`, `lowered_cost`), `movecheck.rs`'s `rfc0092_count` test
+module, `vyrn-frontend/examples/lspbench.rs` and
+`vyrn-frontend/tests/contracts_api.rs`. Two more resolvers keep exactly one
+method of their own and delegate the rest: `remote.rs`'s, whose `read` fetches a
+remote key, and the language server's, whose `read` prefers an open buffer.
+
+Two copies had drifted, and this is what a copy costs. `movecheck.rs`'s and
+`contracts_api.rs`'s listings answered a failed `read_dir` with the operating
+system's own wording, where every other resolver answers the project's
+`listerr`. A generator that walked a missing directory therefore got one
+sentence under a build and a different one under those two suites. Both answer
+the one sentence now.
+
+**3. One connection handler.** `dev_serve_one` was 89 lines of `serve_one` with
+a static-file check in the middle. The two had drifted in SHAPE — one wrote the
+three parse refusals as early returns, the other as match arms — and a drift in
+shape is how a drift in answer arrives next. The static block is the whole
+difference, so the whole difference is an argument: `None` is `serve`,
+`Some(&assets)` is `dev`.
+
+**4. One escape table.** `vyrn-play/src/lib.rs` wrote out RFC-0018's escape a
+third time. It reads `codec::escape_into` now.
+
+**5. The engine table stops calling the wasm route an interpreter.**
+`bench/engines.sh` ran `vyrn run` in a column called `interp`. The interpreter
+went at M5 and `vyrn run` has compiled since, so the column reported the wasm
+route under an interpreter's name, and the table compared three columns of which
+two were one route. The rows are `run` (the module in the driver's own wasmtime
+embedding), `wasm` (the same module under a standalone wasmtime) and `native`
+(the same module through wasm2c and clang) — two hosts of one route, and the
+other route. `examples/threeengines.vyrn` keeps its line count, so its module
+still hashes to `fe57f716`.
+
+**The licences.**
+
+| what | the licence | the result |
+|---|---|---|
+| the roles fold | `vyrn why`, `why --contract` and `why --capability` over every `.vyrn` and `.vyx` in `examples/`, `site/`, `std/` and `compiler/vyrn-cli/tests/` — 465 files, 934 invocations — whole stdout and whole stderr | byte-identical |
+| the resolver | the eleven suites that carried a copy, plus `vyrn-frontend`, `vyrn-lsp` and the ignored corpus suites | green |
+| the connection handler | every response of `vyrn serve examples/bin/server.vyrn`, `vyrn serve examples/rest.vyrn` and `vyrn dev` in `examples/bin` — seventeen requests each, covering the static hit, the static miss, `HEAD`, the traversal attempt, the four parse and gate refusals and the handler path — captured raw with each server's own access lines; and `tests/serve.rs`, `tests/http.rs`, `tests/rpc.rs` | byte-identical, and 56 tests green. `--workers` refuses both corpus servers for module state, so the pool's call site is licensed by `tests/serve.rs` alone |
+| the escape | `vyrn-play`'s own tests, which assert the escape of a control byte | 12 green |
+| the script | none needed; it runs no gate | — |
+
+**Four findings this slice did not take.**
+
+- **The site publishes a chart of an engine that does not exist.**
+  `site/app/chart.vyrn:499` carries `Engine { id: "interp", name: "interpreter",
+  work: 38056 }`, and the page's headline divides by it
+  (`engineWork("interp") / engineWork("native")`). The interpreter's bar IS the
+  chart's scale. Renaming the row would attach an interpreter's milliseconds to
+  the wasm route, which is worse than the stale name; the fix is a
+  re-measurement and a redesign of the scale, and it needs its own payer.
+- **`chains_from` and `import_chains` are one rule in two directions**, 76
+  lines, and `chains_from`'s own doc comment says so. Both are bounded
+  depth-first walks over the same edge list with the same two constant names.
+  The two bounds DIFFER: `chains_from` returns at `seen.len() > MAX_DEPTH` and
+  `import_chains` at `seen.len() >= MAX_DEPTH`, so one allows thirteen nodes and
+  the other twelve. The shared substance is about eight lines of
+  push-recurse-pop, and hiding those behind two closures buys less than it
+  costs — so this is filed, not taken. The off-by-one is the drift a copy earns.
+- **`loader_run.rs`'s `CachingResolver` restates `MapResolver`.** Its `list` and
+  `list_kinds` scan its own key map by the rule `MapResolver` states, and it
+  could hold one instead of copying it. It is not a filesystem resolver, so it
+  was out of this slice.
+- **The driver holds three recursive directory walks.** `project_sources`
+  (`.vyrn` and `.vyx`, skipping dot-prefixed names, `target`, `vendor` and
+  `node_modules`), `collect_vyrn_files` (`.vyrn`, no skips) and
+  `collect_md_files` (`.md`, relativised). Three filters, three skip lists, one
+  recursion.
+
+**The lines.** `compiler/vyrn-cli/src/main.rs` 7,276 to **7,179**;
+`remote.rs` 445 to **416**; `vyrn-frontend/src/loader.rs` 4,806 to **4,862**;
+`manifest.rs` 724 to **766**; `contracts.rs` 1,147 to **1,170**; `movecheck.rs`
+6,262 to **6,233**; `vyrn-lsp/src/main.rs` 4,241 to **4,229**;
+`vyrn-lsp/src/contracts.rs` 174 to **120**; `vyrn-play/src/lib.rs` 528 to
+**520**; `vyrn-frontend/examples/lspbench.rs` 57 to **51**;
+`vyrn-frontend/tests/contracts_api.rs` 711 to **678**. The seven CLI suites lose
+95 lines between them. 364 lines added, 583 removed: **219 fewer**.
+
+**The census rows that move.** The driver's census gains no kind and loses two
+sections. Kind (2), "a rule another pass also states", falls 288 to 202: the 86
+lines are `contract_roots` and the roles fallback, which are the frontend's now,
+and the 202 that remain are the import-graph walk with the reading above
+attached to it. Kind (4), "machinery with a copy elsewhere", falls 30 to **0**:
+`FsResolver` was its only entry. "A command's own path" falls 5,298 to 5,209 —
+`dev_serve_one`'s 89 lines were counted there, and they are `serve_one`'s
+argument now. The stderr column does not move; the driver states the same 210
+sentences.
+
+#### Gates (2026-09-09, the driver's ranked list)
 
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
@@ -14659,6 +14795,24 @@ moves with them: the mapping **5,736 to 5,748**; no other column.
 | `route` `--ignored`, release | 2, 298 s |
 | the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, manifest unchanged — a driver change moves no wasm byte |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 80 suites, all green |
+| `kernel` `--ignored`, release | 1, 17 s |
+| `coretables` `--ignored`, release | 1, 16 s |
+| `typed` `--ignored`, release | 1, 33 s |
+| `effects` `--ignored`, release | 2, 30 s |
+| `fixtures` `--ignored`, release | 1, 14 s |
+| `testsweep` `--ignored`, release | 1, 38 s |
+| `cargo test -p vyrn-frontend` | 11 suites, 1,172 tests |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test` in `compiler/vyrn-play` | 12 passed |
+| `cargo test -p vyrn-genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3 |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 17 s |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 354 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, manifest unchanged — nothing here moves a wasm byte |
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |

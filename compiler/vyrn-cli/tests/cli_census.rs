@@ -159,16 +159,6 @@ fn main_sections() -> Vec<Section> {
             "`vyrn emit-gen [--maps]` (RFC-0021, RFC-0073 M1)",
         ),
         sec(
-            "struct FsResolver;",
-            Library,
-            "the filesystem `ModuleResolver`. Eight corpus suites carry a copy \
-             (`tests/coretables.rs:33`, `effects.rs:64`, `kernel.rs:151`, \
-             `lowered.rs:123`, `lowered_cost.rs:51`, `stores.rs:27`, \
-             `typed.rs:35`, and `vyrn-frontend/src/movecheck.rs:6161`), \
-             `vyrn-frontend/examples/lspbench.rs:19` a ninth and \
-             `vyrn-frontend/tests/contracts_api.rs:29` a tenth",
-        ),
-        sec(
             "fn nearest_manifest(start: &Path) -> Option<Manifest> {",
             Shared,
             "the manifest lookup with the CLI's answer to an unreadable one, its \
@@ -418,12 +408,6 @@ fn main_sections() -> Vec<Section> {
              confirmed by canonicalization",
         ),
         sec(
-            "fn dev_serve_one(",
-            Command,
-            "one `vyrn dev` connection: static-first for a matching GET, \
-             otherwise the server's `handle`",
-        ),
-        sec(
             "fn request_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {",
             Shared,
             "the browser-origin gate every served request passes before Vyrn's \
@@ -583,12 +567,6 @@ fn remote_sections() -> Vec<Section> {
              content-addressed blob read live in `vyrn_frontend::manifest`, \
              because the LSP reads them too and a second reader of a pin is a \
              second answer about what is pinned",
-        ),
-        sec(
-            "pub fn list_dir(dir: &str) -> Result<Vec<String>, String> {",
-            Shared,
-            "the two generation-time directory listings (RFC-0021, RFC-0119), \
-             sorted for determinism",
         ),
         sec(
             "pub fn resolve_to_url(spec: &str) -> Result<String, String> {",
@@ -759,12 +737,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 5295, 189),
-        ("a rule another pass also states", 202, 0),
+        ("a command's own path", 5221, 179),
+        ("a rule another pass also states", 168, 0),
         ("a path only a deleted route reached", 0, 0),
-        ("machinery with a copy elsewhere", 30, 0),
+        ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1133, 0),
-        ("shared machinery", 1473, 19),
+        ("shared machinery", 1485, 21),
         ("tests", 852, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");

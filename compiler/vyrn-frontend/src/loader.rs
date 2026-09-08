@@ -178,6 +178,62 @@ impl ModuleResolver for MapResolver {
     }
 }
 
+/// A resolver over the filesystem — the one every program that loads a project
+/// off a disk uses.
+///
+/// It lived in the driver, and ten other files carried a copy of it: seven test
+/// suites, this crate's own move-check tests, its `lspbench` example and its
+/// contracts test. Each copy answered `read`, and three of them also answered
+/// `list` — with three spellings of one `read_dir` walk. A copy of a resolver is
+/// how a suite loads a corpus the driver would have refused, so it lives here,
+/// beside the trait it implements and the [`MapResolver`] tests use instead.
+///
+/// The listings sort, because a generator that walks a directory must produce
+/// the same module on two machines (RFC-0021). An entry whose type cannot be
+/// read is reported as a file — the caller's walk then surfaces the real error
+/// at the entry itself instead of this listing guessing.
+pub struct DiskResolver;
+
+impl ModuleResolver for DiskResolver {
+    fn read(&self, resolved: &str) -> Result<String, String> {
+        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+    }
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        let mut names = read_dir_names(resolved, false)?;
+        names.sort();
+        Ok(names)
+    }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        let mut names = read_dir_names(resolved, true)?;
+        names.sort();
+        Ok(names)
+    }
+    fn gen_cache_get(&self, key: &str) -> Option<String> {
+        crate::manifest::gen_cache_get(key)
+    }
+    fn gen_cache_put(&self, key: &str, value: &str) {
+        crate::manifest::gen_cache_put(key, value)
+    }
+}
+
+/// The entry names directly under `dir`, unsorted; with `kinds`, a directory's
+/// name carries the trailing `/` RFC-0119 reads. The error is the project's own
+/// `listerr` wording, never the operating system's.
+fn read_dir_names(dir: &str, kinds: bool) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|_| crate::trap::io_at("listerr", dir))?;
+    Ok(entries
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if kinds && e.file_type().is_ok_and(|t| t.is_dir()) {
+                format!("{name}/")
+            } else {
+                name
+            }
+        })
+        .collect())
+}
+
 /// A resolver that forwards every call to an inner resolver while recording each
 /// successful `read` as `(resolved key, content)`. Used by `moduleInterface`
 /// (RFC-0031): reflecting a module's reachable type closure links its imports, so

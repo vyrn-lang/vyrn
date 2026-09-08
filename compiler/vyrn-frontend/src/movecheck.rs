@@ -4250,37 +4250,6 @@ mod tests {
     }
 
     fn rfc0092_count() {
-        struct Disk;
-        impl crate::loader::ModuleResolver for Disk {
-            fn read(&self, resolved: &str) -> Result<String, String> {
-                std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-            }
-            fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-                let mut names: Vec<String> = std::fs::read_dir(resolved)
-                    .map_err(|e| e.to_string())?
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .collect();
-                names.sort();
-                Ok(names)
-            }
-            fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-                let mut names: Vec<String> = std::fs::read_dir(resolved)
-                    .map_err(|e| e.to_string())?
-                    .filter_map(|e| e.ok())
-                    .map(|e| {
-                        let name = e.file_name().to_string_lossy().into_owned();
-                        if e.file_type().is_ok_and(|t| t.is_dir()) {
-                            format!("{name}/")
-                        } else {
-                            name
-                        }
-                    })
-                    .collect();
-                names.sort();
-                Ok(names)
-            }
-        }
         // Canonical, slash-separated, and the same spelling the loader resolves
         // an import to. A root passed in as `<crate>/../../std/x.vyrn` and the
         // same file reached through an import are two strings for one file, and
@@ -4313,7 +4282,9 @@ mod tests {
                 std_root: Some(std_root.clone()),
                 ..Default::default()
             };
-            let Ok(program) = crate::loader::load(&src, &root_key, &opts, &Disk) else {
+            let Ok(program) =
+                crate::loader::load(&src, &root_key, &opts, &crate::loader::DiskResolver)
+            else {
                 unlinkable.push(root_key);
                 continue;
             };

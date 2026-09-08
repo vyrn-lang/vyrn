@@ -28,40 +28,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use vyrn_frontend::ast::{Program, Type, TypeDecl};
+use vyrn_frontend::loader::DiskResolver;
 use vyrn_lower::typed::{self, Step};
-
-struct Fs;
-
-impl vyrn_frontend::loader::ModuleResolver for Fs {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        list_dir(resolved, false)
-    }
-    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        list_dir(resolved, true)
-    }
-}
-
-/// The listing a generator asks for at generation time, as the CLI's resolver
-/// answers it (the shape `tests/effects.rs` uses).
-fn list_dir(dir: &str, kinds: bool) -> Result<Vec<String>, String> {
-    let entries = std::fs::read_dir(dir).map_err(|_| vyrn_frontend::trap::io_at("listerr", dir))?;
-    let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if kinds && e.file_type().is_ok_and(|t| t.is_dir()) {
-                format!("{name}/")
-            } else {
-                name
-            }
-        })
-        .collect();
-    names.sort();
-    Ok(names)
-}
 
 fn repo_root() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -85,7 +53,7 @@ fn load(path: &Path, project: Option<&Path>) -> Result<Program, String> {
         artifacts: project.and_then(manifest).and_then(|m| m.artifacts),
         ..Default::default()
     };
-    vyrn_frontend::load(&src, &slash(path), &opts, &Fs)
+    vyrn_frontend::load(&src, &slash(path), &opts, &DiskResolver)
         .map_err(|d| d.first().map(|d| d.render()).unwrap_or_default())
 }
 

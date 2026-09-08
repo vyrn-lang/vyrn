@@ -50,42 +50,6 @@ pub fn file_sig(path: &std::path::Path) -> u64 {
     h.finish()
 }
 
-/// The `.vyrn` modules a project's roles are discovered from: the manifest's
-/// declared entry points (`main`, `server`, `client`) plus every `.vyrn` file
-/// sitting directly in the app directory.
-///
-/// Generator imports live in an app's ROOT modules by construction — a page
-/// tree is consumed by the server and the client roots, never by a page. So
-/// this is a shallow, bounded scan (no recursive walk), which is what keeps the
-/// fallback affordable.
-pub fn role_roots(app_dir: &std::path::Path) -> Vec<(String, String)> {
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(doc) = vyrn_frontend::manifest::doc_in(app_dir) {
-        for key in ["main", "server", "client"] {
-            if let Some(vyrn_frontend::schema::Json::Str(p)) = doc.get(key) {
-                paths.push(app_dir.join(p));
-            }
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(app_dir) {
-        for e in entries.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
-                paths.push(p);
-            }
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    let mut out = Vec::new();
-    for p in paths {
-        if let Ok(src) = std::fs::read_to_string(&p) {
-            out.push((p.to_string_lossy().replace('\\', "/"), src));
-        }
-    }
-    out
-}
-
 /// The signature the role table was derived at: `vyrn.json` plus every root.
 pub fn roles_sig(app_dir: &std::path::Path, roots: &[(String, String)]) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -96,24 +60,6 @@ pub fn roles_sig(app_dir: &std::path::Path, roots: &[(String, String)]) -> u64 {
         file_sig(std::path::Path::new(p)).hash(&mut h);
     }
     h.finish()
-}
-
-/// Derive a project's roles: the manifest's `roles` key when it has one
-/// (RFC-0071's form, which RFC-0072 inherits), else discovery from the
-/// generator call sites the app already writes.
-pub fn roles_of(
-    app_dir: &std::path::Path,
-    roots: &[(String, String)],
-    opts: &LoadOptions,
-    resolver: &dyn vyrn_frontend::loader::ModuleResolver,
-) -> Vec<Role> {
-    if let Some(doc) = vyrn_frontend::manifest::doc_in(app_dir) {
-        let declared = vyrn_frontend::contracts::roles_from_manifest(&doc);
-        if !declared.is_empty() {
-            return declared;
-        }
-    }
-    vyrn_frontend::contracts::discovered_roles(roots, opts, resolver)
 }
 
 /// The `<script> … </script>` body of a `.vyx`, and how many lines to subtract

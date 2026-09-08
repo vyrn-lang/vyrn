@@ -32,42 +32,8 @@ use std::process::Command;
 // of a pin is a second answer about what is pinned. Re-exported here so this
 // module still reads as the one place remote imports are handled.
 pub use vyrn_frontend::hash::sha256_hex;
-pub use vyrn_frontend::manifest::{
-    cache_dir, gen_cache_get, gen_cache_put, pinned_blob, vendor_dir, write_blob, Lock,
-};
-
-/// List the entry names directly under `dir` (generation-time `listDir`,
-/// RFC-0021), sorted for determinism.
-pub fn list_dir(dir: &str) -> Result<Vec<String>, String> {
-    let entries = std::fs::read_dir(dir).map_err(|_| vyrn_frontend::trap::io_at("listerr", dir))?;
-    let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    Ok(names)
-}
-
-/// The same listing with each entry's kind (RFC-0119 `listDirKinds`): a
-/// directory's name carries a trailing `/`. An entry whose type cannot be read
-/// is reported as a file — the caller's walk will then surface the real error
-/// at the entry itself instead of this listing guessing.
-pub fn list_dir_kinds(dir: &str) -> Result<Vec<String>, String> {
-    let entries = std::fs::read_dir(dir).map_err(|_| vyrn_frontend::trap::io_at("listerr", dir))?;
-    let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if e.file_type().is_ok_and(|t| t.is_dir()) {
-                format!("{name}/")
-            } else {
-                name
-            }
-        })
-        .collect();
-    names.sort();
-    Ok(names)
-}
+use vyrn_frontend::loader::DiskResolver;
+pub use vyrn_frontend::manifest::{cache_dir, pinned_blob, vendor_dir, write_blob, Lock};
 
 // ---------------------------------------------------------------------------
 // specifier resolution + fetching
@@ -286,27 +252,32 @@ impl RemoteResolver {
     }
 }
 
+/// A remote key is read over the network; everything else is a file on this
+/// disk, and every other question this resolver answers is the disk's. So this
+/// is [`vyrn_frontend::loader::DiskResolver`] with ONE method overridden, and
+/// the listing walk and the generation cache are stated where that resolver
+/// states them rather than a second time here.
 impl vyrn_frontend::loader::ModuleResolver for RemoteResolver {
     fn read(&self, resolved: &str) -> Result<String, String> {
         if vyrn_frontend::loader::is_remote(resolved) {
             self.read_remote(resolved)
         } else {
-            std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+            DiskResolver.read(resolved)
         }
     }
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
         // Generation-time `listDir` reads local directories only (inputs are
         // local or lock-pinned; a remote key has no directory to enumerate).
-        list_dir(resolved)
+        DiskResolver.list(resolved)
     }
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        list_dir_kinds(resolved)
+        DiskResolver.list_kinds(resolved)
     }
     fn gen_cache_get(&self, key: &str) -> Option<String> {
-        gen_cache_get(key)
+        DiskResolver.gen_cache_get(key)
     }
     fn gen_cache_put(&self, key: &str, value: &str) {
-        gen_cache_put(key, value)
+        DiskResolver.gen_cache_put(key, value)
     }
 }
 
