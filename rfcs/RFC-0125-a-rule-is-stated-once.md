@@ -15251,6 +15251,46 @@ false negative is a double free and a false positive is a leak, which is why
 `store_is_fresh` is the last screen either closure feeds.
 
 
+#### Gates (2026-09-08, `track-dr`)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Over the three
+commits of this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok — ONE warning now, `kernel.rs`'s unreachable pattern. `vyrn-frontend`'s two went with `fixes_here`, `is_module_state` and `exported` |
+| `cargo test -p vyrn-cli`, no filter | 82 suites, all green |
+| `kernel` `--ignored`, release | 1 — **24,762 accepted**, 0 refused, 0 unlowered (13 fewer instances: the queue's reader) |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — **30,184 functions judged**, 0 differ (13 fewer, the same instances) |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 435 programs from 133 sources |
+| `refusals`, `forms` | re-pinned in the wrapped-lend commit; `emitter_census`, `surface`, `checker_census`, `frontend_census`, `cli_census` unmoved |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 9 — the returned-match row is the new one |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed, 297 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move — no commit of this track changes an emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
+**What this track touched in `core.rs`**, so a track beside it can read the
+overlap: `report` (the facts and placement region), and — outside it, three
+edits of one line each — `Builder::store_is_fresh`'s screen,
+`Builder::read_only_mentions`' collection type, and the `ArgTemp` literal
+inside `Builder::arg_released`. Nothing else in the file, and nothing in
+`kernel.rs` at all. `vyrn-lower/src/lib.rs` loses `dispatched` and its one
+call site in `lower_with`.
+
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
