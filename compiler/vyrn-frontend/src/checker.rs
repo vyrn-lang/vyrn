@@ -3758,6 +3758,10 @@ impl<'a> Checker<'a> {
     fn type_satisfies(&self, ty: &Type, bound: &str) -> bool {
         let base = self.base(ty);
         match bound {
+            // The compiler's own bound (RFC-0125 §3 M6): the element of a
+            // collection an operation forgets or overwrites without releasing
+            // it. Unlexable, so only a seeded row can carry it.
+            crate::prelude::HEAPLESS => !crate::own::owns_heap(&base, self.types),
             "Num" | "Ord" => matches!(
                 base,
                 Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
@@ -7350,160 +7354,6 @@ impl<'a> Checker<'a> {
             return Ok(Type::Str);
         }
 
-        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. A
-        // growable `Array` only — a `SmallArray`'s capacity is part of its type
-        // and a fixed array has none to keep — which the row says. What the row
-        // cannot say is the rule below: the elements are FORGOTTEN rather than
-        // released, so an element type that owns heap is refused, the way
-        // `append` refuses it. That is a refusal about the ELEMENT type, which
-        // is why this block stands where `reserve`'s no longer does.
-        if name == "@clear" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`clear` takes no arguments, got {}",
-                    args.len() - 1
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`clear` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`clear` forgets its elements without releasing them, and `{elem}` owns heap — pop each element in a loop instead"
-                ));
-            }
-            return Ok(at);
-        }
-        // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw bytes.
-        if name == "@tallyBytes" {
-            if args.len() != 3 {
-                return Err(cerr!(
-                    line,
-                    "`tallyBytes` takes 3 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&at) {
-                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => {
-                    // Bytes become a String, so only a String-keyed map can
-                    // take them — an Int64-keyed map has `tally` (RFC-0117).
-                    if crate::types::resolve(&k, self.types) != Type::Str {
-                        return Err(cerr!(
-                            line,
-                            "`tallyBytes` builds a String key, and this map is keyed by {k} — use `tally` with the key itself"
-                        ));
-                    }
-                }
-                Type::Err => return Ok(Type::Err),
-                Type::Map(_, v) => {
-                    return Err(cerr!(
-                        line,
-                        "`tallyBytes` counts Int64 values, and this map holds {v}"
-                    ))
-                }
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`tallyBytes` needs a Map<String, Int64> as its receiver, found {other}"
-                    ))
-                }
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let w = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&w, &want) {
-                return Err(cerr!(line, "`tallyBytes` key is {w}, not an Array<UInt8>"));
-            }
-            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`tallyBytes` count is {n}, not an Int64"));
-            }
-            return Ok(at);
-        }
-        if name == "@copyFrom" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`copyFrom` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            let want = Type::Array(Box::new(elem.clone()));
-            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&xs, &want) {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` source is {xs} but the receiver holds {elem} elements"
-                ));
-            }
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` overwrites the receiver's elements by bytes, and `{elem}` owns heap — the overwritten elements would never be released"
-                ));
-            }
-            return Ok(at);
-        }
-        if name == "@append" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`append` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`append` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            let want = Type::Array(Box::new(elem.clone()));
-            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&xs, &want) {
-                return Err(cerr!(
-                    line,
-                    "`append` source is {xs} but the receiver holds {elem} elements"
-                ));
-            }
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`append` copies its source's elements by bytes, and `{elem}` owns heap — push each element with `.copy()` in a loop instead"
-                ));
-            }
-            return Ok(at);
-        }
-
         // Growable arrays. `[]` builds one, `xs.push(v)` (`@push`) appends and
         // `xs[i]` (`@at`) reads an element; `xs.length` is a field access, so it
         // never arrives here at all.
@@ -8488,6 +8338,10 @@ impl<'a> Checker<'a> {
                 .map(|p| p.capability)
                 .collect::<Vec<Capability>>()
         });
+        // And its bounds, which is where a row states a rule about the type
+        // ARGUMENT rather than about a parameter (RFC-0125 §3 M6:
+        // [`crate::prelude::HEAPLESS`]).
+        let seeded_bounds = seeded.map(|f| &f.type_bounds).filter(|bs| !bs.is_empty());
         // The name a reader can WRITE. An `@` spelling is the sugar's internal
         // one and no source can lex it, so a refusal that printed it would name
         // something the reader cannot type — PR #120's lesson, which
@@ -8504,7 +8358,7 @@ impl<'a> Checker<'a> {
                 ret,
                 type_params: self.generics.get(name).or(seeded_generics.as_ref()),
                 caps: self.caps.get(name).or(seeded_caps.as_ref()),
-                bounds: self.all_bounds.get(name),
+                bounds: self.all_bounds.get(name).or(seeded_bounds),
                 recv: None,
             },
             args,
@@ -8672,6 +8526,22 @@ impl<'a> Checker<'a> {
                     };
                     for b in bs {
                         if !self.type_satisfies(concrete, b) {
+                            // The compiler's own bound is refused in its own
+                            // words. A reader cannot write `@Heapless`, so the
+                            // generic sentence would name something nobody can
+                            // type (PR #120's lesson), and the rule is about
+                            // what the call does to the elements rather than
+                            // about a protocol the type failed to implement.
+                            // One sentence for `clear`, `append` and
+                            // `copyFrom`, where each block had its own.
+                            if b == crate::prelude::HEAPLESS {
+                                return Err(cerr!(
+                                    line,
+                                    "`{shown}` forgets or overwrites elements without releasing \
+                                     them, and `{concrete}` owns heap — move the elements one at \
+                                     a time instead"
+                                ));
+                            }
                             return Err(cerr!(line, "`{shown}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
                             ));
                         }
@@ -12433,8 +12303,46 @@ mod tests {
                        x.b.reserve(8) \
                        x.b.push(3) \
                        x.c.tally(\"k\", 5) \
+                       x.b.clear() \
+                       x.b.append([1, 2]) \
+                       x.b.copyFrom([3, 4]) \
+                       x.c.tallyBytes(bytes(\"k\"), 1) \
                        return fill(x.b) + x.c.keys().length }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// The one thing three of those rows say that no parameter type can:
+    /// `clear`, `append` and `copyFrom` do not release what they forget or
+    /// overwrite, so their element must own no heap (RFC-0125 §3 M6). One
+    /// bound, [`crate::prelude::HEAPLESS`], one sentence, three names — where
+    /// each name had a hand-written block and a sentence of its own.
+    #[test]
+    fn the_heapless_bound_holds_the_three_that_forget_their_elements() {
+        for call in ["xs.clear()", "xs.append(ys)", "xs.copyFrom(ys)"] {
+            let src = format!(
+                "fn main() -> Int64 {{ \
+                   let mut xs: Array<String> = [] \
+                   let ys: Array<String> = [] \
+                   {call} \
+                   return xs.length }}"
+            );
+            let e = check_src(&src).unwrap_err();
+            assert!(
+                e.contains("owns heap — move the elements one at a time instead"),
+                "{call}: {e}"
+            );
+        }
+        // The same three on a heapless element are accepted, which is what the
+        // bound is FOR — a rule that refused everything would pass the test
+        // above and break every caller.
+        let ok = "fn main() -> Int64 { \
+                    let mut xs: Array<Int64> = [] \
+                    let ys: Array<Int64> = [1] \
+                    xs.append(ys) \
+                    xs.copyFrom(ys) \
+                    xs.clear() \
+                    return xs.length }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
     }
 
     /// A `Gone::Module` name may not be reserved: a reader sent to an import

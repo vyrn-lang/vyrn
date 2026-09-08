@@ -20,16 +20,17 @@
 //! # The extra column, and why
 //!
 //! `movecheck.rs`'s census has a kind per section and nothing else, because
-//! every one of its rules is a section. The checker's are not: 116 of its 418
+//! every one of its rules is a section. The checker's are not: 99 of its 402
 //! refusal sites are inside `Checker::call`, which is a table with one arm per
-//! builtin, and a kind alone would file all 116 under the surface and lose
+//! builtin, and a kind alone would file all 99 under the surface and lose
 //! them. (It was 190 of 487 when this census was written; RFC-0125 §3 M6
 //! deleted the twenty-seven that restated a seeded row, then seven more when
 //! four names that had no row got one, then fifteen with the six `consume`
 //! rows, then nine when the ten migration hints became rows of one migration
 //! table, then eight with `@reserve` and `@tally`, then four when the protocol
-//! dispatcher stopped restating the declaration it dispatches to.) So each
-//! section also carries the number of `cerr!`/`cerr_at!` sites it holds, and
+//! dispatcher stopped restating the declaration it dispatches to, then
+//! seventeen when one bound on three rows answered the element-type rule.) So
+//! each section also carries the number of `cerr!`/`cerr_at!` sites it holds, and
 //! [`the_structural_census_is_what_the_rfc_records`] pins the per-kind refusal
 //! tally beside the per-kind line tally. A rule that leaves the checker moves
 //! both numbers.
@@ -443,11 +444,11 @@ fn sections() -> Vec<Section> {
         sec(
             "fn call(",
             Surface,
-            "the builtin table: twenty-three guarded blocks naming a builtin, \
+            "the builtin table: nineteen guarded blocks naming a builtin, \
              each giving its arity, its argument types, its result and its \
              refusals, then the dispatcher — which impl answers — and the \
              fall-through, which since RFC-0125 §3 M6 types a seeded builtin \
-             against its row; twenty-eight names have no block at all. The \
+             against its row; thirty-two names have no block at all. The \
              single largest thing in the file and the `builtins` factor \
              written out",
         ),
@@ -753,12 +754,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3398, 140),
+        ("the typing judgment", 3414, 141),
         ("a rule the checker states", 1455, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 3581, 174),
+        ("one arm per form, type constructor or builtin", 3435, 157),
         ("shared machinery", 2256, 30),
-        ("tests", 4781, 0),
+        ("tests", 4819, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

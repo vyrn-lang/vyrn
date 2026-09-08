@@ -16907,6 +16907,205 @@ to 1,457 — the protocol path's own `Type::Fn` arm is the shared one now), and
 the forms census (`tests/forms.rs` and RFC-0127 §3, unmoved — the slice touches
 no form).
 
+#### One bound answers the element-type four (2026-09-07)
+
+The block census ranks these last: `@clear`, `@append`, `@copyFrom` and
+`@tallyBytes`, 145 lines and 17 refusals, class (c) — "each refuses on a
+property of the ELEMENT type (it owns heap, or it is a byte), which is a fact
+about the type argument rather than about the signature". `@clear`'s own
+comment says the same thing, and says it is why the block stands where
+`@reserve`'s no longer does.
+
+The question this slice was set is whether a row can carry that property, and
+whether one column states all seventeen. The answer is yes, and the count is
+smaller than the census's reason suggests.
+
+**Fourteen of the seventeen needed nothing.** All four names already have rows,
+and the rows already spell every parameter. Twelve refusals are arity and
+parameter types, which is what a row is. `@tallyBytes` needs no property at
+all: its receiver is `Map<String, Int64>` written out, so the census's "a
+String-keyed map taking a byte key — two types in one rule" is one type with
+two arguments, and the row has said so since RFC-0116. That is the fourth
+census verdict this milestone has recomputed and withdrawn, and the shape is
+the same one every time — the reason cites the code and is wrong about the
+consequence.
+
+**Three needed one column.** `clear` forgets its elements, `copyFrom`
+overwrites them, and `append` copies its source's in by bytes. None of the
+three releases anything, so an element type that owns heap leaks. A signature
+says that in a BOUND:
+
+    fn bounded(mut f: Function, tp: &str, bound: &str) -> Function
+
+wraps the three rows, and `prelude::HEAPLESS` is the bound. `type_satisfies`
+gains one arm — `!own::owns_heap(base)` — beside `Num`, `Ord` and `Eq`, which
+are the bounds the compiler already owned. The fall-through reads a seeded
+row's `type_bounds` the way it already reads its capabilities, and
+`check_declared_call`'s bounds loop is where the rule fires.
+
+**The spelling is unlexable, and that is the whole of its containment.**
+`@Heapless` is written the way `@push` and `@slot` are: no source can lex it,
+so no program can declare a protocol of that name and no program can name the
+bound. A user's `<T: Num>` still means what it meant. The refusal is worded for
+it rather than by the generic "does not satisfy" sentence, because a reader
+cannot write what that sentence would print — PR #120's lesson, and the same
+reason the fall-through strips an `@` from the name it shows.
+
+**What went.** Four blocks, 145 statement lines, 17 refusals.
+
+| the block | lines | refusals |
+|---|---|---|
+| `@clear` | 27 | 3 |
+| `@tallyBytes` | 48 | 6 |
+| `@copyFrom` | 35 | 4 |
+| `@append` | 35 | 4 |
+| **all** | **145** | **17** |
+
+**The licence.** The same measurement: `vyrn check` over `examples/`, `site/`,
+`compiler/vyrn-cli/tests/` and testsweep's 1,991-program lift, at the branch
+point `827ab268` and with the four blocks gone, the two streams compared WHOLE.
+
+| the corpus | count |
+|---|---|
+| programs | 2,368 |
+| accepted, both | 1,109 |
+| refused, both | 1,259 |
+| byte-identical stderr | 2,365 |
+| differing text | 3 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+
+This is the first slice of the four whose corpus REACHES the rule it moves.
+`examples/appendowned.vyrn`, `examples/clearowned.vyrn` and
+`examples/copyfromowned.vyrn` are the three fixtures written for it, and all
+three still refuse, on the same line, in the bound's one sentence where each
+had its own. Nothing else in the corpus moves a byte.
+
+The seventeen were witnessed one at a time under both binaries. All seventeen
+still refuse, on the same line.
+
+| the refusal | before | after |
+|---|---|---|
+| `xs.clear(1)` | "`clear` takes no arguments, got 1" | "`clear` expects 1 argument(s), got 2" |
+| `s.clear()` on a `mut` String | "`clear` needs a growable Array as its receiver, found String" | "expected `Array<T>`, found String" |
+| `xs.clear()` on `Array<String>` | "`clear` forgets its elements without releasing them, and `String` owns heap — pop each element in a loop instead" | the bound's sentence |
+| `xs.copyFrom(ys, 1)` | "`copyFrom` takes 2 arguments, got 3" | "`copyFrom` expects 2 argument(s), got 3" |
+| `s.copyFrom(ys)` on a String | "`copyFrom` needs a growable Array as its receiver, found String" | "expected `Array<T>`, found String" |
+| `Array<Int64>.copyFrom(Array<Bool>)` | "`copyFrom` source is `Array<Bool>` but the receiver holds Int64 elements" | "type parameter `T` is both Int64 and Bool" |
+| `xs.copyFrom(ys)` on `Array<String>` | "`copyFrom` overwrites the receiver's elements by bytes, and `String` owns heap — the overwritten elements would never be released" | the bound's sentence |
+| `xs.append(ys, 1)` | "`append` takes 2 arguments, got 3" | "`append` expects 2 argument(s), got 3" |
+| `s.append(ys)` on a String | "`append` needs a growable Array as its receiver, found String" | "expected `Array<T>`, found String" |
+| `Array<Int64>.append(Array<Bool>)` | "`append` source is `Array<Bool>` but the receiver holds Int64 elements" | "type parameter `T` is both Int64 and Bool" |
+| `xs.append(ys)` on `Array<String>` | "`append` copies its source's elements by bytes, and `String` owns heap — push each element with `.copy()` in a loop instead" | the bound's sentence |
+| `m.tallyBytes(b)` | "`tallyBytes` takes 3 arguments, got 2" | "`tallyBytes` expects 3 argument(s), got 2" |
+| `tallyBytes` on a `Map<Int64, Int64>` | "`tallyBytes` builds a String key, and this map is keyed by Int64 — use `tally` with the key itself" | "`tallyBytes` argument 1 expects `Map<String, Int64>`, found `Map<Int64, Int64>`" |
+| `tallyBytes` on a `Map<String, String>` | "`tallyBytes` counts Int64 values, and this map holds String" | "`tallyBytes` argument 1 expects `Map<String, Int64>`, found `Map<String, String>`" |
+| `xs.tallyBytes(b, 1)` on an Array | "`tallyBytes` needs a `Map<String, Int64>` as its receiver, found `Array<Int64>`" | "`tallyBytes` argument 1 expects `Map<String, Int64>`, found `Array<Int64>`" |
+| `m.tallyBytes("k", 1)` | "`tallyBytes` key is String, not an `Array<UInt8>`" | "`tallyBytes` argument 2 expects `Array<UInt8>`, found String" |
+| `m.tallyBytes(b, "n")` | "`tallyBytes` count is String, not an Int64" | "`tallyBytes` argument 3 expects Int64, found String" |
+
+The bound's sentence is one sentence for three names: "`clear` forgets or
+overwrites elements without releasing them, and `String` owns heap — move the
+elements one at a time instead". Three sentences become one, and one of the
+three loses a piece of advice a reader would rather have (`append` said
+`.copy()` in a loop). That is the trade recorded four times above, and it is
+worth the exchange here for the reason the milestone exists: three blocks each
+said the rule, so the rule was stated three times and checked nowhere.
+
+Two more of the seventeen lose the word "source": the mismatched element type
+is the generic solve's own "type parameter `T` is both Int64 and Bool", which
+names the conflict but not which side is the receiver. Both types are in the
+sentence and the line is the same.
+
+`the_heapless_bound_holds_the_three_that_forget_their_elements` asserts the
+refusal for all three names and the acceptance for a heapless element, which is
+what the bound is for. `a_rebuilt_receiver_keeps_its_alias` grows the four calls:
+the rows answer `Array<T>` and `Map<String, Int64>` where the blocks answered
+the receiver's own type, and a `type Buf = Array<Int64>` binding still holds
+the result for the reason `@reserve`'s record gives.
+
+**The numbers.**
+
+| measure | after the dispatcher | after this one |
+|---|---|---|
+| `checker.rs` | 15,925 | 15,833 |
+| `Checker::call` | 1,677 lines, 116 refusals | 1,527, 99 |
+| guarded blocks naming a builtin | 23 | 19 |
+| builtin names typed by a row alone | 28 | 32 |
+| refusals in `checker.rs` | 418 | 402 |
+| the census's `Surface` kind | 3,581 lines, 174 refusals | 3,435, 157 |
+| the census's `Judgment` kind | 3,398 lines, 140 refusals | 3,414, 141 |
+| RFC-0126 §3's six-file mentions | 1,457 | 1,436 |
+| `prelude.rs` | 1,029 | 1,073 |
+
+The surface census falls 21 in one slice, and every one of the 21 is a block
+spelling a type its row already spelled: `Type::Err` falls 8 (each block's
+`Ok(Type::Err)` after a failed argument), `Type::Array` 6, `Type::Int` 3,
+`Type::Map` 2, `Type::Str` 1, `Type::IntN` 1.
+
+The three censuses are re-pinned in the same commit: the structural census
+(`tests/checker_census.rs` — `Surface` 3,581 lines and 174 refusals to 3,435 and
+157, `Judgment` 3,398 and 140 to 3,414 and 141, `Tests` 4,781 to 4,819, and the
+`fn call` section's reader from twenty-three blocks to nineteen), the surface
+census (`tests/surface.rs` and RFC-0126 §3, six rows and the six-file total
+1,457 to 1,436), and the forms census (`tests/forms.rs` and RFC-0127 §3,
+unmoved — the slice touches no form).
+
+#### What is left in `Checker::call`, and the three that need a decision
+
+`Checker::call` was 2,501 lines and 190 refusals when the block census was
+written. It is 1,527 and 99 now: 974 lines and 91 refusals gone, and 32 builtin
+names typed by their seeded row alone. Of the two the census ranked as needing
+no language decision, both are taken. What remains needs one, and each of the
+three below is recorded here rather than built, because each asks the language
+a question and the answers cost different things.
+
+**The four log levels — 28 lines, 3 refusals.** The decision is whether
+`trace`, `debug`, `info`, `warn` and `error` join `RESERVED`. The signature is
+not the problem: `(l: read Logger, m: read String) -> Unit` says all of it, and
+`logger` itself got its row in the seed extension above. What blocks the row is
+that a row is matched by NAME, and `every_seeded_name_is_reserved_or_unspellable`
+is the invariant that makes that sound — a name a user can declare would
+inherit the row's contract by spelling alone. Reserving costs five common words
+that any program might already use for a function of its own; the corpus would
+say how many do, and the cost falls on every future program as well as the
+present ones. Not reserving costs the block, and costs the hand-written
+`prelude::capability` exception beside it, which exists precisely because these
+four names have no row to read a capability from — one interpolated log message
+per record leaked before that exception was written (exit-residue round
+thirty-nine). A third answer is a spelling nobody can write, the way this
+slice's bound is spelled: an internal `@trace` the log sugar produces, keyed
+like `@push`. That costs a rewrite in the parser and buys the invariant back
+without reserving a word.
+
+**`schemaOf`, `jsonSchema` and `fromJson` — 77 lines, 11 refusals.** The
+decision is whether a signature can say "the type my caller wrote". All three
+take a TYPE NAME where a value goes, and `fromJson` builds its result FROM it,
+so no parameter type this language spells is honest about any of the three —
+their rows spell the parameter `Unit` and say on the row that it is inert.
+Answering it properly is a language feature: a type-level parameter, which
+touches the parser, the checker, both engines' monomorphization and every
+reflection generator. Answering it narrowly is a fourth kind of inert column —
+"this parameter is a type name" — which the rows could carry today and which
+would let the fall-through do the arity and the result while a much smaller
+block did the one check that is left. The narrow answer is the cheaper one and
+it does not close the door on the wide one; what it costs is a column that
+means something only to three names.
+
+**`print`, `@str` and `toJson` — 70 lines, 6 refusals.** The decision is
+whether the language can spell the union these three take: a number, a `Bool`,
+a `String`, or a type with `impl Show`. RFC-0094 M3 already made `Show` the
+dispatch for all three, so the block that remains is the union itself, written
+out three times. Spelling it as a protocol — `Show` for the scalars too, with
+seeded impls — costs an impl per scalar type and makes the three rows
+`(x: read T) -> String` with a `T: Show` bound, which is the column this slice
+just built. That is the cheapest answer on the page, and the reason it is not
+taken here is that it changes what `impl Show for Int64` MEANS in a user
+program: a user impl would then overlap a seeded one, and `protocol_overlap`'s
+rule refuses that. Spelling it as a sum type costs a construction at every call
+site. Leaving it costs the three blocks, which are one union written three
+times and are checked nowhere against each other.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

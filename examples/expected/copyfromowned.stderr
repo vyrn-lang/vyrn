@@ -1,1 +1,1 @@
-copyfromowned.vyrn:6:0: `copyFrom` overwrites the receiver's elements by bytes, and `String` owns heap — the overwritten elements would never be released
+copyfromowned.vyrn:6:0: `copyFrom` forgets or overwrites elements without releasing them, and `String` owns heap — move the elements one at a time instead
