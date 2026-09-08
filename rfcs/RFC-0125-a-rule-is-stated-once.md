@@ -9223,9 +9223,10 @@ row to take, at 915, and the switch's tag the third.
 added, all of it in the driver's one section: the call arm, the `St::Do` arm,
 the signature screen, and the readability screen moved onto `Fn_` because it
 now asks the emitter's own table. `core.rs` is **6,158 before and 6,222
-after**: `Callee`, its three questions, and the branch labels. `kernel.rs`
-loses two lines: `taker_of`'s two arms become guards and the builtin test
-becomes a `match` over one field instead of a `matches!` over two. The emitter
+after**: `Callee`, its three questions, and the branch labels. `kernel.rs` is
+**2,591 lines before and 2,577 after**: `taker_of`'s two arms become guards and
+the builtin test becomes a `match` over one field instead of a `matches!` over
+two. The emitter
 census's mapping kind moves **6,256 to 6,360 lines and 586 to 588
 instructions**, and the read class `the core's rows` **2,530 to 2,634 lines**
 with its row count **72 to 82** — `Callee::` joins the list of core rows a
