@@ -5323,76 +5323,50 @@ fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
     i == 0 && crate::prelude::rebuilds(name)
 }
 
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6). This file's collectors read it; the judgment
+// itself — `MoveCheck::stmt` and `MoveCheck::expr` — states a fact per arm and
+// keeps its own.
+crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
+/// The collector's line at each site: a bare name is a read, and a lambda with
+/// a BLOCK body carries nothing out of this frame.
+struct Reads<'a>(&'a mut Vec<String>);
+
+impl BodyVisit<'_> for Reads<'_> {
+    // Root names, not what shadows what: the caller asks about the frame.
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        match e {
+            Expr::Var { name, .. } => {
+                self.0.push(name.clone());
+                true
+            }
+            // A block-bodied lambda is a body, not a value this expression
+            // carries out. The expression-bodied one is walked, because its
+            // result IS what leaves the frame.
+            Expr::Lambda {
+                body: LambdaBody::Block(_),
+                ..
+            } => false,
+            _ => true,
+        }
+    }
+}
+
 /// Every name `e` reads, root names only, in no particular order.
 ///
 /// Used where a whole expression carries values out of the frame — a `return`,
 /// a `spawn`. It over-collects on purpose: a name it lists costs a leak, and a
 /// name it misses costs a use-after-free.
+///
+/// A `match` block arm (RFC-0118) exists only in statement position — the
+/// checker's rule — so the shared walk's arm for it is unreachable from here.
 fn reads(e: &Expr) -> Vec<String> {
-    fn go(e: &Expr, out: &mut Vec<String>) {
-        match e {
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-            Expr::Var { name, .. } => out.push(name.clone()),
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                go(expr, out)
-            }
-            Expr::Consume { place, .. } => go(place, out),
-            Expr::Binary { lhs, rhs, .. } => {
-                go(lhs, out);
-                go(rhs, out);
-            }
-            Expr::Call { args, .. }
-            | Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. }
-            | Expr::Spawn { args, .. } => {
-                for a in args {
-                    go(a, out);
-                }
-            }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    go(v, out);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    go(k, out);
-                    go(v, out);
-                }
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                go(scrutinee, out);
-                for a in arms {
-                    // A block arm (RFC-0118) is never part of a return or a
-                    // spawn argument — statement position only, the checker's
-                    // rule — so there is nothing here to carry out.
-                    if let ArmBody::Expr(e) = &a.body {
-                        go(e, out);
-                    }
-                }
-            }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                go(cond, out);
-                go(then_branch, out);
-                if let Some(eb) = else_branch {
-                    go(eb, out);
-                }
-            }
-            Expr::Lambda { body, .. } => match body {
-                LambdaBody::Expr(inner) => go(inner, out),
-                LambdaBody::Block(_) => {}
-            },
-        }
-    }
     let mut out = Vec::new();
-    go(e, &mut out);
+    let locals = HashSet::new();
+    body_expr(e, &locals, &mut Reads(&mut out));
     out
 }
 
