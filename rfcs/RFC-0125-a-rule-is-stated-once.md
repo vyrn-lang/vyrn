@@ -22012,6 +22012,296 @@ stand after: two dead members of `movecheck::MoveCheck` and one unreachable
 pattern in `vyrn-lower`'s kernel.
 
 
+#### The parser, counted — and what the corpus writes (2026-09-09)
+
+`parser.rs` is 7,497 lines and nobody had counted it. Six files carry a
+census — the checker, the ownership pass, the loader, the symbol map, the
+project pass, the emitter and the CLI — and the front of the compiler was not
+one of them. §2.7 counts the whole compiler toward 40,000–45,000 lines, and
+`parser.rs` (7,497), `lexer.rs` (1,453), `ast.rs` (1,950) and `fmt.rs` (857)
+are 11,757 of them.
+
+Two measurements, and one deletion.
+
+##### The kinds, and why they are not the loader's
+
+The loader's census asks "is this rule stated anywhere else?". A parser's
+answer to that is always no: only the parser sees a token, so the grammar is
+stated once by construction. The question that fits the front of the compiler
+is RFC-0125 §1.1's other one — **is the parser the right home for this?**
+
+* **the grammar's own arm** — one production, one place.
+* **a desugar the parser states** — a surface form goes in and a different
+  tree comes out. Each row names where the checker, `vyrn-lower` or
+  `symbols.rs` states the same rewrite or keeps a special case of it. These
+  are the rows a deletion argument is made from, in both directions.
+* **a table stated a second time** — the deletion candidates proper.
+* **recovery and the diagnostic sentences** — a parse error's wording is not
+  the grammar (RFC-0006).
+* **shared machinery**, and **tests**.
+
+A production that also rewrites is `Grammar` and its row names the rewrite;
+`Desugar` is for a section that exists only to state one. The rule keeps the
+tiling from turning into an opinion.
+
+`ast.rs` and `fmt.rs` are not tiled. `ast.rs` is the surface's declaration,
+which RFC-0126 and RFC-0127 already price one constructor at a time, and
+`fmt.rs` names no form and no keyword — RFC-0127 §3.3 measures both zeros.
+
+`compiler/vyrn-cli/tests/parser_census.rs` computes the spans and pins the
+totals. The whole table, section by section, is
+`cargo test -p vyrn-cli --test parser_census -- --ignored --nocapture
+the_parser_census_as_a_table`.
+
+##### The census
+
+| kind | `parser.rs` | diagnostics | `lexer.rs` | diagnostics |
+|---|---|---|---|---|
+| the grammar's own arm | 3,512 | 52 | 583 | 11 |
+| a desugar the parser states | 928 | 7 | 0 | 0 |
+| a table stated a second time | 786 | 1 | 484 | 7 |
+| recovery and the diagnostic sentences | 175 | 2 | 0 | 0 |
+| shared machinery | 176 | 1 | 147 | 2 |
+| tests | 1,920 | 0 | 239 | 0 |
+| **the file** | **7,497** | **63** | **1,453** | **20** |
+
+Those are the numbers at the census, before the deletion below.
+
+**Half of `parser.rs` is not the grammar.** 3,512 lines are, 1,920 are its own
+tests, and the remaining 2,065 are desugars, duplicated tables, recovery and
+machinery. **A third of `lexer.rs` is a table stated a second time**, and 321
+of those 484 lines are one thing: the lexical grammar, scanned twice.
+
+The nine rows that carry it, largest first.
+
+| the section | file | lines | kind | the other statement, or the rewrite |
+|---|---|---|---|---|
+| the injected declarations in `parse_accum` | `parser.rs` | 535 | twice | the language's prelude, written as Rust: eleven type declarations pushed into every program at line 0. `schema_reflect.rs` writes `Schema`'s and `ParamInfo`'s fields out by hand, `types.rs` writes the schema field list, `direct.rs` names `IntVal`/`StrVal` |
+| `lex_with_trivia` | `lexer.rs` | 321 | twice | `lex`. Comments, plain and triple-quoted strings, interpolation holes, byte literals, numbers, identifiers and operators — the same boundaries, by its own admission: *the two lexers must agree on what is a legal token* |
+| `code_quote` and its six helpers | `parser.rs` | 220 | desugar | `vyrn"…"` onto a `Code` value, with the skeleton validated in four parse modes |
+| `place_receiver` | `parser.rs` | 121 | desugar | `movecheck.rs` asks the same question of the same tree — the parser mints the temporary and the ownership pass recognises it |
+| `storage_desugar` | `parser.rs` | 112 | desugar | `save`/`load`/`loadOr` at the call site (RFC-0044) |
+| `refutable_let` | `parser.rs` | 104 | desugar | `let Variant(a, b) = v` onto a `match` per binder (RFC-0121) |
+| `template` + `tagged_template` | `parser.rs` | 153 | desugar | `"a\{e}b"` onto a `concat`/`str` chain, and a tag onto a call (RFC-0007) |
+| `METHOD_BUILTINS` | `parser.rs` | 69 | twice | `symbols::ALL_BUILTIN_METHODS` is a second copy of its left column; a test compares them, which is what a copy costs when it cannot be deleted |
+| `mark_member_type_params` | `parser.rs` | 49 | twice | `loader::type_head_descent!` — the fourth hand-written copy of that macro's arms |
+
+##### What the corpus writes
+
+RFC-0127 §3 prices every form in compiler lines and says nothing about whether
+anyone writes one. `tests/forms.rs` now counts the other half over `std/`,
+`examples/`+`site/`, the CLI's fixtures and the committed API docs.
+
+**The count is by parsing, never by grepping.** A `vyrn"…"` quote is a string
+literal to the lexer, a comment is not a token at all, and a form's name in a
+doc comment is prose. A text scan counts all three; the token stream and the
+tree count none of them. The tree answers for a form, a declaration and a
+pattern; the token stream answers for a keyword, an operator, a contextual word
+IN THE POSITION THE PARSER READS IT, and the six surface forms the parser
+rewrites away and that therefore leave no node.
+
+419 files, and every one of `std/`, `examples/`+`site/` and the fixtures
+parses. **58 of the 401 doc fences do**, and that is `vyrn doc` working as
+designed rather than a defect: a generated page prints a declaration's
+SIGNATURE, and a `fn` with no body is not a program. A docs-only row is
+therefore a weak claim and the table says so.
+
+**One row is unwritten in the whole corpus: `place`.** RFC-0120 retired
+`place at(..)` for `-> read T`, and what is left of the word is the one parser
+mention RFC-0127 §3.4 counts — the migration refusal RFC-0094 calls a teaching
+hint. **No row is kept alive by a test alone.** Both facts are pinned by
+`forms.rs::nothing_in_the_corpus_writes_these`, because a zero in prose is a
+claim and a zero in a test is a fact.
+
+So the debloat candidates are not zeros. They are the rows the corpus barely
+writes, and here they are — with what removing each would cost.
+
+| the form | RFC | `std/` | `examples/`+`site/` | tests | docs | what removal costs |
+|---|---|---|---|---|---|---|
+| `Pattern::Other` | 0121 | 0 | 6 | 0 | 0 | nothing a program writes: **no source can spell it**. `pattern()` has one arm and every identifier is a variant name. The 6 are `refutable_let`'s default arm |
+| `Pattern::Success` / `Pattern::Failure` | 0079 | 31 | 17 | 0 | 0 | the same: unspellable. 48 of each, and there are 48 `??` — every one is that desugar's |
+| `Expr::TryConstruct` | 0079 | 0 | 7 | 0 | 0 | seven `Name?(args)` in `examples/`+`site/`, none in `std/` |
+| `word share` | 0089 | 0 | 1 | 0 | 0 | one parameter in the corpus. The word is surface-only — the checker treats `share` as `read` |
+| `word lazy` | — | 0 | 1 | 0 | 0 | one field |
+| `word contract` / `decl contracts` | 0071 | 3 | 0 | 0 | 0 | three contracts, all in `std/`, and the whole of RFC-0071's comptime story |
+| `word logging` | — | 0 | 3 | 0 | 0 | three `logging` blocks. It is the declaration with no field on `Program` |
+| `surface while let` | 0060 | 0 | 5 | 0 | 0 | five loops. It is a pure parser rewrite onto `while true { if let .. else break }`, so removing the spelling removes nothing below the parser |
+| `surface a code quote` | 0054 | 14 | 1 | 0 | 0 | 15 quotes, against 220 lines of parser. Every one is in a generator |
+| `Expr::Spawn` / `tok spawn` | — | 0 | 16 | 1 | 0 | sixteen, none in `std/` |
+| `Stmt::Region` / `tok region` | — | 0 | 24 | 3 | 0 | twenty-four, none in `std/` |
+| `tok =~` | 0003 | 0 | 16 | 0 | 1 | the regex match operator: sixteen uses, all outside `std/` |
+| `tok ~` | 0045 | 0 | 21 | 0 | 0 | bitwise complement |
+| `tok ^` | 0045 | 18 | 11 | 0 | 0 | bitwise xor |
+| `tok <<` | 0045 | 39 | 3 | 1 | 0 | shift left |
+| `tok ;` | — | 0 | 0 | 0 | 19 | **nothing in the corpus writes a semicolon.** The 19 are in doc fences. `eat_semi` still accepts one everywhere |
+| `Stmt::Continue` | — | 9 | 18 | 0 | 0 | RFC-0127 §3.1.1's floor form: 15 compiler mentions for 27 uses |
+
+This list is for a decision and nothing here removes a form.
+
+Two of its rows are already answers rather than candidates. **Three of the four
+`Pattern` constructors have no surface syntax at all** — `pattern()` is one
+arm, 47 lines, and `Success`, `Failure` and `Other` are minted by two parser
+desugars and by nothing a programmer can type. RFC-0127 §3.1 prices them at
+20, 15 and 13 mentions across eight files, which is what `??` and the refutable
+`let` cost in the passes below the parser. They are not surface forms and the
+form census's shape says so.
+
+##### The deletion: an operator's spelling, stated once
+
+RFC-0127 §3.4 measures every keyword at exactly 3 mentions in the lexer and
+calls them three copies of one fact. The punctuation was the same shape and
+worse. `two_char_op` and `single_char_op` map characters to a token,
+`token_name_and_text` mapped the token back to its spelling, and nothing
+checked that the three agreed.
+
+One list of 36 rows now, expanded into the two scanners, into the spelling
+`token_name_and_text` answers with, into the reverse lookup a caller needs, and
+into `PUNCT_SPELLINGS`, which is what `tests/forms.rs` counts a corpus's
+operators against rather than a copy of the table. It is a macro for
+`loader::type_head_descent!`'s reason: the readers want the list keyed both
+ways, and no other mechanism in Rust states a table once across both.
+
+`checker::pred_summary` carried its own nineteen rows for the same spellings,
+beside the nineteen `parser::binop` already had. It calls `parser::binop_text`,
+which walks the one table: `binop` says which token spells an operator and
+`punct_text` says how that token is written. The search is over 36 spellings,
+on a path that is about to format a message.
+
+**The keyword rows stay three, and the reason is a measurement rather than a
+preference.** Two readers outside this crate parse `keyword_or_ident`'s arms as
+text — `tests/forms.rs` and `editor/vscode/test/grammar.test.mjs` — and both
+anchor on the function's own name. Folding the keywords the same way moves both
+anchors and every row of RFC-0127 §3.4's keyword table. It is ranked below with
+that cost named.
+
+##### The licence
+
+| the measurement | before | after |
+|---|---|---|
+| `vyrn check` stderr over the corpus, byte-identical | 419 of 419 | 419 of 419 |
+| a refusal LOST or GAINED | — | 0 / 0 |
+| `the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics | the same |
+
+The whole-stderr diff is the licence that fits: `pred_summary` renders a
+predicate into a refusal, so a moved spelling would move a byte of it. The
+columns pin is the second, because `symbols::pin_diagnostics` reads the map
+`token_name_and_text` answers from and `vyrn check` does not go through that
+path.
+
+##### The numbers
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,533 | 15,516 | −17 |
+| `compiler/vyrn-frontend/src/lexer.rs` | 1,453 | 1,475 | +22 |
+| `compiler/vyrn-frontend/src/parser.rs` | 7,497 | 7,517 | +20 |
+| **the three** | **24,483** | **24,508** | **+25** |
+
+**The slice costs 25 lines and buys four fewer statements of one table.** That
+is worth recording plainly rather than dressing up: the macro and its four
+readers are longer than the 55 rows they replace, and the size strand gains
+nothing here. What it buys is the invariant — a new operator is one row, and
+the three tables can no longer disagree, which nothing checked before. RFC-0127
+§5.1 already prices a collapse at "0 saved, and every clause of the licence
+holds"; this is that shape, one table down.
+
+The censuses that moved. The parser census: `lexer.rs`'s `a table stated a
+second time` 484 to 506 and `parser.rs`'s `shared machinery` 176 to 196 —
+`binop_text` sits with the `Parser` state it renders out of. The checker
+census: `shared machinery` 2,374 to 2,357. The form census is unmoved: no form,
+declaration, keyword or contextual word changed its count in any of the eight
+files, which is the point of a fold that touches only spellings. The frontend
+census is untouched.
+
+##### What is left, ranked, with the licence each needs
+
+1. **The language's prelude, out of the parser — 535 lines.** Eleven type
+   declarations built as Rust AST literals and pushed into every program at
+   line 0. RFC-0125 §2.4 already says where they belong: `loader.rs`'s runtime
+   module table (`RT_PREFIX`, RFC-0078 M2b) injects a builtin's implementation
+   as a Vyrn module, and these are Vyrn declarations written in Rust. The
+   licence is the whole-stderr `vyrn check` diff over the corpus, the symbols
+   pin (the declarations carry line 0 and the editor filters them by it), and
+   `lowered_dump::the_pinned_lowering_over_the_corpus`. The cost: the injected
+   set is what `loader::is_injected` recognises, and three passes state these
+   records' field names a second time — those copies come with it or stay as
+   copies.
+2. **One lexical grammar, scanned once — about 320 lines.** `lex` and
+   `lex_with_trivia` find the same token boundaries and say so in a comment.
+   What separates them is decoding: the trivia scan keeps raw text and does not
+   resolve an escape or split a template. So `lex` becomes the trivia scan plus
+   a decode pass. The licence is RFC-0017's own: `tests/fmt.rs`'s re-lex
+   equality invariant, `vyrn fmt --check` over the corpus, and the whole-stderr
+   `vyrn check` diff with 0 lost and 0 gained — a lexer's refusals are its
+   sentences, and every one of them is in that diff.
+3. **`code_quote`'s four parse modes — up to 220 lines, for 15 quotes.** The
+   skeleton is validated by trying to parse it four ways. It is the highest
+   line-per-use row in the file. The licence is the corpus diff plus
+   `tests/codequotes.rs`, and the question is a design one: whether a code
+   quote must be validated at the generator's compile time at all.
+4. **`mark_member_type_params` — 49 lines.** The fourth hand-written copy of
+   `type_head_descent!`'s arms. It does not fold as the macro stands: the
+   macro's hook is handed a type's NAME and this one replaces a `Type::Named`
+   node with a `Type::Param`, which a `&mut String` cannot do. A node hook on
+   the macro closes it, and that is a `loader.rs` change.
+5. **The keyword spellings, three statements to one — about 24 lines.** As
+   above. It moves `tests/forms.rs`'s and `editor/vscode/test/grammar.test.mjs`'s
+   anchors and every `lexer` cell of RFC-0127 §3.4's keyword table, 24 rows from
+   3 to 2, and the section's sentence "every keyword costs the lexer exactly 3"
+   with them.
+6. **The capability words, four statements to one — 0 lines.** `read`,
+   `modify`, `consume` and `share` are matched three times in `parser.rs` and
+   rendered back in `checker.rs`, `symbols.rs` twice and `core.rs`. All four
+   render every word and none of them has drifted, which is why this is ranked
+   last: the fold is a wash in lines and closes a gap nothing has fallen into.
+
+`METHOD_BUILTINS` is not on the list. Its second copy carries a completion
+detail per row that the parser has no use for, and `symbols.rs`'s own test
+compares the two. That is the "what a copy costs when it cannot be deleted"
+shape, and it is already paid.
+
+##### Gates (2026-09-09)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 593 passed, no failure |
+| `kernel` `--ignored` | 1, 122 s |
+| `coretables` `--ignored` | 1, 116 s |
+| `typed` `--ignored` | 1, 186 s |
+| `effects` `--ignored` | 2, 140 s |
+| `fixtures` `--ignored` | 1, 62 s |
+| `testsweep` `--ignored` | 1, 197 s |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 325 s |
+| the residue ratchet | 1, 409 s — green, so the clean and leaking counts are unmoved on both engines |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 35 s — no byte moved |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files |
+| `parser_census` | 2 passed, 1 ignored |
+| `frontend_census`, `emitter_census`, `checker_census` | 2 passed and 1 ignored each |
+| `forms` | 8 passed, 2 ignored |
+| `refusals`, `surface` | 19, 3 |
+| `the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics, no row moved |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, the same 2 unstable |
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical |
+
+No red in the first pass. The ignored suites ran three to five times slower
+than the last record's — other tracks were gating on the same machine — so the
+times measure the machine and not the change. The four warnings that stand at
+the branch point stand after: two dead members of `movecheck::MoveCheck`, one
+dead `checker::expr_contains_spawn` that the last slice's macro left behind,
+and one unreachable pattern in `vyrn-lower`'s kernel.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

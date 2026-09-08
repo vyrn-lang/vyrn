@@ -903,6 +903,26 @@ struct Parser {
     depth: u32,
 }
 
+/// How a binary operator is written, for a diagnostic that quotes one.
+///
+/// Derived, not tabulated: [`Parser::binop`] says which token spells each
+/// operator and `lexer::punct_text` says how that token is written, so the
+/// spelling is stated once and `checker::pred_summary`'s own nineteen rows are
+/// gone (RFC-0125 §3 M6). The search is over 36 spellings, on a path that is
+/// about to format a message.
+pub fn binop_text(op: BinOp) -> &'static str {
+    crate::lexer::PUNCT_SPELLINGS
+        .iter()
+        .find(|s| {
+            crate::lexer::punct_tok(s)
+                .and_then(|t| Parser::binop(&t))
+                .map(|(o, _)| o)
+                == Some(op)
+        })
+        .copied()
+        .unwrap_or_else(|| unreachable!("every `BinOp` is spelled by one token"))
+}
+
 /// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `@at(a, i)`),
 /// e.g. `a[i].f` or `a[i].f.g`. Used to distinguish a too-deep array-element
 /// write-through (`a[i].f.g = v`, rejected) from an ordinary nested record-field

@@ -744,7 +744,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule the checker states", 1486, 58),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 2860, 157),
-        ("shared machinery", 2264, 29),
+        ("shared machinery", 2247, 29),
         ("tests", 4649, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
