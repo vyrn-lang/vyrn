@@ -5067,57 +5067,54 @@ impl MoveCheck<'_> {
 /// A lambda with a block body answers `true` without being read. The question is
 /// "may this store free the old value", where `true` costs a leak and `false` can
 /// cost a use-after-free.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; what is
+/// this probe's own is the derived-name test and the two forms it answers
+/// `true` for without descending.
 pub fn mentions_place(e: &Expr, base: &str) -> bool {
-    fn derived(n: &str, base: &str) -> bool {
-        n == base
-            || (n.len() > base.len()
-                && n.starts_with(base)
-                && matches!(n.as_bytes()[base.len()], b'.' | b'['))
+    /// The probe's line at each site: a name derived from the base is a
+    /// mention, and two forms answer `true` without being read.
+    struct Mentions<'a> {
+        base: &'a str,
+        found: bool,
     }
-    fn go(e: &Expr, base: &str) -> bool {
-        match e {
-            Expr::Var { name, .. } => derived(name, base),
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                go(expr, base)
-            }
-            Expr::Consume { place, .. } => go(place, base),
-            Expr::Binary { lhs, rhs, .. } => go(lhs, base) || go(rhs, base),
-            Expr::Call { args, .. }
-            | Expr::Spawn { args, .. }
-            | Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. } => args.iter().any(|a| go(a, base)),
-            Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| go(k, base) || go(v, base)),
-            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| go(v, base)),
-            // A block arm (RFC-0118) answers `true` without being read — the
-            // lambda-block precedent above, for the same reason: `true` costs
-            // a leak and `false` can cost a use-after-free.
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                go(scrutinee, base)
-                    || arms
-                        .iter()
-                        .any(|a| a.body.as_expr().is_none_or(|e| go(e, base)))
-            }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                go(cond, base)
-                    || go(then_branch, base)
-                    || else_branch.as_ref().is_some_and(|x| go(x, base))
-            }
-            Expr::Lambda {
-                body: LambdaBody::Expr(inner),
-                ..
-            } => go(inner, base),
-            Expr::Lambda { .. } => true,
+
+    impl Mentions<'_> {
+        fn derived(&self, n: &str) -> bool {
+            let base = self.base;
+            n == base
+                || (n.len() > base.len()
+                    && n.starts_with(base)
+                    && matches!(n.as_bytes()[base.len()], b'.' | b'['))
         }
     }
-    go(e, base)
+
+    impl BodyVisit<'_> for Mentions<'_> {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+            match e {
+                Expr::Var { name, .. } if self.derived(name) => self.found = true,
+                // A block-bodied lambda and a block match arm (RFC-0118) both
+                // answer `true` without being read, for the reason the doc
+                // gives: `true` costs a leak and `false` can cost a
+                // use-after-free.
+                Expr::Lambda {
+                    body: LambdaBody::Block(_),
+                    ..
+                } => self.found = true,
+                Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
+                    self.found = true
+                }
+                _ => {}
+            }
+            !self.found
+        }
+    }
+
+    let mut v = Mentions { base, found: false };
+    body_expr(e, &HashSet::new(), &mut v);
+    v.found
 }
 
 // ---------------------------------------------------------------------------
