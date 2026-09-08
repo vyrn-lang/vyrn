@@ -227,16 +227,23 @@ fn loader_sections() -> Vec<Section> {
              and the co-naming rename that frees a foreign name for a local stub",
         ),
         sec(
+            "macro_rules! type_head_descent {",
+            Shared,
+            "the ONE descent over a `Type`, written by a macro so that the \
+             collector's shared borrow and the two rewriters' unique ones are \
+             spellings of one arm list (RFC-0125 §3 M6). It was three \
+             fourteen-arm matches until then",
+        ),
+        sec(
             "struct NsResolver<'a> {",
             Twice,
-            "RFC-0027's `ns.member` pass, and it carries its OWN copy of two \
-             walks this file states three times each: `NsResolver::rewrite_type` \
-             is the type descent `type_names` and `rewrite_type` also write out, \
-             and `NsResolver::walk_block`/`walk_stmt`/`walk_expr` is the \
-             scope-aware body walk `scope_block` and `rewrite_block` also write \
-             out. The rule each states is the same one — which identifier \
-             occurrence in a body names a declaration and which is bound by a \
-             local in scope",
+            "RFC-0027's `ns.member` pass. Its type descent READS the shared one \
+             above since RFC-0125 §3 M6; what stays stated a second time is \
+             `NsResolver::walk_block`/`walk_stmt`/`walk_expr`, the scope-aware \
+             body walk `scope_block` and `rewrite_block` also write out. The \
+             rule all three state is the same one — which identifier occurrence \
+             in a body names a declaration and which is bound by a local in \
+             scope",
         ),
         sec(
             "fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {",
@@ -266,16 +273,16 @@ fn loader_sections() -> Vec<Section> {
              references that could name a declaration, minus the locals in \
              scope. `rewrite_block` below and `NsResolver::walk_block` above are \
              the other two, and the checker's `Scope`/`shadows_here`/`lookup` \
-             states the same rule a fourth time for a different reader. This one \
-             is the only one an immutable borrow can call, which is why it \
-             cannot simply read one of the others",
+             states the same rule a fourth time for a different reader. The type \
+             descent's macro is what closes this one too, and it is 892 lines \
+             rather than 194",
         ),
         sec(
             "fn type_names(ty: &Type) -> Vec<String> {",
-            Twice,
-            "the type descent, FIRST of three: every named or applied type head \
-             inside a type. `rewrite_type` and `NsResolver::rewrite_type` are \
-             the other two, arm for arm",
+            Job,
+            "every named or applied type head inside a type. Three lines over \
+             the shared descent since RFC-0125 §3 M6, where it was one of three \
+             copies of that descent",
         ),
         sec(
             "fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {",
@@ -284,9 +291,9 @@ fn loader_sections() -> Vec<Section> {
         ),
         sec(
             "fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {",
-            Twice,
-            "the type descent, SECOND of three — the same fourteen arms as \
-             `type_names`, assigning through `ren` where that one pushes a clone",
+            Job,
+            "every referenced type name rewritten through a map — the same \
+             shared descent, assigning where `type_names` clones",
         ),
         sec(
             "fn rewrite_expr(",
@@ -790,8 +797,8 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 3538, 22),
-        ("loader.rs", "a rule stated a second time", 1276, 1),
+        ("loader.rs", "the file's own job", 3587, 22),
+        ("loader.rs", "a rule stated a second time", 1095, 1),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
             "loader.rs",
@@ -799,7 +806,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             15,
             0,
         ),
-        ("loader.rs", "shared machinery", 391, 0),
+        ("loader.rs", "shared machinery", 462, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2897, 0),
         ("symbols.rs", "a rule stated a second time", 360, 0),
