@@ -160,6 +160,22 @@ pub struct NameInfo {
     /// pattern binder and a temporary are keyed by a node too, and none of
     /// them is a binding the memory report is about.
     pub bound_by_let: bool,
+    /// For a name a LAMBDA literal binds: the captures the closure reads as
+    /// VALUES, where the closure may outlive the call it is written at
+    /// (RFC-0037, RFC-0125 §3 M3, row 24). `None` where it may not, and for
+    /// every name no lambda binds.
+    ///
+    /// Two facts about the literal, both about WHERE it is written, so the
+    /// core states them and the kernel states the rule over them. A lambda
+    /// written at an argument position whose parameter provably only borrows
+    /// it — `map(xs, x -> ..)` — cannot outlive the call and captures freely;
+    /// everywhere else the closure is a value under RFC-0037's
+    /// defunctionalization, which is the default and the safe direction. And
+    /// a capture the body only CALLS is not a value the closure holds:
+    /// `applyAll`'s `n -> f(n) + 1` names a function, and the call reaches
+    /// the same body whoever holds it, where a captured buffer is one block
+    /// with one owner (`examples/capturefn.vyrn`, `std/stream.vyrn`).
+    pub closure_reads: Option<Vec<Name>>,
     /// Why the value this name binds is NOT this frame's, where it is not —
     /// the core's own statement, minted where [`Builder::owned_binding`]
     /// decides it (RFC-0125 §3 M3, the report slice). `None` for a name the
@@ -1487,6 +1503,8 @@ fn build_seeded(
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
         rebinding: false,
+        call_keeps: None,
+        pending_closure: None,
     };
     let f: &Function = inst.func;
     // The instance's substitution, so a parameter's type here is the type the
@@ -1590,6 +1608,8 @@ pub fn build_module_state<'a>(
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
         rebinding: false,
+        call_keeps: None,
+        pending_closure: None,
     };
     let mut out = Vec::new();
     for g in &program.globals {
@@ -1693,6 +1713,8 @@ fn build_outside_seeded<'a>(
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
         rebinding: false,
+        call_keeps: None,
+        pending_closure: None,
     };
     let mut out = Vec::new();
     b.block(block, &mut out)?;
@@ -1752,6 +1774,18 @@ struct Builder<'a> {
     /// temporary the value passes through owns nothing, and the loop's back
     /// edge repeats no release. `std/html.vyrn`'s `attrKey` is the shape.
     rebinding: bool,
+    /// Whether the ARGUMENT position being lowered may keep what it is
+    /// handed: `Some(false)` for a position that provably only borrows,
+    /// `Some(true)` for one that may store it, `None` outside an argument.
+    ///
+    /// It answers one question about one form — a lambda literal written at
+    /// a call argument — and the two lambda arms are its only readers
+    /// (RFC-0125 §3 M3, row 24).
+    call_keeps: Option<bool>,
+    /// [`NameInfo::closure_reads`] for the lambda [`Builder::rhs`] has just
+    /// built, waiting for the name [`Builder::bind`] gives it. The arm that
+    /// builds a lambda as a whole right-hand side has no name yet.
+    pending_closure: Option<Vec<Name>>,
 }
 
 impl<'a> Builder<'a> {
@@ -1783,6 +1817,7 @@ impl<'a> Builder<'a> {
             loop_var: None,
             linear,
             bound_by_let: false,
+            closure_reads: None,
             not_owned: None,
         });
         (self.body.names.len() - 1) as Name
@@ -1960,6 +1995,9 @@ impl<'a> Builder<'a> {
     /// String temporaries the reading site frees (RFC-0096 M3). After, because
     /// the result is named first and the temporaries were its operands.
     fn bind(&mut self, n: Name, rhs: Rhs, out: &mut Vec<St>) {
+        if matches!(rhs, Rhs::Prim(Op::Closure, ..)) {
+            self.body.names[n as usize].closure_reads = self.pending_closure.take();
+        }
         out.push(St::Let(n, rhs));
         for t in std::mem::take(&mut self.after_of_rhs) {
             out.push(St::Drop(t, Site::None, 0));
@@ -3864,6 +3902,11 @@ impl<'a> Builder<'a> {
         let caps = self.captures(e);
         let ty = self.ty_of(e).unwrap_or(Type::Unit);
         let t = self.name("@lambda", ty.clone(), false, e.line());
+        // Where the literal is written ([`NameInfo::closure_reads`]). The cell
+        // is taken, so a lambda in the BODY of this one — and a sibling lambda
+        // in a later argument of the same call — asks the position it is
+        // written at rather than this one's.
+        self.body.names[t as usize].closure_reads = self.closure_reads(e, &caps);
         out.push(St::Let(t, Rhs::Prim(Op::Closure, caps.clone(), Some(ty))));
         self.lambda_frame(e, &caps)?;
         Ok(Val::Name(t))
@@ -4006,6 +4049,43 @@ impl<'a> Builder<'a> {
             }
         }
         caps
+    }
+
+    /// [`NameInfo::closure_reads`] for one lambda literal: the captures its
+    /// body reads as VALUES, where the literal is written somewhere the
+    /// closure value may outlive the call, and `None` where it may not.
+    fn closure_reads(&mut self, e: &Expr, caps: &[Val]) -> Option<Vec<Name>> {
+        if self.call_keeps.take() == Some(false) {
+            return None;
+        }
+        let Expr::Lambda { body, .. } = e else {
+            return None;
+        };
+        // The names the body MENTIONS, which is not the names it captures: a
+        // callee is a name the core captures — the closure has to reach the
+        // body — and no value the closure holds.
+        let (mut vars, mut calls) = (Vec::new(), Vec::new());
+        mentions_in_lambda(body, &mut vars, &mut calls);
+        let read = |at: &str| {
+            vars.iter().any(|v| match v {
+                Expr::Var { name, .. } => {
+                    name == at
+                        || (name.len() > at.len()
+                            && name.starts_with(at)
+                            && matches!(name.as_bytes()[at.len()], b'.' | b'['))
+                }
+                _ => false,
+            })
+        };
+        Some(
+            caps.iter()
+                .filter_map(|v| match v {
+                    Val::Name(n) => Some(*n),
+                    Val::Lit(_) => None,
+                })
+                .filter(|n| read(&self.body.names[*n as usize].source))
+                .collect(),
+        )
     }
 
     /// A read of module state as a value: a borrow of the global, because
@@ -4534,6 +4614,9 @@ impl<'a> Builder<'a> {
             }
             Expr::Lambda { .. } => {
                 let caps = self.captures(e);
+                // The name this closure binds is `bind`'s to give, so the
+                // fact waits for it ([`Builder::pending_closure`]).
+                self.pending_closure = self.closure_reads(e, &caps);
                 self.lambda_frame(e, &caps)?;
                 Ok(Rhs::Prim(Op::Closure, caps, self.produced(e)))
             }
@@ -4794,6 +4877,20 @@ impl<'a> Builder<'a> {
             self.drain += 1;
         }
         for (k, (a, cap)) in args.iter().zip(caps.iter()).enumerate() {
+            // Whether THIS position may keep what it is handed, for a lambda
+            // literal written AT it ([`NameInfo::closure_reads`]). The
+            // capability is read where the rule about a position is stated
+            // once — `declared::arg_cap`, the declaration's word or the
+            // seeded row's — and a position neither answers may keep it: the
+            // safe direction is refusing an author once, never dangling a
+            // capture. A lambda DEEPER inside the argument answers `None` and
+            // escapes: an array, a map and a record literal retain what they
+            // are given, whatever the call around them would have done
+            // (`movecheck`'s four literal arms).
+            self.call_keeps = matches!(a, Expr::Lambda { .. }).then(|| {
+                vyrn_frontend::declared::arg_cap(&self.own.arg_caps, name, k)
+                    .is_none_or(|c| c == Capability::Consume)
+            });
             let v = if *cap == Capability::Consume {
                 // Module state as the receiver (`books.push(b)`): a read of
                 // it is a borrow nothing may take, so the write-back form
@@ -4817,6 +4914,7 @@ impl<'a> Builder<'a> {
             } else {
                 self.read_arg(a, out, name, k)?
             };
+            self.call_keeps = None;
             if let Val::Name(t) = v {
                 // The drop the key stands for: `read_arg` set it, and a
                 // temporary the read did not already queue is queued here

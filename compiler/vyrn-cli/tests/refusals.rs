@@ -34,8 +34,9 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27 and 34,
-//! RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two must
+//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27, 34, 22
+//! and 24, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two
+//! must
 //! still agree. The row is what stops the sentence moving after the deletion,
 //! so it stays in the census.
 //!
@@ -262,8 +263,10 @@ fn census() -> Vec<Row> {
              releases the whole binding",
             // The kernel gives it too since the walk's deletion (RFC-0125 §3
             // M3): it used to read a record literal of literals as static
-            // data and so never judged the `drop`.
-            Kernel::Other("is released whole although a `consume` took `.name` out of it"),
+            // data and so never judged the `drop`. It gives it in these words
+            // since the drop-hole slice, which moved the sentence and its menu
+            // to `Kernel::drop` and took the checker's copy away.
+            Kernel::Same,
         ),
         row(
             "r23_modify_is_exclusive.vyrn",
@@ -271,15 +274,22 @@ fn census() -> Vec<Row> {
             "RFC-0090",
             "`a` is passed to `bump` as `modify` and read again in the same call — a `modify` \
              borrow is exclusive",
-            Kernel::No,
+            // The CHECKER states it now, beside the other two rules about a
+            // `modify` argument (`check_modify_arg`), so the knob that stands
+            // the move check aside does not reach it.
+            Kernel::Elsewhere,
         ),
         row(
             "r24_capture_that_outlives_the_call.vyrn",
             "a closure that outlives the call may not capture a borrow",
             "RFC-0037",
+            // The kernel gives it since the capture slice: the core says
+            // where a lambda literal is written and which captures its body
+            // READS (`NameInfo::closure_reads`), and the kernel states
+            // RFC-0037 over the two.
             "`s` may not be captured by a closure that outlives this call — it is a `read` \
              parameter",
-            Kernel::No,
+            Kernel::Same,
         ),
         row(
             "r25_consume_inside_a_loop.vyrn",
@@ -2525,6 +2535,103 @@ fn a_lend_through_a_wrapper_is_refused_and_the_kernel_is_what_refuses_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The three rules `movecheck.rs` stated last, as its own unit tests wrote
+/// them: they moved out of the file in one track (RFC-0125 §3 M3, rows 22, 23
+/// and 24), so the shapes move here.
+///
+/// Two runs each, as every row of the census above: `vyrn check`, and with the
+/// move check stood aside. All five must be refused in the same words by both,
+/// because none of the three rules is the move check's any more — two are the
+/// kernel's and one is the checker's.
+#[test]
+fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
+    const END: &str = " fn main() -> Int64 { return 0 }";
+    let cases: &[(&str, &str, String)] = &[
+        (
+            "a drop after a partial take",
+            "`t` may not be dropped — `t.name` was taken out of it on line 1, and `drop` \
+             releases the whole binding",
+            format!(
+                "type T = {{ id: Int64, name: String }} \
+                 impl Owned for T {{ fn release(consume self) \
+                 {{ let a = consume self.name drop a }} }} \
+                 fn go() -> Int64 {{ let t = T {{ id: 1, name: \"n\" }} \
+                 let n = consume t.name drop n drop t return 0 }}{END}"
+            ),
+        ),
+        (
+            "a modify borrow read again in the same call",
+            "`xs` is passed to `f` as `modify` and read again in the same call — a `modify` \
+             borrow is exclusive",
+            format!(
+                "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 {{ return a.length }} \
+                 fn go() -> Int64 {{ let mut xs: Array<Int64> = [] return f(xs, xs) }}{END}"
+            ),
+        ),
+        (
+            "a modify receiver read again in the same call",
+            "`t` is passed to `merge` as `modify` and read again in the same call — a `modify` \
+             borrow is exclusive",
+            format!(
+                "type T = {{ n: Int64 }} \
+                 protocol Merging {{ fn merge(modify self, other: T) -> Unit }} \
+                 impl Merging for T {{ fn merge(modify self, other: T) -> Unit \
+                 {{ self.n = self.n + other.n }} }} \
+                 fn go() -> Int64 {{ let mut t = T {{ n: 1 }} t.merge(t) return 0 }}{END}"
+            ),
+        ),
+        (
+            "a stored closure captures a borrow",
+            "`s` may not be captured by a closure that outlives this call — it is a `read` \
+             parameter",
+            format!(
+                "fn go(s: String) -> Int64 \
+                 {{ let f: fn(Int64) -> Int64 = n -> n + s.byteLength \
+                 return f(1) }}{END}"
+            ),
+        ),
+        (
+            "a closure at a consume fn parameter captures a borrow",
+            "`q` may not be captured by a closure that outlives this call — it is a `read` \
+             parameter",
+            format!(
+                "fn reg(f: consume fn(Int64) -> Int64) -> Int64 {{ return f(0) }} \
+                 fn go(q: read String) -> Int64 {{ return reg(n -> n + q.byteLength) }}{END}"
+            ),
+        ),
+    ];
+    let dir = common::scratch("last-three-shapes");
+    let mut bad: Vec<String> = Vec::new();
+    for (what, says, src) in cases {
+        let name = format!("{}.vyrn", what.replace(' ', "_"));
+        std::fs::write(dir.join(&name), src).expect("write the program");
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+            continue;
+        }
+        let (_, msg) = split_head(&text);
+        let first = msg.lines().next().unwrap_or_default();
+        if first != *says {
+            bad.push(format!("{what}: said `{first}`"));
+            continue;
+        }
+        // The licence, per program: the whole refusal survives the deletion.
+        let (kok, ktext) = refusal_in(dir.to_path_buf(), &name, true);
+        if kok || ktext != text {
+            bad.push(format!(
+                "{what}: without the move check it said `{}`",
+                if kok { "nothing".to_string() } else { ktext }
+            ));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "a rule the last three shapes pin no longer refuses:\n  {}",
+        bad.join("\n  ")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The structural census of `movecheck.rs` (RFC-0125 §3 M3, the checker's
 // deletion path).
@@ -2556,12 +2663,23 @@ enum Kind {
     Kernel,
     /// A refusal rule only the checker gives. The census above says `nothing`
     /// or `its own words`, so nothing may take this yet.
+    ///
+    /// **The column is empty** (RFC-0125 §3 M3). The three rules that stood
+    /// here left in one track: the `drop` of a binding with a hole and the
+    /// escaping closure's capture to the kernel, `modify` exclusivity to
+    /// `checker.rs`, beside the two other rules about a `modify` argument.
+    /// This file states no refusal at all, and the kind stays so one that
+    /// reappears is classified rather than lost.
     Checker,
     /// Placement rows for the engines: what `own.rs` reads and the plan
     /// carries. It is not a rule, and the kernel does not replace it — the
     /// own-side deletion track does.
     Rows,
     /// A `fix:` menu. Surface knowledge the kernel has no source for.
+    ///
+    /// **The column is empty** too, and for the same reason: a menu belongs to
+    /// a refusal, and there is none here to belong to. `kernel::menu` and
+    /// `core::BorrowKind::fixes` are where the ways out are written now.
     Menu,
     /// Shared machinery: the walk itself, the scope stacks, the path algebra,
     /// the entry points, the recorded measurements.
@@ -2664,16 +2782,11 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "enum Borrow {",
-            Checker,
-            "what a borrow is, in words. `core::BorrowKind::what` is the same \
-             sentence, so nothing here is owed; what reads this one now is \
-             `check_take` and the two closure rules, which the kernel does \
-             not give",
-        ),
-        sec(
-            "    fn fixes(&self, root: &str, path: &str) -> Vec<String> {",
-            Menu,
-            "the named ways out of a borrow error",
+            Shared,
+            "what a borrow is, for the walk's own reading of a place. The two \
+             SENTENCES left with the capture rule (row 24): \
+             `core::BorrowKind::what` and `::fixes` are the statement, and \
+             nothing outside the kernel words a borrow now",
         ),
         sec(
             "pub fn root_of(path: &str) -> &str {",
@@ -2726,11 +2839,6 @@ fn sections() -> Vec<Section> {
             "what a pattern's binders name, and whether an iterable is a place",
         ),
         sec(
-            "    fn callee_keeps(&self, callee: &str, i: usize) -> bool {",
-            Shared,
-            "whether a callee keeps a `fn` value",
-        ),
-        sec(
             "    fn carries_param_storage(&self, e: &Expr) -> bool {",
             Rows,
             "the escape screen: storage flow rather than mention",
@@ -2769,17 +2877,6 @@ fn sections() -> Vec<Section> {
             "a lambda's captures, recorded for the enclosing block",
         ),
         sec(
-            "    fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) \
-             -> Result<(), Diagnostic> {",
-            Checker,
-            "a `modify` borrow is exclusive (row 23)",
-        ),
-        sec(
-            "    fn check_capture(&self, name: &str, line: usize) -> Result<(), Diagnostic> {",
-            Checker,
-            "a closure that outlives the call may not capture a borrow (row 24)",
-        ),
-        sec(
             "    fn expr(",
             Shared,
             "the walk over expressions: the same traversal does both jobs",
@@ -2811,11 +2908,6 @@ fn sections() -> Vec<Section> {
             "pub fn element_path(e: &Expr) -> Option<(String, String)> {",
             Shared,
             "the place spellings every rule above compares",
-        ),
-        sec(
-            "fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic {",
-            Menu,
-            "one diagnostic with its menu of fixes",
         ),
         sec(
             "fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>) {",
@@ -2933,11 +3025,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("a rule the kernel now gives", 0),
-        ("a rule only the checker gives", 126),
-        ("placement rows for the engines", 533),
-        ("a fix menu", 37),
-        ("shared machinery", 3125),
-        ("tests", 564),
+        ("a rule only the checker gives", 0),
+        ("placement rows for the engines", 494),
+        ("a fix menu", 0),
+        ("shared machinery", 2993),
+        ("tests", 490),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

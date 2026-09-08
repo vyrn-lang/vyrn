@@ -15992,6 +15992,440 @@ inside `Builder::arg_released`. Nothing else in the file, and nothing in
 call site in `lower_with`.
 
 
+#### The census of what only `movecheck` refuses (2026-09-08, `track-dt`)
+
+`movecheck.rs` is 4,411 lines and states **three** refusals. That is the whole
+of what §2.7's delete key waits on, and this is each one with the pass that
+would have to say it instead.
+
+**The three sites.** Every `menu(..)` in the file, and the one `cerr!`-shaped
+`Err` beside them:
+
+| the site | the sentence | the rule | who else states it | the census row |
+|---|---|---|---|---|
+| `Stmt::Drop`, the hole screen | "`p` may not be dropped — `p.name` was taken out of it on line 17, and `drop` releases the whole binding" | RFC-0093: `drop` reclaims by TYPE and cannot skip what a take handed away | the KERNEL, `Kernel::drop`'s hole screen — in words of its own until the slice below | `r22` |
+| `MoveCheck::check_exclusive` | "`a` is passed to `bump` as `modify` and read again in the same call — a `modify` borrow is exclusive" | RFC-0090: mutation is exclusive | **nobody**. `checker.rs` has `check_modify_arg`, which asks that the argument be a `mut` variable of exactly the parameter's type, and asks nothing about the other arguments | `r23` |
+| `MoveCheck::check_capture` | "`s` may not be captured by a closure that outlives this call — it is a `read` parameter" | RFC-0037: a stored closure is a value, and a borrow inside one has no lifetime | **nobody**. `checker.rs`'s `check_lambda_body_captures` is RFC-0023's discipline — a capture may not be assigned, dropped or consumed — and says nothing about a borrow | `r24` |
+
+`Kind::Checker`'s 126 lines are the last two of these and `enum Borrow`, whose
+words both of them quote. `Kind::Menu`'s 37 are `Borrow::fixes` and the free
+`menu`, which the same two read.
+
+**The corpus, run twice.** Every row of `tests/refusals` and `tests/unlicensed`
+— 34 census programs and 9 counterexamples — under `vyrn check` and under
+`VYRN_NO_MOVECHECK=1 vyrn check`:
+
+| | rows |
+|---|---|
+| refused by both | **41** |
+| refused by the checker alone | **2** — `r23_modify_is_exclusive`, `r24_capture_that_outlives_the_call` |
+| refused by the kernel alone | 0 |
+
+So the file's deletion is two rules wide. The ranked list:
+
+1. **`r22`, the `drop` of a binding with a hole.** The kernel already refuses
+   the program at the same line; only the wording and the menu were the
+   checker's. Taken by the slice below.
+2. **`r24`, an escaping closure's borrowed capture.** The core builds the
+   closure as `St::Let(t, Rhs::Prim(Op::Closure, caps, ..))` with the captures
+   as operands, and `NameInfo::borrow` says which of them is a borrow. What the
+   kernel does not have is the ESCAPE: whether the closure value is returned,
+   stored, or handed to a parameter that may keep it. It is a forward question
+   and the kernel walks forward, so the row is stated at the escape and worded
+   at the lambda's line.
+3. **`r23`, `modify` exclusivity.** The core's `Rhs::Call` already carries a
+   `Capability` per argument, so the `modify` half is there. The other half is
+   not: the checker asks `mentions(other_arg, root)` over the SOURCE, and the
+   core has hoisted every argument into a name of its own, so the kernel would
+   need the roots a temporary's defining `Rhs` reads — a walk over the body's
+   own definitions, which is a fact and not a rule.
+
+**One rule the checker states and does not reach.** `Checker::captures_expr`
+tiles the expression tree by hand — `Call`, `Spawn`, `TryConstruct`,
+`ArrayLit`, `Unary`, `Try`, `Field`, `Binary`, `Match`, `IfExpr`, `StructLit`,
+`Lambda` — and falls to `_ => Ok(())` for the rest. Two forms fall through:
+`Expr::MapLit` and `Expr::Consume`. A `consume` of a captured binding inside a
+map literal is silent for RFC-0023's rule, and the same shape inside an array
+literal is refused. The program is refused all the same — the KERNEL says
+"`s` may not be passed to a `consume` parameter via `take(..)` — it is a
+captured binding" — so nothing is accepted that should not be; what is lost is
+the checker's own sentence. The fix is two arms and it is `checker.rs`'s, not
+this track's.
+
+
+#### The `drop` of a binding with a hole is the kernel's sentence (2026-09-08, `track-dt`)
+
+The census's first row. `Kernel::drop` refuses the program already and the
+placer's own wording is what a reader got: "`p` (line 16) is released whole
+although a `consume` took `.name` out of it". The checker's is the one that
+names the statement the reader wrote and the two ways out of it. So the
+sentence moves rather than the rule: `Kernel::drop`'s hole screen asks
+`self.by`, which is `` `drop` `` for a `drop` a reader wrote and something else
+for a release this pass placed — the same distinction the refusal one line
+above it already draws — and words the reader's case as the checker worded it,
+menu and all.
+
+**The licence.** Both corpora, whole stderr, plain and with the checker stood
+aside:
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over the 280 corpus roots under `examples/`, `std/`, `site/` and `site/app/` | byte-identical, **0 lost / 0 gained** |
+| the same over `tests/refusals` and `tests/unlicensed`, `vyrn check` | byte-identical |
+| the same with `VYRN_NO_MOVECHECK=1` | **one line moves**: `r22`'s kernel sentence becomes the checker's, and its two `fix:` lines appear. Nothing else, in either corpus |
+
+Every refused program stays refused, at the same file and line. The one
+sentence that changes changes TOWARD the checker's, which is why the census
+row can say `Kernel::Same` afterwards instead of `Kernel::Other`.
+
+**The censuses.** `compiler/vyrn-cli/tests/refusals.rs`: row 22's kernel column
+`Other` to **`Same`**, and the doc comment's list of rows whose site has left
+the file gains 22. The structural census: shared machinery **3,122 to 3,096**;
+`Kernel`, `Checker`, `Rows`, `Menu` and `Tests` do not move — the deleted
+screen sat inside `fn stmt`, which is the walk. RFC-0127 §3's form census does
+not move: the `Stmt::Drop` arm is still there and still records the
+consumption. `emitter_census`, `surface`, `checker_census`, `frontend_census`
+and `cli_census` are unmoved.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,411 to **4,385**;
+`compiler/vyrn-lower/src/kernel.rs` 2,591 to **2,617**. Net 0, and the rule is
+stated once.
+
+#### The escaping closure's capture is the kernel's rule (2026-09-09, `track-dt`)
+
+The census's second row. RFC-0037: a closure that outlives the call it is
+written at may not capture a borrow, because the borrow's owner is the frame
+the closure leaves. `movecheck::check_capture` was the only pass that said so,
+and `VYRN_NO_MOVECHECK=1` accepted every program that broke it.
+
+**Two facts and one rule.** The rule is the kernel's and it needs two facts
+about a lambda LITERAL, both about where it is written, so the core states
+them on the name the literal binds
+([`crate::core::NameInfo::closure_reads`]):
+
+| the fact | what the checker read it off | what the core reads it off |
+|---|---|---|
+| does the closure outlive the call it is written at | `call_keeps`, a cell set per call argument to `callee_keeps` — the declared capability, else the seeded row, else "it may keep it" | the same question at the same door: `declared::arg_cap` in `Builder::call`'s argument loop, `Consume` or unanswered means the position may keep it. Every other position, and every lambda that is not an argument, escapes |
+| which captures does the body READ | nothing: the rule fired at an `Expr::Var` the walk reached inside the lambda, so a capture the body only CALLS was never asked about | the `vars` half of `mentions_in_lambda`, which `Builder::captures` already collects beside the `calls` half it adds to the capture set |
+
+The second fact is the one a corpus run found, and it is not a detail: three
+corpus programs capture a `fn`-valued `read` parameter and call it —
+`examples/capturefn.vyrn`'s `applyAll`, `std/stream.vyrn`'s `unfold` and its
+`map` — and all three compile. A call reaches the same body whoever holds the
+name; a captured BUFFER is one block with one owner. Stating the rule over
+the whole capture set refused all three, which is how the distinction was
+found rather than assumed.
+
+**One more door the checker had and the core did not.** A lambda inside an
+array, map, record or `try` literal escapes whatever the call around the
+literal would have done — the checker set its cell to `true` at all four
+arms. The core answers the position for a lambda written AT it and `None`
+for one deeper inside the argument, which is the same answer with one screen
+instead of five: `matches!(a, Expr::Lambda { .. })`.
+
+**The licence.** Measured at each step, and the reads filter is the step the
+corpus paid for:
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over the 280 corpus roots | byte-identical, **0 lost / 0 gained** |
+| the same, before the reads filter | **12 lines gained** in 2 files — `examples/capturefn.vyrn` and `std/stream.vyrn`, three functions, each a called capture |
+| `tests/refusals` and `tests/unlicensed`, `vyrn check` | byte-identical |
+| the same with `VYRN_NO_MOVECHECK=1` | **three lines gained**: `r24`'s sentence and its two `fix:` lines, byte for byte the checker's |
+
+**What went.** In `movecheck.rs`: `check_capture` and its two call sites,
+`note_capture` — which recorded nothing, its body ending at `let _ = line`
+— `callee_keeps`, `MoveCheck::lambda_escapes`, `MoveCheck::call_keeps` and the
+six sites that set them, and the four literal arms' overrides. With the rule
+gone, `Borrow::what` and `Borrow::fixes` had no reader: `core::BorrowKind`'s
+two methods are the same two sentences, and nothing outside the kernel words a
+borrow now. `Consumption::line` and `Consumption::hole` had none either — the
+`drop`-with-a-hole slice above was the last reader of both — and with them
+went `Consumed::overlapping` and the free `overlaps`.
+
+**A finding the deletion leaves standing.** `Consumed` is now WRITE-ONLY: four
+`insert`s, twelve `or_insert`s, ten `clone`s, one `revive`, and no read at all.
+The table is a set of consumed paths that nothing asks about, and the
+`consumed: &mut Consumed` parameter threads through `block`, `stmt`, `expr`,
+`store` and `walk_writeback` — 92 mentions. It is the next deletion and it is
+`Kind::Shared`, not a rule.
+
+**In `core.rs`, and where.** `NameInfo::closure_reads` (the facts region),
+`Builder::call_keeps` and `Builder::pending_closure` (two new cells),
+`Builder::closure_reads` (a new reader of `mentions_in_lambda`), and three
+one-site edits: the capability screen in `Builder::call`'s argument loop,
+`Builder::lambda`, and `Builder::rhs`'s `Expr::Lambda` arm — which has no name
+to write to, so `Builder::bind` hands the fact on. In `kernel.rs`:
+`Kernel::escaping_capture`, and four lines in `Kernel::stmt`'s `St::Let` arm.
+
+**The censuses.** The structural census
+(`compiler/vyrn-cli/tests/refusals.rs`): `Kind::Checker` **126 to 35** —
+`check_exclusive` alone — `Kind::Menu` **37 to 13**, `Kind::Rows` **533 to
+494**, shared machinery **3,096 to 2,992**; `Kernel` and `Tests` do not move.
+Three anchors go with their sections (`fn check_capture`, `fn callee_keeps`,
+`fn fixes`) and `enum Borrow` is re-kinded `Shared`: what it holds is a
+reading of a place for the walk, and the words it used to carry are the
+kernel's. Row 24's kernel column `No` to **`Same`**, and the doc comment's
+list of rows whose site has left the file gains 24. RFC-0127 §3's form census
+moves at two forms, **1,202 mentions to 1,205**: `Expr::Var` gains one `lower`
+mention and `Expr::Lambda` two, all three in the new core reader. The other
+censuses do not move.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,385 to **4,127**;
+`compiler/vyrn-lower/src/kernel.rs` 2,617 to **2,676**;
+`compiler/vyrn-lower/src/core.rs` 6,109 to **6,207**. 258 lines out of the
+pass, 157 into the two that outlive it, and the rule is stated once.
+
+#### `modify` is exclusive, and the checker says so beside its two other rules (2026-09-09, `track-dt`)
+
+The census's third row, and the last refusal in `movecheck.rs`. RFC-0090:
+`f(modify a, .. a ..)` hands the callee two names for one value and the callee
+was told it had one.
+
+**It goes to the checker, not to the kernel.** The rule reads two things and
+neither is a memory fact: the CAPABILITIES a declaration wrote, and the
+ARGUMENTS a reader wrote. `checker.rs` already states two rules over exactly
+that pair, in one place — `check_modify_arg`, the call-site discipline for a
+`modify` parameter: the argument must be a `mut` variable, and its type must
+be exactly the parameter's. Exclusivity is the third, and it is now stated
+with them. The kernel was the wrong home for the same reason it was the right
+one for row 24: by the time the core has built the call, every argument but
+the `modify` one is a temporary of its own, and the kernel would have to
+rebuild "which places does this argument name" — a fact about the SOURCE that
+the checker still has in its hand.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over the 280 corpus roots | byte-identical, **0 lost / 0 gained** |
+| `tests/refusals` and `tests/unlicensed`, `vyrn check` | byte-identical, sentence and menu alike |
+| the same with `VYRN_NO_MOVECHECK=1` | **three lines gained**: `r23`'s sentence and its two `fix:` lines. The knob stands the move check aside and the checker is not the move check, so the row's kernel column is `Elsewhere` now, not `No` |
+
+**`movecheck.rs` states no refusal.** With `check_exclusive` gone the free
+`menu` had no caller, and the structural census's two refusal columns are
+empty: `Kind::Checker` **35 to 0**, `Kind::Menu` **13 to 0**. Every sentence
+the file used to give is given by the kernel, by the checker, or by the
+must-use judgment, and each is pinned by its census row.
+
+**Two findings the empty column leaves standing**, both `Kind::Shared` and
+both the next slice's:
+
+1. **`run(program, Want::Check).diags` is always empty.** `movecheck::refusals`
+   still runs a whole-program walk to collect it. It is not measurable —
+   `vyrn check site/app/docs.vyrn` is 690/693/721 ms plain against
+   695/704/732 ms with `VYRN_NO_MOVECHECK=1`, which is noise — so the deletion
+   is worth lines and not milliseconds. What it takes with it is
+   `MoveCheck::errors`, `check_accum`, `borrow_store_sites`, the `refusal`
+   string shim, `in_source_order`, `Run::diags` and the `Result<_, Diagnostic>`
+   on `block`, `stmt` and `expr`.
+2. **`Consumed` is write-only** (recorded in the slice above): four `insert`s,
+   twelve `or_insert`s, one `revive`, ten `clone`s, no read. 92 mentions of
+   `consumed`, threaded through the same five functions.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,127 to **4,077**;
+`compiler/vyrn-frontend/src/checker.rs` 15,386 to **15,426**. 50 out, 40 in.
+
+**The censuses.** The structural census: `Checker` **35 to 0**, `Menu` **13 to
+0**, shared machinery **2,992 to 2,990**; `Rows` and `Tests` do not move. Two
+anchors go with their sections (`fn check_exclusive`, `fn menu`), and both
+kinds' doc comments now say the column is empty, as `Kind::Kernel`'s has since
+M3. Row 23's kernel column `No` to **`Elsewhere`**. The checker census
+(`compiler/vyrn-cli/tests/checker_census.rs`): "a rule the checker states"
+**1,354 lines / 57 refusals to 1,385 / 58**, the typing judgment **3,393 to
+3,402** — the two call sites that pass the argument list — and
+`fn check_modify_arg`'s row in §3 M6's section table **51 lines / 4 refusals to
+82 / 5**. The kind table beside it is `track-cv`'s snapshot and already stood
+apart from the test's counts before this slice; the test is the pin. The form
+census, the surface census, `emitter_census`, `frontend_census` and
+`cli_census` do not move.
+
+#### The two closures, priced against the corpus (2026-09-09, `track-dt`)
+
+`track-dr` left `Facts::escapers` and `Facts::fnval_clear` standing and named
+the blocker as ORDER: both are asked WHILE a body is built, and the core folds
+its own facts AFTER. Two shapes were on the table — a second build against the
+fold (**181 ms in place of 74 ms** of a 304 ms placer on `site/app/docs.vyrn`,
+`track-dr`'s measurement), or a fold from the FIRST pass read at the build the
+emitter reads, which costs no build and leaves the first pass's rows made
+against an empty answer. This slice priced what an empty answer is worth,
+which is the number the second shape has to survive.
+
+**What each closure is worth, measured by emptying it.** A knob in
+`own::analyze_now` hands the core an empty set for one or both, and everything
+else is unchanged:
+
+| | `VYRN_WASM_MANIFEST=check` (176 examples) | the residue ratchet |
+|---|---|---|
+| both sets, as today | green, unmoved | engine 172 clean / 3 leaking, route 172 clean / 3 leaking, 0 failed |
+| `escapers` empty | **green, unmoved** | **172 clean / 3 leaking on each engine, 0 failed** |
+| `fnval_clear` empty | green, unmoved | *(not run alone; the pair below names its programs)* |
+| both empty | green, unmoved | **170 clean / 5 leaking on each engine, 4 failed** — `rpc` leaks 6 blocks and `rpcsplit` 5, on the engine and on the route alike |
+
+**So the two are not one question.** `fnval_clear` is load-bearing and its
+programs are named: `examples/rpc.vyrn` and `examples/rpcsplit.vyrn`, the call
+through a fn value where no capability row answers, which is the shape round
+forty-six wrote it for. `escapers` changes nothing the corpus can observe —
+not a byte of the 176 examples, not a row of the ratchet's 175 programs.
+
+**And `escapers` is not vacuous, which is the finding.** A dump at
+`Builder::store_is_fresh`'s screen counts **589 firings** over the 280 corpus
+roots: the set is consulted, it contains a mentioned callee, and it flips the
+store's answer from fresh to not-fresh — 589 times, with no emitted byte and
+no runtime block depending on the flip. That is a different situation from
+`lending` and `retains`, which `track-dh` measured EMPTY: this one fires and
+does not matter. Either the store rows it changes are re-decided by the second
+build, or the emitter reads the same code out of both answers. A slice that
+deletes it owes that explanation or a shaped program, exactly as the
+wrapped-lend slice owed its eleven.
+
+**The order question, answered by those numbers.** Neither shape is free.
+The second-build shape costs about a third more placer on the command a
+keystroke pays for. The fold-from-the-first-pass shape leaves the rows of the
+**1,314 bodies the second pass does not rebuild** (2,232 built, 918 rebuilt)
+made against an empty answer — and an empty answer, measured above, is worth
+two leaking programs and four failed runs. It could be made safe only by
+rebuilding exactly the bodies whose answer changed, which is the second shape
+under another name. So the numbers are recorded and the closures stand, and
+what moves next is the smaller question: `escapers` fires 589 times and is
+worth nothing, so it is the top of the list below and not an order question at
+all.
+
+
+#### What `own.rs` is, with a reader against every part (2026-09-09, `track-dt`)
+
+1,827 lines, and nothing in them is dead: every section below has a reader
+outside the file. The count is the file's own tiling — a section runs from its
+doc comment to the next item's.
+
+| section | lines | who reads it |
+|---|---|---|
+| the module comment | 46 | — |
+| `Exit`, `Release`, `DropKind` + `words`, `Linear` | 183 | the row vocabulary every pass shares: `Exit` in `kernel.rs`, `direct.rs`, `lib.rs`; `Release` in `core.rs`, `direct.rs`, `lib.rs`; `DropKind` in five files including `render.rs`'s printer; `Linear` in `declared.rs` and `typed.rs` |
+| `Owned` and its ten methods (`new`, `linear_kind`, `must_use`, `types`, `owns_heap`, `unbounded`, `reaches_declared`, `is_release_fn`, `release_kind`) | 434 | **the type table every pass asks**: `core.rs`, `declared.rs`, `direct.rs`, `typed.rs`, `types.rs`. `release_kind` alone is 189 lines and is the answer "what does releasing a value of this type do" |
+| the free type predicates: `self_referring`, `owns_heap`, `skippable`, `holes_under`, `str_temporary` | 286 | `checker.rs` (`self_referring`, `owns_heap`), `core.rs` (`skippable`), `direct.rs` (`holes_under`, `str_temporary`), `types.rs`, `declared.rs`, `tests/memory.rs` |
+| `MemoryRow`, `Bucket` | 43 | `vyrn why --memory` and the editor: `symbols.rs`, `vyrn-cli/src/main.rs` |
+| `ReleasePlan` and the alias machinery (`alias_clones`, `alias_clones_scoped`, `alias_scope`, `alias_unwind`, `resolve`, `key_of`) | 79 | `core.rs` and `direct.rs` |
+| `Ownership` — eight fields | 58 | ten sites in seven files. `plan`, `owned_fns`, `memory`, `proto`, `releases`, `escapers`, `fnval_clear`, `arg_caps` |
+| the memoized analysis: `Memo`, `ident`, `hand_on`, `forget_loaded`, `open`, `Drop`, `analyze`, `analyze_now` | 183 | `analyze` has **28 call sites in twelve files** — it is the door. `Memo` is the one-analysis-per-command scope (`checker.rs`, `symbols.rs`, `main.rs`) |
+| the two plan keys: `for_var_key`, `binder_key` | 22 | `core.rs` and `direct.rs`, which key the same rows |
+| the three installed slots: `Placer`, `Refusals`, `MustUse` and their six functions | 71 | `vyrn-lower/src/lib.rs` installs all three; `movecheck.rs` and `symbols.rs` read them. They are the inversion that lets `vyrn-frontend` be below `vyrn-lower` |
+| `placed` | 28 | `direct.rs` |
+| tests | 395 | the file's own |
+
+**What that says about §2.7's "delete `own.rs`".** The file is no longer a
+PASS. It is four things a reader can name, and only one of them is going
+anywhere:
+
+1. **The `Owned` type table and the free predicates — 720 lines, 39 per cent.**
+   Every pass in the compiler asks it, and RFC-0125 keeps the question: "what
+   does a value of this type own, and what does releasing it do" is a reading
+   of the DECLARATIONS. It moves to whatever file states declarations; it does
+   not go.
+2. **The row vocabulary and the plan — 340 lines.** `Exit`, `Release`,
+   `DropKind`, `ReleasePlan`, `Ownership`, `placed`, the two keys. Written by
+   the placer alone since the container slice, read by `core.rs` and
+   `direct.rs`. §2.7 keeps the table and renames it.
+3. **The analysis door and the three slots — 254 lines.** `analyze` with 28
+   callers and the inversion that lets the frontend call up into the lowering.
+   It goes when the two crates are one.
+4. **The report — 43 lines.** `MemoryRow` and `Bucket`, written by the core
+   through the placer slot and printed by `vyrn why --memory`.
+
+**The ranked list, for the next slice.**
+
+1. **`Ownership::escapers`** and everything behind it —
+   `movecheck::Facts::escapers`, `MoveCheck::param_escapers`,
+   `carries_param_storage`, and `Builder::store_is_fresh`'s last screen. Fires
+   589 times over the corpus and is worth zero bytes and zero blocks, measured
+   above. It is the only field of `Ownership` a measurement says nothing reads
+   the answer of.
+2. **`movecheck`'s refusal plumbing** — `run(program, Want::Check).diags` is
+   always empty since row 23 left, so `MoveCheck::errors`, `check_accum`,
+   `borrow_store_sites`, `refusal`, `in_source_order`, `Run::diags` and the
+   `Result<_, Diagnostic>` on `block`, `stmt` and `expr` all carry nothing.
+   Not `own.rs`'s, but it is what `own::kernel_refusals` and
+   `own::must_use_refusals` are still called through.
+3. **`Consumed`** — write-only, 92 mentions, five functions. Also
+   `movecheck.rs`'s.
+4. **`Ownership::owned_fns`** — "the return type and nothing else" by its own
+   comment, since RFC-0089 rule 3. A table whose rule is a declaration.
+
+#### Gates (2026-09-09, `track-dt`)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Over the five
+commits of this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok — one warning, `kernel.rs`'s unreachable pattern, which stood at the branch point |
+| `cargo test -p vyrn-cli`, no filter | 82 suites, all green |
+| `kernel` `--ignored`, release | 1 — **24,762 accepted**, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — **30,184 functions judged**, 0 differ |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 435 programs from 133 sources. `LEFT_THE_CHECKER` gains two needles with the two rows that licensed them: row 22's `drop` and row 24's capture, both refused by the kernel alone now, which is what the pair of runs is supposed to disagree about |
+| `refusals`, `forms`, `checker_census` | re-pinned, each in the commit that moved it; `surface`, `emitter_census`, `frontend_census`, `cli_census` unmoved |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed, 520 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move — no commit of this track changes an emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 189 blocks, 0 failed |
+
+**Five tests moved with their rules.** `movecheck.rs`'s own unit tests asserted
+three of the rules that left — `rejects_drop_after_a_partial_take`,
+`a_modify_borrow_is_exclusive`, `a_modify_receiver_is_exclusive_too`,
+`an_escaping_closure_may_not_capture_a_borrow`,
+`a_lambda_at_a_consume_parameter_escapes`. They read `movecheck::refusal`,
+which returns nothing now, so the five shapes moved to
+`compiler/vyrn-cli/tests/refusals.rs::the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused`,
+asserted refused with the exact sentence twice, plain and with the move check
+stood aside — the same licence every census row carries. `Kind::Tests` **593 to
+519**.
+
+**And three tests in `vyrn-frontend` lost their subject.**
+`diagnostics_api.rs`'s two accumulation tests asked for two `movecheck`-stage
+diagnostics, and `symbols_api.rs`'s `movecheck_rule_two_pinned_to_ident` asked
+that the column pinner cover that stage. This crate cannot reach the kernel —
+the memory judgment lives above it, behind `own.rs`'s installed slot — so a
+`movecheck`-stage refusal is the only ownership refusal these tests could ever
+see, and there is none. RFC-0006's accumulation is kept as the CHECKER's
+(`the_checker_accumulates_across_declarations`) and the ownership half is
+pinned where the kernel is reachable, in `refusals.rs`. The pinner guard goes
+with its rule, and its doc records the standing gap it was the last witness of:
+`vyrn-lsp` installs the lowering so a kernel refusal does reach a reader, but
+the kernel refuses at a LINE and the pinner works from a column. Every rule
+that left since row 06 is in that position; the answer is one slice about
+`Refusal`, not one test.
+
+**What this track touched, so a track beside it can read the overlap.** In
+`core.rs`: `NameInfo` (one field), the `Builder` struct (two cells) and its
+three constructors, `Builder::lambda`, `Builder::rhs`'s `Expr::Lambda` arm,
+`Builder::bind`, `Builder::call`'s argument loop, and one new method
+`Builder::closure_reads`. Nothing else in the file, and nothing in the row
+definitions, the builders of a row, the printer or the driver. In `kernel.rs`:
+`Kernel::drop`'s hole screen, `Kernel::stmt`'s `St::Let` arm (four lines) and
+one new method `Kernel::escaping_capture`. In `checker.rs`:
+`check_modify_arg` and its two call sites.
+
+**The lines, over the track.** `compiler/vyrn-frontend/src/movecheck.rs` 4,411
+to **4,003**; `compiler/vyrn-lower/src/kernel.rs` 2,591 to **2,676**;
+`compiler/vyrn-lower/src/core.rs` 6,109 to **6,207**;
+`compiler/vyrn-frontend/src/checker.rs` 15,386 to **15,426**;
+`compiler/vyrn-frontend/src/own.rs` **1,827**, unmoved — this track censused it
+and moved nothing in it. 408 lines out of the pass §2.7 deletes, and three
+rules each stated once.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
@@ -18045,7 +18479,7 @@ is a surface problem, not a duplication problem.
 | `fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 27 | 3 | a rule the checker states | which named functions may become values (RFC-0037) |
 | `fn check_lambda_body_captures` | 18 | 1 | a rule the checker states | a lambda's capture discipline (RFC-0023) |
 | `fn captures_block` | 210 | 0 | one arm per form, type constructor or builtin | one arm per form again, collecting the names a lambda body captures |
-| `fn check_modify_arg` | 51 | 4 | a rule the checker states | the call-site discipline for a `modify` parameter |
+| `fn check_modify_arg` | 82 | 5 | a rule the checker states | the call-site discipline for a `modify` parameter: a `mut` variable, the exact parameter type, and no other argument of the same call naming it (RFC-0090's exclusivity, row 23) |
 | `fn unify` | 120 | 11 | the typing judgment | match a generic parameter type against a concrete argument and extend the substitution |
 | `fn check_construction` | 51 | 3 | the typing judgment | `TypeName(arg)`, and the constant folded through its predicate |
 | `fn shadows_here(&self, name: &str) -> bool` | 44 | 0 | shared machinery | the three scope queries: shadowing, lookup, and whether a name is module state |
