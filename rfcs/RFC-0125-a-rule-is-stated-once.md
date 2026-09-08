@@ -15650,6 +15650,81 @@ anywhere:
 4. **`Ownership::owned_fns`** — "the return type and nothing else" by its own
    comment, since RFC-0089 rule 3. A table whose rule is a declaration.
 
+#### Gates (2026-09-09, `track-dt`)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Over the five
+commits of this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok — one warning, `kernel.rs`'s unreachable pattern, which stood at the branch point |
+| `cargo test -p vyrn-cli`, no filter | 82 suites, all green |
+| `kernel` `--ignored`, release | 1 — **24,762 accepted**, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — **30,184 functions judged**, 0 differ |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 435 programs from 133 sources. `LEFT_THE_CHECKER` gains two needles with the two rows that licensed them: row 22's `drop` and row 24's capture, both refused by the kernel alone now, which is what the pair of runs is supposed to disagree about |
+| `refusals`, `forms`, `checker_census` | re-pinned, each in the commit that moved it; `surface`, `emitter_census`, `frontend_census`, `cli_census` unmoved |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed, 520 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move — no commit of this track changes an emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 189 blocks, 0 failed |
+
+**Five tests moved with their rules.** `movecheck.rs`'s own unit tests asserted
+three of the rules that left — `rejects_drop_after_a_partial_take`,
+`a_modify_borrow_is_exclusive`, `a_modify_receiver_is_exclusive_too`,
+`an_escaping_closure_may_not_capture_a_borrow`,
+`a_lambda_at_a_consume_parameter_escapes`. They read `movecheck::refusal`,
+which returns nothing now, so the five shapes moved to
+`compiler/vyrn-cli/tests/refusals.rs::the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused`,
+asserted refused with the exact sentence twice, plain and with the move check
+stood aside — the same licence every census row carries. `Kind::Tests` **593 to
+519**.
+
+**And three tests in `vyrn-frontend` lost their subject.**
+`diagnostics_api.rs`'s two accumulation tests asked for two `movecheck`-stage
+diagnostics, and `symbols_api.rs`'s `movecheck_rule_two_pinned_to_ident` asked
+that the column pinner cover that stage. This crate cannot reach the kernel —
+the memory judgment lives above it, behind `own.rs`'s installed slot — so a
+`movecheck`-stage refusal is the only ownership refusal these tests could ever
+see, and there is none. RFC-0006's accumulation is kept as the CHECKER's
+(`the_checker_accumulates_across_declarations`) and the ownership half is
+pinned where the kernel is reachable, in `refusals.rs`. The pinner guard goes
+with its rule, and its doc records the standing gap it was the last witness of:
+`vyrn-lsp` installs the lowering so a kernel refusal does reach a reader, but
+the kernel refuses at a LINE and the pinner works from a column. Every rule
+that left since row 06 is in that position; the answer is one slice about
+`Refusal`, not one test.
+
+**What this track touched, so a track beside it can read the overlap.** In
+`core.rs`: `NameInfo` (one field), the `Builder` struct (two cells) and its
+three constructors, `Builder::lambda`, `Builder::rhs`'s `Expr::Lambda` arm,
+`Builder::bind`, `Builder::call`'s argument loop, and one new method
+`Builder::closure_reads`. Nothing else in the file, and nothing in the row
+definitions, the builders of a row, the printer or the driver. In `kernel.rs`:
+`Kernel::drop`'s hole screen, `Kernel::stmt`'s `St::Let` arm (four lines) and
+one new method `Kernel::escaping_capture`. In `checker.rs`:
+`check_modify_arg` and its two call sites.
+
+**The lines, over the track.** `compiler/vyrn-frontend/src/movecheck.rs` 4,411
+to **4,003**; `compiler/vyrn-lower/src/kernel.rs` 2,591 to **2,676**;
+`compiler/vyrn-lower/src/core.rs` 6,109 to **6,207**;
+`compiler/vyrn-frontend/src/checker.rs` 15,386 to **15,426**;
+`compiler/vyrn-frontend/src/own.rs` **1,827**, unmoved — this track censused it
+and moved nothing in it. 408 lines out of the pass §2.7 deletes, and three
+rules each stated once.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
