@@ -60,7 +60,7 @@ fn load(path: &std::path::Path) -> Result<Program, String> {
 /// lost its last reader.
 fn core_holes(src: &str, binding: &str) -> Vec<String> {
     vyrn_lower::install();
-    let program = vyrn_frontend::load(src, "holes.vyrn", &Default::default(), &Fs)
+    let program = vyrn_frontend::load(src, "holes.vyrn", &Default::default(), &DiskResolver)
         .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let _memo = vyrn_frontend::project::Memo::open();
     let lowered = vyrn_lower::lower(&program);
@@ -88,7 +88,7 @@ fn core_holes(src: &str, binding: &str) -> Vec<String> {
 /// assertions moved here, where a built body can be seen.
 fn core_releases(src: &str, which: &str, binding: &str) -> bool {
     vyrn_lower::install();
-    let program = vyrn_frontend::load(src, "owns.vyrn", &Default::default(), &Fs)
+    let program = vyrn_frontend::load(src, "owns.vyrn", &Default::default(), &DiskResolver)
         .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let _memo = vyrn_frontend::project::Memo::open();
     let lowered = vyrn_lower::lower(&program);
@@ -152,7 +152,7 @@ fn a_lender_forwarded_through_an_aggregate_lends_still() {
     // nextest runs each test in its own process, so this one installs it too.
     vyrn_lower::install();
     let src = "type R = { name: String }                fn pick(xs: Array<String>) -> String                { for x in xs { return x } return \"\" }                fn g(a: Array<String>) -> R { return R { name: pick(a) } }                fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]                let r = g(arr) return r.name.byteLength }";
-    let program = vyrn_frontend::load(src, "lend.vyrn", &Default::default(), &Fs);
+    let program = vyrn_frontend::load(src, "lend.vyrn", &Default::default(), &DiskResolver);
     assert!(
         program.is_err(),
         "a loop variable may not be returned, so `pick` is refused before it can lend"
