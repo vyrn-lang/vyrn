@@ -15200,6 +15200,57 @@ placer is the only writer of `own.releases` since the container slice — so the
 table they read is the one §2.7 keeps, under the name it will keep.
 
 
+#### The other two closures: the core does walk it, and the blocker is order (2026-09-08, `track-dr`)
+
+`Facts::escapers` and `Facts::fnval_clear` are what is left of `track-dd`'s
+row 5. `track-dh` measured them non-empty — up to 123 escaper rows in one
+corpus program, up to 1,154 cleared signature keys — and named what each needs:
+a body walk (`carries_param_storage`) and a census of every lambda's arity and
+signature. The question this slice was to answer is whether `vyrn-lower`'s core
+already walks what they need. It does, and it is not the walk that stands in
+the way.
+
+**What each asks, and what the core has.**
+
+| the closure | what it reads | what the core has |
+|---|---|---|
+| `escapers` | can a function's RESULT hold a borrowed parameter's storage: a walk over returned expressions and over field/element stores, with a per-body provenance set for a local that was assigned a carrying value | every store is an `St::Store` and every call an `Rhs::Call`; `NameInfo` says whether a name is a borrow and whose (`not_owned`, `borrow`), which is the question `borrow_of` answers on the AST. The provenance set is a fold over the frame's own names |
+| `fnval_clear` | the meet over every fn-value signature: no member lends, every position reads, and no LAMBDA could inhabit the signature | the capability rows are `declared::arg_caps`, which is a declaration; the two call-graph sets it also asked are gone with this slice's first record; and the core builds every lambda as a frame of its own (`Body::lambdas`), so the arity and signature census is a walk over `Body::frames()` |
+
+**The blocker is ORDER, not the walk.** Both are asked WHILE a body is built:
+`Builder::store_is_fresh` decides `St::Store { releases }` on the row it is
+writing, and `fnval_released` decides an argument temporary's drop at the call
+it is lowering. The core's own facts are folded AFTER a body is built
+(`fold_frame` over `Body::frames()`, into the `FACTS` thread-local), so a fact
+folded there is one build too late for the pass that needs it. The shape that
+would work is the one `augment` already has — build every body, fold, then
+build again against the fold — and its price is measured rather than guessed.
+
+**The price, on `site/app/docs.vyrn`** (`vyrn check --profile`, release):
+
+| phase | count | total |
+|---|---|---|
+| `placer: core::build` | 2,232 | 113.63 ms |
+| `placer: facts: rebuilt` | 918 | 74.51 ms |
+| `placer` | 3 | 304.05 ms |
+
+The second build runs for the 918 functions the first pass wrote a row for. A
+fold that every body must be rebuilt against turns 918 into 2,232, which is
+about **181 ms in place of 74 ms** — roughly a third more placer on the
+command a keystroke pays for. That is the number the next slice has to beat or
+accept, and there is a cheaper shape beside it: fold from the bodies the FIRST
+pass already builds and read the fold at the build the EMITTER reads, which
+costs no extra build but leaves the first pass's rows built against an empty
+answer. Neither is a walk the core cannot make; both are a decision about which
+build states which fact.
+
+**What must be pinned either way.** A corpus equality of the two answers in
+both directions before each reader switches, as every slice of this arc has
+done — the escaper set is read at a store whose release stands down, so a
+false negative is a double free and a false positive is a leak, which is why
+`store_is_fresh` is the last screen either closure feeds.
+
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
