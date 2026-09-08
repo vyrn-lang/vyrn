@@ -759,7 +759,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("the typing judgment", 3418, 141),
         ("a rule the checker states", 1576, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 2957, 157),
+        ("one arm per form, type constructor or builtin", 2912, 157),
         ("shared machinery", 2374, 30),
         ("tests", 4819, 0),
     ];

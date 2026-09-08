@@ -9864,84 +9864,39 @@ fn contains_drop(b: &Block) -> bool {
     })
 }
 
+/// The probe's line at each site: a `spawn` is the answer, wherever it stands.
+struct Spawns(bool);
+
+impl BodyVisit<'_> for Spawns {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        // A spawn hides from the comptime-purity probe just as well behind a
+        // lambda literal as behind a call, so the walk descends into one.
+        if matches!(e, Expr::Spawn { .. }) {
+            self.0 = true;
+        }
+        !self.0
+    }
+}
+
 /// Whether an expression tree uses `spawn` anywhere.
 fn expr_contains_spawn(e: &Expr) -> bool {
-    match e {
-        Expr::Spawn { .. } => true,
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            expr_contains_spawn(expr)
-        }
-        Expr::Binary { lhs, rhs, .. } => expr_contains_spawn(lhs) || expr_contains_spawn(rhs),
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => args.iter().any(expr_contains_spawn),
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            expr_contains_spawn(scrutinee)
-                || arms.iter().any(|a| match &a.body {
-                    ArmBody::Expr(e) => expr_contains_spawn(e),
-                    ArmBody::Block(b) => contains_spawn(b),
-                })
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            expr_contains_spawn(cond)
-                || expr_contains_spawn(then_branch)
-                || else_branch.as_ref().is_some_and(|e| expr_contains_spawn(e))
-        }
-        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_spawn(v)),
-        // A spawn hides from the comptime-purity probe just as well behind a
-        // lambda literal as behind a call — the generator can invoke the
-        // stored value at generation time (`calls_expr` descends here too).
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e) => expr_contains_spawn(e),
-            LambdaBody::Block(b) => contains_spawn(b),
-        },
-        _ => false,
-    }
+    let mut v = Spawns(false);
+    body_expr(e, &HashSet::new(), &mut v);
+    v.0
 }
 
 /// Whether a block uses `spawn` anywhere (including nested blocks) — used by the
 /// comptime-purity analysis (RFC-0021): a generator may not spawn.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6. It was two
+/// arm lists whose catch-alls entered neither a map literal nor a `consume`, so
+/// a `spawn` under either was invisible to the probe.
 fn contains_spawn(b: &Block) -> bool {
-    fn stmt(s: &Stmt) -> bool {
-        match s {
-            Stmt::Let { value, .. }
-            | Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::Expr(value) => expr_contains_spawn(value),
-            Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_contains_spawn),
-            Stmt::IndexSet { index, value, .. } => {
-                expr_contains_spawn(index) || expr_contains_spawn(value)
-            }
-            Stmt::If {
-                cond: e,
-                then_block,
-                else_block,
-                ..
-            }
-            | Stmt::IfLet {
-                scrutinee: e,
-                then_block,
-                else_block,
-                ..
-            } => {
-                expr_contains_spawn(e)
-                    || contains_spawn(then_block)
-                    || else_block.as_ref().is_some_and(contains_spawn)
-            }
-            Stmt::While { cond, body, .. } => expr_contains_spawn(cond) || contains_spawn(body),
-            Stmt::ForIn { iter, body, .. } => expr_contains_spawn(iter) || contains_spawn(body),
-            Stmt::Region { body, .. } => contains_spawn(body),
-            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => false,
-        }
-    }
-    b.stmts.iter().any(stmt)
+    let mut v = Spawns(false);
+    body_block(b, &mut HashSet::new(), &mut v);
+    v.0
 }
 
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
