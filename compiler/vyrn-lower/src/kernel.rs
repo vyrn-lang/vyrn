@@ -1646,13 +1646,13 @@ impl<'b> Kernel<'b> {
                 // track still owes.
                 Ok(())
             }
-            Rhs::Prim(vs, _) => {
+            Rhs::Prim(_, vs, _) => {
                 for v in vs {
                     self.read(st, v)?;
                 }
                 Ok(())
             }
-            Rhs::Make(vs) => {
+            Rhs::Make(_, vs) => {
                 // A record literal takes each part into a FIELD, and the
                 // refusal names it — "a literal" is where the value went for a
                 // reader who did not write one (RFC-0125 §3 M3, row 07). The
@@ -1754,7 +1754,7 @@ impl<'b> Kernel<'b> {
                 callee.trim_start_matches('@')
             ),
             Rhs::Take(_) => "`consume`".to_string(),
-            Rhs::Make(_) => "a literal".to_string(),
+            Rhs::Make(..) => "a literal".to_string(),
             Rhs::Read(_) | Rhs::Prim(..) => String::new(),
         }
     }
@@ -1882,7 +1882,7 @@ impl<'b> Kernel<'b> {
                 // refusal the kernel now gives as well as the checker —
                 // `r22_drop_with_a_hole`'s `drop p` after a take of `p.name`
                 // — and the census records it there.
-                let is_static = self.releases(*n) && matches!(rhs, Rhs::Val(Val::Lit));
+                let is_static = self.releases(*n) && matches!(rhs, Rhs::Val(Val::Lit(_)));
                 // An alias: a borrow read out of a place, or a second name
                 // for a borrow. What it reads is kept, and a second name for
                 // a borrow is not a take of it.
@@ -1959,7 +1959,7 @@ impl<'b> Kernel<'b> {
                 // second turn of a loop refused a store over a name that owns
                 // nothing.
                 let fresh_static = match value {
-                    Val::Lit => true,
+                    Val::Lit(_) => true,
                     Val::Name(m) => self.releases(*m) && st.own[*m as usize] == Own::Static,
                 };
                 self.take(st, value)?;
@@ -2374,7 +2374,7 @@ impl<'b> Kernel<'b> {
     fn line_of(&self, v: &Val) -> usize {
         match v {
             Val::Name(n) => self.body.names[*n as usize].line,
-            Val::Lit => 0,
+            Val::Lit(_) => 0,
         }
     }
 

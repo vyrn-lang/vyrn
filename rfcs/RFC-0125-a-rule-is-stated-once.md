@@ -8748,6 +8748,181 @@ pointed at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
 
+**The core states what is computed (2026-09-08, `track-do`).** The census
+before this one counted what the emitter reads and named the blocker: "the
+core states no OPERATION". `Rhs::Prim(Vec<Val>, Option<Type>)` carried no
+operator, so `a + b` and `a - b` were one row. `Rhs::Make(Vec<Val>)` carried
+no constructor and no field names, so a record literal, an array literal, a
+map literal and a `T?(..)` were one row. `Val::Lit` carried no value, so
+`let x = 5` and `let x = 7` were one statement. §2.3 says the emitter "maps
+`prim` rows to wasm instructions"; nothing could be mapped, and a `BodyRef`
+over a core body would have read nothing out of it. This slice gives the three
+rows what they were missing. It changes no judgment and moves no byte.
+
+**What each row names, and why at that granularity.** Three enums, each stated
+once in `core.rs`.
+
+| the row | the enum | what it names |
+|---|---|---|
+| `Rhs::Prim(Op, Vec<Val>, Option<Type>)` | `Op` — `Un(UnOp)`, `Bin(BinOp)`, `Closure` | the SOURCE's operator |
+| `Rhs::Make(Ctor, Vec<Val>)` | `Ctor` — `Record(String, Vec<String>)`, `Array`, `Map`, `Try(String)` | the constructor, and the field each part fills |
+| `Val::Lit(Lit)` | `Lit` — `Int`, `Byte`, `Float`, `Bool`, `Str`, `Opaque` | the literal itself |
+
+`Op` names the OPERATOR and not an opcode, and that is the whole granularity
+argument. One operator is many instructions — `i32.add`, `i64.add`, `f64.add`,
+`i32x4.add` — and what chooses among them is the OPERAND's type, which the
+checker already states at the operand's own node. An opcode in the row would
+restate the checker there, and RFC-0083's lane counts would arrive as a second
+table. The same reasoning removes two things a first draft carried:
+`Lit::Int` has no WIDTH, because an integer literal's type is its
+destination's (RFC-0058) and `Row::ty` is what answers that; `Ctor::Record`
+carries the field order the READER WROTE and not the declaration's, because
+the declaration's order is `layout.rs`'s and a copy of it in the row would go
+stale the day a field moves. An emitter joins the two by name, which is what
+it does off the source today.
+
+`Lit::Str` names the BYTES and not a data segment, because where they land is
+the emitter's question and the two compiled backends answer it differently.
+`Lit::Opaque` is the word for a value nobody wrote: a function's name, a
+type's name or a nullary constructor used as a value — static, and the checker
+types none of them as an expression — and the placeholders this pass writes
+where it needs a value and reads none.
+
+`Op::Closure` is a lambda's captures, which is where the core already put
+them. It stays a prim rather than becoming a `Ctor` because its parts are READ
+where a constructor's are taken, and because moving it would change what the
+typed judgment says about a lambda (`How::Constructor` against
+`How::Finding("primitive")`) for no reading's sake.
+
+**A rule the row nearly stated twice, and the census caught it.** `lit_of` was
+written first as a plain `Expr -> Lit`, and both builders kept their own
+five-variant arm beside it. `forms` failed at once: `Expr::Int in lower: code
+says 9, RFC says 8`, and the same for `Byte`, `Float`, `Bool` and `Str` — five
+rows, each one form named a third time. So `lit_of` answers `Option<Lit>` and
+`Builder::val` asks it instead of naming the five. `Builder::rhs_inner` still
+names them, and that is deliberate: its match is EXHAUSTIVE on purpose, so a
+new `Expr` variant fails to compile rather than falling into a catch-all, and
+the arm it keeps says WHICH forms are literals while `lit_of` says WHAT each
+one is. The census then reads 8 again — the number it read before the row
+existed — which is the point: a row that adds a column must not add a
+statement.
+
+**Two findings, recorded and not taken.**
+
+`&&` and `||` are stated as prims that read both operands. They
+SHORT-CIRCUIT: `binary_inner` emits the right operand under a branch. The
+linear judgment is right either way — a read of either operand owns nothing —
+but a reader of the row now has the operator in front of it and has to be
+told, so `Op`'s doc says it. What would make the row honest is a control-flow
+row for the two, which is `St::If` over a temporary, and it moves bytes. It
+waits on the emitter reading the row rather than on the row.
+
+`kernel.rs:1853` warns `unreachable pattern` on `St::Drop(n, ..) | St::Row {
+name: n, .. }`, which the arm above it already matched. It is not this slice's
+— `St::Row` is in the placement region — and a warning-free build is the bar,
+so it is recorded here rather than left for the next reader to find.
+
+**The licence.** The rows carry more and nothing they judge changes, and the
+gates say so rather than the argument. The kernel corpus is **24,775 accepted,
+0 refused, 0 unlowered** over 170 programs, exactly as before.
+`VYRN_WASM_MANIFEST=check` on `wasmhash` is green and
+`rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte, which is
+what "the emitter does not read them yet" means. Every placement count in
+`coretables` is unmoved — 12,572 switch sites, 12,113 owning their scrutinee,
+9,587 taking a name, 57,259 stores, 23,882 argument drops. And no census
+moved: `emitter_census` 3 and 1, `forms` 7 and 1, `surface` 3 and 1,
+`checker_census` 2 and 1, `refusals` 19 and 3, `lowered` 3 and 1. The emitter
+is untouched, so its kind table and its read-class table are what they were,
+and RFC-0126 §3 and RFC-0127 §3 are unmoved with them.
+
+**What the census records.** `core.rs` is **5,815 lines before and 5,974
+after** — 159 added, and all of it is the three enums, their docs, `lit_of`
+and the builders' new arguments. `direct.rs` is **untouched**: this slice
+writes the rows and reads none of them. `coretables` gains the column the
+licence needs, over the whole corpus:
+
+| what the rows say is computed | count |
+|---|---|
+| `prim Bin(Add)` | 74,047 |
+| `prim Bin(Sub)` | 25,266 |
+| `prim Bin(Eq)` | 23,179 |
+| `prim Bin(Lt)` | 15,534 |
+| `prim Bin(Mul)` | 12,224 |
+| `prim Bin(Gt)`, `NotEq`, `And`, `Or` | 9,998, 8,540, 7,897, 4,998 |
+| `prim Bin(GtEq)`, `Shl`, `LtEq`, `Div` | 4,454, 4,377, 3,604, 2,957 |
+| `prim Bin(BitAnd)`, `Rem`, `Shr`, `BitXor`, `BitOr` | 2,695, 2,436, 2,207, 868, 862 |
+| `prim Bin(Match)` | 19 |
+| `prim Un(Not)`, `Un(Neg)`, `Un(BitNot)` | 1,918, 1,867, 21 |
+| `prim Closure` | 55 |
+| `make array`, `record`, `map`, `try` | 4,290, 2,013, 71, 10 |
+| `lit int`, `byte`, `string`, `bool`, `opaque`, `float` | 172,855, 11,944, 10,576, 9,948, 4,881, 1,158 |
+
+The `make` rows sum to 6,384, which is the `make` count the producer-type pin
+already read, and the `prim` rows to 210,023, which is its `prim` count. So
+the new column is a partition of the old one rather than a second walk, and a
+row that stopped naming its operation would leave the two disagreeing.
+
+The core's printer says it too. `VYRN_KERNEL_TRACE=fib vyrn check
+examples/fib.vyrn` printed `prim(n, lit)` before this slice and prints
+`prim lt(n, lit 2)` after it. `vyrn emit-lowered` prints the RFC-0101 IR and
+not this one, so `lowered_dump`'s five snapshots do not move; the corpus pin
+over the core's own printer is on another line and is not on this branch.
+
+**What is left, and it is the same ranked list with the row that blocked it
+struck.** Rows 3 and 4 of the census above — `Fn_::expr`'s twenty arms, 409
+lines, and `Fn_::stmt`'s nineteen, 864 — no longer wait on the row. They wait
+on a CHANNEL. The core's per-node answers reach an emitter through
+`core::facts()`, a side table keyed by node, and every row it carries today is
+a placement FACT: a question the emitter asks about a node it already holds.
+An operation row is not that. It is the STATEMENT the emitter should be
+walking instead of the AST, and reading it means a `BodyRef` over
+`Body::stmts` and a driver that walks `St` rather than `Stmt`. That is one
+piece of work, it is where §2.3's emitter begins, and it is not this slice's:
+`Facts` and the placement region were another track's while this ran. So the
+switch is stated here and not taken.
+
+`Fn_::stmt`'s two holes are unmoved and both are `St` questions rather than
+`Rhs` ones: `Stmt::Region` still lowers to a plain `St::Block`, so the region
+depth is the emitter's; and a user container's `c[i] = v` still lowers through
+RFC-0091 M2's `place at` rewrite, whose stores carry `Site::None`, which is
+why `elem_field_store` reads three source statements as a peephole. Neither
+needs a new enum now that the operation rows exist. Both need the same
+channel, and neither is worth a row an emitter cannot reach.
+
+#### The operation slice's gates (2026-09-08)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 23 s |
+| `cargo test -p vyrn-cli`, no filter | 589 passed, 37 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 35 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 28 s — the operation column added, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 50 s |
+| `effects` `--ignored`, release | 2, 69 s |
+| `fixtures` `--ignored`, release | 1, 21 s |
+| `testsweep` `--ignored`, release | 1, 54 s |
+| `emitter_census`, plain and `--ignored` | 3 and 1 — both tables unmoved |
+| `forms` and `surface`, plain and `--ignored` | 7 and 1, 3 and 1 — unmoved |
+| `checker_census`, `refusals`, `lowered` plain and `--ignored` | 2 and 1, 19 and 3, 3 and 1 — all unmoved |
+| `lowered_dump` | 5 — the five snapshots do not move |
+| `fmt`, and the frontend's `symbols_api` | 5 and 34 |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own manifest | 77 passed, 5 ignored, and its 23 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 339 s |
+| the residue ratchet `--ignored`, release | 1, 327 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 21 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
