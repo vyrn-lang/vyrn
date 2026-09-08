@@ -345,15 +345,16 @@ fn analyze_inner(
     // rather than the whole line. See [`pin_diagnostics`].
     let mut kw_cols: std::collections::HashMap<
         usize,
-        std::collections::HashMap<&'static str, (usize, usize)>,
+        std::collections::HashMap<String, (usize, usize)>,
     > = std::collections::HashMap::new();
     for t in tokens.iter() {
         if let Some(text) = keyword_text(&t.tok) {
+            let width = text.chars().count();
             kw_cols
                 .entry(t.line)
                 .or_default()
                 .entry(text)
-                .or_insert((t.col, t.col + text.len()));
+                .or_insert((t.col, t.col + width));
         }
     }
 
@@ -734,35 +735,17 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
     }
 }
 
-/// The source text of a keyword/operator `Tok`, or `None` for identifiers,
-/// literals, and punctuation not used in any error message. Used to build the
-/// per-line keyword-column map consumed by [`pin_diagnostics`].
-fn keyword_text(t: &Tok) -> Option<&'static str> {
-    match t {
-        Tok::Fn => Some("fn"),
-        Tok::Let => Some("let"),
-        Tok::Mut => Some("mut"),
-        Tok::If => Some("if"),
-        Tok::Else => Some("else"),
-        Tok::While => Some("while"),
-        Tok::For => Some("for"),
-        Tok::In => Some("in"),
-        Tok::Drop => Some("drop"),
-        Tok::Protocol => Some("protocol"),
-        Tok::Impl => Some("impl"),
-        Tok::Vself => Some("self"),
-        Tok::Return => Some("return"),
-        Tok::True => Some("true"),
-        Tok::False => Some("false"),
-        Tok::Type => Some("type"),
-        Tok::Where => Some("where"),
-        Tok::Match => Some("match"),
-        Tok::Region => Some("region"),
-        Tok::Spawn => Some("spawn"),
-        Tok::Question => Some("?"),
-        Tok::AndAnd => Some("&&"),
-        Tok::OrOr => Some("||"),
-        Tok::Bang => Some("!"),
+/// The source text of a keyword or operator token, or `None` for an identifier
+/// or a literal.
+///
+/// ONE TABLE: [`lexer::token_name_and_text`], which is the same table the
+/// `lex()` builtin reads (RFC-0054). This was a thirty-four-line `match` of its
+/// own — twenty-four arms out of that table's eighty — and the copy had already
+/// drifted: `import`, `export`, `break` and `continue` are keywords the lexer
+/// names and it did not, so a diagnostic quoting one of them never pinned.
+fn keyword_text(t: &Tok) -> Option<String> {
+    match crate::lexer::token_name_and_text(t) {
+        (kind, text) if kind == "keyword" || kind == "punct" => Some(text),
         _ => None,
     }
 }
@@ -810,10 +793,7 @@ fn backtick_tokens(msg: &str) -> Vec<&str> {
 /// for pinned diagnostics, as it already was for `match`.
 fn pin_diagnostics(
     diags: &mut [Diagnostic],
-    kw_cols: &std::collections::HashMap<
-        usize,
-        std::collections::HashMap<&'static str, (usize, usize)>,
-    >,
+    kw_cols: &std::collections::HashMap<usize, std::collections::HashMap<String, (usize, usize)>>,
     tok_info: &[TokenInfo],
 ) {
     for d in diags.iter_mut() {

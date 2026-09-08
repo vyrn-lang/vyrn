@@ -356,13 +356,12 @@ fn symbols_sections() -> Vec<Section> {
             "what a lex or parse failure hands back",
         ),
         sec(
-            "fn keyword_text(t: &Tok) -> Option<&'static str> {",
-            Copy,
-            "the source spelling of a keyword or operator token — twenty-four \
-             arms, every one of them an arm of `lexer::token_name_and_text`, \
-             which spells EIGHTY tokens. The copy has already drifted: \
-             `import`, `export`, `break` and `continue` are keywords the lexer \
-             names and this does not",
+            "fn keyword_text(t: &Tok) -> Option<String> {",
+            Job,
+            "the source spelling of a keyword or operator token, READ off \
+             `lexer::token_name_and_text` since RFC-0125 §3 M6. It was a \
+             thirty-four-line copy of twenty-four of that table's eighty arms, \
+             and it had already lost `import`, `export`, `break` and `continue`",
         ),
         sec(
             "fn backtick_tokens(msg: &str) -> Vec<&str> {",
@@ -802,13 +801,13 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("loader.rs", "shared machinery", 391, 0),
         ("loader.rs", "tests", 137, 0),
-        ("symbols.rs", "the file's own job", 2884, 0),
+        ("symbols.rs", "the file's own job", 2897, 0),
         ("symbols.rs", "a rule stated a second time", 360, 0),
         ("symbols.rs", "a path only a deleted route reached", 0, 0),
         (
             "symbols.rs",
             "a copy of a table another module carries",
-            261,
+            228,
             0,
         ),
         ("symbols.rs", "shared machinery", 435, 0),
