@@ -2560,7 +2560,13 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let (opts, resolver, _, _) = load_context(uri, &overlays)?;
 
     let mut cache = server.contract_cache.borrow_mut();
-    let roots = contracts::role_roots(&app_dir);
+    // The roots, and the declared-else-discovered rule below, are the
+    // frontend's — `vyrn why --contract` asks the same two functions, and the
+    // editor and the command cannot disagree about which contract governs a
+    // file. This reader owns its own read of `vyrn.json`, which is the one half
+    // that differs between them.
+    let doc = vyrn_frontend::manifest::doc_in(&app_dir);
+    let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc.as_ref());
     let sig = contracts::roles_sig(&app_dir, &roots);
     let entry = cache
         .entry(app_dir.clone())
@@ -2573,7 +2579,12 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     if entry.sig != sig || !entry.derived {
         entry.sig = sig;
         entry.derived = true;
-        entry.roles = contracts::roles_of(&app_dir, &roots, &opts, &resolver);
+        entry.roles = vyrn_frontend::contracts::roles_for_project(
+            doc.as_ref(),
+            &roots,
+            &opts,
+            &resolver,
+        );
         entry.views.clear();
     }
     let role = vyrn_frontend::contracts::role_for(&path, &entry.roles)?.clone();

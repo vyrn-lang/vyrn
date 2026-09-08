@@ -817,18 +817,13 @@ fn why_cmd(args: &[String]) -> ExitCode {
         .as_ref()
         .map(|m| PathBuf::from(&m.dir))
         .unwrap_or_else(|| dir.clone());
-    let roots = contract_roots(&app_dir, manifest.as_ref());
-    // The declared roles come from the manifest this command already read, not
-    // from a second read of the same file: two readers of one file are two
-    // policies whenever one of them fails.
-    let roles = match manifest
-        .as_ref()
-        .map(|m| vyrn_frontend::contracts::roles_from_manifest(&m.doc))
-        .filter(|r| !r.is_empty())
-    {
-        Some(declared) => declared,
-        None => vyrn_frontend::contracts::discovered_roles(&roots, &opts, &DiskResolver),
-    };
+    // The roots and the declared-else-discovered rule are the frontend's, and
+    // the language server asks the same two functions. What stays HERE is the
+    // manifest this command already read: it is passed in, never re-read, because
+    // two readers of one file are two policies whenever one of them fails.
+    let doc = manifest.as_ref().map(|m| &m.doc);
+    let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc);
+    let roles = vyrn_frontend::contracts::roles_for_project(doc, &roots, &opts, &DiskResolver);
     let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
         println!("{path}");
         println!("  no contract: this file is in no role");
@@ -1896,40 +1891,6 @@ fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
     // not an answer to "imported by".
     out.retain(|c| c.len() > 1);
     out
-}
-
-/// The `.vyrn` modules role discovery reads: the manifest's entry points plus
-/// every `.vyrn` directly in the app directory. Generator imports live in an
-/// app's ROOT modules by construction, so this stays a shallow scan.
-fn contract_roots(app_dir: &Path, manifest: Option<&Manifest>) -> Vec<(String, String)> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    // The manifest the caller already read. Re-reading and re-parsing it here is
-    // how a second reader silently answers "this project declares no entry
-    // points" to a file the first reader refused.
-    if let Some(m) = manifest {
-        for key in ["main", "server", "client"] {
-            if let Some(vyrn_frontend::schema::Json::Str(p)) = m.doc.get(key) {
-                paths.push(app_dir.join(p));
-            }
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(app_dir) {
-        for e in entries.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
-                paths.push(p);
-            }
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-        .into_iter()
-        .filter_map(|p| {
-            let src = std::fs::read_to_string(&p).ok()?;
-            Some((p.to_string_lossy().replace('\\', "/"), src))
-        })
-        .collect()
 }
 
 /// The `<script> … </script>` body of a `.vyx`, which is ordinary Vyrn. The
