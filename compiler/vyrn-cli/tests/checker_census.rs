@@ -611,9 +611,11 @@ fn sections() -> Vec<Section> {
              ahead of the walk",
         ),
         sec(
-            "fn init_restrictions(",
+            "struct InitRules<'a> {",
             Refusal,
-            "what a module-state initializer may do (RFC-0013, RFC-0029)",
+            "what a module-state initializer may do (RFC-0013, RFC-0029). The \
+             descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; \
+             every arm this pass wrote out was a refusal or a plain recursion",
         ),
         sec(
             "crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);",
@@ -757,7 +759,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("the typing judgment", 3418, 141),
-        ("a rule the checker states", 1576, 57),
+        ("a rule the checker states", 1556, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 2912, 157),
         ("shared machinery", 2374, 30),

@@ -10544,12 +10544,105 @@ fn global_ref_expr(
     v.found
 }
 
+/// The rule's line at each site, and its first violation.
+struct InitRules<'a> {
+    forbidden: &'a HashSet<String>,
+    fn_module: &'a HashMap<String, Option<String>>,
+    own_module: &'a Option<String>,
+    all_globals: &'a HashSet<&'a str>,
+    ready: &'a HashSet<String>,
+    own_name: &'a str,
+    line: usize,
+    err: Option<Diagnostic>,
+}
+
+impl InitRules<'_> {
+    fn fail(&mut self, d: Diagnostic) {
+        if self.err.is_none() {
+            self.err = Some(d);
+        }
+    }
+}
+
+impl BodyVisit<'_> for InitRules<'_> {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        if self.err.is_some() {
+            return false;
+        }
+        let (own_name, line) = (self.own_name, self.line);
+        match e {
+            Expr::Var { name, .. }
+                if self.all_globals.contains(name.as_str()) && !self.ready.contains(name) =>
+            {
+                if name == own_name {
+                    self.fail(cerr!(
+                        line,
+                        "module state `{own_name}` may not read itself in its                          own initializer"
+                    ));
+                } else {
+                    self.fail(cerr!(
+                        line,
+                        "initializer of `{own_name}` reads `{name}`, a module-state                          binding declared later — a global may only read earlier ones"
+                    ));
+                }
+                false
+            }
+            Expr::Call { name, .. }
+                // An `extern` or protocol method is never callable before
+                // `main`. A SAME-MODULE ordinary function is forbidden too —
+                // only imported modules are guaranteed initialized first
+                // (RFC-0029).
+                if self.forbidden.contains(name)
+                    || matches!(self.fn_module.get(name), Some(m) if m == self.own_module) =>
+            {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not call `{name}` — a                      module-state initializer runs before `main`, so it may use only                      literals, operators, built-ins, and functions imported from another                      module (whose state initializes first)"
+                ));
+                false
+            }
+            Expr::Spawn { name, .. } => {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not `spawn {name}` — a                      module-state initializer runs before `main` (no user calls)"
+                ));
+                false
+            }
+            // A module-state initializer is an expression, and a block arm
+            // exists only in statement position — unreachable, and refused
+            // rather than assumed.
+            Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not use a block match arm"
+                ));
+                false
+            }
+            // A lambda literal can never appear in a valid initializer (the
+            // checker's position rule rejects it outside a call argument, and
+            // initializers make no calls); an expression body is walked for
+            // completeness so the deeper diagnostic still fires, and a block
+            // body holds statements an initializer cannot have.
+            Expr::Lambda {
+                body: LambdaBody::Block(_),
+                ..
+            } => false,
+            _ => true,
+        }
+    }
+}
+
 /// Enforce a module-state initializer's restrictions (RFC-0013, RFC-0029): it
 /// may not read a global declared later (or itself), and it may call only
 /// literals/operators/built-ins, constructors, and functions IMPORTED from
 /// another module (which initialize first). A same-module ordinary function,
 /// any `extern`, a protocol method, or a `spawn` is rejected. Returns the first
 /// violation.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; every arm
+/// this pass wrote out was either a refusal or a plain recursion.
 #[allow(clippy::too_many_arguments)]
 fn init_restrictions(
     e: &Expr,
@@ -10561,133 +10654,20 @@ fn init_restrictions(
     own_name: &str,
     line: usize,
 ) -> Result<(), Diagnostic> {
-    let recur = |e: &Expr| {
-        init_restrictions(
-            e,
-            forbidden,
-            fn_module,
-            own_module,
-            all_globals,
-            ready,
-            own_name,
-            line,
-        )
+    let mut v = InitRules {
+        forbidden,
+        fn_module,
+        own_module,
+        all_globals,
+        ready,
+        own_name,
+        line,
+        err: None,
     };
-    match e {
-        Expr::Var { name, .. } => {
-            if all_globals.contains(name.as_str()) && !ready.contains(name) {
-                if name == own_name {
-                    return Err(cerr!(
-                        line,
-                        "module state `{own_name}` may not read itself in its \
-                         own initializer"
-                    ));
-                }
-                return Err(cerr!(
-                    line,
-                    "initializer of `{own_name}` reads `{name}`, a module-state \
-                     binding declared later — a global may only read earlier ones"
-                ));
-            }
-            Ok(())
-        }
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => recur(expr),
-        Expr::Consume { place, .. } => recur(place),
-        Expr::Binary { lhs, rhs, .. } => {
-            recur(lhs)?;
-            recur(rhs)
-        }
-        Expr::Call { name, args, .. } => {
-            // An `extern` or protocol method is never callable before `main`.
-            let forbidden_here = forbidden.contains(name)
-                // A SAME-MODULE ordinary function is forbidden too — only
-                // imported modules are guaranteed initialized first (RFC-0029).
-                || matches!(fn_module.get(name), Some(m) if m == own_module);
-            if forbidden_here {
-                return Err(cerr!(
-                    line,
-                    "initializer of `{own_name}` may not call `{name}` — a \
-                     module-state initializer runs before `main`, so it may use only \
-                     literals, operators, built-ins, and functions imported from another \
-                     module (whose state initializes first)"
-                ));
-            }
-            for a in args {
-                recur(a)?;
-            }
-            Ok(())
-        }
-        Expr::Spawn { name, .. } => Err(cerr!(
-            line,
-            "initializer of `{own_name}` may not `spawn {name}` — a \
-             module-state initializer runs before `main` (no user calls)"
-        )),
-        Expr::TryConstruct { args, .. } => {
-            for a in args {
-                recur(a)?;
-            }
-            Ok(())
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            recur(scrutinee)?;
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => recur(e)?,
-                    // A module-state initializer is an expression, and a block
-                    // arm exists only in statement position — unreachable, and
-                    // refused rather than assumed.
-                    ArmBody::Block(_) => {
-                        return Err(cerr!(
-                            line,
-                            "initializer of `{own_name}` may not use a block match arm"
-                        ))
-                    }
-                }
-            }
-            Ok(())
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            recur(cond)?;
-            recur(then_branch)?;
-            if let Some(eb) = else_branch {
-                recur(eb)?;
-            }
-            Ok(())
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                recur(v)?;
-            }
-            Ok(())
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                recur(v)?;
-            }
-            Ok(())
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                recur(k)?;
-                recur(v)?;
-            }
-            Ok(())
-        }
-        // A lambda literal can never appear in a valid initializer (the checker's
-        // position rule rejects it outside a call argument, and initializers make
-        // no calls); recurse for completeness so the deeper diagnostic still fires.
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => recur(e2),
-            LambdaBody::Block(_) => Ok(()),
-        },
+    body_expr(e, &HashSet::new(), &mut v);
+    match v.err {
+        Some(d) => Err(d),
+        None => Ok(()),
     }
 }
 
