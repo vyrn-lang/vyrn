@@ -7946,13 +7946,13 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 5,764 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
-| a decision §2.3 says it must not make | 2,211 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
+| the mapping §2.3 names | 5,765 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| a decision §2.3 says it must not make | 2,289 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
-| shared machinery | 2,339 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
-| tests | 328 | 0 | the file's own unit tests |
+| shared machinery | 2,415 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
+| tests | 329 | 0 | the file's own unit tests |
 
 The whole table, section by section, is what
 `the_emitter_census_as_a_table` prints:
@@ -8111,6 +8111,177 @@ at a shallow scratch directory outside the checkout.
 | `route` `--ignored`, release | 2, 316 s |
 | the residue ratchet `--ignored`, release | 1, 343 s — 163 clean, 12 leaking, 0 failed, the baseline untouched |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest file is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+**A drop becomes a call, and the shape stays where the offsets are (2026-09-08,
+`track-de`).** The census ranked `Fn_::rel_at` second and `Fn_::copy_at` third:
+two recursive walks over a TYPE, 425 and 434 lines, deciding what releasing and
+copying a value of it mean. §2.3 forbids the emitter that decision. This slice
+asks where the decision could live instead, prices the three answers, and lands
+the one that survives.
+
+**The three answers, priced.**
+
+1. **The core states a `drop` row per field and per box.** A row would have to
+   name a byte offset, because that is what every step of the walk is: field 3
+   of a `SmallArray` header, the keys buffer of a `Map` at `l.fields[0]`, the
+   payload slot a variant's second `String` rides in. Nothing above this crate
+   computes one. The price is `vyrn-codegen/src/layout.rs` and its three
+   readers on `Cx` — `ll`, `words`, `payload_slot` — moved into `vyrn-lower`,
+   and every layout question the emitter asks re-asked through a row. That
+   moves the layout, not the rule. Refused.
+2. **A generated `release<T>` in `std/runtime`'s style.** `std/runtime.vyrn` is
+   2,107 lines and every one of them is written against `std/mem`'s primitives
+   at addresses the RUNTIME chose. A release is written against addresses the
+   LAYOUT chose, and the language has no way to spell one: there is no
+   `freeBufferAtOffset(p, 12)`. A `release<T>` that derived the offsets itself
+   would need the type's fields at generation time, which is RFC-0021's
+   generators and not the runtime. Refused.
+3. **The type record already carries it.** `own::DropKind::Deep(Type)` — and
+   its own doc says the answer: "the walk is the type". It carries the type
+   BECAUSE the shape is not one offset list; a variant payload is selected at
+   run time. Every question above the offsets is `own`'s already and the walk
+   asks it: `release_kind` decides `Deep` against `Release` against nothing,
+   `owns_heap` decides whether a field is walked at all, and `own` holds the
+   stop for a type that reaches itself. The RULE is stated once. What is left
+   in this file is the byte offsets, and no reading of §2.3 moves those.
+
+**So the half of §2.3 that was not done is the other half, and it is the
+sentence itself.** §2.3 says the emitter maps a `drop` to a CALL. It did not.
+It inlined the whole walk at every drop site and at every copy site — a record
+of four owning fields wrote four field walks at each of them. This slice makes
+the site a call. `Fn_::rel_at` and `Fn_::copy_at` now emit two instructions,
+`local.get` and `call`; the walks are `Fn_::rel_body` and `Fn_::copy_body`, and
+each is the body of one function per type, written once and called everywhere.
+
+**What carries it.** `Shapes` on `Cx`, beside `Mono` and `Dispatch` and drained
+by the same loop: a key of `(a release rather than a copy, the substituted
+type, the take holes)` against a function index, and a worklist of the bodies
+still to write. The key is a linear scan because `Type` is `Eq` and not `Hash`,
+and a module has tens of these. The holes are RFC-0093 M2's and they are part
+of the key, because a walk around a place a `consume` took is a different
+function. The type is substituted at the SITE and not at the body: a body is
+written after the drain has moved on to another instance, so a walk over `T`
+written then would read a different `T` than the site meant. The bodies drain
+between the instances and the dispatchers, and the loop reads all three lists
+afresh every turn — writing a shape reaches a field with a declared `release`,
+which is an ordinary call and may be a generic one.
+
+**Two answers stay at the site, because neither is a call to make.** A type
+that owns no heap releases nothing. A type that DECLARED its release is already
+one call and one indirection is enough — which is why `binarytrees.vyrn` is
+byte-identical through this slice: its `Tree` declares `release`, so `rel_at`
+took the declared branch before and takes it now.
+
+**What it is worth, over the whole corpus.** The 176 examples of `examples/`,
+built with `vyrn build --target wasm`, add up to **3,861,407 bytes before and
+3,785,406 after** — 76,001 fewer, 1.97 %. 55 examples got smaller by 77,087
+bytes between them, 45 got larger by 1,086, and 76 are byte-identical. The
+release is nearly all of it: with the copy left inline the corpus is 3,788,274
+(the release call is worth 73,133) and with the release left inline it is
+3,858,458 (the copy call is worth 2,949). The five largest: `rest.vyrn`
+−13,105, `graphql.vyrn` −13,032, `vlog.vyrn` −5,650, `jsondecbytes.vyrn`
+−4,670, `enumarray.vyrn` −4,011.
+
+**The 45 that grew are the price of not deciding.** A type released or copied
+at exactly ONE site pays for a function definition it did not need: a type
+entry, a function entry and a body with a prologue. That is +10 bytes at the
+smallest and +105 at the largest (`fnvalarg.vyrn`), +1,086 in all. The emitter
+does not weigh a call against an inline copy of it, because weighing that is
+the optimizer §2.3 forbids by name. So the one-site case pays, and the record
+says so rather than a threshold saying it in code.
+
+**The licence.** 102 of the 176 manifest rows move, and the cause is one
+sentence for all of them: an inline walk became a call. Every row that did NOT
+move is an example holding no non-trivial release or copy under a place — a
+declared release (`binarytrees`), a `String` released at the top of a drop
+through `emit_rel`'s own `Rel::Str` arm, or nothing owning at all. The
+behaviour gates hold either side. `tests/route.rs`: 175 checked, 34 skipped, 0
+failed. `tests/residue.rs`: engine 172 clean and 3 leaking, route 172 clean and
+3 leaking, 0 failed — the baseline of this line, to the program.
+
+**The route is not slower, which is what §2.3 predicts.** §2.3 forbids the
+EMITTER an optimizer; it does not forbid the runtime's. `wasm2c` writes each
+shape as a C function and `clang -O2` inlines it back. `vyrn bench`, native, O2,
+best `minNs` of three runs before and two after:
+
+| benchmark | before | after |
+|---|---|---|
+| nbody, 50000 steps | 2.133 ms | 2.117 ms |
+| binary-trees, depth 14 | 5.909 ms | 5.866 ms |
+| fannkuch-redux, n = 9 | 26.303 ms | 25.339 ms |
+| spectral-norm, N = 500 | 8.908 ms | 8.876 ms |
+
+Run to run on ONE binary the `minNs` moves 0.1 % to 2.7 %, so three of the four
+are inside the measurement band and fannkuch's −3.7 % is just outside it. The
+honest reading is that nothing regressed; the small gains are a smaller module,
+not a faster loop.
+
+**What the census records.** `direct.rs` is **16,408 lines before and 16,564
+after**, and `std/runtime.vyrn` is 2,107 lines both sides — nothing moved there,
+for the reason answer 2 gives. The release section runs 425 to 471 and the copy
+section 434 to 464: the split costs the two function heads and their docs.
+Shared runs 2,339 to 2,415 — the worklist, the key, the `Cx` field and
+`lower_shape` — and the mapping kind one line, the tests kind one, because the
+file's own test module builds a `Cx` and the `Cx` gained a field. The kind
+stays `Decision` for both walks, and the entry says why: the SHAPE is still
+decided here and the offsets have no other home. A slice that renamed its own
+kind to fit its own deletion would be the census measuring the measurer.
+
+**The snapshot family does not leave, and the licence says why (140 lines, 17
+instructions).** Row 6 of the ranked list reads "byte-identical if the core's
+store row names the buffers instead of the type being re-read here". The core
+cannot name them, for answer 1's reason: a buffer is a byte offset. A store row
+naming FIELD PATHS instead would leave the emitter turning a path into an
+offset, which is the same walk with a longer route to it — moving the statement
+rather than deleting it. Nor can the family become a call the way a release
+did: `Fn_::snap_at` hands its caller a LIST of locals holding the old pointers,
+the store runs between, and `Fn_::free_snap` frees them afterwards. A call
+cannot hand back a list of locals, and a fixed scratch block instead of locals
+would collide with a store inside the value of another store. The size of what
+is refused, measured by counting the family's emissions over the corpus: 1,385
+buffer snapshots, 13 boxed-payload snapshots and 1,703 frees across all 176
+modules, a median of four a module. It stays where it is until a row can carry
+an offset, which is the same day answer 1 becomes affordable.
+
+**What rows 2, 3 and 6 of the ranked list are now.** Rows 2 and 3 are half
+taken: the CALL is landed and the walk is not deleted, because the census read
+"needs the core to name the release" as one question and it is two. Naming
+WHERE a release happens is the core's and track-da finished it. Naming WHAT a
+release is, is a layout question, and this record is the first to price it.
+Row 6 is refused with numbers. The ranked list's remaining rows are unmoved: 4
+waits on the rewrite moving to the parser, 5 on the typed judgment, 7 and 8 on
+a `check` row, and the optimizer waits for the core to hoist.
+
+#### The two shape walks' gates (2026-09-08)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 33 s |
+| `cargo test -p vyrn-cli`, no filter | 588 passed, 37 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 18 s |
+| `coretables` `--ignored`, release | 1, 27 s |
+| `typed` `--ignored`, release | 1, 54 s |
+| `effects` `--ignored`, release | 2, 47 s |
+| `fixtures` `--ignored`, release | 1, 15 s |
+| `testsweep` `--ignored`, release | 1, 56 s |
+| `emitter_census`, plain and `--ignored` | 2 and 1 — re-pinned by this slice |
+| `checker_census`, `refusals`, `surface`, `forms`, `lowered` `--ignored` | 1, 3, 1, 1, 1 — all unmoved |
+| `vyrn-frontend` | 1,170 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,217 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 418 s — 175 checked, 34 skipped, 0 failed |
+| the residue ratchet `--ignored`, release | 1, 668 s — 172 clean, 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green against the rewritten manifest: 102 of 176 rows moved, and the reason is one sentence for all of them |
 | `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
