@@ -5714,12 +5714,32 @@ fn report(
     released: &[Option<Vec<String>>],
     own: &mut Ownership,
 ) {
-    // The exit releases the kernel found owed, and the holes each walks
-    // around: this is "reclaimed at block exit", stated once.
+    // The releases the kernel found owed, and the holes each walks around:
+    // this is "reclaimed at block exit", stated once.
+    //
+    // A row is a release whatever TABLE the placer files it under, and the
+    // table is a question about where the emitter reads it, not about whether
+    // the value comes back. `place_frames` files a whole-value row under four
+    // keys — the exit, a join's edge, an arm's binder, and a store — and a
+    // reader that counted the first alone called the other three a leak. `let
+    // arg = mk(); return match fromJson(R, arg.j) { .. }` holds `arg` at both
+    // arms of a returned `match`, so the kernel files one edge row per arm
+    // and the report said "NOT reclaimed — nothing in this frame releases it"
+    // about a value the audit sees freed (RFC-0125 §3 M3, the returned
+    // match).
     let mut exits: HashMap<Name, Vec<String>> = HashMap::new();
     for m in missing {
-        if m.kind == crate::kernel::MissingKind::Exit {
-            exits.entry(m.name).or_insert_with(|| plan_holes(&m.holes));
+        match m.kind {
+            // The whole value, released on this path.
+            crate::kernel::MissingKind::Exit
+            | crate::kernel::MissingKind::Edge { .. }
+            | crate::kernel::MissingKind::ArmBinder { .. } => {
+                exits.entry(m.name).or_insert_with(|| plan_holes(&m.holes));
+            }
+            // A SUB-PLACE one edge took, released on the edge that did not:
+            // it says nothing about the binding as a whole. A store row names
+            // a place, which may be nobody's binding.
+            crate::kernel::MissingKind::EdgePlace { .. } | crate::kernel::MissingKind::Store => {}
         }
     }
     // The rows are built against a borrowed `own` and put in at the end: the

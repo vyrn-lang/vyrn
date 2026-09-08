@@ -14968,6 +14968,77 @@ reason.
 | the five censuses | unmoved: nothing here touches a pass |
 
 
+#### A placed row is a release, whatever table it goes in (2026-09-08, `track-dr`)
+
+`track-dm` recorded a leak it could not move: `let arg = mk(); return match
+fromJson(R, arg.j) { .. }`, where `vyrn why --memory` prints "`arg` NOT
+reclaimed — nothing in this frame releases it". The report is wrong and the
+program is not. This is what it was.
+
+**The kernel places the row, in the table beside the one the report read.**
+`place_frames` files a whole-value row under four keys: the exit
+(`MissingKind::Exit`), a join's EDGE (`Edge`), an arm's binder (`ArmBinder`)
+and a store (`Store`). Which key a row takes is a question about where the
+EMITTER reads it, not about whether the value comes back: an exit row inside
+an arm would be emitted on the arm beside it, which took the name, so
+`Kernel::scope_end_inner` files a name held at one arm's end as that arm's
+edge instead. `arg` is held at both arms of the returned `match`, so the
+kernel files two edge rows, `Builder::edge_drops` emits a `St::Drop` on each,
+and `report` — which built its set from `Exit` alone — called the value a
+leak.
+
+**Measured on the program itself.** `VYRN_KERNEL_TRACE=1` prints an
+`Edge { edge: 0 }` row for `arg` at the `Return` and the same row for edge 1,
+and `VYRN_LEAK_CHECK=1 vyrn run` on that program exits 0 with the accounting
+allocator armed, before this change and after it. So there is no leak here,
+and there was none at `track-dm`'s commit or its parent: what is wrong is one
+reader that restated "which rows are releases" more narrowly than the pass
+that files them.
+
+**The rule, stated once.** `report` reads every table that carries a WHOLE
+value — the exit, the edge, the arm's binder — and neither of the two that do
+not: an `EdgePlace` row releases a sub-place one edge took, which says nothing
+about the binding, and a `Store` row names a place that may be nobody's
+binding. The match is exhaustive on `MissingKind`, so a fifth table has to
+decide. `ArmBinder` moves no row today — `bound_by_let` is set at a `let` and
+nowhere else, and the report is about the `let`s a reader wrote — and it is in
+the set because it is a whole-value row, not because a row needs it.
+
+**What moved over the corpus.** `vyrn why --memory` over all 190 `.vyrn` roots
+under `examples/`, `std/`, `site/` and `site/app/`:
+
+| | before | after |
+|---|---|---|
+| rows reading "NOT reclaimed — nothing in this frame releases it" | 42 | **10** |
+| files with one | 24 | 10 |
+
+Thirty-two rows, in fifteen files (`codecbytes`, `jsonbytes`, `knucleotide`,
+`site/app/bench`, `site/app/demohl`, `site/app/packages`, `site/app/pagemd`,
+`site/export`, `std/contract`, `std/graphql`, `std/hash`, `std/json`,
+`std/json5`, `std/runtime`, `std/von`), each moving from that sentence to
+"reclaimed at block exit — …" and none moving the other way: 18 array
+buffers, 11 String buffers, one pair of map buffers, one `Array<json$Json>`
+and one `Option<String>`. The ten that stand are ten different sentences the
+core does state — `fnvalstore`'s `sink` is the corpus's own `leak 1` row.
+
+**No byte moves.** The report is a printer: `VYRN_WASM_MANIFEST=check` is
+green and the manifest does not move, and the residue ratchet reads the same
+172 clean / 3 leaking on each engine.
+
+**The pin.** `compiler/vyrn-cli/tests/memory.rs::a_name_held_at_a_returned_match_is_reported_reclaimed_and_is`
+— the shape above, asserted twice: the report says "reclaimed at block exit —
+releasing what the `{ j: String }` holds", and the same program under
+`VYRN_LEAK_CHECK=1` exits 0. The second half is why the first is trustworthy,
+and it is the reason no corpus example was added for this: the ratchet already
+watches the shape (`std/hash.vyrn`'s `sha1Hex` and `examples/graphql.vyrn`'s
+`gqlResolve` both hold a name at both arms of a returned `match`, and both are
+clean rows), so a new example would pin a runtime answer that was never wrong
+and would move the corpus counts every other slice quotes.
+
+**The lines.** `compiler/vyrn-lower/src/core.rs` 6,108 to **6,128**. The five
+censuses do not move: nothing here touches a pass they count.
+
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

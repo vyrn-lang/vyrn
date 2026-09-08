@@ -2039,3 +2039,79 @@ fn the_copy_the_menu_offers_is_accepted_and_a_rebind_is_untouched() {
     );
     assert!(ok, "a rebind is not a second owner:\n{err}");
 }
+
+// ---------------------------------------------------------------------------
+// RFC-0125 §3 M3 — a placed row is a release, whatever table it goes in.
+//
+// `place_frames` files a whole-value row under four keys: the exit, a join's
+// EDGE, an arm's binder, and a store. The report counted the first alone, so a
+// name held at both arms of a RETURNED `match` — which the kernel files as one
+// edge row per arm, because an exit row inside an arm would be emitted on the
+// arm beside it — was printed "NOT reclaimed — nothing in this frame releases
+// it" about a value the free audit sees come back.
+//
+// Two halves, and the second is why the first is a printer's defect and not a
+// leak: the report says the value is reclaimed, and the accounting allocator
+// says the same thing about the same program.
+// ---------------------------------------------------------------------------
+
+const RETURNED_MATCH: &str = r#"type R = { id: Int64 }
+type Pack = { j: String }
+
+fn mk() -> Pack {
+    return Pack { j: "x" + "y" }
+}
+
+fn go() -> Int64 {
+    let arg = mk()
+    return match fromJson(R, arg.j) {
+        Valid(v) => v.id,
+        Invalid(i) => 0,
+    }
+}
+
+fn main() -> Int64 {
+    print("\{go()}")
+    return 0
+}
+"#;
+
+#[test]
+fn a_name_held_at_a_returned_match_is_reported_reclaimed_and_is() {
+    let dir = std::env::temp_dir().join(format!("vyrn-retmatch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("m.vyrn");
+    std::fs::write(&file, RETURNED_MATCH).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["why", "--memory"])
+        .arg(&file)
+        .output()
+        .expect("vyrn why --memory");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "arg              reclaimed at block exit — releasing what the { j: String } holds"
+        ),
+        "the row the edge table carries:\n{text}"
+    );
+
+    // The same program under the accounting allocator: every block the
+    // allocator handed out comes back, so the row above is the truth and not a
+    // second opinion.
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "the free audit: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
