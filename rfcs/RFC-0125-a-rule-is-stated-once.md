@@ -18005,6 +18005,270 @@ after: two dead members of `movecheck::MoveCheck` and one unreachable pattern in
 `vyrn-lower`'s kernel.
 
 
+
+#### Thirteen of the twenty, and the four that were never foldable (2026-09-08)
+
+The last slice counted every descent over a body and left a ranked list of
+twenty. This slice takes thirteen of them, in that order, one commit each. Four
+more are not foldable at all, and saying why is the second half of the work: the
+ranking judged them by SIZE and shape, and reading them arm by arm says the arm
+list is the rule in each. Two are left because their files belong to another
+track this week.
+
+##### What each fold cost, and what it bought
+
+| the descent | file | before | after | what its own line is |
+|---|---|---|---|---|
+| `collect_lets` | `symbols.rs` | 274 | 120 | the binding row it records, and the synthetic `let` whose value it does not enter |
+| `calls_*` | `checker.rs` | 127 | 40 | a call, a spawn and a `try`-construct name what they reach |
+| `bound_names` | `vyrn-codegen/src/lib.rs` | 123 | 38 | a `let`, a loop variable, a binder, a lambda parameter |
+| `reads` | `movecheck.rs` | 72 | 37 | a bare name, and the block-bodied lambda it stops at |
+| `calls_in` | `movecheck.rs` | 67 | 28 | a call, and the lambda it steps over |
+| `rename_bindings` | `project.rs` | 78 | 58 | a declared name, through the map |
+| `captures_*` | `checker.rs` | 207 | 111 | four refusals, and the entry that puts the lambda's parameters in scope |
+| `captures_of_*` | `vyrn-codegen/src/lib.rs` | 158 | 50 | a name no local shadows, in first-seen order |
+| `global_ref_*` | `checker.rs` | 145 | 69 | a read, a write, a drop or a call of module state |
+| `contains_spawn` | `checker.rs` | 78 | 26 | a `spawn`, wherever it stands |
+| `contains_call` | `consteval.rs` | 54 | 34 | what is not const-analyzable |
+| `mentions_place` | `movecheck.rs` | 94 | 43 | a derived name, and two forms answered without reading |
+| `init_restrictions` | `checker.rs` | 146 | 106 | five refusals |
+| **the thirteen** | | **1,623** | **760** | |
+
+"Before" is the last slice's count of the descent; "after" is what stands where
+it stood, doc comment and entry point included. The files lose 653 lines, which
+is less than 863: some of what a fold deletes is a doc comment the fold keeps,
+reworded.
+
+Three folds needed a hook and no more. `SCOPED` is `false` for the eight
+collectors that never ask what shadows what, and `true` for the two that do.
+`expr` answers `false` at four sites: a synthetic `let`'s value, a block-bodied
+lambda, a lambda literal under the nesting lock, and a node that has already
+found its answer. `arm_pattern` records a `match` arm's binders for two readers.
+Nothing else was added, and **no `stop` hook was needed** — see the measurement
+below.
+
+Two folds needed a line at the ENTRY rather than a hook, and that is the answer
+to the last slice's question about the two collectors "with a scope that is not
+quite the walk's". Both keep a scope the walk cannot know: `captures_*` is
+handed a lambda's own parameters, and `global_ref_*` is handed the flat set of
+every binder in the function, which `collect_binders_block` computes ahead of
+the walk. Neither is a property of the descent. Both are stated where the walk
+is started, in one line, and the arm list underneath is the walk's.
+
+##### The four that are not foldable, and why the ranking was wrong
+
+The last slice's list ranked by what the fold costs. Read arm by arm, four of
+its rows are not plain descents at all; they belong beside the eight the same
+record already excused.
+
+| the descent | file | lines | why the arm list IS the rule |
+|---|---|---|---|
+| `ban_append_expr` | `vyrn-codegen/src/lib.rs` | 101 | a per-EDGE decision. Every arm chooses between `ban_append_expr` and `ban_append_read` for each child, by whether that POSITION retains its operand, and flips `strict` at a lambda. A hook is handed a node, not an edge |
+| `scan_append_block` | `vyrn-codegen/src/lib.rs` | 74 | the statement half of the same rule: it picks which of those two expression walks each operand gets, and suppresses the descent entirely for a self-append spine's target |
+| `carries_param_storage` | `movecheck.rs` | 90 | a judgment per arm — a value carries what its parts carry — that answers `false` outright for an operator, pushes the pass's own scope at a `match` arm, and ends in a conservative catch-all |
+| `stmt_mentions` | `movecheck.rs` | 21 | its expression half is `paths`, which the same record already lists as not foldable; what is left is a statement recursion that dispatches a different judgment per statement |
+
+**The shape they share is one the macro cannot state, and it is worth naming.**
+A foldable descent asks one question of every NODE. These four ask a question of
+every EDGE: what a parent does with a child depends on the position the child
+sits in. The hooks are `stmt`, `expr`, `after_expr` and `arm_pattern`, and every
+one of them is handed a node. A fifth hook that named the edge would be the arm
+list again, under another name. So 286 lines come off the foldable list and go
+onto the "the arm list is the rule" one, which is now twelve descents rather
+than eight.
+
+##### The findings
+
+**Four coverage holes, all in a catch-all arm, and one of them was a
+miscompile.** Every hand-written walk in this slice ended in `_ => {}` or
+`_ => false`, and four of them let a form fall through it:
+
+- `codegen::captures_of_expr` never entered a map literal. `x -> ["a": x + tag]`
+  over a captured `tag` therefore captured nothing, and the direct backend
+  refused the program it was handed: `no lowering for the name 'tag' (not a
+  local)`. It is a REACHABLE defect, not a latent one, and `examples/lambdas.vyrn`
+  now holds the four lines that reproduce it — the corpus's answer to it moved
+  from a refusal to `12`, and `rfcs/census/wasm-sha256.tsv`'s `lambdas.vyrn` row
+  moved with it (the one row `VYRN_WASM_MANIFEST=write` rewrote).
+- `checker::captures_expr` never entered a map literal or a `consume`, so the
+  capture discipline was silent on `f(s)` inside one. The program is still
+  refused, because `movecheck` states the same rule in almost the same sentence
+  — which makes those two a candidate for the M6 deletion list rather than a
+  bug: `a lambda cannot consume the captured binding 's'` against `'s' may not
+  be passed to a 'consume' parameter via 'take(..)' — it is a captured binding`.
+- `checker::expr_contains_spawn` never entered a map literal or a `consume`, so
+  a `spawn` under either was invisible to the comptime-purity probe.
+- `project::rename_bindings` walked statements in one pass and expressions in
+  another, and the statement pass never entered a lambda's BLOCK body — whose
+  `let`s `collect_bindings` puts in the rename map and `subst_block` rewrites
+  the USES of. A hygiene rename could therefore leave a body reading a name
+  nothing declared. One walk reaches every declaration site the map can name.
+
+**Three of the four holes are the same hole.** `Expr::MapLit` and
+`Expr::Consume` are the two forms a hand-written expression walk forgets, and
+three separate walks forgot at least one of them. That is the invariant this
+macro buys, stated as a measurement rather than as a hope: a form added to the
+AST now reaches twenty-one readers or none.
+
+**None of the four moves the corpus.** All 419 programs give byte-identical
+`vyrn check` stderr, and the lowering of all 341 that lower is unchanged. The
+miscompile is reachable but nothing in the corpus reached it, which is the same
+shape the last slice's `Ok(x)` finding had: a rule stated four times fails in
+the copy nobody exercises.
+
+**One ordering nuance, recorded rather than smoothed over.** `captures_*`
+checks a `consume` argument at the CALL, before that argument is walked, so the
+first violation in source order is the one reported. The macro's `expr` hook
+fires at the call before any child, so a hook that checked every argument first
+would report a later argument's violation ahead of an earlier argument's nested
+one. The fold walks the arguments itself, in the arm, interleaving the check
+with the walk — five lines, and the messages cannot reorder.
+
+**The last slice's list said twenty and named nineteen.** The rows add to 2,288
+either way; the count is the typo.
+
+##### The licence
+
+The same four measurements, over the same 419 programs, after every one of the
+thirteen commits.
+
+| the measurement | every commit |
+|---|---|
+| `vyrn check` stderr, byte-identical | 419 of 419 |
+| a refusal LOST or GAINED | 0 / 0 |
+| `the_pinned_lowering_over_the_corpus`, hashes identical | 339 of 341 |
+| rows the pin cannot speak for | the same 2 (`std/von.vyrn`, `std/vyx.vyrn`) |
+| `the_pinned_columns_over_the_corpus` | 3,249 diagnostics, unmoved |
+| `VYRN_WASM_MANIFEST=check` | 176 hashed, 0 moved |
+
+The three folds that reach the emitter — `bound_names`, `captures_of_*` and
+`rename_bindings` — were licensed against the manifest as well as the lowering,
+and the two that reach the ownership pass — `reads` and `calls_in` — against the
+residue ratchet, which stayed green — the ratchet only turns one way, so a
+green run is the statement that the leaking count did not grow.
+
+The one deliberate exception is the corpus commit. `examples/lambdas.vyrn` gains
+four lines and its recorded stdout gains `12`; its manifest row moves; the
+symbols pin's rows for that file shift by eleven lines and say the same seven
+things. It is a separate commit for exactly this reason: a licence table reads
+"nothing moved" only when nothing moved.
+
+##### The measurement the last slice asked for
+
+The seven early-stop walks sit on the checker's per-node path, and the ranked
+list said to measure before adding a `stop` hook. **The hook was not needed and
+was not added.** A boolean walk keeps a `found` flag and answers `false` from
+`expr` once it has its answer, which prunes that node's children; its siblings
+are still visited, and the question was whether that costs anything.
+
+Interleaved, nine runs each, against the binary from the commit before the five
+early-stop folds — the machine runs other tracks' gates at the same time, so the
+medians carry about ten per cent of noise and the minimums are given beside
+them.
+
+| what | before | after |
+|---|---|---|
+| `vyrn check site/export.vyrn`, median | 1,546.4 ms | 1,571.7 ms |
+| the same, minimum of nine | 1,242.9 ms | 1,226.9 ms |
+| `vyrn check std/vyx.vyrn`, median | 165.2 ms | 168.2 ms |
+| the same, minimum of nine | 155.9 ms | 160.9 ms |
+| `lspbench std/vyx.vyrn`, five runs | — | 88.9–93.2 ms |
+
+Flat: every difference is inside the noise and both signs appear. RFC-0084's
+keystroke budget is 97 ms and the editor path is under it. So the seven readers
+that wanted a `stop` get by with a flag, and the macro keeps four hooks.
+
+##### The numbers
+
+| the file | before | after | lost |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,833 | 15,533 | 300 |
+| `compiler/vyrn-codegen/src/lib.rs` | 2,481 | 2,296 | 185 |
+| `compiler/vyrn-frontend/src/symbols.rs` | 4,781 | 4,693 | 88 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 6,321 | 6,262 | 59 |
+| `compiler/vyrn-frontend/src/consteval.rs` | 251 | 235 | 16 |
+| `compiler/vyrn-frontend/src/project.rs` | 1,690 | 1,685 | 5 |
+| **the six** | **31,357** | **30,704** | **653** |
+
+Descents over a body: 28 before this slice, 15 after. Readers of
+`ast::body_scope_descent!`: 8 before, 21 after.
+
+The censuses that moved. The checker census: `one arm per form, type
+constructor or builtin` 3,435 to 2,912, `shared machinery` 2,256 to 2,374, `a
+rule the checker states` 1,455 to 1,556, `the typing judgment` 3,414 to 3,418 —
+and four anchors, because a section that is now a visitor is named by its
+struct. The frontend census: `symbols.rs`'s `a rule stated a second time` 360 to
+272, `project.rs`'s `the file's own job` 1,108 to 1,103. The ownership census in
+`tests/refusals.rs`: `shared machinery` 3,671 to 3,612. The form census: 1,314
+mentions to 1,061, the statement floor 22 to 15, the expression floor 26 to 16,
+and the declaration table's `globals` row 32 to 33 — the purity walk names a
+global once more than it did, in one place instead of twelve.
+
+RFC-0127 §3.1.1's sentence about the three pattern rows under the statement
+floor is now about one: the floor fell past `Pattern::Failure` and
+`Pattern::Success`. That is the collapse the section predicted, arriving from
+the side it did not predict — not by deleting a form, but by deleting the walks
+that name every form.
+
+##### What is left
+
+Six of the ranked twenty, 665 lines, and only two of them are plain
+collectors.
+
+1. **Track-dm's two.** `own::Emit` (266) and `core::mentions_in_*` (113) are
+   plain collectors and fold exactly as these thirteen did; their files were
+   another track's this week. 379 lines.
+2. **The twelve where the arm list is the rule.** The eight the last slice
+   named, plus the four this one reclassifies. Nothing in this direction reaches
+   them; what reaches them is §2.3's one emitter and §2.2's three judgments,
+   which is a different milestone.
+
+`Expr::line`, `Node::kind`, `expr_kind` and `stmt_line` are still four flat
+matches over the same twenty constructors in four files, and this macro still
+does not reach them. With the descents down from 33 to 15, they are now the
+larger half of what RFC-0127 §3.1.1 calls "walks that do not decide anything".
+
+##### Gates (2026-09-08, thirteen of the twenty)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 590 passed, no failure |
+| `kernel` `--ignored` | 1, 24 s |
+| `coretables` `--ignored` | 1, 23 s |
+| `typed` `--ignored` | 1, 29 s |
+| `effects` `--ignored` | 2, 29 s |
+| `fixtures` `--ignored` | 1, 11 s |
+| `testsweep` `--ignored` | 1, 53 s |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 277 s |
+| the residue ratchet | 1, 309 s — green, so the clean and leaking counts are unmoved on both engines |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, one row rewritten by the corpus commit |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 13 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files |
+| `frontend_census` | 2 passed, 1 ignored |
+| `emitter_census` | 2 passed, 1 ignored |
+| `checker_census` | 2 passed, 1 ignored |
+| `forms` | 7 passed, 1 ignored |
+| `refusals`, `surface` | 19, 3 |
+| `the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics; the only rows that move are `lambdas.vyrn`'s seven, by the eleven lines that example gained |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 2 unstable, 339 hashes unmoved |
+
+No red in the first pass. The three warnings that stand at the branch point
+stand after: two dead members of `movecheck::MoveCheck` and one unreachable
+pattern in `vyrn-lower`'s kernel.
+
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
