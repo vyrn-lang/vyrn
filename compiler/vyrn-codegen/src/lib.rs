@@ -641,179 +641,72 @@ pub(crate) fn normalize_fn_sig(t: &Type, types: &HashMap<String, TypeDecl>) -> T
 /// first-seen order: names read in the body that are neither the lambda's own
 /// parameters/locals nor module state nor functions — i.e. bindings that live in
 /// the enclosing local scope, which is what `is_local` answers.
+///
+/// The descent and the scope stack are `ast::body_scope_descent!`'s since
+/// RFC-0125 §3 M6. The scope this pass kept was the walk's, arm for arm; what
+/// is its own is the entry — the lambda's own parameters are in `locals` before
+/// the body is walked — and one line at a site: a nested lambda literal is not
+/// descended, because RFC-0023's nesting lock means there is never one.
 pub(crate) fn lambda_captures(
     body: &LambdaBody,
     locals: std::collections::HashSet<String>,
     is_local: &dyn Fn(&str) -> bool,
 ) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut locals = locals;
-    match body {
-        LambdaBody::Expr(e) => captures_of_expr(e, &mut locals, &mut out, &mut seen, is_local),
-        LambdaBody::Block(b) => captures_of_block(b, &mut locals, &mut out, &mut seen, is_local),
+    /// The collector's line at each site: a name read that no local shadows and
+    /// `is_local` answers for is a capture, recorded once, in first-seen order.
+    struct CapturesOf<'a> {
+        out: Vec<String>,
+        seen: std::collections::HashSet<String>,
+        is_local: &'a dyn Fn(&str) -> bool,
     }
-    out
-}
 
-fn captures_of_block(
-    b: &Block,
-    locals: &mut std::collections::HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut std::collections::HashSet<String>,
-    is_local: &dyn Fn(&str) -> bool,
-) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { name, value, .. } => {
-                captures_of_expr(value, locals, out, seen, is_local);
-                locals.insert(name.clone());
-            }
-            Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::Expr(value)
-            | Stmt::Return {
-                value: Some(value), ..
-            } => captures_of_expr(value, locals, out, seen, is_local),
-            Stmt::IndexSet { index, value, .. } => {
-                captures_of_expr(index, locals, out, seen, is_local);
-                captures_of_expr(value, locals, out, seen, is_local);
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                captures_of_expr(cond, locals, out, seen, is_local);
-                captures_of_block(then_block, &mut locals.clone(), out, seen, is_local);
-                if let Some(eb) = else_block {
-                    captures_of_block(eb, &mut locals.clone(), out, seen, is_local);
-                }
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                captures_of_expr(scrutinee, locals, out, seen, is_local);
-                let mut inner = locals.clone();
-                for b in vyrn_frontend::movecheck::pattern_bindings(pattern) {
-                    inner.insert(b.to_string());
-                }
-                captures_of_block(then_block, &mut inner, out, seen, is_local);
-                if let Some(eb) = else_block {
-                    captures_of_block(eb, &mut locals.clone(), out, seen, is_local);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                captures_of_expr(cond, locals, out, seen, is_local);
-                captures_of_block(body, &mut locals.clone(), out, seen, is_local);
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                captures_of_expr(iter, locals, out, seen, is_local);
-                let mut inner = locals.clone();
-                inner.insert(var.clone());
-                captures_of_block(body, &mut inner, out, seen, is_local);
-            }
-            Stmt::Region { body, .. } => {
-                captures_of_block(body, &mut locals.clone(), out, seen, is_local)
-            }
-            Stmt::Return { value: None, .. }
-            | Stmt::Drop { .. }
-            | Stmt::Break { .. }
-            | Stmt::Continue { .. } => {}
-        }
-    }
-}
-
-fn captures_of_expr(
-    e: &Expr,
-    locals: &mut std::collections::HashSet<String>,
-    out: &mut Vec<String>,
-    seen: &mut std::collections::HashSet<String>,
-    is_local: &dyn Fn(&str) -> bool,
-) {
-    match e {
-        Expr::Var { name, .. } => {
-            if locals.contains(name) || seen.contains(name) {
+    impl CapturesOf<'_> {
+        fn take(&mut self, n: &str, locals: &std::collections::HashSet<String>) {
+            if locals.contains(n) || self.seen.contains(n) {
                 return;
             }
             // Only an enclosing LOCAL slot is a capture — module state and
             // functions/variants are reached directly by the lifted function.
-            if is_local(name) {
-                seen.insert(name.clone());
-                out.push(name.clone());
+            if (self.is_local)(n) {
+                self.seen.insert(n.to_string());
+                self.out.push(n.to_string());
             }
         }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            captures_of_expr(expr, locals, out, seen, is_local)
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            captures_of_expr(lhs, locals, out, seen, is_local);
-            captures_of_expr(rhs, locals, out, seen, is_local);
-        }
-        // A CALL captures its callee when the callee names an enclosing local:
-        // `|req, ps| run(req)` over a `fn`-typed `run` calls a value, not a
-        // symbol, and leaving it out of the capture list lowered it as a direct
-        // call to `@vyrn_run` — a name no module defines (the interpreter, which
-        // resolves through the environment, ran the same program fine). Nothing
-        // else changes: `is_local` is false for a top-level function, so an
-        // ordinary call still reaches its symbol with no capture at all.
-        Expr::Call { name, args, .. } => {
-            if !locals.contains(name) && !seen.contains(name) && is_local(name) {
-                seen.insert(name.clone());
-                out.push(name.clone());
-            }
-            for a in args {
-                captures_of_expr(a, locals, out, seen, is_local);
-            }
-        }
-        Expr::Spawn { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                captures_of_expr(a, locals, out, seen, is_local);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            captures_of_expr(scrutinee, locals, out, seen, is_local);
-            for arm in arms {
-                let mut inner = locals.clone();
-                for b in vyrn_frontend::pattern_bindings(&arm.pattern) {
-                    inner.insert(b.to_string());
-                }
-                match &arm.body {
-                    ArmBody::Expr(e) => captures_of_expr(e, &mut inner, out, seen, is_local),
-                    ArmBody::Block(b) => captures_of_block(b, &mut inner, out, seen, is_local),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            captures_of_expr(cond, locals, out, seen, is_local);
-            captures_of_expr(then_branch, locals, out, seen, is_local);
-            if let Some(eb) = else_branch {
-                captures_of_expr(eb, locals, out, seen, is_local);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                captures_of_expr(v, locals, out, seen, is_local);
-            }
-        }
-        _ => {}
     }
+
+    impl BodyVisit<'_> for CapturesOf<'_> {
+        fn expr(&mut self, e: &Expr, locals: &std::collections::HashSet<String>) -> bool {
+            match e {
+                Expr::Var { name, .. } => self.take(name, locals),
+                // A CALL captures its callee when the callee names an enclosing
+                // local: `|req, ps| run(req)` over a `fn`-typed `run` calls a
+                // value, not a symbol, and leaving it out of the capture list
+                // lowered it as a direct call to `@vyrn_run` — a name no module
+                // defines (the interpreter, which resolves through the
+                // environment, ran the same program fine). Nothing else changes:
+                // `is_local` is false for a top-level function, so an ordinary
+                // call still reaches its symbol with no capture at all.
+                Expr::Call { name, .. } => self.take(name, locals),
+                // RFC-0023's nesting lock: a lambda body may not hold another
+                // lambda literal, so there is no inner body to walk.
+                Expr::Lambda { .. } => return false,
+                _ => {}
+            }
+            true
+        }
+    }
+
+    let mut v = CapturesOf {
+        out: Vec::new(),
+        seen: std::collections::HashSet::new(),
+        is_local,
+    };
+    let mut locals = locals;
+    match body {
+        LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+        LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+    }
+    v.out
 }
 
 /// LLVM byte-string escaping: printable ASCII as-is, everything else `\NN`,
@@ -999,128 +892,50 @@ pub(crate) fn global_append_candidates(program: &Program) -> std::collections::B
     targets.into_iter().collect()
 }
 
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6). This module's collectors read it.
+vyrn_frontend::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
+/// The collector's line at each site: a `let`, a loop variable, an `if let` or
+/// arm binder, a lambda parameter.
+struct BoundNames<'a>(&'a mut std::collections::HashSet<String>);
+
+impl BodyVisit<'_> for BoundNames<'_> {
+    // The union of every name bound anywhere, not what is in scope where.
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+        match s {
+            Stmt::Let { name, .. } => {
+                self.0.insert(name.clone());
+            }
+            Stmt::ForIn { var, .. } => {
+                self.0.insert(var.clone());
+            }
+            Stmt::IfLet { pattern, .. } => self.0.extend(pattern_names(pattern)),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        if let Expr::Lambda { params, .. } = e {
+            self.0.extend(params.iter().cloned());
+        }
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &Pattern, _: usize, _: &std::collections::HashSet<String>) {
+        self.0.extend(pattern_names(p));
+    }
+}
+
 /// Every name a block binds anywhere inside it — `let`s, loop variables, pattern
 /// binders and lambda parameters. Over-collecting is safe here: the only use is
 /// to decide that a body is talking about its own name rather than about module
 /// state, and an extra name only costs a global the in-place append path.
 fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
-    fn in_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
-        match e {
-            Expr::Lambda { params, body, .. } => {
-                out.extend(params.iter().cloned());
-                match body {
-                    LambdaBody::Expr(inner) => in_expr(inner, out),
-                    LambdaBody::Block(blk) => bound_names(blk, out),
-                }
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                in_expr(scrutinee, out);
-                for a in arms {
-                    out.extend(pattern_names(&a.pattern));
-                    match &a.body {
-                        ArmBody::Expr(e) => in_expr(e, out),
-                        ArmBody::Block(b) => bound_names(b, out),
-                    }
-                }
-            }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                in_expr(expr, out)
-            }
-            Expr::Consume { place, .. } => in_expr(place, out),
-            Expr::Binary { lhs, rhs, .. } => {
-                in_expr(lhs, out);
-                in_expr(rhs, out);
-            }
-            Expr::Call { args, .. }
-            | Expr::Spawn { args, .. }
-            | Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. } => args.iter().for_each(|a| in_expr(a, out)),
-            Expr::StructLit { fields, .. } => fields.iter().for_each(|(_, v)| in_expr(v, out)),
-            Expr::MapLit { entries, .. } => entries.iter().for_each(|(k, v)| {
-                in_expr(k, out);
-                in_expr(v, out);
-            }),
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                in_expr(cond, out);
-                in_expr(then_branch, out);
-                if let Some(eb) = else_branch {
-                    in_expr(eb, out);
-                }
-            }
-            Expr::Int(_)
-            | Expr::Byte(_)
-            | Expr::Float(_)
-            | Expr::Bool(_)
-            | Expr::Str(_)
-            | Expr::Var { .. } => {}
-        }
-    }
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { name, value, .. } => {
-                out.insert(name.clone());
-                in_expr(value, out);
-            }
-            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } | Stmt::Expr(value) => {
-                in_expr(value, out)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                in_expr(index, out);
-                in_expr(value, out);
-            }
-            Stmt::Return { value, .. } => {
-                if let Some(e) = value {
-                    in_expr(e, out);
-                }
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                in_expr(cond, out);
-                bound_names(then_block, out);
-                if let Some(eb) = else_block {
-                    bound_names(eb, out);
-                }
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                out.extend(pattern_names(pattern));
-                in_expr(scrutinee, out);
-                bound_names(then_block, out);
-                if let Some(eb) = else_block {
-                    bound_names(eb, out);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                in_expr(cond, out);
-                bound_names(body, out);
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                out.insert(var.clone());
-                in_expr(iter, out);
-                bound_names(body, out);
-            }
-            Stmt::Region { body, .. } => bound_names(body, out),
-            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        }
-    }
+    let mut locals = std::collections::HashSet::new();
+    body_block(b, &mut locals, &mut BoundNames(out));
 }
 
 /// The names a refutable pattern binds.

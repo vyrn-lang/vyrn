@@ -1082,80 +1082,75 @@ fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
 /// Rewrite the *declaration* side of each binding through `map` — a lambda's
 /// parameters are declarations too (see [`collect_bindings`]); their USES go
 /// through the same map in [`subst_block`], whose walk reaches the same bodies.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6. It used to
+/// be two walks — a statement recursion that never entered an expression, and
+/// [`walk_block`] for the lambda parameters and the arm binders — and the
+/// statement one never reached a lambda's BLOCK body, whose `let`s
+/// [`collect_bindings`] puts in the map and [`subst_block`] rewrites the uses
+/// of. One walk reaches every declaration site the map can name.
 fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
-    for s in &mut b.stmts {
-        match s {
-            Stmt::Let { name, .. } => {
-                if let Some(n) = map.get(name) {
-                    *name = n.clone();
-                }
+    crate::body_scope_descent!(RenameVisit, ren_block, ren_stmt, ren_expr, mut);
+
+    /// The one line this reader writes: a declared name, through the map. A
+    /// name the map does not hold is somebody else's — module state — and is
+    /// left alone.
+    struct Rename<'a>(&'a HashMap<String, String>);
+
+    impl Rename<'_> {
+        fn put(&self, n: &mut String) {
+            if let Some(r) = self.0.get(n.as_str()) {
+                *n = r.clone();
             }
-            // A statement that NAMES a binding follows the binding's rename
-            // (RFC-0121 — the first projection bodies that mutate a local).
-            // A name not in the map is somebody else's (module state) and is
-            // left alone.
-            Stmt::Assign { name, .. }
-            | Stmt::IndexSet { name, .. }
-            | Stmt::SetField { name, .. }
-            | Stmt::Drop { name, .. } => {
-                if let Some(n) = map.get(name) {
-                    *name = n.clone();
-                }
-            }
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                rename_bindings(then_block, map);
-                if let Some(e) = else_block {
-                    rename_bindings(e, map);
-                }
-            }
-            Stmt::IfLet {
-                pattern,
-                then_block,
-                else_block,
-                ..
-            } => {
-                for n in pattern_binder_names_mut(pattern) {
-                    if let Some(r) = map.get(n.as_str()) {
-                        *n = r.clone();
-                    }
-                }
-                rename_bindings(then_block, map);
-                if let Some(e) = else_block {
-                    rename_bindings(e, map);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => rename_bindings(body, map),
-            Stmt::ForIn { var, body, .. } => {
-                if let Some(n) = map.get(var) {
-                    *var = n.clone();
-                }
-                rename_bindings(body, map);
-            }
-            _ => {}
         }
     }
-    walk_block(b, &mut |e: &mut Expr| {
-        if let Expr::Match { arms, .. } = e {
-            for arm in arms.iter_mut() {
-                for n in pattern_binder_names_mut(&mut arm.pattern) {
-                    if let Some(r) = map.get(n.as_str()) {
-                        *n = r.clone();
+
+    impl RenameVisit for Rename<'_> {
+        // The map is the whole scope: `collect_bindings` tagged every name in
+        // this body before the rename began.
+        const SCOPED: bool = false;
+
+        fn stmt(&mut self, s: &mut Stmt, _: &std::collections::HashSet<String>) {
+            match s {
+                // A statement that NAMES a binding follows the binding's rename
+                // (RFC-0121 — the first projection bodies that mutate a local).
+                Stmt::Let { name, .. }
+                | Stmt::Assign { name, .. }
+                | Stmt::IndexSet { name, .. }
+                | Stmt::SetField { name, .. }
+                | Stmt::Drop { name, .. } => self.put(name),
+                Stmt::IfLet { pattern, .. } => {
+                    for n in pattern_binder_names_mut(pattern) {
+                        self.put(n);
                     }
                 }
+                Stmt::ForIn { var, .. } => self.put(var),
+                _ => {}
             }
         }
-        if let Expr::Lambda { params, .. } = e {
-            for p in params.iter_mut() {
-                if let Some(n) = map.get(p) {
-                    *p = n.clone();
+
+        fn expr(&mut self, e: &mut Expr, _: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Lambda { params, .. } = e {
+                for p in params.iter_mut() {
+                    self.put(p);
                 }
             }
+            true
         }
-    });
+
+        fn arm_pattern(
+            &mut self,
+            p: &mut crate::ast::Pattern,
+            _: usize,
+            _: &std::collections::HashSet<String>,
+        ) {
+            for n in pattern_binder_names_mut(p) {
+                self.put(n);
+            }
+        }
+    }
+
+    ren_block(b, &mut std::collections::HashSet::new(), &mut Rename(map));
 }
 
 /// How many times `name` is read in `b`.

@@ -486,13 +486,10 @@ fn sections() -> Vec<Section> {
         sec(
             "fn check_lambda_body_captures(",
             Refusal,
-            "a lambda's capture discipline (RFC-0023)",
-        ),
-        sec(
-            "fn captures_block(",
-            Surface,
-            "one arm per form again, collecting the names a lambda body \
-             captures",
+            "a lambda's capture discipline (RFC-0023). The descent and the \
+             scope stack are `ast::body_scope_descent!`'s since RFC-0125 §3 \
+             M6; it was one arm per form again, and the arm list held two \
+             holes — a map literal and a `consume` were never entered",
         ),
         sec(
             "fn check_modify_arg(",
@@ -548,9 +545,9 @@ fn sections() -> Vec<Section> {
             "which type constructors may appear in an `extern` signature",
         ),
         sec(
-            "fn expr_contains_spawn(e: &Expr) -> bool {",
-            Surface,
-            "a whole-tree search, one arm per form: does this body `spawn`",
+            "struct Spawns(bool);",
+            Shared,
+            "the spawn probe's one line at a node; the descent is `ast::body_scope_descent!`'s",
         ),
         sec(
             "fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {",
@@ -585,23 +582,30 @@ fn sections() -> Vec<Section> {
         sec(
             "fn pattern_binders(p: &Pattern) -> Vec<String> {",
             Shared,
-            "what a pattern binds, and one arm's scope",
+            "what a pattern binds",
         ),
         sec(
-            "fn global_ref_block(",
-            Surface,
-            "one arm per form, deciding whether a body reads or writes a global",
+            "struct GlobalRef<'a> {",
+            Shared,
+            "whether a body reads or writes a global: the purity walk's line at \
+             each site, over `ast::body_scope_descent!` since RFC-0125 §3 M6. \
+             It was one arm per form, with a shadow set the caller flattened \
+             ahead of the walk",
         ),
         sec(
-            "fn init_restrictions(",
+            "struct InitRules<'a> {",
             Refusal,
-            "what a module-state initializer may do (RFC-0013, RFC-0029)",
+            "what a module-state initializer may do (RFC-0013, RFC-0029). The \
+             descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; \
+             every arm this pass wrote out was a refusal or a plain recursion",
         ),
         sec(
-            "pub fn fn_calls(b: &Block) -> std::collections::HashSet<String> {",
-            Surface,
-            "one arm per form again, collecting every callee name — the call \
-             graph the two fixpoints above run over",
+            "crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);",
+            Shared,
+            "the descent over a body, READ from `ast::body_scope_descent!` since \
+             RFC-0125 §3 M6 — and `fn_calls`, the first of this file's \
+             collectors to read it: every callee name, which is the call graph \
+             the two fixpoints above run over. It was one arm per form again",
         ),
         sec("mod tests {", Tests, "the file's own unit tests"),
     ]
@@ -736,11 +740,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3393, 140),
-        ("a rule the checker states", 1354, 57),
+        ("the typing judgment", 3397, 140),
+        ("a rule the checker states", 1455, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 3418, 157),
-        ("shared machinery", 2118, 29),
+        ("one arm per form, type constructor or builtin", 2860, 157),
+        ("shared machinery", 2264, 29),
         ("tests", 4649, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");

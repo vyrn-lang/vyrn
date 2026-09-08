@@ -472,10 +472,11 @@ fn symbols_sections() -> Vec<Section> {
             Twice,
             "a second walk over every body, for the binder POSITIONS the checker \
              does not record. The types are the checker's — `let_types` is \
-             passed in — so what is stated twice is the walk and the binding \
-             forms it knows, beside `checker::Scope`/`pattern_binders` and \
-             beside `loader::scope_block`. A checker that recorded a binder's \
-             column would delete this",
+             passed in — and since RFC-0125 §3 M6's third slice the descent is \
+             `ast::body_scope_descent!`'s, so what is stated twice is the PASS \
+             and the binding forms it knows, beside `checker::Scope` and \
+             `pattern_binders`. A checker that recorded a binder's column would \
+             delete this",
         ),
         sec(
             "fn with_doc(detail: &str, doc: &Option<String>) -> String {",
@@ -825,7 +826,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ("loader.rs", "shared machinery", 462, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2897, 0),
-        ("symbols.rs", "a rule stated a second time", 360, 0),
+        ("symbols.rs", "a rule stated a second time", 272, 0),
         ("symbols.rs", "a path only a deleted route reached", 0, 0),
         (
             "symbols.rs",
@@ -835,7 +836,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 861, 0),
-        ("project.rs", "the file's own job", 1108, 0),
+        ("project.rs", "the file's own job", 1103, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (

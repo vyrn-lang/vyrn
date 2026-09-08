@@ -8855,9 +8855,13 @@ impl<'a> Checker<'a> {
         // Effect summary for the `--workers` walk (RFC-0025): the body's call
         // names and the first module-state binding it touches, if any.
         let mut calls: std::collections::HashSet<String> = Default::default();
-        match body {
-            LambdaBody::Expr(e) => calls_expr(e, &mut calls),
-            LambdaBody::Block(b) => calls_block(b, &mut calls),
+        {
+            let mut v = Calls(&mut calls);
+            let mut locals = HashSet::new();
+            match body {
+                LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+                LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+            }
         }
         // Names that shadow module state at this point: the lambda's own
         // params/binders plus every enclosing LOCAL binding. Every frame is a
@@ -9025,6 +9029,16 @@ impl<'a> Checker<'a> {
     /// captured (outer) binding may be READ but never assigned, `drop`ped, or
     /// passed to a `consume` parameter. Names introduced inside the lambda
     /// (parameters, `let`s, `for`-vars) are tracked in `locals` and are exempt.
+    ///
+    /// The descent and the scope stack are `ast::body_scope_descent!`'s since
+    /// RFC-0125 §3 M6. This pass carried its own copy of both, and the scope it
+    /// kept was the walk's, arm for arm: a branch clones, an `if let` binds its
+    /// pattern into the then-block alone, a `for`-var and an arm binder join the
+    /// block they open. What is this pass's own is the entry — a lambda's own
+    /// parameters are in `locals` before the body is walked — and three lines at
+    /// sites: a nested lambda literal is refused rather than descended, a
+    /// `consume` argument is checked before that argument is walked, and the
+    /// first violation is the one reported.
     fn check_lambda_body_captures(
         &self,
         body: &LambdaBody,
@@ -9032,220 +9046,121 @@ impl<'a> Checker<'a> {
         locals: &mut HashSet<String>,
         line: usize,
     ) -> Result<(), Diagnostic> {
-        match body {
-            LambdaBody::Expr(e) => self.captures_expr(e, outer, locals),
-            LambdaBody::Block(b) => self.captures_block(b, outer, &mut locals.clone()),
+        /// The rule's line at each site. A captured binding is one visible in
+        /// the enclosing scope and NOT shadowed by a name introduced inside the
+        /// lambda, which is what `locals` holds.
+        struct Captures<'a, 'b> {
+            ck: &'a Checker<'b>,
+            outer: &'a Scope,
+            err: Option<String>,
         }
-        .map_err(|m| cerr!(line, "{m}"))
-    }
 
-    fn captures_block(
-        &self,
-        b: &Block,
-        outer: &Scope,
-        locals: &mut HashSet<String>,
-    ) -> Result<(), String> {
-        for s in &b.stmts {
-            self.captures_stmt(s, outer, locals)?;
+        impl Captures<'_, '_> {
+            fn is_capture(&self, n: &str, locals: &HashSet<String>) -> bool {
+                !locals.contains(n) && self.ck.lookup(self.outer, n).is_some()
+            }
+
+            fn fail(&mut self, m: String) {
+                if self.err.is_none() {
+                    self.err = Some(m);
+                }
+            }
         }
-        Ok(())
-    }
 
-    fn captures_stmt(
-        &self,
-        s: &Stmt,
-        outer: &Scope,
-        locals: &mut HashSet<String>,
-    ) -> Result<(), String> {
-        // A captured binding is one visible in the enclosing scope and NOT shadowed
-        // by a name introduced inside the lambda.
-        let is_capture = |n: &str, locals: &HashSet<String>| {
-            !locals.contains(n) && self.lookup(outer, n).is_some()
-        };
-        match s {
-            Stmt::Let { name, value, .. } => {
-                self.captures_expr(value, outer, locals)?;
-                locals.insert(name.clone());
-                Ok(())
-            }
-            Stmt::Assign { name, value, line } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot assign to the captured \
-                         binding `{name}` (line {line})"
-                    ));
+        impl BodyVisit<'_> for Captures<'_, '_> {
+            fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
+                match s {
+                    Stmt::Assign { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot assign to the captured \
+                             binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::SetField { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot mutate a field of the \
+                             captured binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::IndexSet { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot store into the captured \
+                             binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::Drop { name, line } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda cannot `drop` the captured binding `{name}` (line {line})"
+                        ));
+                    }
+                    _ => {}
                 }
-                self.captures_expr(value, outer, locals)
             }
-            Stmt::SetField {
-                name, value, line, ..
-            } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot mutate a field of the \
-                         captured binding `{name}` (line {line})"
-                    ));
-                }
-                self.captures_expr(value, outer, locals)
-            }
-            Stmt::IndexSet {
-                name,
-                index,
-                value,
-                line,
-            } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot store into the captured \
-                         binding `{name}` (line {line})"
-                    ));
-                }
-                self.captures_expr(index, outer, locals)?;
-                self.captures_expr(value, outer, locals)
-            }
-            Stmt::Drop { name, line } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda cannot `drop` the captured binding `{name}` (line {line})"
-                    ));
-                }
-                Ok(())
-            }
-            Stmt::Return { value: Some(e), .. } => self.captures_expr(e, outer, locals),
-            Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
-            Stmt::Expr(e) => self.captures_expr(e, outer, locals),
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_block(then_block, outer, &mut locals.clone())?;
-                if let Some(eb) = else_block {
-                    self.captures_block(eb, outer, &mut locals.clone())?;
-                }
-                Ok(())
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.captures_expr(scrutinee, outer, locals)?;
-                let mut inner = locals.clone();
-                for b in crate::movecheck::pattern_bindings(pattern) {
-                    inner.insert(b.to_string());
-                }
-                self.captures_block(then_block, outer, &mut inner)?;
-                if let Some(eb) = else_block {
-                    self.captures_block(eb, outer, &mut locals.clone())?;
-                }
-                Ok(())
-            }
-            Stmt::While { cond, body, .. } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_block(body, outer, &mut locals.clone())
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                self.captures_expr(iter, outer, locals)?;
-                let mut inner = locals.clone();
-                inner.insert(var.clone());
-                self.captures_block(body, outer, &mut inner)
-            }
-            Stmt::Region { body, .. } => self.captures_block(body, outer, &mut locals.clone()),
-        }
-    }
 
-    fn captures_expr(
-        &self,
-        e: &Expr,
-        outer: &Scope,
-        locals: &HashSet<String>,
-    ) -> Result<(), String> {
-        let is_capture = |n: &str| !locals.contains(n) && self.lookup(outer, n).is_some();
-        match e {
-            Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
-                // Passing a captured binding to a `consume` parameter would move it
-                // out of the enclosing scope from inside the lambda — forbidden.
-                let caps = self.caps.get(name);
-                for (k, a) in args.iter().enumerate() {
-                    if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
-                        if let Expr::Var { name: vn, .. } = a {
-                            if is_capture(vn) {
-                                return Err(format!(
-                                    "a lambda cannot consume the captured binding `{vn}` \
-                                     (line {line})"
-                                ));
+            fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+                if self.err.is_some() {
+                    return false;
+                }
+                match e {
+                    Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+                        // Passing a captured binding to a `consume` parameter
+                        // would move it out of the enclosing scope from inside
+                        // the lambda — forbidden. The argument is checked before
+                        // it is walked, so the FIRST violation in source order is
+                        // the one reported; the walk of the arguments is
+                        // therefore this arm's own.
+                        let caps = self.ck.caps.get(name);
+                        for (k, a) in args.iter().enumerate() {
+                            if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
+                                if let Expr::Var { name: vn, .. } = a {
+                                    if self.is_capture(vn, locals) {
+                                        self.fail(format!(
+                                            "a lambda cannot consume the captured binding \
+                                             `{vn}` (line {line})"
+                                        ));
+                                        return false;
+                                    }
+                                }
+                            }
+                            body_expr(a, locals, self);
+                            if self.err.is_some() {
+                                return false;
                             }
                         }
+                        false
                     }
-                    self.captures_expr(a, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
-                for a in args {
-                    self.captures_expr(a, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                self.captures_expr(expr, outer, locals)
-            }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.captures_expr(lhs, outer, locals)?;
-                self.captures_expr(rhs, outer, locals)
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.captures_expr(scrutinee, outer, locals)?;
-                for arm in arms {
-                    let mut inner = locals.clone();
-                    for b in crate::movecheck::pattern_bindings(&arm.pattern) {
-                        inner.insert(b.to_string());
+                    // A nested lambda literal is NOT permitted inside a lambda
+                    // body in v1 (RFC-0023 nesting lock): it would compound
+                    // monomorphization. A lambda body MAY call functions that
+                    // themselves take `fn` parameters — that is an ordinary
+                    // call, handled above.
+                    Expr::Lambda { line, .. } => {
+                        self.fail(format!(
+                            "a lambda body may not contain another lambda literal in v1 \
+                             (line {line})"
+                        ));
+                        false
                     }
-                    match &arm.body {
-                        ArmBody::Expr(e) => self.captures_expr(e, outer, &inner)?,
-                        ArmBody::Block(b) => self.captures_block(b, outer, &mut inner)?,
-                    }
+                    // Everything else reads, and a read is what a capture is
+                    // allowed to be.
+                    _ => true,
                 }
-                Ok(())
             }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_expr(then_branch, outer, locals)?;
-                if let Some(eb) = else_branch {
-                    self.captures_expr(eb, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    self.captures_expr(v, outer, locals)?;
-                }
-                Ok(())
-            }
-            // A nested lambda literal is NOT permitted inside a lambda body in v1
-            // (RFC-0023 nesting lock): it would compound monomorphization. A lambda
-            // body MAY call functions that themselves take `fn` parameters — that is
-            // an ordinary call, handled above.
-            Expr::Lambda { line, .. } => Err(format!(
-                "a lambda body may not contain another lambda literal in v1 \
-                 (line {line})"
-            )),
-            // Scalar leaves and plain variable reads (captures by read) are fine.
-            _ => Ok(()),
+        }
+
+        let mut v = Captures {
+            ck: self,
+            outer,
+            err: None,
+        };
+        let mut locals = locals.clone();
+        match body {
+            LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+            LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+        }
+        match v.err {
+            Some(m) => Err(cerr!(line, "{m}")),
+            None => Ok(()),
         }
     }
 
@@ -9775,84 +9690,32 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
     }
 }
 
-/// Whether an expression tree uses `spawn` anywhere.
-fn expr_contains_spawn(e: &Expr) -> bool {
-    match e {
-        Expr::Spawn { .. } => true,
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            expr_contains_spawn(expr)
-        }
-        Expr::Binary { lhs, rhs, .. } => expr_contains_spawn(lhs) || expr_contains_spawn(rhs),
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => args.iter().any(expr_contains_spawn),
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            expr_contains_spawn(scrutinee)
-                || arms.iter().any(|a| match &a.body {
-                    ArmBody::Expr(e) => expr_contains_spawn(e),
-                    ArmBody::Block(b) => contains_spawn(b),
-                })
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            expr_contains_spawn(cond)
-                || expr_contains_spawn(then_branch)
-                || else_branch.as_ref().is_some_and(|e| expr_contains_spawn(e))
-        }
-        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_spawn(v)),
+/// The probe's line at each site: a `spawn` is the answer, wherever it stands.
+struct Spawns(bool);
+
+impl BodyVisit<'_> for Spawns {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
         // A spawn hides from the comptime-purity probe just as well behind a
-        // lambda literal as behind a call — the generator can invoke the
-        // stored value at generation time (`calls_expr` descends here too).
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e) => expr_contains_spawn(e),
-            LambdaBody::Block(b) => contains_spawn(b),
-        },
-        _ => false,
+        // lambda literal as behind a call, so the walk descends into one.
+        if matches!(e, Expr::Spawn { .. }) {
+            self.0 = true;
+        }
+        !self.0
     }
 }
 
 /// Whether a block uses `spawn` anywhere (including nested blocks) — used by the
 /// comptime-purity analysis (RFC-0021): a generator may not spawn.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6. It was two
+/// arm lists whose catch-alls entered neither a map literal nor a `consume`, so
+/// a `spawn` under either was invisible to the probe.
 fn contains_spawn(b: &Block) -> bool {
-    fn stmt(s: &Stmt) -> bool {
-        match s {
-            Stmt::Let { value, .. }
-            | Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::Expr(value) => expr_contains_spawn(value),
-            Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_contains_spawn),
-            Stmt::IndexSet { index, value, .. } => {
-                expr_contains_spawn(index) || expr_contains_spawn(value)
-            }
-            Stmt::If {
-                cond: e,
-                then_block,
-                else_block,
-                ..
-            }
-            | Stmt::IfLet {
-                scrutinee: e,
-                then_block,
-                else_block,
-                ..
-            } => {
-                expr_contains_spawn(e)
-                    || contains_spawn(then_block)
-                    || else_block.as_ref().is_some_and(contains_spawn)
-            }
-            Stmt::While { cond, body, .. } => expr_contains_spawn(cond) || contains_spawn(body),
-            Stmt::ForIn { iter, body, .. } => expr_contains_spawn(iter) || contains_spawn(body),
-            Stmt::Region { body, .. } => contains_spawn(body),
-            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => false,
-        }
-    }
-    b.stmts.iter().any(stmt)
+    let mut v = Spawns(false);
+    body_block(b, &mut HashSet::new(), &mut v);
+    v.0
 }
 
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
@@ -10310,142 +10173,180 @@ fn pattern_binders(p: &Pattern) -> Vec<String> {
     }
 }
 
-/// `local` extended with what `p` binds — the scope of one arm.
-fn locals_with(
-    local: &std::collections::HashSet<String>,
-    p: &Pattern,
-) -> std::collections::HashSet<String> {
-    let mut out = local.clone();
-    out.extend(pattern_binders(p));
-    out
+/// The purity walk's line at each site: a name that a global answers to and no
+/// local shadows is a reference, whether it is read, written, dropped or called.
+struct GlobalRef<'a> {
+    globals: &'a HashSet<String>,
+    found: bool,
+}
+
+impl GlobalRef<'_> {
+    fn hit(&mut self, n: &str, locals: &HashSet<String>) {
+        if self.globals.contains(n) && !locals.contains(n) {
+            self.found = true;
+        }
+    }
+}
+
+impl BodyVisit<'_> for GlobalRef<'_> {
+    fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
+        match s {
+            Stmt::Assign { name, .. }
+            | Stmt::SetField { name, .. }
+            | Stmt::IndexSet { name, .. }
+            | Stmt::Drop { name, .. } => self.hit(name, locals),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+        if self.found {
+            return false;
+        }
+        match e {
+            Expr::Var { name, .. } => self.hit(name, locals),
+            // Calling a fn-typed module global READS it (`g(x)` dispatches
+            // through the stored value, exactly like any other use), so the
+            // callee name is a reference too — a generator that only ever
+            // called such a global used to pass the purity walk. A declared
+            // function never collides: functions and module state share one
+            // namespace.
+            //
+            // A lambda body (RFC-0023) that reads module state makes the
+            // enclosing call chain non-spawn-safe, and the walk descends into
+            // one, so the effect is attributed to the instantiation site.
+            Expr::Call { name, .. } => self.hit(name, locals),
+            _ => {}
+        }
+        !self.found
+    }
 }
 
 /// Whether a block references a global (reads it via `Var`, or writes it via
 /// `Assign`/`SetField`/`IndexSet`) that no local of the same name shadows.
+///
+/// The descent and the scope stack are `ast::body_scope_descent!`'s since
+/// RFC-0125 §3 M6. The shadow set this pass carried was NOT the walk's: it was
+/// one flat set for the whole function, from [`collect_binders_block`], plus a
+/// per-arm extension for a pattern's binders. The caller still seeds that flat
+/// set, so a name read ABOVE its own `let` is answered as it always was; what
+/// the walk adds is the two shadows the flat set never held — a lambda's own
+/// parameters, and a `let` inside a lambda body or a `match` block arm.
 fn global_ref_block(
     b: &Block,
     globals: &std::collections::HashSet<String>,
     local: &std::collections::HashSet<String>,
 ) -> bool {
-    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
-    b.stmts.iter().any(|s| match s {
-        Stmt::Let { value, .. } | Stmt::Expr(value) => global_ref_expr(value, globals, local),
-        Stmt::Assign { name, value, .. } | Stmt::SetField { name, value, .. } => {
-            is_global(name) || global_ref_expr(value, globals, local)
-        }
-        Stmt::IndexSet {
-            name, index, value, ..
-        } => {
-            is_global(name)
-                || global_ref_expr(index, globals, local)
-                || global_ref_expr(value, globals, local)
-        }
-        Stmt::Return { value: Some(e), .. } => global_ref_expr(e, globals, local),
-        Stmt::Return { value: None, .. } => false,
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            global_ref_expr(cond, globals, local)
-                || global_ref_block(then_block, globals, local)
-                || else_block
-                    .as_ref()
-                    .is_some_and(|eb| global_ref_block(eb, globals, local))
-        }
-        Stmt::IfLet {
-            pattern,
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            global_ref_expr(scrutinee, globals, local)
-                || global_ref_block(then_block, globals, &locals_with(local, pattern))
-                || else_block
-                    .as_ref()
-                    .is_some_and(|eb| global_ref_block(eb, globals, local))
-        }
-        Stmt::While { cond, body, .. } => {
-            global_ref_expr(cond, globals, local) || global_ref_block(body, globals, local)
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            global_ref_expr(iter, globals, local) || global_ref_block(body, globals, local)
-        }
-        Stmt::Drop { name, .. } => is_global(name),
-        Stmt::Region { body, .. } => global_ref_block(body, globals, local),
-        Stmt::Break { .. } | Stmt::Continue { .. } => false,
-    })
+    let mut locals = local.clone();
+    let mut v = GlobalRef {
+        globals,
+        found: false,
+    };
+    body_block(b, &mut locals, &mut v);
+    v.found
 }
 
+/// The same question of one expression.
 fn global_ref_expr(
     e: &Expr,
     globals: &std::collections::HashSet<String>,
     local: &std::collections::HashSet<String>,
 ) -> bool {
-    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
-    match e {
-        Expr::Var { name, .. } => is_global(name),
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            global_ref_expr(expr, globals, local)
+    let mut v = GlobalRef {
+        globals,
+        found: false,
+    };
+    body_expr(e, local, &mut v);
+    v.found
+}
+
+/// The rule's line at each site, and its first violation.
+struct InitRules<'a> {
+    forbidden: &'a HashSet<String>,
+    fn_module: &'a HashMap<String, Option<String>>,
+    own_module: &'a Option<String>,
+    all_globals: &'a HashSet<&'a str>,
+    ready: &'a HashSet<String>,
+    own_name: &'a str,
+    line: usize,
+    err: Option<Diagnostic>,
+}
+
+impl InitRules<'_> {
+    fn fail(&mut self, d: Diagnostic) {
+        if self.err.is_none() {
+            self.err = Some(d);
         }
-        Expr::Consume { place, .. } => global_ref_expr(place, globals, local),
-        Expr::Binary { lhs, rhs, .. } => {
-            global_ref_expr(lhs, globals, local) || global_ref_expr(rhs, globals, local)
+    }
+}
+
+impl BodyVisit<'_> for InitRules<'_> {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        if self.err.is_some() {
+            return false;
         }
-        // Calling a fn-typed module global READS it (`g(x)` dispatches
-        // through the stored value, exactly like any other use), so the
-        // callee name is a reference too — a generator that only ever
-        // called such a global used to pass the purity walk. A declared
-        // function never collides: functions and module state share one
-        // namespace.
-        Expr::Call { name, args, .. } => {
-            is_global(name) || args.iter().any(|a| global_ref_expr(a, globals, local))
+        let (own_name, line) = (self.own_name, self.line);
+        match e {
+            Expr::Var { name, .. }
+                if self.all_globals.contains(name.as_str()) && !self.ready.contains(name) =>
+            {
+                if name == own_name {
+                    self.fail(cerr!(
+                        line,
+                        "module state `{own_name}` may not read itself in its                          own initializer"
+                    ));
+                } else {
+                    self.fail(cerr!(
+                        line,
+                        "initializer of `{own_name}` reads `{name}`, a module-state                          binding declared later — a global may only read earlier ones"
+                    ));
+                }
+                false
+            }
+            Expr::Call { name, .. }
+                // An `extern` or protocol method is never callable before
+                // `main`. A SAME-MODULE ordinary function is forbidden too —
+                // only imported modules are guaranteed initialized first
+                // (RFC-0029).
+                if self.forbidden.contains(name)
+                    || matches!(self.fn_module.get(name), Some(m) if m == self.own_module) =>
+            {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not call `{name}` — a                      module-state initializer runs before `main`, so it may use only                      literals, operators, built-ins, and functions imported from another                      module (whose state initializes first)"
+                ));
+                false
+            }
+            Expr::Spawn { name, .. } => {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not `spawn {name}` — a                      module-state initializer runs before `main` (no user calls)"
+                ));
+                false
+            }
+            // A module-state initializer is an expression, and a block arm
+            // exists only in statement position — unreachable, and refused
+            // rather than assumed.
+            Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not use a block match arm"
+                ));
+                false
+            }
+            // A lambda literal can never appear in a valid initializer (the
+            // checker's position rule rejects it outside a call argument, and
+            // initializers make no calls); an expression body is walked for
+            // completeness so the deeper diagnostic still fires, and a block
+            // body holds statements an initializer cannot have.
+            Expr::Lambda {
+                body: LambdaBody::Block(_),
+                ..
+            } => false,
+            _ => true,
         }
-        Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
-            args.iter().any(|a| global_ref_expr(a, globals, local))
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            global_ref_expr(scrutinee, globals, local)
-                || arms.iter().any(|a| match &a.body {
-                    ArmBody::Expr(e) => {
-                        global_ref_expr(e, globals, &locals_with(local, &a.pattern))
-                    }
-                    ArmBody::Block(b) => {
-                        global_ref_block(b, globals, &locals_with(local, &a.pattern))
-                    }
-                })
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            global_ref_expr(cond, globals, local)
-                || global_ref_expr(then_branch, globals, local)
-                || else_branch
-                    .as_ref()
-                    .is_some_and(|e| global_ref_expr(e, globals, local))
-        }
-        Expr::StructLit { fields, .. } => fields
-            .iter()
-            .any(|(_, v)| global_ref_expr(v, globals, local)),
-        Expr::ArrayLit { elems, .. } => elems.iter().any(|v| global_ref_expr(v, globals, local)),
-        Expr::MapLit { entries, .. } => entries
-            .iter()
-            .any(|(k, v)| global_ref_expr(k, globals, local) || global_ref_expr(v, globals, local)),
-        // A lambda body (RFC-0023) that reads module state makes the enclosing
-        // call chain non-spawn-safe — the effect is attributed to the
-        // instantiation site (this function).
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => global_ref_expr(e2, globals, local),
-            LambdaBody::Block(b) => global_ref_block(b, globals, local),
-        },
     }
 }
 
@@ -10455,6 +10356,9 @@ fn global_ref_expr(
 /// another module (which initialize first). A same-module ordinary function,
 /// any `extern`, a protocol method, or a `spawn` is rejected. Returns the first
 /// violation.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; every arm
+/// this pass wrote out was either a refusal or a plain recursion.
 #[allow(clippy::too_many_arguments)]
 fn init_restrictions(
     e: &Expr,
@@ -10466,273 +10370,62 @@ fn init_restrictions(
     own_name: &str,
     line: usize,
 ) -> Result<(), Diagnostic> {
-    let recur = |e: &Expr| {
-        init_restrictions(
-            e,
-            forbidden,
-            fn_module,
-            own_module,
-            all_globals,
-            ready,
-            own_name,
-            line,
-        )
+    let mut v = InitRules {
+        forbidden,
+        fn_module,
+        own_module,
+        all_globals,
+        ready,
+        own_name,
+        line,
+        err: None,
     };
-    match e {
-        Expr::Var { name, .. } => {
-            if all_globals.contains(name.as_str()) && !ready.contains(name) {
-                if name == own_name {
-                    return Err(cerr!(
-                        line,
-                        "module state `{own_name}` may not read itself in its \
-                         own initializer"
-                    ));
-                }
-                return Err(cerr!(
-                    line,
-                    "initializer of `{own_name}` reads `{name}`, a module-state \
-                     binding declared later — a global may only read earlier ones"
-                ));
-            }
-            Ok(())
-        }
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => recur(expr),
-        Expr::Consume { place, .. } => recur(place),
-        Expr::Binary { lhs, rhs, .. } => {
-            recur(lhs)?;
-            recur(rhs)
-        }
-        Expr::Call { name, args, .. } => {
-            // An `extern` or protocol method is never callable before `main`.
-            let forbidden_here = forbidden.contains(name)
-                // A SAME-MODULE ordinary function is forbidden too — only
-                // imported modules are guaranteed initialized first (RFC-0029).
-                || matches!(fn_module.get(name), Some(m) if m == own_module);
-            if forbidden_here {
-                return Err(cerr!(
-                    line,
-                    "initializer of `{own_name}` may not call `{name}` — a \
-                     module-state initializer runs before `main`, so it may use only \
-                     literals, operators, built-ins, and functions imported from another \
-                     module (whose state initializes first)"
-                ));
-            }
-            for a in args {
-                recur(a)?;
-            }
-            Ok(())
-        }
-        Expr::Spawn { name, .. } => Err(cerr!(
-            line,
-            "initializer of `{own_name}` may not `spawn {name}` — a \
-             module-state initializer runs before `main` (no user calls)"
-        )),
-        Expr::TryConstruct { args, .. } => {
-            for a in args {
-                recur(a)?;
-            }
-            Ok(())
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            recur(scrutinee)?;
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => recur(e)?,
-                    // A module-state initializer is an expression, and a block
-                    // arm exists only in statement position — unreachable, and
-                    // refused rather than assumed.
-                    ArmBody::Block(_) => {
-                        return Err(cerr!(
-                            line,
-                            "initializer of `{own_name}` may not use a block match arm"
-                        ))
-                    }
-                }
-            }
-            Ok(())
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            recur(cond)?;
-            recur(then_branch)?;
-            if let Some(eb) = else_branch {
-                recur(eb)?;
-            }
-            Ok(())
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                recur(v)?;
-            }
-            Ok(())
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                recur(v)?;
-            }
-            Ok(())
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                recur(k)?;
-                recur(v)?;
-            }
-            Ok(())
-        }
-        // A lambda literal can never appear in a valid initializer (the checker's
-        // position rule rejects it outside a call argument, and initializers make
-        // no calls); recurse for completeness so the deeper diagnostic still fires.
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => recur(e2),
-            LambdaBody::Block(_) => Ok(()),
-        },
+    body_expr(e, &HashSet::new(), &mut v);
+    match v.err {
+        Some(d) => Err(d),
+        None => Ok(()),
     }
 }
 
-/// The names of every function/builtin called (or spawned) anywhere in a block.
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6). Every reader in this file that wants to know one
+// thing about a body — and not to type it — is an impl of this trait.
+crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
+/// The collector's line at each site: a call, a spawn and a `try`-construct
+/// each name what they reach, and no other form does.
+struct Calls<'a>(&'a mut HashSet<String>);
+
+impl BodyVisit<'_> for Calls<'_> {
+    // The question is what a body reaches, not what shadows what.
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        // A call inside a lambda body (RFC-0023) is attributed to the enclosing
+        // function — that is the monomorphization site, so a lambda that
+        // performs I/O (or, via `global_ref_expr`, reads module state) makes the
+        // enclosing function non-spawn-safe. The walk descends into one, so
+        // there is nothing to say here about it.
+        if let Expr::Call { name, .. }
+        | Expr::TryConstruct { name, .. }
+        | Expr::Spawn { name, .. } = e
+        {
+            self.0.insert(name.clone());
+        }
+        true
+    }
+}
+
 /// Every function name called anywhere in `b`.
 ///
 /// Public because RFC-0076's wasm engine needs the same question the
 /// comptime-purity check asks — "what does this reach?" — to decide whether a
 /// generator touches a capability it cannot yet serve. One walker, one answer.
-pub fn fn_calls(b: &Block) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    calls_block(b, &mut out);
+pub fn fn_calls(b: &Block) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut locals = HashSet::new();
+    body_block(b, &mut locals, &mut Calls(&mut out));
     out
-}
-fn calls_block(b: &Block, out: &mut std::collections::HashSet<String>) {
-    for s in &b.stmts {
-        calls_stmt(s, out);
-    }
-}
-fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
-    match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => calls_expr(value, out),
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                calls_expr(e, out);
-            }
-        }
-        Stmt::If {
-            cond: e,
-            then_block,
-            else_block,
-            ..
-        }
-        | Stmt::IfLet {
-            scrutinee: e,
-            then_block,
-            else_block,
-            ..
-        } => {
-            calls_expr(e, out);
-            calls_block(then_block, out);
-            if let Some(eb) = else_block {
-                calls_block(eb, out);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            calls_expr(cond, out);
-            calls_block(body, out);
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            calls_expr(iter, out);
-            calls_block(body, out);
-        }
-        Stmt::IndexSet { index, value, .. } => {
-            calls_expr(index, out);
-            calls_expr(value, out);
-        }
-        Stmt::Region { body, .. } => calls_block(body, out),
-        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-    }
-}
-fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
-    match e {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            calls_expr(expr, out)
-        }
-        Expr::Consume { place, .. } => calls_expr(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            calls_expr(lhs, out);
-            calls_expr(rhs, out);
-        }
-        Expr::Call { name, args, .. } | Expr::TryConstruct { name, args, .. } => {
-            out.insert(name.clone());
-            for a in args {
-                calls_expr(a, out);
-            }
-        }
-        Expr::Spawn { name, args, .. } => {
-            out.insert(name.clone());
-            for a in args {
-                calls_expr(a, out);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            calls_expr(scrutinee, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => calls_expr(e, out),
-                    ArmBody::Block(b) => calls_block(b, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            calls_expr(cond, out);
-            calls_expr(then_branch, out);
-            if let Some(eb) = else_branch {
-                calls_expr(eb, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                calls_expr(v, out);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                calls_expr(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                calls_expr(k, out);
-                calls_expr(v, out);
-            }
-        }
-        // Calls inside a lambda body (RFC-0023) are attributed to the enclosing
-        // function — that is the monomorphization site, so a lambda that performs
-        // I/O (or, via `global_ref_expr`, reads module state) makes the enclosing
-        // function non-spawn-safe.
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => calls_expr(e2, out),
-            LambdaBody::Block(b) => calls_block(b, out),
-        },
-    }
 }
 
 #[cfg(test)]
