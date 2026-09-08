@@ -8294,6 +8294,194 @@ at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
 
+**The fourth item of the ranked list, counted before it was taken (2026-09-08,
+`track-dj`).** The emitter census ranked `Fn_::try_` fourth: "`?`, `??`, the
+optional `if let`", 362 lines, with the licence "byte-identical if the rewrite
+moves to the parser and lowers to the same tree". This slice counted the three
+forms one pass at a time. **Two of the three are already stated once, and the
+row was counting code that answers a fourth form.** The row is three rows now,
+each naming what it holds and which pass could state it; the one deletion the
+count found is landed; and the parser is refused, with the repo's own two
+measurements rather than a new argument.
+
+**The census, by form.** For each form: the pass that STATES its meaning — the
+rewrite into a test on the sum, the early exit, the binder's ownership, the copy
+of the whole value — and what the emitter holds beside it.
+
+| form | the pass that states it | what the emitter holds | lines here |
+|---|---|---|---|
+| `a ?? b` | the PARSER (RFC-0079): `Parser::nullish` builds an `Expr::Match` over `Pattern::Success` and `Pattern::Failure` | nothing — no `??` reaches this file | 0 |
+| `if let P = e { .. } else { .. }` | the CORE: `Stmt::IfLet` lowers to a two-arm switch, the `else` under `Pattern::Other` | nothing — the arm builds two `ArmRef`s and calls `match_expr` (M5's one emission) | 0 |
+| `if let Some(x) = s.tryAt(h)` | `project::optional_site`, read by the checker, the lowering and here | the expansion mapped onto wasm blocks, plus a synthetic `let` and a name guard of its own | 77 |
+| `e?` | the CORE states it, and this file states it AGAIN | the tag test, the whole sum copied through `dest`, the payload on the fall-through — twice, once per dispatch | 208 |
+| `Age?(n)` | this file, alone | the base-typed argument, the predicate's answer as the tag, the `Option` built by hand | 77 |
+
+`??` left for the parser when RFC-0079 added the two patterns, and `ast.rs` says
+so in the entry for `Pattern::Success`: "the same trick `Expr::Try` plays for
+`?`, moved into `Pattern` so `??` can reach `match` and inherit its drops,
+ownership, validation and short-circuiting instead of restating any of them".
+The payload `if let` left for `match_expr` in M5. So the row's 362 lines are `?`
+at 208, a fallible CONSTRUCTION at 77 — a different form, which the row did not
+name — and RFC-0122's optional projection at 77.
+
+**The decision, priced.** Where should `?` be stated?
+
+1. **The parser, as RFC-0121 did for the refutable `let`.** Refused, and
+   RFC-0127 §4 already refused it in one sentence: "the propagation returns from
+   the enclosing function, and an expression-position `?` has no statement to
+   put a `return` in". The desugar would be `match e { Success(@v) => @v
+   Failure(@e) => return .. }`, and three things stop it. The failure arm returns
+   the WHOLE sum, which `Pattern::Failure` cannot bind — it binds variant 0's
+   payload by construction — so the rewrite needs a new unspellable binder, which
+   moves the statement rather than deleting it. `?` on a DECLARED `Fallible`
+   (RFC-0080 M3) is not a tag test at all but two impl calls, and the parser
+   cannot tell which dispatch applies. And `check_try`'s five refusals name `?`
+   in their sentences; a `match` in its place refuses in the `match`'s words,
+   which the whole-stderr licence forbids. RFC-0127 §5.4a measured the same move
+   for `if let` and stopped for a fourth reason: the emitted code is not the same.
+2. **The core, which already states it.** `core.rs`'s `Expr::Try` arm lowers a
+   switch over the sum, a failure arm holding `drops_at(Exit::Try)` and a
+   `Return { is_try: true }`, and a success arm binding the payload — 78 lines,
+   and the kernel reads them. This is the right home and it is already occupied.
+   What is NOT done is the emitter reading it, and that is M3's own endgame
+   rather than a slice: the emitter reads the plan's tables, not the core's
+   statements, and `?` already reads the ones it needs, because `ExitKind::Try`
+   is a placed row. Routing `?` through `match_expr` instead would need a third
+   `BodyRef` for an arm body that is not AST, which adds a form to remove one.
+3. **The checker.** It states the TYPE rule and it cannot state the rewrite,
+   because it produces no tree. `check_try` is 74 lines and every one of them
+   needs the sum's type and the function's return type.
+
+**So the rewrite stays where the two statements are, and this slice takes the
+one statement that was a third.** "Tag 1 succeeds" was written twice inside
+`try_`: `Pattern::Success`, which exists for it, and a `Pattern::Variant`
+rebuilt from `vs[1].name` with an invented empty binder. `tag_of` maps both to
+index 1, so the emission cannot move. Three comments went with it, each naming a
+twin that no longer exists — `emit_all_drops`, "the textual backend makes the
+same check in the same words", `gen_try_construct`. `track-cg` deleted that
+backend. A comment claiming a rule is stated twice, when it is stated once, is
+what a census exists to find.
+
+**Two findings, and one is a hole.** `check_try`'s `Option` arm reads the
+enclosing return as `Some(_)` and never compares the payloads. That is
+deliberate and it is right: only the FAILING variant travels, and `None` carries
+nothing, so `?` on an `Option<String>` inside a function returning
+`Option<Int64>` is sound and both engines run it. But the emitter copies the
+whole sum, so it needs a WIDTH the type rule does not promise, and a payload two
+words wide meets a return one word wide:
+
+```
+fn inner() -> Option<fn(Int64, Int64) -> Int64> { return Some(add) }
+fn outer() -> Option<Int64> { let f = inner()?  return Some(f(1, 2)) }
+```
+
+`vyrn check` accepts this. Both routes then refuse it with "no lowering for `?`
+on `Option<fn(Int64, Int64) -> Int64>` in a function returning `Option<Int64>`",
+which is a gap and not a diagnostic — the distinction RFC-0006 draws. The rule
+that would refuse it in the checker's words is a LAYOUT equality, and the shape
+walks' record priced moving layout out of this crate and refused it. So the
+finding is recorded at the source and here, and its home is the typed judgment
+of M6, which is row 5's pass.
+
+The second finding is smaller: three passes spell the built-in-versus-`Fallible`
+dispatch three ways — `option_payload` then `result_payloads` in the checker,
+both `is_none()` in the core, `is_builtin_sum(vs) && vs[1].payload.len() == 1`
+here. They were read against each other and they agree on everything spellable,
+because the four variant names are reserved and no user declaration can answer
+to them. Three spellings of one rule that agree is a smaller defect than three
+that do not, and folding them costs a helper each caller would still wrap.
+Recorded, not taken.
+
+**What was weighed and left.** `try_fallible` writes the propagation a second
+time — 17 lines, comment included, and its own doc says "Same three moves as
+`try_` above". Extracting them needs a `Place` parameter whose `Static` arm
+cannot occur, so the trade is a duplicated block for a refusal nothing can
+reach. Left, and said here instead.
+
+**The licence.** The emission cannot move, and the gate says so rather than the
+argument: `VYRN_WASM_MANIFEST=check` on `wasmhash` is green and
+`rfcs/census/wasm-sha256.tsv` is untouched — not one emitted byte, and no
+manifest row moved. The refusals hold too. `vyrn check` ran over every `.vyrn`
+file under `examples/`, `site/`, `compiler/vyrn-cli/tests/` and `std/` — 419
+programs, 79 of them refused — whole stderr including the exit code, before the
+change and after it:
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419 | 419 |
+| refused | 79 | 79 |
+| stderr differing | — | 0 |
+
+The two probes hold the other direction and are unmoved: the mismatched-`Option`
+program prints `hello`, `7` and `-1` on both sides, and the two-word one refuses
+with the same sentence at the same line.
+
+**What the census records.** The one row splits into three, and no kind changes,
+because none of the three earned a different one: `?` is a rewrite this file
+states a second time, `Age?(n)` is §2.3's "does not know what a validated type
+is" and waits on the same `check` row `emit_validation` waits on, and the
+optional `if let` binds by a synthetic `let` the core has no arm for. A slice
+that renamed a kind to fit its own reading would be the census measuring the
+measurer.
+
+| section | lines before | lines after | wasm | kind |
+|---|---|---|---|---|
+| `fn try_` | 208 | 215 | 21 | a decision §2.3 says it must not make |
+| `fn try_construct` | 77 | 79 | 10 | a decision §2.3 says it must not make |
+| `fn optional_if_let` | 77 | 77 | 3 | a decision §2.3 says it must not make |
+
+`direct.rs` is **16,543 lines before and 16,552 after**: nine lines of prose for
+the two findings, against six lines of code and three stale comments deleted.
+The kind pin moves by the same nine — decisions 2,289 to 2,298 — and the
+hand-emitted instruction count does not move at all, which is the reading the
+second column exists for. No other file changed. `checker.rs` is 15,386,
+`movecheck.rs` 6,074, `core.rs` 5,739 and `parser.rs` 7,497, all of them what
+they were, because the census found nothing in them to move: the checker's seven
+`Try`/`IfLet` arms are one typed rule and six traversals, and movecheck's six are
+one move rule and five traversals. RFC-0127 §3's rows for `Expr::Try`,
+`Expr::TryConstruct` and `Stmt::IfLet` are unmoved for the same reason — this
+slice deletes a `Pattern::Variant`, which is none of the three needles.
+
+**The ranked list after this slice.** Row 4 is not "waiting on the parser"; it
+is refused there, and it waits on the same thing rows 2 and 3 wait on — the
+emitter reading the core. Rows 7 and 8's `check` row has a third payer now,
+`try_construct`. The optional `if let` is a small row of its own: 77 lines that
+leave when `core.rs`'s `Stmt::IfLet` arm learns RFC-0122's shape.
+
+#### The `?` census's gates (2026-09-08)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 24 s |
+| `cargo test -p vyrn-cli`, no filter | 588 passed, 37 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 21 s |
+| `coretables` `--ignored`, release | 1, 27 s |
+| `typed` `--ignored`, release | 1, 45 s |
+| `effects` `--ignored`, release | 2, 47 s |
+| `fixtures` `--ignored`, release | 1, 27 s |
+| `testsweep` `--ignored`, release | 1, 65 s |
+| `emitter_census`, plain and `--ignored` | 2 and 1 - re-pinned by this slice |
+| `forms`, plain and `--ignored` | 7 and 1 - two rows re-pinned by this slice |
+| `checker_census`, `refusals`, `surface`, `lowered` `--ignored` | 1, 3, 1, 1 - all unmoved |
+| `fmt` and `symbols_api` | 5 and 5 - the three forms still print and resolve as written |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own manifest | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 344 s |
+| the residue ratchet `--ignored`, release | 1, 403 s - engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+| `vyrn check` over the corpus, whole stderr | 419 programs, 79 refused, 0 differing |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

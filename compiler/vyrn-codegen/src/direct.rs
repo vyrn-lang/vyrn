@@ -13206,8 +13206,7 @@ impl<'p> Fn_<'_, 'p> {
     /// AFTER the block every exit branches to. So this writes the sum through
     /// `dest` exactly as [`Stmt::Return`] does and takes the same `br` to the same
     /// block — which is why `?` needs no reclamation of its own and cannot leak a
-    /// frame or skip a copy-back. (`drop` is a no-op in this backend, so the
-    /// textual emitter's `emit_all_drops` before its `ret` has nothing to answer.)
+    /// frame or skip a copy-back.
     ///
     /// The success path is the FALL-THROUGH, not an arm: the failing side branches
     /// away, so there is nothing to join and no `peek` to get wrong. The `if` is
@@ -13223,29 +13222,37 @@ impl<'p> Fn_<'_, 'p> {
         at: usize,
     ) -> Result<Type, String> {
         let st = self.expr(m, b, e)?;
-        // The success pattern's binder name is unread — `tag_test` and
-        // `bind_payload` both take the type from `sum`, not from the pattern — so
-        // it is spelled empty rather than invented.
         // Tag 1 is the success side of the two BUILT-IN sums (§8.1); every other
         // sum asks `Fallible` (RFC-0080 M3) instead of the tag. The test is the
         // variant NAMES, not the arity: a declared `| Full(T) | Gone(String)`
         // has two variants and is not a `Result` (RFC-0126 §8.16).
-        let (sum, ok_ty, ok_pat) = match self.sum_of(&st) {
+        let (sum, ok_ty) = match self.sum_of(&st) {
             Some(vs) if ftypes::is_builtin_sum(&vs) && vs[1].payload.len() == 1 => {
                 let ok_ty = vs[1].payload[0].clone();
-                let pat = Pattern::Variant(vs[1].name.clone(), vec![String::new()]);
-                (vs, ok_ty, pat)
+                (vs, ok_ty)
             }
             _ => return self.try_fallible(m, b, &st, line, at),
         };
+        // "Tag 1 succeeds" is [`Pattern::Success`], which `ast.rs` says was added
+        // for exactly this — "the same trick `Expr::Try` plays for `?`, moved
+        // into `Pattern`". A `Variant` rebuilt here from `vs[1].name` said it a
+        // second time. The binder is unread either way: `tag_test` takes the tag
+        // from the pattern and `bind_payload` the type from the sum.
+        let ok_pat = Pattern::Success(String::new());
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("`?` on a non-aggregate sum", line);
         };
         // The propagated value is the WHOLE sum, byte for byte, which is only
         // sound if the two are the same shape. Since RFC-0126 §8.4 a sum's slot
-        // count follows its widest payload, so the two really can differ; the
-        // textual backend makes the same check in the same words, and a memcpy
-        // has a width, so the width is checked rather than assumed.
+        // count follows its widest payload, so the two really can differ, and a
+        // memcpy has a width — so the width is checked rather than assumed.
+        //
+        // The checker's rule does not guarantee it: `check_try`'s `Option` arm
+        // reads the return as `Some(_)` and never compares the payloads, because
+        // only the FAILING variant travels. So `Option<fn(Int64, Int64) -> Int64>`
+        // unwrapped in a function returning `Option<Int64>` types, and arrives
+        // here two words wide against one. A width is a LAYOUT, so it is refused
+        // as a gap rather than diagnosed (RFC-0125 §3 M3, the `?` census).
         let ret_ty = self.ret_ty.clone();
         if self.sum_of(&ret_ty).is_none() || self.cx.ll(&ret_ty) != self.cx.ll(&st) {
             return unsupported(
@@ -13411,9 +13418,11 @@ impl<'p> Fn_<'_, 'p> {
     /// This is the one flow that deliberately steps AROUND the M2d coercion seam,
     /// and the reason is the whole point of the form: `expr_as(n, Age)` would emit
     /// the validation that aborts. So the argument is evaluated at the refinement's
-    /// BASE type and the predicate's own answer becomes the tag — the same thing
-    /// the textual backend's `gen_try_construct` does, and it has to be the same
-    /// thing, because a value the two disagree about is a diverging `None`.
+    /// BASE type and the predicate's own answer becomes the tag. The predicate
+    /// itself is stated once, in `predicate_holds`, and this is the one caller
+    /// that reads its answer as a value instead of letting it trap — a form the
+    /// interpreter runs from the same declaration, because a value the two
+    /// disagree about is a diverging `None`.
     fn try_construct(
         &mut self,
         m: &mut Module,
