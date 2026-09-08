@@ -15143,6 +15143,63 @@ walks what they need. `fnval_clear`'s meet is simpler for this slice: with the
 two sets gone it asks the capability rows alone.
 
 
+#### The queue stops reading the placed rows (2026-09-08, `track-dr`)
+
+`track-dd` named `Ownership::releases`' outside readers as the blocker for the
+plan's last table: `vyrn-lower/src/lib.rs` feeds `dispatched`, the
+monomorphisation queue, which follows a declared `release` a placed row names
+to the instance it needs. Its question was whether the queue could follow the
+same release from `Owned::impls` instead — coarser, with `Module::sweep`
+dropping what no row names. The measurement answers something shorter: **the
+queue owes it nothing at all.**
+
+**What the reader was worth, measured.** `VYRN_NO_DISPATCH=1` skips
+`calls.extend(dispatched(..))` and nothing else:
+
+| | with | without |
+|---|---|---|
+| kernel corpus, instances accepted | 24,775 | **24,762** |
+| `VYRN_WASM_MANIFEST=check` | green | **green, and the manifest does not move** |
+| `route` `--ignored` | 175 checked, 0 failed | 175 checked, 0 failed |
+| the residue ratchet | 172 clean, 3 leaking on each engine | the same |
+| `cargo test -p vyrn-cli`, no filter, and the six ignored corpus suites | green | green |
+
+Thirteen instances, zero bytes. `VYRN_DISPATCH_DUMP=1` names all thirteen and
+they are one function: `Owned__Slots__release<T>` at eleven receivers, in
+`autorelease`, `copy`, `freelist`, `genref` (three), `linkedlist`, `membench`,
+`slots` (two), `slottable`, `tree` and `tryplace`.
+
+**Why it stopped mattering.** RFC-0101 M5 wrote `dispatched` because a backend
+emitted `Owned__Slots__release<…>` at a drop site and no worklist above a
+backend could see it — clang reported the missing symbol at the end of a
+build. There is one emitter now, and it does not emit a name: `direct.rs`'s
+`Rel::Call` parks the receiver under `@rel` and calls `Fn_::call`, "the
+ordinary call path", which reaches the body the way any written call does. The
+worklist entry is a second statement of a call the emitter already makes. The
+residue ratchet is the proof it is reached: `slots.vyrn` and the ten beside it
+come out clean with the queue's entry gone, and a release that was not emitted
+would leak the slab.
+
+**What went.** `vyrn_lower::dispatched`, and with it `lib.rs`'s only read of
+`Instance::releases`. `compiler/vyrn-lower/src/lib.rs` 1,490 to **1,443**.
+`tests/lowered.rs`'s retired-rule note gains the second half of its own story:
+`InstRule::ImplicitDispatch` went when the step began carrying its receiver
+type, and the solver that replaced it goes now that one emitter reaches the
+body itself.
+
+**The number that moves for every later record.** The kernel corpus is
+**24,762 accepted, 0 refused, 0 unlowered**. The thirteen instances were
+lowered and judged and emitted nothing; they are not accepted any more because
+they are not queued.
+
+**What still reads `Instance::releases`.** Three, and none of them is a
+compiler pass: `render.rs` prints the rows for `vyrn emit-lowered`,
+`tests/lowered.rs` lints a step's type for concreteness, and `tests/kernel.rs`
+prints them beside a refusal. All three read the CORE's rows already — the
+placer is the only writer of `own.releases` since the container slice — so the
+table they read is the one §2.7 keeps, under the name it will keep.
+
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
