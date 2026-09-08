@@ -235,15 +235,23 @@ fn loader_sections() -> Vec<Section> {
              fourteen-arm matches until then",
         ),
         sec(
+            "macro_rules! body_scope_descent {",
+            Shared,
+            "the ONE scope-aware descent over a `Block`, written by a macro for \
+             the descent above's reason one binding form up: the collector reads \
+             through a shared borrow and the two rewriters assign through a \
+             unique one (RFC-0125 §3 M6). It was three thirty-five-arm walks — \
+             `scope_*`, `rewrite_*` and `NsResolver::walk_*` — until then, and \
+             the three had already drifted over an `Ok(x) =>` arm's binding",
+        ),
+        sec(
             "struct NsResolver<'a> {",
-            Twice,
-            "RFC-0027's `ns.member` pass. Its type descent READS the shared one \
-             above since RFC-0125 §3 M6; what stays stated a second time is \
-             `NsResolver::walk_block`/`walk_stmt`/`walk_expr`, the scope-aware \
-             body walk `scope_block` and `rewrite_block` also write out. The \
-             rule all three state is the same one — which identifier occurrence \
-             in a body names a declaration and which is bound by a local in \
-             scope",
+            Job,
+            "RFC-0027's `ns.member` pass. Both its descents are read, not \
+             written, since RFC-0125 §3 M6 — the type one from \
+             `type_head_descent`, the body one from `body_scope_descent`. What \
+             is left is the pass itself: what a namespace member resolves to, \
+             and the receiver argument it deletes at a call",
         ),
         sec(
             "fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {",
@@ -268,14 +276,15 @@ fn loader_sections() -> Vec<Section> {
         ),
         sec(
             "fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {",
-            Twice,
-            "the scope-aware free-name walk, FIRST of three: every name a body \
-             references that could name a declaration, minus the locals in \
-             scope. `rewrite_block` below and `NsResolver::walk_block` above are \
-             the other two, and the checker's `Scope`/`shadows_here`/`lookup` \
-             states the same rule a fourth time for a different reader. The type \
-             descent's macro is what closes this one too, and it is 892 lines \
-             rather than 194",
+            Job,
+            "every name a body references that could name a declaration, minus \
+             the locals in scope — the link-time visibility check's question. \
+             The walk is `body_scope_descent`'s since RFC-0125 §3 M6, where it \
+             was the FIRST of three copies of it; what stays here is the \
+             collector's own line at a site, and the namespace sugar it records \
+             under a dotted spelling. The checker's \
+             `Scope`/`shadows_here`/`lookup` still states the scope rule a second \
+             time for a different reader",
         ),
         sec(
             "fn type_names(ty: &Type) -> Vec<String> {",
@@ -296,11 +305,14 @@ fn loader_sections() -> Vec<Section> {
              shared descent, assigning where `type_names` clones",
         ),
         sec(
-            "fn rewrite_expr(",
-            Twice,
-            "the scope-aware free-name walk, SECOND of three — the same arms as \
-             `scope_expr`, assigning where that one collects. Its own comment \
-             says so: \"the same walk `fn_body_ref_names` uses\"",
+            "pub(crate) fn rewrite_names(p: &mut Program, map: &HashMap<String, String>) {",
+            Job,
+            "every reference to a declaration name rewritten through a map. The \
+             walk is `body_scope_descent`'s since RFC-0125 §3 M6, where it was \
+             the SECOND of three copies of it and its own comment said so — \"the \
+             same walk `fn_body_ref_names` uses\". What stays here is the \
+             substitution, and the three things it must not fold: a namespace \
+             receiver, a local, and the module's own enum constructor",
         ),
         sec(
             "fn program_ref_names(p: &Program) -> HashSet<String> {",
@@ -797,8 +809,8 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 3587, 22),
-        ("loader.rs", "a rule stated a second time", 1095, 1),
+        ("loader.rs", "the file's own job", 4192, 23),
+        ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
             "loader.rs",
@@ -806,7 +818,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             15,
             0,
         ),
-        ("loader.rs", "shared machinery", 462, 0),
+        ("loader.rs", "shared machinery", 677, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2897, 0),
         ("symbols.rs", "a rule stated a second time", 360, 0),
