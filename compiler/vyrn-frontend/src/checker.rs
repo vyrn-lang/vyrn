@@ -8973,9 +8973,13 @@ impl<'a> Checker<'a> {
         // call names, the first module-state binding it touches (if any), and
         // whether it performs a spawn-forbidden op.
         let mut calls: std::collections::HashSet<String> = Default::default();
-        match body {
-            LambdaBody::Expr(e) => calls_expr(e, &mut calls),
-            LambdaBody::Block(b) => calls_block(b, &mut calls),
+        {
+            let mut v = Calls(&mut calls);
+            let mut locals = HashSet::new();
+            match body {
+                LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+                LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+            }
         }
         // Names that shadow module state at this point: the lambda's own
         // params/binders plus every enclosing LOCAL binding. Every frame is a
@@ -10873,143 +10877,45 @@ fn init_restrictions(
     }
 }
 
-/// The names of every function/builtin called (or spawned) anywhere in a block.
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6). Every reader in this file that wants to know one
+// thing about a body — and not to type it — is an impl of this trait.
+crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
+/// The collector's line at each site: a call, a spawn and a `try`-construct
+/// each name what they reach, and no other form does.
+struct Calls<'a>(&'a mut HashSet<String>);
+
+impl BodyVisit<'_> for Calls<'_> {
+    // The question is what a body reaches, not what shadows what.
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        // A call inside a lambda body (RFC-0023) is attributed to the enclosing
+        // function — that is the monomorphization site, so a lambda that
+        // performs I/O (or, via `global_ref_expr`, reads module state) makes the
+        // enclosing function non-spawn-safe. The walk descends into one, so
+        // there is nothing to say here about it.
+        if let Expr::Call { name, .. }
+        | Expr::TryConstruct { name, .. }
+        | Expr::Spawn { name, .. } = e
+        {
+            self.0.insert(name.clone());
+        }
+        true
+    }
+}
+
 /// Every function name called anywhere in `b`.
 ///
 /// Public because RFC-0076's wasm engine needs the same question the
 /// comptime-purity check asks — "what does this reach?" — to decide whether a
 /// generator touches a capability it cannot yet serve. One walker, one answer.
-pub fn fn_calls(b: &Block) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    calls_block(b, &mut out);
+pub fn fn_calls(b: &Block) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut locals = HashSet::new();
+    body_block(b, &mut locals, &mut Calls(&mut out));
     out
-}
-fn calls_block(b: &Block, out: &mut std::collections::HashSet<String>) {
-    for s in &b.stmts {
-        calls_stmt(s, out);
-    }
-}
-fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
-    match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => calls_expr(value, out),
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                calls_expr(e, out);
-            }
-        }
-        Stmt::If {
-            cond: e,
-            then_block,
-            else_block,
-            ..
-        }
-        | Stmt::IfLet {
-            scrutinee: e,
-            then_block,
-            else_block,
-            ..
-        } => {
-            calls_expr(e, out);
-            calls_block(then_block, out);
-            if let Some(eb) = else_block {
-                calls_block(eb, out);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            calls_expr(cond, out);
-            calls_block(body, out);
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            calls_expr(iter, out);
-            calls_block(body, out);
-        }
-        Stmt::IndexSet { index, value, .. } => {
-            calls_expr(index, out);
-            calls_expr(value, out);
-        }
-        Stmt::Region { body, .. } => calls_block(body, out),
-        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-    }
-}
-fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
-    match e {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            calls_expr(expr, out)
-        }
-        Expr::Consume { place, .. } => calls_expr(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            calls_expr(lhs, out);
-            calls_expr(rhs, out);
-        }
-        Expr::Call { name, args, .. } | Expr::TryConstruct { name, args, .. } => {
-            out.insert(name.clone());
-            for a in args {
-                calls_expr(a, out);
-            }
-        }
-        Expr::Spawn { name, args, .. } => {
-            out.insert(name.clone());
-            for a in args {
-                calls_expr(a, out);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            calls_expr(scrutinee, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => calls_expr(e, out),
-                    ArmBody::Block(b) => calls_block(b, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            calls_expr(cond, out);
-            calls_expr(then_branch, out);
-            if let Some(eb) = else_branch {
-                calls_expr(eb, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                calls_expr(v, out);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                calls_expr(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                calls_expr(k, out);
-                calls_expr(v, out);
-            }
-        }
-        // Calls inside a lambda body (RFC-0023) are attributed to the enclosing
-        // function — that is the monomorphization site, so a lambda that performs
-        // I/O (or, via `global_ref_expr`, reads module state) makes the enclosing
-        // function non-spawn-safe.
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => calls_expr(e2, out),
-            LambdaBody::Block(b) => calls_block(b, out),
-        },
-    }
 }
 
 #[cfg(test)]

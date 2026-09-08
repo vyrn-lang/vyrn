@@ -616,10 +616,12 @@ fn sections() -> Vec<Section> {
             "what a module-state initializer may do (RFC-0013, RFC-0029)",
         ),
         sec(
-            "pub fn fn_calls(b: &Block) -> std::collections::HashSet<String> {",
-            Surface,
-            "one arm per form again, collecting every callee name — the call \
-             graph the two fixpoints above run over",
+            "crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);",
+            Shared,
+            "the descent over a body, READ from `ast::body_scope_descent!` since \
+             RFC-0125 §3 M6 — and `fn_calls`, the first of this file's \
+             collectors to read it: every callee name, which is the call graph \
+             the two fixpoints above run over. It was one arm per form again",
         ),
         sec("mod tests {", Tests, "the file's own unit tests"),
     ]
@@ -754,11 +756,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3414, 141),
+        ("the typing judgment", 3418, 141),
         ("a rule the checker states", 1455, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 3435, 157),
-        ("shared machinery", 2256, 30),
+        ("one arm per form, type constructor or builtin", 3296, 157),
+        ("shared machinery", 2297, 30),
         ("tests", 4819, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
