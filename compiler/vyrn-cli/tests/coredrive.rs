@@ -79,6 +79,16 @@ const CLASSES: [&str; 8] = [
     "nothing: the rows carry it",
 ];
 
+/// The types `Fn_::core_walkable` admits a name of, spelled here so the count
+/// beside each class is the emitter's own screen and not a second rule.
+fn scalar(t: &vyrn_frontend::ast::Type) -> bool {
+    use vyrn_frontend::ast::Type;
+    matches!(
+        t,
+        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool
+    )
+}
+
 fn class_of(body: &Body) -> usize {
     let mut worst = CLASSES.len() - 1;
     let mut note = |c: usize| worst = worst.min(c);
@@ -216,6 +226,14 @@ fn run() {
     vyrn_genwasm::install();
     vyrn_lower::install();
     let mut classes = [0usize; CLASSES.len()];
+    // Beside each class, how many of its bodies name ONLY the scalar types the
+    // driver's own screen admits — RFC-0125 §3 M3, the loop slice's finding.
+    // A class's count says what the CORE still owes; this says what writing
+    // that row would buy today, because a body the emitter's screen refuses is
+    // one the row cannot reach. The two numbers ranked the list differently:
+    // the tag on `Arm` is 792 bodies and none of them, because a scrutinee is
+    // an enum and an enum is not a scalar.
+    let mut scalars = [0usize; CLASSES.len()];
     let mut carried: std::collections::BTreeSet<String> = Default::default();
     let mut bodies = 0usize;
     let mut programs = 0usize;
@@ -239,6 +257,9 @@ fn run() {
                     bodies += 1;
                     let c = class_of(body);
                     classes[c] += 1;
+                    if body.names.iter().all(|i| scalar(&i.ty)) {
+                        scalars[c] += 1;
+                    }
                     if c == CLASSES.len() - 1 {
                         carried.insert(body.name.clone());
                     }
@@ -267,7 +288,7 @@ fn run() {
     eprintln!("{programs} programs, {bodies} bodies");
     eprintln!("what a body waits on before the core's rows could carry it:");
     for (i, what) in CLASSES.iter().enumerate() {
-        eprintln!("  {:6}  {what}", classes[i]);
+        eprintln!("  {:6}  {:6} scalar-only  {what}", classes[i], scalars[i]);
     }
     eprintln!(
         "  {} distinct bodies the rows carry end to end",

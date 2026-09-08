@@ -9394,6 +9394,74 @@ pointed at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
 
+**What writing the next row would buy, measured rather than argued
+(2026-09-08, `track-ds`).** The loop slice ended on a claim: the rows carry
+3,106 bodies, the driver takes 986, and the 2,120 in between are the emitter's
+own screen. A claim like that reorders the whole list, so it is measured. The
+probe gains one column: beside each class, how many of its bodies name ONLY
+the scalar types `Fn_::core_walkable` admits. A class's own count says what the
+CORE still owes; the second says what writing that row would buy TODAY, because
+a body the emitter's screen refuses is one no row can reach.
+
+| what a body waits on | bodies | of those, scalar-only |
+|---|---|---|
+| a callee that is no declared function of the program | 10,842 | 8,209 |
+| the row names no value (`Val::Lit(Opaque)`) | 3,468 | 382 |
+| a layout: an aggregate made, read or taken | 3,124 | 23 |
+| **nothing: the rows carry it** | **3,106** | **2,780** |
+| a tag the arm does not carry (`St::Switch`) | 792 | **0** |
+| an `&&` or `||` | 271 | 249 |
+| a release the driver must place | 131 | 0 |
+| a lambda body the row does not carry (`Op::Closure`) | 30 | 0 |
+
+**The tag on `Arm` was the second row on the list and it buys nothing.** Zero
+of its 792 bodies name only scalars, and the reason is structural rather than
+incidental: a `St::Switch` scrutinee is an enum, an `Option` or a `Result`, and
+none of those is a scalar the driver reads. The same holds for the release row
+and for `Op::Closure`. Writing the tag today would add a column no emitter
+could use, which is the failure this RFC is named after read the other way
+round — a row stated for a reader that does not exist yet.
+
+**Three clauses of the screen, counted.** `core_walkable` refuses in one of
+three places, and the corpus run says where: **8,362** at the frame (a placed
+release, an aggregate destination, or a lambda of its own), **3,875** at the
+scalar clause, and **11,419** at the statement screen, which is the rows
+themselves plus the temporary the operand stack cannot carry. The frame clause
+is checked first and is the largest, and it is the one §2.3 already assigns:
+release PLACEMENT is the emitter's, and the placer is another track's work in
+flight.
+
+**So the order in §3 M3's list is now this, and it is the emitter's list rather
+than the core's.**
+
+| # | what | bodies it would add | what it needs |
+|---|---|---|---|
+| 1 | the frame clause: a body with a placed release | up to 8,362 frames | `St::Drop` and `St::Row` in the driver, and the placement itself, which is where the release placer's own work lands |
+| 2 | the scalar clause | up to 3,875 | a `String` name reaches the operators the operation slice kept out of `bin_ins` — the ones that release what an operand allocated between two reads. Measured: widening the clause to `Type::Str` refuses `vlog.vyrn` at `Add` on `String` and moves thirteen bytes of `threeengines.vyrn` |
+| 3 | `&&` and `||` | 249 | `St::If` over a temporary, unchanged from the operation slice, and it still moves bytes |
+| 4 | a value the row does not name | 382 | `Lit::Opaque` at a `for`'s element index and a `?`'s ok arm; the rest of its 3,468 wait behind the layout |
+| 5 | the builtin callee | 8,209 | the 4,807 lines of one block per builtin name, which is §1.1's `builtins` factor and not a row |
+| 6 | the tag on `Arm` | 0 | nothing today: every one of its 792 bodies fails the scalar clause first |
+| 7 | the layout | 23 | unchanged: placement is target vocabulary |
+| 8 | a lambda body on `Op::Closure` | 0 | unchanged |
+
+#### The measurement's gates (2026-09-08)
+
+One test file moves and nothing reads it, so the list is run to say so.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 637 passed, 41 ignored, 0 failed |
+| `coredrive` `--ignored`, release | 1 — 986 of 21,720 bodies, 167 of 170 programs byte-identical, the new column as above |
+| `kernel`, `coretables`, `typed`, `effects`, `fixtures`, `testsweep` `--ignored` | 1, 1, 1, 2, 1, 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `emitter_census`, `forms`, `surface`, `checker_census`, `refusals`, `lowered`, `lowered_dump` | all unmoved |
+| `vyrn-frontend`, the workspace less `vyrn-cli`, `vyrn-lsp`, `vyrn-genwasm` | 1,120; 1,167; 100; 3 |
+| `memory`, `route`, the residue ratchet | 8; 2; engine 172 clean and 3 leaking, route 172 clean and 3 leaking |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and `rfcs/census/wasm-sha256.tsv` untouched |
+| `genwasm` fresh `VYRN_GEN_CACHE_DIR`, `vyrn doc --verify`, the site export, `vyrn test` | 13; 41 files; 82 routes and 14 assets; 35 and 154 over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
