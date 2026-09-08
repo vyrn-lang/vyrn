@@ -1,7 +1,7 @@
 //! `vyrn` — the Vyrn driver.
 //!
 //! Usage:
-//!   vyrn run     [file.vyrn]            Type-check and interpret; process exits with main's value.
+//!   vyrn run     [file.vyrn]            Type-check, compile and run; process exits with main's value.
 //!   vyrn check   [file.vyrn]            Type-check only; print "ok" or every diagnostic.
 //!   vyrn emit-wat [file.vyrn]           Print the emitter's module as WAT to stdout.
 //!   vyrn emit-lowered [file.vyrn]       Print the lowered form of the root module (RFC-0101).
@@ -11,11 +11,11 @@
 //!                                        Compile to a native executable — the module through
 //!                                        wasm2c and clang (RFC-0125 §2.5) — or to the module.
 //!   vyrn test    [file.vyrn] [--name <substring>]
-//!                                        Run the root file's `test` blocks under the interpreter.
+//!                                        Run the root file's `test` blocks, each as compiled wasm.
 //!   vyrn bench   [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]
 //!                                        Compile the root file's `bench` blocks NATIVE and time them
-//!                                        (divan-simplified). `--check` runs each once under the
-//!                                        interpreter (deterministic, no timing) — the CI face.
+//!                                        (divan-simplified). `--check` runs each once, compiled
+//!                                        (deterministic, no timing) — the CI face.
 //!                                        `--json` emits the machine-readable report (RFC-0063).
 //!                                        `--compare` runs, then flags regressions vs a baseline
 //!                                        (min > baselineMin * threshold, default 1.5; exit 1 on any).
@@ -1149,7 +1149,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
 /// `surface(..)` stands for a whole subsystem and is dropped here, because the
 /// directive channel already lists its members one row each.
 ///
-/// The limits are the interpreter's, unchanged: an argument that names a local
+/// The limits are the channel's own: an argument that names a local
 /// of its enclosing function cannot be lifted into the new `main`, and a
 /// `mount` that is not `std/http`'s four-argument one is not found. Either way
 /// the caller prints its note and keeps the derived rows.
@@ -1330,22 +1330,24 @@ fn routes_json(
     ExitCode::SUCCESS
 }
 
-/// A JSON string literal. Paths reach here as the loader keyed them, which on
-/// Windows can still hold a backslash, so escaping is not optional.
+/// A JSON string literal, quotes included — for `vyrn routes --json` and for
+/// every manifest [`json_pretty`] rewrites.
+///
+/// Escaping is not optional in either place. A route path reaches here as the
+/// loader keyed it, which on Windows can still hold a backslash; and Rust's
+/// `Debug` escapes (`\u{1}`) are NOT valid JSON, so a manifest written with
+/// them would be unreadable to every later command.
+///
+/// The escape is `vyrn_frontend::codec::escape_into` — RFC-0018's canonical
+/// table, which both wasm backends must produce byte for byte. This driver
+/// carried two copies of that table until the census of RFC-0125 §3 M5 found
+/// them — one here and one under `vyrn add`'s manifest writer, differing only
+/// in whether a backspace came out `\b` or `\u0008`. `vyrn-play` carries a
+/// third, which its own crate has to answer for.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
+    vyrn_frontend::codec::escape_into(s, &mut out);
     out.push('"');
     out
 }
@@ -3663,33 +3665,6 @@ fn vendor(check: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `s` as a JSON string literal, quotes included.
-///
-/// Rust's `Debug` escapes (`\u{1}`) are NOT valid JSON — `\u` must be followed
-/// by exactly four hex digits — so a manifest rewritten through [`json_pretty`]
-/// with Debug escapes would be unreadable to every later command. Short forms
-/// where JSON defines one, `\u00xx` for every other control character, and
-/// nothing else escaped: any codepoint above `0x1F` may stand as itself.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Pretty-print a Json value (4-space indent, stable key order).
 fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
     use vyrn_frontend::schema::Json;
@@ -3705,7 +3680,7 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
                 format!("{n}")
             }
         }
-        Json::Str(s) => json_string(s),
+        Json::Str(s) => json_str(s),
         Json::Arr(items) => {
             if items.is_empty() {
                 return "[]".into();
@@ -3722,18 +3697,16 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
             }
             let inner: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{pad}{}: {}", json_string(k), json_pretty(v, depth + 1)))
+                .map(|(k, v)| format!("{pad}{}: {}", json_str(k), json_pretty(v, depth + 1)))
                 .collect();
             format!("{{\n{}\n{close}}}", inner.join(",\n"))
         }
     }
 }
 
-/// `vyrn build <file.vyrn> [-o out] [--target wasm]` — a native executable via
-/// textual IR and clang, or a `wasm32-wasi` module emitted directly (RFC-0077 M5:
-/// no clang, no wasi sysroot, no builtins archive).
 /// `vyrn test [file] [--name <substring>]` (RFC-0015) — load + check the root
-/// file, then run its `test` blocks under the interpreter in declaration order.
+/// file, then run its `test` blocks in declaration order, each as a door into
+/// one compiled module (RFC-0125 §3 M5).
 /// Prints `test "name" ... ok` / `... FAILED: <message>` per test and a
 /// `N passed, M failed` summary; exits 1 if any test failed. A file with no
 /// tests prints `no tests` and exits 0.
@@ -4650,8 +4623,7 @@ export extern fn vyrnServeHeaderValue(i: Int64) -> String {
 /// One frame off the parked producer. `false` is the end of the stream, and the
 /// host answers it by closing. The box comes out of module state for the pull
 /// and goes back after it, because the step is ordinary Vyrn and may reach
-/// `serveStream` itself — the newest producer wins, as it does under the
-/// interpreter.
+/// `serveStream` itself — the newest producer wins.
 export extern fn vyrnServeNext() -> Bool {
     vyrnServeFrame = ""
     if vyrnServeLive == 0 {
@@ -6405,7 +6377,7 @@ fn bodies_wasm(
     let (mut ok, mut failed) = (0usize, 0usize);
     {
         // Whatever the module's initializers wrote, before the first body's
-        // line, as the interpreter streams it.
+        // line.
         let mut stderr = std::io::stderr().lock();
         let _ = stderr.write_all(res.drain_err().as_bytes());
         let _ = stderr.flush();

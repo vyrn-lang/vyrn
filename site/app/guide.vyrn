@@ -286,8 +286,8 @@ export fn chapters() -> Array<Chapter> {
             sections: [
                 section("install", "Install and check", [
                         "Install the compiler with the script for your platform. The <a href=\"/install.html\">install page</a> has both, and both verify the archive against the release checksums before they unpack anything.",
-                        "Then run a file. <code>vyrn run</code> uses the interpreter and needs nothing else on your machine. <code>vyrn build</code> writes a native binary and needs <code>clang</code>. <code>vyrn build --target wasm</code> writes a WebAssembly module and needs nothing.",
-                        "The three backends are the same language. The parity harness runs every example on all three and compares the bytes, so a program that runs under the interpreter runs the same way as a binary.",
+                        "Then run a file. <code>vyrn run</code> compiles the program to WebAssembly and runs it, and needs nothing else on your machine. <code>vyrn build --target wasm</code> writes that module. <code>vyrn build</code> puts the same bytes through <code>wasm2c</code> and <code>clang</code> into a native binary.",
+                        "Both are the same program. The route harness runs every example both ways and compares the bytes, so a program that runs as wasm runs the same way as a binary.",
                     ], []),
                 section("first", "Your first program", [
                         "A program is a file. <code>main</code> returns the exit code, and <code>print</code> writes one line to standard output.",
@@ -424,7 +424,7 @@ export fn chapters() -> Array<Chapter> {
             sections: [
                 section("protocols", "A protocol and a bound", [
                         "<code>protocol</code> declares the methods. <code>impl P for T</code> supplies them for one type, including a built-in type such as <code>Int64</code>.",
-                        "A generic function takes a bound: <code>fn label&lt;T: Show&gt;(x: T)</code>. The compiler generates one <code>label</code> per concrete type and calls the implementation directly. There is no table and no dynamic lookup, and the interpreter agrees with the binary because both resolve the same way.",
+                        "A generic function takes a bound: <code>fn label&lt;T: Show&gt;(x: T)</code>. The compiler generates one <code>label</code> per concrete type and calls the implementation directly. There is no table and no dynamic lookup: the choice is made once, while compiling.",
                         "A protocol can also declare an associated type. <a href=\"/guide/errors.html#fallible\">Chapter 11</a> uses one: <code>Fallible</code> owes an <code>Output</code>, which is what <code>?</code> hands back.",
                     ], ["protocols"]),
             ],
@@ -479,7 +479,7 @@ export fn chapters() -> Array<Chapter> {
                     ], ["genuse"]),
                 section("reflection", "Reading a type at compile time", [
                         "<code>schemaOf(T)</code> reads a validated type's own declaration. It answers with the name, the base type, the documentation line and every bound the <code>where</code> clause implies. <code>jsonSchema(T)</code> writes the JSON Schema document from the same facts.",
-                        "This is not runtime reflection. Vyrn erases types before the program runs; the compiler computes the answer from the declaration, so the interpreter and the binary agree.",
+                        "This is not runtime reflection. Vyrn erases types before the program runs; the compiler computes the answer from the declaration.",
                     ], ["schema"]),
             ],
         },
@@ -597,7 +597,7 @@ export fn chapters() -> Array<Chapter> {
             lede: "One binary. `vyrn run` needs nothing else on your machine; `vyrn build` writes a native binary; every other task — tests, benchmarks, formatting, docs — is a subcommand.",
             sections: [
                 section("build", "Run, check, build", [
-                        "<code>vyrn run</code> uses the interpreter and needs nothing installed. <code>vyrn check</code> diagnoses without running. <code>vyrn build</code> writes a native binary and needs <code>clang</code>; <code>vyrn build --target wasm</code> writes a WebAssembly module and needs nothing. The three backends are the same language — the parity harness runs every example on all of them and compares the bytes.",
+                        "<code>vyrn run</code> compiles to WebAssembly and runs it, and needs nothing installed. <code>vyrn check</code> diagnoses without running. <code>vyrn build --target wasm</code> writes the module; <code>vyrn build</code> puts the same bytes through <code>wasm2c</code> and <code>clang</code> into a native binary. Both are the same program — the route harness runs every example both ways and compares the bytes.",
                     ], []),
                 section("daily", "Format, document, test", [
                         "<code>vyrn fmt</code> writes the one canonical layout. It has no style options, and <code>--check</code> is the CI gate. <code>vyrn doc</code> writes Markdown API docs from the <code>///</code> comments, and <code>--verify</code> fails when they drift from the code. <code>vyrn test</code> and <code>vyrn bench</code> have <a href=\"/tooling/testing.html\">their own page</a>.",
@@ -619,8 +619,8 @@ export fn chapters() -> Array<Chapter> {
                         "A file can hold tests and a <code>main</code> at once. The tests are checked, then stripped, so the program is unchanged by having them.",
                     ], ["tests"]),
                 section("bench", "bench blocks", [
-                        "A <code>bench</code> block is a body the timer runs. <code>vyrn bench</code> reports the minimum, median and mean over many samples. It uses the native build, because timing the interpreter would report the wrong thing.",
-                        "<code>blackBox</code> hides a value from the optimizer. Around the input it stops the compiler from precomputing the answer; around the result it keeps the work live. <code>vyrn bench --check</code> runs each body once under the interpreter, which is what CI does.",
+                        "A <code>bench</code> block is a body the timer runs. <code>vyrn bench</code> reports the minimum, median and mean over many samples. It uses the native build, because that is what a shipped program is.",
+                        "<code>blackBox</code> hides a value from the optimizer. Around the input it stops the compiler from precomputing the answer; around the result it keeps the work live. <code>vyrn bench --check</code> runs each body once, compiled, which is what CI does.",
                     ], ["benches"]),
             ],
         },

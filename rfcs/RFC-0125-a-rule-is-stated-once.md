@@ -13570,6 +13570,138 @@ builds it, and `arg_caps`. The census's rows 2 and 3 are what stands, with the
 blocker each names.
 
 #### Gates (2026-09-08, the event stream's deletion)
+#### The driver, counted (2026-09-08, `track-dg`)
+
+§2.7 counts the compiler toward 40,000–45,000 lines. Four passes have been
+censused against that number — `own.rs` by a reader against every part,
+`movecheck.rs` by the kind table in `tests/refusals.rs`, `checker.rs` by
+`tests/checker_census.rs`, `direct.rs` by `tests/emitter_census.rs`. Nobody had
+counted the driver. `main.rs` stood at 7,276 lines and 118 top-level functions,
+`wasmrun.rs` at 1,275 and `remote.rs` at 445, and the routes those files once
+served are gone: the interpreter (M5), the text-IR native route, `emit-ir`,
+`--route` and the parity harness (M3 and M4).
+
+`compiler/vyrn-cli/tests/cli_census.rs` is the count. The method is
+`checker_census.rs`'s — a section runs from an anchor's doc comment to the next
+anchor's, every line falls in exactly one section, the test computes the spans
+and a reader writes the kind. Two things differ.
+
+It tiles FOUR files, not one. The other censuses each measure one pass; this
+one measures a crate. `main.rs` is the driver, `wasmrun.rs` is the WASI host,
+`remote.rs` is the remote resolver, `lib.rs` is the library face
+`vyrn-frontend`'s tests reach the host through. A census of `main.rs` alone
+would record a move into `wasmrun.rs` as a deletion.
+
+And the column beside lines is the number of `eprintln!` sites, where the
+checker's census counts refusals and the emitter's counts `Instruction::`. What
+a driver produces is an exit code and a sentence on stderr. That is also the
+reading the deletion candidates need: a rule stated twice is a sentence written
+twice.
+
+**The census, at the count.** Eighty-one sections, 9,013 lines, 210 sentences.
+
+| kind | lines | stderr | what it is |
+|---|---|---|---|
+| a command's own path | 5,298 | 189 | argument parsing, the call into the frontend, the lowering or the emitter, and the exit code. Nothing replaces it: it is what a driver is |
+| a rule another pass also states | 288 | 0 | the deletion candidates, each naming the other site |
+| a path only a deleted route reached | **0** | 0 | — |
+| machinery with a copy elsewhere | 30 | 0 | `FsResolver`, which ten other files carry |
+| the WASI host and the wasmtime embedding | 1,133 | 0 | `wasmrun.rs` and `lib.rs` |
+| shared machinery | 1,412 | 19 | the load site, the lock, the HTTP host `serve` and `dev` both answer on, the remote resolver |
+| tests | 852 | 2 | the crate's own unit tests |
+
+**Kind (3) is empty, and that is the finding.** Every candidate the size strand
+named is live, and each was proved by grep before it was filed:
+
+- `--native-target`, `NativeTarget`, `NATIVE_TARGETS`, `DEFAULT_NATIVE_TARGET`,
+  `native_target_for` and `add_native_clang_flags` — 163 lines — are read by
+  `bench_native` and by `build_wasm2c`. Those are the two native clang
+  invocations there are, and the doc comment says why one place holds the flags:
+  they drifted twice when there were two.
+- `emit-wat`, `emit-lowered` and `emit-gen` are three commands `real_main`
+  dispatches. `emit-ir` is the deleted one and no line names it.
+- `vyrn-frontend/src/prof.rs`, 115 lines, is M4's build-phase table and not the
+  tree-walker's per-function rows. `phase`, `charge` and `phase_table` are
+  called from the loader, from `main` and from `wasm_profile`.
+- `cargo check -p vyrn-cli --all-targets` reports no `dead_code` anywhere under
+  `src/`. The one dead item in the crate is `worded` in `tests/refusals.rs:613`,
+  which belongs to `movecheck.rs`'s census.
+
+**What the deleted routes did leave is prose.** The M5 record "What still names
+the interpreter" set the policy: a comment that explains a decision by saying
+what the tree-walker did is a record and stays; a doc comment that describes
+CURRENT behaviour is rewritten. That record greps `compiler --include=*.rs`. It
+never reached the pages a user reads, and those were the ones still wrong:
+
+| where | what it said | what it says |
+|---|---|---|
+| `README.md`, the second paragraph | "One program compiles to three targets: an interpreter, a native binary, and a WebAssembly module" | one WebAssembly module, and the native binary built from it |
+| `README.md`, "Three targets, one meaning" | the tree-walking interpreter is the reference semantics; `vyrn build` emits textual LLVM IR | one module, two ways to run it; the route harness compares them |
+| `README.md`, "What needs what" | a native build needs `clang` | `clang`, plus wabt's `wasm2c` and simde |
+| `README.md`, the repository layout | `vyrn-frontend/` holds an interpreter; `vyrn-codegen/` is a textual LLVM IR emitter | neither |
+| `README.md`, "What CI proves" | four jobs, of which one is three-way parity and one is cross-engine generation | eight jobs, named as `ci.yml` names them |
+| `site/app/guide.vyrn`, seven answers | `vyrn run` uses the interpreter; the three backends; `bench --check` runs under the interpreter | what the commands do |
+| `site/app/repo.vyrn` | `backendCount()` is 3, "the tree-walking interpreter, the native binary, and the WebAssembly module" | 2 |
+| `site/app/routes/releases.vyx`, `why-vyrn.vyx` | every example runs on three engines; the binary must agree with the interpreter | both ways; the parity harness is the route harness |
+| `docs/releasing.md` | the three-way parity harness | the route harness, and `wasm2c` and simde beside `clang` |
+| `.github/workflows/README.md` | the floor is the Vyrn interpreter executing test corpora; `Bench --check` runs each body under the interpreter | Vyrn executing them; compiled |
+| `main.rs`'s own header, and four doc comments | `vyrn run` interprets; `test` runs under the interpreter; `bench --check` runs under the interpreter; a `vyrn build` sentence about textual IR, attached to `test_cmd` | what each does |
+
+Two mentions were left, and are findings rather than edits. `bench/engines.sh`
+still calls its first column `interp` and runs `vyrn run` in it, so the script
+compares three columns where two are the same route; the fix is that script's
+and `examples/threeengines.vyrn`'s. And `vyrn-play/src/lib.rs:326` carries a
+third copy of the JSON escape table below.
+
+**The rules stated twice.** Two sections, 288 lines, and both said the same
+sentence.
+
+| the driver's statement | lines | the other statement | what happened |
+|---|---|---|---|
+| `json_str`, the JSON string literal `vyrn routes --json` writes | 20 | `vyrn_frontend::codec::escape_into` — RFC-0018's canonical table, which both wasm backends must produce byte for byte | deleted. `json_str` quotes and calls `escape_into` |
+| `json_string`, the JSON string literal the manifest writer writes | 66 with `json_pretty` | the same table again, with two more short forms | deleted. `json_pretty` calls `json_str`; the driver holds one escape |
+| `project_imports`, `project_sources`, `import_chains`, `contract_roots`, `vyx_script_body` | 202 | `vyrn-frontend/src/loader.rs` builds the same edge set on every load | kept, and why below |
+
+The two escapes differed only in whether a backspace came out `\b` or
+``. Both are valid JSON and `escape_into`'s is the canonical one, so the
+frontend's sentence is at least as good and the two copies went.
+
+The import-graph walk is a second WALK rather than a second answer: it resolves
+each edge with the loader's own `resolve_spec` and `audience::generator_inputs`,
+so the two cannot disagree about an edge. It exists because `vyrn why`,
+`vyrn why --contract` and `vyrn why --capability` answer about a project that
+need not load, and the loader's graph exists only after a load that succeeded.
+Closing it needs the loader to offer the edges without the check. That is the
+next payer's list, and its licence is `vyrn why` in its three forms over the
+corpus, whole stdout and whole stderr, before and against.
+
+**The licence, and the invariant.** A rule that leaves the driver is licensed
+by the whole output of the commands that state it, over `examples/`, `site/`,
+`compiler/vyrn-cli/tests/` and `std/`, before and after. For the escape that is
+`vyrn routes --json` over every program in the corpus that mounts anything —
+`examples/bin/server.vyrn` and `examples/rest.vyrn` — and stdout and stderr are
+byte-identical both times. Beside it stands the invariant every CLI change has
+to hold: a driver change must move no wasm byte. `VYRN_WASM_MANIFEST=check`
+passes on the manifest unchanged.
+
+**What to take next, in order.**
+
+| # | what | lines | its licence | what blocks it |
+|---|---|---|---|---|
+| 1 | the import-graph walk, for a loader that answers with edges and no check | 202 | `vyrn why`, `why --contract`, `why --capability` over the corpus, whole stdout and stderr | the loader's graph needs a load that succeeded, and `why` answers about files that fail |
+| 2 | `FsResolver`, into this crate's library target beside `wasmrun` | 30 here, about 80 across ten copies (`tests/coretables.rs`, `effects.rs`, `kernel.rs`, `lowered.rs`, `lowered_cost.rs`, `stores.rs`, `typed.rs`, `vyrn-frontend/src/movecheck.rs`, `vyrn-frontend/examples/lspbench.rs`, `vyrn-frontend/tests/contracts_api.rs`) | the suites that use it | nothing but the work. It is not a deletion on the driver's side: the lines move to `lib.rs` and the ten copies go |
+| 3 | `dev_serve_one` against `serve_one` | 89 of 274 | `vyrn serve` and `vyrn dev` over the corpus | `dev` is `serve` with a static-file check in front, and the two accept loops have drifted. This is one rule stated twice inside the driver, not one another pass states |
+| 4 | `vyrn-play`'s escape table | 20 | that crate's own | its crate's, not this one's |
+
+Nothing else in the driver is a candidate. 5,298 of its 9,013 lines are one
+command's own path, and a command's own path is what a driver is.
+
+**The lines.** `compiler/vyrn-cli/src/main.rs` 7,276 to **7,248**;
+`wasmrun.rs` 1,275, `remote.rs` 445 and `vyrn-frontend/src/prof.rs` 115
+unchanged, each with a reader against every part. The crate is 8,985 lines,
+which §2.7 counts whole.
+
+#### Gates (2026-09-08, the driver's census)
 
 Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
 pointed at a shallow scratch directory outside the checkout.
@@ -13672,6 +13804,23 @@ moves with them: the mapping **5,736 to 5,748**; no other column.
 | the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move |
 | `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 77 suites, all green |
+| `kernel` `--ignored`, release | 1, 31 s |
+| `coretables` `--ignored`, release | 1, 25 s |
+| `typed` `--ignored`, release | 1, 44 s |
+| `effects` `--ignored`, release | 2, 47 s |
+| `fixtures` `--ignored`, release | 1, 22 s |
+| `testsweep` `--ignored`, release | 1, 54 s |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3 |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 28 s |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 298 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, manifest unchanged — a driver change moves no wasm byte |
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
