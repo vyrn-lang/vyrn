@@ -626,7 +626,7 @@ fn sections() -> Vec<Section> {
         sec(
             "/// Whether the AST walk is asked for even where the core's rows carry the body",
             Mapping, Core,
-            "RFC-0125 §2.3's own walk: the core's statements to wasm, its              operators through the one table `Expr::Binary` reaches, and the              screen that says which bodies the rows carry",
+            "RFC-0125 §2.3's own walk: the core's statements to wasm, its              operators through the one table `Expr::Binary` reaches, the callee              row read against the emitter's own function table, and the screen              that says which bodies the rows carry",
         ),
         sec("#[cfg(test)]", Tests, Neither, "the file's own unit tests"),
     ]
@@ -736,11 +736,12 @@ fn forms(lines: &[String], a: usize, b: usize) -> usize {
 /// `forms` names the source's. One list, so a query added to the emitter has
 /// to be added here before a section can be classified as reading it.
 fn rows(lines: &[String], a: usize, b: usize) -> usize {
-    const Q: [&str; 17] = [
+    const Q: [&str; 18] = [
         "body_of",
         "St::",
         "Rhs::",
         "Lit::",
+        "Callee::",
         "peek",
         "receiver_row",
         "store_row",
@@ -812,7 +813,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 6256, 586),
+        ("the mapping §2.3 names", 6421, 596),
         ("a decision §2.3 says it must not make", 2212, 356),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
@@ -893,7 +894,7 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("neither", 46, 5993, 0, 0),
-        ("the core's rows", 6, 2530, 0, 72),
+        ("the core's rows", 6, 2695, 0, 91),
         ("the source, and the core says it too", 1, 81, 1, 0),
         ("the source, and the core has no row", 9, 1847, 50, 0),
         ("both, for two questions", 14, 6501, 93, 49),

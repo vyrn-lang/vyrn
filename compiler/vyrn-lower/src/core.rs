@@ -449,25 +449,8 @@ pub enum Rhs {
         /// pass and `movecheck::sinks` read. The exception itself is stated
         /// here (RFC-0125 §3 M3, the checker's deletion path).
         write_back: bool,
-        /// Whether the callee DECLARES its capabilities: a function, a
-        /// method or a projection whose parameters the author wrote. A
-        /// `consume` on such a parameter is RFC-0089 rule 1 — it takes
-        /// ownership of whatever it is handed, heap or not.
-        ///
-        /// False for a builtin, a variant constructor and every other callee
-        /// whose capabilities this pass synthesizes. Such a call STORES its
-        /// argument, and storing a value that owns no heap copies it, so the
-        /// caller keeps its own (`movecheck::sinks` asks `owns_heap` there
-        /// and asks nothing at a declared parameter). RFC-0125 §3 M3, the
-        /// two-questions slice.
-        declared: bool,
-        /// Whether the callee is a CONSTRUCTOR — a variant of an enum,
-        /// `Some`, `Ok`, `Err`. [`Rhs::Call::declared`] is false for a builtin
-        /// and for a variant alike, and the two are different sentences: a
-        /// builtin STORES its argument and a constructor PUTS it into the
-        /// value it makes, which is how `movecheck` words the refusal
-        /// (RFC-0125 §3 M3, row 19).
-        ctor: bool,
+        /// WHO the name resolves to (RFC-0125 §3 M3, the callee slice).
+        kind: Callee,
         /// The producer type: what the callee answers at this site, with the
         /// call's own type arguments already substituted. `None` for a call
         /// the checker did not type.
@@ -481,6 +464,84 @@ pub enum Rhs {
     /// A record, array, map or variant literal: takes its parts. The first
     /// field is WHAT it constructs.
     Make(Ctor, Vec<Val>),
+}
+
+/// WHO a [`Rhs::Call`]'s name resolves to (RFC-0125 §3 M3, the callee slice).
+///
+/// [`Builder::call`] answers this once, to say where each argument's
+/// capability comes from. It threw the answer away into two bools —
+/// `declared`, for the three cases whose parameters the author wrote, and
+/// `ctor`, for the variant — and every later reader that needed a THIRD case
+/// resolved the name again. The emitter's ladder is that reader: fourteen
+/// rungs from a `std/mem` primitive to the function table, walked over the
+/// source at every call site, and no row it could have read instead.
+///
+/// So the answer is the row. `declared` and `ctor` are the two questions the
+/// kernel asks of it ([`Callee::declared`], [`Callee::ctor`]), and an emitter
+/// asks which rung it is.
+///
+/// The cases are [`Builder::call`]'s own branches and nothing more. Two of
+/// them fold three branches each, because the branches differ in the
+/// capability they synthesize and not in who the callee is: a name with no
+/// seeded row and a name beginning with `@` are both [`Callee::Reserved`],
+/// and `print` is too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Callee {
+    /// A function this program declares. The emitter's function table
+    /// answers for it, at the instance this call dispatches to.
+    Fn,
+    /// A method of an `impl` block (RFC-0002 §5), dispatched on its
+    /// receiver's concrete type.
+    Method,
+    /// A projection (RFC-0120), dispatched through the places table.
+    Projection,
+    /// A seeded builtin: a row of [`prelude::signature`].
+    Builtin,
+    /// A variant of an enum, or `Some`, `Ok`, `Err`.
+    Ctor,
+    /// A scalar type's own conversion — `Int32(n)`, `F64x2(..)` — or
+    /// `logger`. Its arguments are read.
+    Scalar,
+    /// A declared type's constructor: `T(v)` for a record or a
+    /// `where`-checked type (RFC-0079). Its arguments are taken.
+    Named,
+    /// A reserved name with no seeded row: `fromJson`, `value`, a log level,
+    /// a generation-time surface builtin, a `@`-spelled operation, `print`.
+    Reserved,
+    /// A call through a function VALUE in scope (RFC-0023): a lambda takes
+    /// its parameters by read.
+    Value,
+}
+
+impl Callee {
+    /// Whether the callee DECLARES its capabilities: a function, a method or
+    /// a projection whose parameters the author wrote. A `consume` on such a
+    /// parameter is RFC-0089 rule 1 — it takes ownership of whatever it is
+    /// handed, heap or not.
+    ///
+    /// False for a builtin, a variant constructor and every other callee
+    /// whose capabilities [`Builder::call`] synthesizes. Such a call STORES
+    /// its argument, and storing a value that owns no heap copies it, so the
+    /// caller keeps its own (`movecheck::sinks` asks `owns_heap` there and
+    /// asks nothing at a declared parameter). RFC-0125 §3 M3, the
+    /// two-questions slice.
+    pub fn declared(self) -> bool {
+        matches!(self, Callee::Fn | Callee::Method | Callee::Projection)
+    }
+
+    /// Whether the callee is a CONSTRUCTOR. A builtin and a variant are both
+    /// undeclared and the two are different sentences: a builtin STORES its
+    /// argument and a constructor PUTS it into the value it makes, which is
+    /// how `movecheck` words the refusal (RFC-0125 §3 M3, row 19).
+    pub fn ctor(self) -> bool {
+        matches!(self, Callee::Ctor)
+    }
+
+    /// Whether the callee STORES what it is handed: neither declared nor a
+    /// constructor, which is the third of the same three sentences.
+    pub fn stores(self) -> bool {
+        !self.declared() && !self.ctor()
+    }
 }
 
 /// The operation a [`Rhs::Prim`] row performs (RFC-0125 §3 M3, the operation
@@ -856,10 +917,12 @@ impl Body {
                 callee,
                 args,
                 spawn,
+                kind,
                 ..
             } => format!(
-                "{}{callee}({})",
+                "{}{} {callee}({})",
                 if *spawn { "spawn " } else { "" },
+                format!("{kind:?}").to_lowercase(),
                 args.iter()
                     .map(|(v, c)| format!("{:?} {}", c, self.val(v)).to_lowercase())
                     .collect::<Vec<_>>()
@@ -4515,8 +4578,7 @@ impl<'a> Builder<'a> {
                 spawn: false,
                 write_back: false,
                 // A variant constructor: it puts the payload into the value.
-                declared: false,
-                ctor: true,
+                kind: Callee::Ctor,
                 // `success` answers the unwrapped value, which is what the
                 // result name of the `?` holds.
                 ret: Some(self.body.names[res as usize].ty.clone()),
@@ -4653,18 +4715,18 @@ impl<'a> Builder<'a> {
         // buffer back through the result, so the receiver is taken by the
         // call (`movecheck::sinks`).
         let rebuilds = prelude::rebuilds(name);
-        // Whether the capabilities below are the author's word or this
-        // pass's: the three branches that read a declaration set it.
-        let mut declared = false;
-        // And whether it is a constructor, which is a third answer to the same
-        // question: a declared parameter TAKES, a builtin STORES, a variant
-        // PUTS the value into what it makes (RFC-0125 §3 M3, row 19).
-        let mut ctor = false;
+        // WHO the name resolves to, which is the one question the capability
+        // of each argument position turns on. The answer is the row's
+        // ([`Callee`]) rather than the two bools it used to be flattened into,
+        // because a later reader that needs a third case has no other way to
+        // ask (RFC-0125 §3 M3, the callee slice).
+        let mut kind = Callee::Reserved;
         let caps: Vec<Capability> =
             if let Some(f) = self.program.functions.iter().find(|f| f.name == name) {
-                declared = true;
+                kind = Callee::Fn;
                 f.params.iter().map(|p| p.capability).collect()
             } else if prelude::signature(name).is_some() {
+                kind = Callee::Builtin;
                 let mut caps: Vec<Capability> = (0..args.len())
                     .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
                     .collect();
@@ -4673,13 +4735,13 @@ impl<'a> Builder<'a> {
                 }
                 caps
             } else if let Some(m) = method {
-                declared = true;
+                kind = Callee::Method;
                 m.params.iter().map(|p| p.capability).collect()
             } else if let Some(p) = self.projection(name) {
-                declared = true;
+                kind = Callee::Projection;
                 p.params.iter().map(|p| p.capability).collect()
             } else if matches!(name, "Some" | "Ok" | "Err") || self.is_variant(name) {
-                ctor = true;
+                kind = Callee::Ctor;
                 vec![Capability::Consume; args.len()]
             } else if vyrn_frontend::checker::RESERVED.contains(&name)
                 || vyrn_frontend::ast::is_log_level(name)
@@ -4696,14 +4758,17 @@ impl<'a> Builder<'a> {
                     .map(|i| prelude::capability(name, i).unwrap_or(Capability::Read))
                     .collect()
             } else if scalar {
+                kind = Callee::Scalar;
                 vec![Capability::Read; args.len()]
             } else if decls.contains_key(name) {
+                kind = Callee::Named;
                 vec![Capability::Consume; args.len()]
             } else if name.starts_with('@') {
                 vec![Capability::Read; args.len()]
             } else if self.lookup(name).is_some() {
                 // A call through a function value: the value's parameters are
                 // `read` (RFC-0023) — a lambda captures by read and takes by read.
+                kind = Callee::Value;
                 vec![Capability::Read; args.len()]
             } else if matches!(name, "print") {
                 vec![Capability::Read; args.len()]
@@ -4775,8 +4840,7 @@ impl<'a> Builder<'a> {
             args: vs,
             spawn: false,
             write_back,
-            declared,
-            ctor,
+            kind,
             ret,
         })
     }

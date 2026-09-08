@@ -48,7 +48,7 @@ use vyrn_frontend::types::INT32;
 /// RFC-0125 §2.3's own vocabulary: the statements the emitter walks, what each
 /// one computes, and the values it computes it from. `Body` is spelled out at
 /// each use, because this file's own `Body` is the AST's.
-use vyrn_lower::core::{Lit, Op, Rhs, St, Val};
+use vyrn_lower::core::{Callee, Lit, Op, Rhs, St, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
@@ -16278,6 +16278,65 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_val(m, b, body, w, value, &ty, *line)?;
                     b.ins(&Instruction::LocalSet(l));
                 }
+                // A LOOP'S EXIT, which the core states and wasm has one
+                // instruction for. The pass makes up exactly one `break`
+                // (`site: 0`, "a break this pass made up") and puts it in the
+                // else arm of a two-way branch it also made up, at the head
+                // of the loop it desugared: that row is a conditional branch
+                // out of the loop's block and nothing else. The reader's own
+                // `if c { break }` carries the reader's site and is emitted
+                // as the two-way branch it is, so this reads the row rather
+                // than recognizing a shape.
+                St::If {
+                    cond,
+                    then,
+                    els,
+                    site: 0,
+                } if then.is_empty()
+                    && matches!(els.as_slice(), [St::Break { site: 0 }])
+                    && !self.loops.is_empty() =>
+                {
+                    self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
+                    b.ins(&Instruction::I32Eqz);
+                    let brk = self.loops.last().expect("a loop is open").0;
+                    let out = self.br_to(brk);
+                    b.ins(&Instruction::BrIf(out));
+                }
+                // `block { loop { .. br 0 } }` — the block is where a `break`
+                // goes and the loop is where a `continue` goes, which is the
+                // pair `St::Break` and `St::Continue` name. `St::Loop` is the
+                // infinite loop the row states, so the back edge is this
+                // walk's and unconditional.
+                St::Loop(inner) => {
+                    let brk = self.depth;
+                    b.ins(&Instruction::Block(BlockType::Empty));
+                    self.depth += 1;
+                    let cont = self.depth;
+                    b.ins(&Instruction::Loop(BlockType::Empty));
+                    self.depth += 1;
+                    self.loops.push((brk, cont, self.region_depth));
+                    let r = self.core_stmts(m, b, body, w, inner);
+                    self.loops.pop();
+                    r?;
+                    let back = self.br_to(cont);
+                    b.ins(&Instruction::Br(back));
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                St::Break { .. } | St::Continue { .. } => {
+                    let Some(&(brk, cont, regions)) = self.loops.last() else {
+                        return unsupported("a core exit outside a loop", 0);
+                    };
+                    self.exit_regions_above(b, regions, true);
+                    let to = match s {
+                        St::Break { .. } => brk,
+                        _ => cont,
+                    };
+                    let d = self.br_to(to);
+                    b.ins(&Instruction::Br(d));
+                }
                 St::If {
                     cond, then, els, ..
                 } => {
@@ -16334,6 +16393,17 @@ impl<'p> Fn_<'_, 'p> {
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
+                // An expression for its effect. What it leaves on the stack
+                // is dropped, or the enclosing block's type will not check —
+                // the same sentence the AST walk's statement arm writes, on
+                // the row rather than on the node.
+                St::Do(rhs, line) => {
+                    let got = self.core_rhs_ty(rhs, *line)?;
+                    self.core_rhs(m, b, body, w, rhs, &got, *line)?;
+                    if self.cx.repr(&got, *line)? != Repr::Unit {
+                        b.ins(&Instruction::Drop);
+                    }
+                }
                 _ => return unsupported("a core statement this walk does not read", 0),
             }
         }
@@ -16358,8 +16428,78 @@ impl<'p> Fn_<'_, 'p> {
                 let got = ret.clone().unwrap_or(got);
                 self.coerce(m, b, None, &got, want, line)
             }
+            Rhs::Call {
+                callee, args, kind, ..
+            } => {
+                let got = self.core_call(m, b, body, w, callee, *kind, args, line)?;
+                self.coerce(m, b, None, &got, want, line)
+            }
             _ => unsupported("a core right-hand side this walk does not read", line),
         }
+    }
+
+    /// What a right-hand side the driver reads PRODUCES, without emitting it —
+    /// which a `St::Do` needs and a `St::Let` does not, because a `let` has a
+    /// name and a name has the checker's type on it.
+    fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
+        match rhs {
+            Rhs::Call { callee, kind, .. } => match self.core_sig(callee, *kind) {
+                Some(s) => Ok(s.ret_ty),
+                None => unsupported("a core call this walk does not read", line),
+            },
+            _ => unsupported("a discarded value the row does not type", line),
+        }
+    }
+
+    /// One call, its callee read off the row — RFC-0125 §3 M3, the callee
+    /// slice.
+    ///
+    /// The ABI is the DECLARATION's and the emitter reads it there: which
+    /// wasm index the callee is, what each parameter's type is, whether one
+    /// crosses by address. What the row states is WHO the callee is
+    /// ([`Callee`]), which is the fourteen-rung ladder [`Fn_::call_inner`]
+    /// walks over the source at every site and this walk does not walk at
+    /// all.
+    fn core_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        callee: &str,
+        kind: Callee,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some(sig) = self.core_sig(callee, kind) else {
+            return unsupported("a core call this walk does not read", line);
+        };
+        for ((v, _), p) in args.iter().zip(&sig.params) {
+            self.core_val(m, b, body, w, v, p, line)?;
+        }
+        b.ins(&Instruction::Call(sig.index));
+        Ok(sig.ret_ty)
+    }
+
+    /// The signature this walk calls a [`Callee::Fn`] through, and `None` for
+    /// every callee whose emission is more than a `call`.
+    ///
+    /// `Cx::sigs` holds exactly the functions this module DEFINES: a generic,
+    /// a higher-order shell and a `std/mem` declaration are all skipped
+    /// before it is filled, so a hit is the last rung of the ladder and a
+    /// miss is one of the thirteen above it. The audited instrument is the
+    /// one name that hits and must not be called — an unaudited build drops
+    /// its four hooks rather than emitting them.
+    fn core_sig(&self, callee: &str, kind: Callee) -> Option<Sig> {
+        if kind != Callee::Fn || (!self.cx.audit && callee.starts_with(AUDIT_PREFIX)) {
+            return None;
+        }
+        let sig = self.cx.sigs.get(callee)?;
+        // A `modify` parameter crosses as the address of the caller's binding
+        // and an aggregate result through a hidden leading pointer. Both are
+        // placements, which is where §2.3 draws the emitter's own line, and
+        // neither is reachable from a body of scalars.
+        (!sig.modify.iter().any(|m| *m) && sig.ret.agg().is_none()).then(|| sig.clone())
     }
 
     /// An operator, its operands read off the row — RFC-0125 §3 M3, the
@@ -16517,7 +16657,66 @@ impl<'p> Fn_<'_, 'p> {
             }
         }
         let reads = core_reads(body);
-        core_readable(body, &body.stmts, &reads)
+        self.core_readable(body, &body.stmts, &reads)
+    }
+
+    /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
+    fn core_readable(&self, body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
+        ss.iter().enumerate().all(|(i, s)| match s {
+            St::Let(n, rhs) => {
+                let held = body.names[*n as usize].binding.is_none()
+                    && reads[*n as usize] == 1
+                    && ss.get(i + 1).and_then(first_read) == Some(*n);
+                // A temporary the stack cannot carry needs a local the AST walk
+                // never takes, so the two would emit different locals.
+                (held || body.names[*n as usize].binding.is_some()) && self.core_rhs_readable(rhs)
+            }
+            St::Store { place, value, .. } => {
+                matches!(place, vyrn_lower::core::Place::Name(_)) && core_val_readable(value)
+            }
+            St::If {
+                cond, then, els, ..
+            } => {
+                core_val_readable(cond)
+                    && self.core_readable(body, then, reads)
+                    && self.core_readable(body, els, reads)
+            }
+            St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
+            St::Loop(inner) => self.core_readable(body, inner, reads),
+            St::Break { .. } | St::Continue { .. } => true,
+            St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
+            St::Do(rhs, _) => self.core_rhs_readable(rhs),
+            St::Trap => true,
+            _ => false,
+        })
+    }
+
+    fn core_rhs_readable(&self, rhs: &Rhs) -> bool {
+        match rhs {
+            Rhs::Val(v) => core_val_readable(v),
+            // `&&` and `||` are stated as prims and emit a branch; the row states
+            // no branch, so the walk stands down at them.
+            Rhs::Prim(Op::Bin(BinOp::And | BinOp::Or), ..) | Rhs::Prim(Op::Closure, ..) => false,
+            Rhs::Prim(_, vs, _) => vs.iter().all(core_val_readable),
+            // A `spawn` runs the call as a task and a write-back stores the
+            // receiver the call handed back; both are more than a `call`.
+            Rhs::Call {
+                callee,
+                args,
+                spawn,
+                write_back,
+                kind,
+                ..
+            } => {
+                !spawn
+                    && !write_back
+                    && args.iter().all(|(v, _)| core_val_readable(v))
+                    && self
+                        .core_sig(callee, *kind)
+                        .is_some_and(|s| s.params.len() == args.len())
+            }
+            _ => false,
+        }
     }
 }
 
@@ -16576,47 +16775,13 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
     match s {
         St::Let(_, Rhs::Val(v)) | St::Store { value: v, .. } => name(v),
         St::Let(_, Rhs::Prim(_, vs, _)) => vs.first().and_then(name),
+        // A call pushes its arguments in order, so only the FIRST of them can
+        // be the value the stack is already carrying.
+        St::Let(_, Rhs::Call { args, .. }) | St::Do(Rhs::Call { args, .. }, _) => {
+            args.first().and_then(|(v, _)| name(v))
+        }
         St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
         _ => None,
-    }
-}
-
-/// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
-fn core_readable(body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
-    ss.iter().enumerate().all(|(i, s)| match s {
-        St::Let(n, rhs) => {
-            let held = body.names[*n as usize].binding.is_none()
-                && reads[*n as usize] == 1
-                && ss.get(i + 1).and_then(first_read) == Some(*n);
-            // A temporary the stack cannot carry needs a local the AST walk
-            // never takes, so the two would emit different locals.
-            (held || body.names[*n as usize].binding.is_some()) && core_rhs_readable(rhs)
-        }
-        St::Store { place, value, .. } => {
-            matches!(place, vyrn_lower::core::Place::Name(_)) && core_val_readable(value)
-        }
-        St::If {
-            cond, then, els, ..
-        } => {
-            core_val_readable(cond)
-                && core_readable(body, then, reads)
-                && core_readable(body, els, reads)
-        }
-        St::Block { body: inner, .. } => core_readable(body, inner, reads),
-        St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
-        St::Trap => true,
-        _ => false,
-    })
-}
-
-fn core_rhs_readable(rhs: &Rhs) -> bool {
-    match rhs {
-        Rhs::Val(v) => core_val_readable(v),
-        // `&&` and `||` are stated as prims and emit a branch; the row states
-        // no branch, so the walk stands down at them.
-        Rhs::Prim(Op::Bin(BinOp::And | BinOp::Or), ..) | Rhs::Prim(Op::Closure, ..) => false,
-        Rhs::Prim(_, vs, _) => vs.iter().all(core_val_readable),
-        _ => false,
     }
 }
 

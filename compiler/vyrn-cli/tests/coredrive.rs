@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 use vyrn_frontend::ast::Program;
-use vyrn_lower::core::{Body, Op, Place, Rhs, St, Val};
+use vyrn_lower::core::{Body, Callee, Op, Place, Rhs, St, Val};
 
 struct Fs;
 
@@ -68,17 +68,26 @@ fn corpus() -> Vec<PathBuf> {
 ///
 /// A body's class is the HARDEST thing in it, so the counts partition the
 /// corpus and the ranked list in §3 M3 reads straight off them.
-const CLASSES: [&str; 9] = [
+const CLASSES: [&str; 8] = [
     "the row names no value (`Val::Lit(Opaque)`)",
     "a lambda body the row does not carry (`Op::Closure`)",
     "a tag the arm does not carry (`St::Switch`)",
     "a layout: an aggregate made, read or taken",
-    "a callee's ABI (`Rhs::Call`)",
+    "a callee that is no declared function of the program (`Rhs::Call`)",
     "a release the driver must place (`St::Drop`, `St::Row`)",
-    "a loop, whose exit the row states as a branch the AST walk folds",
     "an `&&` or `||`: a prim row for a branch the emitter writes",
     "nothing: the rows carry it",
 ];
+
+/// The types `Fn_::core_walkable` admits a name of, spelled here so the count
+/// beside each class is the emitter's own screen and not a second rule.
+fn scalar(t: &vyrn_frontend::ast::Type) -> bool {
+    use vyrn_frontend::ast::Type;
+    matches!(
+        t,
+        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool
+    )
+}
 
 fn class_of(body: &Body) -> usize {
     let mut worst = CLASSES.len() - 1;
@@ -103,10 +112,10 @@ fn walk(ss: &[St], note: &mut impl FnMut(usize)) {
                 walk(then, note);
                 walk(els, note);
             }
-            St::Loop(b) => {
-                note(6);
-                walk(b, note);
-            }
+            // Since the loop slice the exit is the row's: the pass makes up
+            // the two-way branch and the `break` at the head of the loop it
+            // desugared, and the walk emits wasm's conditional branch for it.
+            St::Loop(b) => walk(b, note),
             St::Block { body, .. } => walk(body, note),
             St::Break { .. } | St::Continue { .. } | St::Trap => {}
             St::Return { value, .. } => {
@@ -133,8 +142,20 @@ fn rhs(r: &Rhs, note: &mut impl FnMut(usize)) {
             note(3);
             at(p, note);
         }
-        Rhs::Call { args, .. } => {
-            note(4);
+        // Since the callee slice the row says WHO: a function this program
+        // declares is one the emitter's own table answers for, and only the
+        // other eight kinds — and a `spawn`, and a write-back — are still
+        // waiting on a row.
+        Rhs::Call {
+            args,
+            kind,
+            spawn,
+            write_back,
+            ..
+        } => {
+            if *kind != Callee::Fn || *spawn || *write_back {
+                note(4);
+            }
             for (v, _) in args {
                 val(v, note);
             }
@@ -144,7 +165,7 @@ fn rhs(r: &Rhs, note: &mut impl FnMut(usize)) {
             vs,
             _,
         ) => {
-            note(7);
+            note(6);
             for v in vs {
                 val(v, note);
             }
@@ -205,6 +226,14 @@ fn run() {
     vyrn_genwasm::install();
     vyrn_lower::install();
     let mut classes = [0usize; CLASSES.len()];
+    // Beside each class, how many of its bodies name ONLY the scalar types the
+    // driver's own screen admits — RFC-0125 §3 M3, the loop slice's finding.
+    // A class's count says what the CORE still owes; this says what writing
+    // that row would buy today, because a body the emitter's screen refuses is
+    // one the row cannot reach. The two numbers ranked the list differently:
+    // the tag on `Arm` is 792 bodies and none of them, because a scrutinee is
+    // an enum and an enum is not a scalar.
+    let mut scalars = [0usize; CLASSES.len()];
     let mut carried: std::collections::BTreeSet<String> = Default::default();
     let mut bodies = 0usize;
     let mut programs = 0usize;
@@ -228,6 +257,9 @@ fn run() {
                     bodies += 1;
                     let c = class_of(body);
                     classes[c] += 1;
+                    if body.names.iter().all(|i| scalar(&i.ty)) {
+                        scalars[c] += 1;
+                    }
                     if c == CLASSES.len() - 1 {
                         carried.insert(body.name.clone());
                     }
@@ -256,7 +288,7 @@ fn run() {
     eprintln!("{programs} programs, {bodies} bodies");
     eprintln!("what a body waits on before the core's rows could carry it:");
     for (i, what) in CLASSES.iter().enumerate() {
-        eprintln!("  {:6}  {what}", classes[i]);
+        eprintln!("  {:6}  {:6} scalar-only  {what}", classes[i], scalars[i]);
     }
     eprintln!(
         "  {} distinct bodies the rows carry end to end",
