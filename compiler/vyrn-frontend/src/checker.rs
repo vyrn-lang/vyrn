@@ -9151,6 +9151,16 @@ impl<'a> Checker<'a> {
     /// captured (outer) binding may be READ but never assigned, `drop`ped, or
     /// passed to a `consume` parameter. Names introduced inside the lambda
     /// (parameters, `let`s, `for`-vars) are tracked in `locals` and are exempt.
+    ///
+    /// The descent and the scope stack are `ast::body_scope_descent!`'s since
+    /// RFC-0125 §3 M6. This pass carried its own copy of both, and the scope it
+    /// kept was the walk's, arm for arm: a branch clones, an `if let` binds its
+    /// pattern into the then-block alone, a `for`-var and an arm binder join the
+    /// block they open. What is this pass's own is the entry — a lambda's own
+    /// parameters are in `locals` before the body is walked — and three lines at
+    /// sites: a nested lambda literal is refused rather than descended, a
+    /// `consume` argument is checked before that argument is walked, and the
+    /// first violation is the one reported.
     fn check_lambda_body_captures(
         &self,
         body: &LambdaBody,
@@ -9158,220 +9168,121 @@ impl<'a> Checker<'a> {
         locals: &mut HashSet<String>,
         line: usize,
     ) -> Result<(), Diagnostic> {
-        match body {
-            LambdaBody::Expr(e) => self.captures_expr(e, outer, locals),
-            LambdaBody::Block(b) => self.captures_block(b, outer, &mut locals.clone()),
+        /// The rule's line at each site. A captured binding is one visible in
+        /// the enclosing scope and NOT shadowed by a name introduced inside the
+        /// lambda, which is what `locals` holds.
+        struct Captures<'a, 'b> {
+            ck: &'a Checker<'b>,
+            outer: &'a Scope,
+            err: Option<String>,
         }
-        .map_err(|m| cerr!(line, "{m}"))
-    }
 
-    fn captures_block(
-        &self,
-        b: &Block,
-        outer: &Scope,
-        locals: &mut HashSet<String>,
-    ) -> Result<(), String> {
-        for s in &b.stmts {
-            self.captures_stmt(s, outer, locals)?;
+        impl Captures<'_, '_> {
+            fn is_capture(&self, n: &str, locals: &HashSet<String>) -> bool {
+                !locals.contains(n) && self.ck.lookup(self.outer, n).is_some()
+            }
+
+            fn fail(&mut self, m: String) {
+                if self.err.is_none() {
+                    self.err = Some(m);
+                }
+            }
         }
-        Ok(())
-    }
 
-    fn captures_stmt(
-        &self,
-        s: &Stmt,
-        outer: &Scope,
-        locals: &mut HashSet<String>,
-    ) -> Result<(), String> {
-        // A captured binding is one visible in the enclosing scope and NOT shadowed
-        // by a name introduced inside the lambda.
-        let is_capture = |n: &str, locals: &HashSet<String>| {
-            !locals.contains(n) && self.lookup(outer, n).is_some()
-        };
-        match s {
-            Stmt::Let { name, value, .. } => {
-                self.captures_expr(value, outer, locals)?;
-                locals.insert(name.clone());
-                Ok(())
-            }
-            Stmt::Assign { name, value, line } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot assign to the captured \
-                         binding `{name}` (line {line})"
-                    ));
+        impl BodyVisit<'_> for Captures<'_, '_> {
+            fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
+                match s {
+                    Stmt::Assign { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot assign to the captured \
+                             binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::SetField { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot mutate a field of the \
+                             captured binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::IndexSet { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot store into the captured \
+                             binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::Drop { name, line } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda cannot `drop` the captured binding `{name}` (line {line})"
+                        ));
+                    }
+                    _ => {}
                 }
-                self.captures_expr(value, outer, locals)
             }
-            Stmt::SetField {
-                name, value, line, ..
-            } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot mutate a field of the \
-                         captured binding `{name}` (line {line})"
-                    ));
-                }
-                self.captures_expr(value, outer, locals)
-            }
-            Stmt::IndexSet {
-                name,
-                index,
-                value,
-                line,
-            } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot store into the captured \
-                         binding `{name}` (line {line})"
-                    ));
-                }
-                self.captures_expr(index, outer, locals)?;
-                self.captures_expr(value, outer, locals)
-            }
-            Stmt::Drop { name, line } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda cannot `drop` the captured binding `{name}` (line {line})"
-                    ));
-                }
-                Ok(())
-            }
-            Stmt::Return { value: Some(e), .. } => self.captures_expr(e, outer, locals),
-            Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
-            Stmt::Expr(e) => self.captures_expr(e, outer, locals),
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_block(then_block, outer, &mut locals.clone())?;
-                if let Some(eb) = else_block {
-                    self.captures_block(eb, outer, &mut locals.clone())?;
-                }
-                Ok(())
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.captures_expr(scrutinee, outer, locals)?;
-                let mut inner = locals.clone();
-                for b in crate::movecheck::pattern_bindings(pattern) {
-                    inner.insert(b.to_string());
-                }
-                self.captures_block(then_block, outer, &mut inner)?;
-                if let Some(eb) = else_block {
-                    self.captures_block(eb, outer, &mut locals.clone())?;
-                }
-                Ok(())
-            }
-            Stmt::While { cond, body, .. } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_block(body, outer, &mut locals.clone())
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                self.captures_expr(iter, outer, locals)?;
-                let mut inner = locals.clone();
-                inner.insert(var.clone());
-                self.captures_block(body, outer, &mut inner)
-            }
-            Stmt::Region { body, .. } => self.captures_block(body, outer, &mut locals.clone()),
-        }
-    }
 
-    fn captures_expr(
-        &self,
-        e: &Expr,
-        outer: &Scope,
-        locals: &HashSet<String>,
-    ) -> Result<(), String> {
-        let is_capture = |n: &str| !locals.contains(n) && self.lookup(outer, n).is_some();
-        match e {
-            Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
-                // Passing a captured binding to a `consume` parameter would move it
-                // out of the enclosing scope from inside the lambda — forbidden.
-                let caps = self.caps.get(name);
-                for (k, a) in args.iter().enumerate() {
-                    if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
-                        if let Expr::Var { name: vn, .. } = a {
-                            if is_capture(vn) {
-                                return Err(format!(
-                                    "a lambda cannot consume the captured binding `{vn}` \
-                                     (line {line})"
-                                ));
+            fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+                if self.err.is_some() {
+                    return false;
+                }
+                match e {
+                    Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+                        // Passing a captured binding to a `consume` parameter
+                        // would move it out of the enclosing scope from inside
+                        // the lambda — forbidden. The argument is checked before
+                        // it is walked, so the FIRST violation in source order is
+                        // the one reported; the walk of the arguments is
+                        // therefore this arm's own.
+                        let caps = self.ck.caps.get(name);
+                        for (k, a) in args.iter().enumerate() {
+                            if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
+                                if let Expr::Var { name: vn, .. } = a {
+                                    if self.is_capture(vn, locals) {
+                                        self.fail(format!(
+                                            "a lambda cannot consume the captured binding \
+                                             `{vn}` (line {line})"
+                                        ));
+                                        return false;
+                                    }
+                                }
+                            }
+                            body_expr(a, locals, self);
+                            if self.err.is_some() {
+                                return false;
                             }
                         }
+                        false
                     }
-                    self.captures_expr(a, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
-                for a in args {
-                    self.captures_expr(a, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                self.captures_expr(expr, outer, locals)
-            }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.captures_expr(lhs, outer, locals)?;
-                self.captures_expr(rhs, outer, locals)
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.captures_expr(scrutinee, outer, locals)?;
-                for arm in arms {
-                    let mut inner = locals.clone();
-                    for b in crate::movecheck::pattern_bindings(&arm.pattern) {
-                        inner.insert(b.to_string());
+                    // A nested lambda literal is NOT permitted inside a lambda
+                    // body in v1 (RFC-0023 nesting lock): it would compound
+                    // monomorphization. A lambda body MAY call functions that
+                    // themselves take `fn` parameters — that is an ordinary
+                    // call, handled above.
+                    Expr::Lambda { line, .. } => {
+                        self.fail(format!(
+                            "a lambda body may not contain another lambda literal in v1 \
+                             (line {line})"
+                        ));
+                        false
                     }
-                    match &arm.body {
-                        ArmBody::Expr(e) => self.captures_expr(e, outer, &inner)?,
-                        ArmBody::Block(b) => self.captures_block(b, outer, &mut inner)?,
-                    }
+                    // Everything else reads, and a read is what a capture is
+                    // allowed to be.
+                    _ => true,
                 }
-                Ok(())
             }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_expr(then_branch, outer, locals)?;
-                if let Some(eb) = else_branch {
-                    self.captures_expr(eb, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    self.captures_expr(v, outer, locals)?;
-                }
-                Ok(())
-            }
-            // A nested lambda literal is NOT permitted inside a lambda body in v1
-            // (RFC-0023 nesting lock): it would compound monomorphization. A lambda
-            // body MAY call functions that themselves take `fn` parameters — that is
-            // an ordinary call, handled above.
-            Expr::Lambda { line, .. } => Err(format!(
-                "a lambda body may not contain another lambda literal in v1 \
-                 (line {line})"
-            )),
-            // Scalar leaves and plain variable reads (captures by read) are fine.
-            _ => Ok(()),
+        }
+
+        let mut v = Captures {
+            ck: self,
+            outer,
+            err: None,
+        };
+        let mut locals = locals.clone();
+        match body {
+            LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+            LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+        }
+        match v.err {
+            Some(m) => Err(cerr!(line, "{m}")),
+            None => Ok(()),
         }
     }
 

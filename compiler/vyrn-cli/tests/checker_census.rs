@@ -486,13 +486,10 @@ fn sections() -> Vec<Section> {
         sec(
             "fn check_lambda_body_captures(",
             Refusal,
-            "a lambda's capture discipline (RFC-0023)",
-        ),
-        sec(
-            "fn captures_block(",
-            Surface,
-            "one arm per form again, collecting the names a lambda body \
-             captures",
+            "a lambda's capture discipline (RFC-0023). The descent and the \
+             scope stack are `ast::body_scope_descent!`'s since RFC-0125 §3 \
+             M6; it was one arm per form again, and the arm list held two \
+             holes — a map literal and a `consume` were never entered",
         ),
         sec(
             "fn check_modify_arg(",
@@ -757,9 +754,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("the typing judgment", 3418, 141),
-        ("a rule the checker states", 1455, 57),
+        ("a rule the checker states", 1576, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 3296, 157),
+        ("one arm per form, type constructor or builtin", 3086, 157),
         ("shared machinery", 2297, 30),
         ("tests", 4819, 0),
     ];
