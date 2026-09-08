@@ -410,9 +410,18 @@ enum InstRule {
 // it stayed 24, because `own::release_kind` threw the receiver type away and a
 // name alone does not say which instance a generic release reaches. The step
 // carries the type now (`DropKind::Release(name, receiver)`) and `vyrn_lower`
-// solves the instance from it, so the class is empty and the rule goes rather
+// solved the instance from it, so the class was empty and the rule went rather
 // than firing zero times — §3 M2's own precedent, applied to itself for the
 // second time.
+//
+// The SOLVER that replaced it is gone too (RFC-0125 §3 M3, the queue's reader).
+// `lower_with` read the placed release rows to queue those instances, and over
+// the corpus that queued 13 of them — every one an `Owned__Slots__release<T>`
+// — while the emitted wasm was byte-identical without them. With one emitter,
+// a declared release is emitted through the ordinary call path
+// (`direct.rs`'s `Rel::Call` parks the receiver and calls), which reaches the
+// body the way any written call does. So the worklist owes it nothing, and the
+// queue stopped reading a table §2.7 deletes.
 
 /// Which rule, if any, explains `a` against `b`. `None` means the gate fails.
 ///

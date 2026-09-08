@@ -15184,6 +15184,329 @@ reason.
 | the five censuses | unmoved: nothing here touches a pass |
 
 
+#### A placed row is a release, whatever table it goes in (2026-09-08, `track-dr`)
+
+`track-dm` recorded a leak it could not move: `let arg = mk(); return match
+fromJson(R, arg.j) { .. }`, where `vyrn why --memory` prints "`arg` NOT
+reclaimed — nothing in this frame releases it". The report is wrong and the
+program is not. This is what it was.
+
+**The kernel places the row, in the table beside the one the report read.**
+`place_frames` files a whole-value row under four keys: the exit
+(`MissingKind::Exit`), a join's EDGE (`Edge`), an arm's binder (`ArmBinder`)
+and a store (`Store`). Which key a row takes is a question about where the
+EMITTER reads it, not about whether the value comes back: an exit row inside
+an arm would be emitted on the arm beside it, which took the name, so
+`Kernel::scope_end_inner` files a name held at one arm's end as that arm's
+edge instead. `arg` is held at both arms of the returned `match`, so the
+kernel files two edge rows, `Builder::edge_drops` emits a `St::Drop` on each,
+and `report` — which built its set from `Exit` alone — called the value a
+leak.
+
+**Measured on the program itself.** `VYRN_KERNEL_TRACE=1` prints an
+`Edge { edge: 0 }` row for `arg` at the `Return` and the same row for edge 1,
+and `VYRN_LEAK_CHECK=1 vyrn run` on that program exits 0 with the accounting
+allocator armed, before this change and after it. So there is no leak here,
+and there was none at `track-dm`'s commit or its parent: what is wrong is one
+reader that restated "which rows are releases" more narrowly than the pass
+that files them.
+
+**The rule, stated once.** `report` reads every table that carries a WHOLE
+value — the exit, the edge, the arm's binder — and neither of the two that do
+not: an `EdgePlace` row releases a sub-place one edge took, which says nothing
+about the binding, and a `Store` row names a place that may be nobody's
+binding. The match is exhaustive on `MissingKind`, so a fifth table has to
+decide. `ArmBinder` moves no row today — `bound_by_let` is set at a `let` and
+nowhere else, and the report is about the `let`s a reader wrote — and it is in
+the set because it is a whole-value row, not because a row needs it.
+
+**What moved over the corpus.** `vyrn why --memory` over all 190 `.vyrn` roots
+under `examples/`, `std/`, `site/` and `site/app/`:
+
+| | before | after |
+|---|---|---|
+| rows reading "NOT reclaimed — nothing in this frame releases it" | 42 | **10** |
+| files with one | 24 | 10 |
+
+Thirty-two rows, in fifteen files (`codecbytes`, `jsonbytes`, `knucleotide`,
+`site/app/bench`, `site/app/demohl`, `site/app/packages`, `site/app/pagemd`,
+`site/export`, `std/contract`, `std/graphql`, `std/hash`, `std/json`,
+`std/json5`, `std/runtime`, `std/von`), each moving from that sentence to
+"reclaimed at block exit — …" and none moving the other way: 18 array
+buffers, 11 String buffers, one pair of map buffers, one `Array<json$Json>`
+and one `Option<String>`. The ten that stand are ten different sentences the
+core does state — `fnvalstore`'s `sink` is the corpus's own `leak 1` row.
+
+**No byte moves.** The report is a printer: `VYRN_WASM_MANIFEST=check` is
+green and the manifest does not move, and the residue ratchet reads the same
+172 clean / 3 leaking on each engine.
+
+**The pin.** `compiler/vyrn-cli/tests/memory.rs::a_name_held_at_a_returned_match_is_reported_reclaimed_and_is`
+— the shape above, asserted twice: the report says "reclaimed at block exit —
+releasing what the `{ j: String }` holds", and the same program under
+`VYRN_LEAK_CHECK=1` exits 0. The second half is why the first is trustworthy,
+and it is the reason no corpus example was added for this: the ratchet already
+watches the shape (`std/hash.vyrn`'s `sha1Hex` and `examples/graphql.vyrn`'s
+`gqlResolve` both hold a name at both arms of a returned `match`, and both are
+clean rows), so a new example would pin a runtime answer that was never wrong
+and would move the corpus counts every other slice quotes.
+
+**The lines.** `compiler/vyrn-lower/src/core.rs` 6,108 to **6,128**. The five
+censuses do not move: nothing here touches a pass they count.
+
+
+#### The lend through a wrapper is refused, so the two closures go (2026-09-08, `track-dr`)
+
+`track-dh` measured `Facts::lending` and `Facts::retains` EMPTY in every one of
+190 corpus programs and named the blocker for deleting them:
+`note_wrapped_lend` "records, never refuses", and its own words say refusing
+`found = match a { Key(k) => Some(k) }` "would refuse most of `std/html`". A
+non-empty set is therefore silent, and a silent set the core reads is a
+release stood down for a reason nobody stated.
+
+**The blocker is not true on this line, and the measurement says so.** Eleven
+programs were built, one per seed path of the two sets, and every one is
+REFUSED — with `VYRN_LEND_DUMP=1` naming the seed it filled first:
+
+| the shape | the set it seeds | the refusal |
+|---|---|---|
+| `std/html`'s `attrKey`: `found = match a { Key(k) => Some(k), .. }` in a loop, the local returned | `lending` | "`k` may not be put into `Some(..)` — it is read out of a place that owns it" |
+| the same wrap at the `return`, over a loop element | `lending` | the same |
+| `return Some(p.j)` on a `read` parameter | both | "`p.j` may not be put into `Some(..)` — it is a `read` parameter" |
+| `return Wrap { s: p.j }` | both | "`p.j` may not be stored into the field `Wrap.s` — it is a `read` parameter" |
+| `return if c { Some(p.j) } else { None }` | both | "`p.j` may not be put into `Some(..)` — it is a `read` parameter" |
+| `return Some(d.title)` out of a LOCALLY built record — RFC-0092's leaf | `lending` | "`d.title` may not be put into `Some(..)` — it is read out of a place that owns it" |
+| the same, stored into a local aggregate instead of returned | `lending` | "`d.title` may not be stored into the field `Box.v` — …" |
+| `One(xs) => One(xs)` — a payload binder handed back into its own constructor | `lending` | "`xs` may not be put into `One(..)` — it is a second name for the `read` parameter `b`" |
+| `return [p.j]` — the element half of the same door | `retains` | "`p.j` may not be stored into the literal — it is a `read` parameter" |
+| `return Some(c.v)` where `c: Cell<T>` — the one type the wrapper walk cannot name | neither | "`c.v` may not be put into `Some(..)` — it is a `read` parameter" |
+| `return Some(p.j)` under `Some(Some(..))` | both | the `read`-parameter sentence, at the inner wrap |
+
+**Why the comment is stale, and what states the rule instead.**
+`lends_through_a_wrapper` reads a CONSTRUCTOR argument and a STRUCT-LITERAL
+field, and `note_wrapped_lend` is called immediately after `store(value, ..)`
+on the same expression at the same line. That is the door exit-residue rounds
+seven and ten closed — "the door now refuses heap-owning borrows at
+constructor positions outright", in `lends_through_a_wrapper`'s own comment —
+and rule 2 is the KERNEL's since census rows 01, 02, 03, 27 and 34. So the
+seed and the refusal are the same site, and the refusal is stated by the pass
+that outlives `movecheck.rs`: every one of the eleven prints the SAME sentence
+under `VYRN_NO_MOVECHECK=1`, byte for byte. `VYRN_NO_KERNEL=1` accepts all
+eleven, which is the one configuration where a non-empty set could reach a
+reader — and it is the knob that turns the whole memory judgment off.
+
+**What went.** In `movecheck.rs`: `Facts::lending`, `Facts::retains`,
+`Run::lending`, `Run::retains`, the four `MoveCheck` cells (`lending`,
+`forwards`, `retains`, `handed_on`), the two fixpoint loops that closed them,
+`VYRN_LEND_DUMP`, and the seven walks that fed them — `lends`,
+`note_wrapped_lend`, `note_retention`, `note_handover`, `note_return`,
+`lends_through_a_wrapper`, `arm_carries_heap`, and the free `calls_in` that
+marked a lender's forwarders. `arg_verdict` loses two parameters and four
+clauses; what is left of the lending clause is `views`, which is a seeded
+row's own shape and no closure at all. `ArgTemp::elem_producers` goes with
+them — round twenty-five screened it against the lending set and against
+nothing else. In `own.rs`: `Ownership::lending` and `Ownership::retains`. In
+`core.rs`: two of `store_is_fresh`'s three screens, and with them the index
+half of `read_only_mentions`' collection — the escape closure asks about a
+callee and not about a position.
+
+**Two dead items this slice found beside them.** `MoveCheck::fixes_here` and
+`MoveCheck::is_module_state` had no caller, and `MoveCheck::exported` was read
+by `fixes_here` alone. They are `vyrn-frontend`'s two standing build warnings,
+and they go here: the file has no `Menu` section left that nothing calls.
+
+**One mode flag was a sink.** Two sites asked `self.lending.is_some()` to mean
+"this is the `Want::Lets` walk" — the projection store walk and the capture
+record. A sink is not a mode, and with the sink gone the walk says so itself:
+`MoveCheck::lets`.
+
+**The licence.** Every number, and each was run before the next:
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over all 190 corpus roots | byte-identical, **0 lost / 0 gained** |
+| kernel corpus | **24,775 accepted, 0 refused, 0 unlowered** |
+| `VYRN_WASM_MANIFEST=check` | green, and the manifest does not move — all 176 examples emit the same bytes, so neither set stood a release down anywhere the corpus reaches |
+| the residue ratchet | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `cargo test -p vyrn-cli`, no filter | 82 suites, all green |
+
+**The pin.** `compiler/vyrn-cli/tests/refusals.rs::a_lend_through_a_wrapper_is_refused_and_the_kernel_is_what_refuses_it`
+— the eleven programs above, each asserted refused with its exact sentence,
+twice: as the checker states it, and with `VYRN_NO_MOVECHECK=1` so the
+sentence is the kernel's. A row that stops being refused is the day the two
+sets are needed again, and it says so. `tests/kernel.rs`'s corpus count of the
+two closures goes with them: a table over eleven SHAPES is what the count was
+standing in for, and the count could only ever say the corpus has none.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,879 to **4,411**;
+`compiler/vyrn-frontend/src/own.rs` 1,833 to **1,827**;
+`compiler/vyrn-lower/src/core.rs` 6,128 to **6,109**. 493 lines.
+
+**The censuses.** The structural census
+(`compiler/vyrn-cli/tests/refusals.rs`): `Kind::Rows` **815 to 533**, `Menu`
+**73 to 37**, shared machinery **3,272 to 3,122**; `Kernel`, `Checker` and
+`Tests` do not move. Six anchors go with their sections and one is re-aimed —
+`fn names_a_constructor` for the borrow table's neighbour. RFC-0127 §3's form
+census moves at thirteen expression forms, **1,223 mentions to 1,202**: twelve
+of them lose `movecheck` mentions and two lose a `lower` mention beside it.
+The emitter census does not move: nothing here touches `direct.rs`.
+
+**What is left of `track-dd`'s row 5.** Two closures, not four.
+`Facts::escapers` (up to 123 rows in one corpus program) and
+`Facts::fnval_clear` (up to 1,154 cleared signature keys) are answers a body
+does state, and the question for them is whether `vyrn-lower`'s core already
+walks what they need. `fnval_clear`'s meet is simpler for this slice: with the
+two sets gone it asks the capability rows alone.
+
+
+#### The queue stops reading the placed rows (2026-09-08, `track-dr`)
+
+`track-dd` named `Ownership::releases`' outside readers as the blocker for the
+plan's last table: `vyrn-lower/src/lib.rs` feeds `dispatched`, the
+monomorphisation queue, which follows a declared `release` a placed row names
+to the instance it needs. Its question was whether the queue could follow the
+same release from `Owned::impls` instead — coarser, with `Module::sweep`
+dropping what no row names. The measurement answers something shorter: **the
+queue owes it nothing at all.**
+
+**What the reader was worth, measured.** `VYRN_NO_DISPATCH=1` skips
+`calls.extend(dispatched(..))` and nothing else:
+
+| | with | without |
+|---|---|---|
+| kernel corpus, instances accepted | 24,775 | **24,762** |
+| `VYRN_WASM_MANIFEST=check` | green | **green, and the manifest does not move** |
+| `route` `--ignored` | 175 checked, 0 failed | 175 checked, 0 failed |
+| the residue ratchet | 172 clean, 3 leaking on each engine | the same |
+| `cargo test -p vyrn-cli`, no filter, and the six ignored corpus suites | green | green |
+
+Thirteen instances, zero bytes. `VYRN_DISPATCH_DUMP=1` names all thirteen and
+they are one function: `Owned__Slots__release<T>` at eleven receivers, in
+`autorelease`, `copy`, `freelist`, `genref` (three), `linkedlist`, `membench`,
+`slots` (two), `slottable`, `tree` and `tryplace`.
+
+**Why it stopped mattering.** RFC-0101 M5 wrote `dispatched` because a backend
+emitted `Owned__Slots__release<…>` at a drop site and no worklist above a
+backend could see it — clang reported the missing symbol at the end of a
+build. There is one emitter now, and it does not emit a name: `direct.rs`'s
+`Rel::Call` parks the receiver under `@rel` and calls `Fn_::call`, "the
+ordinary call path", which reaches the body the way any written call does. The
+worklist entry is a second statement of a call the emitter already makes. The
+residue ratchet is the proof it is reached: `slots.vyrn` and the ten beside it
+come out clean with the queue's entry gone, and a release that was not emitted
+would leak the slab.
+
+**What went.** `vyrn_lower::dispatched`, and with it `lib.rs`'s only read of
+`Instance::releases`. `compiler/vyrn-lower/src/lib.rs` 1,490 to **1,443**.
+`tests/lowered.rs`'s retired-rule note gains the second half of its own story:
+`InstRule::ImplicitDispatch` went when the step began carrying its receiver
+type, and the solver that replaced it goes now that one emitter reaches the
+body itself.
+
+**The number that moves for every later record.** The kernel corpus is
+**24,762 accepted, 0 refused, 0 unlowered**. The thirteen instances were
+lowered and judged and emitted nothing; they are not accepted any more because
+they are not queued.
+
+**What still reads `Instance::releases`.** Three, and none of them is a
+compiler pass: `render.rs` prints the rows for `vyrn emit-lowered`,
+`tests/lowered.rs` lints a step's type for concreteness, and `tests/kernel.rs`
+prints them beside a refusal. All three read the CORE's rows already — the
+placer is the only writer of `own.releases` since the container slice — so the
+table they read is the one §2.7 keeps, under the name it will keep.
+
+
+#### The other two closures: the core does walk it, and the blocker is order (2026-09-08, `track-dr`)
+
+`Facts::escapers` and `Facts::fnval_clear` are what is left of `track-dd`'s
+row 5. `track-dh` measured them non-empty — up to 123 escaper rows in one
+corpus program, up to 1,154 cleared signature keys — and named what each needs:
+a body walk (`carries_param_storage`) and a census of every lambda's arity and
+signature. The question this slice was to answer is whether `vyrn-lower`'s core
+already walks what they need. It does, and it is not the walk that stands in
+the way.
+
+**What each asks, and what the core has.**
+
+| the closure | what it reads | what the core has |
+|---|---|---|
+| `escapers` | can a function's RESULT hold a borrowed parameter's storage: a walk over returned expressions and over field/element stores, with a per-body provenance set for a local that was assigned a carrying value | every store is an `St::Store` and every call an `Rhs::Call`; `NameInfo` says whether a name is a borrow and whose (`not_owned`, `borrow`), which is the question `borrow_of` answers on the AST. The provenance set is a fold over the frame's own names |
+| `fnval_clear` | the meet over every fn-value signature: no member lends, every position reads, and no LAMBDA could inhabit the signature | the capability rows are `declared::arg_caps`, which is a declaration; the two call-graph sets it also asked are gone with this slice's first record; and the core builds every lambda as a frame of its own (`Body::lambdas`), so the arity and signature census is a walk over `Body::frames()` |
+
+**The blocker is ORDER, not the walk.** Both are asked WHILE a body is built:
+`Builder::store_is_fresh` decides `St::Store { releases }` on the row it is
+writing, and `fnval_released` decides an argument temporary's drop at the call
+it is lowering. The core's own facts are folded AFTER a body is built
+(`fold_frame` over `Body::frames()`, into the `FACTS` thread-local), so a fact
+folded there is one build too late for the pass that needs it. The shape that
+would work is the one `augment` already has — build every body, fold, then
+build again against the fold — and its price is measured rather than guessed.
+
+**The price, on `site/app/docs.vyrn`** (`vyrn check --profile`, release):
+
+| phase | count | total |
+|---|---|---|
+| `placer: core::build` | 2,232 | 113.63 ms |
+| `placer: facts: rebuilt` | 918 | 74.51 ms |
+| `placer` | 3 | 304.05 ms |
+
+The second build runs for the 918 functions the first pass wrote a row for. A
+fold that every body must be rebuilt against turns 918 into 2,232, which is
+about **181 ms in place of 74 ms** — roughly a third more placer on the
+command a keystroke pays for. That is the number the next slice has to beat or
+accept, and there is a cheaper shape beside it: fold from the bodies the FIRST
+pass already builds and read the fold at the build the EMITTER reads, which
+costs no extra build but leaves the first pass's rows built against an empty
+answer. Neither is a walk the core cannot make; both are a decision about which
+build states which fact.
+
+**What must be pinned either way.** A corpus equality of the two answers in
+both directions before each reader switches, as every slice of this arc has
+done — the escaper set is read at a store whose release stands down, so a
+false negative is a double free and a false positive is a leak, which is why
+`store_is_fresh` is the last screen either closure feeds.
+
+
+#### Gates (2026-09-08, `track-dr`)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Over the three
+commits of this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok — ONE warning now, `kernel.rs`'s unreachable pattern. `vyrn-frontend`'s two went with `fixes_here`, `is_module_state` and `exported` |
+| `cargo test -p vyrn-cli`, no filter | 82 suites, all green |
+| `kernel` `--ignored`, release | 1 — **24,762 accepted**, 0 refused, 0 unlowered (13 fewer instances: the queue's reader) |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — **30,184 functions judged**, 0 differ (13 fewer, the same instances) |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 435 programs from 133 sources |
+| `refusals`, `forms` | re-pinned in the wrapped-lend commit; `emitter_census`, `surface`, `checker_census`, `frontend_census`, `cli_census` unmoved |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 9 — the returned-match row is the new one |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed, 297 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move — no commit of this track changes an emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
+**What this track touched in `core.rs`**, so a track beside it can read the
+overlap: `report` (the facts and placement region), and — outside it, three
+edits of one line each — `Builder::store_is_fresh`'s screen,
+`Builder::read_only_mentions`' collection type, and the `ArgTemp` literal
+inside `Builder::arg_released`. Nothing else in the file, and nothing in
+`kernel.rs` at all. `vyrn-lower/src/lib.rs` loses `dispatched` and its one
+call site in `lower_with`.
+
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

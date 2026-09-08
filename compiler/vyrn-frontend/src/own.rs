@@ -1102,17 +1102,13 @@ pub struct Ownership {
     /// the one order that used to be asserted separately by `Gen::drop_stack`,
     /// `Fn_::releases` and the interpreter's per-block `Vec`.
     pub releases: HashMap<String, Vec<Release>>,
-    /// The two closures over the call graph, handed on so the CORE can ask
-    /// [`crate::movecheck::arg_verdict`] the same question at the same
-    /// position (RFC-0125 §3 M3, the argument slice).
+    /// Round nineteen's closure over the call graph, handed on so the CORE
+    /// can screen the store it is lowering (RFC-0125 §3 M3, the fresh-store
+    /// slice).
     ///
-    /// Not a table: neither says anything a body states. `lending` names the
-    /// functions whose result the caller must not release and `retains` the
-    /// positions that KEEP a borrowed parameter, and both are answers only a
-    /// pass that has read every body can give. See
-    /// [`crate::movecheck::Facts::lending`] for why they still exist.
-    pub lending: std::collections::HashSet<String>,
-    pub retains: std::collections::HashSet<(String, usize)>,
+    /// Not a table: it says nothing a body states. It names the functions
+    /// whose result can HOLD a borrowed parameter's storage, which is an
+    /// answer only a pass that has read every body can give.
     pub escapers: std::collections::HashSet<String>,
     /// Round forty-six's meet, by signature key — see
     /// [`crate::movecheck::Facts::fnval_clear`]. The fourth answer only a
@@ -1297,8 +1293,6 @@ fn analyze_now(program: &Program) -> Ownership {
         // Every row in this table is the placer's now: the analysis injects
         // none, and the fold that did is deleted (RFC-0125 §3 M3).
         releases: HashMap::new(),
-        lending: facts.lending.clone(),
-        retains: facts.retains.clone(),
         escapers: facts.escapers.clone(),
         fnval_clear: facts.fnval_clear.clone(),
         arg_caps: crate::declared::arg_caps(program),

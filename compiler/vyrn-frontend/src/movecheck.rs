@@ -163,11 +163,6 @@ pub struct ArgTemp {
     /// unfreed `bytes` buffer per line; with this the row is Released like
     /// any read argument instead of standing down as Lent.
     pub view_copies: bool,
-    /// Round twenty-five: for a heapified array-literal argument with
-    /// heap-owning elements, the callee of each element expression — screened
-    /// in `arg_verdict` against the CLOSED lending set, because a lender's
-    /// result inside the literal would make the deep free a use-after-free.
-    pub elem_producers: Vec<String>,
 }
 
 /// What the callee at a call-argument position does with the temporary it is
@@ -181,8 +176,8 @@ pub enum ArgVerdict {
     Released,
     /// A `consume` parameter: the callee owns it now, so the caller must not.
     Transferred,
-    /// The callee keeps it — a variant constructor, or a position
-    /// [`MoveCheck::note_retention`] recorded. A leak, and not this rule's.
+    /// The callee keeps it — a variant constructor. A leak, and not this
+    /// rule's.
     Retained,
     /// The result points into the argument, or the argument's own producer
     /// handed back storage it does not own. Either way somebody else owns it.
@@ -197,32 +192,9 @@ pub enum ArgVerdict {
 /// Everything one `Want::Lets` walk answers. Two facts out of one walk, because
 /// [`crate::own::analyze`] needs both and the walk is not cheap.
 pub struct Facts {
-    /// The two closures over the call graph, kept so a reader can ask whether
-    /// either says anything (RFC-0125 §3 M3, the checker's deletion path).
-    ///
-    /// `lending` names the functions whose result the caller must not release;
-    /// `retains` names the `(callee, index)` positions that KEEP a borrowed
-    /// parameter they are handed. Both are seeded by rule 2 and rule 3's own
-    /// recording paths, and both are EMPTY over the corpus.
-    ///
-    /// **Empty over the corpus is not the same as unfillable, and the deletion
-    /// slice found the difference.** The record read "the shadow of a rule that
-    /// is enforced now": rule 3 refuses a returned borrow, so no function may
-    /// lend its result. Rule 3 does not refuse a [`Borrow::Element`], and
-    /// [`MoveCheck::check_return`] says so in its own words — a `for` variable
-    /// keeps phase 4b's verdict. So `fn pick(xs: Array<String>) -> String { for
-    /// x in xs { return x } .. }` is ACCEPTED and seeds `lending`, and
-    /// `movecheck`'s own
-    /// `a_lender_forwarded_through_an_aggregate_is_still_marked_lending` is that
-    /// program. Delete the closures and its caller frees an element the caller's
-    /// caller still owns. So these two stay until rule 3 covers an element, or
-    /// something else states what they state (RFC-0125 §3 M3, the deletion
-    /// slice).
-    pub lending: HashSet<String>,
-    pub retains: HashSet<(String, usize)>,
     /// Round nineteen's third closure: the functions whose result can HOLD a
-    /// borrowed parameter's storage. Screened beside the other two in
-    /// `core::Builder::store_is_fresh`, and handed on to the core with them.
+    /// borrowed parameter's storage. Screened in
+    /// `core::Builder::store_is_fresh`, and handed on to the core.
     pub escapers: HashSet<String>,
     /// Round forty-six's meet, as a set of signature keys: the fn-value
     /// signatures whose whole target set READS the position, retains nothing
@@ -235,16 +207,14 @@ pub struct Facts {
     /// a lambda; lambdas carry no capability and no retention rows, so a
     /// signature any lambda could inhabit is not in this set. What is in it is
     /// a signature the meet cleared, and the core reads it at the position
-    /// ([`fn_sig_key`]) the way it reads `lending` and `retains`.
+    /// ([`fn_sig_key`]).
     pub fnval_clear: HashSet<String>,
 }
 
-/// The four closures over the call graph, out of one walk.
+/// The two closures over the call graph, out of one walk.
 pub fn facts(program: &Program) -> Facts {
     let r = run(program, Want::Lets);
     Facts {
-        lending: r.lending,
-        retains: r.retains,
         escapers: r.param_escapers,
         fnval_clear: r.fnval_clear,
     }
@@ -273,8 +243,6 @@ enum Want {
 struct Run {
     diags: Vec<Diagnostic>,
     sites: Vec<OwningSite>,
-    lending: HashSet<String>,
-    retains: HashSet<(String, usize)>,
     projections: Vec<ProjectionSite>,
     param_escapers: HashSet<String>,
     fnval_clear: HashSet<String>,
@@ -313,31 +281,20 @@ pub fn lends_result(name: &str) -> bool {
 
 /// What the callee does with the temporary at `(callee, ix)`.
 ///
-/// Every clause is a rule that already shipped, read at a position instead of at
-/// a binding: `constructs` is `59c8a0c`'s recorded exit, `retains` is
-/// [`MoveCheck::note_retention`]'s set closed over the call graph, `lending` is
-/// [`MoveCheck::lends`]'s, and the capability is the parameter's own
+/// Every clause is a rule that already shipped, read at a position instead of
+/// at a binding: `constructs` is `59c8a0c`'s recorded exit, `views` is the
+/// seeded row's own shape, and the capability is the parameter's own
 /// declaration. Rules 2 and 3 are what make `read` mean "keeps nothing": a
 /// borrow may not be stored and may not be returned, and `59c8a0c` closed the
 /// hand-over exit.
-pub fn arg_verdict(
-    s: &ArgTemp,
-    constructs: bool,
-    cap: Option<Capability>,
-    retains: &HashSet<(String, usize)>,
-    lending: &HashSet<String>,
-) -> ArgVerdict {
-    // The producer handed back storage it does not own, so there is no
-    // temporary here at all — the same rule [`ownership`] applies to a `let`
-    // whose initializer is a call to a lender.
-    if s.producer.as_deref().is_some_and(|p| lending.contains(p)) {
-        return ArgVerdict::Lent;
-    }
-    // Round twenty-five: a heapified literal whose ELEMENTS came from a lender
-    // holds borrowed storage — the deep free must stand down.
-    if s.elem_producers.iter().any(|p| lending.contains(p)) {
-        return ArgVerdict::Lent;
-    }
+///
+/// **No call-graph set is asked here.** Two of them used to be — the
+/// functions whose result the caller must not release, and the positions
+/// that keep a borrowed parameter they are handed. Both were empty over
+/// every corpus program and over every witness the deletion slice could
+/// build, because the kernel refuses the shapes that fill them at the
+/// constructor and field doors (RFC-0125 §3 M3, the wrapped lend).
+pub fn arg_verdict(s: &ArgTemp, constructs: bool, cap: Option<Capability>) -> ArgVerdict {
     // RFC-0096 M3's four consumer sites free this operand already. The two
     // rules must not both fire on one value, and this is where they partition.
     let allocating_operand = match s.producer.as_deref() {
@@ -353,14 +310,11 @@ pub fn arg_verdict(
     if constructs {
         return ArgVerdict::Retained;
     }
-    if retains.contains(&(s.callee.clone(), s.ix)) {
-        return ArgVerdict::Retained;
-    }
     // A view LENDS — its result names a place inside this argument — except
     // where the element it hands out is a heap-free copy (round twenty): a
     // scalar read through `bytes(l)[0]` keeps no pointer into the buffer, so
     // the temporary is the caller's to free like any read argument.
-    if lending.contains(&s.callee) || (views(&s.callee) && !s.view_copies) {
+    if views(&s.callee) && !s.view_copies {
         return ArgVerdict::Lent;
     }
     // A row whose RETURN is the same bare type parameter as this argument's may
@@ -886,14 +840,6 @@ fn run(program: &Program, want: Want) -> Run {
     // function became a method. Stated once, in [`crate::declared::arg_caps`].
     let caps = crate::declared::arg_caps(program);
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
-    // `export extern fn` names. Rule 3 is stricter here, because the caller is
-    // JS and JS frees every String it is handed (RFC-0089 M3b).
-    let exported: HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| f.is_export_extern)
-        .map(|f| f.name.clone())
-        .collect();
     // RFC-0125 §3 M3, the type slice: the type of a node is the checker's
     // answer, read off its record. `recorded` serves the analysis's own check
     // where one was made and checks once where none was, and the record it
@@ -907,7 +853,6 @@ fn run(program: &Program, want: Want) -> Run {
         caps: &caps,
         impls: &program.impls,
         globals: &globals,
-        exported: &exported,
         errors: RefCell::new(Vec::new()),
         decl: &decl,
         // Module state is the outermost frame and is built once, not per body.
@@ -931,10 +876,7 @@ fn run(program: &Program, want: Want) -> Run {
         sites: (want == Want::Sites).then(|| RefCell::new(Vec::new())),
         cur_fn: RefCell::new(String::new()),
         writeback: RefCell::new(None),
-        lending: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
-        forwards: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
-        retains: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
-        handed_on: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
+        lets: want == Want::Lets,
         param_ix: RefCell::new(HashMap::new()),
         param_escapers: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
         carrying_locals: RefCell::new(HashSet::new()),
@@ -1003,49 +945,8 @@ fn run(program: &Program, want: Want) -> Run {
     // consumed after) and "disposed exactly once" is a must-analysis — and it
     // is now the typed judgment's (`vyrn_lower::typed::obligation`), reached
     // from [`refusals`] through `own::must_use_refusals`.
-    // Close the lending set: a function that returns what a lender returned is
-    // a lender too. It only grows and the function count bounds it, so the loop
-    // stops. Two passes settle the whole corpus; the loop is here because
-    // "usually two" is not an argument.
-    let mut lending = mc.lending.map(RefCell::into_inner).unwrap_or_default();
-    let forwards = mc.forwards.map(RefCell::into_inner).unwrap_or_default();
-    loop {
-        let before = lending.len();
-        for (caller, callees) in &forwards {
-            if callees.iter().any(|c| lending.contains(c)) {
-                lending.insert(caller.clone());
-            }
-        }
-        if lending.len() == before {
-            break;
-        }
-    }
-    // Retention travels backwards: a parameter forwarded into a position that
-    // keeps what it is given is kept too. Same shape as the lending closure
-    // above, and it stops for the same reason.
-    let mut retains = mc.retains.map(RefCell::into_inner).unwrap_or_default();
-    let handed_on = mc.handed_on.map(RefCell::into_inner).unwrap_or_default();
-    loop {
-        let before = retains.len();
-        for (pos, callers) in &handed_on {
-            if retains.contains(pos) {
-                for c in callers {
-                    retains.insert(c.clone());
-                }
-            }
-        }
-        if retains.len() == before {
-            break;
-        }
-    }
-    if std::env::var_os("VYRN_LEND_DUMP").is_some() {
-        eprintln!("lending closed: {lending:?}");
-        eprintln!("retains closed: {retains:?}");
-    }
-    // Round forty-six's meet, over the closed target set of every fn-value
-    // signature the program declares. It waits for both closures above, for
-    // the reason they exist: whether a position keeps what it is given is only
-    // settled once every body has been read.
+    // Round forty-six's meet, over the target set of every fn-value signature
+    // the program declares.
     //
     // The core asks this by signature at the call it lowers, because a call
     // through a fn value names no function and no capability row answers for
@@ -1076,15 +977,12 @@ fn run(program: &Program, want: Want) -> Run {
                 // The meet is per POSITION in the plan's reading, and the
                 // position it was asked about is the one the temporary sits
                 // in. A signature every one of whose members reads EVERY
-                // position, retains nothing anywhere and lends nothing is
-                // clear at every position, which is the answer a key can
-                // carry.
-                !lending.contains(m)
-                    && caps.get(m).is_some_and(|cs| {
-                        cs.iter().enumerate().all(|(ix, c)| {
-                            *c == Capability::Read && !retains.contains(&(m.clone(), ix))
-                        })
-                    })
+                // position is clear at every position, which is the answer a
+                // key can carry. It used to ask two call-graph sets beside
+                // the capability; both were empty for every program the
+                // kernel accepts (RFC-0125 §3 M3, the wrapped lend).
+                caps.get(m)
+                    .is_some_and(|cs| cs.iter().all(|c| *c == Capability::Read))
             });
         if std::env::var("VYRN_MEET_DUMP").is_ok() {
             eprintln!("meet: key={key} members={members:?} clear={all_clear}");
@@ -1096,8 +994,6 @@ fn run(program: &Program, want: Want) -> Run {
     Run {
         diags: out,
         sites: mc.sites.map(RefCell::into_inner).unwrap_or_default(),
-        lending,
-        retains,
         projections,
         param_escapers: mc
             .param_escapers
@@ -1147,10 +1043,6 @@ struct MoveCheck<'a> {
     /// Module-state binding names (RFC-0013). A global may never be passed to a
     /// `consume` parameter — nothing may take ownership of module state.
     globals: &'a HashSet<String>,
-    /// Every `export extern fn` (RFC-0012). Rule 3 admits no lend here: the
-    /// caller is JS, and since RFC-0089 M3b the wrapper frees every String an
-    /// export hands back. See [`MoveCheck::check_return`].
-    exported: &'a HashSet<String>,
     /// Per-function statement-boundary error sink (RFC-0006 accumulation).
     /// Cleared at the start of each function, drained by `check_accum`.
     errors: RefCell<Vec<Diagnostic>>,
@@ -1218,19 +1110,12 @@ struct MoveCheck<'a> {
     /// receiver (`sinks`), and the statement form takes and revives it in one
     /// line — so the take is not recorded there, and the receiver is read.
     writeback: RefCell<Option<String>>,
-    /// Functions whose result the caller must NOT release — see
-    /// [`MoveCheck::check_return`]. `None` on the check path.
-    lending: Option<RefCell<HashSet<String>>>,
-    /// `caller -> every callee named in a `return` whose result the caller
-    /// releases`. A function that hands one of these straight back lends what it
-    /// was lent, so the set is closed over this before it is used.
-    forwards: Option<RefCell<HashMap<String, Vec<String>>>>,
-    /// Parameter positions that KEEP what they are handed — see
-    /// [`MoveCheck::note_retention`]. `None` on the check path.
-    retains: Option<RefCell<HashSet<(String, usize)>>>,
-    /// `(callee, i) -> every (caller, its own parameter index)` that forwards a
-    /// parameter into that position. Retention travels backwards along these.
-    handed_on: Option<RefCell<HashMap<(String, usize), Vec<(String, usize)>>>>,
+    /// Whether this is the [`Want::Lets`] walk — the one `own::analyze` runs,
+    /// which walks a projection's desugared statement group and records what
+    /// a lambda captures. It was read off `lending.is_some()` until the two
+    /// call-graph sets went (RFC-0125 §3 M3, the wrapped lend), which made a
+    /// sink stand in for a mode.
+    lets: bool,
     /// The index of each parameter of the function under check.
     param_ix: RefCell<HashMap<String, usize>>,
     param_escapers: Option<RefCell<HashSet<String>>>,
@@ -1604,49 +1489,6 @@ impl MoveCheck<'_> {
         walked
     }
 
-    /// The ways out of a borrow error in THIS function.
-    ///
-    /// [`Borrow::fixes`] offers `consume` first, and inside an `export extern fn`
-    /// that fix does not exist: the caller is JS, which frees the String when the
-    /// call returns whatever the declaration says, so `consume` is refused at the
-    /// signature (RFC-0089 M3b). Offering it would send a reader to a second
-    /// error. `.copy()` is the one answer, so it is the only one named.
-    fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String> {
-        if matches!(b, Borrow::Read(_) | Borrow::Modify(_))
-            && self.exported.contains(&*self.cur_fn.borrow())
-        {
-            return vec![format!(
-                "`{path}.copy()` — an `export extern fn` may not take ownership of a String \
-                 its JS caller releases"
-            )];
-        }
-        // RFC-0093: the take is the first answer where it exists. A projection of
-        // a root this frame OWNS may be moved out — that is the case RFC-0092 M1
-        // could only answer with `.copy()`, and the 44 copies it landed are what
-        // this entry removes. A borrowed root, module state and a container
-        // element are all still `.copy()`, so the menu names the take only where
-        // `check_take` would accept it.
-        if matches!(b, Borrow::Projection)
-            && path != root
-            && self.borrow_of(root).is_none()
-            && !self.is_module_state(root)
-        {
-            let mut fixes = vec![format!(
-                "`consume {path}` if `{root}` should give it up — the field is dead afterwards"
-            )];
-            fixes.extend(b.fixes(root, path));
-            return fixes;
-        }
-        b.fixes(root, path)
-    }
-
-    /// Whether `name` names module state here (RFC-0013) rather than a local
-    /// that shadows one. Frame 0 IS the globals frame, which is what tells them
-    /// apart — the same reading [`MoveCheck::names_a_place`] makes.
-    fn is_module_state(&self, name: &str) -> bool {
-        self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0)
-    }
-
     /// Whether `name` is a NULLARY constructor rather than a binding.
     ///
     /// `None`, `Nothing`, `Leaf` — a variant with no payload parses as a bare
@@ -1787,7 +1629,6 @@ impl MoveCheck<'_> {
                 self.note_projection("elem-store", &path, into(), ty, line);
             }
             if outlives && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
-                self.note_retention(value);
                 return false;
             }
         }
@@ -1807,13 +1648,10 @@ impl MoveCheck<'_> {
         if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
             return false;
         }
-        // A borrow does not move: the caller still owns it. The retention row
-        // says the borrow was put somewhere that outlives the call, which is
-        // what the call graph is closed over.
+        // A borrow does not move: the caller still owns it. Putting one
+        // somewhere that outlives the call is the kernel's refusal at the
+        // field and constructor doors, so nothing is recorded here.
         if self.borrow_of(&root).is_some() {
-            if outlives {
-                self.note_retention(value);
-            }
             return false;
         }
         // A projection does not move either: reading a field out of a record
@@ -1987,80 +1825,6 @@ impl MoveCheck<'_> {
     ///
     /// A returned borrow was refused here at three exits — a place named
     /// straight at the `return`, a projection of a place the frame owns, and a
-    /// borrow yielded by a `match` or an `if` arm — and by one shared sentence
-    /// under them, which carried the export's own words. The kernel states the
-    /// rule at ONE exit now, because the core carries the exit into the arms
-    /// and does not release the place a returned projection reads out of.
-    /// Sixteen programs of the corpus reach the rule and all sixteen get the
-    /// same refusal with the checker standing aside, menu included.
-    ///
-    /// What is left is what nothing else states: RFC-0092's instrument counts
-    /// the returned projections, and [`MoveCheck::lends`] records that this
-    /// function hands a borrow on. That record is read after every body is
-    /// walked, and half of it — the lend through a wrapper — was never a
-    /// refusal at all.
-    fn note_return(&self, e: &Expr, line: usize) {
-        self.note_returned_projection(e, line);
-        if !self.decl.releases(&self.ret.borrow()) {
-            return;
-        }
-        // A place named straight at the `return` is no lend to record: the
-        // refusal was the whole of what this walk had to say about it.
-        if place_path(e).is_some() {
-            return;
-        }
-        if self.returned_borrow(e).is_some() || self.lends_through_a_wrapper(e).is_some() {
-            self.lends();
-        }
-    }
-
-    /// Note that argument `i` of `callee` was handed a place.
-    ///
-    /// Two records, both read after every body has been walked: a LOCAL passed
-    /// here must not be released if `(callee, i)` turns out to keep what it is
-    /// given, and a PARAMETER passed here makes this function keep it in turn.
-    fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize) {
-        let Some((root, _)) = place_path(arg) else {
-            return;
-        };
-        let _ = line;
-        if let Some(&ix) = self.param_ix.borrow().get(&root) {
-            if let Some(edges) = &self.handed_on {
-                edges
-                    .borrow_mut()
-                    .entry((callee.to_string(), i))
-                    .or_default()
-                    .push((self.cur_fn.borrow().clone(), ix));
-            }
-        }
-    }
-
-    /// Whether an arm's value can carry HEAP out of the arm.
-    ///
-    /// `Ok(s) => s.byteLength` names a place and hands out a number, and reading
-    /// that as a handover left the scrutinee unreleased — the leak this rule
-    /// exists to close, closed by the rule itself.
-    ///
-    /// The type answers wherever it can be named. Where it cannot, a field read
-    /// whose BASE is not a record is a builtin scalar projection (`byteLength`,
-    /// `length`, `charCount`) and carries nothing; everything else is unknown
-    /// and answers yes, because a leak is the direction this analysis fails in.
-    fn arm_carries_heap(&self, a: &Expr) -> bool {
-        if let Some(t) = self.type_of(a) {
-            return self.decl.owns_heap(&t);
-        }
-        match a {
-            Expr::Field { expr, .. } => match self.type_of(expr) {
-                Some(t) => matches!(
-                    crate::types::resolve(&t, self.decl.decls()),
-                    Type::Record(_)
-                ),
-                None => true,
-            },
-            _ => true,
-        }
-    }
-
     /// Can a call to `name` return storage one of its arguments holds? The
     /// copying builtins cannot — `@concat`, `@str`, `@copy` and every seeded
     /// row that neither hands an argument back (identity-typed return), views,
@@ -2200,63 +1964,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Record that a borrowed PARAMETER was put somewhere that outlives the call.
-    fn note_retention(&self, e: &Expr) {
-        let Some(sink) = &self.retains else { return };
-        let Some((root, _)) = place_path(e) else {
-            return;
-        };
-        if !matches!(
-            self.borrow_of(&root),
-            Some(Borrow::Read(_)) | Some(Borrow::Modify(_))
-        ) {
-            return;
-        }
-        if let Some(&ix) = self.param_ix.borrow().get(&root) {
-            if std::env::var_os("VYRN_LEND_DUMP").is_some() {
-                eprintln!(
-                    "retain seed: fn={} ix={ix} root={root} e={e:?}",
-                    self.cur_fn.borrow()
-                );
-            }
-            sink.borrow_mut().insert((self.cur_fn.borrow().clone(), ix));
-        }
-    }
-
-    /// Record the function under check as one whose result the caller must not
-    /// release, and note the plain `return f(..)` callees that pass it along.
-    fn lends(&self) {
-        if let Some(sink) = &self.lending {
-            if std::env::var_os("VYRN_LEND_DUMP").is_some() {
-                eprintln!("lend seed: {}", self.cur_fn.borrow());
-            }
-            sink.borrow_mut().insert(self.cur_fn.borrow().clone());
-        }
-    }
-
-    /// A borrow WRAPPED into a local — the lend `check_return` cannot see.
-    ///
-    /// [`MoveCheck::lends_through_a_wrapper`] reads the returned expression, and
-    /// `std/html`'s `attrKey` does not return one: it writes `found = match a {
-    /// Key(k) => Some(k), .. }` in a loop and returns the local. `found` is a
-    /// plain name at the `return`, and `borrow_of` answers `None` for it, so
-    /// nothing recorded that this function hands back an element of its
-    /// argument's array — and the caller then released one. Reachable without a
-    /// `match` scrutinee anywhere: `let got = attrKey(xs)` frees the element
-    /// natively on `310753c`.
-    ///
-    /// Recording, never refusing, exactly as the wrapper reading is: refusing
-    /// `found = match a { Key(k) => Some(k) }` would refuse most of `std/html`,
-    /// and a function marked a lender only ever STOPS a release.
-    fn note_wrapped_lend(&self, value: &Expr) {
-        if self.lending.is_some()
-            && self.decl.releases(&self.ret.borrow())
-            && self.lends_through_a_wrapper(value).is_some()
-        {
-            self.lends();
-        }
-    }
-
     /// The first borrow a returned expression yields, looking through the forms
     /// that yield one of their arms.
     ///
@@ -2368,83 +2075,6 @@ impl MoveCheck<'_> {
             ty: ty.as_ref().map_or("?".to_string(), |t| t.to_string()),
             owns_heap: ty.is_some_and(|t| self.decl.owns_heap(&t)),
         });
-    }
-
-    /// The same question, looking THROUGH a constructor and a struct literal —
-    /// used to RECORD a lend and never to refuse one (Phase 10a).
-    ///
-    /// `openRule(c)` is `for m in c.members { return Some(m) }`: a projection of
-    /// a `read` parameter, wrapped. Phase 5 recorded exactly this shape as the
-    /// one nothing could see — "`returned_borrow` reads a returned PLACE, and a
-    /// struct literal is not one" — and Phase 10a paid for it the moment it
-    /// released an `if let` scrutinee: `std/contract` read freed members and the
-    /// `components` generator emitted a mangled spelling.
-    ///
-    /// It is separate from [`MoveCheck::returned_borrow`] because refusing here
-    /// would refuse `return Some(m)` over any loop element, which is most of the
-    /// corpus. Recording is the whole job: a lender's result is the one thing
-    /// this analysis never releases, so this can only stop a free, never cause
-    /// one.
-    fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)> {
-        match e {
-            // A borrow whose KNOWN type owns no heap is copied by value into
-            // the payload and lends nothing — `JBool(b) => JBool(b)` in a
-            // declared `copy` was read as a wrapped lend, which made the copy
-            // a LENDER and stopped every `.copy()` result in the corpus from
-            // being released (exit-residue round six). An unknown type keeps
-            // the lend, conservatively.
-            // A borrow whose KNOWN type owns no heap is copied by value into
-            // the payload and lends nothing — `JBool(b) => JBool(b)` in a
-            // declared `copy` read as a wrapped lend, which made the copy a
-            // LENDER, the lending closure spread it through every
-            // `copyJson`-forwarding reader (`fieldAt`, `elemAt`), and every
-            // decoder's field snapshot was pinned Lent forever (exit-residue
-            // rounds six and thirteen — round six refused this filter while
-            // two real dangles behind it were still live; rounds seven and
-            // ten fixed those, and the door now refuses heap-owning borrows
-            // at constructor positions outright). An unknown type keeps the
-            // lend, conservatively.
-            // The filter is [`MoveCheck::arm_carries_heap`], not a bare
-            // `type_of` probe (exit-residue round fifty-six): `Ok(s.byteLength)`
-            // answers no type — a builtin scalar projection is not a record
-            // field — and the old filter kept the lend, which made the whole
-            // function a LENDER, pinned every caller's argument row Lent, and
-            // stood the caller's own scrutinee release down with it. A scalar
-            // projection carries no heap, so it lends nothing; unknown shapes
-            // still keep the lend, conservatively.
-            Expr::Call { name, args, .. } if self.decl.constructs(name) => args
-                .iter()
-                .find_map(|a| self.returned_borrow(a).filter(|_| self.arm_carries_heap(a))),
-            Expr::StructLit { fields, .. } => fields
-                .iter()
-                .find_map(|(_, v)| self.returned_borrow(v).filter(|_| self.arm_carries_heap(v))),
-            Expr::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => self.lends_through_a_wrapper(then_branch).or_else(|| {
-                else_branch
-                    .as_ref()
-                    .and_then(|b| self.lends_through_a_wrapper(b))
-            }),
-            Expr::Match {
-                scrutinee, arms, ..
-            } => arms.iter().find_map(|arm| {
-                let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
-                self.enter();
-                for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
-                    self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
-                }
-                // A block arm (RFC-0118) is never a return value.
-                let r = arm
-                    .body
-                    .as_expr()
-                    .and_then(|e| self.lends_through_a_wrapper(e));
-                self.exit();
-                r
-            }),
-            _ => None,
-        }
     }
 
     /// Record one site RFC-0089 rule 1 governs. `declared` overrides the
@@ -2588,7 +2218,6 @@ impl MoveCheck<'_> {
                     hoisted,
                     consumed,
                 );
-                self.note_wrapped_lend(value);
                 // Round fifty-six provenance: a binding initialized with a
                 // carrying value carries it (read pre-bind, so `let x = x + b`
                 // asks about the old `x`).
@@ -2633,7 +2262,6 @@ impl MoveCheck<'_> {
                 // `d`. Without this, `let t = d.title` was refused at the next
                 // store and `let mut t = "" ; t = d.title` was not — RFC-0092's
                 // two-spellings-two-verdicts defect, one statement over.
-                self.note_wrapped_lend(value);
                 if !global {
                     let b = self.borrow_from(value);
                     // And it must carry the RECLAMATION answer too, which is the
@@ -2708,7 +2336,7 @@ impl MoveCheck<'_> {
                 // the user-container half of §26's stand-aside). The CHECK
                 // walk keeps the plain reading: its diagnostics name the
                 // spelling the user wrote.
-                if self.lending.is_some() && crate::project::memo_open() {
+                if self.lets && crate::project::memo_open() {
                     let aty = self.vars.borrow().get(name).cloned().flatten();
                     if let Some(aty) = aty {
                         if let Ok(Some(blk)) =
@@ -2768,18 +2396,7 @@ impl MoveCheck<'_> {
                             sink.borrow_mut().insert(self.cur_fn.borrow().clone());
                         }
                     }
-                    self.note_return(e, *line);
-                    // A result handed straight back is lent if what it names is.
-                    if self.decl.releases(&self.ret.borrow()) {
-                        if let Some(sink) = &self.forwards {
-                            let mut names = Vec::new();
-                            calls_in(e, &mut names);
-                            sink.borrow_mut()
-                                .entry(self.cur_fn.borrow().clone())
-                                .or_default()
-                                .extend(names);
-                        }
-                    }
+                    self.note_returned_projection(e, *line);
                 }
                 Ok(true)
             }
@@ -3151,7 +2768,7 @@ impl MoveCheck<'_> {
     /// and Phase 5 is where a closure releases what it holds. Until then the
     /// honest answer is that this block does not own it.
     fn note_capture(&self, name: &str, line: usize) {
-        if self.lending.is_none() {
+        if !self.lets {
             return;
         }
         let Some(&inside) = self.lambda_base.borrow().last() else {
@@ -3512,7 +3129,6 @@ impl MoveCheck<'_> {
                     let r = self.expr(arg, consumed, scope);
                     self.call_keeps.set(None);
                     r?;
-                    self.note_handover(arg, name, i, *line);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         // A NULLARY constructor is a value with no owner, not a
                         // name (RFC-0126 §8.8): `take(None)` twice hands the
@@ -3530,20 +3146,6 @@ impl MoveCheck<'_> {
                             }
                         }
                     } else if self.decl.constructs(name) {
-                        // Round fifty-six: only a value that can CARRY heap is
-                        // retained. `Ok(s.byteLength)` copies a scalar out of
-                        // the parameter — recording it made the whole function
-                        // a retainer of its argument, pinned every caller's
-                        // binding Lent, and stood the callers' releases down
-                        // (`return match decode(arg.json) { .. }` leaked `arg`
-                        // at every call). The screen is the one
-                        // `arm_carries_heap` already states: a typed value
-                        // answers `owns_heap`, an untyped field read on a
-                        // non-record base is a builtin scalar projection, and
-                        // anything else stays retained, conservatively.
-                        if self.arm_carries_heap(arg) {
-                            self.note_retention(arg);
-                        }
                         // A variant constructor is a literal that reads like a
                         // call: the value it builds holds the argument and
                         // outlives the call, exactly as an array literal does.
@@ -3564,16 +3166,14 @@ impl MoveCheck<'_> {
                         if let Some((root, path)) = place_path(arg) {
                             let borrowed = self.borrow_of(&root).is_some();
                             // A borrow put into a constructor is the kernel's
-                            // refusal now (RFC-0125 §3 M3, row 19). The
-                            // retention row is still this pass's: the value the
-                            // constructor makes holds the argument and outlives
-                            // the call.
-                            if !taken
+                            // refusal now (RFC-0125 §3 M3, row 19), and this
+                            // pass records nothing beside it: the value the
+                            // constructor makes holds the argument and
+                            // outlives the call, and the door refuses it.
+                            let refused = !taken
                                 && (path != root || borrowed)
-                                && self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t))
-                            {
-                                self.note_retention(arg);
-                            } else if root == path {
+                                && self.type_of(arg).is_some_and(|t| self.decl.owns_heap(&t));
+                            if !refused && root == path {
                                 // Round thirty-three: the move enters the
                                 // consumption map, exactly as `store()`'s
                                 // does — rule 1 refuses reuse, and Rule N's
@@ -4062,74 +3662,6 @@ fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
     // its buffer out, and the caller received freed memory
     // (`rfcs/probes-0125/push-in-expression-position.vyrn`).
     i == 0 && crate::prelude::rebuilds(name)
-}
-
-/// Every function name called anywhere in `e`.
-///
-/// The walk is what marks a lender's FORWARDERS: a call nested inside an
-/// aggregate (`return R { name: pick(a) }`, `return [pick(a)]`) forwards the
-/// lender's result exactly as a bare `return pick(a)` does, so the literal,
-/// constructor, take, spawn and operator forms descend like the call arm. A
-/// form missed here leaves its wrapper unmarked, and the wrapper's caller then
-/// releases storage the lender's own caller still owns.
-fn calls_in(e: &Expr, out: &mut Vec<String>) {
-    if let Expr::Call { name, .. } = e {
-        out.push(name.clone());
-    }
-    match e {
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            calls_in(scrutinee, out);
-            for a in arms {
-                // A block arm (RFC-0118) is never a return value, so it can
-                // forward no lender.
-                if let ArmBody::Expr(e) = &a.body {
-                    calls_in(e, out);
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            calls_in(cond, out);
-            calls_in(then_branch, out);
-            if let Some(b) = else_branch {
-                calls_in(b, out);
-            }
-        }
-        Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                calls_in(a, out);
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            calls_in(expr, out)
-        }
-        Expr::Consume { place, .. } => calls_in(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            calls_in(lhs, out);
-            calls_in(rhs, out);
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                calls_in(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                calls_in(k, out);
-                calls_in(v, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// The place `e` reads, as `(root name, whole path)`.
