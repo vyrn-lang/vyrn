@@ -200,6 +200,11 @@ fn run() {
             *counted.entry("switch sites").or_default() += 1;
             *counted.entry("consuming: taken").or_default() += usize::from(*took);
         }
+        // RFC-0125 §3 M3, the box slice: the wider question beside the take —
+        // the construct switches on a value the frame MADE, so the boxes its
+        // binders came out of are its own. It contains `consuming: taken` and
+        // is not contained by it.
+        *counted.entry("owns_scrutinee").or_default() += facts.owns_scrutinee.len();
 
         // RFC-0125 §3 M6, the third judgment's third slice: every right-hand
         // side of every instance, counted by whether it names its producer

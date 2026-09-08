@@ -86,134 +86,178 @@ impl Kind {
     }
 }
 
-/// One section: the exact source line that starts it, its kind, and what it is.
+/// What a section READS to decide what it emits — RFC-0125 §2.3's own
+/// sentence, counted: "the emitter reads the core and writes wasm".
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+enum Reads {
+    /// Neither: the section decides nothing about a source form. The wasm
+    /// format, a layout, the driver, the file's own tests.
+    Neither,
+    /// The core's rows alone. This is what §2.3 asks every section to be.
+    Core,
+    /// The SOURCE form, and the core has a row that says the same thing. The
+    /// AST read is a second statement of a rule, which is what this RFC is
+    /// named after, and these are the switches to take.
+    Twice,
+    /// The source form, and the core states NO row for it. The core is
+    /// incomplete for that form, and the ranked list in §3 M3 names the row
+    /// and the builder each one needs before it can switch.
+    Source,
+    /// Both, for two different questions — the core for a release, a take or
+    /// a type, and the form for what to emit. A section leaves this class by
+    /// the core stating the second question too.
+    Both,
+}
+
+impl Reads {
+    fn label(self) -> &'static str {
+        match self {
+            Reads::Neither => "neither",
+            Reads::Core => "the core's rows",
+            Reads::Twice => "the source, and the core says it too",
+            Reads::Source => "the source, and the core has no row",
+            Reads::Both => "both, for two questions",
+        }
+    }
+}
+
+/// One section: the exact source line that starts it, its kind, what it reads,
+/// and what it is.
 struct Section {
     at: &'static str,
     kind: Kind,
+    reads: Reads,
     what: &'static str,
 }
 
-const fn sec(at: &'static str, kind: Kind, what: &'static str) -> Section {
-    Section { at, kind, what }
+const fn sec(at: &'static str, kind: Kind, reads: Reads, what: &'static str) -> Section {
+    Section {
+        at,
+        kind,
+        reads,
+        what,
+    }
 }
 
 /// The sections, in file order. The first one starts at line 1.
 fn sections() -> Vec<Section> {
     use Kind::*;
+    #[allow(clippy::enum_glob_use)]
+    use Reads::{Both, Core, Neither, Source, Twice};
     vec![
         sec(
             "fn unsupported<T>(what: &str, line: usize) -> Result<T, String> {",
-            Shared,
+            Shared, Neither,
             "the module head, and the three wordings this backend states when it \
              cannot lower a construct — `unsupported`, `gap`, `too_big`",
         ),
         sec(
             "struct Wasi {",
-            Encoding,
+            Encoding, Neither,
             "the two host-import tables: `wasi_snapshot_preview1` for a program, \
              and the generator host's `vyrn` namespace. §2.4's \"each a \
              declaration the emitter lowers to one `call`\"",
         ),
         sec(
             "struct Ext {",
-            Encoding,
+            Encoding, Neither,
             "RFC-0012's `extern fn` as one wasm import, and the ABI its \
              declaration implies",
         ),
         sec(
             "pub fn compile(program: &Program) -> Result<Vec<u8>, String> {",
-            Shared,
+            Shared, Neither,
             "the four entry points: a module, its text, the generator host's \
              reachable set, and the generator host module",
         ),
         sec(
             "fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {",
-            Shared,
+            Shared, Core,
             "the driver: reserve the index space, declare module state, walk the \
              declarations, drain the monomorphisation queue, sweep what no \
              export reaches",
         ),
         sec(
             "fn abi_kind(ty: &Type) -> &'static str {",
-            Encoding,
+            Encoding, Neither,
             "the `vyrn.abi` custom section, written byte by byte — a wasm \
              section, not a rule of the language",
         ),
         sec(
             "enum MapKey {",
-            Shared,
+            Shared, Neither,
             "which key family a `Map` runs on, and whether a type travels in a \
              wasm value or as the address of a slot",
         ),
         sec(
             "struct Sig {",
-            Shared,
+            Shared, Neither,
             "the monomorphisation state: a signature, an instance key, a pending \
              body, the function-value tables",
         ),
         sec(
             "struct Cx<'a> {",
-            Shared,
+            Shared, Neither,
             "the whole-module context every lowering reads",
         ),
         sec(
             "fn receiver_row(&self, node: usize) -> Option<Vec<String>> {",
-            Mapping,
+            Mapping, Core,
             "the nine readers of the core's rows — the receiver, the store, the \
              discard, the argument drop, the edges, the `match` consume, the arm \
              bindings. This IS \"the emitter reads the core\"",
         ),
         sec(
             "fn sub(&self, ty: &Type) -> Type {",
-            Shared,
+            Shared, Neither,
             "the type machinery on `Cx`: substitution, resolution, a layout's \
              words, a sum's variants, instantiation, and the gap wording for a \
              type this backend cannot represent",
         ),
         sec(
             "fn wasm_sig(&self, sig: &Sig, line: usize) -> Result<(Vec<ValType>, Vec<ValType>), String> {",
-            Encoding,
+            Encoding, Neither,
             "M2b's four ABI rules: which parameters ride a wasm value and which \
              ride a hidden destination",
         ),
         sec(
             "enum Place {",
-            Shared,
+            Shared, Neither,
             "a place, a release and its slot, and the signature of a stream's \
              step function",
         ),
         sec(
             "impl Place {",
-            Mapping,
+            Mapping, Neither,
             "a place's address, and the destination a store writes through — \
              §2.3's \"typed loads and stores at computed addresses\"",
         ),
         sec(
             "const LAMBDA: &str = \"@lambda\";",
-            Shared,
+            Shared, Neither,
             "the shell a lambda is lowered as",
         ),
         sec(
             "struct Fn_<'a, 'p> {",
-            Shared,
+            Shared, Neither,
             "the per-function state: the frame, the scopes, the placed releases, \
              the open regions, the stream cursors",
         ),
         sec(
             "fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {",
-            Shared,
+            Shared, Twice,
             "RFC-0013's module state: the initializer and the teardown, and the \
              one-line entry to a function body",
         ),
         sec(
             "fn lower_body(",
-            Mapping,
+            Mapping, Neither,
             "a function body: the parameters into locals, the prologue, the \
              epilogue, the return",
         ),
         sec(
             "fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {",
-            Decision,
+            Decision, Neither,
             "the frame-size refusal and the call-depth counter — a check the \
              emitter inserts and a limit it enforces. The language states the \
              depth (`vyrn_frontend::trap`); the counter and its comparison are \
@@ -221,30 +265,30 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {",
-            Shared,
+            Shared, Source,
             "RFC-0037's defunctionalisation: the copy helper and the dispatcher \
              a stored closure is called through",
         ),
         sec(
             "fn scratch(&mut self, b: &mut Frame, t: ValType, n: u8) -> u32 {",
-            Shared,
+            Shared, Neither,
             "scratch locals, the string temporaries a call's arguments tee, and \
              the value a `return` leaves",
         ),
         sec(
             "fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {",
-            Mapping,
+            Mapping, Neither,
             "a block: its statements, then the releases the core placed at its \
              brace",
         ),
         sec(
             "fn elem_field_store(",
-            Mapping,
+            Mapping, Source,
             "`a[i].f = v` — the address, then the typed store",
         ),
         sec(
             "fn cached_walk(&self, e: &Expr) -> Option<Walk> {",
-            Decision,
+            Decision, Source,
             "THE OPTIMIZER. A loop whose header proves an array's base and count \
              invariant has its walk hoisted out of the body and cached. §2.3: \
              \"The emitter carries no optimizer, ever\" — and M1 measured this \
@@ -254,13 +298,13 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn emit_releases(",
-            Mapping,
+            Mapping, Source,
             "the core's drop rows at an exit become calls, in the order the core \
              placed them — §2.3's \"`drop` to a call\"",
         ),
         sec(
             "fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {",
-            Decision,
+            Decision, Neither,
             "what releasing a type MEANS, derived here from the type's shape: a \
              recursive walk over records, elements, payloads and buffers. §2.3 \
              says a drop is a call, and since the two-shape-walks slice it IS \
@@ -271,67 +315,67 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn addr_local(&mut self, b: &mut Frame, p: Place, off: u32) -> u32 {",
-            Decision,
+            Decision, Neither,
             "the snapshot family: which buffers a store overwrites and must free \
              first, read off the type here rather than named by the core's store \
              row",
         ),
         sec(
             "fn region_enter(&mut self, b: &mut Frame) {",
-            Mapping,
+            Mapping, Neither,
             "RFC-0004's `region`: the enter and exit calls, the arena routing \
              flag `std/runtime` reads, and `stringFromBytes`'s check",
         ),
         sec(
             "fn lookup(&self, name: &str, line: usize) -> Result<(Place, Type), String> {",
-            Shared,
+            Shared, Neither,
             "a name's place: the scope stack, then module state",
         ),
         sec(
             "fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {",
-            Mapping,
+            Mapping, Both,
             "one arm per statement form — `let`, assignment, `if`, `while`, \
              `for`, `break`, `continue`, `return`, `defer`. The control flow of \
              §2.3, plus the surface forms that reach the emitter unrewritten",
         ),
         sec(
             "fn cond(&mut self, m: &mut Module, b: &mut Frame, e: &Expr, line: usize) -> Result<(), String> {",
-            Mapping,
+            Mapping, Neither,
             "a condition, a place for a representation, the string append, and \
              the two stores an aggregate takes",
         ),
         sec(
             "fn expr_as(",
-            Mapping,
+            Mapping, Neither,
             "an expression lowered at a wanted type",
         ),
         sec(
             "fn coerce(",
-            Decision,
+            Decision, Neither,
             "THE COERCION LADDER — §2.7 deletes it in both backends. Which \
              conversions are implicit is a typing rule, and the emitter \
              re-decides it here",
         ),
         sec(
             "fn proven(&self, e: &Expr, to: &Type) -> bool {",
-            Decision,
+            Decision, Source,
             "what a validated type is, and the check inserted at every value \
              boundary. §2.3: it \"does not know what a validated type is\"",
         ),
         sec(
             "fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {",
-            Mapping,
+            Mapping, Both,
             "one arm per expression form",
         ),
         sec(
             "fn applied_record(",
-            Mapping,
+            Mapping, Core,
             "a record and a variant built into their slots, and the join of a \
              branch that yields",
         ),
         sec(
             "fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {",
-            Shared,
+            Shared, Both,
             "the type of an expression the emitter has not emitted yet. This WAS \
              the class: twenty arms deriving a type the checker had already \
              stated. RFC-0125 §3 M5 emptied them — `peek` reads the record by \
@@ -340,130 +384,130 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn regex_dfa(",
-            Builtin,
+            Builtin, Neither,
             "the regex builtin's table",
         ),
         sec(
             "fn binary(",
-            Mapping,
+            Mapping, Neither,
             "an operator, and the releases the core placed on its edges",
         ),
         sec(
             "fn binary_inner(",
-            Mapping,
+            Mapping, Both,
             "one arm per operator — the `prim` rows of §2.3, at their widths",
         ),
         sec(
             "fn user_claims(&self, name: &str) -> bool {",
-            Builtin,
+            Builtin, Both,
             "RFC-0076 M7's generation-time builtins: the `Code` handle \
              operations and the atom stream, one block each, plus the two string \
              renderings they share with `print`",
         ),
         sec(
             "fn call(",
-            Mapping,
+            Mapping, Neither,
             "a call: the argument temporaries it drains afterwards, and which \
              names lend their result",
         ),
         sec(
             "fn call_inner(",
-            Builtin,
+            Builtin, Both,
             "ONE HAND-WRITTEN BLOCK PER BUILTIN NAME — 84 names in one `match`. \
              The shape `Checker::call` had before RFC-0125 §3 M6 emptied it, and \
              the largest single item in the file",
         ),
         sec(
             "fn mem_prim(",
-            Mapping,
+            Mapping, Neither,
             "`std/mem`'s primitives, one wasm instruction each \
              (`PLAN-0125-runtime.md` §2.1) — the clearest `prim` row in the file",
         ),
         sec(
             "fn log_write(",
-            Builtin,
+            Builtin, Neither,
             "RFC-0008's log write",
         ),
         sec(
             "fn reflected(&self, which: &str, arg: &Expr, line: usize) -> Result<Expr, String> {",
-            Builtin,
+            Builtin, Both,
             "RFC-0094 M3's reflection: which `show` a type renders itself with, \
              and the variant a `value` box carries",
         ),
         sec(
             "fn emit_call(",
-            Mapping,
+            Mapping, Both,
             "the call itself: a direct call, a higher-order call, and RFC-0037's \
              stored function values with their capture blocks and dispatchers",
         ),
         sec(
             "fn length_of(",
-            Builtin,
+            Builtin, Neither,
             "`len` over every receiver that has one, and RFC-0025's `spawn`",
         ),
         sec(
             "struct Walk {",
-            Builtin,
+            Builtin, Source,
             "RFC-0075's `Stream<T>`: one hand-written block per stream operation \
              — from an array, from a step, box, unbox, pull, next, release, and \
              the `for` over one",
         ),
         sec(
             "fn walk(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<Walk, String> {",
-            Mapping,
+            Mapping, Neither,
             "a receiver's base and count, and an element's address — the \
              computed address of §2.3",
         ),
         sec(
             "fn trap_row(&mut self, b: &mut Frame, rule: vyrn_frontend::trap::Rule, val: Option<u32>) {",
-            Mapping,
+            Mapping, Neither,
             "a trap is a call with a table index. §2.3, exactly",
         ),
         sec(
             "fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, string: bool) {",
-            Decision,
+            Decision, Neither,
             "the bounds check, and the span check a SIMD access takes. §2.3: it \
              \"does not check bounds it was not told to\" — the core has no \
              `check` row to tell it",
         ),
         sec(
             "fn load_elem(&mut self, b: &mut Frame, w: &Walk, line: usize) -> Result<(), String> {",
-            Mapping,
+            Mapping, Neither,
             "the typed load of an element",
         ),
         sec(
             "fn array_lit(",
-            Builtin,
+            Builtin, Both,
             "the `Array` family, one hand-written block per operation: the \
              literal, the heap literal, `push`, `pop`, `at`, `swapRemove`, \
              `@reserve`, `@append`, `@copyFrom`, `@clear`",
         ),
         sec(
             "type Sum = Vec<EnumVariant>;",
-            Shared,
+            Shared, Source,
             "a sum's tag, and the two-word encoding a payload rides in",
         ),
         sec(
             "fn owns_heap(&self, ty: &Type) -> bool {",
-            Decision,
+            Decision, Neither,
             "the deep-copy family: what copying a type MEANS, derived here from \
              its shape, in the same recursive-walk shape as the release above — \
              and a call at the site for the same reason, one body per type",
         ),
         sec(
             "fn copy_word(",
-            Mapping,
+            Mapping, Both,
             "sums: build a variant, box a payload, name a constructor's types",
         ),
         sec(
             "fn match_expr(",
-            Mapping,
+            Mapping, Both,
             "`match`: the scrutinee, the tag test, the arms, the join — control \
              flow to wasm's blocks",
         ),
         sec(
             "fn try_(",
-            Decision,
+            Decision, Both,
             "the emitter states the `?` rewrite a second time — the tag test, \
              the whole sum copied out through the function's own destination, \
              and the payload read on the fall-through — for the built-in sums \
@@ -475,7 +519,7 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn try_construct(",
-            Decision,
+            Decision, Neither,
             "`Age?(n)` (RFC-0003): the argument is evaluated at the refinement's \
              BASE type and the predicate's own answer becomes the tag, which is \
              §2.3's \"does not know what a validated type is\" — the same row as \
@@ -484,7 +528,7 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn optional_if_let(",
-            Decision,
+            Decision, Both,
             "an OPTIONAL projection tested by `if let` (RFC-0122). The expansion \
              is `project::optional_site`'s and is shared with the checker and \
              the lowering, but the binding is this file's: a synthetic `let` \
@@ -495,60 +539,60 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn tag_test(",
-            Mapping,
+            Mapping, Both,
             "a tag test and the binders a pattern's payload opens",
         ),
         sec(
             "fn map_lit(",
-            Builtin,
+            Builtin, Core,
             "RFC-0028 and RFC-0117's `Map`, one hand-written block per operation: \
              the literal, `@tally`, `@tallyBytes`, set, scan, put, reserve, the \
              key pack, `@at`, and the method table",
         ),
         sec(
             "fn sa_parts(&mut self, b: &mut Frame, hdr: u32, l: &Layout, n: usize) -> (u32, u32, u32) {",
-            Builtin,
+            Builtin, Neither,
             "RFC-0080's `SmallArray`: its parts, its literal, its push, and its \
              method table",
         ),
         sec(
             "fn at(off: u32) -> MemArg {",
-            Encoding,
+            Encoding, Neither,
             "the memory arguments a load and a store carry",
         ),
         sec(
             "struct Num {",
-            Mapping,
+            Mapping, Neither,
             "a number's width and signedness, the renormalisation a narrow width \
              needs, and the integer opcode per operator",
         ),
         sec(
             "fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {",
-            Mapping,
+            Mapping, Neither,
             "the typed load, by the low-level type name",
         ),
         sec(
             "fn each_expr(e: &Expr, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {",
-            Decision,
+            Decision, Source,
             "the AST walks the hoist above needs, and the header-invariance \
              proof it runs: does the loop body write the name, rebind it, or \
              call anything that could. An optimizer's analysis, in the emitter",
         ),
         sec(
             "fn store_of(ll: &str) -> Instruction<'static> {",
-            Mapping,
+            Mapping, Neither,
             "the typed store, by the low-level type name",
         ),
         sec(
             "const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[",
-            Runtime,
+            Runtime, Neither,
             "the runtime's declaration table: 40 rows `std/runtime.vyrn` defines \
              and this emitter calls, each with the wasm signature the two have \
              to agree about",
         ),
         sec(
             "struct Rt {",
-            Runtime,
+            Runtime, Neither,
             "the index of every runtime function and every interned string the \
              emitter names. It carried the NUMBERING too — a slot allocator, a \
              dense-index table, a count and a per-helper order assertion — until \
@@ -557,25 +601,25 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "const SHDR: u32 = 8;",
-            Runtime,
+            Runtime, Neither,
             "what nine steps of `PLAN-0125-runtime.md` §6 left: the `String` \
              header offsets, the arena flag's address, and the tag test — the \
              inline sequences step 9 lists, at their one site each",
         ),
         sec(
             "fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {",
-            Runtime,
+            Runtime, Neither,
             "wiring: every reserved index into its field, the interned messages, \
              the UTF-8 table both backends share, and the trap table `trapAt` \
              reads",
         ),
         sec(
             "const RIGHT_FD_WRITE: i64 = 1 << 6;",
-            Shared,
+            Shared, Source,
             "the two WASI constants `_start` opens a log sink with, and the \
              small type helpers the I/O builtins ask for their result type",
         ),
-        sec("#[cfg(test)]", Tests, "the file's own unit tests"),
+        sec("#[cfg(test)]", Tests, Neither, "the file's own unit tests"),
     ]
 }
 
@@ -659,6 +703,51 @@ fn instructions(lines: &[String], a: usize, b: usize) -> usize {
         .sum()
 }
 
+/// How many SOURCE forms a span names — `Expr::`, `Stmt::`, `Pattern::` and
+/// `ArmBody::` in code, comments excluded, and `Expr::line` excluded with
+/// them because an accessor is not a form.
+fn forms(lines: &[String], a: usize, b: usize) -> usize {
+    lines[a - 1..b]
+        .iter()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| {
+            ["Expr::", "Stmt::", "Pattern::", "ArmBody::"]
+                .iter()
+                .map(|p| l.matches(p).count())
+                .sum::<usize>()
+                - l.matches("Expr::line").count()
+        })
+        .sum()
+}
+
+/// How many CORE rows a span reads: the queries on [`Cx`] that reach
+/// `vyrn_lower::core`, the two type answers the record carries, and
+/// [`Fn_::peek`], which is the node type read by another name. One list, so a
+/// query added to the emitter has to be added here before a section can be
+/// classified as reading it.
+fn rows(lines: &[String], a: usize, b: usize) -> usize {
+    const Q: [&str; 13] = [
+        "peek",
+        "receiver_row",
+        "store_row",
+        "store_fact",
+        "discarded_row",
+        "loop_gives_back",
+        "arg_drop_row",
+        "edge_rows",
+        "arm_row",
+        "owns_scrutinee",
+        "frees_boxes",
+        "node_ty",
+        "join_ty",
+    ];
+    lines[a - 1..b]
+        .iter()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .map(|l| Q.iter().map(|q| l.matches(q).count()).sum::<usize>())
+        .sum()
+}
+
 /// The sections tile `direct.rs`: every line is in one, in file order.
 #[test]
 fn the_structural_census_covers_the_file() {
@@ -709,7 +798,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 5749, 573),
+        ("the mapping §2.3 names", 5718, 573),
         ("a decision §2.3 says it must not make", 2298, 356),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
@@ -730,6 +819,84 @@ fn the_emitter_census_is_what_the_rfc_records() {
     );
 }
 
+/// What each section READS, per class, as RFC-0125 §3 M3 records it — and the
+/// mechanical half of the classification, which is what stops it rotting.
+///
+/// A reader puts a section in a class; the file says whether it can be there.
+/// A section that names a source form cannot be `Core` or `Neither`, and one
+/// that reads a core row cannot be `Source`, `Twice` or `Neither`. What no
+/// count can decide is `Twice` against `Source` — whether the core HAS a row
+/// that says the same thing — and that is the reader's, exactly as `Kind` is.
+#[test]
+fn what_the_emitter_reads_is_what_the_rfc_records() {
+    let lines = emitter();
+    let secs = sections();
+    let mut by_class = std::collections::BTreeMap::new();
+    for (i, a, b) in spans(&lines) {
+        let (f, r) = (forms(&lines, a, b), rows(&lines, a, b));
+        let at = secs[i].at;
+        match secs[i].reads {
+            Reads::Neither => assert!(
+                f == 0 && r == 0,
+                "`{at}` is filed as reading neither and names {f} source forms and {r} core rows"
+            ),
+            Reads::Core => assert!(
+                f == 0 && r > 0,
+                "`{at}` is filed as reading the core and names {f} source forms and {r} core rows"
+            ),
+            Reads::Twice | Reads::Source => assert!(
+                f > 0 && r == 0,
+                "`{at}` is filed as reading the source and names {f} source forms and {r} core rows"
+            ),
+            Reads::Both => assert!(
+                f > 0 && r > 0,
+                "`{at}` is filed as reading both and names {f} source forms and {r} core rows"
+            ),
+        }
+        let e = by_class
+            .entry(secs[i].reads as usize)
+            .or_insert((0usize, 0usize, 0usize, 0usize));
+        e.0 += 1;
+        e.1 += b - a + 1;
+        e.2 += f;
+        e.3 += r;
+    }
+    let got: Vec<(&'static str, usize, usize, usize, usize)> = [
+        Reads::Neither,
+        Reads::Core,
+        Reads::Twice,
+        Reads::Source,
+        Reads::Both,
+    ]
+    .iter()
+    .map(|c| {
+        let (n, l, f, r) = by_class
+            .get(&(*c as usize))
+            .copied()
+            .unwrap_or((0, 0, 0, 0));
+        (c.label(), n, l, f, r)
+    })
+    .collect();
+    let want = vec![
+        ("neither", 47, 6270, 0, 0),
+        ("the core's rows", 4, 1773, 0, 20),
+        ("the source, and the core says it too", 1, 81, 1, 0),
+        ("the source, and the core has no row", 9, 1933, 85, 0),
+        ("both, for two questions", 14, 6464, 93, 48),
+    ];
+    assert_eq!(got, want, "what the emitter reads has moved");
+    assert_eq!(
+        got.iter().map(|(_, n, ..)| n).sum::<usize>(),
+        secs.len(),
+        "the classes do not add up to the sections"
+    );
+    assert_eq!(
+        got.iter().map(|(_, _, l, ..)| l).sum::<usize>(),
+        lines.len(),
+        "the classes do not add up to the file"
+    );
+}
+
 /// The table for RFC-0125 §3 M3, printed from the sections above:
 /// `cargo test -p vyrn-cli --test emitter_census -- --ignored --nocapture
 /// the_emitter_census_as_a_table`.
@@ -738,8 +905,8 @@ fn the_emitter_census_is_what_the_rfc_records() {
 fn the_emitter_census_as_a_table() {
     let lines = emitter();
     let secs = sections();
-    println!("| section | lines | wasm | kind | what it is |");
-    println!("|---|---|---|---|---|");
+    println!("| section | lines | wasm | forms | rows | kind | reads | what it is |");
+    println!("|---|---|---|---|---|---|---|---|");
     for (i, a, b) in spans(&lines) {
         let name = secs[i]
             .at
@@ -750,11 +917,14 @@ fn the_emitter_census_as_a_table() {
             .trim_end_matches('(')
             .to_string();
         println!(
-            "| `{}` | {} | {} | {} | {} |",
+            "| `{}` | {} | {} | {} | {} | {} | {} | {} |",
             name,
             b - a + 1,
             instructions(&lines, a, b),
+            forms(&lines, a, b),
+            rows(&lines, a, b),
             secs[i].kind.label(),
+            secs[i].reads.label(),
             secs[i].what
         );
     }

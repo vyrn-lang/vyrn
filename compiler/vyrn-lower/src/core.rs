@@ -551,6 +551,25 @@ pub enum St {
         /// exit — the two tables the core reads back per arm are the binders'
         /// and RFC-0114 Rule N's edges (RFC-0125 §3 M3, row 17).
         carries: bool,
+        /// The scrutinee is a value the frame MADE, not a place it reads: a
+        /// `consume`, a call's result, a literal, a named value the construct
+        /// took, or a `Map` lookup, which builds its `Option<V>` rather than
+        /// naming an entry (RFC-0028). So the boxes the arms' binders come
+        /// out of are the construct's own to give back.
+        ///
+        /// A different question from `consuming`, and both are needed.
+        /// `consuming` is about a NAME: the construct is the last owner of a
+        /// binding the reader wrote, so nothing releases it afterwards. This
+        /// one is about the VALUE: nobody else holds it, whether or not a
+        /// name ever did. Neither contains the other over the corpus, which
+        /// is why an emitter frees the boxes where EITHER is true: of 12,572
+        /// switches, 12,113 own their scrutinee and 9,587 took a name, and
+        /// the 161 and 19 sites of `examples/` that separate the two answers
+        /// are what the box slice measured before it moved the reading.
+        ///
+        /// Stated here rather than read off the source, which is where each
+        /// compiled backend read it until RFC-0125 §3 M3's box slice.
+        owns: bool,
         line: usize,
     },
     /// An expression for its effect, on its line.
@@ -1887,6 +1906,7 @@ impl<'a> Builder<'a> {
                 let mid = e as *const Expr as usize;
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*mline, arms)), out)?;
+                let owns = consuming || self.made_scrutinee(scrutinee);
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
                     let mut body = Vec::new();
@@ -1924,6 +1944,7 @@ impl<'a> Builder<'a> {
                     arms: core_arms,
                     consuming,
                     carries: true,
+                    owns,
                     line: *mline,
                 });
                 Ok(true)
@@ -2261,6 +2282,7 @@ impl<'a> Builder<'a> {
             } => {
                 let sty = self.ty_of(scrutinee)?;
                 let (sv, consuming) = self.scrutinee(scrutinee, sid, None, out)?;
+                let owns = consuming || self.made_scrutinee(scrutinee);
                 let mut t = Vec::new();
                 let mark = self.scope.len();
                 let from = borrow_root(&sv, consuming);
@@ -2294,6 +2316,7 @@ impl<'a> Builder<'a> {
                     ],
                     consuming,
                     carries: false,
+                    owns,
                     line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
@@ -2783,6 +2806,38 @@ impl<'a> Builder<'a> {
     /// told from a move after it ([`Builder::takes_scrutinee`]). `None` where
     /// the construct has no arm that can hand a payload out of a NAMED
     /// scrutinee — an `if let`, a `?` — and a named local is read there.
+    /// Whether the construct MADE the value it switches on — [`St::Switch`]'s
+    /// `owns`, and the half of that row `consuming` does not answer.
+    ///
+    /// A name is not made here: what a named scrutinee is worth is
+    /// [`Builder::takes_scrutinee`]'s question, and the `||` at each call site
+    /// puts the two halves together. Nor is a place: a field, an element, a
+    /// projection's `read` result. Everything else is a call's result, a
+    /// literal, a `consume` or a constructor, and the frame made all four.
+    ///
+    /// ONE place is made rather than named: `m[k]` on a `Map` BUILDS its
+    /// `Option<V>` rather than naming an entry (RFC-0028), so the value is
+    /// the construct's like any temporary's. The lowering still reads it as a
+    /// place, and that is a different question — what the arms may hold, not
+    /// what the frame owns.
+    fn made_scrutinee(&self, e: &'a Expr) -> bool {
+        use vyrn_frontend::movecheck::{element_path, place_path};
+        if place_path(e).is_none() && element_path(e).is_none() {
+            return true;
+        }
+        let Expr::Call { name, args, .. } = e else {
+            return false;
+        };
+        name == vyrn_frontend::project::AT
+            && args.len() == 2
+            && self.ty_of(&args[0]).is_ok_and(|t| {
+                matches!(
+                    vyrn_frontend::types::resolve(&t, self.proto.types()),
+                    Type::Map(..)
+                )
+            })
+    }
+
     fn scrutinee(
         &mut self,
         e: &'a Expr,
@@ -3979,6 +4034,7 @@ impl<'a> Builder<'a> {
                 let res = self.temp(ty, *line);
                 let (sv, consuming) =
                     self.scrutinee(scrutinee, mid, Some(arms_span(*line, arms)), out)?;
+                let owns = consuming || self.made_scrutinee(scrutinee);
                 let outer = self.body.names.len();
                 let mut core_arms = Vec::new();
                 for (i, arm) in arms.iter().enumerate() {
@@ -4031,6 +4087,7 @@ impl<'a> Builder<'a> {
                     arms: core_arms,
                     consuming,
                     carries: false,
+                    owns,
                     line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, mid, out)?;
@@ -4042,6 +4099,7 @@ impl<'a> Builder<'a> {
                 let tid = e as *const Expr as usize;
                 let res = self.temp(ty, *line);
                 let (sv, consuming) = self.scrutinee(expr, tid, None, out)?;
+                let owns = consuming || self.made_scrutinee(expr);
                 let decls = self.proto.types();
                 // A DECLARED `Fallible` enum (RFC-0080 M3) asks its impl; the two
                 // built-in sums have tags, and since RFC-0126 §8.11's M4b they
@@ -4052,7 +4110,7 @@ impl<'a> Builder<'a> {
                     && vyrn_frontend::types::option_payload(&r).is_none()
                     && vyrn_frontend::types::result_payloads(&r).is_none()
                 {
-                    return self.fallible_try(ity, sv, res, tid, out);
+                    return self.fallible_try(ity, sv, owns, res, tid, out);
                 }
                 // Failure: the exit's drops, then the propagated value leaves.
                 let mut fail = Vec::new();
@@ -4115,6 +4173,7 @@ impl<'a> Builder<'a> {
                     ],
                     consuming,
                     carries: false,
+                    owns,
                     line: *line,
                 });
                 Ok(Rhs::Val(Val::Name(res)))
@@ -4135,6 +4194,7 @@ impl<'a> Builder<'a> {
         &mut self,
         ity: Type,
         sv: Val,
+        owns: bool,
         res: Name,
         tid: usize,
         out: &mut Vec<St>,
@@ -4199,6 +4259,7 @@ impl<'a> Builder<'a> {
             ],
             consuming: false,
             carries: false,
+            owns,
             line,
         });
         Ok(Rhs::Val(Val::Name(res)))
@@ -4777,6 +4838,17 @@ pub struct Facts {
     /// are its own to give back ([`St::Switch`]'s `consuming`). A site
     /// absent from the map is one this pass states no answer for.
     pub consuming: std::collections::HashMap<usize, bool>,
+    /// Per `match`, `if let` or `?` node: the construct switches on a value
+    /// the frame MADE, so the boxes its binders come out of are its own to
+    /// give back ([`St::Switch`]'s `owns`).
+    ///
+    /// The union of two questions and not one of them: the construct took a
+    /// named scrutinee, OR the scrutinee names no place the frame keeps. Each
+    /// compiled backend asked the second half of the SOURCE — a `consume`, an
+    /// expression with no place path, a `Map` lookup — beside the first half
+    /// off the table above. This row is the one statement of both
+    /// (RFC-0125 §3 M3, the box slice).
+    pub owns_scrutinee: std::collections::HashSet<usize>,
 }
 
 /// What the kernel decided over the core's own first build, keyed the way the
@@ -4892,10 +4964,14 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
             St::Switch {
                 arms,
                 consuming: took,
+                owns,
                 ..
             } => {
                 if let Some(a) = arms.first() {
                     out.consuming.insert(a.site, *took);
+                    if *owns {
+                        out.owns_scrutinee.insert(a.site);
+                    }
                 }
                 for a in arms {
                     if let Some(frees) = &a.frees {

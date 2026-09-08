@@ -8482,6 +8482,272 @@ at a shallow scratch directory outside the checkout.
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
 | `vyrn check` over the corpus, whole stderr | 419 programs, 79 refused, 0 differing |
 
+**What the emitter reads, counted section by section, and the answer M3's
+endgame was waiting for (2026-09-08, `track-dl`).** Four emitter tracks each
+ended at the same sentence. `track-cs` made the emitter read the core alone for
+every RELEASE fact. `track-de` made a release a call and refused the layout
+move with numbers. `track-dj` counted `?` and said the core states it, "and
+that is M3's own endgame rather than a slice: the emitter reads the plan's
+tables, not the core's statements". `track-dc` filed the coercion ladder, the
+bounds checks and `emit_validation` as decisions waiting on a `check` row. All
+four name one blocker: §2.3's "The emitter reads the core and writes wasm".
+Nobody had counted what the emitter reads instead. This slice counts it, and
+the count decides what can move.
+
+**The method is the census's own, with two more columns.** `emitter_census.rs`
+already tiles `direct.rs` into 75 sections and counts the lines and the wasm
+instructions each writes by hand. Two counts join them, both mechanical and
+both over CODE with comments excluded: the SOURCE forms a section names
+(`Expr::`, `Stmt::`, `Pattern::`, `ArmBody::`, less `Expr::line`, which is an
+accessor and not a form), and the CORE rows it reads (the queries on `Cx` that
+reach `vyrn_lower::core`, the two type answers the record carries, and
+`Fn_::peek`, which is the node type by another name). A fifth class column
+records what a READER concluded, and the two counts say whether the conclusion
+is possible.
+
+| class | what it is |
+|---|---|
+| neither | the section decides nothing about a source form: the wasm format, a layout, the driver, the tests |
+| the core's rows | the core alone. This is what §2.3 asks every section to be |
+| the source, and the core says it too | the AST read is a SECOND statement of a rule the core already states. The switches to take |
+| the source, and the core has no row | the core is incomplete for that form. Each names the row and the builder it needs |
+| both, for two questions | the core for a release, a take or a type; the form for what to emit |
+
+`what_the_emitter_reads_is_what_the_rfc_records` pins the classification and
+checks the half a count can check: a section that names a source form cannot be
+`neither` or `the core's rows`, and one that reads a core row cannot be `the
+source`. What no count decides is "the core says it too" against "the core has
+no row", and that stays the reader's, exactly as `Kind` is.
+
+**The count.**
+
+| class | sections | lines | forms | rows |
+|---|---|---|---|---|
+| neither | 47 | 6,270 | 0 | 0 |
+| the core's rows | 4 | 1,773 | 0 | 20 |
+| the source, and the core says it too | 1 | 81 | 1 | 0 |
+| the source, and the core has no row | 9 | 1,933 | 85 | 0 |
+| both, for two questions | 14 | 6,464 | 93 | 48 |
+
+The 28 sections that read anything, in file order:
+
+| section | lines | forms | rows | class |
+|---|---|---|---|---|
+| `Cx::compile_inner` | 541 | 0 | 1 | the core's rows |
+| the `Cx` release queries (`receiver_row` …) | 138 | 0 | 12 | the core's rows |
+| `lower_globals_init` | 81 | 1 | 0 | the source, and the core says it too |
+| `lower_fnval_copy` | 249 | 2 | 0 | the source, and the core has no row |
+| `elem_field_store` | 110 | 8 | 0 | the source, and the core has no row |
+| `cached_walk` | 75 | 1 | 0 | the source, and the core has no row |
+| `emit_releases` | 275 | 1 | 0 | the source, and the core has no row |
+| `Fn_::stmt` | 864 | 19 | 10 | both |
+| `Fn_::proven` | 121 | 1 | 0 | the source, and the core has no row |
+| `Fn_::expr` | 409 | 24 | 2 | both |
+| `applied_record` | 240 | 0 | 5 | the core's rows |
+| `Fn_::peek` | 121 | 8 | 7 | both |
+| `binary_inner` | 385 | 3 | 1 | both |
+| `user_claims` | 234 | 1 | 1 | both |
+| `call_inner` | 1,585 | 4 | 9 | both |
+| `reflected` | 88 | 2 | 2 | both |
+| `emit_call` | 963 | 14 | 4 | both |
+| `struct Walk` | 719 | 1 | 0 | the source, and the core has no row |
+| `array_lit` | 677 | 1 | 2 | both |
+| `tag_of` and `pattern_binds` | 63 | 3 | 0 | the source, and the core has no row |
+| `copy_word` | 390 | 7 | 2 | both |
+| `match_expr` | 261 | 4 | 4 | both |
+| `Fn_::try_` | 215 | 2 | 1 | both |
+| `optional_if_let` | 77 | 3 | 1 | both |
+| `tag_test` | 195 | 1 | 2 | both |
+| `map_lit` | 854 | 0 | 2 | the core's rows |
+| `each_expr` | 236 | 61 | 0 | the source, and the core has no row |
+| the gap wordings | 85 | 7 | 0 | the source, and the core has no row |
+
+**The first thing the count says: the AST dispatch is THREE sections.**
+`Fn_::stmt` holds nineteen statement arms, `Fn_::expr` twenty expression arms,
+and `each_expr` names every form once or twice for the optimizer's traversal.
+Every other section names one form or a handful, for a wording, a peephole or a
+synthetic tree it builds itself. So the emitter is not fifty AST readers. It is
+two dispatches and a walk.
+
+**The second thing it says is the endgame's answer, and it is not a driver.**
+`track-dj` named the blocker as a third `BodyRef` for an arm body that is not
+AST. That is not what stops the switch. What stops it is that **the core states
+no operation.** `Rhs` has six variants and two of them carry every computation
+the language has:
+
+- `Rhs::Prim(Vec<Val>, Option<Type>)` — "arithmetic, comparison, interpolation,
+  conversion". The operator is not in the row. `a + b` and `a - b` lower to the
+  same `Prim`, and the emitter cannot tell them apart.
+- `Rhs::Make(Vec<Val>)` — "a record, array, map or variant literal". The type
+  constructor is not in the row, and neither are the field names:
+  `Expr::StructLit`, `Expr::ArrayLit`, `Expr::MapLit` and
+  `Expr::TryConstruct` all lower to `Make`.
+- `Val::Lit` — a literal. The VALUE is not in the row. `let x = 5` and
+  `let x = 7` lower to the same statement.
+
+The core states WHO OWNS WHAT and WHERE CONTROL GOES. It does not state WHAT IS
+COMPUTED. §2.3 describes an emitter that "maps `prim` rows to wasm
+instructions", and the `prim` row of §2.3 is not the `Rhs::Prim` of `core.rs`:
+one carries an opcode and the other carries an operand list. So no expression
+form can be emitted from the core's statement today, and a `BodyRef` for a core
+body would have nothing to read out of it. The driver is not the blocker; the
+row is.
+
+**What that costs, said as the work it names.** Three rows have to grow before
+`Fn_::expr` can switch, and each is a builder in `core.rs`:
+
+| the row | what it must carry | the builder |
+|---|---|---|
+| `Rhs::Prim` | the operator — `BinOp`, `UnOp`, the interpolation, the conversion | `Builder::rhs_inner`'s `Unary` and `Binary` arms |
+| `Rhs::Make` | which constructor, and the field order the layout wants | its `StructLit`, `ArrayLit`, `MapLit` and `TryConstruct` arms |
+| `Val::Lit` | the literal | `Builder::val` |
+
+`St` needs less: every statement form has a row already (`Let`, `Store`, `If`,
+`Loop`, `Block`, `Break`, `Continue`, `Return`, `Switch`, `Do`, `Drop`,
+`Trap`), and `Stmt::While` and `Stmt::ForIn` lower into them. Two statement
+forms are stated with a hole. `Stmt::Region` lowers to an ordinary `St::Block`
+and the region depth is the emitter's, which `Facts::receiver_malloc`'s doc
+already says out loud. And a user container's `c[i] = v` lowers through
+RFC-0091 M2's `place at` rewrite, whose stores carry `Site::None`, which is why
+`elem_field_store` reads three source statements as a peephole.
+
+**The ranked list, by lines against risk.** The licence method is the M3
+records': a switch that is "the same wasm from one place" is shown
+byte-identical over the whole corpus by `VYRN_WASM_MANIFEST=check`; one that
+moves bytes reads every moved row at the source and says why.
+
+| # | what | lines | what it needs first |
+|---|---|---|---|
+| 1 | `frees_boxes`'s four clauses — TAKEN below | 31 | nothing: the core states the take, and the other three are its own too |
+| 2 | `lower_globals_init`'s `Expr::Str` test | 1 | nothing but a fact on the global — a string literal is `NotOwned::Static`, which the core states for every other binding |
+| 3 | `Fn_::expr`'s twenty arms | 409 | the three rows above. The largest single switch M3 has left, and it cannot start before them |
+| 4 | `Fn_::stmt`'s nineteen arms | 864 | the two holes above: a `region` row, and a `Site` on a rewritten store |
+| 5 | `copy_word`, `tag_of`, `pattern_binds` — a `Pattern` to a tag | 453 | a tag on `Arm`. The core keys an arm by index and the emitter reads the pattern; the index is already there and the TAG is not |
+| 6 | `optional_if_let` | 77 | RFC-0122's shape on `Stmt::IfLet`, which `track-dj` named |
+| 7 | `Fn_::proven`, `emit_validation`, `bounds_check` | 304 | a `check` row, which now has four payers |
+| 8 | `Fn_::coerce` | 277 | the typed judgment, which is M6's |
+| 9 | `each_expr` and `cached_walk` | 311 | the core hoisting a loop-invariant header, which is M1's thesis |
+
+**The switch this slice takes: the boxes an arm's binders came out of (31
+lines).** `Fn_::frees_boxes` decides whether a `match`, an `if let` or a `?`
+frees the boxes its payload binders were read out of. It asked four questions
+and three of them read the SOURCE:
+
+```
+let consumed = matches!(scrutinee, Expr::Consume { .. })
+    || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
+    || self.map_lookup(scrutinee)
+    || self.cx.match_consumes(key);
+```
+
+The fourth is the core's. The comment above it claimed the core states the
+other three too, "at more sites than the plan's table named". It does not, and
+the first measurement of this slice is why the switch is not a deletion: a
+probe over `examples/` compared the structural three against `Facts::consuming`
+at every site, and they disagree in BOTH directions — 161 sites where the
+source says yes and the core says no, and 19 where the core says yes and the
+source says no. Neither contains the other, because they answer different
+questions. `consuming` is about a NAME: the construct is the last owner of a
+binding the reader wrote. The other three are about a VALUE: nobody else holds
+it, whether or not a name ever did.
+
+**So the core states the second question too, and the emitter asks one.**
+`St::Switch` gains `owns`: the construct switches on a value the frame MADE.
+`Builder::made_scrutinee` states it in one place — a name is not made, a place
+is not made, and everything else is a call's result, a literal, a `consume` or
+a constructor. One place is made rather than named, and it keeps its own
+sentence: `m[k]` on a `Map` BUILDS its `Option<V>` rather than naming an entry
+(RFC-0028), so the value is the construct's like any temporary's. The four call
+sites — the statement `match`, the expression `match`, `if let` and `?` — each
+write `owns: consuming || self.made_scrutinee(..)`, and `fold_facts` folds the
+row into `Facts::owns_scrutinee`. `Cx::owns_scrutinee` is what the emitter
+reads, and `Cx::match_consumes` lost its last reader and went.
+
+The rule is stated once and it is stated in the pass that decides: "what names
+a place" is `movecheck::place_path` and `element_path`, which `core.rs` already
+asks at a `consume`, and the Map exception is `ty_of` at the one site that
+needs it.
+
+**The licence.** The corpus equality was pinned in both directions BEFORE the
+source read was deleted. A probe printed every site where the new core row and
+the old four-clause expression disagree, over all 209 programs of `examples/`
+and then over the 158 `.vyrn` files of `compiler/vyrn-cli/tests` and `site/`:
+**zero**. Then the deletion, and the gate says the rest rather than the
+argument: `VYRN_WASM_MANIFEST=check` on `wasmhash` is green and
+`rfcs/census/wasm-sha256.tsv` is untouched — not one emitted byte, and no
+manifest row moved.
+
+**One finding, recorded and not taken.** The core lowers `match m[k]` as a
+place READ and this row says the frame OWNS the value. Both are right and they
+are different questions — what the arms may hold, against what the frame gives
+back — but a reader meets them in one function and the doc has to say so. The
+row that would make them one is an element read that knows a `Map` from an
+`Array`, which is `is_place_read` asking a type it has no access to. Recorded
+at the source.
+
+**The second row of the list is refused, with the arithmetic.**
+`lower_globals_init` writes `let owns = !matches!(g.init, Expr::Str(_))` — one
+line, deciding that a module-state binding initialized by a string literal owns
+no heap, because a data segment is not an allocation. The core states the same
+sentence: `Val::Lit`'s own doc reads "A literal: nothing to own. A string
+literal is static data (`NotOwned::Static`)", and `Builder::owned_binding`
+mints that reason for every other binding. But `Facts` is keyed by NODE and a
+global has no node the emitter can name; the row would be keyed by the global's
+NAME, and it needs a field on `Facts`, a fold over `build_module_state`'s body
+and a query on `Cx`. That is about thirty lines added to delete one, and the
+rule would still be stated twice until the fold is proved to answer at every
+global. So it stays, and the list keeps it at 2 because the row it needs is the
+same row rows 3 and 4 need — module state is a frame like any other, and this
+line goes when the core's bodies reach the emitter rather than its side table.
+
+**What the censuses record.** `direct.rs` is **16,552 lines before and 16,521
+after** — 31 gone, in three pieces: the four-clause expression, `Fn_::map_lookup`
+(14 lines) and `Cx::match_consumes` (20 lines), against the doc that says what
+the one clause is. `core.rs` is **5,739 before and 5,815 after**: the row, its
+doc, `made_scrutinee` and the fold. The emitter census moves by the same 31 —
+the mapping kind **5,749 → 5,718** — and the hand-emitted instruction count does
+not move at all, which is the reading the second column exists for. RFC-0127
+§3.1's form census falls **1,342 → 1,341**: `Expr::Consume` loses a `wasm`
+mention and `Expr::Call` moves one from `wasm` to `lower`, which is the switch
+in one line. `coretables` counts the new row over the corpus: of 12,572
+switches, **12,113 own their scrutinee** and 9,587 took a name. RFC-0126 §3's
+surface census falls **1,436 → 1,435**: `Type::Map` loses its `wasm` mention,
+because the Map exception is stated in `core.rs` now and the census does not
+count that file.
+
+#### The box slice's gates (2026-09-08)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 19 s |
+| `cargo test -p vyrn-cli`, no filter | 589 passed, 37 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 28 s |
+| `coretables` `--ignored`, release | 1, 24 s — and the new `owns_scrutinee` row, 12,113 of 12,572 switches |
+| `typed` `--ignored`, release | 1, 66 s |
+| `effects` `--ignored`, release | 2, 53 s |
+| `fixtures` `--ignored`, release | 1, 27 s |
+| `testsweep` `--ignored`, release | 1, 61 s |
+| `emitter_census`, plain and `--ignored` | 3 and 1 — the reads column added and the kind pin re-pinned |
+| `forms` and `surface`, plain and `--ignored` | 7 and 1, 3 and 1 — one row each re-pinned |
+| `checker_census`, `refusals`, `lowered` `--ignored` | 1, 3, 1 — all unmoved |
+| `fmt`, and `symbols_api` in `vyrn-frontend` | 5 and 34 |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own manifest | 77 passed, 5 ignored, and its 23 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 298 s |
+| the residue ratchet `--ignored`, release | 1, 288 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
