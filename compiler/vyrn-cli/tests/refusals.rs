@@ -2281,6 +2281,251 @@ fn the_kernel_does_not_say_again_what_the_checker_said_about_the_same_binding() 
 }
 
 // ---------------------------------------------------------------------------
+// The wrapped lend, refused (RFC-0125 §3 M3).
+//
+// `movecheck` kept two closures over the call graph — the functions whose
+// result the caller must not release, and the positions that KEEP a borrowed
+// parameter they are handed. Neither said anything a body states, and the core
+// read both at a call argument and at a store. Both were empty over every
+// corpus program, and `note_wrapped_lend`'s own words said that was not a
+// licence: it recorded and never refused, because refusing `found = match a {
+// Key(k) => Some(k) }` "would refuse most of `std/html`".
+//
+// That sentence predates the door it fears. Exit-residue rounds seven and ten
+// closed the constructor position outright, and the rule is the KERNEL's since
+// census rows 01, 02, 03, 27 and 34 — so every shape that fills either set is
+// refused, and refused by the pass that outlives `movecheck.rs`. This table is
+// that claim as a gate: one program per seed path, its exact sentence, and the
+// same sentence with the checker stood aside.
+//
+// A row that stops being refused is the day the two sets are needed again.
+// ---------------------------------------------------------------------------
+
+/// One shape that used to seed a call-graph closure, and the sentence that
+/// refuses it.
+struct Wrapped {
+    stem: &'static str,
+    /// Which set the shape seeded: the lending closure, the retention set, or
+    /// both.
+    seeds: &'static str,
+    source: &'static str,
+    says: &'static str,
+}
+
+fn wrapped_lends() -> Vec<Wrapped> {
+    vec![
+        // `std/html`'s `attrKey`: a payload borrow wrapped into `Some(..)` and
+        // stored in a local, which is the shape `note_wrapped_lend` was
+        // written for and the one its doc comment named.
+        Wrapped {
+            stem: "attrkey",
+            seeds: "lending",
+            source: "type Attr =\n    | Key(String)\n    | Pair(String, String)\n\n\
+                     fn attrKey(xs: Array<Attr>) -> Option<String> {\n\
+                     \x20 let mut found: Option<String> = None\n\
+                     \x20 for a in xs {\n\
+                     \x20   found = match a {\n\
+                     \x20     Key(k) => Some(k),\n\
+                     \x20     Pair(k, v) => None,\n\
+                     \x20   }\n\
+                     \x20 }\n\
+                     \x20 return found\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let xs: Array<Attr> = [Key(\"a\" + \"b\")]\n\
+                     \x20 match attrKey(xs) { Some(s) => print(s), None => print(\"none\") }\n\
+                     \x20 return 0\n}\n",
+            says: "`k` may not be put into `Some(..)` — it is read out of a place that owns it",
+        },
+        // The same wrap at the `return` itself, over a loop element.
+        Wrapped {
+            stem: "firstkey",
+            seeds: "lending",
+            source: "type Attr = | Key(String) | Pair(String, String)\n\n\
+                     fn firstKey(xs: Array<Attr>) -> Option<String> {\n\
+                     \x20 for a in xs {\n\
+                     \x20   return match a {\n\
+                     \x20     Key(k) => Some(k),\n\
+                     \x20     Pair(k, v) => None,\n\
+                     \x20   }\n\
+                     \x20 }\n\
+                     \x20 return None\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let xs: Array<Attr> = [Key(\"a\" + \"b\")]\n\
+                     \x20 match firstKey(xs) { Some(s) => print(s), None => print(\"n\") }\n\
+                     \x20 return 0\n}\n",
+            says: "`k` may not be put into `Some(..)` — it is read out of a place that owns it",
+        },
+        // A `read` parameter's field, wrapped in a constructor at the return:
+        // the shape that seeds BOTH sets at once.
+        Wrapped {
+            stem: "fieldwrap",
+            seeds: "lending and retains",
+            source: "type Pack = { j: String }\n\n\
+                     fn f1(p: Pack) -> Option<String> {\n\
+                     \x20 return Some(p.j)\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let p = Pack { j: \"a\" + \"b\" }\n\
+                     \x20 match f1(p) { Some(s) => print(s), None => print(\"n\") }\n\
+                     \x20 return 0\n}\n",
+            says: "`p.j` may not be put into `Some(..)` — it is a `read` parameter",
+        },
+        // The struct-literal half of `lends_through_a_wrapper`.
+        Wrapped {
+            stem: "structwrap",
+            seeds: "lending and retains",
+            source: "type Pack = { j: String }\ntype Wrap = { s: String }\n\n\
+                     fn f2(p: Pack) -> Wrap {\n\
+                     \x20 return Wrap { s: p.j }\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let p = Pack { j: \"a\" + \"b\" }\n\
+                     \x20 let w = f2(p)\n\
+                     \x20 print(w.s)\n\
+                     \x20 return 0\n}\n",
+            says: "`p.j` may not be stored into the field `Wrap.s` — it is a `read` parameter",
+        },
+        // The `if` arm the wrapper walk looks through.
+        Wrapped {
+            stem: "ifwrap",
+            seeds: "lending and retains",
+            source: "type Pack = { j: String }\n\n\
+                     fn f3(p: Pack, c: Bool) -> Option<String> {\n\
+                     \x20 return if c { Some(p.j) } else { None }\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let p = Pack { j: \"a\" + \"b\" }\n\
+                     \x20 match f3(p, true) { Some(s) => print(s), None => print(\"n\") }\n\
+                     \x20 return 0\n}\n",
+            says: "`p.j` may not be put into `Some(..)` — it is a `read` parameter",
+        },
+        // A projection of a LOCALLY built record: RFC-0092's leaf, where
+        // `borrow_of` answers nothing and the walk reads the place anyway.
+        Wrapped {
+            stem: "localfield",
+            seeds: "lending",
+            source: "type Doc = { title: String, body: String }\n\n\
+                     fn pick() -> Option<String> {\n\
+                     \x20 let d = Doc { title: \"a\" + \"b\", body: \"c\" + \"d\" }\n\
+                     \x20 return Some(d.title)\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 match pick() { Some(s) => print(s), None => print(\"n\") }\n\
+                     \x20 return 0\n}\n",
+            says: "`d.title` may not be put into `Some(..)` — it is read out of a place that owns it",
+        },
+        // The same, stored into a local aggregate rather than returned: the
+        // store site `note_wrapped_lend` was called from.
+        Wrapped {
+            stem: "localstore",
+            seeds: "lending",
+            source: "type Doc = { title: String, body: String }\ntype Box = { v: String }\n\n\
+                     fn pick() -> Box {\n\
+                     \x20 let d = Doc { title: \"a\" + \"b\", body: \"c\" + \"d\" }\n\
+                     \x20 let b = Box { v: d.title }\n\
+                     \x20 return b\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let b = pick()\n\
+                     \x20 print(b.v)\n\
+                     \x20 return 0\n}\n",
+            says: "`d.title` may not be stored into the field `Box.v` — it is read out of a place that owns it",
+        },
+        // A payload binder handed straight back into its own constructor.
+        Wrapped {
+            stem: "rewrap",
+            seeds: "lending",
+            source: "type Bag = | One(Array<String>) | Nil\n\n\
+                     fn take(b: Bag) -> Bag {\n\
+                     \x20 return match b {\n\
+                     \x20   One(xs) => One(xs),\n\
+                     \x20   Nil => Nil,\n\
+                     \x20 }\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let b = One([\"a\" + \"b\"])\n\
+                     \x20 match take(b) { One(xs) => print(\"\\{xs.length}\"), Nil => print(\"n\") }\n\
+                     \x20 return 0\n}\n",
+            says: "`xs` may not be put into `One(..)` — it is a second name for the `read` parameter `b`",
+        },
+        // An ARRAY literal, which is the element half of the same door.
+        Wrapped {
+            stem: "arraywrap",
+            seeds: "retains",
+            source: "type Pack = { j: String }\n\n\
+                     fn wrap(p: Pack) -> Array<String> {\n\
+                     \x20 return [p.j]\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let p = Pack { j: \"a\" + \"b\" }\n\
+                     \x20 let a = wrap(p)\n\
+                     \x20 print(\"\\{a.length}\")\n\
+                     \x20 return 0\n}\n",
+            says: "`p.j` may not be stored into the literal — it is a `read` parameter",
+        },
+        // The wrapper walk looks THROUGH a constructor, so a doubly wrapped
+        // borrow seeds at the inner one.
+        Wrapped {
+            stem: "nestwrap",
+            seeds: "lending and retains",
+            source: "type Pack = { j: String }
+
+                     fn f4(p: Pack) -> Option<Option<String>> {
+                       return Some(Some(p.j))
+}
+
+                     fn main() -> Int64 {
+                       let p = Pack { j: \"a\" + \"b\" }
+                       match f4(p) { Some(o) => print(\"s\"), None => print(\"n\") }
+                       return 0
+}
+",
+            says: "`p.j` may not be put into `Some(..)` — it is a `read` parameter",
+        },
+        // A generic container's field, where the type is a parameter: the one
+        // shape whose type the wrapper walk could not name.
+        Wrapped {
+            stem: "genericfield",
+            seeds: "neither, and it is refused all the same",
+            source: "type Cell<T> = { v: T }\n\n\
+                     fn get<T>(c: Cell<T>) -> Option<T> {\n\
+                     \x20 return Some(c.v)\n}\n\n\
+                     fn main() -> Int64 {\n\
+                     \x20 let c = Cell { v: \"a\" + \"b\" }\n\
+                     \x20 match get(c) { Some(s) => print(s), None => print(\"n\") }\n\
+                     \x20 return 0\n}\n",
+            says: "`c.v` may not be put into `Some(..)` — it is a `read` parameter",
+        },
+    ]
+}
+
+/// Every shape that used to fill a call-graph closure is refused, and the
+/// refusal is the kernel's.
+#[test]
+fn a_lend_through_a_wrapper_is_refused_and_the_kernel_is_what_refuses_it() {
+    let root = std::env::temp_dir().join(format!("vyrn-wrapped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    for w in wrapped_lends() {
+        let file = format!("{}.vyrn", w.stem);
+        std::fs::write(root.join(&file), w.source).unwrap();
+        // The checker's answer, with the `file:line:col: ` prefix off.
+        let (ok, err) = refusal_in(root.clone(), &file, false);
+        assert!(!ok, "{} ({}) is accepted:\n{err}", w.stem, w.seeds);
+        assert_eq!(split_head(&err).1, w.says, "{} ({})", w.stem, w.seeds);
+        // The same sentence with the checker stood aside: the door is the
+        // kernel's, so deleting `movecheck.rs` does not reopen it.
+        let (ok, err) = refusal_in(root.clone(), &file, true);
+        assert!(
+            !ok,
+            "{} ({}) is accepted with the checker aside:\n{err}",
+            w.stem, w.seeds
+        );
+        assert_eq!(
+            split_head(&err).1,
+            w.says,
+            "{} ({}), kernel alone",
+            w.stem,
+            w.seeds
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------------
 // The structural census of `movecheck.rs` (RFC-0125 §3 M3, the checker's
 // deletion path).
 //
@@ -2451,14 +2696,9 @@ fn sections() -> Vec<Section> {
             "the store whose value hands the place back, which records no take",
         ),
         sec(
-            "    fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String> {",
-            Menu,
-            "the ways out that exist in THIS function",
-        ),
-        sec(
-            "    fn is_module_state(&self, name: &str) -> bool {",
+            "    fn names_a_constructor(&self, name: &str) -> bool {",
             Shared,
-            "module state, the borrow table, and the type reading",
+            "a nullary constructor, the borrow table, and the type reading",
         ),
         sec(
             "    fn sinks(&self, name: &str, i: usize) -> bool {",
@@ -2470,8 +2710,9 @@ fn sections() -> Vec<Section> {
             "    fn store(",
             Rows,
             "what a store still records once rule 2 is the kernel's (rows 01, \
-             02, 03, 27, 34): `Gone::Moved`'s row, the consumed entry, the \
-             projection instrument and the retention record",
+             02, 03, 27, 34): the consumed entry and the projection \
+             instrument. The retention record went with the closure that \
+             read it",
         ),
         sec(
             "    fn borrow_from(&self, value: &Expr) -> Option<Borrow> {",
@@ -2490,47 +2731,21 @@ fn sections() -> Vec<Section> {
             "whether a callee keeps a `fn` value",
         ),
         sec(
-            "    fn note_return(&self, e: &Expr, line: usize) {",
-            Rows,
-            "what a `return` still records once rule 3 is the kernel's: the              projection instrument, and the lend the call graph is closed over              (rows 15, 16, 17, 18)",
-        ),
-        sec(
-            "    fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize) {",
-            Rows,
-            "the retention and hand-over records the call graph is closed over",
-        ),
-        sec(
-            "    fn arm_carries_heap(&self, a: &Expr) -> bool {",
-            Rows,
-            "whether an arm's value can carry heap out of the arm",
-        ),
-        sec(
             "    fn carries_param_storage(&self, e: &Expr) -> bool {",
             Rows,
             "the escape screen: storage flow rather than mention",
         ),
         sec(
-            "    fn lends(&self) {",
-            Rows,
-            "the lending record, and the lend a wrapper hides",
-        ),
-        sec(
             "    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {",
             Rows,
             "the first borrow a returned expression yields. Rule 3 left with \
-             row 17, so the readers are RFC-0092's instrument and the lend the \
-             call graph is closed over",
+             row 17 and the lend record left with its closure, so the one \
+             reader is RFC-0092's instrument",
         ),
         sec(
             "    fn note_returned_projection(&self, e: &Expr, line: usize) {",
             Shared,
             "RFC-0092's instrument",
-        ),
-        sec(
-            "    fn lends_through_a_wrapper(&self, e: &Expr) -> Option<(Borrow, String, String)> {",
-            Rows,
-            "the same question through a constructor, to record a lend and never \
-             to refuse one",
         ),
         sec(
             "    fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>) {",
@@ -2591,11 +2806,6 @@ fn sections() -> Vec<Section> {
             "whether a builtin's parameter takes its argument for good — read \
              off `prelude::signature` and `prelude::rebuilds`, where the rule \
              is stated once for this pass and the core alike",
-        ),
-        sec(
-            "fn calls_in(e: &Expr, out: &mut Vec<String>) {",
-            Shared,
-            "the calls an expression makes",
         ),
         sec(
             "pub fn element_path(e: &Expr) -> Option<(String, String)> {",
@@ -2724,9 +2934,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 0),
         ("a rule only the checker gives", 126),
-        ("placement rows for the engines", 815),
-        ("a fix menu", 73),
-        ("shared machinery", 3272),
+        ("placement rows for the engines", 533),
+        ("a fix menu", 37),
+        ("shared machinery", 3122),
         ("tests", 593),
     ];
     assert_eq!(got, want, "the structural census has moved");

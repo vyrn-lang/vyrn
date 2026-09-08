@@ -3351,8 +3351,8 @@ impl<'a> Builder<'a> {
     /// Round eighteen's rule, stated by the core (RFC-0125 §3 M3): a store
     /// whose value mentions the place it writes into may be handing the old
     /// buffer back, UNLESS every mention is a read the value cannot hand
-    /// back. The shape is read off the statement; the three closures over the
-    /// call graph are the checker's, handed on beside the plan.
+    /// back. The shape is read off the statement; the escape closure over the
+    /// call graph is the checker's, handed on beside the plan.
     fn store_is_fresh(&self, value: &'a Expr, name: &str) -> bool {
         // The recording gate: a value whose type owns no heap has nothing to
         // hand back and no row is written for it.
@@ -3363,17 +3363,13 @@ impl<'a> Builder<'a> {
         if !self.read_only_mentions(value, name, &mut ms) {
             return false;
         }
-        ms.iter().all(|(c, i)| {
-            !self.own.lending.contains(c)
-                && !self.own.retains.contains(&(c.clone(), *i))
-                && !self.own.escapers.contains(c)
-        })
+        ms.iter().all(|c| !self.own.escapers.contains(c))
     }
 
     /// Whether every mention of `root` in `e` is a read that cannot hand
-    /// `root`'s own storage back, collecting the `(callee, index)` positions
-    /// the closures then screen.
-    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<(String, usize)>) -> bool {
+    /// `root`'s own storage back, collecting the callees the escape closure
+    /// then screens.
+    fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<String>) -> bool {
         use vyrn_frontend::movecheck as mc;
         if !mc::mentions_place(e, root) {
             return true;
@@ -3384,7 +3380,7 @@ impl<'a> Builder<'a> {
             return true;
         }
         match e {
-            Expr::Call { name, args, .. } => args.iter().enumerate().all(|(ix, a)| {
+            Expr::Call { name, args, .. } => args.iter().all(|a| {
                 let is_root_read = match a {
                     Expr::Var { name: v, .. } => v == root,
                     _ => mc::place_path(a).is_some_and(|(r, _)| r == root),
@@ -3398,7 +3394,7 @@ impl<'a> Builder<'a> {
                     && !name.starts_with('@')
                     && prelude::signature(name).is_none()
                 {
-                    out.push((name.clone(), ix));
+                    out.push(name.clone());
                     true
                 } else {
                     false
@@ -3499,18 +3495,6 @@ impl<'a> Builder<'a> {
             Expr::Field { .. } => Some("@lazy".to_string()),
             _ => Some("@build".to_string()),
         };
-        // A heapified literal holds what its elements produced, and a
-        // lender's result inside one makes the deep free a use-after-free.
-        let elem_producers: Vec<String> = match e {
-            Expr::ArrayLit { elems, .. } => elems
-                .iter()
-                .filter_map(|x| match x {
-                    Expr::Call { name, .. } => Some(name.clone()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
         // A view LENDS, unless the element it hands out is a heap-free copy.
         let decls = self.proto.types();
         let view_copies = mc::lends_result(callee)
@@ -3531,14 +3515,11 @@ impl<'a> Builder<'a> {
             kind,
             verdict: mc::ArgVerdict::Unknown,
             view_copies,
-            elem_producers,
         };
         let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
             || self.is_variant(callee);
         let cap = vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix);
-        if mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
-            == mc::ArgVerdict::Released
-        {
+        if mc::arg_verdict(&s, constructs, cap) == mc::ArgVerdict::Released {
             return true;
         }
         // Round forty-six: a call THROUGH A FN VALUE names no function, so no

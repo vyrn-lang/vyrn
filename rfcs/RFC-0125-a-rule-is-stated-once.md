@@ -15039,6 +15039,110 @@ and would move the corpus counts every other slice quotes.
 censuses do not move: nothing here touches a pass they count.
 
 
+#### The lend through a wrapper is refused, so the two closures go (2026-09-08, `track-dr`)
+
+`track-dh` measured `Facts::lending` and `Facts::retains` EMPTY in every one of
+190 corpus programs and named the blocker for deleting them:
+`note_wrapped_lend` "records, never refuses", and its own words say refusing
+`found = match a { Key(k) => Some(k) }` "would refuse most of `std/html`". A
+non-empty set is therefore silent, and a silent set the core reads is a
+release stood down for a reason nobody stated.
+
+**The blocker is not true on this line, and the measurement says so.** Eleven
+programs were built, one per seed path of the two sets, and every one is
+REFUSED — with `VYRN_LEND_DUMP=1` naming the seed it filled first:
+
+| the shape | the set it seeds | the refusal |
+|---|---|---|
+| `std/html`'s `attrKey`: `found = match a { Key(k) => Some(k), .. }` in a loop, the local returned | `lending` | "`k` may not be put into `Some(..)` — it is read out of a place that owns it" |
+| the same wrap at the `return`, over a loop element | `lending` | the same |
+| `return Some(p.j)` on a `read` parameter | both | "`p.j` may not be put into `Some(..)` — it is a `read` parameter" |
+| `return Wrap { s: p.j }` | both | "`p.j` may not be stored into the field `Wrap.s` — it is a `read` parameter" |
+| `return if c { Some(p.j) } else { None }` | both | "`p.j` may not be put into `Some(..)` — it is a `read` parameter" |
+| `return Some(d.title)` out of a LOCALLY built record — RFC-0092's leaf | `lending` | "`d.title` may not be put into `Some(..)` — it is read out of a place that owns it" |
+| the same, stored into a local aggregate instead of returned | `lending` | "`d.title` may not be stored into the field `Box.v` — …" |
+| `One(xs) => One(xs)` — a payload binder handed back into its own constructor | `lending` | "`xs` may not be put into `One(..)` — it is a second name for the `read` parameter `b`" |
+| `return [p.j]` — the element half of the same door | `retains` | "`p.j` may not be stored into the literal — it is a `read` parameter" |
+| `return Some(c.v)` where `c: Cell<T>` — the one type the wrapper walk cannot name | neither | "`c.v` may not be put into `Some(..)` — it is a `read` parameter" |
+| `return Some(p.j)` under `Some(Some(..))` | both | the `read`-parameter sentence, at the inner wrap |
+
+**Why the comment is stale, and what states the rule instead.**
+`lends_through_a_wrapper` reads a CONSTRUCTOR argument and a STRUCT-LITERAL
+field, and `note_wrapped_lend` is called immediately after `store(value, ..)`
+on the same expression at the same line. That is the door exit-residue rounds
+seven and ten closed — "the door now refuses heap-owning borrows at
+constructor positions outright", in `lends_through_a_wrapper`'s own comment —
+and rule 2 is the KERNEL's since census rows 01, 02, 03, 27 and 34. So the
+seed and the refusal are the same site, and the refusal is stated by the pass
+that outlives `movecheck.rs`: every one of the eleven prints the SAME sentence
+under `VYRN_NO_MOVECHECK=1`, byte for byte. `VYRN_NO_KERNEL=1` accepts all
+eleven, which is the one configuration where a non-empty set could reach a
+reader — and it is the knob that turns the whole memory judgment off.
+
+**What went.** In `movecheck.rs`: `Facts::lending`, `Facts::retains`,
+`Run::lending`, `Run::retains`, the four `MoveCheck` cells (`lending`,
+`forwards`, `retains`, `handed_on`), the two fixpoint loops that closed them,
+`VYRN_LEND_DUMP`, and the seven walks that fed them — `lends`,
+`note_wrapped_lend`, `note_retention`, `note_handover`, `note_return`,
+`lends_through_a_wrapper`, `arm_carries_heap`, and the free `calls_in` that
+marked a lender's forwarders. `arg_verdict` loses two parameters and four
+clauses; what is left of the lending clause is `views`, which is a seeded
+row's own shape and no closure at all. `ArgTemp::elem_producers` goes with
+them — round twenty-five screened it against the lending set and against
+nothing else. In `own.rs`: `Ownership::lending` and `Ownership::retains`. In
+`core.rs`: two of `store_is_fresh`'s three screens, and with them the index
+half of `read_only_mentions`' collection — the escape closure asks about a
+callee and not about a position.
+
+**Two dead items this slice found beside them.** `MoveCheck::fixes_here` and
+`MoveCheck::is_module_state` had no caller, and `MoveCheck::exported` was read
+by `fixes_here` alone. They are `vyrn-frontend`'s two standing build warnings,
+and they go here: the file has no `Menu` section left that nothing calls.
+
+**One mode flag was a sink.** Two sites asked `self.lending.is_some()` to mean
+"this is the `Want::Lets` walk" — the projection store walk and the capture
+record. A sink is not a mode, and with the sink gone the walk says so itself:
+`MoveCheck::lets`.
+
+**The licence.** Every number, and each was run before the next:
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over all 190 corpus roots | byte-identical, **0 lost / 0 gained** |
+| kernel corpus | **24,775 accepted, 0 refused, 0 unlowered** |
+| `VYRN_WASM_MANIFEST=check` | green, and the manifest does not move — all 176 examples emit the same bytes, so neither set stood a release down anywhere the corpus reaches |
+| the residue ratchet | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `cargo test -p vyrn-cli`, no filter | 82 suites, all green |
+
+**The pin.** `compiler/vyrn-cli/tests/refusals.rs::a_lend_through_a_wrapper_is_refused_and_the_kernel_is_what_refuses_it`
+— the eleven programs above, each asserted refused with its exact sentence,
+twice: as the checker states it, and with `VYRN_NO_MOVECHECK=1` so the
+sentence is the kernel's. A row that stops being refused is the day the two
+sets are needed again, and it says so. `tests/kernel.rs`'s corpus count of the
+two closures goes with them: a table over eleven SHAPES is what the count was
+standing in for, and the count could only ever say the corpus has none.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,879 to **4,411**;
+`compiler/vyrn-frontend/src/own.rs` 1,833 to **1,827**;
+`compiler/vyrn-lower/src/core.rs` 6,128 to **6,109**. 493 lines.
+
+**The censuses.** The structural census
+(`compiler/vyrn-cli/tests/refusals.rs`): `Kind::Rows` **815 to 533**, `Menu`
+**73 to 37**, shared machinery **3,272 to 3,122**; `Kernel`, `Checker` and
+`Tests` do not move. Six anchors go with their sections and one is re-aimed —
+`fn names_a_constructor` for the borrow table's neighbour. RFC-0127 §3's form
+census moves at thirteen expression forms, **1,223 mentions to 1,202**: twelve
+of them lose `movecheck` mentions and two lose a `lower` mention beside it.
+The emitter census does not move: nothing here touches `direct.rs`.
+
+**What is left of `track-dd`'s row 5.** Two closures, not four.
+`Facts::escapers` (up to 123 rows in one corpus program) and
+`Facts::fnval_clear` (up to 1,154 cleared signature keys) are answers a body
+does state, and the question for them is whether `vyrn-lower`'s core already
+walks what they need. `fnval_clear`'s meet is simpler for this slice: with the
+two sets gone it asks the capability rows alone.
+
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

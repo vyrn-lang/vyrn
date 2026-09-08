@@ -285,12 +285,11 @@ fn a_struct_literal_store_with_scalar_mentions_releases_what_it_replaces() {
     );
 }
 
-// The other two screens `store_is_fresh` reads keep their witnesses where the
-// closures are computed (`movecheck`'s
-// `a_lender_forwarded_through_an_aggregate_is_still_marked_lending` and
-// `a_lambda_at_a_consume_parameter_escapes`). Neither has a store-side witness
-// that reaches this file: a lender's own program is one the KERNEL refuses (a
-// returned element), and `blackBox` — the launderer round nineteen was written
-// for — is refused outside a `bench` or a `test` block. Both were unit tests of
-// the closure, not of an emitted program, and the closure is still the
-// checker's.
+// The one screen `store_is_fresh` still reads is the escape closure, whose
+// witness stays where the closure is computed (`movecheck`'s
+// `a_lambda_at_a_consume_parameter_escapes`). It has no store-side witness that
+// reaches this file: `blackBox` — the launderer round nineteen was written for
+// — is refused outside a `bench` or a `test` block. The other two screens were
+// the lending and retention closures, deleted with the sets they read: every
+// shape that fills either is refused at the kernel's constructor and field
+// doors, which `refusals.rs`'s wrapped-lend table pins (RFC-0125 §3 M3).
