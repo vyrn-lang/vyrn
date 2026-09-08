@@ -1,11 +1,11 @@
-/// One program for all three engines: the interpreter, the native binary, and
-/// the WebAssembly module.
+/// One program, every way this project has of running it: `vyrn run`, the
+/// WebAssembly module under a standalone runtime, and the native binary.
 ///
 /// The site publishes a speed comparison, and the only comparison it can make
-/// honestly is Vyrn against itself — one machine, one instant, one source file,
-/// three engines. This is the program it measures. `bench/engines.sh` builds it
-/// twice, runs it three ways, checks that the three outputs are identical, and
-/// prints the times.
+/// honestly is Vyrn against itself — one machine, one instant, one source file.
+/// This is the program it measures. `bench/engines.sh` builds it twice, runs it
+/// three ways, checks that the three outputs are identical, and prints the
+/// times.
 ///
 ///     vyrn run examples/threeengines.vyrn 4000
 ///     sh bench/engines.sh 4000
