@@ -7946,13 +7946,13 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 5,748 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 5,751 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,211 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
-| shared machinery | 2,335 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
-| tests | 327 | 0 | the file's own unit tests |
+| shared machinery | 2,312 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
+| tests | 325 | 0 | the file's own unit tests |
 
 The whole table, section by section, is what
 `the_emitter_census_as_a_table` prints:
@@ -13798,6 +13798,153 @@ already named.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
+#### The container's release at a loop, and the last table (2026-09-08, `track-dm`)
+
+The census's slice 3 had two halves, and the element half was taken. This is
+the container half, and with it the plan's per-binding table has no reader
+left — so slice 4 goes in the same commit.
+
+**What the emitter read, and what states it now.** At a `for` the emitter
+asked `own.droppable` twice: whether there is a release of the CONTAINER at
+the loop at all, and — off the row's KIND, `DropKind::FreeArr` — whether it
+walks the buffer alone. Both are the core's:
+
+| the fact | who states it now |
+|---|---|
+| a release of the container stands at this loop | a placed row that names the container's key, or — for a consuming loop, whose release is a `St::Drop` the core states and no row names — `Facts::loop_gives_back`. `Fn_::releases_whole` already asked the first of those, and the two together are exactly the set the plan's row had |
+| it walks the BUFFER alone | `Facts::loop_buffer_only`, written at the loop out of the same sentence `Cand::Elem` answers: every element left through the loop variable, so each turn owns its element and what the loop still owns is the growable array's buffer, which is field 0 of the triple. Growable arrays only, which is the screen round fourteen's blanket downgrade did not have |
+
+**The licence for that half alone.** `VYRN_WASM_MANIFEST=check` green with no
+manifest change: all 176 examples emit the same bytes, so the core's answer
+and the plan's row agree at every `for` the corpus reaches. That is the
+reading the element half asked for and could not make: the fourteen examples
+it measured (`aliascontext`, `consumeloop`, `enumarray`, `enumcodec`,
+`graphql`, `jsoncodec`, `jsondecbytes`, `mapdemo`, `patchdemo`, `rest`,
+`storage`, `vlog`, `vyxdemo`, `wirekey`) keep their recorded wasm.
+
+**Then the table had four readers, and each was the same question.** A
+`consume` parameter, a `let`, a `for` VARIABLE and a `match` arm's binder each
+asked "does this key own a value here" before registering what to release it
+with. A placed row is that answer — the register is read only at an exit the
+placer named — so all four ask `Fn_::releases_whole` now.
+
+**One example's wasm moves, and it is three pinned slots.** Three of the four
+switched clean. The `let` disagreed at exactly three bindings in the corpus,
+all in `regionescape.vyrn`: `let o: Option<String> = Some(..)` and two
+`let w: Boxed = Wrapped(..)`, each inside a `region`. The plan gave them a
+row; the placer names none, because nothing holds them at an exit. A row
+nothing places emits nothing — `emit_releases` walks the placer's steps and
+skips a slot no step names — so the only effect was that `register_rel`
+PINNED three frame slots. The wat diff says so: not one `call` changes, and
+the slot offsets after them shrink by 16 bytes each.
+`rfcs/census/wasm-sha256.tsv` moves one row for that, and 175 of 176 are
+byte-identical.
+
+**What went.** `Ownership::droppable`, and with it the whole `Emit` walk in
+`own.rs` — `emit_body`, `Emit`, `FnResult`, `Emit::kept`, the variant-name set
+and the `consume`-parameter loop in `analyze`. In `movecheck.rs`, the ROW
+TABLE and everything that fed it: `Facts::lets`, `LetOwnership` (its
+`elem_only` included), `Gone`, `ownership()`, `let_id`, `place_key`,
+`note_temporary`, `note_temporary_at`, `took`, `hole`, `wrote_into`,
+`gave_up`, `gave_up_returned`, `note_arm_aliases`, `note_arm_value`,
+`is_bound_name`, `names_a_place`, `reads`, the `nodes` scope stack and the
+`passed` half of `note_handover`. In `direct.rs`, `Cx::droppable` and
+`Fn_::drops`. The `Want::Lets` walk stays: it still closes the four
+call-graph sets, which are the answers no body states.
+
+**Two findings, and the second is why the table had to go.**
+
+The first is small. Six of the moved unit tests read `s.length` on a
+`String`, which RFC-0058 deleted. They never noticed, because the walk they
+asserted type-checked nothing. Run against a lowering they fail at the load,
+and they are fixed to `byteLength`.
+
+The second is the defect this RFC is named for. Four assertions could not
+move, because the plan and the core say different things at their shapes, and
+nothing read the plan there:
+
+| the assertion | the plan said | the core says |
+|---|---|---|
+| `a_wrapped_scalar_projection_neither_lends_nor_retains`, `a_from_json_read_does_not_give_the_binding_up` | `arg` is reclaimed at the end of `go` | `vyrn why --memory` prints "NOT reclaimed — nothing in this frame releases it", at this commit and at its parent alike |
+| `a_match_over_a_temporary_releases_its_scrutinee`, `a_match_inside_a_region_frees_a_callee_built_scrutinee` | a row for the match's scrutinee | no row; the arm's own `frees` releases what the arm binds |
+
+The plan's rows at those shapes were never read by an emitter — the manifest
+proves it, since deleting them moves no byte — so the disagreement was
+invisible. The leak the first row names is real and it is older than this
+slice; it is a question for the kernel at a returned `match`, and it is
+recorded here rather than left to be found again.
+`a_write_after_a_take_leaks_the_whole_binding` also could not move: the
+placer's row carries the kernel's hole set at the exit (the holes slice), so
+the binding IS reclaimed minus the hole, and `coretables.rs` pins the set.
+
+**Where the assertions went.** `compiler/vyrn-cli/tests/plan.rs`, a new file:
+the same questions with their source swapped from the plan's table to
+`Ownership::releases`, which a test in `vyrn-cli` can fill because it can
+install a lowering. 37 of them pass there.
+`a_consuming_loop_releases_what_it_took` is rewritten as
+`a_consuming_loop_gives_its_container_back_at_the_loop`, which asserts the
+core's two facts directly. Three more went to `coretables.rs`, where a built
+body is visible: a payload binding out of module state owes no release, an
+`if let` over a parameter owes none and over a call result owes one, and a
+lender forwarded through an aggregate is refused before it can lend.
+
+**The lines.** `compiler/vyrn-frontend/src/own.rs` 3,066 to **1,833**;
+`compiler/vyrn-frontend/src/movecheck.rs` 6,031 to **4,879**;
+`compiler/vyrn-lower/src/core.rs` 5,843 to **5,873**;
+`compiler/vyrn-codegen/src/direct.rs` 16,365 to **16,365** — the emitter
+deletes as much as the new reading adds. 2,385 lines, and the census's rows 3
+and 4 are empty.
+
+**The censuses.** The structural census
+(`compiler/vyrn-cli/tests/refusals.rs`): `Kind::Rows` **1,565 to 815**,
+shared machinery **3,564 to 3,272**, tests **703 to 593**; the `Kernel`,
+`Checker` and `Menu` columns do not move. Five anchors go with their sections
+and four are re-aimed at what is left — `fn views` for the lending builtins,
+`fn walk_writeback` for the scope stacks' neighbour, `fn arm_carries_heap`
+for what an arm's value carries, `fn calls_in` for the calls in an
+expression. The emitter census
+(`compiler/vyrn-cli/tests/emitter_census.rs` and M3's kind table): the
+mapping **5,736 to 5,751**, shared machinery **2,326 to 2,312**, tests **326
+to 325**. RFC-0127 §3's form census moves for the first time in this arc:
+`own` drops to 0 mentions at every statement form and `movecheck` drops at
+fourteen expression forms, **1,347 mentions to 1,262**.
+
+**What is left of the census.** Row 5's four call-graph closures and
+`ArgVerdict`, with the two-part licence the capability slice named. Nothing
+else: `own.rs` states no per-binding table at all now, and `movecheck.rs` is
+a refusal pass with four sets beside it.
+
+#### Gates (2026-09-08, the container's release)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok, and the two pre-existing warnings unchanged |
+| `cargo test -p vyrn-cli`, no filter | 80 suites, all green — `plan.rs` is the new one |
+| `kernel` `--ignored`, release | 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs, 201 binding holes, 2 receiver holes |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — 30,197 functions judged, 0 differ |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 400 programs from 129 sources — 36 fewer programs, because the deleted unit tests carried them |
+| `refusals`, `emitter_census`, `forms` | re-pinned in this commit; `surface` and `checker_census` unmoved |
+| `cargo test -p vyrn-frontend` | 10 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 17 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 331 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, on a manifest regenerated with `write`: 1 of 176 rows moved, read above |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
 
 ### M6 — the other two judgments
 

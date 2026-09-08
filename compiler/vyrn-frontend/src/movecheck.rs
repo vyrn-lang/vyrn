@@ -127,93 +127,6 @@ pub fn projection_sites(program: &Program) -> Vec<ProjectionSite> {
     run(program, Want::Projections).projections
 }
 
-/// Why a `let` binding does **not** hold its value at the end of its block.
-///
-/// This is rule 1 read backwards. The pass already decides, at every store,
-/// whether a place hands its value over; recording the answer costs one map
-/// insert and turns the rules into the reclamation rule (RFC-0089 rule 4,
-/// Phase 4c). Nothing here is a second opinion — every row is written by the
-/// same code that writes the diagnostic.
-#[derive(Clone, Debug)]
-pub enum Gone {
-    /// The binding names a value somebody else owns: a projection of a place, a
-    /// borrowed parameter passed on, module state, or a builtin view. Carries
-    /// what it is, in words.
-    Borrowed(&'static str),
-    /// A store took it. `by` is the destination, in the words the diagnostic
-    /// uses ("the binding `t`", "`push(..)`").
-    Moved { line: usize, by: String },
-    /// A `return` carried it out of the function.
-    Returned { line: usize },
-    /// `drop name` reclaims it, so the automatic path must not.
-    Dropped { line: usize },
-    /// A lambda or a `spawn` holds it. A LAMBDA's capture is a by-value deep
-    /// snapshot since RFC-0114 §25 round three (both compiling backends
-    /// duplicate heap captures into the block, and the release twin walks
-    /// them), so the binding's own value is still this frame's to release —
-    /// round fifty-seven turns that release on. A `spawn`'s capture crosses
-    /// to a task that outlives the frame, and stays a recorded leak.
-    Captured { line: usize, spawned: bool },
-    /// A second name reads it without taking it: `let d = c` on a type rule 1
-    /// leaves alone. `Ref<T>` was the built-in case and is deleted (RFC-0090 M4);
-    /// what reaches here now is a type that DECLARES `impl Owned` and holds no
-    /// heap of its own — census U4's shape. Neither name may be released, because
-    /// neither of them is the owner.
-    Aliased { line: usize },
-    /// It was handed to a declared function, which may keep it.
-    Lent { line: usize, to: String },
-    /// A `consume` took one or more of its PLACES (RFC-0093 M1), so the value
-    /// has holes in it. Carries every place taken, RELATIVE to the binding
-    /// (`title`, `head.err`), and the line of the first take.
-    ///
-    /// It is a SET, not one path: `std/vyx.vyrn:1431` drains nine fields out of
-    /// one record. RFC-0093 M2 carries the set to [`crate::own`], which hands it
-    /// to the release walk so the walk skips exactly these places and reclaims
-    /// the rest.
-    ///
-    /// `skippable` is false where the walk may not be told to skip. A write to
-    /// a place of this binding is the case: it revives the hole, and a store
-    /// into an owning place releases what the place held — which is the buffer
-    /// the take gave away. Then nothing may be skipped and nothing may be
-    /// released, so the whole binding leaks, exactly as M1 shipped it. A leak is
-    /// a task; a double free is a bug in a language that promises memory safety.
-    Hole {
-        line: usize,
-        paths: Vec<String>,
-        skippable: bool,
-    },
-}
-
-/// One `let` binding, as the rules see it: its type and what became of it.
-#[derive(Clone, Debug, Default)]
-pub struct LetOwnership {
-    /// The binding's type — its annotation, else what the declared-types
-    /// reading makes of the initializer. `None` where neither names one.
-    pub ty: Option<Type>,
-    /// `None` means the binding still owns its value where the block ends.
-    pub gone: Option<Gone>,
-    /// The callee, when the initializer is a plain call. Read after the walk, to
-    /// answer whether that callee lends its result rather than transferring it.
-    pub from_call: Option<String>,
-    /// Every `(callee, argument index, line)` this binding was handed to. Read
-    /// after the walk: a position that KEEPS what it is given means this block
-    /// must not release the value.
-    pub passed: Vec<(String, usize, usize)>,
-    /// Exit-residue round sixteen. `Some(true)` while every take recorded on
-    /// this row came through the loop variable bound to it — an element
-    /// departure, which COPIES the value out of the buffer. `Some(false)` once
-    /// any other writer touched the row: a foreign take, a lender's result, a
-    /// position that retains. `None` = nothing recorded. Read by `own.rs`'s
-    /// `ForIn` arm: a consumed array row whose value is gone but whose writes
-    /// were all elem-only still owns its BUFFER, and the buffer alone is freed
-    /// (`DropKind::FreeArr`). Round fourteen's blanket version of that
-    /// downgrade freed LENT buffers — this field is the WHICH-take attribution
-    /// the refusal note asked for.
-    pub elem_only: Option<bool>,
-    /// The loop variable bound to this row, set where `ForIn` binds one.
-    pub elem_name: Option<String>,
-}
-
 /// One call-argument position whose argument expression BUILT the value it
 /// hands over — the census's shape A (an owning call's result) and shape B (an
 /// allocating String expression), in `rfcs/census-call-arguments.md` §1.
@@ -284,8 +197,6 @@ pub enum ArgVerdict {
 /// Everything one `Want::Lets` walk answers. Two facts out of one walk, because
 /// [`crate::own::analyze`] needs both and the walk is not cheap.
 pub struct Facts {
-    /// What every `let` owns at the end of its block — see [`ownership`].
-    pub lets: HashMap<usize, LetOwnership>,
     /// The two closures over the call graph, kept so a reader can ask whether
     /// either says anything (RFC-0125 §3 M3, the checker's deletion path).
     ///
@@ -328,90 +239,10 @@ pub struct Facts {
     pub fnval_clear: HashSet<String>,
 }
 
-/// What every `let` in `program` owns at the end of its block, keyed by the
-/// `Stmt::Let` node address — the same key [`crate::own`] emits drops with.
-///
-/// The addresses are the ones in `program`, so the caller must pass the very
-/// AST the backend lowers. Nothing is cloned on the way through, and a test or
-/// bench body is walked in place for exactly that reason.
-pub fn ownership(program: &Program) -> HashMap<usize, LetOwnership> {
-    facts(program).lets
-}
-
-/// [`ownership`] and the rows the plan still folds, out of one walk.
+/// The four closures over the call graph, out of one walk.
 pub fn facts(program: &Program) -> Facts {
     let r = run(program, Want::Lets);
-    let mut lets = r.lets;
-    // A call to a lender hands back storage the callee does not own, so the
-    // binding that names it may not be released. Applied here rather than at the
-    // `let`, because a lender is only known once every body has been read.
-    for row in lets.values_mut() {
-        // Round sixteen: these two rules answer "somebody else holds this
-        // value's storage". A row a body already marked gone SKIPS them below
-        // — but the elem-only attribution must still see them, because a
-        // buffer-only free of a LENT or producer-owned buffer is the
-        // use-after-free round fourteen's blanket downgrade shipped. Poison
-        // first, so the skip cannot hide a foreign owner.
-        if row
-            .from_call
-            .as_ref()
-            .is_some_and(|n| r.lending.contains(n))
-            || row
-                .passed
-                .iter()
-                .any(|(c, i, _)| r.retains.contains(&(c.clone(), *i)) || r.lending.contains(c))
-        {
-            row.elem_only = Some(false);
-        }
-        // A HOLE row is not a decision yet — it says the binding is reclaimed
-        // minus a few places (RFC-0093 M2), so the two rules below still apply
-        // to it and still overwrite it. They only ever answer "somebody else
-        // holds this", which is a leak, and a leak beats releasing a value a
-        // callee kept.
-        if row.gone.is_some() && !matches!(row.gone, Some(Gone::Hole { .. })) {
-            continue;
-        }
-        if let Some(name) = &row.from_call {
-            if r.lending.contains(name) {
-                row.gone = Some(Gone::Borrowed("a value its producer does not own"));
-                continue;
-            }
-        }
-        // Handed to a position that keeps what it is given. Rule 2 promises a
-        // `read` callee does not, and refuses every way of breaking that promise
-        // except one: a variant constructor, which `el(tag, attrs, kids)` is all
-        // through `std/html`. So this asks per position, instead of assuming
-        // every call may retain — the assumption this phase deleted, and the one
-        // that left `let s = a + b; takes(s)` leaking.
-        if let Some((to, _, line)) = row
-            .passed
-            .iter()
-            .find(|(c, i, _)| r.retains.contains(&(c.clone(), *i)))
-        {
-            row.gone = Some(Gone::Lent {
-                line: *line,
-                to: to.clone(),
-            });
-            continue;
-        }
-        // Handed to a LENDER. A lender returns a projection of what it was given
-        // (`tagOf(v)` is `match v { JStr(s) => s, .. }`), so its result names
-        // storage inside this argument and this block may not release it.
-        //
-        // Phase 10a found this by writing the bug. `if let Some(j) = maybe(x) {
-        // g = tagOf(j) }` released the scrutinee and left module state pointing
-        // at the freed buffer — a store of a CALL result records no move, so
-        // nothing else here could see it. The rule is wider than the row that
-        // needed it, and wider is the safe direction: it can only stop a release.
-        if let Some((to, _, line)) = row.passed.iter().find(|(c, _, _)| r.lending.contains(c)) {
-            row.gone = Some(Gone::Lent {
-                line: *line,
-                to: to.clone(),
-            });
-        }
-    }
     Facts {
-        lets,
         lending: r.lending,
         retains: r.retains,
         escapers: r.param_escapers,
@@ -442,7 +273,6 @@ enum Want {
 struct Run {
     diags: Vec<Diagnostic>,
     sites: Vec<OwningSite>,
-    lets: HashMap<usize, LetOwnership>,
     lending: HashSet<String>,
     retains: HashSet<(String, usize)>,
     projections: Vec<ProjectionSite>,
@@ -568,11 +398,6 @@ pub fn arg_verdict(
         // can be the destination of. The corpus has none.
         Some(_) | None => ArgVerdict::Unknown,
     }
-}
-
-/// The identity of a `let`: its node address, the key `own.rs` emits drops with.
-fn let_id(s: &Stmt) -> usize {
-    s as *const Stmt as usize
 }
 
 /// Whether the builtin `name` hands back a pointer **into** its argument.
@@ -1104,8 +929,6 @@ fn run(program: &Program, want: Want) -> Run {
         call_keeps: std::cell::Cell::new(None),
         continue_seen: std::cell::Cell::new(false),
         sites: (want == Want::Sites).then(|| RefCell::new(Vec::new())),
-        nodes: RefCell::new(Scopes::new(HashMap::new())),
-        lets: (want == Want::Lets).then(|| RefCell::new(HashMap::new())),
         cur_fn: RefCell::new(String::new()),
         writeback: RefCell::new(None),
         lending: (want == Want::Lets).then(|| RefCell::new(HashSet::new())),
@@ -1273,7 +1096,6 @@ fn run(program: &Program, want: Want) -> Run {
     Run {
         diags: out,
         sites: mc.sites.map(RefCell::into_inner).unwrap_or_default(),
-        lets: mc.lets.map(RefCell::into_inner).unwrap_or_default(),
         lending,
         retains,
         projections,
@@ -1388,9 +1210,7 @@ struct MoveCheck<'a> {
     /// — 0 for a parameter, a loop variable, a pattern binder or a lambda
     /// parameter. **Every** binder is recorded, so an inner `let s` shadowing an
     /// outer one takes the move rather than passing it up.
-    nodes: RefCell<Scopes<usize>>,
     /// Where the per-`let` ownership rows go, or `None` on the check path.
-    lets: Option<RefCell<HashMap<usize, LetOwnership>>>,
     /// The function being checked, so a recorded fact can name it.
     cur_fn: RefCell<String>,
     /// RFC-0125 M2: the binding a write-back statement `xs = xs.push(v)` is
@@ -1697,44 +1517,12 @@ impl MoveCheck<'_> {
         {
             let mut v = self.vars.borrow_mut();
             let mut b = self.borrows.borrow_mut();
-            let mut n = self.nodes.borrow_mut();
             v.truncate(1);
             b.truncate(1);
-            n.truncate(1);
             v.enter();
             b.enter();
-            n.enter();
             for p in f_params {
                 v.bind(&p.name, Some(p.ty.clone()));
-                // RFC-0114: a `consume` parameter is a value this frame OWNS,
-                // and until now it was the one owned value with no row — the
-                // callee released it only if the body wrote `drop v`, and a
-                // body that merely read it leaked its argument every call. It
-                // gets a row keyed by the `Param` node, exactly as a `let` is
-                // keyed by its statement; every take writes onto that row, so
-                // a param that is moved on, dropped, or returned releases
-                // nothing here, same as a `let`. A BORROWED parameter stays at
-                // node 0 — minting a row for one releases somebody else's
-                // value, which is the `argsdemo` corruption Phase 10a records.
-                if p.capability == Capability::Consume && self.decl.owns_heap(&p.ty) {
-                    let key = p as *const Param as usize;
-                    n.bind(&p.name, key);
-                    if let Some(sink) = &self.lets {
-                        sink.borrow_mut().insert(
-                            key,
-                            LetOwnership {
-                                ty: Some(p.ty.clone()),
-                                gone: None,
-                                from_call: None,
-                                passed: Vec::new(),
-                                elem_only: None,
-                                elem_name: None,
-                            },
-                        );
-                    }
-                } else {
-                    n.bind(&p.name, 0);
-                }
                 // RFC-0089 rule 2: everything but `consume` is a borrow, and only
                 // a type that owns heap has anything to borrow.
                 b.bind(
@@ -1762,24 +1550,19 @@ impl MoveCheck<'_> {
         self.vars.borrow_mut().enter();
         self.borrows.borrow_mut().enter();
         self.reads.borrow_mut().enter();
-        self.nodes.borrow_mut().enter();
     }
 
     fn exit(&self) {
         self.vars.borrow_mut().exit();
         self.borrows.borrow_mut().exit();
         self.reads.borrow_mut().exit();
-        self.nodes.borrow_mut().exit();
     }
 
-    /// Bind `name` with its type and its borrow status. Every binder that is not
-    /// a `let` gets node 0 — it declares no reclaimable binding, and recording it
-    /// is what stops it inheriting an outer `let`'s identity.
+    /// Bind `name` with its type and its borrow status.
     fn bind(&self, name: &str, ty: Option<Type>, borrow: Option<Borrow>) {
         self.vars.borrow_mut().bind(name, ty);
         self.borrows.borrow_mut().bind(name, borrow);
         self.reads.borrow_mut().bind(name, None);
-        self.nodes.borrow_mut().bind(name, 0);
     }
 
     /// The place a borrow of `value` reads, when the value spells one: `h.meta`,
@@ -1788,154 +1571,6 @@ impl MoveCheck<'_> {
         place_path(value)
             .or_else(|| element_path(value))
             .map(|(_, path)| path)
-    }
-
-    /// Record what became of the binding `name` names, if this run is recording
-    /// and if the binding is a `let` that has not already lost its value.
-    ///
-    /// First answer wins: a value can only leave once, and the earliest reason
-    /// is the one a reader needs.
-    /// The reclamation row of the place `e` names, or 0 for anything else.
-    ///
-    /// A pattern binder over a place is a PROJECTION of it, so what becomes of
-    /// the binder becomes of the place:
-    /// `if let Some(resp) = answer { return Some(apply(resp)) }` hands `answer`'s
-    /// payload to the caller. Keying the binder to the place's row is what
-    /// records that. Without it Phase 5 released `answer` on the way out and the
-    /// caller read freed memory — `examples/rest.vyrn`, in one parity run.
-    fn place_key(&self, e: &Expr) -> usize {
-        let Some((root, _)) = place_path(e) else {
-            return 0;
-        };
-        self.nodes.borrow().get(&root).copied().unwrap_or(0)
-    }
-
-    /// Give a statement that walks a TEMPORARY a row of its own, keyed by the
-    /// statement's node address, and hand back that key (Phase 10a).
-    ///
-    /// The temporary owns what it holds and has no name, so the row is what makes
-    /// it releasable at all: the binders bind to this key, and the ordinary
-    /// `took` path then records a `return`, a store, a capture or a handover onto
-    /// it exactly as it does for a `let`. `from_call` is filled for the same
-    /// reason a `let`'s is — a call to a LENDER hands back storage nobody here
-    /// owns, and [`ownership`] reads that after every body.
-    ///
-    /// Two statements ask for one: `if let PAT = f()` (Phase 10a) and
-    /// `for x in f()` (RFC-0092 M5). The key is the statement address, which is
-    /// the key `own.rs` reads.
-    ///
-    /// A `match` asks too, and it is an EXPRESSION — so it keys on its own node
-    /// address through [`MoveCheck::note_temporary_at`]. One AST, one arena: a
-    /// `Stmt` address and an `Expr` address cannot collide.
-    fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize {
-        self.note_temporary_at(let_id(s), value)
-    }
-
-    fn note_temporary_at(&self, key: usize, value: &Expr) -> usize {
-        let Some(sink) = &self.lets else { return 0 };
-        sink.borrow_mut().insert(
-            key,
-            LetOwnership {
-                ty: self.type_of(value),
-                gone: None,
-                from_call: match value {
-                    Expr::Call { name, .. } => Some(name.clone()),
-                    _ => None,
-                },
-                passed: Vec::new(),
-                elem_only: None,
-                elem_name: None,
-            },
-        );
-        key
-    }
-
-    fn took(&self, name: &str, gone: Gone) {
-        let Some(sink) = &self.lets else { return };
-        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
-        if key == 0 {
-            return;
-        }
-        if let Some(row) = sink.borrow_mut().get_mut(&key) {
-            // Which-take attribution (round sixteen): a take through the loop
-            // variable bound to this row is an element leaving — the value was
-            // copied OUT of the buffer. Any other taker poisons the row.
-            let via_elem = row.elem_name.as_deref() == Some(name);
-            row.elem_only = Some(row.elem_only.unwrap_or(true) && via_elem);
-            // A HOLE is not the last word (RFC-0093 M2): it says the binding is
-            // reclaimed minus a few places, and every row written here says the
-            // value LEFT — moved, returned, captured, lent. Those win, and they
-            // have to. `gave_up` marks the root of every name a `return`
-            // expression reads, so `return f(er.next)` after `consume er.node`
-            // records that `er` left; keeping the hole instead would release a
-            // value the caller now holds. The wasm generator engine trapped on
-            // `std/vyx` within one run of this rule being wrong.
-            if row.gone.is_none() || matches!(row.gone, Some(Gone::Hole { .. })) {
-                row.gone = Some(gone);
-            }
-        }
-    }
-
-    /// A take of the place `rel` out of the binding `name` (RFC-0093 M2).
-    ///
-    /// Not [`MoveCheck::took`], because a hole ACCUMULATES: the ninth take out
-    /// of one record must not overwrite the first eight, and `took` writes only
-    /// where nothing is written yet. A row that already says something else —
-    /// moved, captured, lent — keeps saying it, and that row is a leak or a
-    /// move, so it is the safe answer either way.
-    fn hole(&self, name: &str, line: usize, rel: Option<String>) {
-        let Some(sink) = &self.lets else { return };
-        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
-        if key == 0 {
-            return;
-        }
-        if let Some(row) = sink.borrow_mut().get_mut(&key) {
-            // A hole taken out of the loop element still leaves through the
-            // element — the payload was copied out (round sixteen).
-            let via_elem = row.elem_name.as_deref() == Some(name);
-            row.elem_only = Some(row.elem_only.unwrap_or(true) && via_elem);
-            match &mut row.gone {
-                None => {
-                    row.gone = Some(Gone::Hole {
-                        line,
-                        paths: rel.iter().cloned().collect(),
-                        // A path this pass cannot state relative to the binding
-                        // is a path the walk cannot be told to skip.
-                        skippable: rel.is_some(),
-                    })
-                }
-                Some(Gone::Hole {
-                    paths, skippable, ..
-                }) => match rel {
-                    Some(p) => {
-                        if !paths.contains(&p) {
-                            paths.push(p);
-                        }
-                    }
-                    None => *skippable = false,
-                },
-                Some(_) => {}
-            }
-        }
-    }
-
-    /// A write to a place of `name`, after a take took one (RFC-0093 M2).
-    ///
-    /// The write fills the hole, and the store that fills it releases what the
-    /// place held — the buffer the take gave away. So the binding stops being
-    /// skippable and leaks whole. Only a binding that already carries a hole is
-    /// touched; a write to any other binding means nothing here.
-    fn wrote_into(&self, name: &str) {
-        let Some(sink) = &self.lets else { return };
-        let key = self.nodes.borrow().get(name).copied().unwrap_or(0);
-        if key == 0 {
-            return;
-        }
-        if let Some(row) = sink.borrow_mut().get_mut(&key) {
-            if let Some(Gone::Hole { skippable, .. }) = &mut row.gone {
-                *skippable = false;
-            }
-        }
     }
 
     /// Every name `e` reads, so a `return` or a `spawn` can give up all of them.
@@ -1967,290 +1602,6 @@ impl MoveCheck<'_> {
         let walked = self.expr(value, consumed, scope);
         *self.writeback.borrow_mut() = None;
         walked
-    }
-
-    fn gave_up(&self, e: &Expr, gone: &Gone) {
-        for n in reads(e) {
-            self.took(&n, gone.clone());
-        }
-    }
-
-    /// Rule 3's marking at a RETURN, narrowed (exit-residue round seven): a
-    /// returned call whose callee is a KNOWN function carries an owned
-    /// result that contains none of its read arguments — rule 3 refuses
-    /// returning a borrow, and the positions the rule excepts are settled
-    /// by the `facts()` post-passes reading `row.passed` (a lender marks
-    /// them Lent, a retaining position marks them too). Marking everything
-    /// under the call `Returned` left `out`'s buffer unreleased at every
-    /// `return fromBytesOr(out, ..)` in `std/` — one scratch buffer per
-    /// byte-building call, twelve sites and every caller's own spelling of
-    /// the shape.
-    ///
-    /// The narrowing asks three guards, and every "no" keeps the
-    /// conservative walk: a variant constructor RETAINS its arguments, a
-    /// view lends a place inside one, and a name any scope binds is a
-    /// `fn`-typed local whose body nothing can read.
-    fn gave_up_returned(&self, e: &Expr, gone: &Gone) {
-        let off = std::env::var("VYRN_RET_NARROW_OFF").unwrap_or_default();
-        if off == "all" {
-            return self.gave_up(e, gone);
-        }
-        if let Ok(skip) = std::env::var("VYRN_RET_NARROW_SKIP") {
-            let f = self.cur_fn.borrow();
-            if skip.split(',').any(|s| s == f.as_str()) {
-                return self.gave_up(e, gone);
-            }
-        }
-        match e {
-            Expr::Call { name, .. } if off.contains("call") => self.gave_up(e, gone),
-            Expr::Match { .. } if off.contains("join") => self.gave_up(e, gone),
-            Expr::IfExpr { .. } if off.contains("join") => self.gave_up(e, gone),
-            Expr::Binary { .. } if off.contains("add") => self.gave_up(e, gone),
-            // A returned CONSTRUCTOR recurses per argument (exit-residue
-            // round eleven): `return Err(errAt(p, ..))` read `p` through the
-            // constructor and the conservative walk marked it Returned on
-            // EVERY path of the function — `parseJson`'s cursor record, and
-            // its whole byte buffer, leaked once per call because of the
-            // error return at the bottom. A direct place argument still
-            // falls to the conservative walk below (and the call walk has
-            // already moved or refused it at the constructor position); a
-            // call argument's reads are rule 3's business, same as at the
-            // top level.
-            Expr::Call { name, args, .. } if self.decl.constructs(name) => {
-                for a in args {
-                    // A CONSUMED place argument accounts for itself: the
-                    // take already recorded its hole, only the taken field
-                    // is in the returned value, and marking the ROOT
-                    // Returned made the whole binding unreleasable —
-                    // `return Ok(consume bd.op)` left every OTHER Builder
-                    // field with no owner (exit-residue round fifty-one).
-                    if matches!(a, Expr::Consume { .. }) {
-                        continue;
-                    }
-                    self.gave_up_returned(a, gone);
-                }
-            }
-            // The copying builtins build fresh storage out of what they
-            // READ — `@copy`'s row is held back from the return table (its
-            // type is its receiver's), so the is_function screen below never
-            // clears it, and `return Err(bd.err.copy())` marked the whole
-            // record moved into the return: every OTHER field lost its
-            // owner. Round fifty's first cut of this un-masked a DOUBLE
-            // release — round forty-four's Hole rows in the early fold — and
-            // round fifty-one removed those (a holed binding places
-            // structurally), which is what makes this narrowing sound.
-            Expr::Call { name, .. } if name == "@copy" || name == "@str" || name == "@concat" => {}
-            // The codec forms build FRESH values out of what they read —
-            // `fromJson(T, s)` parses and copies, `toJson(v)` renders — so
-            // neither result can carry an argument's storage, and neither is
-            // a program function the screen below could clear (exit-residue
-            // round fifty-six: `return match fromJson(IdReq, arg.json) { .. }`
-            // — the generated GraphQL resolver arm — marked `arg` moved into
-            // the return on every path, and the argument JSON leaked once per
-            // argument-carrying resolve).
-            Expr::Call { name, .. } if name == "fromJson" || name == "toJson" => {}
-            // A NUMERIC CAST is a call spelled with a type's name and returns
-            // a scalar copy — `return Some(Float32(toFloat(sc, ..)))` marked
-            // `sc` through the cast the conservative walk could not see
-            // through (exit-residue round fifty-four). The width names are
-            // the checker's own cast set; the argument keeps its own
-            // reading.
-            Expr::Call { name, args, .. }
-                if matches!(
-                    name.as_str(),
-                    "Int"
-                        | "Int8"
-                        | "Int16"
-                        | "Int32"
-                        | "Int64"
-                        | "UInt8"
-                        | "UInt16"
-                        | "UInt32"
-                        | "UInt64"
-                        | "Float"
-                        | "Float32"
-                        | "Float64"
-                ) =>
-            {
-                for a in args {
-                    self.gave_up_returned(a, gone);
-                }
-            }
-            Expr::Call { name, .. } => {
-                // A seeded row whose return is the same bare parameter as an
-                // argument's may hand that argument straight back —
-                // `blackBox` is the identity — which `views` does not cover
-                // (it lends no PLACE, it returns the value itself). Same
-                // guard as `arg_verdict`'s.
-                let hands_back = crate::prelude::signature(name).is_some_and(|f| {
-                    matches!(&f.ret, Type::Param(r)
-                        if f.params.iter().any(|p| matches!(&p.ty, Type::Param(q) if q == r)))
-                });
-                if self.decl.is_function(name)
-                    && !self.decl.constructs(name)
-                    && !views(name)
-                    && !hands_back
-                    && self.vars.borrow().get(name).is_none()
-                {
-                    return;
-                }
-                self.gave_up(e, gone);
-            }
-            // The value-position joins recurse per arm — `return match
-            // stringFromBytes(out) { Ok(v) => v, Err(e) => "" }` is the
-            // spelling every byte-builder in `std/` ends on, and marking the
-            // whole match conservatively re-leaked exactly what the call arm
-            // above releases.
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                // The scrutinee's row is marked, and NOT as a read: every arm
-                // has already written its own verdict there.
-                self.gave_up_returned(scrutinee, gone);
-                for arm in arms {
-                    if let crate::ast::ArmBody::Expr(b) = &arm.body {
-                        self.gave_up_returned(b, gone);
-                    }
-                }
-            }
-            // The condition's reads are a test, not the result — nothing it
-            // names can be inside the returned value, so only the branches
-            // are walked.
-            Expr::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.gave_up_returned(then_branch, gone);
-                if let Some(eb) = else_branch {
-                    self.gave_up_returned(eb, gone);
-                }
-            }
-            Expr::Try { expr, .. } => self.gave_up_returned(expr, gone),
-            // A returned STRUCT LITERAL is a constructor spelled with braces
-            // (exit-residue round fifty-three): its fields take the same
-            // per-argument reading a constructor call's arguments do, and
-            // marking the whole literal re-marked what the fields already
-            // account for — `return Ok(Regex { op: consume bd.op, nsets:
-            // bd.nsets, .. })` marked bd moved-into-the-return on its
-            // SUCCESS path, and the un-consumed `pat` buffer lost its owner
-            // once per compile.
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    if matches!(v, Expr::Consume { .. }) {
-                        continue;
-                    }
-                    self.gave_up_returned(v, gone);
-                }
-            }
-            // A place read whose type owns no heap travels BY VALUE — a
-            // scalar copied into the result carries none of the binding's
-            // storage, so it marks nothing (the same top-level screen
-            // `read_only_mentions` applies, one position over).
-            e2 if place_path(e2).is_some()
-                && self.type_of(e2).is_some_and(|t| !self.decl.owns_heap(&t)) => {}
-            // `return acc + "}"` — the shape every `std/` emitter ends on. A
-            // String `+` is `@concat`, which copies both operands into a
-            // fresh buffer; a `Code +` concatenates arena handles; every
-            // other `+` is scalar. Nothing an addition reads is inside its
-            // result, so nothing is marked.
-            Expr::Binary { op: BinOp::Add, .. } => {}
-            _ => self.gave_up(e, gone),
-        }
-    }
-
-    /// Whether a `let` of `value` names storage somebody else owns, for
-    /// reclamation purposes.
-    ///
-    /// Wider than [`MoveCheck::borrow_from`], which answers rule 2 and therefore
-    /// only fires where this reading can name a type. Reclamation must be right
-    /// where the type is unknown too, so this asks the SHAPE: a field read, a
-    /// view builtin, module state, or a name that is itself a borrow.
-    /// Round twenty-nine: a bare name that is BOUND — a parameter included —
-    /// is never a temporary, whatever `names_a_place` says about it. A read
-    /// parameter whose type owns no heap carries no borrow (rule 2 has
-    /// nothing to borrow), so the temporary-row guards used to fall through
-    /// for exactly those and mint a row that released the CALLER's value —
-    /// masked while such types had no release kind, exposed the day
-    /// `Option<Handle>` got one.
-    fn is_bound_name(&self, e: &Expr) -> bool {
-        matches!(e, Expr::Var { name, .. } if self.vars.borrow().frame_of(name).is_some())
-    }
-
-    fn names_a_place(&self, value: &Expr) -> Option<&'static str> {
-        match value {
-            // A field read is somebody's place only when its base chain roots
-            // at one. A field of a TEMPORARY — `makeRec(i).name` — is read out
-            // of a value NOBODY owns: no row, no release, and calling it a
-            // borrow was the leak (RFC-0114, the last receiver case). The
-            // binding takes ownership of the extracted buffer instead; the
-            // recursion keeps a view builtin's field a borrow, and a user
-            // function cannot return a borrow at all ("a return is owned"),
-            // so there is no owner left to double-free against.
-            Expr::Field { expr, .. } => {
-                if place_path(value).is_some() || element_path(value).is_some() {
-                    Some("read out of a place that owns it")
-                } else {
-                    self.names_a_place(expr)
-                }
-            }
-            Expr::Var { name, .. } => {
-                if self.borrow_of(name).is_some() {
-                    return Some("a borrow of somebody else's value");
-                }
-                // Module state lives for the whole module and is never dropped,
-                // so naming it takes nothing (RFC-0013). Frame 0 IS the globals
-                // frame, which is also what tells a global from a local shadow.
-                let global =
-                    self.globals.contains(name) && self.vars.borrow().frame_of(name) == Some(0);
-                global.then_some("module state, which nothing may take")
-            }
-            Expr::Call { name, .. } if views(name) => Some("a view into its argument"),
-            // An arm can name a place as easily as the whole initializer can:
-            // `let ty = if k < n { types[k] } else { "Int64" }` binds an element
-            // of `types` on one path. One arm is enough — nothing here can say
-            // which path runs.
-            Expr::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => self
-                .names_a_place(then_branch)
-                .or_else(|| else_branch.as_ref().and_then(|b| self.names_a_place(b))),
-            // A block arm (RFC-0118) yields no value, so it names no place.
-            Expr::Match {
-                scrutinee, arms, ..
-            } => arms.iter().find_map(|a| {
-                let e = a.body.as_expr()?;
-                // RFC-0121: an arm that yields a binder its own pattern bound
-                // reads the scrutinee's PAYLOAD — a place whoever owns the
-                // scrutinee still owns. Only when the scrutinee itself names
-                // a place: matching a temporary hands its payload over, and
-                // calling that a borrow would leak it (the same line
-                // `Expr::Field` draws above). Without this, `let items =
-                // match g { JArr(items) => items, .. }` on module state read
-                // as a fresh owned value, and `own` freed the global's buffer
-                // out from under it.
-                if let Expr::Var { name, .. } = e {
-                    if pattern_bindings(&a.pattern).contains(&name.as_str())
-                        && self.names_a_place(scrutinee).is_some()
-                    {
-                        return Some("the payload of a place somebody owns");
-                    }
-                }
-                self.names_a_place(e)
-            }),
-            // `x.copy()` allocates for exactly the types `owns_heap` counts
-            // (RFC-0089 M1b). Everything else it is called on is a handle, and a
-            // copied handle SHARES what it points at — releasing both copies of
-            // a declared container would release one value twice.
-            Expr::Call { name, args, .. } if name == "@copy" => (!args
-                .first()
-                .and_then(|a| self.type_of(a))
-                .is_some_and(|t| self.decl.owns_heap(&t)))
-            .then_some("a copy of a handle, which shares what it points at"),
-            _ => None,
-        }
     }
 
     /// The ways out of a borrow error in THIS function.
@@ -2470,7 +1821,7 @@ impl MoveCheck<'_> {
         if path != root {
             return false;
         }
-        self.took(&root, Gone::Moved { line, by: into() });
+        let _ = into;
         consumed.insert(root, Consumption { line, hole: false });
         true
     }
@@ -2669,10 +2020,10 @@ impl MoveCheck<'_> {
     /// here must not be released if `(callee, i)` turns out to keep what it is
     /// given, and a PARAMETER passed here makes this function keep it in turn.
     fn note_handover(&self, arg: &Expr, callee: &str, i: usize, line: usize) {
-        let Some(sink) = &self.lets else { return };
         let Some((root, _)) = place_path(arg) else {
             return;
         };
+        let _ = line;
         if let Some(&ix) = self.param_ix.borrow().get(&root) {
             if let Some(edges) = &self.handed_on {
                 edges
@@ -2681,70 +2032,6 @@ impl MoveCheck<'_> {
                     .or_default()
                     .push((self.cur_fn.borrow().clone(), ix));
             }
-        }
-        let key = self.nodes.borrow().get(&root).copied().unwrap_or(0);
-        if key != 0 {
-            if let Some(row) = sink.borrow_mut().get_mut(&key) {
-                row.passed.push((callee.to_string(), i, line));
-            }
-        }
-    }
-
-    /// An arm of an if-expression or a `match` can yield a PLACE, and the value
-    /// then has two names: the arm's and whatever the expression is bound to,
-    /// stored into or returned as.
-    ///
-    /// `let rel = if prefix == "" { st } else { prefix + "/" + st }` is the shape,
-    /// out of `std/rpc`'s scanner. Both `rel` and `st` named one buffer and both
-    /// were released, and the generator running as wasm then built its stub names
-    /// out of reused memory. Neither name may be released, exactly as for the
-    /// bare `let d = c` alias.
-    /// A `match` is not walked here. Its arms bind PAYLOAD names, and this walk
-    /// runs with those names out of scope — `Some(v) => v` would ask what `v`
-    /// meant in the enclosing block, which is either nothing or the wrong
-    /// binding. [`MoveCheck::expr`]'s `Expr::Match` arm asks the same question
-    /// one scope in, where the binders are bound and keyed to the scrutinee's
-    /// row, and that is the only place it can be asked correctly.
-    fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String]) {
-        if self.lets.is_none() {
-            return;
-        }
-        let Expr::IfExpr {
-            then_branch,
-            else_branch,
-            ..
-        } = e
-        else {
-            return;
-        };
-        self.note_arm_value(then_branch, line, binders);
-        if let Some(b) = else_branch {
-            self.note_arm_value(b, line, binders);
-        }
-    }
-
-    /// One arm's VALUE, and what naming a place in it costs.
-    ///
-    /// A whole place yielded by an arm is the alias above: two names, one
-    /// buffer, and only the name the expression is bound to may release it.
-    ///
-    /// A place rooted at one of this arm's own `binders` is the same fact about
-    /// the SCRUTINEE, because a binder is keyed to the scrutinee's row — so
-    /// `Some(v) => v` and `Ok(d) => d.title` both say the scrutinee gave its
-    /// payload up, and nothing may release the scrutinee afterwards. The path
-    /// does not have to be the whole root for a binder, and it does for anything
-    /// else: `d.title` out of an outer record leaves the record's own release
-    /// alone, which is what a projection means.
-    fn note_arm_value(&self, a: &Expr, line: usize, binders: &[String]) {
-        self.note_arm_aliases(a, line, binders);
-        let Some((root, path)) = place_path(a).or_else(|| element_path(a)) else {
-            return;
-        };
-        if !self.arm_carries_heap(a) {
-            return;
-        }
-        if root == path || binders.iter().any(|b| *b == root) {
-            self.took(&root, Gone::Aliased { line });
         }
     }
 
@@ -3285,7 +2572,7 @@ impl MoveCheck<'_> {
                 // what makes the diagnostic name `ps[0].xs`, which the reader
                 // wrote, instead of `ps[]val`, which the parser minted.
                 let hoisted = name.ends_with("[]val");
-                let moved = self.store(
+                self.store(
                     value,
                     &|| {
                         if hoisted {
@@ -3302,44 +2589,6 @@ impl MoveCheck<'_> {
                     consumed,
                 );
                 self.note_wrapped_lend(value);
-                // Phase 4c: the row this binding is reclaimed by. Written BEFORE
-                // the binding enters scope, so `let s = s + "x"` records the new
-                // `s` and the move of the old one lands on the old row.
-                let mut place = self.names_a_place(value);
-                // A whole place that did NOT move is an alias: rule 1 leaves the
-                // type alone, so this name did not take it. Neither name may be
-                // released, or one value is released twice.
-                if place.is_none() && !moved {
-                    if let Some((root, path)) = place_path(value) {
-                        // A NULLARY constructor parses as a bare name — `let
-                        // mut head = None` is a construction, not an alias
-                        // (round twenty-nine: the mislabel was invisible
-                        // while `Option<Handle>` had no release kind, and
-                        // then it stood every such binding's release down).
-                        // The reading is [`MoveCheck::names_a_constructor`],
-                        // which the `consume`-argument sites ask too.
-                        if root == path && !self.names_a_constructor(&root) {
-                            self.took(&root, Gone::Aliased { line: *line });
-                            place = Some("a second name for a value it did not take");
-                        }
-                    }
-                }
-                if let Some(sink) = &self.lets {
-                    sink.borrow_mut().insert(
-                        let_id(s),
-                        LetOwnership {
-                            ty: bty.clone(),
-                            gone: place.map(Gone::Borrowed),
-                            from_call: match value {
-                                Expr::Call { name, .. } => Some(name.clone()),
-                                _ => None,
-                            },
-                            passed: Vec::new(),
-                            elem_only: None,
-                            elem_name: None,
-                        },
-                    );
-                }
                 // Round fifty-six provenance: a binding initialized with a
                 // carrying value carries it (read pre-bind, so `let x = x + b`
                 // asks about the old `x`).
@@ -3352,7 +2601,6 @@ impl MoveCheck<'_> {
                     let read = Self::read_of(value).map(|p| (p, *line));
                     self.reads.borrow_mut().bind(name, read);
                 }
-                self.nodes.borrow_mut().bind(name, let_id(s));
                 revive(consumed, name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
                 Ok(false)
@@ -3395,9 +2643,6 @@ impl MoveCheck<'_> {
                     // record still holds and releases again — `out = v` inside
                     // `if let Some(v) = o` is the same store one keyword over.
                     // One question, asked at both spellings.
-                    if let Some(why) = self.names_a_place(value) {
-                        self.took(name, Gone::Borrowed(why));
-                    }
                     let read = b
                         .as_ref()
                         .and_then(|_| Self::read_of(value).map(|p| (p, *line)));
@@ -3418,7 +2663,6 @@ impl MoveCheck<'_> {
                     }
                 }
                 revive(consumed, name); // reassignment revives it
-                self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 Ok(false)
             }
             Stmt::SetField {
@@ -3440,7 +2684,6 @@ impl MoveCheck<'_> {
                 // sentence `Stmt::Assign` has carried since Phase 4b, one dot
                 // down — and the reason no drop flag is needed to say it.
                 revive(consumed, &format!("{name}.{field}"));
-                self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 self.note_carrying_store(name, value);
                 Ok(false)
             }
@@ -3465,7 +2708,7 @@ impl MoveCheck<'_> {
                 // the user-container half of §26's stand-aside). The CHECK
                 // walk keeps the plain reading: its diagnostics name the
                 // spelling the user wrote.
-                if self.lets.is_some() && crate::project::memo_open() {
+                if self.lending.is_some() && crate::project::memo_open() {
                     let aty = self.vars.borrow().get(name).cloned().flatten();
                     if let Some(aty) = aty {
                         if let Ok(Some(blk)) =
@@ -3508,7 +2751,6 @@ impl MoveCheck<'_> {
                 // snapshot is a temporary the loop owns (M5), so `k` binds an
                 // OWNED element and the store still records the move.
                 self.store(index, &|| format!("`{name}`"), *line, true, consumed);
-                self.wrote_into(name); // RFC-0093 M2: a filled hole is not skippable
                 self.note_carrying_store(name, value);
                 Ok(false)
             }
@@ -3527,12 +2769,6 @@ impl MoveCheck<'_> {
                         }
                     }
                     self.note_return(e, *line);
-                    // Rule 3: the caller owns the result. Everything the returned
-                    // expression reads may be inside it, so this block releases
-                    // none of it. Only a heap return type can carry anything out.
-                    if self.decl.owns_heap(&self.ret.borrow()) {
-                        self.gave_up_returned(e, &Gone::Returned { line: *line });
-                    }
                     // A result handed straight back is lent if what it names is.
                     if self.decl.releases(&self.ret.borrow()) {
                         if let Some(sink) = &self.forwards {
@@ -3645,23 +2881,12 @@ impl MoveCheck<'_> {
                 // is given a reclamation row, and it is the same question here:
                 // a borrow, module state, a field read or a view builtin owns
                 // nothing this block may release.
-                let key = match self.place_key(scrutinee) {
-                    0 if self.names_a_place(scrutinee).is_none()
-                        && !self.is_bound_name(scrutinee) =>
-                    {
-                        self.note_temporary(s, scrutinee)
-                    }
-                    k => k,
-                };
                 for (i, b) in pattern_bindings(pattern).into_iter().enumerate() {
                     scope.last_mut().unwrap().insert(b.to_string());
                     // Recording it is the point: an unrecorded binder falls
                     // through to whatever the enclosing scope calls that name
                     // (`own.rs`'s shadowing lesson).
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
-                    if key != 0 {
-                        self.nodes.borrow_mut().bind(b, key);
-                    }
                 }
                 let binders: HashSet<String> = pattern_bindings(pattern)
                     .into_iter()
@@ -3759,16 +2984,6 @@ impl MoveCheck<'_> {
                 // survives is a body that kept nothing, so the release at the
                 // exit gives back the visited and the unvisited elements alike,
                 // each exactly once.
-                let key = match self.place_key(iter) {
-                    0 if !*consuming
-                        && self.names_a_place(iter).is_none()
-                        && !self.is_bound_name(iter) =>
-                    {
-                        self.note_temporary(s, iter)
-                    }
-                    _ if *consuming => self.note_temporary(s, iter),
-                    _ => 0,
-                };
                 let mut body_c = consumed.clone();
                 self.enter();
                 let is_borrow = borrow.is_some();
@@ -3776,26 +2991,6 @@ impl MoveCheck<'_> {
                 if is_borrow {
                     let read = place_path(iter).map(|(_, p)| (format!("{p}[..]"), *line));
                     self.reads.borrow_mut().bind(var, read);
-                }
-                // The loop variable is bound to the snapshot's row, so every way
-                // an ELEMENT can leave the loop is written on it: a store
-                // (`fs.push(Field { key: k, .. })`, which is what `httpInput`
-                // does), a `return`, a `drop`, a capture, a handover to a
-                // position that retains. A row that says the value left is a row
-                // `own.rs` reclaims nothing from — the elements the body kept
-                // stay allocated, and so does the buffer with them. That is a
-                // leak and not a double free, which is the direction this
-                // analysis is allowed to be wrong in.
-                if key != 0 {
-                    self.nodes.borrow_mut().bind(var, key);
-                    // Round sixteen: name the loop variable on the row, so
-                    // `took`/`hole` can tell an element departure — a take
-                    // THROUGH this name — from any other writer.
-                    if let Some(sink) = &self.lets {
-                        if let Some(row) = sink.borrow_mut().get_mut(&key) {
-                            row.elem_name = Some(var.clone());
-                        }
-                    }
                 }
                 let outer_continue = self.continue_seen.replace(false);
                 let _ = self.block(body, &mut body_c, scope);
@@ -3815,22 +3010,6 @@ impl MoveCheck<'_> {
                     // readable — the same hole the prefix makes, recorded the
                     // same way and handed to the same walk (M2).
                     if let Some((root, path)) = place_path(iter) {
-                        if root == path {
-                            self.took(
-                                &root,
-                                Gone::Moved {
-                                    line: *line,
-                                    by: "the `for .. in consume` loop".into(),
-                                },
-                            );
-                        } else {
-                            let rel = path
-                                .strip_prefix(&root)
-                                .and_then(|r| r.strip_prefix('.'))
-                                .filter(|r| !r.contains('['))
-                                .map(str::to_string);
-                            self.hole(&root, *line, rel);
-                        }
                         consumed.insert(
                             path.clone(),
                             Consumption {
@@ -3921,7 +3100,6 @@ impl MoveCheck<'_> {
                         ],
                     ));
                 }
-                self.took(name, Gone::Dropped { line: *line });
                 consumed.insert(
                     name.clone(),
                     Consumption {
@@ -3973,7 +3151,7 @@ impl MoveCheck<'_> {
     /// and Phase 5 is where a closure releases what it holds. Until then the
     /// honest answer is that this block does not own it.
     fn note_capture(&self, name: &str, line: usize) {
-        if self.lets.is_none() {
+        if self.lending.is_none() {
             return;
         }
         let Some(&inside) = self.lambda_base.borrow().last() else {
@@ -3999,13 +3177,7 @@ impl MoveCheck<'_> {
             .frame_of(name)
             .is_some_and(|f| f < inside)
         {
-            self.took(
-                name,
-                Gone::Captured {
-                    line,
-                    spawned: false,
-                },
-            );
+            let _ = line;
         }
     }
 
@@ -4154,27 +3326,6 @@ impl MoveCheck<'_> {
                 // binding is reclaimed MINUS these places. Every take of the same
                 // root joins the set, because a record is drained a field at a
                 // time.
-                if root == path {
-                    self.took(
-                        &root,
-                        Gone::Moved {
-                            line: *line,
-                            by: "`consume`".into(),
-                        },
-                    );
-                } else {
-                    // The walk starts at the binding, so the path it skips is
-                    // relative to it. A name that is not a prefix of its own path
-                    // is RFC-0082's place desugar, whose temporaries are named
-                    // after the paths they took (`o.i[]`); it is one binding and
-                    // not a path, and the walk cannot be told to skip inside it.
-                    let rel = path
-                        .strip_prefix(&root)
-                        .and_then(|r| r.strip_prefix('.'))
-                        .filter(|r| !r.contains('['))
-                        .map(str::to_string);
-                    self.hole(&root, *line, rel);
-                }
                 consumed.insert(
                     path.clone(),
                     Consumption {
@@ -4227,63 +3378,13 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Expr::Match {
-                scrutinee,
-                arms,
-                line,
-                ..
+                scrutinee, arms, ..
             } => {
                 self.expr(scrutinee, consumed, scope)?;
-                // The scrutinee's row, and the same two cases `if let` has since
-                // Phase 10a — with the same guard, for the same reason.
-                //
-                // A PLACE keeps its own row: an arm that hands the payload out
-                // gives that place up, and `note_arm_value` below writes it
-                // there. A TEMPORARY has no name and therefore had no row at
-                // all, so nothing released `match makeResult(i) { .. }` and a
-                // statement-position match leaked its scrutinee every turn. The
-                // row is minted here, keyed by the MATCH EXPRESSION's address —
-                // a match is an expression and has no statement to key on — and
-                // `own` releases exactly the rows nothing wrote on.
-                let key = match self.place_key(scrutinee) {
-                    0 if self.names_a_place(scrutinee).is_none()
-                        && !self.is_bound_name(scrutinee) =>
-                    {
-                        self.note_temporary_at(e as *const Expr as usize, scrutinee)
-                    }
-                    k => k,
-                };
-                // Round forty: whether this is the temp row minted just above
-                // — the per-arm payload accounting below acts only on those.
-                let minted_temp = key == e as *const Expr as usize && self.lets.is_some();
-                let pre_gone = if minted_temp {
-                    self.lets
-                        .as_ref()
-                        .and_then(|s| s.borrow().get(&key).and_then(|r| r.gone.clone()))
-                } else {
-                    None
-                };
-                let mut any_moved = false;
-                let mut moved_gone: Option<Gone> = None;
                 let base = consumed.clone();
                 let mut arm_cs: Vec<Consumed> = Vec::new();
                 for arm in arms {
                     let mut c = base.clone();
-                    // Round forty: each arm is an ALTERNATIVE — a take through
-                    // one arm's binder must not read as this arm's, so the
-                    // temp row's verdict is reset per arm and the worst one is
-                    // written back after the loop. Reset FIRST, before
-                    // `note_arm_value` below writes an alias verdict this
-                    // arm's accounting must see (resetting after it erased
-                    // the mark, the whole-release fired on an aliased-out
-                    // payload, and `ascii`'s caller freed a returned buffer
-                    // twice — the audit caught it before anything shipped).
-                    if minted_temp {
-                        if let Some(s) = &self.lets {
-                            if let Some(row) = s.borrow_mut().get_mut(&key) {
-                                row.gone = pre_gone.clone();
-                            }
-                        }
-                    }
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
@@ -4294,15 +3395,6 @@ impl MoveCheck<'_> {
                     for (i, b) in binders.iter().enumerate() {
                         scope.last_mut().unwrap().insert(b.clone());
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
-                        if key != 0 {
-                            self.nodes.borrow_mut().bind(b, key);
-                        }
-                    }
-                    // Asked HERE, one scope in, because the question is about
-                    // the binders and this is where they are bound. A block arm
-                    // (RFC-0118) yields nothing, so there is no arm value.
-                    if let ArmBody::Expr(body) = &arm.body {
-                        self.note_arm_value(body, *line, &binders);
                     }
                     self.arm_binders
                         .borrow_mut()
@@ -4317,41 +3409,10 @@ impl MoveCheck<'_> {
                         }
                     };
                     self.arm_binders.borrow_mut().pop();
-                    // Round forty's other half: which arm MOVED the temp
-                    // scrutinee, which is what the row below writes back.
-                    // Which binders an arm still holds at its end is the
-                    // kernel's answer since RFC-0125 §3 M3's derivation
-                    // slice, and the screens this walk kept for it — one
-                    // binder, a silent release, an arm value that cannot
-                    // alias — went with the table they fed.
-                    if minted_temp {
-                        let now = self
-                            .lets
-                            .as_ref()
-                            .and_then(|s| s.borrow().get(&key).and_then(|r| r.gone.clone()));
-                        let moved_here = now.is_some() != pre_gone.is_some();
-                        if moved_here {
-                            any_moved = true;
-                            if moved_gone.is_none() {
-                                moved_gone = now;
-                            }
-                        }
-                    }
                     self.exit();
                     r?;
                     scope.pop();
                     arm_cs.push(c);
-                }
-                if minted_temp {
-                    if let Some(s) = &self.lets {
-                        if let Some(row) = s.borrow_mut().get_mut(&key) {
-                            row.gone = if any_moved {
-                                moved_gone.clone()
-                            } else {
-                                pre_gone.clone()
-                            };
-                        }
-                    }
                 }
                 // RFC-0114 Rule N at a MATCH join: a binding cleanly whole-taken
                 // in some arms and untouched in the rest is released on each
@@ -4386,10 +3447,9 @@ impl MoveCheck<'_> {
                 cond,
                 then_branch,
                 else_branch,
-                line,
+                ..
             } => {
                 self.expr(cond, consumed, scope)?;
-                self.note_arm_aliases(e, *line, &[]);
                 let base = consumed.clone();
                 let mut then_c = base.clone();
                 let r = self.expr(then_branch, &mut then_c, scope);
@@ -4460,16 +3520,6 @@ impl MoveCheck<'_> {
                         // the first refused a program every engine runs.
                         if let Expr::Var { name: v, .. } = arg {
                             if !self.names_a_constructor(v) {
-                                self.took(
-                                    v,
-                                    Gone::Moved {
-                                        line: *line,
-                                        by: format!(
-                                            "`{}(..)`",
-                                            crate::parser::method_surface(name)
-                                        ),
-                                    },
-                                );
                                 consumed.or_insert(
                                     v.clone(),
                                     Consumption {
@@ -4524,16 +3574,6 @@ impl MoveCheck<'_> {
                             {
                                 self.note_retention(arg);
                             } else if root == path {
-                                self.took(
-                                    &root,
-                                    Gone::Moved {
-                                        line: *line,
-                                        by: format!(
-                                            "`{}(..)`",
-                                            crate::parser::method_surface(name)
-                                        ),
-                                    },
-                                );
                                 // Round thirty-three: the move enters the
                                 // consumption map, exactly as `store()`'s
                                 // does — rule 1 refuses reuse, and Rule N's
@@ -4704,15 +3744,6 @@ impl MoveCheck<'_> {
                 for (i, arg) in args.iter().enumerate() {
                     self.site("arg", *line, arg, None);
                     self.expr(arg, consumed, scope)?;
-                    // A spawned frame outlives the statement that spawns it
-                    // (census §10), so this block releases nothing it was handed.
-                    self.gave_up(
-                        arg,
-                        &Gone::Captured {
-                            line: *line,
-                            spawned: true,
-                        },
-                    );
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         // A nullary constructor is not a name — see the
                         // ordinary call above (RFC-0126 §8.8).
@@ -5033,79 +4064,6 @@ fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
     i == 0 && crate::prelude::rebuilds(name)
 }
 
-/// Every name `e` reads, root names only, in no particular order.
-///
-/// Used where a whole expression carries values out of the frame — a `return`,
-/// a `spawn`. It over-collects on purpose: a name it lists costs a leak, and a
-/// name it misses costs a use-after-free.
-fn reads(e: &Expr) -> Vec<String> {
-    fn go(e: &Expr, out: &mut Vec<String>) {
-        match e {
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-            Expr::Var { name, .. } => out.push(name.clone()),
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                go(expr, out)
-            }
-            Expr::Consume { place, .. } => go(place, out),
-            Expr::Binary { lhs, rhs, .. } => {
-                go(lhs, out);
-                go(rhs, out);
-            }
-            Expr::Call { args, .. }
-            | Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. }
-            | Expr::Spawn { args, .. } => {
-                for a in args {
-                    go(a, out);
-                }
-            }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    go(v, out);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    go(k, out);
-                    go(v, out);
-                }
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                go(scrutinee, out);
-                for a in arms {
-                    // A block arm (RFC-0118) is never part of a return or a
-                    // spawn argument — statement position only, the checker's
-                    // rule — so there is nothing here to carry out.
-                    if let ArmBody::Expr(e) = &a.body {
-                        go(e, out);
-                    }
-                }
-            }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                go(cond, out);
-                go(then_branch, out);
-                if let Some(eb) = else_branch {
-                    go(eb, out);
-                }
-            }
-            Expr::Lambda { body, .. } => match body {
-                LambdaBody::Expr(inner) => go(inner, out),
-                LambdaBody::Block(_) => {}
-            },
-        }
-    }
-    let mut out = Vec::new();
-    go(e, &mut out);
-    out
-}
-
 /// Every function name called anywhere in `e`.
 ///
 /// The walk is what marks a lender's FORWARDERS: a call nested inside an
@@ -5414,32 +4372,6 @@ mod tests {
         }
     }
 
-    /// RFC-0121: the refutable `let`'s binding is the PAYLOAD of the
-    /// scrutinee's place — a borrow, never a fresh owner. When the scrutinee
-    /// is module state, minting an owned row freed the global's buffer at
-    /// block exit, out from under the next read (`vyrn why --memory` said
-    /// "reclaimed at block exit — freeing the array buffer"; the loop
-    /// crashed at iteration two).
-    #[test]
-    fn a_payload_binding_from_module_state_gets_no_reclamation_row() {
-        let src = "type E = | Tag(Array<Int64>) | Blank\n\
-                   let mut g: E = Blank\n\
-                   fn main() -> Int64 {\n\
-                       let Tag(xs) = g\n\
-                       return xs.length\n\
-                   }";
-        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        let rows = super::ownership(&program);
-        let payload = rows
-            .values()
-            .find(|r| matches!(&r.ty, Some(crate::ast::Type::Array(_))))
-            .expect("the binding has a row");
-        assert!(
-            payload.gone.is_some(),
-            "the payload binding must be marked borrowed, not owned: {payload:?}"
-        );
-    }
-
     #[test]
     fn rejects_drop_after_a_partial_take() {
         // F2-049: the taken field belongs to whoever received it, and `drop`
@@ -5453,36 +4385,6 @@ mod tests {
     }
 
     // ---- RFC-0089 Phase 4b: rules 1 and 3 --------------------------------
-
-    /// Phase 10a keyed the scrutinee row on `place_key == 0`, and 0 means two
-    /// things: no place at all, and a place with no `let` row. A parameter is
-    /// the second — it binds node 0 — so `if let Some(s) = v` released the
-    /// caller's value. `examples/argsdemo.vyrn` fed it an `args()` element and
-    /// CI's parity job went red for twenty-four runs.
-    #[test]
-    fn an_if_let_over_a_parameter_gets_no_reclamation_row() {
-        let src = "fn show(v: Option<String>) -> Int64 { \
-                   if let Some(s) = v { return s.byteLength } return 0 } \
-                   fn main() -> Int64 { return 0 }";
-        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(
-            super::ownership(&program)
-                .values()
-                .all(|r| r.gone.is_some()),
-            "a parameter is the caller's, so the `if let` over one may not be reclaimed"
-        );
-        // A genuine temporary still gets one — the row Phase 10a is for.
-        let tmp = "fn maybe() -> Option<String> { return Some(\"a\" + \"b\") } \
-                   fn main() -> Int64 { if let Some(s) = maybe() { return s.byteLength } \
-                   return 0 }";
-        let program = crate::parser::parse(crate::lexer::lex(tmp).unwrap()).unwrap();
-        assert!(
-            super::ownership(&program)
-                .values()
-                .any(|r| r.gone.is_none()),
-            "an `if let` over a call result owns what it matched"
-        );
-    }
 
     // ---- RFC-0093: the take ---------------------------------------------
 
@@ -5502,29 +4404,6 @@ mod tests {
         assert!(
             e.contains("may not be captured by a closure that outlives this call"),
             "{e}"
-        );
-    }
-
-    /// A lender forwarded through an AGGREGATE is still a lender: `calls_in`
-    /// has to see through the literal, or the wrapper goes unmarked and its
-    /// caller reclaims storage the lender's own caller still owns.
-    #[test]
-    fn a_lender_forwarded_through_an_aggregate_is_still_marked_lending() {
-        let src = "type R = { name: String } \
-                   fn pick(xs: Array<String>) -> String \
-                   { for x in xs { return if true { x } else { \"\" } } return \"\" } \
-                   fn g(a: Array<String>) -> R { return R { name: pick(a) } } \
-                   fn h(a: Array<String>) -> Array<String> { return [pick(a)] } \
-                   fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"] \
-                   let r = g(arr) let s2 = h(arr) \
-                   return r.name.byteLength + s2[0].byteLength }";
-        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        assert!(
-            super::ownership(&program).values().all(|r| {
-                let fc = r.from_call.as_deref();
-                (fc != Some("g") && fc != Some("h")) || r.gone.is_some()
-            }),
-            "a lender forwarded through an aggregate must never be reclaimed by its caller"
         );
     }
 
@@ -5593,37 +4472,6 @@ mod tests {
     const TWICE: &str = "fn twice(s: Stream<Int64>) -> Stream<Int64> { \
                          let mut out: Array<Int64> = [] for x in s { out.push(x * 2) } \
                          return fromArray(out) } ";
-
-    #[test]
-    fn a_stream_producer_takes_what_it_is_handed() {
-        // RFC-0092 M5. A buffer-tagged stream's close frees the array's buffer,
-        // and a stepped one's close frees the step's capture block. So the frame
-        // must not release either a second time — it did, and the native binary
-        // corrupted its heap.
-        let moved = |src: &str| {
-            let p = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-            ownership(&p)
-                .values()
-                .any(|r| matches!(&r.gone, Some(Gone::Moved { .. })))
-        };
-        assert!(moved(
-            "fn main() -> Int64 { let xs: Array<Int64> = [1, 2] let s = fromArray(xs) \
-             for v in s { print(v) } return 0 }"
-        ));
-        assert!(moved(
-            "fn main() -> Int64 { let n = 1 \
-             let run: fn(Int64, Int64, Bool) -> Option<Int64> = (a, b, c) -> { return Some(n) } \
-             let s = fromStep(0, 0, run) close(s) return 0 }"
-        ));
-
-        // Reading the name afterwards is row 07's error, in the kernel's words
-        // since the row left: `tests/refusals.rs` asks it of the whole compiler.
-
-        // A `read` parameter's buffer may not go into a stream: the caller
-        // still owns it, and the stream's close would free it. That refusal is
-        // the kernel's since RFC-0125 §3 M3, rows 01, 02, 03, 27 and 34, and
-        // `tests/refusals.rs` asks it of the whole compiler.
-    }
 
     // ---- RFC-0089 Phase 4a: the site census ------------------------------
 

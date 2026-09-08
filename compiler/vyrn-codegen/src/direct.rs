@@ -484,7 +484,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // `own::analyze` above (RFC-0125 §3 M3).
         facts: vyrn_lower::core::facts(),
         releases: ownership.releases,
-        droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
         // address, which is unique in the program.
         owned: ownership.proto,
@@ -1283,19 +1282,9 @@ struct Cx<'a> {
     /// rather than this file's, which is also how RFC-0043's host boundary is
     /// reached by name.
     externs: HashMap<String, Ext>,
-    /// Per function, which `let` statements own a heap value and how to reclaim
-    /// it — `vyrn_frontend::own`'s answer, keyed by statement node address: the
-    /// same map, read with the same key, as the textual backend's `droppable`.
-    ///
-    /// Every kind is acted on since M6. The KIND itself is not read — the release
-    /// shape comes off the binding's type through [`Fn_::rel_for`], so an explicit
-    /// `drop x` and an inferred block-exit release cannot reclaim different things
-    /// — but the map's membership is `own`'s answer and stays authoritative about
-    /// WHICH `let`s own their value.
-    droppable: HashMap<String, HashMap<usize, DropKind>>,
-    /// Per function: [`droppable`](Cx::droppable)'s rows PLACED — every step, at
-    /// the exit that runs it, in the order it runs (RFC-0101 M4). One order for
-    /// three engines, read at the exit instead of derived from a frame stack.
+    /// Per function: every release step PLACED — at the exit that runs it, in
+    /// the order it runs (RFC-0101 M4). One order for three engines, read at
+    /// the exit instead of derived from a frame stack.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
     /// The per-node release decisions (RFC-0114 §26) — the same artifact the
     /// textual backend reads, so the two cannot disagree about a site.
@@ -1403,6 +1392,17 @@ impl<'a> Cx<'a> {
         self.facts
             .as_ref()
             .is_some_and(|f| f.loop_gives_back.contains(&self.plan.key_of(node)))
+    }
+
+    /// Does the container's release at this `for` walk the BUFFER alone? The
+    /// core states it at the loop
+    /// ([`vyrn_lower::core::Facts::loop_buffer_only`]), out of the same
+    /// sentence that says whose an element is; this emitter read the KIND of
+    /// the plan's own row until RFC-0125 §3 M3's container slice.
+    fn loop_buffer_only(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.loop_buffer_only.contains(&self.plan.key_of(node)))
     }
 
     /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
@@ -1921,8 +1921,8 @@ const LAMBDA: &str = "@lambda";
 /// become ordinary read parameters, so [`lower_fn`] emits it with no case of its
 /// own. [`Fn_::lift_lambda`] names it `@lambda <owner>`: the analysis records
 /// a lambda's release rows under the ENCLOSING function's name, keyed by the
-/// lambda's own nodes, and [`lower_body`] reads `Cx::droppable` and
-/// `Cx::releases` under the owner (RFC-0125 M3, third slice). Before that the
+/// lambda's own nodes, and [`lower_body`] reads `Cx::releases` under the
+/// owner (RFC-0125 M3, third slice). Before that the
 /// shell owned no rows, and a row inside a lambda was placed and never run.
 fn f_shell(line: usize) -> Function {
     Function {
@@ -2060,8 +2060,6 @@ struct Fn_<'a, 'p> {
     /// `std/runtime`. Parallel to `region_depth`, which is its length while a
     /// statement is being lowered.
     region_marks: Vec<u32>,
-    /// [`Cx::droppable`] for the function being lowered.
-    drops: HashMap<usize, DropKind>,
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
     /// call ends — see [`Fn_::call`].
@@ -2134,7 +2132,6 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         cursors: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
-        drops: HashMap::new(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -2290,7 +2287,6 @@ fn lower_body(
         cursors: Vec::new(),
         region_depth: 0,
         region_marks: Vec::new(),
-        drops: cx.droppable.get(&owner).cloned().unwrap_or_default(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -2372,7 +2368,7 @@ fn lower_body(
         // the textual backend.
         if p.capability == Capability::Consume {
             let key = p as *const vyrn_frontend::ast::Param as usize;
-            if cx_fn.drops.contains_key(&key) {
+            if cx_fn.releases_whole(key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
                     cx_fn.register_rel(&b, key, place, r);
                 }
@@ -3817,7 +3813,7 @@ impl<'p> Fn_<'_, 'p> {
     // `place_owns` lived here until §26 steps 3–4: the ownedness of a field
     // or element store is the plan's per-statement answer now
     // (`store_owned_at`), folded once in `own::analyze` from module-state
-    // rule 4 and the droppable rows — the same two ways to own it tested,
+    // rule 4 and the placed rows — the same two ways to own it tested,
     // read from one artifact instead of two per-binding registries. The
     // region caveat its doc carried — a String reassigned in module state
     // inside a `region` must not free arena memory — is gone with the rest of
@@ -4268,11 +4264,10 @@ impl<'p> Fn_<'_, 'p> {
                 // is why the answer is read rather than assumed.
                 //
                 // A LITERAL initializer is somebody else's storage too: `let mut
-                // acc = ""` is droppable (`own` answers for the buffer the loop
-                // ENDS on) and its first append would otherwise grow a data
-                // segment address in place. The textual backend carries the same
-                // second half, and the module-state seed always did.
-                let owns = self.drops.contains_key(&(s as *const Stmt as usize));
+                // acc = ""` is released (a placed row answers for the buffer the
+                // loop ENDS on) and its first append would otherwise grow a data
+                // segment address in place. The module-state seed always did.
+                let owns = self.releases_whole(s as *const Stmt as usize);
                 if let Place::Local(l) = place {
                     if self.cx.resolve(&bound) == Type::Str
                         && self.append_ok.contains(name.as_str())
@@ -4686,17 +4681,22 @@ impl<'p> Fn_<'_, 'p> {
                 // it is pushed BEFORE the loop's boundary so `break` and
                 // `continue` leave it to the fall-through below.
                 let key = s as *const Stmt as usize;
-                if let Some(kind) = self.drops.get(&key).cloned() {
+                // Is the container this frame's to give back here? A placed
+                // row names it at an exit, or — for a consuming loop, whose
+                // release is the core's own statement and no row's — the
+                // core says so at the loop. Both are the core's answers;
+                // this emitter asked the plan's droppable table until
+                // RFC-0125 §3 M3's container slice.
+                if self.releases_whole(key) || self.cx.loop_gives_back(key) {
                     if let Some(r) = self.rel_for(&it, *line)? {
-                        // The row's KIND decides, not the type alone. A
-                        // `FreeArr` row is round sixteen's element handover:
-                        // the body took the elements out through the loop
-                        // variable, so the deep walk `rel_for` builds would
-                        // free values somebody else now owns — the trap that
-                        // turned round fourteen's blanket downgrade back. The
-                        // buffer is the triple's field 0, and it is all the
-                        // loop still owns.
-                        let r = if matches!(kind, DropKind::FreeArr) {
+                        // WHAT the release walks is the other half of the
+                        // element sentence. Where every element left through
+                        // the loop variable the deep walk `rel_for` builds
+                        // would free values somebody else now owns — the trap
+                        // that turned round fourteen's blanket downgrade back
+                        // — so the buffer, which is the triple's field 0, is
+                        // all the loop still owns.
+                        let r = if self.cx.loop_buffer_only(key) {
                             Rel::Buffers(vec![0])
                         } else {
                             r
@@ -4778,7 +4778,7 @@ impl<'p> Fn_<'_, 'p> {
                 // keyed by the variable's spelling, since it has no `let` —
                 // release that rest at every exit of the body.
                 let vkey = vyrn_frontend::own::for_var_key(var);
-                if self.drops.contains_key(&vkey) {
+                if self.releases_whole(vkey) {
                     if let Some(r) = self.rel_for(&w.elem, *line)? {
                         self.register_rel(b, vkey, place, r);
                     }
@@ -12811,7 +12811,7 @@ impl<'p> Fn_<'_, 'p> {
         // `if let` states: an arm that returns walks the frames, and an arm may
         // build over the scratch the scrutinee was left in.
 
-        // A ROW, not the droppable table: a construct that TOOK its scrutinee
+        // A ROW, and no per-binding table: a construct that TOOK its scrutinee
         // has no row, and a slot registered for a release nobody emits is a
         // slot no later statement can reuse — the frame then grows once per
         // construct, and one generated `main` of 316 matches went past the
@@ -12918,7 +12918,7 @@ impl<'p> Fn_<'_, 'p> {
                 // `arm_row` below states it; the two are exclusive, since a
                 // binder handed out or already freed is held at neither.
                 if let Some(key) = keys.get(i).copied() {
-                    if self.drops.contains_key(&key) {
+                    if self.releases_whole(key) {
                         if let Some(rel) = self.rel_for(&t, line)? {
                             self.register_rel(b, key, place.clone(), rel);
                         }
@@ -13559,7 +13559,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Whether a placed row releases the value at `key` WHOLE — the question
-    /// [`Fn_::frees_boxes`] used to ask of the plan's droppable table
+    /// [`Fn_::frees_boxes`] used to ask of the plan's own per-binding table
     /// (RFC-0125 §3 M3, the walk's deletion).
     ///
     /// The two are not the same question. The table says the type of the
@@ -16120,7 +16120,6 @@ mod tests {
             globals: HashMap::new(),
             gappend: HashMap::new(),
             externs: HashMap::new(),
-            droppable: HashMap::new(),
             releases: HashMap::new(),
             // RFC-0008's defaults, which are `Program`'s: nothing here logs.
             log_level: DEFAULT_LOG_LEVEL,
