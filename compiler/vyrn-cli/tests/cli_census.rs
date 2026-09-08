@@ -1,6 +1,7 @@
 //! The structural census of the driver — RFC-0125 §3 M5, the size strand.
 //!
-//! `compiler/vyrn-cli/src/main.rs` is 7,276 lines and 118 top-level functions.
+//! `compiler/vyrn-cli/src/main.rs` was 7,276 lines and 118 top-level functions
+//! when this census was written.
 //! §2.7 counts the compiler toward 40,000–45,000 lines, and since that estimate
 //! was written the interpreter went (M5), the text-IR native route, `emit-ir`,
 //! `--route` and the parity harness went (M3/M4), the runtime became Vyrn (M4)
@@ -199,11 +200,12 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn json_str(s: &str) -> String {",
-            Restated,
-            "the JSON string escape, which `vyrn-frontend/src/codec.rs:432` \
-             (`escape_into`) states in the same five short forms and the same \
-             `\\u00xx` fallback — RFC-0018's canonical table, which both wasm \
-             backends must produce byte for byte",
+            Shared,
+            "the one JSON string literal this driver writes, for \
+             `vyrn routes --json` and for every manifest the pretty printer \
+             rewrites. It quotes and calls `codec::escape_into`; the table \
+             itself is RFC-0018's, stated in `vyrn-frontend/src/codec.rs:432`. \
+             It was two copies of that table until RFC-0125 §3 M5",
         ),
         sec(
             "fn why_memory(file: &str) -> ExitCode {",
@@ -335,11 +337,12 @@ fn main_sections() -> Vec<Section> {
             "`vyrn vendor [--check]`",
         ),
         sec(
-            "fn json_string(s: &str) -> String {",
-            Restated,
-            "the manifest writer's JSON escape and pretty printer. The escape is \
-             `codec::escape_into`'s rule with two more short forms (`\\b`, \
-             `\\f`) — the same sentence, said longer",
+            "fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {",
+            Shared,
+            "the manifest writer `vyrn add` and `vyrn update` rewrite \
+             `vyrn.json` through. Its own escape was `codec::escape_into`'s rule \
+             with two more short forms — the same sentence said longer — and \
+             RFC-0125 §3 M5 deleted it for `json_str`",
         ),
         sec(
             "fn test_cmd(path: &str, rest: &[String]) -> ExitCode {",
@@ -756,12 +759,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 5298, 189),
-        ("a rule another pass also states", 288, 0),
+        ("a command's own path", 5295, 189),
+        ("a rule another pass also states", 202, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 30, 0),
         ("the WASI host and the wasmtime embedding", 1133, 0),
-        ("shared machinery", 1412, 19),
+        ("shared machinery", 1473, 19),
         ("tests", 852, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");

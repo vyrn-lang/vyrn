@@ -1330,22 +1330,24 @@ fn routes_json(
     ExitCode::SUCCESS
 }
 
-/// A JSON string literal. Paths reach here as the loader keyed them, which on
-/// Windows can still hold a backslash, so escaping is not optional.
+/// A JSON string literal, quotes included — for `vyrn routes --json` and for
+/// every manifest [`json_pretty`] rewrites.
+///
+/// Escaping is not optional in either place. A route path reaches here as the
+/// loader keyed it, which on Windows can still hold a backslash; and Rust's
+/// `Debug` escapes (`\u{1}`) are NOT valid JSON, so a manifest written with
+/// them would be unreadable to every later command.
+///
+/// The escape is `vyrn_frontend::codec::escape_into` — RFC-0018's canonical
+/// table, which both wasm backends must produce byte for byte. This driver
+/// carried two copies of that table until the census of RFC-0125 §3 M5 found
+/// them — one here and one under `vyrn add`'s manifest writer, differing only
+/// in whether a backspace came out `\b` or `\u0008`. `vyrn-play` carries a
+/// third, which its own crate has to answer for.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
+    vyrn_frontend::codec::escape_into(s, &mut out);
     out.push('"');
     out
 }
@@ -3663,33 +3665,6 @@ fn vendor(check: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `s` as a JSON string literal, quotes included.
-///
-/// Rust's `Debug` escapes (`\u{1}`) are NOT valid JSON — `\u` must be followed
-/// by exactly four hex digits — so a manifest rewritten through [`json_pretty`]
-/// with Debug escapes would be unreadable to every later command. Short forms
-/// where JSON defines one, `\u00xx` for every other control character, and
-/// nothing else escaped: any codepoint above `0x1F` may stand as itself.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Pretty-print a Json value (4-space indent, stable key order).
 fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
     use vyrn_frontend::schema::Json;
@@ -3705,7 +3680,7 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
                 format!("{n}")
             }
         }
-        Json::Str(s) => json_string(s),
+        Json::Str(s) => json_str(s),
         Json::Arr(items) => {
             if items.is_empty() {
                 return "[]".into();
@@ -3722,7 +3697,7 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
             }
             let inner: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{pad}{}: {}", json_string(k), json_pretty(v, depth + 1)))
+                .map(|(k, v)| format!("{pad}{}: {}", json_str(k), json_pretty(v, depth + 1)))
                 .collect();
             format!("{{\n{}\n{close}}}", inner.join(",\n"))
         }
