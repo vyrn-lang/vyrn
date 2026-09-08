@@ -13284,15 +13284,19 @@ whether it allocated. `pure` is the bottom.
 | `extern` | every other extern declaration, resolved by name | the `vyrn` namespace | trap | no instantiation | yes | no |
 | `serve` | `serveStream` | — | trap | trap | trap | no |
 | `spawn` | no name: the marker the core keeps on a spawned call (§2.1; the spawn flag of a core call, second slice) | — | yes | yes, eager | yes, eager | no |
+| `module-state` | no name: a read or a write of a global place, which is how the core spells a module-state binding (RFC-0013) | — | yes | yes | yes | no |
 | `trap` | `panic`, `@panicAt`, `assert`, `assertEq`, `runtime$trap`, `mem$trap`; and the core's trap statement | `proc_exit` | yes | yes | yes | yes |
 | `gen-only` | `moduleInterface`, `contractOf`, `lex`, `render`, `raw`, `rawAt`, `@codeText`, `@codeSplice` | — | no | no | no | yes |
 
 Every one of the fifteen preview1 imports `direct.rs` declares is in the
 third column; `environ_sizes_get` and `environ_get` serve the clock and the
 seed and nothing else. The runtime module's own primitives (`std/mem`,
-`std/runtime`) are pure but for the four rows that name them. `spawn` has
-no atom: the core keeps a marker on the call (`Rhs::Call::spawn`, second
-slice), and the spawning body carries the effect. The spawn-isolation rule
+`std/runtime`) are pure but for the four rows that name them. Two rows have
+no atom. `spawn` is a marker the core keeps on the call
+(`Rhs::Call::spawn`, second slice), and the spawning body carries the
+effect. `module-state` is a PLACE — the core spells a module-state binding
+as a global place, and the body that reads or writes one carries the effect
+(M6, the module-state slice). The spawn-isolation rule
 of RFC-0004 §Q4 is the one inclusion check the judgment makes today: the
 spawned callee's set within `effects::Effects::SPAWN_ALLOWS`, which is
 `alloc, trap`. The harness counts every spawn site and puts one outside the
@@ -16737,6 +16741,512 @@ the doc comment says which promise was kept. Three shapes remain deferred:
 The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
 at a shallow scratch directory outside the checkout. Run over the three slices
 together.
+#### Module state is a row of the lattice (2026-09-07)
+
+The ranked list's second item. `check_comptime_purity` has one non-effect
+condition and the spawn rule has three, and the same one is in both: **does this
+body read or write module state**. The two orders the last record left open
+were "give the lattice the three rules" and "split the rule". This slice takes
+the first, for this one condition, in the cheapest form it has: module state
+becomes a ROW, not a second judgment beside the effect set.
+
+**Why a row and not a fact beside the set.** RFC-0004 §Q4's word is *isolated*,
+and its own sentence says what it means: a task "may `read`/`share` immutable
+data but cannot `print` or `modify` outside state". Module state IS outside
+state. An effect system's rows are the observable interactions a body has with
+something the frame does not own, and a read of a global is the oldest one of
+those — it is a state effect in every reading of the word. The lattice already
+holds two rows with no atom: `spawn` is a marker on a call and `trap` is a
+statement. A place is the third kind of thing the core has, so the row's atoms
+column says *no name: a read or a write of a global place*, and
+`vyrn_lower::effects::Walk::place` raises it at `Rhs::Read`, `Rhs::Take` and
+`St::Store` — walking `Field`, `Elem` and `Key` down to the root, because
+`g.f[i]` is module state and `x.f[i]` is not.
+
+**What the two options cost.**
+
+| option | cost |
+|---|---|
+| a row of the lattice | one enum variant, one row of the RFC table, three exhaustive matches (`Effect::ALL`, `Effect::gen`, `floor::Capability::of`), and a nine-line `place` walk in the judgment. The row maps to no floor capability — every target has module state — so the floor, the audience pass and `vyrn why --capability` do not move |
+| a fact beside the effect set | a second field on `Judged`, a second fixpoint or a widened one, a second inclusion rule at the spawn site, and a second thing every reader of a judgment has to know about. It buys precision nobody asked for: the spawn rule and the generation fence both want the join, which is what the lattice already computes |
+| a `Capability` of the floor | wrong twice: the floor is a TARGET question (RFC-0103) and every target has module state, so the row would refuse nothing there |
+
+The `gen` cell is **no**. A generator that read a module-state binding would
+read whatever the generation order left in it, and RFC-0021's cache key cannot
+name it — the same argument the clock row's cell makes.
+
+**The licence, and the finding it found.** `tests/effects.rs` now stands the
+row beside `checker::module_state_use`, per function, over the 184 programs and
+30,197 judged functions. That is the checker's own walk — `touches_globals`
+through the call graph, expanded through impls and RFC-0037's stored values —
+and it is the SAME question the row answers, so the two lists are the licence
+any deletion of the checker's copy will need.
+
+| direction | count | verdict |
+|---|---|---|
+| the checker's walk says yes and the row says no | **0** | exact, asserted. The judgment has no hole, so replacing the checker's copy would accept nothing the checker refuses |
+| the row says yes and the checker's walk says no | **21** | ratcheted, and the cause is documented already |
+
+The 21 are one cause, and `StoredFnEffects::arg_sources` states it in its own
+words: a function handed to a `fn`-typed PARAMETER (RFC-0023, monomorphized, no
+defunctionalization tag) is collected in `arg_sources`, "the spawn and
+`--workers` analyses read `sources` alone, so their verdicts do not move", and
+the judgment reads both. `VYRN_EFFECTS_DUMP=rpc.vyrn:usersById` shows it in one
+line: `calls cb: alloc, module-state`. `cb` is the completion callback the
+in-process RPC dispatcher takes, and `examples/rpc.vyrn`'s callbacks write the
+module-state binding `line`. The checker's walk does not follow a parameter, so
+it says `usersById` is module-state-free and the row says it is not.
+
+That is a hole in the `--workers` gate (RFC-0025) rather than a hole in the row:
+a `handle` that reaches module state through a callback passes a gate that
+exists to refuse exactly that. It is not this slice's to fix — closing it means
+deciding whether the gate joins over every function of a matching signature in
+the program, which is the over-approximation the judgment makes — and it is now
+written down with its 21 members instead of being a sentence in a doc comment.
+
+**The three probes, re-run.** The last record's three non-effect conditions,
+with the judgment's answer for each callee before and after. Each probe is the
+callee with its `spawn` removed, so the program checks and lowers, and
+`VYRN_EFFECTS_DUMP` prints the set:
+
+| probe | the checker | the judgment before | the judgment now |
+|---|---|---|---|
+| `fn bump(n)` reading the global `counter` | refused | `pure` — accepted | **`module-state`** — refused |
+| `fn work(xs: modify Array<Int64>)` | refused | `alloc` — accepted | `alloc` — accepted |
+| a body holding `drop s` | refused | `pure` — accepted | `pure` — accepted |
+
+One of the three conditions is the judgment's now, and it is the one both rules
+have. The other two are the spawn rule's alone, and the next record takes them.
+
+**The licence for the checker: zero.** `vyrn check` over 419 programs —
+`examples`, `std`, `site`, and the three fixture directories under
+`compiler/vyrn-cli/tests` — whole stderr with the exit code. Nothing in
+`checker.rs` changed in this slice; the row is a fact the judgment states and no
+frontend reader asks for yet.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,269 | 16,269 |
+
+**The censuses this moves.** None. `checker.rs` is untouched, so
+`tests/checker_census.rs` is unmoved; the slice names no type constructor and no
+surface form, so RFC-0126 §3 and RFC-0127 §3 are unmoved. The table above is the
+census that did move, and it is this file's own.
+
+**Commit.** `module state is an effect, and the lattice grows the row that says
+so`, `compiler/vyrn-frontend/src/effects.rs`, `floor.rs`,
+`compiler/vyrn-lower/src/effects.rs`, `compiler/vyrn-cli/tests/effects.rs`, the
+lattice table and this record.
+
+#### The four names that were on the list and in no row (2026-09-07)
+
+The ranked list's third item. `SPAWN_FORBIDDEN` held 21 names and four of them
+— `close`, `stringFromBytes`, `lineAt`, `colAt` — were in no row of
+`effects::ATOMS`. Three had no comment at all. The order was "classify them or
+drop them, with a witness each", and all four drop.
+
+**`stringFromBytes`, `lineAt`, `colAt`: the classification is pure.** Their
+signatures say it. `stringFromBytes(b: Array<UInt8>) -> Result<String, String>`
+is a conversion whose whole effect is the allocation of its result, and `alloc`
+is a row a task MAY have. `lineAt(bytes, offset)` and `colAt(bytes, offset)`
+answer a line and a column from a byte buffer and an offset — an `Int64` out of
+a borrow, no allocation at all. The judgment says so in one word each:
+`VYRN_EFFECTS_DUMP` prints `alloc` for the first and `pure` for the other two.
+The interpreter memoizes a line-start table per buffer, which is a cache under
+the language and observable nowhere.
+
+**`close`: the classification is ownership, and the ownership judgment already
+states it.** Its comment named a real hazard — "frees a stream's buffer: the
+caller may still hold it across the task boundary" — and the probe says who
+refuses it. `rfcs/probes-0125/stream-disposed-by-task-and-caller.vyrn` hands a
+`Stream<Int64>` to a task and consumes it again in the caller, and the refusal
+is not the spawn rule's:
+
+```
+`s` is a `Stream` and is disposed more than once
+  note: a stream must be consumed with `for … in`, forwarded by returning it,
+  or released with `close(s)` — on every path
+```
+
+That is RFC-0075's must-use judgment, and it refuses every route into the
+hazard, `close` included, whether or not a `spawn` is anywhere near. What the
+list added on top was a refusal of the CORRECT program:
+`rfcs/probes-0125/task-closes-its-own-stream.vyrn` builds a stream inside the
+task and closes it there, nothing outside the task ever names it, and the
+checker refused it.
+
+**The witnesses, one per name, both directions.**
+
+| probe | before | after |
+|---|---|---|
+| `probes-0125/task-closes-its-own-stream.vyrn` — a task that makes and closes its own stream | refused: "does I/O or touches shared mutable state" | **ok** |
+| a task handed a stream that closes it, the caller having moved it | refused, same sentence | **ok** |
+| `probes-0125/stream-disposed-by-task-and-caller.vyrn` — the hazard `close`'s comment named | refused by the must-use judgment | refused, the same words |
+| `probes-0125/task-converts-bytes-to-a-string.vyrn` — `stringFromBytes` in a task | refused | **ok** |
+| a task calling `lineAt` | refused | **ok** |
+| a task reading a global, a task with a `modify` parameter, a task holding a `drop` | refused | refused, unchanged |
+| a `Stream<Int64>` as a spawn argument with no `close` anywhere | ok | ok |
+
+The last two rows are the direction that matters: nothing else moved. The three
+conditions the previous record counted are all still refused, and the one shape
+that was already accepted still is.
+
+**What stands in place of the four.** `SPAWN_FORBIDDEN` is 17 names now and
+every one is an atom of a row outside `Effects::SPAWN_ALLOWS`, which
+`spawn_forbidden_names_are_effects` asserts. The list can therefore only be
+NARROWER than the lattice, never a second answer — and it is narrower, by the
+twelve atoms it does not name: the clock's two, entropy's one, `serveStream`,
+and the eight generation-only names. Widening it to the derived set is not this
+slice's: it would refuse a task that reads the clock, which is a rule RFC-0004
+§Q4's determinism argument supports and which nothing has measured. Deleting
+the list outright is the spawn fixpoint's slice, where the judgment states the
+whole rule.
+
+**The licence.** The whole-stderr corpus diff over the same 419 programs, and
+the seven probes, because the corpus does not reach this rule.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,269 | 16,285 |
+
+The corpus is silent because no corpus program spawns a callee that touches any
+of the four. The probes are the measurement, and three of them are in the tree
+now.
+
+**The arithmetic is honest and it is the wrong sign.** The four names and their
+comment are seven lines out; the pin that keeps the list a subset of the lattice
+is twenty-three lines in, of which nineteen are the test. A rule that was a
+hand-written list beside the lattice is now a hand-written list the lattice
+checks, and that is worth the sixteen lines until the list goes entirely.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | shared machinery | 2,229 lines | 2,228 | `SPAWN_FORBIDDEN` loses four names and its `close` comment, and gains three doc lines |
+| | tests | 4,658 | 4,675 | `spawn_forbidden_names_are_effects` |
+| RFC-0126 §3, RFC-0127 §3 | — | unmoved | the slice names no type constructor and no form |
+
+**Commit.** `four names come off the task's forbidden list, and the lattice
+checks the rest`, `compiler/vyrn-frontend/src/checker.rs` (+16),
+`compiler/vyrn-cli/tests/checker_census.rs`, three probes under
+`rfcs/probes-0125/`, and this record.
+
+#### A task may release what it owns (2026-09-07)
+
+The ranked list's fifth item names two non-effect conditions the spawn rule
+keeps: a `modify` parameter and a `drop` in the body. This slice takes the
+second, and it does not move it anywhere — it deletes it, because the rule was
+already stated and stated better.
+
+**What the condition said.** `contains_drop` searched a body for `Stmt::Drop`
+and its comment gave the reason: "`drop` can release a shared `Ref`, so a task
+must not". Path B is gone — RFC-0004 §Q4's own text says the `cell`/`set`/
+`release` refusals went with it and §5.4 says there is no slab — so the shared
+`Ref` the sentence names does not exist. The test beside it gave a second
+reason: "`drop` reclaims storage the spawning frame may still name".
+
+**That second reason is a real hazard, and it is RFC-0089 rule 2's.** The probe
+is three lines: a callee that releases a parameter, and a caller that reads the
+buffer afterwards.
+
+| probe | what refuses it |
+|---|---|
+| `probes-0125/task-releases-what-its-caller-owns.vyrn` — the task releases a buffer its caller still names | the ownership judgment: **`xs` (line 1) is released although the body does not own it** |
+| the same body with the `spawn` taken off — an ordinary call | the same refusal, the same words, the same line |
+| a `read` parameter released instead | the same refusal |
+| `probes-0125/task-releases-what-it-owns.vyrn` — the task builds an array and releases it | the spawn rule, and nothing else. **This is a correct program** |
+
+The last row is the whole slice. Every body the `drop` search refused divides
+in two: those that release something the frame does not own, which RFC-0089
+rule 2 refuses with or without a `spawn` anywhere near them, and those that
+release what they own, which nobody else refuses because there is nothing to
+refuse. The search bought no refusal and cost one.
+
+**Why the ownership rule is enough, and not a coincidence.** A spawn argument is
+not moved — `spawn work(xs)` followed by `size(xs)` in the caller checks, which
+this slice measured before it deleted anything — so the caller does keep
+naming what it hands a task. That is exactly the case rule 2 governs: the callee
+holds a borrow, and a release of a borrow is refused at the callee, by name and
+by line. The spawn rule was asking a question whose answer it did not need,
+because the answer is the same for every caller.
+
+**`close` was the same argument, one slice earlier.** The four-names slice took
+`close` off `SPAWN_FORBIDDEN` because the must-use judgment refuses the double
+disposal and the list refused the single correct one. This is that argument for
+the statement rather than the builtin, and the two are the same rule: **who owns
+the value is the ownership judgment's question, and the isolation rule has no
+second answer to it.**
+
+**The licence.** The whole-stderr corpus diff over the same 419 programs, and
+the four probes, because the corpus does not reach this rule either — no corpus
+program spawns a callee holding a `drop`.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `checker.rs` | 16,285 | 16,276 |
+
+**What this leaves the spawn rule.** The previous record counted three
+conditions that are not effects. Module state became a row of the lattice, and
+`drop` is gone. **One is left: a `modify` parameter**, and the next record says
+what it costs.
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | one arm per form, type constructor or builtin | 4,321 lines | 4,304 | `contains_drop` is gone; the section is `expr_contains_spawn`'s alone now, one search instead of two |
+| | the typing judgment | 3,152 | 3,151 | the lambda source's `forbidden` flag loses its `drop` half |
+| | shared machinery | 2,228 | 2,231 | the seed says where the fifth condition went |
+| | tests | 4,675 | 4,681 | `rejects_spawn_of_function_that_drops` is `a_task_may_release_what_it_owns`, and it carries the reason |
+| RFC-0127 §3 | `Stmt::Drop` | checker 7, row 26 | checker 6, row **25** | the form is at the statement floor now: every one of its 25 mentions is a walk that recurses, and no pass decides anything about it but `own` |
+| | `Stmt::If`, `Stmt::While`, `Stmt::ForIn`, `Stmt::Region` | checker 9, 9, 10, 9 | 8, 8, 9, 8 | the deleted search had an arm for each |
+| | the total | 1,391 mentions | 1,386 | |
+| RFC-0126 §3 | — | unmoved | the slice names no type constructor |
+
+`Stmt::Drop` reaching the floor is the honest measure of this slice, and it is
+RFC-0127 §3's own thesis read backwards: a form costs one arm in every walk, so
+a walk deleted is one arm off every form it visited. Five forms got cheaper
+because one rule stopped existing.
+
+**Commit.** `a task may release what it owns, and the ownership judgment says
+who does`, `compiler/vyrn-frontend/src/checker.rs` (-9),
+`compiler/vyrn-cli/tests/checker_census.rs`, RFC-0127 §3, two probes under
+`rfcs/probes-0125/`, and this record.
+
+#### The spawn rule is the effect judgment (2026-09-07)
+
+The ranked list's fifth item, taken. RFC-0004 §Q4's isolation rule leaves
+`checker.rs`: **454 lines out**, and what states it is
+`vyrn_lower::effects::spawn_refusals`, over the same core the floor's judgment
+reads.
+
+**What the answer to "can the judgment carry them" turned out to be.** The
+census recorded three conditions of the checker's five that are not effects.
+Two are gone already — module state is a row of the lattice and the `drop`
+search was deleted — and this record answers the third:
+
+| condition | the judgment's answer |
+|---|---|
+| the callee is `extern` | the `extern` row, always was |
+| a callee name is in `SPAWN_FORBIDDEN` | seventeen atoms of rows outside `SPAWN_ALLOWS`; the list is deleted |
+| the body reads or writes module state | the `module-state` row, since this milestone's module-state slice |
+| the body holds a `drop` | nothing: the rule was deleted, because the ownership judgment states it |
+| a parameter has the `modify` capability | **not an effect, and it needs no fixpoint.** Only the SPAWNED callee's parameters can alias what the caller keeps, because only the spawned callee is handed the caller's values. It is a test on one signature at one site |
+
+The checker applied the `modify` test to every function in the seed, so a
+helper taking `modify` on a task's OWN local data poisoned the whole call graph
+above it. That was never the rule; it was the shape of the seed.
+
+**The wall was never the conditions. It was where the rule is stated.** A
+`vyrn check` refuses while the checker is still deciding what a node's type is,
+and the judgment reads a core that does not exist until the check is over. The
+seam already existed and the floor already uses it: `check_and_synthesize` holds
+a decision until `diags.is_empty()`, and `floor::install_judge` is the slot a
+driver installs. `crate::isolation` is the same slot for this rule, 39 lines,
+and `vyrn_lower::install()` fills it beside the placer, the refusals, the
+must-use judgment and the floor's judge.
+
+**What it cost, honestly.**
+
+| paid | lines |
+|---|---|
+| `vyrn-lower`: `with_judgment`, the callback that hands one setup to two readers, and `spawn_refusals` | +110 |
+| `vyrn-frontend/src/isolation.rs`, the slot | +39 |
+| `vyrn-frontend/tests/isolation.rs`, the fifteen unit tests that can no longer be unit tests | +248 |
+| **`checker.rs`** | **-454** |
+
+The fifteen tests are the honest half of that. They asserted through
+`checker::check`, which no longer answers this question, so they move to an
+integration test where `vyrn_lower::install()` can run — the same move M3's
+accumulation slice made for the kernel's refusals. `vyrn-lower` becomes a
+DEV-dependency of `vyrn-frontend`, beside `vyrn-cli` and `vyrn-codegen`, which
+the crate's own `Cargo.toml` comment already allows for exactly this reason.
+
+**The three trades, each deliberate.**
+
+1. **Reachability.** A `spawn` inside a function no instance covers has no core
+   and is not judged. That is finding 7's trade for the floor, taken again. The
+   corpus holds four spawn-holding bodies and every one is covered.
+2. **Order.** A program with type errors gets its type errors and no isolation
+   refusal, because the judgment cannot lower a program that does not type. The
+   floor's rule, and the same words in the code.
+3. **An uninstalled slot answers nothing.** A consumer that checks a program
+   without `vyrn_lower::install()` loses the rule. The CLI and the editor both
+   install; `tests/semantics.rs` does not, and the one test there that needed
+   the rule moved to `tests/isolation.rs` rather than turning the placer on for
+   two hundred tests that were written without it.
+
+**The defect a moved test found.** `spawning_through_a_stateful_stored_value_is_rejected`
+failed on the judgment, and the reason was not the spawn rule.
+`reaches` — the FLOOR's judgment, live since M6's fourth slice — ended its
+resolver with `Callee::Pure` for a name the program does not declare. But
+`Walk::callee` asks `through` about a name of the body only when the answer is
+`Callee::Unknown`, so **a call through a function value contributed nothing to
+the floor's judgment**: RFC-0037's whole stored-source machinery was wired into
+the judgment and unreachable from this reader. `tests/effects.rs` has always
+ended its own resolver with `Unknown`, which is why the corpus harness saw the
+sources and the floor did not, and why no gate caught it. One word, and the two
+resolvers agree.
+
+**The one sentence, instead of two.** The rule refused in two wordings before —
+one for the pre-check and one for the stored-value fixpoint, "invokes a stored
+function value (RFC-0037) whose possible targets do I/O". There is one rule now
+and one sentence, and it names the effects it found rather than saying "does I/O
+or touches shared mutable state" about all of them:
+
+```
+`spawn work(..)` is not allowed: `work` (or something it calls) does
+`module-state`, so running it as a task could race or interleave. A spawned
+function must be isolated (pure).
+```
+
+A `modify` parameter gets its own sentence, because it is its own rule: "`spawn
+work(..)` is not allowed: `work` declares the `modify` parameter `xs`, so the
+task and its caller would write one value."
+
+**The licence.** The whole-stderr corpus diff over the same 419 programs, and
+sixteen tests, because the corpus reaches this rule at zero sites — not one of
+the 419 programs is refused for isolation, which is why the tests are the
+measurement and the record says so.
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 419, 79 refused | 419, 79 refused |
+| stderr differing | — | 0 |
+| `cargo test -p vyrn-cli` | 586 passed, 36 ignored | 586, 36 |
+| `cargo test -p vyrn-frontend` | 1,166 | 1,166 |
+| the effect suite, `--ignored` | 30,197 judged, 12 spawn sites, 0 outside | the same, to the number |
+| `checker.rs` | 16,276 | **15,822** |
+
+**The censuses this moves.**
+
+| census | row | before | after | why |
+|---|---|---|---|---|
+| `tests/checker_census.rs` | a rule the checker states | 1,455 lines, 57 refusals | 1,354, 57 | `stored_unsafe_sigs` and `extend_spawn_safe` are two whole sections, and neither held a `cerr!` — the refusal they earned was stated at the call site |
+| | shared machinery | 2,231 / 30 | 2,091 / 29 | `SPAWN_FORBIDDEN`, the driver's fixpoint and its four tables, and step 8's refusal |
+| | the typing judgment | 3,151 / 135 | 3,131 / 134 | the `Expr::Spawn` arm loses the isolation refusal and the site record; the lambda source loses its `forbidden` flag |
+| | tests | 4,681 | 4,488 | fifteen tests moved to `tests/isolation.rs` |
+| | one arm per form, type constructor or builtin | 4,304 | 4,304 | unmoved, and that is the census's standing finding: the size is in the surface |
+| RFC-0127 §3.2 | `functions` | checker 22, row 71 | 16, **65** | the fixpoints walked `program.functions` five times |
+| | `impls` | checker 15, row 32 | 13, 30 | two method-impl expansions, one per fixpoint |
+| | `globals` | checker 14, row 32 | 13, 31 | the seed's global-name table |
+| | the total | 287 mentions | 278 | |
+| RFC-0127 §3.1, RFC-0126 §3 | — | unmoved | the slice deletes no arm of a form and names no type constructor |
+
+**What is left of the spawn rule in `checker.rs`.** Three refusals at the site,
+and all three are the SHAPE of the call rather than the isolation rule: the
+callee must exist, it must not be a `gen fn` (its body is never emitted), and it
+must take no function-value parameter (RFC-0037's thunk carries plain data).
+None of them is a question about effects, and none is stated anywhere else.
+
+**Commit.** `the spawn rule is the effect judgment, and the checker stops
+keeping a copy`, `compiler/vyrn-frontend/src/checker.rs` (-454),
+`isolation.rs` (new), `lib.rs`, `Cargo.toml`,
+`compiler/vyrn-frontend/tests/isolation.rs` (new), `loader_run.rs`,
+`semantics.rs`, `compiler/vyrn-lower/src/effects.rs`, `lib.rs`,
+`compiler/vyrn-cli/tests/checker_census.rs`, RFC-0127 §3.2, and this record.
+
+#### The generation fence asks by atom, and the lattice answers by row (2026-09-07)
+
+The ranked list's fourth item — `check_comptime_purity`, 134 lines — was to be
+taken once module state became a judged fact. Module state is a row now and the
+spawn rule is gone, and this one does NOT follow them out. The reason is one
+cell of the table, it is measured, and it is a cell M6's fifth slice already
+decided to keep split.
+
+**The fence's four conditions, after this milestone.** All four are the
+lattice's rows:
+
+| the condition | the row |
+|---|---|
+| a callee the `gen` column refuses | the column itself; the checker has read `effects::gen_refusal` since the fifth slice |
+| the body holds a `spawn` | `spawn`, gen cell no |
+| the body calls an `extern` | `extern`, gen cell no |
+| the body reads or writes module state | `module-state`, gen cell no, since this milestone's module-state slice |
+
+So the RULE is stated once already. What the checker keeps a copy of is not the
+rule but the WALK: `fn_calls` over the AST, the method-impl expansion, and a
+BFS to the nearest violation. The judgment does the same three things over the
+core, and the census's line "this copy exists because a `gen fn` no lowering
+instantiates has no core to judge" names a blocker the last record measured at
+**zero** over 184 programs.
+
+**The blocker that is real, in two probes.** `Effects` is a set of ROWS. The
+`gen` column has one cell that is not its row's, and it is finding 5's:
+
+| probe | verdict | row |
+|---|---|---|
+| `probes-0125/generator-reads-a-file.vyrn` — a `gen fn` calling `readFile` | **ok** | `fs-read` |
+| `probes-0125/generator-reads-file-bytes.vyrn` — a `gen fn` calling `readFileBytes` | refused: ``it calls `readFileBytes` `` | `fs-read` |
+
+Two programs, one row, opposite verdicts. A judgment that hands back
+`fs-read` cannot separate them, so the fence cannot be stated from the effect
+SET the way the spawn rule was. Finding 5 chose that split deliberately — the
+difference is the ROUTE, not the effect: `readFile` goes through the loader's
+resolver and is recorded as a cache input, `readFileBytes` does not — and it
+named its own closing condition: "the cell becomes its row's when
+`readFileBytes` takes the resolver route, and not before".
+
+**What each option costs.**
+
+| option | cost |
+|---|---|
+| **close finding 5**: `readFileBytes` takes the resolver route, the cell becomes its row's, and the fence is statable from the set alone | a change to the loader's resolver and to the cache key, in the generation engine. Then this deletion is the spawn rule's shape exactly: a `gen_refusals` beside `spawn_refusals`, over `with_judgment`, and 134 lines out |
+| **widen the judgment**: `Judged` carries the atom NAMES each body called, beside the rows | about 10 lines of state and 90 of walk. It works, and it makes the judgment answer a question the lattice was built not to ask — its module head says it sees a call by its callee's name and joins ROWS, and a per-name list beside the set is a second vocabulary for one reader |
+| **leave it**: the fence keeps its walk | 134 lines stand, and the rule is still stated once. The copy is a TRAVERSAL, not a rule |
+
+The third is what this record takes, because the first is another milestone's
+work and the second buys 134 lines by widening the thing this RFC exists to
+keep narrow. A traversal stated twice is a smaller fault than a rule stated
+twice, and the census's own kinds say so: the size of `checker.rs` is in the
+surface, at 4,304 lines, and not here.
+
+**Two more reasons to leave it, both about WHEN.** The fence gates the
+compiler's own sandbox, so its two differences from the spawn rule matter more
+than they did there. It would move behind an installable slot — a consumer that
+checks without `vyrn_lower::install()` would run generators with no fence — and
+it would become reachability-bound, for a rule RFC-0021 states over EVERY
+`gen fn`. The corpus says zero `gen fn` bodies are uninstantiated, and zero is
+a measurement and not a proof; for a task that cannot run, that trade was cheap
+(the spawn rule's), and for a generator that DOES run, at load time, before any
+of this, it is not.
+
+**What the module-state question was worth, counted.** The last record priced
+it at "about 380 lines of `checker.rs` across the three sections that ask it".
+The row bought the spawn rule's 70-line pre-check and the two fixpoints behind
+it. The rest stays, and each part now has one named reader:
+
+| section | lines | its reader |
+|---|---|---|
+| `module_state_use` | 141 | RFC-0025's `--workers` gate in `main.rs`, which needs a CHAIN and a global's name, not a boolean |
+| `global_ref_block` | 129 | `touches_globals`, and the lambda source's `touches_global` that `module_state_use` walks |
+| `touches_globals` | 40 | `check_comptime_purity` and `module_state_use` |
+| `check_comptime_purity` | 134 | itself: the generation fence |
+| `shadows_here` | 44 | the scope queries, of which "is this name module state" is one |
+
+Two readers, both inside the check, both before a core exists. That is the
+whole reason those 310 lines stand.
+
+**No licence table, because nothing changed.** This record is a decision and a
+measurement. The two probes are in the tree, and they fail the day the split
+cell closes — which is the signal that this deletion is ready.
+
+**Commit.** Recorded with the two probes under `rfcs/probes-0125/`; no code
+change.
+
+#### Gates for the isolation arc (2026-09-07)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at `C:\wtcdtmp` — a shallow scratch directory outside the checkout,
+because other worktrees gate at the same time and the suites scratch under fixed
+names.
 
 | gate | result |
 |---|---|
@@ -16766,6 +17276,53 @@ The one red in the first pass was the sentinel above. It and
 `vyrn_lower::follow`'s one-line skip are the only changes these three slices
 made outside `checker.rs`, `prelude.rs` and the censuses. The list was run
 again whole after the sentinel was answered, and it is the table above.
+| `cargo build --release` | ok, and no new warning — the nine that stand are the branch point's |
+| `cargo test -p vyrn-cli`, no filter | 586 passed, 36 ignored, no failure |
+| `kernel` `--ignored` | 1, 126 s |
+| `coretables` `--ignored` | 1, 102 s |
+| `typed` `--ignored` | 1, 206 s |
+| `effects` `--ignored` | 2, 147 s — 30,197 judged, 804 with `module-state`, 12 spawn sites and 0 outside the rule, 0 the judgment misses and 21 it reaches through an argument |
+| `fixtures` `--ignored` | 1, 70 s |
+| `testsweep` `--ignored` | 1, 175 s |
+| `cargo test -p vyrn-frontend` | 1,166, 5 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,212, 12 ignored |
+| `vyrn-lsp`'s own tests | 100, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 278 s |
+| the residue ratchet | 1, 272 s — **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed**, which is the branch point's row exactly |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 17 s — a checker-only change moves no byte, and no slice here touched an emitter |
+| `genwasm`, release, `--ignored`, fresh `VYRN_GEN_CACHE_DIR` | 1, 23 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files, 0 failed |
+| `vyrn check` over the 419-program corpus, whole stderr | **0 bytes differ** against the branch point, over all four slices together |
+
+`checker.rs` across the arc: **16,269 to 15,822**, four hundred and forty-seven
+lines. By census kind, from `tests/checker_census.rs`:
+
+| kind | at `161423d7` | now | moved by |
+|---|---|---|---|
+| the typing judgment | 3,152 / 135 | 3,131 / 134 | the `Expr::Spawn` arm's isolation refusal and site record; the lambda source's `forbidden` flag |
+| a rule the checker states | 1,455 / 57 | 1,354 / 57 | `stored_unsafe_sigs` and `extend_spawn_safe`, neither of which held a `cerr!` |
+| the checker's part in a rewrite stated elsewhere | 454 / 16 | 454 / 16 | unmoved |
+| one arm per form, type constructor or builtin | 4,321 / 248 | 4,304 / 248 | `contains_drop` |
+| shared machinery | 2,229 / 30 | 2,091 / 29 | `SPAWN_FORBIDDEN`, the pre-check fixpoint and its four tables, the stored-value re-check |
+| tests | 4,658 / 0 | 4,488 / 0 | fifteen tests to `tests/isolation.rs`, three list tests rewritten |
+
+Every kind but one fell, and the one that did not is the surface at 4,304 — the
+census's finding, standing where it stood four slices ago. What the arc bought
+is not the 447 lines: it is that RFC-0004 §Q4's isolation rule, which was five
+conditions in two fixpoints over the AST, is one inclusion check over the same
+core the floor reads, plus one test on one signature.
+
+**The corpus is silent for all four slices**, and that is the honest weakness of
+this arc rather than its strength: not one of 419 programs is refused for
+isolation or for comptime purity, so the licence is sixteen tests and eleven
+probes. Three of those probes are in `rfcs/probes-0125/` because they show a
+program the old rule refused and the new one accepts; two more are there because
+they show the rule that does the refusing instead; two more because they are the
+cell that keeps the generation fence where it is.
 
 ### The surface collapse — RFC-0126 §8, one line per step
 

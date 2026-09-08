@@ -864,6 +864,7 @@ dependencies = [
  "vyrn-cli",
  "vyrn-codegen",
  "vyrn-genwasm",
+ "vyrn-lower",
 ]
 
 [[package]]

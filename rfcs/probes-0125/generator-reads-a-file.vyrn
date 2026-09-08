@@ -1,0 +1,13 @@
+/// RFC-0125 §3 M6, the fence's remaining blocker: the split gen cell.
+///
+/// Accepted — `readFile` routes through the loader's resolver and is recorded
+/// as a cache input. Same row as its neighbour, opposite verdict, which is why
+/// the generation fence asks by ATOM and the lattice answers by ROW.
+gen fn g() -> String {
+  let s = readFile("x")
+  return ""
+}
+
+fn main() -> Int64 {
+  return 0
+}

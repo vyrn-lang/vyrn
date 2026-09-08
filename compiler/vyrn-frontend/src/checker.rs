@@ -752,80 +752,13 @@ fn check_accum_inner(
         }
     }
 
-    // Which functions are "spawn-safe" — pure enough to run as a concurrent task:
-    // no I/O (`print`), no shared-mutable-state ops (`cell`/`set`/`release`), no
-    // `modify` params, and (transitively) only calls to other spawn-safe functions.
-    // A monotone fixpoint over the call graph (starts optimistic, shrinks).
-    let fn_names: std::collections::HashSet<String> =
-        program.functions.iter().map(|f| f.name.clone()).collect();
-    // Module-state bindings (RFC-0013). A function that reads OR writes any
-    // global is not spawn-safe (module state is shared by definition), and the
-    // fixpoint below spreads that transitively to every caller.
-    let global_names: std::collections::HashSet<String> =
-        program.globals.iter().map(|g| g.name.clone()).collect();
-    // A protocol-method call site (`n.burp()`) collects the *surface* name, but
-    // impl bodies live under mangled names (`Noise__Int__burp`). Expand each
-    // surface method name to every registered impl so those call-graph edges
-    // are visible to the fixpoint — otherwise an impure impl (one that prints)
-    // would be spawnable through a method call.
-    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
-    for imp in &program.impls {
-        if let Some(key) = crate::types::type_key(&imp.ty) {
-            for m in &imp.methods {
-                method_impls
-                    .entry(m.name.clone())
-                    .or_default()
-                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
-            }
-        }
-    }
-    let expand = |calls: std::collections::HashSet<String>| -> std::collections::HashSet<String> {
-        let mut out = std::collections::HashSet::with_capacity(calls.len());
-        for c in calls {
-            if let Some(impls) = method_impls.get(&c) {
-                out.extend(impls.iter().cloned());
-            }
-            out.insert(c);
-        }
-        out
-    };
-    let mut spawn_safe: std::collections::HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| {
-            let calls = expand(fn_calls(&f.body));
-            let no_modify = f.params.iter().all(|p| p.capability != Capability::Modify);
-            // An `extern` (RFC-0012) is a host effect (I/O by definition), so it is
-            // never spawn-safe — and any function that calls one becomes unsafe
-            // transitively through the fixpoint below.
-            !f.is_extern
-                && no_modify
-                && !calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
-                && !contains_drop(&f.body)
-                && !touches_globals(f, &global_names)
-        })
-        .map(|f| f.name.clone())
-        .collect();
-    loop {
-        let mut changed = false;
-        let snapshot = spawn_safe.clone();
-        for f in &program.functions {
-            if snapshot.contains(&f.name) {
-                let callees = expand(fn_calls(&f.body));
-                let ok = callees
-                    .iter()
-                    .filter(|c| fn_names.contains(*c))
-                    .all(|c| snapshot.contains(c));
-                if !ok {
-                    spawn_safe.remove(&f.name);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    // RFC-0004 §Q4's spawn-isolation rule used to be a monotone fixpoint over
+    // the call graph here, and a second fixpoint after the check for calls
+    // through a stored function value. It is `vyrn_lower::effects` now, stated
+    // once over the named core and reached through `crate::isolation`
+    // (RFC-0125 §3 M6, the isolation slice). What stays at a `spawn` site is
+    // the shape of the call: the callee must exist, must not be a `gen fn`,
+    // and must take no function value.
 
     // Protocol registries (RFC-0002 §5): map each method name to its protocol +
     // signature, and record which (protocol, type-key) pairs are implemented.
@@ -1240,7 +1173,6 @@ fn check_accum_inner(
         sigs: &sigs,
         caps: &caps,
         caps_by_sig: &caps_by_sig,
-        spawn_safe: &spawn_safe,
         types: &types,
         contracts: &contracts,
         variants: &variants,
@@ -1268,7 +1200,6 @@ fn check_accum_inner(
         stored_sources: RefCell::new(Vec::new()),
         arg_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
-        spawn_sites: RefCell::new(Vec::new()),
         json_types: RefCell::new(Vec::new()),
         json_dec_types: RefCell::new(Vec::new()),
     };
@@ -1495,38 +1426,11 @@ fn check_accum_inner(
     //    type errors surface first.
     check_comptime_purity(program, &mut out);
 
-    // 8. RFC-0037: re-verify every accepted `spawn` site against the
-    //    stored-closure-EXTENDED spawn-safety fixpoint. The pre-check fixpoint
-    //    cannot see calls through stored function values (their callee set is
-    //    the signature's collected sources), so a function whose only impurity
-    //    flows through a stored value passed the inline check; catch it here.
     let effects = StoredFnEffects {
         sources: checker.stored_sources.borrow().clone(),
         arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
     };
-    if !effects.calls.is_empty() {
-        let ext = extend_spawn_safe(program, &spawn_safe, &effects);
-        for (caller, callee, line) in checker.spawn_sites.borrow().iter() {
-            if !ext.contains(callee.as_str()) {
-                let mut d = cerr!(
-                    line,
-                    "`spawn {callee}(..)` is not allowed: `{callee}` \
-                         (or something it calls) invokes a stored function value \
-                         (RFC-0037) whose possible targets do I/O or touch shared \
-                         mutable state, so running it as a task could race. A \
-                         spawned function must be isolated (pure)."
-                );
-                d.file = program
-                    .functions
-                    .iter()
-                    .find(|f| &f.name == caller)
-                    .and_then(|f| f.module.clone());
-                out.push(d);
-            }
-        }
-    }
-
     let let_types = checker.let_types.borrow().clone();
     let mut json_types = checker.json_types.borrow().clone();
     json_types.dedup_by_key(|t| format!("{t:?}"));
@@ -2147,7 +2051,6 @@ struct Checker<'a> {
     /// none of its own.
     caps_by_sig: &'a HashMap<String, Vec<Capability>>,
     /// Functions that may be run as a concurrent task (`spawn`) — isolated/pure.
-    spawn_safe: &'a std::collections::HashSet<String>,
     types: &'a HashMap<String, TypeDecl>,
     /// Module contracts (RFC-0071): name -> declaration. Comptime-only — used to
     /// validate member types and to resolve `contractOf(Name)`.
@@ -2258,10 +2161,6 @@ struct Checker<'a> {
     /// RFC-0037: each call through a stored (non-parameter) fn-typed binding,
     /// as (enclosing function, signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
-    /// `spawn` sites that passed the pre-check spawn-safety test, re-verified
-    /// after checking against the stored-closure-extended fixpoint (RFC-0037):
-    /// (caller, callee, line).
-    spawn_sites: RefCell<Vec<(String, String, usize)>>,
     /// RFC-0078 M2b: the static type of every `toJson(x)` argument in the program.
     /// This is the ONE place in the pipeline that knows it — the loader can add
     /// functions to a linked program but not type an expression, and the engines
@@ -5272,14 +5171,6 @@ impl<'a> Checker<'a> {
                          never emitted (RFC-0021)"
                     ));
                 }
-                if !self.spawn_safe.contains(name) {
-                    return Err(cerr!(
-                        line,
-                        "`spawn {name}(..)` is not allowed: `{name}` (or something it \
-                         calls) does I/O or touches shared mutable state, so running it as a task \
-                         could race or interleave. A spawned function must be isolated (pure)."
-                    ));
-                }
                 // A spawned callee cannot take function-value parameters: its
                 // per-callee thunk carries plain data only (RFC-0037 keeps the
                 // v1 rejection, now with a named diagnostic).
@@ -5290,14 +5181,6 @@ impl<'a> Checker<'a> {
                          may not take function-value parameters (RFC-0037)"
                     ));
                 }
-                // The pre-check spawn-safety fixpoint cannot see calls through
-                // stored function values (RFC-0037) — record the site and
-                // re-verify it against the extended fixpoint after checking.
-                self.spawn_sites.borrow_mut().push((
-                    self.cur_fn.borrow().clone(),
-                    name.clone(),
-                    *line,
-                ));
                 if params.len() != args.len() {
                     return Err(cerr!(
                         line,
@@ -9067,9 +8950,8 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|(_, s)| s.clone())
             .collect();
-        // Effect summary for the extended spawn/workers fixpoint: the body's
-        // call names, the first module-state binding it touches (if any), and
-        // whether it performs a spawn-forbidden op.
+        // Effect summary for the `--workers` walk (RFC-0025): the body's call
+        // names and the first module-state binding it touches, if any.
         let mut calls: std::collections::HashSet<String> = Default::default();
         match body {
             LambdaBody::Expr(e) => calls_expr(e, &mut calls),
@@ -9100,8 +8982,6 @@ impl<'a> Checker<'a> {
                 }
             })
             .cloned();
-        let forbidden = calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
-            || matches!(body, LambdaBody::Block(b) if contains_drop(b));
         self.stored_sources.borrow_mut().push(StoredSource {
             sig: sig.clone(),
             named: None,
@@ -9110,7 +8990,6 @@ impl<'a> Checker<'a> {
                 line: *line,
                 calls,
                 touches_global,
-                forbidden,
                 nested_sigs,
             }),
         });
@@ -9208,7 +9087,6 @@ impl<'a> Checker<'a> {
                 line,
                 calls: HashSet::new(),
                 touches_global: None,
-                forbidden: false,
                 nested_sigs: Vec::new(),
             }),
         });
@@ -9981,41 +9859,6 @@ fn render_int_literal(n: i64) -> String {
     }
 }
 
-/// Builtins a concurrent task may not use: `print` (observable ordering) and
-/// the log methods.
-///
-/// Every name here is also in [`RESERVED`], and has to be: a name the compiler
-/// does not own is a user function, which this list would then forbid by
-/// coincidence of spelling. `spawn_forbidden_names_are_reserved` checks it.
-const SPAWN_FORBIDDEN: &[&str] = &[
-    "print",
-    // `close` frees a stream's buffer: the caller may still hold it across the
-    // task boundary.
-    "close",
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error",
-    // Input I/O effects (RFC-0014): observe/mutate the outside world (stdin
-    // cursor, the filesystem), so they must not cross a task boundary. `listDir`
-    // reads the filesystem too (RFC-0021).
-    "args",
-    "readLine",
-    "readFile",
-    "writeFile",
-    "writeFileBytes",
-    "writeStdout",
-    "renameFile",
-    "fsyncFile",
-    "readFileBytes",
-    "stringFromBytes",
-    "listDir",
-    "listDirKinds",
-    "lineAt",
-    "colAt",
-];
-
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
 /// primitives cross by value; a `String` crosses as a `(ptr, len)` pair. Nothing
 /// else — named/validated types, records, options, arrays, refs — has a v1
@@ -10028,23 +9871,6 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
         Type::Unit => allow_unit,
         _ => false,
     }
-}
-
-/// Whether a block contains a `drop` statement anywhere (including nested blocks).
-/// Used by spawn-safety: `drop` can release a shared `Ref`, so a task must not.
-fn contains_drop(b: &Block) -> bool {
-    b.stmts.iter().any(|s| match s {
-        Stmt::Drop { .. } => true,
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => contains_drop(then_block) || else_block.as_ref().is_some_and(contains_drop),
-        Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
-            contains_drop(body)
-        }
-        _ => false,
-    })
 }
 
 /// Whether an expression tree uses `spawn` anywhere.
@@ -10289,8 +10115,6 @@ pub struct StoredLambda {
     pub calls: std::collections::HashSet<String>,
     /// The first module-state binding the body reads or writes, if any.
     pub touches_global: Option<String>,
-    /// Whether the body performs a spawn-forbidden op (I/O, cells, `drop`, ...).
-    pub forbidden: bool,
     /// Signatures of OTHER stored function values the body itself calls.
     pub nested_sigs: Vec<Type>,
 }
@@ -10370,107 +10194,6 @@ pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
         }
         _ => a == b,
     }
-}
-
-/// The signatures whose stored values are NOT spawn-safe to call, under the
-/// current safe-function assumption: a signature is unsafe when ANY collected
-/// source is — a named source outside `safe`, or a lambda source that touches
-/// module state, performs a forbidden op, calls an unsafe function, or calls
-/// a stored value of an unsafe signature (iterated to fixpoint).
-fn stored_unsafe_sigs(
-    effects: &StoredFnEffects,
-    safe: &std::collections::HashSet<String>,
-    fn_names: &std::collections::HashSet<String>,
-) -> Vec<Type> {
-    let mut unsafe_sigs: Vec<Type> = Vec::new();
-    loop {
-        let mut changed = false;
-        for src in &effects.sources {
-            if unsafe_sigs.iter().any(|u| fn_sigs_match(u, &src.sig)) {
-                continue;
-            }
-            let bad = if let Some(n) = &src.named {
-                !safe.contains(n)
-            } else if let Some(l) = &src.lambda {
-                l.touches_global.is_some()
-                    || l.forbidden
-                    || l.calls
-                        .iter()
-                        .any(|c| fn_names.contains(c) && !safe.contains(c))
-                    || l.nested_sigs
-                        .iter()
-                        .any(|s| unsafe_sigs.iter().any(|u| fn_sigs_match(u, s)))
-            } else {
-                false
-            };
-            if bad {
-                unsafe_sigs.push(src.sig.clone());
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    unsafe_sigs
-}
-
-/// Extend the pre-check spawn-safety set with stored-function-value edges
-/// (RFC-0037): a function that calls a stored value of an unsafe signature
-/// becomes unsafe, and the ordinary call graph re-propagates until fixed.
-fn extend_spawn_safe(
-    program: &Program,
-    pre: &std::collections::HashSet<String>,
-    effects: &StoredFnEffects,
-) -> std::collections::HashSet<String> {
-    let fn_names: std::collections::HashSet<String> =
-        program.functions.iter().map(|f| f.name.clone()).collect();
-    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
-    for imp in &program.impls {
-        if let Some(key) = crate::types::type_key(&imp.ty) {
-            for m in &imp.methods {
-                method_impls
-                    .entry(m.name.clone())
-                    .or_default()
-                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
-            }
-        }
-    }
-    let mut ext = pre.clone();
-    loop {
-        let mut changed = false;
-        let unsafe_sigs = stored_unsafe_sigs(effects, &ext, &fn_names);
-        for (f, sig) in &effects.calls {
-            if ext.contains(f) && unsafe_sigs.iter().any(|u| fn_sigs_match(u, sig)) {
-                ext.remove(f);
-                changed = true;
-            }
-        }
-        // Ordinary call-graph propagation over the shrunk set.
-        let snapshot = ext.clone();
-        for f in &program.functions {
-            if snapshot.contains(&f.name) {
-                let mut callees: std::collections::HashSet<String> = Default::default();
-                for c in fn_calls(&f.body) {
-                    if let Some(impls) = method_impls.get(&c) {
-                        callees.extend(impls.iter().cloned());
-                    }
-                    callees.insert(c);
-                }
-                let ok = callees
-                    .iter()
-                    .filter(|c| fn_names.contains(*c))
-                    .all(|c| snapshot.contains(c));
-                if !ok && ext.remove(&f.name) {
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    ext
 }
 
 /// RFC-0025 (`vyrn serve --workers`): does `root` — transitively — read or
@@ -11115,39 +10838,39 @@ mod tests {
 
     /// Every log level is reserved, and every log level is an effect.
     ///
-    /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside three long
-    /// lists here — `RESERVED` and `SPAWN_FORBIDDEN` — mixed among dozens of
-    /// unrelated builtin names. They cannot read [`ast::LOG_LEVELS`] directly,
-    /// because splicing a const array into an array literal costs more than it
-    /// saves and would make two readable lists unreadable.
+    /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside `RESERVED`,
+    /// mixed among dozens of unrelated builtin names. It cannot read
+    /// [`ast::LOG_LEVELS`] directly, because splicing a const array into an
+    /// array literal costs more than it saves and would make a readable list
+    /// unreadable.
     ///
     /// So this compares them instead. A sixth level added to `ast::LOG_LEVELS`
-    /// and to the dispatch, but not to these lists, is a level that logs while
-    /// counting as neither an effect nor a reserved word: `spawn` would let it
-    /// cross a task boundary, and a `gen fn` would be allowed to call it at
-    /// compile time. The third list was the generation fence's, and it is the
-    /// lattice's `write-output` row now (RFC-0125 §3 M6, fifth slice).
+    /// and to the dispatch, but not to that list, is a level that logs while
+    /// counting as neither an effect nor a reserved word. The other two lists
+    /// this test guarded are gone: the generation fence reads the lattice's
+    /// `write-output` row (M6's fifth slice) and so does the spawn rule (M6's
+    /// isolation slice), so the last two clauses ask the lattice.
     #[test]
     fn every_log_level_is_reserved_and_forbidden_where_effects_are() {
-        for list in [("RESERVED", RESERVED), ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN)] {
-            let (what, names) = list;
-            let missing: Vec<&str> = crate::ast::LOG_LEVELS
-                .iter()
-                .copied()
-                .filter(|lvl| !names.contains(lvl))
-                .collect();
-            assert!(
-                missing.is_empty(),
-                "{what} does not hold every log level — missing: {}",
-                missing.join(", ")
-            );
-        }
-        // The generation fence reads the lattice's `gen` column now (RFC-0125
-        // §3 M6, fifth slice), so the third list is the `write-output` row.
+        let missing: Vec<&str> = crate::ast::LOG_LEVELS
+            .iter()
+            .copied()
+            .filter(|lvl| !RESERVED.contains(lvl))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "RESERVED does not hold every log level — missing: {}",
+            missing.join(", ")
+        );
         for lvl in crate::ast::LOG_LEVELS {
             assert!(
                 crate::effects::gen_refusal(lvl).is_some(),
                 "`{lvl}` is a log level a `gen fn` may call"
+            );
+            let e = crate::effects::atom(lvl).expect("a log level is an atom");
+            assert!(
+                !crate::effects::Effects::SPAWN_ALLOWS.has(e),
+                "`{lvl}` is a log level a task may call"
             );
         }
     }
@@ -11992,29 +11715,6 @@ mod tests {
     // ---- stored function values: spawn / workers pins (RFC-0037) ---------
 
     #[test]
-    fn spawning_through_a_stateful_stored_value_is_rejected() {
-        // `work` looks pure to the pre-check fixpoint (its only impurity flows
-        // through a stored function value whose source reads module state) —
-        // the extended fixpoint must catch the spawn.
-        let src = "let mut hits: Int64 = 0\n\
-             fn stateful() -> Int64 { return hits }\n\
-             fn make() -> fn() -> Int64 { return stateful }\n\
-             fn work() -> Int64 { let f = make()  return f() }\n\
-             fn main() -> Int64 { let t = spawn work()  return t.join() }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("invokes a stored function value"), "{e}");
-    }
-
-    #[test]
-    fn spawning_through_an_isolated_stored_value_is_fine() {
-        let src = "fn pure() -> Int64 { return 7 }\n\
-             fn make() -> fn() -> Int64 { return pure }\n\
-             fn work() -> Int64 { let f = make()  return f() }\n\
-             fn main() -> Int64 { let t = spawn work()  return t.join() }";
-        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
-
-    #[test]
     fn spawned_function_may_not_take_fn_parameters() {
         let src = "fn hof(f: fn(Int64) -> Int64) -> Int64 { return f(1) }\n\
              fn main() -> Int64 { let t = spawn hof(x -> x)  return t.join() }";
@@ -12444,24 +12144,6 @@ mod tests {
     }
 
     #[test]
-    fn io_builtins_are_spawn_forbidden() {
-        // A function touching stdin/files/argv is an effect — never a task.
-        for body in [
-            "let l = readLine()",
-            "let r = readFile(\"p\")",
-            "let w = writeFile(\"p\", \"c\")",
-            "let a = args()",
-        ] {
-            let src = format!(
-                "fn job() -> Int64 {{ {body} return 0 }} \
-                 fn main() -> Int64 {{ let t = spawn job() return t.join() }}"
-            );
-            let e = check_src(&src).unwrap_err();
-            assert!(e.contains("is not allowed"), "{body}: {e}");
-        }
-    }
-
-    #[test]
     fn io_builtins_are_not_constant_in_predicates() {
         // `where` predicates are const-only; an I/O call can never satisfy one.
         let e = check_src(
@@ -12515,34 +12197,6 @@ mod tests {
 
     // ---- structured concurrency -----------------------------------------
 
-    #[test]
-    fn accepts_spawn_of_pure_function() {
-        let src = "fn sq(n: Int64) -> Int64 { return n * n; } \
-                   fn main() -> Int64 { let t = spawn sq(5); return t.join(); }";
-        assert!(check_src(src).is_ok());
-    }
-
-    #[test]
-    fn rejects_spawn_of_impure_function() {
-        let e = check_src(
-            "fn noisy(n: Int64) -> Int64 { print(n); return n; } \
-                           fn main() -> Int64 { let t = spawn noisy(5); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
-    #[test]
-    fn rejects_spawn_of_transitively_impure_function() {
-        let e = check_src(
-            "fn inner(n: Int64) -> Int64 { print(n); return n; } \
-                           fn outer(n: Int64) -> Int64 { return inner(n); } \
-                           fn main() -> Int64 { let t = spawn outer(5); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
     // ---- RFC-0044 storage host effects (renameFile / fsyncFile) ------------
 
     #[test]
@@ -12568,18 +12222,6 @@ mod tests {
             );
             let e = check_src(&src).unwrap_err();
             assert!(e.contains("not comptime-pure"), "{io}: {e}");
-        }
-    }
-
-    #[test]
-    fn rfc0044_rename_and_fsync_are_effects_not_tasks() {
-        for io in ["renameFile(\"a\", \"b\")", "fsyncFile(\"a\")"] {
-            let src = format!(
-                "fn eff(n: Int64) -> Int64 {{ let w = {io} return n }} \
-                 fn main() -> Int64 {{ let t = spawn eff(5); return t.join() }}"
-            );
-            let e = check_src(&src).unwrap_err();
-            assert!(e.contains("isolated (pure)"), "{io}: {e}");
         }
     }
 
@@ -12739,19 +12381,6 @@ mod tests {
         .is_ok());
     }
 
-    #[test]
-    fn extern_calls_are_not_spawn_safe() {
-        // An extern is a host effect; a task calling one (even transitively)
-        // is not isolated.
-        let e = check_src(
-            "extern fn jsNow() -> Float64 \
-             fn sample(n: Int64) -> Int64 { let t = jsNow(); return n; } \
-             fn main() -> Int64 { let t = spawn sample(1); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
     // ---- RFC-0043 time/random effect pins --------------------------------
     // now()/monotonic()/randomSeed() are host-boundary externs, so the EXISTING
     // purity analysis (not new machinery) governs where they may appear: they
@@ -12790,21 +12419,6 @@ mod tests {
                    } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
-
-    #[test]
-    fn rfc0043_spawned_task_calling_the_clock_is_rejected() {
-        // A task calling now()/randomSeed() does host I/O; like print/file I/O it
-        // is not isolated, so `spawn` rejects it (consistent treatment — the RFC
-        // prose's "allowed" is inaccurate: host I/O in a task is forbidden, as
-        // `parallel.vyrn` documents).
-        let e = check_src(
-            "extern fn hostRandomSeed() -> Int64 \
-             fn seed() -> Int64 { return hostRandomSeed() } \
-             fn main() -> Int64 { let t = spawn seed(); return t.join() }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
     }
 
     #[test]
@@ -12864,34 +12478,6 @@ mod tests {
             !e.is_empty(),
             "a type error in the body must be reported: {e}"
         );
-    }
-
-    #[test]
-    fn export_extern_participates_in_spawn_purity_by_its_body() {
-        // A pure-bodied exported extern is spawn-safe (it is a normal fn); one
-        // whose body calls an import extern is not (transitive host effect).
-        let ok = "export extern fn dbl(n: Int64) -> Int64 { return n + n } \
-                  fn main() -> Int64 { let t = spawn dbl(3); return t.join() }";
-        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
-
-        let bad = "extern fn jsNow() -> Float64 \
-                   export extern fn impure(n: Int64) -> Int64 { let t = jsNow(); return n } \
-                   fn main() -> Int64 { let t = spawn impure(1); return t.join() }";
-        let e = check_src(bad).unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
-    #[test]
-    fn rejects_spawn_of_function_that_drops() {
-        // `drop` reclaims storage the spawning frame may still name, so a task
-        // must not contain it — even though `drop` is a statement, not a call.
-        let e = check_src(
-            "fn work(n: Int64) -> Int64 { let mut a: Array<Int64> = [] \
-             a.push(n) let v = a[0] drop a return v } \
-             fn main() -> Int64 { let t = spawn work(1); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
     }
 
     // ---- modify capability ----------------------------------------------
@@ -13263,33 +12849,45 @@ mod tests {
         assert!(e.contains("must be declared `mut`"), "{e}");
     }
 
-    #[test]
-    fn rejects_spawn_of_protocol_method_that_prints() {
-        // Purity must see through protocol dispatch: the impl body does I/O.
-        let src = "protocol Noise { fn burp(self) -> Int64 } \
-                   impl Noise for Int64 { fn burp(self) -> Int64 { print(self) return self } } \
-                   fn task(n: Int64) -> Int64 { return n.burp() } \
-                   fn main() -> Int64 { let t = spawn task(5) return t.join() }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
-    /// The two hand-written name lists in this file, checked against each other.
+    /// The hand-written name list this file still has, checked against the
+    /// lattice.
     ///
-    /// They are not the same set and are not meant to be: `RESERVED` is every
-    /// name the compiler owns, `SPAWN_FORBIDDEN` the few of those a task may not
-    /// reach. But the second is meaningless outside the first — `SPAWN_FORBIDDEN`
-    /// is consulted by name, so an entry the compiler does not own would forbid
-    /// whatever user function happened to share the spelling, and an entry that
-    /// LEAVES `RESERVED` would keep forbidding it silently. Removing `afree` is
-    /// how that became checkable rather than remembered.
+    /// There were two, and the second was `SPAWN_FORBIDDEN` — the few names the
+    /// compiler owns that a task may not reach. It was meaningless outside
+    /// `RESERVED`: it was consulted by name, so an entry the compiler did not
+    /// own would forbid whatever user function shared the spelling, and an
+    /// entry that LEFT `RESERVED` would keep forbidding it silently. The list
+    /// is gone (RFC-0125 §3 M6, the isolation slice) and the effect judgment
+    /// states the rule, so what stands is the direction that outlived it: every
+    /// atom the isolation rule refuses is a name the compiler owns.
     #[test]
-    fn spawn_forbidden_names_are_reserved() {
-        for n in SPAWN_FORBIDDEN {
+    fn the_atoms_a_task_may_not_reach_are_names_the_compiler_owns() {
+        for (n, e) in crate::effects::ATOMS {
+            if crate::effects::Effects::SPAWN_ALLOWS.has(*e) {
+                continue;
+            }
+            // The generation vocabulary is not a task's: a `gen fn` cannot be
+            // spawned at all, and the fence refuses these names by row wherever
+            // they are reached. `lex` and `render` are not `RESERVED`, and
+            // making them so is RFC-0094 M2's question and not this one.
+            if *e == crate::effects::Effect::GenOnly {
+                continue;
+            }
+            // A name no source can spell is nobody's to shadow: the runtime's
+            // own primitives and the compiler's `@`-spelled internals. A
+            // host-boundary name (RFC-0103 M2) is a DECLARATION the runtime
+            // shim answers on every target, so a program that spells it means
+            // the atom.
+            if n.contains('$')
+                || n.starts_with('@')
+                || crate::trap::host_boundary_extern(n).is_some()
+            {
+                continue;
+            }
             assert!(
                 RESERVED.contains(n),
-                "`{n}` is forbidden inside a task but is not a name the compiler \
-                 owns — it now forbids any user function spelled that way"
+                "`{n}` is an atom a task may not reach but is not a name the compiler \
+                 owns — a user function spelled that way would be judged as the atom"
             );
         }
     }
@@ -14137,37 +13735,6 @@ mod tests {
     }
 
     #[test]
-    fn function_touching_a_global_is_not_spawnable() {
-        // `bump` writes a global, so it is not isolated; spawning it is rejected.
-        let e = check_src(
-            "let mut hits = 0\n\
-             fn bump() -> Int64 { hits = hits + 1 return hits }\n\
-             fn main() -> Int64 { let t = spawn bump() return t.join() }",
-        )
-        .unwrap_err();
-        assert!(
-            e.contains("isolated") || e.contains("spawn") || e.contains("pure"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn spawn_impurity_is_transitive_through_globals() {
-        // `outer` calls `bump` (which touches a global); spawning `outer` fails.
-        let e = check_src(
-            "let mut hits = 0\n\
-             fn bump() -> Int64 { hits = hits + 1 return hits }\n\
-             fn outer() -> Int64 { return bump() }\n\
-             fn main() -> Int64 { let t = spawn outer() return t.join() }",
-        )
-        .unwrap_err();
-        assert!(
-            e.contains("isolated") || e.contains("spawn") || e.contains("pure"),
-            "{e}"
-        );
-    }
-
-    #[test]
     fn local_shadowing_a_global_may_be_spawned() {
         // A local `hits` shadows the global inside `pure`, so `pure` is isolated.
         let ok = "let mut hits = 0\n\
@@ -14587,20 +14154,6 @@ mod tests {
              return out }\n\
              fn main() -> Int64 { let ys: Array<Int64> = [1, 2]  let zs = map(ys, x -> x > 0)  return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
-
-    #[test]
-    fn lambda_reading_module_state_poisons_spawn() {
-        // A lambda that reads a global makes the enclosing function non-spawn-safe.
-        let src = "let g: Int64 = 5\n\
-             fn apply(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(x) }\n\
-             fn worker(x: Int64) -> Int64 { return apply(x, y -> y + g) }\n\
-             fn main() -> Int64 { let t = spawn worker(1)  return t.join() }";
-        assert!(
-            check_src(src).unwrap_err().contains("not allowed"),
-            "{:?}",
-            check_src(src)
-        );
     }
 
     #[test]

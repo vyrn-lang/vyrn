@@ -1,0 +1,15 @@
+/// RFC-0125 §3 M6, the release slice: a `drop` in a task's body.
+///
+/// `s` is born in this body and no caller ever names it, so the release is the
+/// body's own. The spawn rule refused it all the same, because the rule asked
+/// whether the body holds a `drop` and not whose value it releases.
+fn work(n: Int64) -> Int64 {
+  let s = "hi{n}"
+  drop s
+  return n
+}
+
+fn main() -> Int64 {
+  let t = spawn work(1)
+  return t.join()
+}

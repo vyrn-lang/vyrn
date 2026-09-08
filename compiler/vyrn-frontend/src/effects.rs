@@ -43,6 +43,10 @@ pub enum Effect {
     Serve,
     /// A task is started (RFC-0004 §Q4): a call the core marks `spawn`.
     Spawn,
+    /// A module-state binding is read or written (RFC-0013). No atom: the
+    /// core spells it as a global place, and the body that names one carries
+    /// the effect — the same shape `spawn` has.
+    ModuleState,
     /// The path may end in a trap.
     Trap,
     /// The compiler's own state is read; exists at generation time only
@@ -51,7 +55,7 @@ pub enum Effect {
 }
 
 impl Effect {
-    pub const ALL: [Effect; 14] = [
+    pub const ALL: [Effect; 15] = [
         Effect::Alloc,
         Effect::ReadInput,
         Effect::WriteOutput,
@@ -64,6 +68,7 @@ impl Effect {
         Effect::Extern,
         Effect::Serve,
         Effect::Spawn,
+        Effect::ModuleState,
         Effect::Trap,
         Effect::GenOnly,
     ];
@@ -83,6 +88,7 @@ impl Effect {
             Effect::Extern => "extern",
             Effect::Serve => "serve",
             Effect::Spawn => "spawn",
+            Effect::ModuleState => "module-state",
             Effect::Trap => "trap",
             Effect::GenOnly => "gen-only",
         }
@@ -212,6 +218,10 @@ impl Effect {
     /// a clock read is a different answer every build, `args` is the compiler's
     /// command line and not the program's.
     ///
+    /// `module-state` is no for the same reason: a generator that read a
+    /// module-state binding would read whatever the generation order left
+    /// there, and the cache key cannot name it (RFC-0021, RFC-0013).
+    ///
     /// `alloc` and `trap` are yes because the sandbox is an interpreter that
     /// allocates and can fail. `gen-only` is yes because it exists nowhere else.
     /// `fs-read` and `fs-list` are yes because they route through the loader's
@@ -230,7 +240,8 @@ impl Effect {
             | Effect::Random
             | Effect::Extern
             | Effect::Serve
-            | Effect::Spawn => false,
+            | Effect::Spawn
+            | Effect::ModuleState => false,
         }
     }
 }

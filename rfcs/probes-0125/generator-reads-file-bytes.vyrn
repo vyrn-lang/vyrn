@@ -1,0 +1,14 @@
+/// RFC-0125 §3 M6, the fence's remaining blocker: the split gen cell.
+///
+/// Refused — `readFileBytes` does not go through the loader's resolver, so a
+/// generation cached on a key that cannot name it would behave two ways
+/// (finding 5). Its ROW is `fs-read`, whose gen cell is yes, so an effect SET
+/// cannot tell this program from its neighbour.
+gen fn g() -> String {
+  let b = readFileBytes("x")
+  return ""
+}
+
+fn main() -> Int64 {
+  return 0
+}

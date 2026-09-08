@@ -1,0 +1,16 @@
+/// RFC-0125 §3 M6, the four-names slice: `stringFromBytes` off
+/// `SPAWN_FORBIDDEN`.
+///
+/// A pure conversion whose whole effect is the allocation of its result, and
+/// `alloc` is a row a task may have. `lineAt` and `colAt` are the same shape
+/// and came off with it. The program was refused; it checks now.
+fn work(b: Array<UInt8>) -> Int64 {
+  let r = stringFromBytes(b)
+  return 0
+}
+
+fn main() -> Int64 {
+  let b = bytes("hi")
+  let t = spawn work(b)
+  return t.join()
+}
