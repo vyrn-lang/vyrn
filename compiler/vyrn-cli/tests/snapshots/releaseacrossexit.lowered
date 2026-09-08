@@ -104,7 +104,6 @@ fn overContinue() -> Int64                                               @112
   return                                                                 @119
     int 4 : Int64                                                        @119
   release inLoop : Release Owned__Ring__release exit=continue            @115
-  release inLoop : Release Owned__Ring__release exit=block               @115
 
 fn overForIn() -> Int64                                                  @89
   for r                                                                  @90
@@ -114,7 +113,7 @@ fn overForIn() -> Int64                                                  @89
         str "seen" : String                                              @91
   return                                                                 @93
     int 6 : Int64                                                        @93
-  release @forin : Deep<Array<Ring>> exit=scrutinee                      @90
+  release @t1 : Deep<Array<Ring>> exit=return                            @90
 
 fn overHandover() -> Int64                                               @63
   let kept : Ring                                                        @64
@@ -130,7 +129,6 @@ fn overHandover() -> Int64                                               @63
   return                                                                 @69
     int 1 : Int64                                                        @69
   release kept : Release Owned__Ring__release exit=return                @64
-  release kept : Release Owned__Ring__release exit=block                 @64
 
 fn overIfLet() -> Int64                                                  @74
   iflet                                                                  @75
@@ -141,7 +139,6 @@ fn overIfLet() -> Int64                                                  @74
         str "bound" : String                                             @76
   return                                                                 @78
     int 2 : Int64                                                        @78
-  release @iflet : Deep<Option<Ring>> exit=scrutinee                     @75
 
 fn overMatch() -> Int64                                                  @52
   let n : Int64                                                          @53
@@ -152,7 +149,6 @@ fn overMatch() -> Int64                                                  @52
       int 0 : Int64                                                      @53
   return                                                                 @57
     var n : Int64                                                        @57
-  release @match : Deep<Option<Ring>> exit=scrutinee                     @53
 
 fn overReturn() -> Int64                                                 @124
   let outer : Ring                                                       @125
@@ -169,9 +165,7 @@ fn overReturn() -> Int64                                                 @124
     int 0 : Int64                                                        @130
   release inner : Release Owned__Ring__release exit=return               @127
   release outer : Release Owned__Ring__release exit=return               @125
-  release inner : Release Owned__Ring__release exit=block                @127
   release outer : Release Owned__Ring__release exit=return               @125
-  release outer : Release Owned__Ring__release exit=block                @125
 
 fn ringList() -> Array<Ring>                                             @81
   let mut xs : Array<Ring>                                               @82

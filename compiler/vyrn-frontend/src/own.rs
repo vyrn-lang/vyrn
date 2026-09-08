@@ -1281,7 +1281,7 @@ fn analyze_now(program: &Program) -> Ownership {
 
     let mut droppable = HashMap::new();
     let mut holes = HashMap::new();
-    let mut releases = HashMap::new();
+    let mut releases: HashMap<String, Vec<Release>> = HashMap::new();
     // Variant constructor names, the builtins included — see `Emit::constructs`.
     let mut constructs: std::collections::HashSet<String> = ["Some", "None", "Ok", "Err"]
         .iter()
@@ -1298,7 +1298,6 @@ fn analyze_now(program: &Program) -> Ownership {
         // value (or whose take was provably revived) is the callee's to
         // release at exit — the same decision a `let` gets, minus the
         // initializer cases a parameter cannot have.
-        let mut owned_params: Vec<(usize, String, u32)> = Vec::new();
         // A declared `release(consume self)` is excluded outright: the release
         // IS the release, and a row for its `self` would place a second one —
         // a self-recursive call, which the trace gate caught on its fixture
@@ -1321,10 +1320,8 @@ fn analyze_now(program: &Program) -> Ownership {
             };
             if ours {
                 r.droppable.insert(key, kind);
-                owned_params.push((key, p.name.clone(), 0));
             }
         }
-        releases.insert(name.clone(), place_body(body, &r.droppable, &owned_params));
         droppable.insert(name.clone(), r.droppable);
         holes.insert(name, r.holes);
     };
@@ -1589,9 +1586,8 @@ fn analyze_now(program: &Program) -> Ownership {
                 }
             }
         }
-        // The lets iteration is hash-ordered; the emitted IR must not be. Only
-        // the injected rows are sorted — the structural rows keep
-        // `place_body`'s frame order.
+        // The lets iteration is hash-ordered; the emitted IR must not be, so
+        // the injected rows are sorted.
         extra.sort_by(|a, b| (&a.0, a.1.site, a.1.binding).cmp(&(&b.0, b.1.site, b.1.binding)));
         for (f, r) in extra {
             releases.entry(f).or_default().push(r);
@@ -1641,6 +1637,19 @@ fn analyze_now(program: &Program) -> Ownership {
 /// is the container row's key — and the two rows overwrote each other.
 pub fn for_var_key(var: &str) -> usize {
     var.as_ptr() as usize
+}
+
+/// The plan's key for a pattern BINDER, which has no `let` node either: the
+/// heap buffer of the name the reader wrote in the pattern, for the same
+/// reason and with the same caveat as [`for_var_key`].
+///
+/// A binder the arm OWNS is a binding of the frame like any other, and the
+/// frame's exit rule releases it at a `return`, a `break` or a `continue`
+/// inside the arm. Both the core and the emitters take the key off the same
+/// pattern node, so a row placed against it lands where the release is
+/// emitted (RFC-0125 §3 M3, the walk's deletion).
+pub fn binder_key(name: &str) -> usize {
+    name.as_ptr() as usize
 }
 
 /// A pass that adds release rows to a finished analysis — RFC-0125 M3's
@@ -1829,347 +1838,6 @@ pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, Option<Ve
             .push((r.binding, holes));
     }
     out
-}
-
-// ---- the placement --------------------------------------------------------
-//
-// RFC-0101 M4. `emit_body` above answers WHETHER a binding is droppable and
-// nominally HOW; this answers WHERE and IN WHAT ORDER, once, for every engine.
-//
-// It is a second walk over the same body rather than a field on `Emit`, because
-// the two ask different questions of different shapes: `Emit` is a dataflow over
-// `movecheck`'s facts and this is a stack discipline over source order. Fusing
-// them would put a frame stack inside a fixpoint for no reader's benefit.
-
-/// A value on a live frame: what [`Emit`] said about it, before an exit says
-/// where.
-struct Live {
-    binding: usize,
-    name: String,
-    kind: DropKind,
-    line: u32,
-}
-
-/// The live frames and the loop boundaries — the one model of what
-/// `Gen::drop_stack`, `Fn_::releases` and the interpreter's per-block `Vec` each
-/// used to keep privately.
-struct Place<'a> {
-    /// RFC-0114: the owned `consume` parameters, tracked FIRST on the
-    /// outermost frame — they outlive every local, so they release last.
-    pending: Vec<(usize, String, u32)>,
-    droppable: &'a HashMap<usize, DropKind>,
-    out: Vec<Release>,
-    /// Innermost last. An exit's steps are these frames, from a boundary
-    /// outward.
-    frames: Vec<Vec<Live>>,
-    /// One entry per enclosing loop: the frame index its body starts at, which
-    /// is where `break` and `continue` unwind to. Below it sits the frame a
-    /// `for`-in's iterable is on, which is why neither edge reaches that one.
-    loops: Vec<usize>,
-}
-
-/// Place one body's steps.
-///
-/// **It walks the program's own nodes and no expansion.** A `place at`
-/// projection and a `for` over a user container are inlined at their access site
-/// (RFC-0101 M2d), and the inline is a CLONE: no node in it is a key of
-/// `droppable`, so no step can be placed inside one. Skipping them is what lets
-/// the placement live here, in the crate the interpreter can reach, instead of
-/// needing the checker's recorded types to expand a projection.
-fn place_body(
-    body: &Block,
-    droppable: &HashMap<usize, DropKind>,
-    params: &[(usize, String, u32)],
-) -> Vec<Release> {
-    let mut p = Place {
-        droppable,
-        out: Vec::new(),
-        frames: Vec::new(),
-        loops: Vec::new(),
-        pending: params.to_vec(),
-    };
-    p.block(body);
-    p.out
-}
-
-impl Place<'_> {
-    /// Put a value this map calls droppable on the innermost live frame.
-    ///
-    /// `key` is `own`'s own key: the `Stmt::Let` for a binding, the construct
-    /// itself for the temporary it owns. A value with no row is not on a frame.
-    fn track(&mut self, key: usize, name: &str, line: u32) {
-        let Some(kind) = self.droppable.get(&key) else {
-            return;
-        };
-        if let Some(f) = self.frames.last_mut() {
-            f.push(Live {
-                binding: key,
-                name: name.to_string(),
-                line,
-                kind: kind.clone(),
-            });
-        }
-    }
-
-    /// Place the steps one exit runs: every frame from `from` outward, innermost
-    /// frame first and newest binding first inside each.
-    ///
-    /// That order is the whole of what three engines used to assert separately.
-    /// It is derived here from source order and this map, and nowhere else.
-    fn place(&mut self, from: usize, exit: Exit, site: usize) {
-        let steps: Vec<Release> = self.frames[from..]
-            .iter()
-            .rev()
-            .flat_map(|f| f.iter().rev())
-            .map(|l| Release {
-                site,
-                binding: l.binding,
-                name: l.name.clone(),
-                kind: l.kind.clone(),
-                exit,
-                line: l.line,
-                full: false,
-                holes: None,
-                early: false,
-            })
-            .collect();
-        self.out.extend(steps);
-    }
-
-    fn block(&mut self, b: &Block) {
-        self.frames.push(Vec::new());
-        let here = self.frames.len() - 1;
-        if here == 0 {
-            for (k, n, l) in std::mem::take(&mut self.pending) {
-                self.track(k, &n, l);
-            }
-        }
-        for s in &b.stmts {
-            self.stmt(s);
-        }
-        // After the statements, so a nested block's exit steps precede its
-        // parent's — "innermost frame first" written as the order they are in.
-        self.place(here, Exit::Block, b as *const Block as usize);
-        self.frames.pop();
-    }
-
-    /// A construct that owns a TEMPORARY runs its body inside a frame of its own
-    /// and releases it when the construct is done — the shape `Stmt::IfLet` has
-    /// had since Phase 10a, `Stmt::ForIn` since RFC-0092 M5 and `Expr::Match`
-    /// since `movecheck` gave a match's scrutinee a row.
-    ///
-    /// The frame is pushed AFTER the scrutinee is walked and BEFORE any loop
-    /// boundary, which is what both compiled backends do and what makes the two
-    /// facts true: an early exit out of an arm reclaims it, and a `break` does
-    /// not.
-    fn owned_temp(&mut self, key: usize, name: &str, line: u32, body: impl FnOnce(&mut Self)) {
-        self.frames.push(Vec::new());
-        let here = self.frames.len() - 1;
-        // The construct's own word, because the value has no name to print: it
-        // is a temporary, which is why `own` keys its row by the construct.
-        self.track(key, name, line);
-        body(self);
-        self.place(here, Exit::Scrutinee, key);
-        self.frames.pop();
-    }
-
-    fn stmt(&mut self, s: &Stmt) {
-        let line = stmt_line(s) as u32;
-        match s {
-            Stmt::Let { name, value, .. } => {
-                self.expr(value);
-                // On the frame AFTER its value is walked, because the value may
-                // itself leave the function — `let a = f()?` reclaims what was
-                // live before `a`, and `a` is not one of them.
-                self.track(id(s), name, line);
-            }
-            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => self.expr(value),
-            Stmt::IndexSet { index, value, .. } => {
-                self.expr(index);
-                self.expr(value);
-            }
-            // A function exit: every frame the body has open, innermost first.
-            // The value is walked first because it runs first, and because it
-            // may hold a `?` of its own — a function exit from further in.
-            Stmt::Return { value, .. } => {
-                if let Some(v) = value {
-                    self.expr(v);
-                }
-                self.place(0, Exit::Return, id(s));
-            }
-            // The loop edges: every frame the innermost loop's body opened, and
-            // no more.
-            Stmt::Break { .. } => {
-                self.place(self.loops.last().copied().unwrap_or(0), Exit::Break, id(s))
-            }
-            Stmt::Continue { .. } => self.place(
-                self.loops.last().copied().unwrap_or(0),
-                Exit::Continue,
-                id(s),
-            ),
-            Stmt::Drop { .. } => {}
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.expr(cond);
-                self.block(then_block);
-                if let Some(e) = else_block {
-                    self.block(e);
-                }
-            }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.expr(scrutinee);
-                self.owned_temp(id(s), "@iflet", line, |p| {
-                    p.block(then_block);
-                    if let Some(e) = else_block {
-                        p.block(e);
-                    }
-                });
-            }
-            Stmt::While { cond, body, .. } => {
-                self.expr(cond);
-                self.loops.push(self.frames.len());
-                self.block(body);
-                self.loops.pop();
-            }
-            Stmt::ForIn { iter, body, .. } => {
-                self.expr(iter);
-                self.owned_temp(id(s), "@forin", line, |p| {
-                    // The boundary sits ABOVE the iterable's frame, so `break`
-                    // and `continue` leave the snapshot alone and land on the
-                    // code that releases it at the statement's own exit.
-                    p.loops.push(p.frames.len());
-                    p.block(body);
-                    p.loops.pop();
-                });
-            }
-            Stmt::Expr(e) => self.expr(e),
-            Stmt::Region { body, .. } => self.block(body),
-        }
-    }
-
-    fn expr(&mut self, e: &Expr) {
-        match e {
-            Expr::Int(_)
-            | Expr::Byte(_)
-            | Expr::Float(_)
-            | Expr::Bool(_)
-            | Expr::Str(_)
-            | Expr::Var { .. } => {}
-            Expr::Unary { expr: inner, .. } | Expr::Field { expr: inner, .. } => self.expr(inner),
-            // A propagating `?` is a function exit and pays what one pays — the
-            // sentence RFC-0101 M4's step 0 wrote nine lines of interpreter for.
-            // The steps are placed unconditionally: an engine reaches them only
-            // on the failing branch, which is a target fact about where the code
-            // goes rather than a decision about what runs.
-            Expr::Try { expr: inner, .. } => {
-                self.expr(inner);
-                self.place(0, Exit::Try, e as *const Expr as usize);
-            }
-            Expr::Consume { place, .. } => self.expr(place),
-            Expr::Binary { lhs, rhs, .. } => {
-                self.expr(lhs);
-                self.expr(rhs);
-            }
-            Expr::Call { args, .. }
-            | Expr::TryConstruct { args, .. }
-            | Expr::Spawn { args, .. } => {
-                for a in args {
-                    self.expr(a);
-                }
-            }
-            // The scrutinee's own frame, and the handover: `movecheck` marks the
-            // row when an arm hands the payload out, so a match that gives its
-            // value away has NO step here and the binding the payload flowed
-            // into is the one owner there is. The handover is the absence.
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.expr(scrutinee);
-                let key = e as *const Expr as usize;
-                self.owned_temp(key, "@match", e.line() as u32, |p| {
-                    for arm in arms {
-                        match &arm.body {
-                            ArmBody::Expr(body) => p.expr(body),
-                            // A block arm (RFC-0118) walks as the statements
-                            // it is — its lets get frames and placement
-                            // exactly as an `if` branch's do.
-                            ArmBody::Block(b) => p.block(b),
-                        }
-                    }
-                });
-            }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.expr(cond);
-                self.expr(then_branch);
-                if let Some(b) = else_branch {
-                    self.expr(b);
-                }
-            }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    self.expr(v);
-                }
-            }
-            Expr::ArrayLit { elems, .. } => {
-                for el in elems {
-                    self.expr(el);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries {
-                    self.expr(k);
-                    self.expr(v);
-                }
-            }
-            Expr::Lambda { body, .. } => match body {
-                LambdaBody::Expr(b) => self.expr(b),
-                LambdaBody::Block(b) => {
-                    // A lambda is its own function in both backends — it lowers
-                    // under a shell that owns no release rows — so a `return` or
-                    // a `?` inside one unwinds ITS frames and not the enclosing
-                    // body's. The frames are set aside rather than shared.
-                    let frames = std::mem::take(&mut self.frames);
-                    let loops = std::mem::take(&mut self.loops);
-                    self.block(b);
-                    self.frames = frames;
-                    self.loops = loops;
-                }
-            },
-        }
-    }
-}
-
-fn stmt_line(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let { line, .. }
-        | Stmt::Assign { line, .. }
-        | Stmt::SetField { line, .. }
-        | Stmt::IndexSet { line, .. }
-        | Stmt::Return { line, .. }
-        | Stmt::Break { line }
-        | Stmt::Continue { line }
-        | Stmt::If { line, .. }
-        | Stmt::IfLet { line, .. }
-        | Stmt::While { line, .. }
-        | Stmt::ForIn { line, .. }
-        | Stmt::Drop { line, .. }
-        | Stmt::Region { line, .. } => *line,
-        Stmt::Expr(e) => e.line(),
-    }
 }
 
 struct FnResult {

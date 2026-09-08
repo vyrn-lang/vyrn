@@ -874,9 +874,17 @@ fn borrow_root(sv: &Val, consuming: bool) -> Option<Name> {
 /// the same question for every shape a candidate has. A construct takes the
 /// value it was handed where nothing reads that name after it — a payload
 /// binder is a name of its own, so an arm reading the payload is not a read
-/// of the scrutinee, and a release the plan placed is a row and reads it —
-/// and where the binding and the construct stand under the same loops, so
-/// one value is not taken twice.
+/// of the scrutinee — and where the binding and the construct stand under the
+/// same loops, so one value is not taken twice.
+///
+/// A release row is NOT a read (RFC-0125 §3 M3, the walk's deletion). The
+/// take is decided over the core's own statements, and the release rows are
+/// derived FROM the take: the placer runs the kernel over the body this
+/// decision made, and a value the construct took is gone at the scrutinee's
+/// exit, so no row is placed there. The other order — the row deciding the
+/// take — made the answer depend on a table this pass writes, so the facts
+/// rebuild read rows the placer had just added and seeded a different take
+/// than the rows were placed for.
 ///
 /// A [`Cand::Switch`] asks it of the switch the core emitted: the name's
 /// last read is the switch's own. A [`Cand::Loop`] asks it of the loop: the
@@ -997,7 +1005,8 @@ impl Reads {
                     self.val(value);
                 }
                 St::Drop(n, _, _) => self.name(*n),
-                St::Row { name, .. } => self.name(*name),
+                // A row is the plan's, not the core's: see [`last_owner`].
+                St::Row { .. } => {}
                 St::If {
                     cond, then, els, ..
                 } => {
@@ -2645,7 +2654,7 @@ impl<'a> Builder<'a> {
             let mut parts = name.split('.');
             let root = parts.next().unwrap_or_default();
             let Some(n) = self.lookup(root) else {
-                return gap("an edge release of a name out of scope", 0);
+                return gap_d("an edge release of a name out of scope", name, 0);
             };
             let mut place = Place::Name(n);
             let mut ty = self.body.names[n as usize].ty.clone();
@@ -2808,7 +2817,7 @@ impl<'a> Builder<'a> {
                 }
                 let t = self.temp(self.body.names[n as usize].ty.clone(), e.line());
                 out.push(St::Let(t, Rhs::Val(Val::Name(n))));
-                self.by_binding.insert(construct, t);
+                self.keyed(t, construct);
                 Ok((Val::Name(t), true))
             }
             Expr::Consume { place, line } => match &**place {
@@ -2818,20 +2827,20 @@ impl<'a> Builder<'a> {
                         // and the same refusal (RFC-0125 §3 M3, row 29).
                         let v = self.global_read(place, name, *line, out)?;
                         if let Val::Name(t) = v {
-                            self.by_binding.insert(construct, t);
+                            self.keyed(t, construct);
                         }
                         return Ok((v, false));
                     };
                     let t = self.temp(self.body.names[n as usize].ty.clone(), *line);
                     out.push(St::Let(t, Rhs::Val(Val::Name(n))));
-                    self.by_binding.insert(construct, t);
+                    self.keyed(t, construct);
                     Ok((Val::Name(t), self.taken_by(t, construct)))
                 }
                 _ => {
                     let Val::Name(t) = self.take_prefix(place, *line, out)? else {
                         return gap("a `consume` of a literal", *line);
                     };
-                    self.by_binding.insert(construct, t);
+                    self.keyed(t, construct);
                     Ok((Val::Name(t), self.taken_by(t, construct)))
                 }
             },
@@ -2839,7 +2848,7 @@ impl<'a> Builder<'a> {
                 let v = self.val(e, out)?;
                 match v {
                     Val::Name(t) => {
-                        self.by_binding.insert(construct, t);
+                        self.keyed(t, construct);
                         Ok((Val::Name(t), self.taken_by(t, construct)))
                     }
                     Val::Lit => Ok((Val::Lit, false)),
@@ -2923,7 +2932,11 @@ impl<'a> Builder<'a> {
     ) -> Result<Vec<Name>, Gap> {
         let decls = self.proto.types();
         let rt = vyrn_frontend::types::resolve(sty, &decls);
-        let payloads: Vec<(String, Type)> = match p {
+        // The binder's own key, beside its spelling: the address of the name
+        // the reader wrote, which is one address per binder and the same one
+        // on every build (RFC-0125 §3 M3, the walk's deletion —
+        // [`Builder::bind_pattern`] below says what it is for).
+        let payloads: Vec<(String, Type, usize)> = match p {
             Pattern::Other => Vec::new(),
             // `??`'s pair (RFC-0079) names a TAG rather than a variant, and the
             // SCRUTINEE says which one: variant 1 succeeds, variant 0 fails. Since
@@ -2935,7 +2948,7 @@ impl<'a> Builder<'a> {
                     vs[at]
                         .payload
                         .first()
-                        .map(|t| vec![(n.clone(), t.clone())])
+                        .map(|t| vec![(n.clone(), t.clone(), vyrn_frontend::own::binder_key(n))])
                         .unwrap_or_default()
                 }
                 _ => return gap("a `??` pattern on a scrutinee with no two tags", line),
@@ -2950,17 +2963,34 @@ impl<'a> Builder<'a> {
                     }
                     names
                         .iter()
-                        .cloned()
                         .zip(var.payload.iter().cloned())
+                        .map(|(n, t)| (n.clone(), t, vyrn_frontend::own::binder_key(n)))
                         .collect()
                 }
                 _ => return gap("a variant pattern on a non-enum", line),
             },
         };
         let mut binds = Vec::new();
-        for (name, ty) in payloads {
+        for (name, ty, key) in payloads {
             let owned = consuming && self.owns(&ty);
             let n = self.name(&name, ty, owned, line);
+            // A binder the arm OWNS is a binding of the frame like any other,
+            // and the frame's exit rule is stated for it once: the kernel
+            // finds it still held at a `return`, a `break` or a `continue`
+            // inside the arm, the placer keys the row by this address, and
+            // [`Builder::drops_at`] emits the release there. The arm's own end
+            // is the other half, and `binders_end` states it (RFC-0125 §3 M3,
+            // the walk's deletion). Without the key `place_frames` skipped the
+            // row and three programs of the corpus held a payload at a
+            // `return` with no release placed for it.
+            //
+            // Keyed whether the arm owns the payload or not: the key is read
+            // on EVERY build, and the first build of a pair takes nothing, so
+            // a key given only to an owned binder would leave the row the
+            // second build's placement wrote with no name to land on.
+            // [`Builder::drops_at`] skips a row for a name this frame does not
+            // own, which is what a borrowed binder is.
+            self.keyed(n, key);
             if !owned {
                 if let Some(m) = from {
                     if let Some(k) = self.body.names[m as usize].borrow_kind.clone() {
@@ -5681,7 +5711,18 @@ fn place_frames(
                     exit: m.exit,
                     line: info.line as u32,
                     full: false,
-                    holes: if holes.is_empty() { None } else { Some(holes) },
+                    // The kernel's set at THIS exit, empty included: a row
+                    // with no set falls back to the binding's own, which is
+                    // per binding and not per path. `regexredux`'s `compile`
+                    // abandons a `Builder` at three early `Err` returns that
+                    // precede every take of its arrays, so the release there
+                    // walks the whole record — the answer round fifty-two's
+                    // `full` flag reconstructed from walk order, stated here
+                    // by the pass that judged the path (RFC-0125 §3 M3, the
+                    // walk's deletion). The rewrite branch above always said
+                    // it; only a row this pass ADDS could lose it, which no
+                    // reader saw while the walk placed a row to rewrite.
+                    holes: Some(holes),
                     early: false,
                 },
                 kind,

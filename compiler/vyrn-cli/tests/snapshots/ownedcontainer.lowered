@@ -76,7 +76,6 @@ fn main() -> Int64                                                       @69
     int 0 : Int64                                                        @84
   release r : Release Owned__Ring__release exit=block                    @74
   release last : Release Owned__Ring__release exit=return                @83
-  release last : Release Owned__Ring__release exit=block                 @83
 
 fn ringOf(label: String, n: Int64) -> Ring                               @50
   let mut slots : Array<Int64>                                           @51
