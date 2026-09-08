@@ -2172,6 +2172,33 @@ struct Checker<'a> {
     json_dec_types: RefCell<Vec<Type>>,
 }
 
+/// A declaration a call is checked against, and the three side columns the
+/// checker reads beside its signature.
+///
+/// A user function, a seeded builtin row, an impl method and a protocol member
+/// are all one thing here: a name, an arity, parameter types with capabilities,
+/// type parameters with bounds, and a result. [`Checker::check_declared_call`]
+/// is the single reading, and the dispatcher above it keeps only the question a
+/// declaration cannot answer — which impl answers.
+struct DeclaredCall<'a> {
+    /// The name `generics`, `all_bounds` and the monomorphization worklist are
+    /// keyed by: a plain function name, or an impl method's mangled one.
+    key: &'a str,
+    /// The name a refusal prints. An `@` spelling is the sugar's internal one
+    /// and no source can lex it, and a dispatched call prints the SURFACE
+    /// method the reader wrote rather than the mangled impl symbol.
+    shown: &'a str,
+    params: &'a [Type],
+    ret: &'a Type,
+    type_params: Option<&'a Vec<String>>,
+    caps: Option<&'a Vec<Capability>>,
+    bounds: Option<&'a HashMap<String, Vec<String>>>,
+    /// `Some` when argument 0 is a receiver dispatch already typed — it is
+    /// typed once, and it is solved rather than coerced, because the impl was
+    /// selected BY it.
+    recv: Option<&'a Type>,
+}
+
 /// What an enum variant name resolves to.
 struct VariantInfo {
     enum_name: String,
@@ -3630,6 +3657,10 @@ impl<'a> Checker<'a> {
     fn type_satisfies(&self, ty: &Type, bound: &str) -> bool {
         let base = self.base(ty);
         match bound {
+            // The compiler's own bound (RFC-0125 §3 M6): the element of a
+            // collection an operation forgets or overwrites without releasing
+            // it. Unlexable, so only a seeded row can carry it.
+            crate::prelude::HEAPLESS => !crate::own::owns_heap(&base, self.types),
             "Num" | "Ord" => matches!(
                 base,
                 Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
@@ -7206,160 +7237,6 @@ impl<'a> Checker<'a> {
             return Ok(Type::Str);
         }
 
-        // `xs.clear()` (RFC-0115 addendum): length to zero, buffer kept. A
-        // growable `Array` only — a `SmallArray`'s capacity is part of its type
-        // and a fixed array has none to keep — which the row says. What the row
-        // cannot say is the rule below: the elements are FORGOTTEN rather than
-        // released, so an element type that owns heap is refused, the way
-        // `append` refuses it. That is a refusal about the ELEMENT type, which
-        // is why this block stands where `reserve`'s no longer does.
-        if name == "@clear" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`clear` takes no arguments, got {}",
-                    args.len() - 1
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`clear` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`clear` forgets its elements without releasing them, and `{elem}` owns heap — pop each element in a loop instead"
-                ));
-            }
-            return Ok(at);
-        }
-        // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw bytes.
-        if name == "@tallyBytes" {
-            if args.len() != 3 {
-                return Err(cerr!(
-                    line,
-                    "`tallyBytes` takes 3 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&at) {
-                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => {
-                    // Bytes become a String, so only a String-keyed map can
-                    // take them — an Int64-keyed map has `tally` (RFC-0117).
-                    if crate::types::resolve(&k, self.types) != Type::Str {
-                        return Err(cerr!(
-                            line,
-                            "`tallyBytes` builds a String key, and this map is keyed by {k} — use `tally` with the key itself"
-                        ));
-                    }
-                }
-                Type::Err => return Ok(Type::Err),
-                Type::Map(_, v) => {
-                    return Err(cerr!(
-                        line,
-                        "`tallyBytes` counts Int64 values, and this map holds {v}"
-                    ))
-                }
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`tallyBytes` needs a Map<String, Int64> as its receiver, found {other}"
-                    ))
-                }
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let w = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&w, &want) {
-                return Err(cerr!(line, "`tallyBytes` key is {w}, not an Array<UInt8>"));
-            }
-            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`tallyBytes` count is {n}, not an Int64"));
-            }
-            return Ok(at);
-        }
-        if name == "@copyFrom" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`copyFrom` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            let want = Type::Array(Box::new(elem.clone()));
-            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&xs, &want) {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` source is {xs} but the receiver holds {elem} elements"
-                ));
-            }
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` overwrites the receiver's elements by bytes, and `{elem}` owns heap — the overwritten elements would never be released"
-                ));
-            }
-            return Ok(at);
-        }
-        if name == "@append" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`append` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`append` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            let want = Type::Array(Box::new(elem.clone()));
-            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&xs, &want) {
-                return Err(cerr!(
-                    line,
-                    "`append` source is {xs} but the receiver holds {elem} elements"
-                ));
-            }
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`append` copies its source's elements by bytes, and `{elem}` owns heap — push each element with `.copy()` in a loop instead"
-                ));
-            }
-            return Ok(at);
-        }
-
         // Growable arrays. `[]` builds one, `xs.push(v)` (`@push`) appends and
         // `xs[i]` (`@at`) reads an element; `xs.length` is a field access, so it
         // never arrives here at all.
@@ -8164,48 +8041,45 @@ impl<'a> Checker<'a> {
                              concrete type, where the impl (and so `{a}`) is known"
                         ));
                     }
-                    // Check arity, then EVERY remaining argument against the
-                    // signature (a bare `zip` would silently drop extras and
-                    // leave them entirely unchecked).
-                    if args.len() - 1 != sig.params.len() {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` expects {} argument(s) besides `self`, got {}",
-                            sig.params.len(),
-                            args.len() - 1
-                        ));
-                    }
-                    // The receiver's capability comes from the PROTOCOL here —
-                    // the impl is not selected, and conformance has already made
-                    // the two agree. A `modify self` method demands the same
-                    // mutable variable at this call site that a `modify`
-                    // parameter demands at any other.
-                    if sig.recv == Capability::Modify {
-                        self.check_modify_arg(name, 0, &args[0], &recv, &recv, scope, line)?;
-                    }
-                    for (i, (arg, pty)) in args[1..].iter().zip(&sig.params).enumerate() {
-                        let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-                        if !self.coercible(&aty, pty) {
-                            return Err(cerr!(line, "`{name}` argument is {aty}, expected {pty}"));
-                        }
-                        self.prove_coercion(arg, pty, line)?;
-                        if sig.param_caps.get(i) == Some(&Capability::Modify) {
-                            self.check_modify_arg(name, i + 1, arg, &aty, pty, scope, line)?;
-                        }
-                    }
-                    return Ok(sig.ret.clone());
+                    // The PROTOCOL's own signature is the declaration here —
+                    // the impl is not selected, and conformance has already
+                    // made the two agree — so the receiver's capability and
+                    // every parameter's come off the member. A `modify self`
+                    // method demands the same mutable variable at this call
+                    // site that a `modify` parameter demands at any other.
+                    let mut params = vec![recv.clone()];
+                    params.extend(sig.params.iter().cloned());
+                    let mut caps = vec![sig.recv];
+                    caps.extend(sig.param_caps.iter().copied());
+                    return self.check_declared_call(
+                        &DeclaredCall {
+                            key: name,
+                            shown: name,
+                            params: &params,
+                            ret: &sig.ret,
+                            type_params: None,
+                            caps: Some(&caps),
+                            bounds: None,
+                            recv: Some(&recv),
+                        },
+                        args,
+                        scope,
+                        expected,
+                        fn_ret,
+                        line,
+                    );
                 }
             }
             match crate::types::type_key(&recv) {
                 Some(key) if self.impls.contains(&(proto.clone(), key.clone())) => {
                     let mangled = crate::types::impl_method_name(&proto, &key, name);
-                    // The receiver above was already checked ONCE; routing the
-                    // whole `args` slice back through `call` evaluated it a
-                    // second time and doubled everything its check records
-                    // (stored function sources, stored calls). Check the
-                    // remaining arguments against the impl method's signature
-                    // directly — exactly as the concrete path below checks its
-                    // arguments.
+                    // The impl method is a declaration like any other, and the
+                    // shared reading below is the pass reading it: arity, the
+                    // parameter types, the capability discipline (the
+                    // RECEIVER's rides at index 0 of the method's table), the
+                    // solve over the impl head's type variables, the bounds and
+                    // the result. What stays here is dispatch — which impl
+                    // answers — and the receiver it had to type to decide.
                     let (mparams, mret) = self.sigs.get(mangled.as_str()).ok_or_else(|| {
                         cerr!(
                             line,
@@ -8213,91 +8087,23 @@ impl<'a> Checker<'a> {
                              (needed for `.{name}(..)`)"
                         )
                     })?;
-                    if mparams.len() != args.len() {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` expects {} argument(s), got {}",
-                            mparams.len() - 1,
-                            args.len() - 1
-                        ));
-                    }
-                    let caps = self.caps.get(mangled.as_str());
-                    // The RECEIVER's capability rides at index 0 of the impl
-                    // method's table — the same entry the removed re-`call`
-                    // used to enforce when it re-checked all of `args`. A
-                    // `modify self` method still demands a `mut` binding here,
-                    // exactly as a `modify` parameter does at any other call.
-                    match caps.and_then(|c| c.first()) {
-                        Some(&Capability::Modify) => {
-                            self.check_modify_arg(name, 0, &args[0], &recv, &recv, scope, line)?
-                        }
-                        Some(&Capability::Consume) => {
-                            self.region_consume_guard(name, 0, &recv, line)?
-                        }
-                        _ => {}
-                    }
-                    // The flattened impl method keeps its head's type
-                    // variables (`fn Unwrap__Option__valueOr(f: T)`), so every
-                    // declared slot is read through the substitution the
-                    // receiver (and earlier arguments) solve — the same
-                    // instantiate-then-check the generic-call path does.
-                    let mut solved: HashMap<String, Type> = HashMap::new();
-                    if let Some(rty) = mparams.first() {
-                        crate::types::solve_param(rty, &recv, &mut solved);
-                    }
-                    let expected_of = |pty: &Type, solved: &HashMap<String, Type>| -> Type {
-                        crate::types::substitute(pty, solved)
-                    };
-                    let _checked: Vec<Type> = Vec::with_capacity(args.len() - 1);
-                    for (i, (arg, pty)) in args[1..].iter().zip(&mparams[1..]).enumerate() {
-                        let expected = expected_of(pty, &solved);
-                        // A `fn`-typed parameter goes through the shared helper
-                        // (RFC-0023), as everywhere else.
-                        if let Type::Fn(..) = &expected {
-                            let mut ignored: HashMap<String, Type> = HashMap::new();
-                            self.check_fn_arg(
-                                name,
-                                i + 1,
-                                arg,
-                                &expected,
-                                scope,
-                                fn_ret,
-                                &mut ignored,
-                                line,
-                            )?;
-                            continue;
-                        }
-                        let aty = self.expr(arg, scope, Some(&expected), fn_ret)?;
-                        if !self.coercible(&aty, &expected) {
-                            return Err(cerr!(
-                                line,
-                                "`{name}` argument is {aty}, expected {expected}"
-                            ));
-                        }
-                        self.prove_coercion(arg, &expected, line)?;
-                        self.prove_string_interpolation(arg, &expected, scope, fn_ret, line)?;
-                        crate::types::solve_param(pty, &aty, &mut solved);
-                        match caps.and_then(|c| c.get(i + 1)) {
-                            Some(&Capability::Modify) => {
-                                self.check_modify_arg(name, i + 1, arg, &aty, pty, scope, line)?
-                            }
-                            Some(&Capability::Consume) => {
-                                self.region_consume_guard(name, i + 1, &aty, line)?
-                            }
-                            _ => {}
-                        }
-                    }
-                    // RFC-0101's recording: the lowering's worklist learns this
-                    // specialization from the call node's substitution — the
-                    // entry the removed re-`call` used to write as a side
-                    // effect of checking the receiver twice. Solve the impl
-                    // method's own parameters the way the generic-call path
-                    // would have: receiver first, then every argument's
-                    // checked type against its declared slot.
-                    if let Some(type_params) = self.generics.get(mangled.as_str()) {
-                        note_subst(mangled.as_str(), &solved, type_params);
-                    }
-                    return Ok(crate::types::substitute(&mret, &solved));
+                    return self.check_declared_call(
+                        &DeclaredCall {
+                            key: mangled.as_str(),
+                            shown: name,
+                            params: mparams,
+                            ret: mret,
+                            type_params: self.generics.get(mangled.as_str()),
+                            caps: self.caps.get(mangled.as_str()),
+                            bounds: self.all_bounds.get(mangled.as_str()),
+                            recv: Some(&recv),
+                        },
+                        args,
+                        scope,
+                        expected,
+                        fn_ret,
+                        line,
+                    );
                 }
                 _ => {
                     return Err(cerr!(
@@ -8415,6 +8221,10 @@ impl<'a> Checker<'a> {
                 .map(|p| p.capability)
                 .collect::<Vec<Capability>>()
         });
+        // And its bounds, which is where a row states a rule about the type
+        // ARGUMENT rather than about a parameter (RFC-0125 §3 M6:
+        // [`crate::prelude::HEAPLESS`]).
+        let seeded_bounds = seeded.map(|f| &f.type_bounds).filter(|bs| !bs.is_empty());
         // The name a reader can WRITE. An `@` spelling is the sugar's internal
         // one and no source can lex it, so a refusal that printed it would name
         // something the reader cannot type — PR #120's lesson, which
@@ -8423,6 +8233,54 @@ impl<'a> Checker<'a> {
         // reaches here (`@charCount` is `charCount`), and it is a no-op for a
         // user declaration, which is every other call on this path.
         let shown = name.trim_start_matches('@');
+        self.check_declared_call(
+            &DeclaredCall {
+                key: name,
+                shown,
+                params,
+                ret,
+                type_params: self.generics.get(name).or(seeded_generics.as_ref()),
+                caps: self.caps.get(name).or(seeded_caps.as_ref()),
+                bounds: self.all_bounds.get(name).or(seeded_bounds),
+                recv: None,
+            },
+            args,
+            scope,
+            expected,
+            fn_ret,
+            line,
+        )
+    }
+
+    /// Type a call against a DECLARATION: its arity, its parameter types, the
+    /// generic solve over its type parameters, its capability discipline, the
+    /// coercion proof, and its result.
+    ///
+    /// This is the one path that reads a declaration at a call site, and three
+    /// kinds of declaration reach it. A user function and a seeded builtin row
+    /// arrive through the fall-through above (RFC-0094: *a builtin's contract
+    /// is its signature*). An impl method and a protocol member arrive through
+    /// the dispatcher, which owns the question a declaration cannot answer —
+    /// WHICH impl answers — and owned all of these as well until RFC-0125 §3
+    /// M6 read the two statements together.
+    #[allow(clippy::too_many_arguments)]
+    fn check_declared_call(
+        &self,
+        d: &DeclaredCall,
+        args: &[Expr],
+        scope: &Scope,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<Type, Diagnostic> {
+        let DeclaredCall {
+            shown,
+            params,
+            ret,
+            recv,
+            caps,
+            ..
+        } = *d;
         if params.len() != args.len() {
             return Err(cerr!(
                 line,
@@ -8433,7 +8291,7 @@ impl<'a> Checker<'a> {
         }
 
         // Generic call: infer the type parameters from the argument types.
-        if let Some(type_params) = self.generics.get(name).or(seeded_generics.as_ref()) {
+        if let Some(type_params) = d.type_params {
             let mut subst: HashMap<String, Type> = HashMap::new();
             let mut atys: Vec<Type> = vec![Type::Err; args.len()];
             // Pass 1: the ordinary (non-`fn`) arguments bind the type parameters
@@ -8444,6 +8302,16 @@ impl<'a> Checker<'a> {
             // higher-order functions monomorphize).
             for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
                 if matches!(pty, Type::Fn(..)) {
+                    continue;
+                }
+                // A dispatched receiver is already typed, and it is SOLVED
+                // rather than unified: the impl was selected by this very type,
+                // so there is nothing here left to refuse. Typing it a second
+                // time doubled every record the check writes (stored function
+                // sources, stored calls).
+                if let (0, Some(r)) = (i, recv) {
+                    crate::types::solve_param(pty, r, &mut subst);
+                    atys[0] = r.clone();
                     continue;
                 }
                 // The parameter type is the expectation, exactly as the
@@ -8471,21 +8339,29 @@ impl<'a> Checker<'a> {
             for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
                 if let Type::Fn(..) = pty {
                     let expected_fn = crate::types::substitute(pty, &subst);
-                    self.check_fn_arg(name, i, arg, &expected_fn, scope, fn_ret, &mut subst, line)?;
+                    self.check_fn_arg(
+                        shown,
+                        i,
+                        arg,
+                        &expected_fn,
+                        scope,
+                        fn_ret,
+                        &mut subst,
+                        line,
+                    )?;
                 }
             }
             // Capability discipline applies to generic calls exactly as to
             // concrete ones (this path used to return early and skip it,
             // letting `f<T>(c: modify C, ..)` mutate immutable bindings).
-            let caps = self.caps.get(name).or(seeded_caps.as_ref());
             for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
                 match caps.and_then(|c| c.get(i)) {
                     Some(&Capability::Modify) => {
                         let concrete_pty = crate::types::substitute(pty, &subst);
-                        self.check_modify_arg(name, i, arg, &atys[i], &concrete_pty, scope, line)?;
+                        self.check_modify_arg(shown, i, arg, &atys[i], &concrete_pty, scope, line)?;
                     }
                     Some(&Capability::Consume) => {
-                        self.region_consume_guard(name, i, &atys[i], line)?
+                        self.region_consume_guard(shown, i, &atys[i], line)?
                     }
                     _ => {}
                 }
@@ -8526,11 +8402,29 @@ impl<'a> Checker<'a> {
                 }
             }
             // Check each inferred type argument against the parameter's bounds.
-            if let Some(bounds) = self.all_bounds.get(name) {
+            if let Some(bounds) = d.bounds {
                 for (tp, bs) in bounds {
-                    let concrete = &subst[tp];
+                    let Some(concrete) = subst.get(tp) else {
+                        continue;
+                    };
                     for b in bs {
                         if !self.type_satisfies(concrete, b) {
+                            // The compiler's own bound is refused in its own
+                            // words. A reader cannot write `@Heapless`, so the
+                            // generic sentence would name something nobody can
+                            // type (PR #120's lesson), and the rule is about
+                            // what the call does to the elements rather than
+                            // about a protocol the type failed to implement.
+                            // One sentence for `clear`, `append` and
+                            // `copyFrom`, where each block had its own.
+                            if b == crate::prelude::HEAPLESS {
+                                return Err(cerr!(
+                                    line,
+                                    "`{shown}` forgets or overwrites elements without releasing \
+                                     them, and `{concrete}` owns heap — move the elements one at \
+                                     a time instead"
+                                ));
+                            }
                             return Err(cerr!(line, "`{shown}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
                             ));
                         }
@@ -8542,38 +8436,46 @@ impl<'a> Checker<'a> {
             // block. This is the one place the type arguments of a generic call
             // exist, and both backends re-solve them afterwards.
             if recording() {
-                note_subst(name, &subst, type_params);
+                note_subst(d.key, &subst, type_params);
             }
             return Ok(rty);
         }
 
-        let caps = self.caps.get(name).or(seeded_caps.as_ref());
         for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
-            // A `fn`-typed parameter (RFC-0023) takes a lambda, a named function,
-            // or a pass-through `fn`-typed parameter — never an ordinary value —
-            // and is checked/monomorphized by the shared helper.
-            if let Type::Fn(..) = pty {
-                let mut ignored: HashMap<String, Type> = HashMap::new();
-                self.check_fn_arg(name, i, arg, pty, scope, fn_ret, &mut ignored, line)?;
-                continue;
-            }
-            let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-            if !self.coercible(&aty, pty) {
-                return Err(cerr!(
-                    line,
-                    "`{shown}` argument {} expects {pty}, found {aty}",
-                    i + 1
-                ));
-            }
-            self.prove_coercion(arg, pty, line)?;
-            self.prove_string_interpolation(arg, pty, scope, fn_ret, line)?;
+            let aty = match (i, recv) {
+                // The dispatched receiver again: typed once, above, and neither
+                // coerced nor proved here. Its capability still applies.
+                (0, Some(r)) => r.clone(),
+                _ => {
+                    // A `fn`-typed parameter (RFC-0023) takes a lambda, a named
+                    // function, or a pass-through `fn`-typed parameter — never an
+                    // ordinary value — and is checked/monomorphized by the shared
+                    // helper.
+                    if let Type::Fn(..) = pty {
+                        let mut ignored: HashMap<String, Type> = HashMap::new();
+                        self.check_fn_arg(shown, i, arg, pty, scope, fn_ret, &mut ignored, line)?;
+                        continue;
+                    }
+                    let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
+                    if !self.coercible(&aty, pty) {
+                        return Err(cerr!(
+                            line,
+                            "`{shown}` argument {} expects {pty}, found {aty}",
+                            i + 1
+                        ));
+                    }
+                    self.prove_coercion(arg, pty, line)?;
+                    self.prove_string_interpolation(arg, pty, scope, fn_ret, line)?;
+                    aty
+                }
+            };
             // A `modify` parameter receives the caller's binding by reference —
             // full discipline checked in the shared helper.
             match caps.and_then(|c| c.get(i)) {
                 Some(&Capability::Modify) => {
-                    self.check_modify_arg(name, i, arg, &aty, pty, scope, line)?
+                    self.check_modify_arg(shown, i, arg, &aty, pty, scope, line)?
                 }
-                Some(&Capability::Consume) => self.region_consume_guard(name, i, &aty, line)?,
+                Some(&Capability::Consume) => self.region_consume_guard(shown, i, &aty, line)?,
                 _ => {}
             }
         }
@@ -12101,8 +12003,46 @@ mod tests {
                        x.b.reserve(8) \
                        x.b.push(3) \
                        x.c.tally(\"k\", 5) \
+                       x.b.clear() \
+                       x.b.append([1, 2]) \
+                       x.b.copyFrom([3, 4]) \
+                       x.c.tallyBytes(bytes(\"k\"), 1) \
                        return fill(x.b) + x.c.keys().length }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// The one thing three of those rows say that no parameter type can:
+    /// `clear`, `append` and `copyFrom` do not release what they forget or
+    /// overwrite, so their element must own no heap (RFC-0125 §3 M6). One
+    /// bound, [`crate::prelude::HEAPLESS`], one sentence, three names — where
+    /// each name had a hand-written block and a sentence of its own.
+    #[test]
+    fn the_heapless_bound_holds_the_three_that_forget_their_elements() {
+        for call in ["xs.clear()", "xs.append(ys)", "xs.copyFrom(ys)"] {
+            let src = format!(
+                "fn main() -> Int64 {{ \
+                   let mut xs: Array<String> = [] \
+                   let ys: Array<String> = [] \
+                   {call} \
+                   return xs.length }}"
+            );
+            let e = check_src(&src).unwrap_err();
+            assert!(
+                e.contains("owns heap — move the elements one at a time instead"),
+                "{call}: {e}"
+            );
+        }
+        // The same three on a heapless element are accepted, which is what the
+        // bound is FOR — a rule that refused everything would pass the test
+        // above and break every caller.
+        let ok = "fn main() -> Int64 { \
+                    let mut xs: Array<Int64> = [] \
+                    let ys: Array<Int64> = [1] \
+                    xs.append(ys) \
+                    xs.copyFrom(ys) \
+                    xs.clear() \
+                    return xs.length }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
     }
 
     /// A `Gone::Module` name may not be reserved: a reader sent to an import
@@ -12922,7 +12862,36 @@ mod tests {
                    fn go<T: P>(x: T) -> Int64 { return x.m(1, 2, 3) } \
                    fn main() -> Int64 { return go(4) }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("expects 1 argument(s) besides `self`"), "{e}");
+        // The receiver is argument 1, as it is for every other builtin and
+        // user call this reading serves (RFC-0125 §3 M6): the checker holds
+        // `m(x, 1, 2, 3)` by the time it types the call, and subtracting one
+        // for a receiver would be the hand-written exception this milestone
+        // deletes. The same trade `@join`'s row made.
+        assert!(e.contains("`m` expects 2 argument(s), got 4"), "{e}");
+    }
+
+    /// One reading, one sentence. A wrong argument is refused in the same
+    /// words whether it reaches a declaration through dispatch or by name
+    /// (RFC-0125 §3 M6): the dispatcher answers which impl, and the
+    /// declaration answers everything else.
+    #[test]
+    fn a_dispatched_call_and_a_plain_call_are_refused_in_the_same_words() {
+        let through_an_impl = "protocol P { fn m(self, k: Int64) -> Int64 } \
+                               impl P for Int64 { fn m(self, k: Int64) -> Int64 { return self + k } } \
+                               fn main() -> Int64 { return 7.m(\"x\") }";
+        let through_a_bound = "protocol P { fn m(self, k: Int64) -> Int64 } \
+                               impl P for Int64 { fn m(self, k: Int64) -> Int64 { return self + k } } \
+                               fn go<T: P>(x: T) -> Int64 { return x.m(\"x\") } \
+                               fn main() -> Int64 { return go(7) }";
+        let by_name = "fn m(x: Int64, k: Int64) -> Int64 { return x + k } \
+                       fn main() -> Int64 { return m(7, \"x\") }";
+        for src in [through_an_impl, through_a_bound, by_name] {
+            let e = check_src(src).unwrap_err();
+            assert!(
+                e.contains("`m` argument 2 expects Int64, found String"),
+                "{e}"
+            );
+        }
     }
 
     /// Inference may now materialize an `Option<Option<..>>` (RFC-0126 §8):

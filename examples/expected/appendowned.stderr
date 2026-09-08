@@ -1,1 +1,1 @@
-appendowned.vyrn:7:0: `append` copies its source's elements by bytes, and `String` owns heap — push each element with `.copy()` in a loop instead
+appendowned.vyrn:7:0: `append` forgets or overwrites elements without releasing them, and `String` owns heap — move the elements one at a time instead

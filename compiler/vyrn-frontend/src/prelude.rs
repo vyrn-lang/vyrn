@@ -62,7 +62,20 @@
 //! `consume` their rows carry, so the deletion ADDS `region_consume_guard` to
 //! those calls, which a corpus pass priced at nothing. `@reserve` and `@tally`
 //! followed (60 lines and 8 refusals): the census held them back over a claim
-//! about an alias that no program can make true.
+//! about an alias that no program can make true. Then the element-type four
+//! (`@clear`, `@append`, `@copyFrom`, `@tallyBytes`, 145 lines and 17
+//! refusals). Three of those four needed one thing a parameter type cannot
+//! say — the element must own no heap — and a BOUND says it: [`HEAPLESS`], one
+//! column, one sentence, three names. The fourth needed nothing: its receiver
+//! is `Map<String, Int64>`, which the row already spelled out.
+//!
+//! ## Where a row states a rule about the type ARGUMENT
+//!
+//! A bound is the third column a row can carry, after the parameter types and
+//! the capabilities. [`HEAPLESS`] is the only one seeded today, and the rule
+//! for adding another is the rule for [`checkable`]: a bound belongs on a row
+//! when it is a property of the type argument that every pass could read, and
+//! not when it is a property of one call site.
 //!
 //! The deletion also found the drift a second statement always risks:
 //! `floatBits` said `UInt64` in its block and `Int64` on its row, and
@@ -177,6 +190,30 @@ fn row(
         is_gen: false,
         is_mut: false,
     }
+}
+
+/// The bound that says **this type parameter owns no heap**.
+///
+/// Three rows below — `@clear`, `@append` and `@copyFrom` — forget or overwrite
+/// their elements without releasing them, so an element that owns heap would
+/// leak. That is a fact about the type ARGUMENT rather than about the
+/// signature, and it is the one thing about those three the rest of the row
+/// cannot say. A bound is where a signature says it: the same column
+/// `fn f<T: Show>` writes, read by [`crate::checker::Checker::type_satisfies`]
+/// like any other.
+///
+/// The spelling is unlexable on purpose, for the reason `@push` and `@slot` are
+/// (see the module comment): no source can write it, so no program can declare
+/// a protocol of that name and no program can name the bound itself. The
+/// refusal is worded for it rather than by the generic "does not satisfy"
+/// sentence, because a reader cannot write what the generic one would print.
+pub const HEAPLESS: &str = "@Heapless";
+
+/// A row with a bound on one of its type parameters.
+fn bounded(mut f: Function, tp: &str, bound: &str) -> Function {
+    f.type_bounds
+        .insert(tp.to_string(), vec![bound.to_string()]);
+    f
 }
 
 /// The seeded signatures, in the census's order (`rfcs/census-builtins.md`, the
@@ -389,22 +426,42 @@ fn rows() -> Vec<Function> {
             &[],
         ),
         // `xs.clear()` (RFC-0115 addendum, RFC-0125 §1): the length goes to
-        // zero and the buffer stays, so the next fill reuses it. Heapless
-        // elements only — forgetting an element that owns heap would leak it.
-        row("@clear", &["T"], &[("self", Read, arr(t()))], arr(t()), &[]),
-        row(
-            "@append",
-            &["T"],
-            &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
-            arr(t()),
-            &[],
+        // zero and the buffer stays, so the next fill reuses it.
+        //
+        // These three are the [`HEAPLESS`] rows. `clear` forgets its elements,
+        // `copyFrom` overwrites them and `append` copies its source's in by
+        // bytes; none of the three releases anything, so an element type that
+        // owns heap leaks. Each stated that rule in a hand-written block of
+        // `Checker::call` until RFC-0125 §3 M6, and each stated its arity, its
+        // parameter types and its result a second time to get there. The bound
+        // is the column the row was missing, and it is the whole of what the
+        // three blocks knew that these rows did not.
+        bounded(
+            row("@clear", &["T"], &[("self", Read, arr(t()))], arr(t()), &[]),
+            "T",
+            HEAPLESS,
         ),
-        row(
-            "@copyFrom",
-            &["T"],
-            &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
-            arr(t()),
-            &[],
+        bounded(
+            row(
+                "@append",
+                &["T"],
+                &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
+                arr(t()),
+                &[],
+            ),
+            "T",
+            HEAPLESS,
+        ),
+        bounded(
+            row(
+                "@copyFrom",
+                &["T"],
+                &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
+                arr(t()),
+                &[],
+            ),
+            "T",
+            HEAPLESS,
         ),
         // ---- the stream primitives (RFC-0075, RFC-0090 M3) ------------------
         // The two PR #118 rows. A stream's close frees what its producer was
