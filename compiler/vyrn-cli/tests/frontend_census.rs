@@ -791,7 +791,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 3544, 22),
+        ("loader.rs", "the file's own job", 3538, 22),
         ("loader.rs", "a rule stated a second time", 1276, 1),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (

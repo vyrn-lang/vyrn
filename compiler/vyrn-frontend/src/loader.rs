@@ -927,12 +927,6 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
         .map(|(_, reserved)| *reserved)
 }
 
-/// The reserved spelling of an injected runtime declaration (`std/json`'s, the
-/// only prefix the `toJson` desugar spells).
-pub fn rt_name(name: &str) -> String {
-    format!("{RT_PREFIX}{name}")
-}
-
 /// The synthesized source of every generator-produced module reachable from the
 /// root (RFC-0021), as `(banner, source)` pairs in load order — the data behind
 /// `vyrn emit-gen`. Runs the whole load (generators fire, cache included) but
