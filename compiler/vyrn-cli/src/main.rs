@@ -4874,7 +4874,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
                 // spmc over std: each idle worker takes the next connection.
                 let stream = rx.lock().unwrap().recv();
                 match stream {
-                    Ok(mut s) => serve_one(&mut s, call_handle),
+                    Ok(mut s) => serve_one(&mut s, None, call_handle),
                     Err(_) => break, // accept loop gone; drain out
                 }
             };
@@ -4943,7 +4943,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
         let mut call_handle = |call| serve_wasm_call(&mut res, call);
         for stream in listener.incoming() {
             match stream {
-                Ok(mut s) => serve_one(&mut s, &mut call_handle),
+                Ok(mut s) => serve_one(&mut s, None, &mut call_handle),
                 Err(_) => continue,
             }
         }
@@ -5232,7 +5232,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
             |_i: usize, call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>| loop {
                 let stream = rx.lock().unwrap().recv();
                 match stream {
-                    Ok(mut s) => dev_serve_one(&mut s, assets, call_handle),
+                    Ok(mut s) => serve_one(&mut s, Some(assets), call_handle),
                     Err(_) => break,
                 }
             };
@@ -5294,7 +5294,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         let mut call_handle = |call| serve_wasm_call(&mut res, call);
         for stream in listener.incoming() {
             match stream {
-                Ok(mut s) => dev_serve_one(&mut s, &assets, &mut call_handle),
+                Ok(mut s) => serve_one(&mut s, Some(&assets), &mut call_handle),
                 Err(_) => continue,
             }
         }
@@ -5377,95 +5377,6 @@ fn dev_content_type(path: &Path) -> &'static str {
         Some("ico") => "image/x-icon",
         Some("png") => "image/png",
         _ => "application/octet-stream",
-    }
-}
-
-/// One `vyrn dev` connection: static-first for a matching GET, otherwise the
-/// server's `handle` (all POSTs, `/rpc/*`, and non-file GETs).
-fn dev_serve_one(
-    stream: &mut std::net::TcpStream,
-    assets: &DevAssets,
-    call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
-) {
-    let req = match parse_request(stream) {
-        Ok(r) => r,
-        Err(ParseError::Chunked { method, path }) => {
-            eprintln!("{method} {path} -> 501");
-            write_response(
-                stream,
-                501,
-                "text/plain",
-                b"chunked transfer-encoding not supported",
-            );
-            return;
-        }
-        Err(ParseError::TooLarge { method, path }) => {
-            eprintln!("{method} {path} -> 413");
-            write_response(stream, 413, "text/plain", b"request body too large");
-            return;
-        }
-        Err(ParseError::Bad) => {
-            eprintln!("- - -> 400");
-            write_response(stream, 400, "text/plain", b"bad request");
-            return;
-        }
-    };
-    // The browser-origin gate runs before anything else — static assets
-    // included: a cross-site page gets nothing from this server at all.
-    if let Some(body) = cross_origin_body(&req) {
-        write_cross_origin_refusal(stream, &req.method, &req.path, &body);
-        return;
-    }
-    // Static assets: GET (or HEAD) only, so nothing shadows a POST /rpc/*.
-    if req.method == "GET" || req.method == "HEAD" {
-        if let Some(file) = dev_static_path(&req.path, assets) {
-            match std::fs::read(&file) {
-                Ok(bytes) => {
-                    eprintln!("{} {} -> 200 (static)", req.method, req.path);
-                    if req.method == "HEAD" {
-                        // RFC 9110 §9.3.2: HEAD sends the headers GET would,
-                        // true Content-Length included, and no body.
-                        write_head_response(stream, 200, dev_content_type(&file), bytes.len());
-                    } else {
-                        write_response(stream, 200, dev_content_type(&file), &bytes);
-                    }
-                }
-                Err(_) => {
-                    eprintln!("{} {} -> 500", req.method, req.path);
-                    write_response(stream, 500, "text/plain", b"cannot read asset");
-                }
-            }
-            return;
-        }
-    }
-    // Otherwise: into Vyrn's `handle` (rpcHandle + the app's own routes).
-    let method = req.method.clone();
-    let path = req.path.clone();
-    match call_handle(ServeCall::Handle(req)) {
-        Ok(ServeAnswer::Live(head)) => {
-            eprintln!("{method} {path} -> {} (stream)", head.status);
-            pump_stream(stream, &head, call_handle);
-        }
-        Ok(ServeAnswer::Buffered(resp)) => {
-            eprintln!("{method} {path} -> {}", resp.status);
-            write_response_vary(
-                stream,
-                resp.status,
-                &resp.content_type,
-                &resp.vary,
-                &resp.headers,
-                resp.body.as_bytes(),
-            );
-        }
-        Ok(_) => {
-            eprintln!("{method} {path} -> 500");
-            write_response(stream, 500, "text/plain", b"internal error");
-        }
-        Err(msg) => {
-            eprintln!("error: {msg}");
-            eprintln!("{method} {path} -> 500");
-            write_response(stream, 500, "text/plain", b"internal error");
-        }
     }
 }
 
@@ -5582,48 +5493,25 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 /// response, close. Malformed input answers 400 without reaching Vyrn; a chunked
 /// body answers 501; a Vyrn trap is logged and answered 500 (the server keeps
 /// running — one bad request must not kill it).
+///
+/// `assets` is what `vyrn dev` adds and `vyrn serve` does not have: a GET or a
+/// HEAD whose path names a file under the public dir, the built client wasm or a
+/// runtime is answered off the disk, and everything else — every POST, every
+/// `/rpc/*`, every GET that is no file — goes to `handle` exactly as it does
+/// without it. `None` is `serve`.
+///
+/// The two used to be two functions, `serve_one` and `dev_serve_one`, and 89 of
+/// `dev`'s 274 lines were this one's, restated. They had already drifted apart
+/// in shape — one wrote the parse refusals as early returns and the other as
+/// match arms — and a drift in shape is how a drift in ANSWER arrives next. The
+/// static block is the whole difference, so the whole difference is an argument.
 fn serve_one(
     stream: &mut std::net::TcpStream,
+    assets: Option<&DevAssets>,
     call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
 ) {
-    match parse_request(stream) {
-        Ok(req) => {
-            // The same browser-origin gate `dev` answers through, ahead of
-            // `handle` — the 101 upgrade path included.
-            if let Some(body) = cross_origin_body(&req) {
-                write_cross_origin_refusal(stream, &req.method, &req.path, &body);
-                return;
-            }
-            let method = req.method.clone();
-            let path = req.path.clone();
-            match call_handle(ServeCall::Handle(req)) {
-                Ok(ServeAnswer::Live(head)) => {
-                    eprintln!("{method} {path} -> {} (stream)", head.status);
-                    pump_stream(stream, &head, call_handle);
-                }
-                Ok(ServeAnswer::Buffered(resp)) => {
-                    eprintln!("{method} {path} -> {}", resp.status);
-                    write_response_vary(
-                        stream,
-                        resp.status,
-                        &resp.content_type,
-                        &resp.vary,
-                        &resp.headers,
-                        resp.body.as_bytes(),
-                    );
-                }
-                Ok(_) => {
-                    eprintln!("{method} {path} -> 500");
-                    write_response(stream, 500, "text/plain", b"internal error");
-                }
-                Err(msg) => {
-                    // Canonical trap wording to stderr, then a generic 500.
-                    eprintln!("error: {msg}");
-                    eprintln!("{method} {path} -> 500");
-                    write_response(stream, 500, "text/plain", b"internal error");
-                }
-            }
-        }
+    let req = match parse_request(stream) {
+        Ok(r) => r,
         Err(ParseError::Chunked { method, path }) => {
             eprintln!("{method} {path} -> 501");
             write_response(
@@ -5632,14 +5520,78 @@ fn serve_one(
                 "text/plain",
                 b"chunked transfer-encoding not supported",
             );
+            return;
         }
         Err(ParseError::TooLarge { method, path }) => {
             eprintln!("{method} {path} -> 413");
             write_response(stream, 413, "text/plain", b"request body too large");
+            return;
         }
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
             write_response(stream, 400, "text/plain", b"bad request");
+            return;
+        }
+    };
+    // The browser-origin gate runs before anything else — static assets
+    // included: a cross-site page gets nothing from this server at all. The 101
+    // upgrade path is covered by being ahead of `handle`.
+    if let Some(body) = cross_origin_body(&req) {
+        write_cross_origin_refusal(stream, &req.method, &req.path, &body);
+        return;
+    }
+    // Static assets: GET (or HEAD) only, so nothing shadows a POST /rpc/*.
+    if let Some(assets) = assets {
+        if req.method == "GET" || req.method == "HEAD" {
+            if let Some(file) = dev_static_path(&req.path, assets) {
+                match std::fs::read(&file) {
+                    Ok(bytes) => {
+                        eprintln!("{} {} -> 200 (static)", req.method, req.path);
+                        if req.method == "HEAD" {
+                            // RFC 9110 §9.3.2: HEAD sends the headers GET would,
+                            // true Content-Length included, and no body.
+                            write_head_response(stream, 200, dev_content_type(&file), bytes.len());
+                        } else {
+                            write_response(stream, 200, dev_content_type(&file), &bytes);
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("{} {} -> 500", req.method, req.path);
+                        write_response(stream, 500, "text/plain", b"cannot read asset");
+                    }
+                }
+                return;
+            }
+        }
+    }
+    // Otherwise: into Vyrn's `handle` (rpcHandle + the app's own routes).
+    let method = req.method.clone();
+    let path = req.path.clone();
+    match call_handle(ServeCall::Handle(req)) {
+        Ok(ServeAnswer::Live(head)) => {
+            eprintln!("{method} {path} -> {} (stream)", head.status);
+            pump_stream(stream, &head, call_handle);
+        }
+        Ok(ServeAnswer::Buffered(resp)) => {
+            eprintln!("{method} {path} -> {}", resp.status);
+            write_response_vary(
+                stream,
+                resp.status,
+                &resp.content_type,
+                &resp.vary,
+                &resp.headers,
+                resp.body.as_bytes(),
+            );
+        }
+        Ok(_) => {
+            eprintln!("{method} {path} -> 500");
+            write_response(stream, 500, "text/plain", b"internal error");
+        }
+        Err(msg) => {
+            // Canonical trap wording to stderr, then a generic 500.
+            eprintln!("error: {msg}");
+            eprintln!("{method} {path} -> 500");
+            write_response(stream, 500, "text/plain", b"internal error");
         }
     }
 }
@@ -7110,7 +7062,7 @@ another bench   # trailing reason
         let port = listener.local_addr().expect("addr").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            serve_one(&mut stream, &mut |_call| {
+            serve_one(&mut stream, None, &mut |_call| {
                 panic!("the request reached `handle` — the cap did not hold");
             });
         });
