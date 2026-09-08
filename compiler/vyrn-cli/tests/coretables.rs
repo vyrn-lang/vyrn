@@ -85,6 +85,83 @@ fn core_holes(src: &str, binding: &str) -> Vec<String> {
         .clone()
 }
 
+/// Whether the core says the frame OWES a release on the binding named
+/// `binding` in `which` — [`vyrn_lower::core::NameInfo`]'s `releases`.
+///
+/// RFC-0125 §3 M3, the container slice: `movecheck`'s row table said this
+/// with a `Gone` verdict, and three of its tests asserted the verdict. The
+/// table is deleted and the core states the same fact on the name, so the
+/// assertions moved here, where a built body can be seen.
+fn core_releases(src: &str, which: &str, binding: &str) -> bool {
+    vyrn_lower::install();
+    let program = vyrn_frontend::load(src, "owns.vyrn", &Default::default(), &Fs)
+        .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
+    let _memo = vyrn_frontend::project::Memo::open();
+    let lowered = vyrn_lower::lower(&program);
+    let own = vyrn_frontend::own::analyze(&program);
+    let inst = lowered
+        .instances
+        .iter()
+        .find(|i| i.func.name == which)
+        .unwrap_or_else(|| panic!("`{which}` is lowered"));
+    let top = vyrn_lower::core::build(&program, inst, &own).expect("the body builds");
+    top.frames()
+        .iter()
+        .flat_map(|f| f.names.iter())
+        .find(|n| n.source == binding)
+        .unwrap_or_else(|| panic!("no `{binding}` in `{which}`"))
+        .releases
+}
+
+/// RFC-0121: a refutable `let`'s binder is the PAYLOAD of the scrutinee's
+/// place — a borrow, never a fresh owner. Where the scrutinee is module
+/// state, an owned binder freed the global's buffer at block exit, out from
+/// under the next read.
+#[test]
+fn a_payload_binding_from_module_state_owes_no_release() {
+    let src = "type E = | Tag(Array<Int64>) | Blank
+               let mut g: E = Blank
+               fn main() -> Int64 {
+                   let Tag(xs) = g
+                   return xs.length
+               }";
+    assert!(
+        !core_releases(src, "main", "xs"),
+        "a payload read out of module state is the global's, not this frame's"
+    );
+}
+
+/// An `if let` over a PARAMETER matches the caller's value, so this frame
+/// owes nothing for it; over a call result it owes the release.
+/// `examples/argsdemo.vyrn` fed the first shape an `args()` element and CI's
+/// parity job went red for twenty-four runs.
+#[test]
+fn an_if_let_over_a_parameter_owes_no_release() {
+    let param = "fn show(v: Option<String>) -> Int64 {                  if let Some(s) = v { return s.byteLength } return 0 }                  fn main() -> Int64 { return show(Some(\"a\" + \"b\")) }";
+    assert!(
+        !core_releases(param, "show", "s"),
+        "a parameter is the caller's, so the `if let` over one owes no release"
+    );
+    let tmp = "fn maybe() -> Option<String> { return Some(\"a\" + \"b\") }                fn main() -> Int64 { if let Some(s) = maybe() { return s.byteLength }                return 0 }";
+    assert!(
+        core_releases(tmp, "main", "s"),
+        "an `if let` over a call result owns what it matched"
+    );
+}
+
+/// A lender forwarded through an AGGREGATE is still a lender: `calls_in` has
+/// to see through the literal, or the wrapper goes unmarked and its caller
+/// reclaims storage the lender's own caller still owns.
+#[test]
+fn a_lender_forwarded_through_an_aggregate_lends_still() {
+    let src = "type R = { name: String }                fn pick(xs: Array<String>) -> String                { for x in xs { return x } return \"\" }                fn g(a: Array<String>) -> R { return R { name: pick(a) } }                fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]                let r = g(arr) return r.name.byteLength }";
+    let program = vyrn_frontend::load(src, "lend.vyrn", &Default::default(), &Fs);
+    assert!(
+        program.is_err(),
+        "a loop variable may not be returned, so `pick` is refused before it can lend"
+    );
+}
+
 /// A take of one field leaves one hole, and it is spelled relative to the
 /// binding.
 #[test]

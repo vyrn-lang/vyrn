@@ -2360,12 +2360,6 @@ fn sections() -> Vec<Section> {
              measurements (RFC-0089 rule 1's sites, RFC-0092's projections)",
         ),
         sec(
-            "pub enum Gone {",
-            Rows,
-            "why a binding does not hold its value at its block's end, and the \
-             row `own.rs` reads it from",
-        ),
-        sec(
             "pub enum ArgVerdict {",
             Rows,
             "what a callee does with the temporary at a call-argument position",
@@ -2397,9 +2391,9 @@ fn sections() -> Vec<Section> {
              (`declared::arg_caps`)",
         ),
         sec(
-            "fn let_id(s: &Stmt) -> usize {",
+            "fn views(name: &str) -> bool {",
             Rows,
-            "the key of a `let`, the lending builtins, and the projection names",
+            "the lending builtins and the projection names",
         ),
         sec(
             "pub fn check_accum(program: &Program) -> Vec<Diagnostic> {",
@@ -2452,27 +2446,9 @@ fn sections() -> Vec<Section> {
             "the three scope stacks, read as one environment",
         ),
         sec(
-            "    fn place_key(&self, e: &Expr) -> usize {",
-            Rows,
-            "the key a row is written under",
-        ),
-        sec(
-            "    fn note_temporary(&self, s: &Stmt, value: &Expr) -> usize {",
-            Rows,
-            "the recording: temporaries, store events, branches, reads, exits, \
-             takes, holes, place stores, hand-overs at a `return`",
-        ),
-        sec(
-            "    fn is_bound_name(&self, e: &Expr) -> bool {",
-            Rows,
-            "whether a `let` names storage somebody else owns, for reclamation",
-        ),
-        sec(
-            "    fn names_a_place(&self, value: &Expr) -> Option<&'static str> {",
-            Rows,
-            "whether a value reads a place that owns it. No refusal exit reads \
-             it: every caller writes a row — `Gone::Borrowed`, a temporary's \
-             owning flag, an arm's slot, a loop's",
+            "    fn walk_writeback(",
+            Shared,
+            "the store whose value hands the place back, which records no take",
         ),
         sec(
             "    fn fixes_here(&self, b: &Borrow, root: &str, path: &str) -> Vec<String> {",
@@ -2524,9 +2500,9 @@ fn sections() -> Vec<Section> {
             "the retention and hand-over records the call graph is closed over",
         ),
         sec(
-            "    fn note_arm_aliases(&self, e: &Expr, line: usize, binders: &[String]) {",
+            "    fn arm_carries_heap(&self, a: &Expr) -> bool {",
             Rows,
-            "an arm that yields a place, and what naming one costs",
+            "whether an arm's value can carry heap out of the arm",
         ),
         sec(
             "    fn carries_param_storage(&self, e: &Expr) -> bool {",
@@ -2617,9 +2593,9 @@ fn sections() -> Vec<Section> {
              is stated once for this pass and the core alike",
         ),
         sec(
-            "fn reads(e: &Expr) -> Vec<String> {",
+            "fn calls_in(e: &Expr, out: &mut Vec<String>) {",
             Shared,
-            "the names an expression reads, and the calls in it",
+            "the calls an expression makes",
         ),
         sec(
             "pub fn element_path(e: &Expr) -> Option<(String, String)> {",
@@ -2748,10 +2724,10 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 0),
         ("a rule only the checker gives", 126),
-        ("placement rows for the engines", 1565),
+        ("placement rows for the engines", 815),
         ("a fix menu", 73),
-        ("shared machinery", 3564),
-        ("tests", 703),
+        ("shared machinery", 3272),
+        ("tests", 593),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

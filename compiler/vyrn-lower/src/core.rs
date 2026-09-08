@@ -742,6 +742,17 @@ pub struct Body {
     /// this body by [`last_owner`], and the second build acts on what that
     /// decided.
     pub(crate) cands: Vec<(usize, Name, Cand)>,
+    /// RFC-0125 §3 M3: the `for` statements whose container release walks the
+    /// BUFFER alone, keyed by the loop's own node.
+    ///
+    /// It is the second half of [`Cand::Elem`]. Where every element left
+    /// through the loop variable, each turn owns its element and the deep
+    /// walk would free values somebody else now owns; what the loop still
+    /// owns is the growable array's buffer, which is field 0 of the triple.
+    /// The first half says whose an element is; this says how the container
+    /// goes back, and an emitter reads it at the loop rather than reading a
+    /// plan row's KIND.
+    pub(crate) loop_buffers: Vec<usize>,
 }
 
 /// What a candidate construct is, which is what [`last_owner`] has to ask of
@@ -1387,6 +1398,7 @@ fn build_seeded(
             stmts: Vec::new(),
             lambdas: Vec::new(),
             cands: Vec::new(),
+            loop_buffers: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -1489,6 +1501,7 @@ pub fn build_module_state<'a>(
             stmts: Vec::new(),
             lambdas: Vec::new(),
             cands: Vec::new(),
+            loop_buffers: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -1591,6 +1604,7 @@ fn build_outside_seeded<'a>(
             stmts: Vec::new(),
             lambdas: Vec::new(),
             cands: Vec::new(),
+            loop_buffers: Vec::new(),
         },
         scope: Vec::new(),
         by_binding: HashMap::new(),
@@ -2631,6 +2645,17 @@ impl<'a> Builder<'a> {
                 let ic = &self.body.names[it as usize];
                 let loops_alone = !ic.borrow && !ic.bound_by_let;
                 let owned = self.owns(&ety) && loops_alone && self.seed.contains(&ekey);
+                // The other half of the same sentence: if every element left
+                // through the variable, the container's release at the loop
+                // walks the BUFFER alone. A growable array only — a fixed or
+                // small array is a value with no heap buffer, and a map or a
+                // stream has machinery of its own — so field 0 of the triple
+                // is what is left to give back. Round fourteen is what a
+                // wrong answer costs: a blanket buffer-only free took
+                // somebody else's storage.
+                if owned && matches!(vyrn_frontend::types::resolve(&ity, &decls), Type::Array(_)) {
+                    self.body.loop_buffers.push(sid);
+                }
                 // In front of the variable: each turn binds its own element,
                 // so handing THAT out of a join arm frees once per turn. The
                 // container is below the mark and handing it out is refused.
@@ -3835,6 +3860,7 @@ impl<'a> Builder<'a> {
                 stmts: Vec::new(),
                 lambdas: Vec::new(),
                 cands: Vec::new(),
+                loop_buffers: Vec::new(),
             },
         );
         self.body.name = format!("{}@lambda:{line}", outer.name);
@@ -5081,6 +5107,14 @@ pub struct Facts {
     /// until RFC-0125 §3 M3's event-stream slice, which is a second reading
     /// of `consume` beside the one the kernel already made.
     pub loop_gives_back: std::collections::HashSet<usize>,
+    /// The `for` statements whose container release walks the BUFFER alone —
+    /// [`Body::loop_buffers`], keyed by the loop's own node.
+    ///
+    /// The release itself is a placed row at the loop (or, for a consuming
+    /// loop, [`Facts::loop_gives_back`]); this says what it walks. An
+    /// emitter read the KIND of the plan's own row for it until RFC-0125 §3
+    /// M3's container slice, which is the last thing that table was asked.
+    pub loop_buffer_only: std::collections::HashSet<usize>,
     /// RFC-0114 M1: the call-argument nodes whose temporary the caller
     /// releases after the call — [`NameInfo::arg_drop`], which the core sets
     /// wherever it lowers such an argument.
@@ -5265,6 +5299,8 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
 /// Every frame's answers, added to the table.
 fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
     fold_facts(body, proto, &body.stmts, out);
+    out.loop_buffer_only
+        .extend(body.loop_buffers.iter().copied());
     let mut released = std::collections::HashSet::new();
     collect_drops(&body.stmts, &mut released);
     for (i, info) in body.names.iter().enumerate() {
@@ -5414,7 +5450,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     // `VYRN_KERNEL_TRACE=1` prints every release the placer found owed, and
     // whether it could place it.
     let trace = std::env::var("VYRN_KERNEL_TRACE").is_ok();
-    let mut added: Vec<(String, Release, DropKind)> = Vec::new();
+    let mut added: Vec<(String, Release)> = Vec::new();
     // Every core body this pass builds, kept for the `Facts` fold below, and
     // the functions this pass wrote a row for (RFC-0125 §3 M3, the repetition
     // slice). A row is keyed by a NODE and a node belongs to one function, so
@@ -5540,13 +5576,8 @@ pub fn augment(program: &Program, own: &mut Ownership) {
         remember(memo.as_ref(), key, refused_before);
     }
     drop(os);
-    for (f, row, kind) in added {
+    for (f, row) in added {
         touched.insert(f.clone());
-        own.droppable
-            .entry(f.clone())
-            .or_default()
-            .entry(row.binding)
-            .or_insert(kind);
         own.releases.entry(f).or_default().push(row);
     }
     // A SECOND build, after every row the placer added: the emitters read
@@ -5879,7 +5910,7 @@ fn place_frames(
     top: &Body,
     owner: &str,
     own: &mut Ownership,
-    added: &mut Vec<(String, Release, DropKind)>,
+    added: &mut Vec<(String, Release)>,
     touched: &mut std::collections::HashSet<String>,
     trace: bool,
 ) {
@@ -6045,7 +6076,7 @@ fn place_frames(
                 touched.insert(owner.to_string());
                 continue;
             }
-            let dup = added.iter().any(|(f, r, _)| {
+            let dup = added.iter().any(|(f, r)| {
                 *f == owner && r.exit == m.exit && r.site == m.site && r.binding == binding
             });
             if dup {
@@ -6071,7 +6102,6 @@ fn place_frames(
                     // walk's deletion).
                     holes: Some(holes),
                 },
-                kind,
             ));
         }
     }

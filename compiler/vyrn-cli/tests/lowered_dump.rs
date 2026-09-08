@@ -230,3 +230,50 @@ fn the_pinned_lowering_over_the_corpus() {
         rels.len()
     );
 }
+
+/// The dump is the same bytes on every run, on a root the blessed snapshots do
+/// not reach — RFC-0125 §3 M3, the determinism gate.
+///
+/// The five snapshots above are small examples. `std/von.vyrn` and
+/// `std/vyx.vyrn` are the two largest generator-carrying modules in the tree,
+/// and a page module is the one `site/` root that needs no generated data. A
+/// placement that walked a `HashMap` would reorder its `release` lines between
+/// processes — Rust seeds a `RandomState` per process — and neither the
+/// blessed snapshots nor `rfcs/census/wasm-sha256.tsv` would see it, because
+/// the snapshots are examples and the manifest hashes `examples/` alone.
+///
+/// Ten runs, because one reordering in ten is still a reordering: the whole
+/// point of a determinism gate is that a rare answer fails it.
+#[test]
+fn the_lowering_is_the_same_bytes_on_every_run() {
+    for root in [
+        "std/von.vyrn",
+        "std/vyx.vyrn",
+        "site/app/docs.vyrn",
+        "examples/regexredux.vyrn",
+    ] {
+        let first = dump(root);
+        assert!(
+            first.contains("\n  release "),
+            "{root} places no release, so it gates nothing"
+        );
+        for run in 2..=10 {
+            let again = dump(root);
+            if again == first {
+                continue;
+            }
+            let (a, b): (Vec<&str>, Vec<&str>) = (again.lines().collect(), first.lines().collect());
+            let at = a
+                .iter()
+                .zip(&b)
+                .position(|(x, y)| x != y)
+                .unwrap_or(a.len().min(b.len()));
+            panic!(
+                "{root}: run {run} differs from run 1 at line {}\n  run 1: {}\n  run {run}: {}",
+                at + 1,
+                b.get(at).unwrap_or(&"<end of file>"),
+                a.get(at).unwrap_or(&"<end of file>"),
+            );
+        }
+    }
+}
