@@ -1485,24 +1485,21 @@ impl<'a> Cx<'a> {
             .unwrap_or_default()
     }
 
-    /// Round twenty-seven's table read off the core (RFC-0125 §3 M3, the
-    /// deletion slice): did the construct at `node` TAKE its scrutinee, so
-    /// the boxes its binders came out of are its own to give back?
+    /// Whether the construct at `node` switches on a value the frame MADE
+    /// ([`vyrn_lower::core::Facts::owns_scrutinee`]), so the boxes its
+    /// binders came out of are its own to give back.
     ///
-    /// Since RFC-0125 §3 M3's third derivation slice the answer is the
-    /// core's own and `own.rs` states none: the first build records which
-    /// constructs give a named scrutinee away, `core::last_owner` decides
-    /// which of them the frame reads no more, and the second build states
-    /// the take. A site the core has no answer for is a construct that took
-    /// nothing.
-    fn match_consumes(&self, node: usize) -> bool {
-        let Some(f) = &self.facts else {
-            return false;
-        };
-        f.consuming
-            .get(&self.plan.key_of(node))
-            .copied()
-            .unwrap_or(false)
+    /// A wider question than [`Cx::match_consumes`] and it contains it: a
+    /// take is one way to own the scrutinee, and a `consume`, a call's
+    /// result, a literal and a `Map` lookup are the others. Each compiled
+    /// backend read those four off the SOURCE, beside the table that answered
+    /// the take; the core states all of them as one row (RFC-0125 §3 M3, the
+    /// box slice). A site the core has no answer for is a body no core was
+    /// built for.
+    fn owns_scrutinee(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.owns_scrutinee.contains(&self.plan.key_of(node)))
     }
 
     /// Round forty's table read off the core (RFC-0125 §3 M3, the
@@ -13683,35 +13680,21 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
-    /// Whether a `match` or `if let` at `key` over `scrutinee` frees the boxes
-    /// its binders were read out of — the textual backend's rule (`gen_match`),
-    /// stated once more here: the construct consumed the value (a `consume`, a
-    /// temporary, or a place the plan proved nobody reads afterwards), no drop
-    /// row walks the value whole after it, the memory is not an arena's, and
-    /// this is not a declared `release` destructuring its own receiver, whose
-    /// caller walks the boxes.
+    /// Whether a `match`, an `if let` or a `?` at `key` frees the boxes its
+    /// binders were read out of: the construct owns the value it switches on,
+    /// no drop row walks that value whole after it, the memory is not an
+    /// arena's, and this is not a declared `release` destructuring its own
+    /// receiver, whose caller walks the boxes.
     ///
-    /// A MAP LOOKUP is the one `@at` that is not an element read: `map_at`
-    /// BUILDS its `Option<V>` and boxes the value into a block of its own,
-    /// so the box is the construct's like any temporary's. It reads as a
-    /// place, which is why it stood outside the free until this slice, and
-    /// the receiver's type is what tells the two apart. The type is read off
-    /// the checker's own answer ([`vyrn_lower::core::node_ty`]) rather than
-    /// through [`Fn_::peek`], which is `&mut` and records an observation:
-    /// nothing is derived here, so no second statement of the typing rule
-    /// exists to disagree with the first.
+    /// The first clause is the CORE's, whole ([`Cx::owns_scrutinee`]). It was
+    /// four clauses here — a `consume`, a scrutinee naming no place, a `Map`
+    /// lookup, and the core's own take — and the first three read the SOURCE
+    /// beside a core row that answered the fourth. The core states all four
+    /// as one row now (`St::Switch`'s `owns`), which is why this backend has
+    /// no `Expr` left to look at (RFC-0125 §3 M3, the box slice).
     fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
-        use vyrn_frontend::movecheck::{element_path, place_path};
-        // RFC-0125 §3 M3, the deletion slice: the third disjunct is the
-        // core's ([`Cx::match_consumes`]). The other two are structural —
-        // a `consume`, and a scrutinee that names no place — and the core
-        // states both of them too, at more sites than the plan's table
-        // named; they stay spelled here because they are this backend's
-        // own reading of the source and no table's.
-        let consumed = matches!(scrutinee, Expr::Consume { .. })
-            || (place_path(scrutinee).is_none() && element_path(scrutinee).is_none())
-            || self.map_lookup(scrutinee)
-            || self.cx.match_consumes(key);
+        use vyrn_frontend::movecheck::place_path;
+        let consumed = self.cx.owns_scrutinee(key);
         let own_receiver = self.is_release
             && match scrutinee {
                 Expr::Consume { place, .. } => {
@@ -13737,20 +13720,6 @@ impl<'p> Fn_<'_, 'p> {
         self.placed
             .values()
             .any(|rows| rows.iter().any(|(binding, _)| *binding == key))
-    }
-
-    /// Whether `e` is `m[k]` on a `Map` — see [`Fn_::frees_boxes`].
-    fn map_lookup(&self, e: &Expr) -> bool {
-        let Expr::Call { name, args, .. } = e else {
-            return false;
-        };
-        if name != "@at" || args.len() != 2 {
-            return false;
-        }
-        let at = &args[0] as *const Expr as usize;
-        vyrn_lower::core::node_ty(at)
-            .or_else(|| vyrn_lower::core::node_ty(self.cx.plan.key_of(at)))
-            .is_some_and(|t| matches!(self.cx.resolve(&self.cx.sub(&t)), Type::Map(..)))
     }
 }
 
