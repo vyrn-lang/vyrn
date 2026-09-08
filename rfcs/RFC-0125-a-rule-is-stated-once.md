@@ -7946,12 +7946,12 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 6,421 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 6,633 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
-| shared machinery | 2,392 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
+| shared machinery | 2,498 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
 | tests | 326 | 0 | the file's own unit tests |
 
 The whole table, section by section, is what
@@ -9462,6 +9462,133 @@ One test file moves and nothing reads it, so the list is run to say so.
 | `memory`, `route`, the residue ratchet | 8; 2; engine 172 clean and 3 leaking, route 172 clean and 3 leaking |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and `rfcs/census/wasm-sha256.tsv` untouched |
 | `genwasm` fresh `VYRN_GEN_CACHE_DIR`, `vyrn doc --verify`, the site export, `vyrn test` | 13; 41 files; 82 routes and 14 assets; 35 and 154 over 27 files |
+
+**The unit of selection is the statement (2026-09-09, `track-dw`).** Three
+slices in a row ended on the same sentence: no arm is deleted. The reason was
+structural rather than incidental. The driver was chosen per FUNCTION —
+`Fn_::core_body` against `Fn_::block` — so a body went through the core walk or
+the AST walk and never both, and an arm of `Fn_::stmt` or `Fn_::expr` could
+only lose its last reader when 100 per cent of the corpus's bodies went through
+the core. 986 of 21,720 did, which is 4.5 per cent, and `direct.rs` had grown
+705 lines over the three slices while nothing left it. This slice changes the
+unit so an arm can retire form by form.
+
+**The correspondence was already stated, and the map is the whole of it.** A
+`let`'s row carries the node the plan keys the binding by (`NameInfo::binding`),
+and `St::Store`, `St::If`, `St::Return`, `St::Break` and `St::Continue` each
+carry the statement's own node. What was missing is the run BEFORE the row: the
+temporaries the statement computes first. `Body::rows_by_statement` walks the
+body once and, at every row that names a node, walks BACK over the `let`s of
+minted names the row reads, transitively, stopping at the first row that is not
+one. That is the statement's rows, and the map is node → run. It descends into
+`St::If`, `St::Loop`, `St::Block` and `St::Switch`, so a statement inside a
+branch or a loop is in the map whether or not the branch itself is.
+
+Two rows are deliberately left out. A `?` states its exit as a `return` whose
+site is the EXPRESSION, so it names no statement of the source; and a `return`
+the pass copied into every arm of a `match` it was the operand of
+(`Builder::return_through`) names one statement twice, so the map answers for
+neither.
+
+**Where the two walks meet.** `Fn_::stmt` asks `Fn_::core_took` before its own
+match. Where the rows carry the statement they emit it and no arm runs;
+everywhere else the arm emits exactly what it always did, into the SAME frame:
+the same locals, allocated in the same order by the same `place_for`, and the
+same scope. A `let` the rows emit is pushed onto `Fn_::scope` where the arm
+would have pushed it, and a name the rows read is found in `Walked::at` or, when
+the arm bound it, through `Fn_::lookup` — the emitter's own name table, which is
+why nothing had to be threaded through `Fn_::block`. The whole-body walk stays
+beside it for the forms the map cannot key: an expression statement, a `while`,
+a `for`, a `break`.
+
+**The screen, per statement, in three clauses.** The FRAME clause: a frame with
+a placed release, an aggregate destination or an open stream cursor is one whose
+emission is more than its rows. The SCALAR clause, now per statement rather than
+per body: every name the run names is one this walk reads. The STATEMENT screen
+is `Fn_::core_readable`, unchanged. To them the interleave adds one clause of
+its own, and it is a finding.
+
+**The two walks did not agree about the type of a name, and the corpus said so
+three times.** Byte-identity is the licence, so each disagreement is a clause of
+the screen and not a change of emission.
+
+1. `stringops.vyrn` compared two bytes at BYTE width from the row and at
+   `Int64` from the frame — the same source, ten bytes apart. The row's type for
+   a name and the frame's must agree, so the screen compares them at every read.
+2. `simd.vyrn`'s `let neg = 0.0 - o` on a `Float32` is `Float32` to the checker
+   and to the row, and `Float64` to the arm, which reads the literal's own width
+   and promotes `o` to meet it: the row divides single where the arm promotes
+   and divides double, 21 bytes. So the screen asks what the ARM would bind for
+   every `let` of a run (`Fn_::core_arm_ty`) and stands down where that is not
+   the row's answer. The row is the checker's and the arm is wider; which is
+   right is a question for the emitter's own widening rule and not for this
+   slice, whose licence is that no byte moves.
+3. `streamlazy.vyrn`, `streamops.vyrn` and `streamunfold.vyrn` each lost 51
+   bytes at a `return`: `Fn_::emit_releases` walks `Fn_::cursors` at a function
+   exit beside the plan's steps, and a stream cursor is a release no plan row
+   names. It joins the frame clause.
+
+A fourth is fixed rather than screened: the core walk's `St::Return` did not
+close the `region` scopes it left, where the arm's `Stmt::Return` does. No body
+of the corpus reached it, so no byte moves; the row is now the same sentence in
+both walks.
+
+**The count, and it is per FORM now.** `coredrive` counts what each form of the
+AST dispatch still emits and what the rows emit for it, because that is the
+number an arm's deletion is read off. The four forms the map keys:
+
+| form | the arm | the core's rows | of its occurrences |
+|---|---|---|---|
+| `Stmt::Let` | 56,044 | **19,296** | 25.6% |
+| `Stmt::Assign` | 35,558 | **17,598** | 33.1% |
+| `Stmt::Return` | 21,814 | **10,072** | 31.6% |
+| `Stmt::If` | 38,397 | **5,468** | 12.5% |
+
+**52,434 of 259,548 statements** come from the core's rows, which is 20.2 per
+cent, against 986 of 21,720 BODIES before. The whole-body count does not move —
+the same 986, byte for byte — because the interleave is beside it and not
+instead of it.
+
+**No arm is deleted, and the count says why.** Every one of the eight expression
+forms the driver reads is still emitted by its own arm at least 589 times
+(`Expr::Float`) and at most 301,628 (`Expr::Var`), because an expression only
+escapes its arm when the whole STATEMENT around it does. The four statement
+forms above are between 12.5 and 33.1 per cent, and the rest are at zero: an
+expression statement, a `while`, a `for`, a `break`, a `continue`, an `if let`
+and a `drop` name no run in the map. What each of those waits on is one row —
+`St::Do`, `St::Loop` and `St::Switch` each carry a line and no site, so no run
+of theirs can be handed back to the arm that wrote it. That is the next row to
+write, and it is three fields.
+
+**The censuses.** `direct.rs` is **17,117 lines before and 17,435 after** — 318
+added, which is the per-statement driver, its screen and the count, less 121
+lines of two walks that were written twice. `Body::names_in` and `Body::reads`
+are the core's now and `direct.rs` asks for them: what a statement NAMES and how
+many times each name is read are facts about the body, and the emitter had its
+own copy of both. `core.rs` is **6,222 before and 6,427 after**: the map, the
+two walks, and the row's own reading of which statement it came from. The
+emitter census gains one section — the count — and the driver's section moves
+from `the core's rows` to `both, for two questions`, because the unit of
+selection is a source statement matched to its rows: the mapping kind **6,421 →
+6,633 lines**, shared machinery **2,392 → 2,498**, the hand-emitted instruction
+count unmoved at 596, and the read classes `neither` **5,993 → 6,012 lines**,
+`the core's rows` **6 sections and 2,695 lines → 5 and 2,075**, `the source, and
+the core has no row` **9 and 1,847 → 10 and 1,934**, `both` **14 and 6,501 → 15
+and 7,333**. RFC-0127 §3's form census rises **1,223 → 1,265**: the emitter
+names every statement and expression form once more, in one place, to count what
+its own arms still do, which is two or three more per row across nineteen rows.
+§3.1.1's floor moves 21 → 23 with it, and that table had already drifted to 22
+with nothing pinning it — which is the RFC's own claim about an unpinned table
+beside a pinned one. RFC-0126 §3's surface census rises **1,451 → 1,457**:
+`Type::Int` 52 → 54, `Bool` 32 → 34, `Float` 23 → 24, `Str` 77 → 78, all in the
+screen's scalar clause and its literal table. `coretables`, `refusals`,
+`checker_census`, `lowered` and `lowered_dump` are unmoved.
+
+**`direct.rs` is larger and not smaller, and the reason is the count rather than
+the driver.** The interleave itself is 318 lines against the 705 the three
+slices before it added, and it is the first of them that moves a number an arm's
+deletion is read off. Nothing can be deleted until one of those numbers reaches
+zero, and the nearest is `Stmt::If` at 38,397.
 
 ### M4 — the runtime in Vyrn
 

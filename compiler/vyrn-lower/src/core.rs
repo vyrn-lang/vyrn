@@ -857,6 +857,109 @@ impl Body {
         out
     }
 
+    /// Which rows each SOURCE statement produced, by the node the row names —
+    /// RFC-0125 §3 M3, the interleave slice.
+    ///
+    /// A driver that picks its walk per FUNCTION can only delete an AST arm
+    /// when every body of the corpus goes through the core. The unit this
+    /// answers for is the statement: a reader hands one source statement to
+    /// the walk that carries it and the other statement to the other walk, and
+    /// an arm goes when no occurrence of its form reaches it any more.
+    ///
+    /// The correspondence is already stated. A `let`'s row carries the node
+    /// the plan keys the binding by ([`NameInfo::binding`]), and `St::Store`,
+    /// `St::If`, `St::Return`, `St::Break` and `St::Continue` each carry the
+    /// statement's own node. What this adds is the run BEFORE that row: the
+    /// temporaries the statement computes first, which are the `let`s of
+    /// minted names it reads, walked back until a row that is not one. A
+    /// statement whose row names no node is not in the map, and the reader
+    /// falls back — which is what a `for`, a `match` and an expression
+    /// statement each do today.
+    pub fn rows_by_statement(&self) -> HashMap<usize, Vec<St>> {
+        let mut out = HashMap::new();
+        let mut twice = Vec::new();
+        self.rows_in(&self.stmts, &mut out, &mut twice);
+        // One statement, two runs: a `return` the pass copied into every arm
+        // of a `match` it was the operand of ([`Builder::return_through`]).
+        // Which run is that statement's is not a question this map answers, so
+        // it answers neither.
+        for at in twice {
+            out.remove(&at);
+        }
+        out
+    }
+
+    fn rows_in(&self, ss: &[St], out: &mut HashMap<usize, Vec<St>>, twice: &mut Vec<usize>) {
+        for (i, s) in ss.iter().enumerate() {
+            match s {
+                St::If { then, els, .. } => {
+                    self.rows_in(then, out, twice);
+                    self.rows_in(els, out, twice);
+                }
+                St::Loop(b) | St::Block { body: b, .. } => self.rows_in(b, out, twice),
+                St::Switch { arms, .. } => {
+                    for a in arms {
+                        self.rows_in(&a.body, out, twice);
+                    }
+                }
+                _ => {}
+            }
+            let Some(node) = self.node_of(s) else {
+                continue;
+            };
+            let mut need: Vec<Name> = Vec::new();
+            names_in(s, &mut need);
+            let mut start = i;
+            while start > 0 {
+                let St::Let(n, rhs) = &ss[start - 1] else {
+                    break;
+                };
+                if self.names[*n as usize].binding.is_some() || !need.contains(n) {
+                    break;
+                }
+                names_in_rhs(rhs, &mut need);
+                start -= 1;
+            }
+            if out.insert(node, ss[start..=i].to_vec()).is_some() {
+                twice.push(node);
+            }
+        }
+    }
+
+    /// How many times each of this body's names is READ, which is what an
+    /// emitter has to know before it can leave a value on an operand stack
+    /// rather than in a local (RFC-0125 §3 M3, the driver slice).
+    pub fn reads(&self) -> Vec<u32> {
+        let mut out = vec![0u32; self.names.len()];
+        count_reads(&self.stmts, &mut out);
+        out
+    }
+
+    /// The source statement a row names, where it names one. `0` is this
+    /// pass's own word for "a row I made up", so it is no statement's node.
+    fn node_of(&self, s: &St) -> Option<usize> {
+        match s {
+            St::Let(n, _) if self.names[*n as usize].bound_by_let => {
+                self.names[*n as usize].binding
+            }
+            St::Store {
+                site: Site::Node(at),
+                ..
+            } => Some(*at),
+            // A `?` states its exit as a `return` whose site is the EXPRESSION,
+            // so it names no statement of the source.
+            St::Return {
+                site,
+                is_try: false,
+                ..
+            } => (*site != 0).then_some(*site),
+            St::If { site, .. } | St::Break { site } | St::Continue { site } => {
+                (*site != 0).then_some(*site)
+            }
+            _ => None,
+        }
+    }
+
     /// The body as text, one statement per line, for reading a refusal.
     pub fn render(&self) -> String {
         let mut out = format!("fn {}(", self.name);
@@ -5315,6 +5418,108 @@ pub fn facts() -> Option<Facts> {
 /// [`facts`] makes.
 pub fn body_of(name: &str) -> Option<Body> {
     BODIES.with(|b| b.borrow().get(name).cloned())
+}
+
+fn count_reads(ss: &[St], out: &mut [u32]) {
+    fn hit(v: &Val, out: &mut [u32]) {
+        if let Val::Name(n) = v {
+            out[*n as usize] += 1;
+        }
+    }
+    for s in ss {
+        match s {
+            St::Let(_, rhs) | St::Do(rhs, _) => match rhs {
+                Rhs::Val(v) => hit(v, out),
+                Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
+                    vs.iter().for_each(|v| hit(v, out));
+                }
+                Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| hit(v, out)),
+                Rhs::Read(_) | Rhs::Take(_) => {}
+            },
+            St::Store { value, .. } => hit(value, out),
+            St::Return { value: Some(v), .. } => hit(v, out),
+            St::If { cond, .. } => hit(cond, out),
+            St::Switch { on, .. } => hit(on, out),
+            _ => {}
+        }
+        match s {
+            St::If { then, els, .. } => {
+                count_reads(then, out);
+                count_reads(els, out);
+            }
+            St::Loop(b) | St::Block { body: b, .. } => count_reads(b, out),
+            St::Switch { arms, .. } => {
+                for a in arms {
+                    count_reads(&a.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every name a statement names, itself and everything under it: what it binds
+/// and what it reads.
+///
+/// One walk for two readers — [`Body::rows_by_statement`]'s backward walk over
+/// the temporaries a statement computes, and the emitter's own screen over the
+/// types a run names (RFC-0125 §3 M3, the interleave slice).
+pub fn names_in(s: &St, out: &mut Vec<Name>) {
+    match s {
+        St::Let(n, rhs) => {
+            out.push(*n);
+            names_in_rhs(rhs, out);
+        }
+        St::Do(rhs, _) => names_in_rhs(rhs, out),
+        St::Store { place, value, .. } => {
+            names_in_place(place, out);
+            names_in_val(value, out);
+        }
+        St::Drop(n, ..) | St::Row { name: n, .. } => out.push(*n),
+        St::If {
+            cond, then, els, ..
+        } => {
+            names_in_val(cond, out);
+            then.iter().for_each(|s| names_in(s, out));
+            els.iter().for_each(|s| names_in(s, out));
+        }
+        St::Loop(b) | St::Block { body: b, .. } => b.iter().for_each(|s| names_in(s, out)),
+        St::Switch { on, arms, .. } => {
+            names_in_val(on, out);
+            for a in arms {
+                a.body.iter().for_each(|s| names_in(s, out));
+            }
+        }
+        St::Return { value: Some(v), .. } => names_in_val(v, out),
+        St::Return { .. } | St::Break { .. } | St::Continue { .. } | St::Trap => {}
+    }
+}
+
+fn names_in_rhs(r: &Rhs, out: &mut Vec<Name>) {
+    match r {
+        Rhs::Val(v) => names_in_val(v, out),
+        Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => vs.iter().for_each(|v| names_in_val(v, out)),
+        Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| names_in_val(v, out)),
+        Rhs::Read(p) | Rhs::Take(p) => names_in_place(p, out),
+    }
+}
+
+fn names_in_val(v: &Val, out: &mut Vec<Name>) {
+    if let Val::Name(n) = v {
+        out.push(*n);
+    }
+}
+
+fn names_in_place(p: &Place, out: &mut Vec<Name>) {
+    match p {
+        Place::Name(n) => out.push(*n),
+        Place::Global(_) => {}
+        Place::Field(b, _) => names_in_place(b, out),
+        Place::Elem(b, v) | Place::Key(b, v) => {
+            names_in_place(b, out);
+            names_in_val(v, out);
+        }
+    }
 }
 
 /// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
