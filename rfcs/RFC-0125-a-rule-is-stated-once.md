@@ -17776,6 +17776,235 @@ pattern in `vyrn-lower`'s kernel.
 
 
 
+#### Every descent over a body, counted — and the five that read the one (2026-09-08)
+
+The last slice stated the scope-aware body descent once, in `loader.rs`, and put
+a number on the next item: the same descent is stated five more times outside
+that file. This slice counts every descent over a body in the workspace, moves
+the macro to `ast.rs` where the AST is declared, and folds the five.
+
+##### The count
+
+A DESCENT is a function family that recurses into a body's children. A flat
+per-node match is not one — `ast::Expr::line`, `vyrn_lower::Node::kind`,
+`core::expr_kind`, `lower::stmt_line` and `lowered.rs`'s test-side `kind` each
+name every form and recurse into none — and neither is `parser.rs`, which BUILDS
+the tree. `fmt.rs` reads a token stream, `vyx.rs`, `gen.rs`, `vyrn-lsp` and
+`vyrn-genwasm` hold no descent at all, and `genwasm` constructs an AST rather
+than walking one. That leaves thirty-three, in nine files.
+
+**Eight are not foldable.** Each arm produces a different structure, so the arm
+list IS the rule and there is no hook to lift out.
+
+| the descent | file | lines | what it produces | why it stays |
+|---|---|---|---|---|
+| `Checker::stmt` + `Checker::expr_inner` | `checker.rs` | 1,311 | a `Type` per node and a `Recorded` row | the typing judgment: an arm is a rule, not a site |
+| `MoveCheck::stmt` + `MoveCheck::expr` | `movecheck.rs` | 1,463 | the borrow, move and must-use facts | a fact per arm, and the branch merge is half the judgment |
+| `Fn_::stmt` + `Fn_::expr_inner` | `direct.rs` | 1,270 | wasm instructions | §2.3's whole job — this is what an emitter is |
+| `Builder::stmt` + `Builder::rhs_inner` | `core.rs` | 871 | the core's rows | the builder |
+| `stmt` + `expr` | `vyrn-lower/src/lib.rs` | 290 | one `Walk` row a node, with its kind, `has` and depth | a row per arm |
+| `typed::scan` | `vyrn-lower/src/typed.rs` | 169 | a `Scan` lattice merged per branch | the merge is the judgment |
+| `consteval::eval` | `consteval.rs` | 149 | a constant value | a value per arm |
+| `movecheck::paths` | `movecheck.rs` | 88 | `(must, may)`, merged per branch | the same merge one question down |
+
+**Twenty-five are foldable**: a plain descent with one line at a site. Five of
+them are this slice's; the loader's three were the last slice's and are already
+one.
+
+| the descent | file | lines | what it produces | after |
+|---|---|---|---|---|
+| `scope_*`, `rewrite_*`, `NsResolver::walk_*` | `loader.rs` | 227 | free names, a rename, a namespace resolution | the macro, at `fc27a3de` |
+| `lambdas` | `ast.rs` | 142 | the `LambdaBody` at each literal's address | **folded** |
+| `node_addrs` | `ast.rs` | 135 | every node's address in walk order | **folded** |
+| `alias_embedded` | `ast.rs` | 129 | a clone's nodes paired with its original's | **folded** |
+| `walk_block` | `project.rs` | 127 | every expression, innermost-last, through `&mut` | **folded** |
+| `each_expr` / `each_block` / `each_stmt` | `direct.rs` | 123 | every node the hoist may lift | **folded** |
+| `collect_lets` | `symbols.rs` | 274 | every binding with its line and type | left |
+| `Emit::block` / `stmt` / `exprs` | `own.rs` | 266 | the release notes | left |
+| `captures_block` / `stmt` / `expr` | `checker.rs` | 207 | a lambda's captured names | left |
+| `captures_of_block` / `expr` | `vyrn-codegen/src/lib.rs` | 158 | the same question, for the emitter | left |
+| `init_restrictions` | `checker.rs` | 146 | the first initializer violation | left |
+| `global_ref_block` / `expr` | `checker.rs` | 145 | does this body read a global | left |
+| `calls_block` / `stmt` / `expr` | `checker.rs` | 127 | every name called | left |
+| `bound_names` / `in_expr` | `vyrn-codegen/src/lib.rs` | 123 | every name a block binds | left |
+| `mentions_in_block` / `expr` | `core.rs` | 113 | the vars and calls a predicate names | left |
+| `ban_append_expr` | `vyrn-codegen/src/lib.rs` | 101 | the names an append may not retain | left |
+| `mentions_place` | `movecheck.rs` | 94 | does `e` mention this place | left |
+| `carries_param_storage` | `movecheck.rs` | 90 | could this value hold a borrowed parameter | left |
+| `contains_spawn` / `expr_contains_spawn` | `checker.rs` | 78 | does this body spawn | left |
+| `rename_bindings` | `project.rs` | 78 | the declaration side of a hygiene rename | left |
+| `scan_append_block` | `vyrn-codegen/src/lib.rs` | 74 | the append targets and the banned names | left |
+| `reads` | `movecheck.rs` | 72 | every root name an expression reads | left |
+| `calls_in` | `movecheck.rs` | 67 | every function a lender's forwarder calls | left |
+| `contains_call` | `consteval.rs` | 54 | does a predicate call anything | left |
+| `stmt_mentions` | `movecheck.rs` | 21 | does a whole statement mention the binding | left |
+
+Thirty-three descents before this slice, twenty-eight after.
+
+##### What the fold needed, and who asked for each part
+
+The macro moves to `ast.rs`, beside the `Stmt` and `Expr` it walks, and is
+`#[macro_export]`ed because two of its readers are in other crates. `loader.rs`
+keeps the two lines that name the borrows it wants and nothing else. It grew
+three things, and a reader asked for each:
+
+- **The shared expansion carries the body's lifetime.** `lambdas` hands back the
+  `LambdaBody` at each address, so its hook must be given `&'a Expr` and not an
+  anonymous borrow. The unique expansion cannot carry one — a `&'a mut` handed to
+  a hook is moved, and the walk still has to match on it — and needs none, so the
+  macro's two entry arms pass the lifetime and the `mut` as one token each.
+- **`after_expr`.** `project::walk_block` promises innermost-last, and four
+  readers in that file plus the loader's panic stamp, the parser's
+  method-builtin give-back, `vyrn test`'s rewrite and the floor's capability scan
+  rely on it: a substituted expression is never re-walked. Pre-order with a
+  `false` is a different promise.
+- **`const SCOPED: bool`.** The scope stack costs a `String` clone per binding
+  and a `pattern_bindings` call per arm, and only the loader's three readers ever
+  look at `locals`. `node_addrs_one` is called once per statement of a cloned
+  loop tail; making it pay for a scope it does not read would have been a
+  compile-time regression for nothing.
+
+`ArrayLit`'s elements joined the arm the other argument lists were already on,
+which the hoist's copy had already done.
+
+##### The findings
+
+**The five had not drifted in coverage, and that is worth recording.** The
+loader's three had — two of them put an `Ok(x) =>` arm's binding in scope and one
+did not — but all five of these name all thirty-four forms, in the same order.
+What differed was three deliberate things, each one line at a site: `walk_block`
+is post-order, the hoist stops at a lambda, `alias_embedded` stops at a subtree
+equal to the one it is pairing. So the fold buys the invariant rather than a
+repair: a form added to the AST now reaches eight readers or none.
+
+**`direct.rs::each_stmt` had no caller.** `each_block` was its only one, and once
+the block walk read the shared descent the entry point stood alone. A walk family
+that hands out three entry points keeps all three whether or not anyone asks,
+which is the second thing writing a walk out costs.
+
+##### The licence
+
+The same three measurements the last slice used, over the same 419 programs,
+after each of the three commits. `each_expr` feeds the hoist, so the emitter's
+own manifest is the reading that matters there: a walk that visits the same nodes
+lifts the same expressions.
+
+| the measurement | after `ast.rs` | after `project.rs` | after `direct.rs` |
+|---|---|---|---|
+| `vyrn check` stderr, byte-identical | 419 of 419 | 419 of 419 | 419 of 419 |
+| a refusal LOST or GAINED | 0 / 0 | 0 / 0 | 0 / 0 |
+| lowerings hashed the same | 339 of 341 | 339 of 341 | 339 of 341 |
+| rows the pin cannot speak for | the same 2 | the same 2 | the same 2 |
+| `the_pinned_columns_over_the_corpus` | 3,249 diagnostics, unmoved | unmoved | unmoved |
+| `VYRN_WASM_MANIFEST=check` | 176 hashed, 0 moved | 176 hashed, 0 moved | 176 hashed, 0 moved |
+
+The two unstable rows are `std/von.vyrn` and `std/vyx.vyrn`, whose release
+placement orders its lines differently on every run under an unchanged compiler.
+That is recorded at `fc27a3de` and is not this slice's.
+
+##### The numbers
+
+| the section | before | after |
+|---|---|---|
+| `macro_rules! body_scope_descent` + its two loader expansions | 227 in `loader.rs` | 293 in `ast.rs`, 5 in `loader.rs` |
+| `ast.rs`'s three walks | 416 | 108 |
+| `project::walk_block` and its two helpers | 127 | 26 |
+| `direct.rs`'s hoist walks | 123 | 39 |
+
+| the file | before | after | lost |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/loader.rs` | 5,021 | 4,806 | 215 |
+| `compiler/vyrn-frontend/src/ast.rs` | 1,964 | 1,950 | 14 |
+| `compiler/vyrn-frontend/src/project.rs` | 1,791 | 1,690 | 101 |
+| `compiler/vyrn-codegen/src/direct.rs` | 16,408 | 16,322 | 86 |
+| **the four** | **25,184** | **24,768** | **416** |
+
+`ast.rs` loses only fourteen lines because it is where the 293 arrived. The
+descent is 293 lines and eight readers read it; the twenty that do not are 2,288
+lines of the same arm list.
+
+The censuses that moved: the frontend census's `loader.rs` `Shared` kind, 677 to
+462, and `project.rs` — shared machinery 376 to 273, the file's own job 1,110 to
+1,108, tests 305 to 309; the emitter census's `Decision` kind, 2,211 to 2,125,
+with §3 M3's table row; and the form census's `wasm` column, one mention off each
+of thirty-three rows, so RFC-0127 §3.1's total is 1,314 and §3.1.1's statement
+floor is 22 rather than 23.
+
+##### What is left, ranked
+
+Twenty foldable descents, 2,288 lines, and the ranking is by what the fold costs
+rather than by size. Three groups.
+
+1. **A plain collector.** `symbols::collect_lets` (274), `own::Emit` (266),
+   `checker::calls_*` (127), `codegen::bound_names` (123),
+   `core::mentions_in_*` (113), `movecheck::reads` (72), `calls_in` (67),
+   `project::rename_bindings` (78, the declaration side only). Each is a hook and
+   nothing else, and each is one commit under the same licence this slice used.
+   The two in `core.rs` and `own.rs` are track-dm's files this week.
+2. **A collector with a scope.** `checker::captures_*` (207),
+   `codegen::captures_of_*` (158), `checker::global_ref_*` (145),
+   `codegen::scan_append_block` (74). These want `locals`, which the walk already
+   carries, so they fold onto the SCOPED path — but the scope they keep is not
+   quite the walk's in each case (`captures_*` puts a lambda's own params in
+   before its body, `global_ref_*` shadows a global rather than a declaration),
+   and the difference has to be read arm by arm before it is folded, not
+   asserted.
+3. **A walk that stops early.** `checker::init_restrictions` (146),
+   `contains_spawn` (78), `movecheck::mentions_place` (94), `stmt_mentions` (21),
+   `carries_param_storage` (90), `consteval::contains_call` (54),
+   `codegen::ban_append_expr` (101). A boolean or a first-violation walk returns
+   the moment it knows; the hook's `false` skips a node's CHILDREN and not its
+   siblings, so a fold gives the same answer and does more work. The answer is a
+   `stop` the walk honours, and it is one more hook — worth adding once, for
+   seven readers, and worth measuring before it is added, because these are
+   called inside the checker's per-node path.
+
+`Expr::line`, `Node::kind`, `expr_kind` and `stmt_line` are the other shape the
+surface pays for — four flat matches over the same twenty constructors, in four
+files, each answering one word about a node. They are not descents and this
+macro does not reach them; RFC-0127 §3.1.1's "about two thirds of every form's
+cost is walks that do not decide anything" is the measurement that would.
+
+##### Gates (2026-09-08, the descent count)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 590 passed, no failure |
+| `kernel` `--ignored` | 1, 19 s |
+| `coretables` `--ignored` | 1, 22 s |
+| `typed` `--ignored` | 1, 34 s |
+| `effects` `--ignored` | 2, 31 s |
+| `fixtures` `--ignored` | 1, 13 s |
+| `testsweep` `--ignored` | 1, 34 s |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 325 s |
+| the residue ratchet | 1, 342 s — engine 172 clean and 3 leaking, route the same, 0 failed |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, no byte moved |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 12 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files |
+| `frontend_census` | 2 passed, 1 ignored |
+| `emitter_census` | 2 passed, 1 ignored |
+| `forms` | 7 passed, 1 ignored |
+| `refusals`, `surface`, `checker_census` | 2, 19, 3 — unmoved |
+| `the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics, unmoved |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 2 unstable, 339 hashes unmoved |
+
+No red in the first pass. The three warnings that stand at the branch point stand
+after: two dead members of `movecheck::MoveCheck` and one unreachable pattern in
+`vyrn-lower`'s kernel.
+
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
