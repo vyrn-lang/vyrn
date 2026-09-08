@@ -639,6 +639,18 @@ pub enum St {
     Block {
         site: usize,
         body: Vec<St>,
+        /// `region { .. }` (RFC-0004 §4) rather than a plain block: an arena
+        /// scope, whose values the exit frees together.
+        ///
+        /// The block is the same block either way — one scope, one site, the
+        /// same release rows — and this pass judges it the same, which is why
+        /// the region was a plain `St::Block` until the driver slice
+        /// (RFC-0125 §3 M3). What it is NOT the same for is the emission: an
+        /// emitter takes a mark on the way in and hands it back on the way
+        /// out, and a walk over the statements that could not tell the two
+        /// apart emitted neither. The DEPTH stays the emitter's — it is a
+        /// counter over the code it is writing, not a fact about the block.
+        region: bool,
     },
     /// `site` is the statement's node, or 0 for a break this pass made up.
     Break {
@@ -2182,7 +2194,11 @@ impl<'a> Builder<'a> {
         }
         self.drops_at(Exit::Block, site, &mut body)?;
         self.scope.truncate(mark);
-        out.push(St::Block { site, body });
+        out.push(St::Block {
+            site,
+            body,
+            region: false,
+        });
         Ok(())
     }
 
@@ -2741,7 +2757,12 @@ impl<'a> Builder<'a> {
             // the body mints is the frame's, and the closing brace is the
             // runtime's. So the body is an ordinary block here and this pass
             // asks nothing about the depth.
-            Stmt::Region { body, .. } => self.block(body, out)?,
+            Stmt::Region { body, .. } => {
+                self.block(body, out)?;
+                if let Some(St::Block { region, .. }) = out.last_mut() {
+                    *region = true;
+                }
+            }
         }
         Ok(())
     }
@@ -4921,6 +4942,16 @@ thread_local! {
     static REFUSALS: std::cell::RefCell<Vec<crate::kernel::Refusal>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
+    /// The core's own BODIES for the program last analysed on this thread, by
+    /// the name each one is emitted under — RFC-0125 §3 M3, the driver slice.
+    ///
+    /// [`Facts`] is a side table keyed by AST node: a question an emitter asks
+    /// about a node it already holds. This is the other channel, and §2.3 is
+    /// about this one — "the emitter reads the core and writes wasm". A body
+    /// here is the STATEMENT an emitter walks in place of the source, so what
+    /// it carries is the whole of [`Body`] and not an answer per node.
+    static BODIES: std::cell::RefCell<HashMap<String, Body>> =
+        std::cell::RefCell::new(HashMap::new());
     static PLACED: std::cell::RefCell<Placed> = std::cell::RefCell::new(Placed::default());
     /// What the checker decided about a program, under `(its address, whether
     /// it was checked as a generator host, whether as a test host)` — the key
@@ -5209,6 +5240,19 @@ pub fn facts() -> Option<Facts> {
     FACTS.with(|f| f.borrow().clone())
 }
 
+/// The core's own body for the function emitted under `name`, or `None` where
+/// this pass built none — RFC-0125 §3 M3, the driver slice.
+///
+/// The key is [`Instance::spelling`], which is the name the emitters lower a
+/// function under: `max<Int64>` for a specialization, `main@lambda:26` for a
+/// lifted lambda, `test@1` for a `test` block, and the empty name for module
+/// state. A body this pass could not build (a [`Gap`]) is absent, and a reader
+/// walks the source instead — the same standing down every reader of
+/// [`facts`] makes.
+pub fn body_of(name: &str) -> Option<Body> {
+    BODIES.with(|b| b.borrow().get(name).cloned())
+}
+
 /// The kernel spells a hole `.f.g`; every table spells it `f.g`, relative to
 /// the binding (RFC-0093 M2).
 fn plan_holes(holes: &[String]) -> Vec<String> {
@@ -5298,6 +5342,11 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
 
 /// Every frame's answers, added to the table.
 fn fold_frame(body: &Body, proto: &Owned, out: &mut Facts) {
+    // The body itself, for the reader that walks it rather than asking it
+    // questions by node (RFC-0125 §3 M3, the driver slice). The fold and the
+    // walk are the same set of frames, so they are filled at one site: a body
+    // the fold does not see is one no emitter may read either.
+    BODIES.with(|b| b.borrow_mut().insert(body.name.clone(), body.clone()));
     fold_facts(body, proto, &body.stmts, out);
     out.loop_buffer_only
         .extend(body.loop_buffers.iter().copied());
@@ -5593,6 +5642,7 @@ pub fn augment(program: &Program, own: &mut Ownership) {
     }
     let _p2 = vyrn_frontend::prof::phase("placer: facts rebuild");
     let mut facts = Facts::default();
+    BODIES.with(|b| b.borrow_mut().clear());
     if let Ok(top) = build_module_state(program, own, &lowered.globals) {
         for body in top.frames() {
             fold_frame(body, &own.proto, &mut facts);

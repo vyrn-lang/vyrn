@@ -7946,12 +7946,12 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 5,720 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
-| a decision §2.3 says it must not make | 2,289 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
+| the mapping §2.3 names | 6,256 | 586 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
-| shared machinery | 2,388 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
+| shared machinery | 2,392 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
 | tests | 326 | 0 | the file's own unit tests |
 
 The whole table, section by section, is what
@@ -8912,6 +8912,222 @@ pointed at a shallow scratch directory outside the checkout.
 | the residue ratchet `--ignored`, release | 1, 327 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 21 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
 | `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+**The emitter walks the core (2026-09-08, `track-dq`).** The census two slices
+back counted what the emitter reads and named one blocker: the core stated no
+OPERATION. The operation slice wrote the three rows and named the next one:
+"the core's per-node answers reach the emitter through exactly one path —
+`core::facts()`, a side table keyed by AST node ... an operation row is the
+STATEMENT the emitter should be WALKING, which means a `BodyRef` over
+`Body::stmts` and a driver over `St`". This slice writes that driver, proves
+it against the AST walk over the whole corpus, and switches it on where the
+two agree.
+
+**The channel, and why it is not `facts`.** `Facts` answers a question about a
+node the emitter already holds. A body is not a question; it is what the
+emitter walks instead of the source. So the core keeps its own bodies
+(`core::body_of`, filled at the one site the facts fold already visits, keyed
+by `Instance::spelling` — the name each function is emitted under). An emitter
+asks for the body of the function it is lowering, and gets it or nothing.
+`lower_body` picks the walk; nothing else in `direct.rs` knows there are two.
+Four functions of `direct.rs` were edited and the rest were added:
+`lower_body`, `binary_inner`, `Fn_::expr`'s `Expr::Unary` arm, and the module
+head's imports. In `core.rs`: the `St::Block` row, `Builder::block_with`, the
+`Stmt::Region` arm, `fold_frame` and the facts rebuild. `kernel.rs` changes
+one pattern, for the new field.
+
+**The driver, in one sentence per row.** `Fn_::core_body` binds the core's
+parameters to the places the prologue already put them — `Body::params` is the
+declaration's list in order — and walks `Body::stmts`. A `St::Let` emits its
+right-hand side and binds. A `St::Store` into a name sets its local. A
+`St::If` is wasm's `if`/`else`. A `St::Block` is its statements, and a
+`region` block takes an arena mark and hands it back. A `St::Return` leaves
+the function's one block. A `St::Trap` is `unreachable`. A `Rhs::Prim` reads
+its operator off `Op` and its operands off the row, and a `Val` is a local
+read or the literal the row names. Every type it needs is the checker's, on
+`NameInfo::ty` or on the row's producer type, and every reconciliation is
+`Fn_::coerce` — the one seam every AST flow site already reaches.
+
+**The operator table is stated once, and that is the only thing that moved in
+`Fn_::expr`.** Two walks map an operator to an instruction, and a table
+written twice is what this RFC is named after. `binary_inner`'s tail and the
+`Expr::Unary` arm's table are now `Fn_::bin_ins` and `Fn_::un_ins`: what an
+operator IS, once its operands stand on the stack. The width rule an integer
+operator adopts from its sibling is `Fn_::op_width`, asked by both walks — the
+AST walk peeks the right operand's node, the core walk reads the type off the
+name the row carries. What did NOT move into `bin_ins` is the families that
+interleave the operands with something else: `&&` and `||` branch, `=~`
+compiles its right operand to a DFA rather than evaluating it, and a `String`
+or a `Code` operator releases what each operand allocated between the two
+evaluations. The extraction alone was gated before the driver existed:
+`VYRN_WASM_MANIFEST=check` green, not one byte.
+
+**What the wasm operand stack is, and why the driver has to know.** §2.1 says
+every value has a name. Wasm has an operand stack, and the AST walk names only
+what the reader named — so a walk that gave every core name a local would emit
+a `local.set`/`local.get` pair at every temporary the AST walk never spills.
+Over the corpus, **328,674 of 430,676 `let`s** bind a value the next statement
+reads once: those are the ones the stack can carry, and the driver carries
+them. A temporary of any other shape needs a local the AST walk does not take,
+so the screen stands down at the body rather than emitting a different frame.
+That is a fact about wasm and not about the program, which is why it is the
+emitter's and not a row.
+
+**The probe, and the count it exists for.**
+`compiler/vyrn-cli/tests/coredrive.rs` emits every corpus program twice — once
+with the driver, once with `VYRN_NO_CORE_WALK=1` — and compares the modules
+byte for byte. It classifies every body by the HARDEST thing in it, so the
+counts partition the corpus and the ranked list reads straight off them.
+
+| what a body waits on | bodies |
+|---|---|
+| a callee's ABI (`Rhs::Call`) | 13,135 |
+| the row names no value (`Val::Lit(Opaque)`) | 3,468 |
+| a layout: an aggregate made, read or taken | 3,124 |
+| **nothing: the rows carry it** | **911** |
+| a tag the arm does not carry (`St::Switch`) | 792 |
+| a loop, whose exit the row states as a branch the AST walk folds | 219 |
+| an `&&` or `||`: a prim row for a branch the emitter writes | 79 |
+| a lambda body the row does not carry (`Op::Closure`) | 30 |
+| a release the driver must place (`St::Drop`, `St::Row`) | 6 |
+
+170 programs, 21,764 bodies, **125 distinct** bodies the rows carry end to
+end — `max`, `min`, `clamp`, `hexVal`, `isHex`, `bit`, `bitMask`, the
+generated JSON predicates, fourteen lambdas. The emitter took the core's walk
+for **629 of 21,720** bodies it lowered, which is 2.9 per cent. The gap
+between 911 and 629 is the screen's rest: a name whose type is not a scalar
+the driver reads, a temporary the stack cannot carry, a frame with a placed
+release or an aggregate return, and a body whose emitted name is no instance
+of the lowering's.
+
+**167 of 170 programs emit the same module either way.** Every switched body
+is byte-identical, and `VYRN_WASM_MANIFEST=check` says so for 173 of the 176
+examples the manifest holds. The other three are ONE shape, and the record has
+to explain it rather than assert it away.
+
+**The difference, read at the source.** `return if c { a } else { b }` reaches
+the AST walk as a join: it writes `if (result i64) .. else .. end` and one
+`br` after it. The core rewrites the same statement into a `return` per arm
+(`Builder::return_through`), so the linear judgment sees each exit, and the
+driver emits what the row says — one `br` inside each arm and none after the
+`if`. Both run the same number of branches and both validate; the core's
+module is one instruction larger per arm. Neither walk is wrong, and the
+decision is the RFC's own sentence: §2.3 says the emitter reads the core and
+decides nothing, so the shape the core states is the shape that is emitted.
+`ifexpr.vyrn`, `knucleotide.vyrn` and `strpredbytes.vyrn` move by 7, 6 and 2
+bytes, and `rfcs/census/wasm-sha256.tsv` moves three rows for it. The
+knucleotide site is its ACGT map, which is hot; the executed branch count does
+not change, only the encoding.
+
+**A defect the gate caught, and the row that closes it.** The first cut of the
+driver emitted 65 nested `region` blocks and no arena scope at all: the core
+lowered `region { .. }` to a plain `St::Block`, so the walk could not tell an
+arena scope from a block, and `limits.rs` failed at
+`every_limit_has_one_source` — the program ran to completion where it must
+refuse. This is the hole `track-dl` filed at row 4 of its list, and it is a
+row and not a peephole. `St::Block` gains `region`: the block is the same
+block, with the same scope, the same site and the same release rows, and this
+pass judges it the same — which is why it was one row until now. What it is
+not the same for is the EMISSION. The depth stays the emitter's, because it
+counts the code being written rather than stating a fact about the block.
+
+**`&&` and `||`, taken as the operation slice said.** That slice recorded them
+as prims that read both operands and short-circuit, and said "what would make
+the row honest is a control-flow row for the two, which is `St::If` over a
+temporary, and it moves bytes". The driver stands down at them rather than
+evaluating an operand the AST walk does not: 79 bodies of the corpus, and the
+row is still the honest thing to write. It waits on a reader that wants those
+79 bodies more than it wants the bytes to hold still.
+
+**The residue: what `Fn_::stmt` and `Fn_::expr` still hold, and what each arm
+waits on.** No arm is deleted. The driver covers 2.9 per cent of the corpus's
+bodies, and an arm goes when its last reader goes — which is when the core
+carries every body that reaches it.
+
+| arm | reached by the driver | the row it waits on |
+|---|---|---|
+| `Stmt::Let`, `Stmt::Assign`, `Stmt::Return`, `Stmt::If`, `Stmt::Region` | yes, for a scalar body | the rows below, for every body that is not one |
+| `Stmt::Break`, `Stmt::Continue`, `Stmt::While`, `Stmt::ForIn` | no | the loop's exit: the core states `loop { if c else break }` and the AST walk folds it to `br_if`. A shape, not a row |
+| `Stmt::IfLet` | no | a tag on `Arm`, and RFC-0122's shape on the optional projection |
+| `Stmt::SetField`, `Stmt::IndexSet` | no | a `Site` on RFC-0091 M2's rewritten `place at` stores, and the layout |
+| `Stmt::Drop` | no | nothing new: `St::Drop` is stated. The driver must place releases first |
+| `Stmt::Expr` | no | `St::Do`, which is stated; it waits on the call row below |
+| `Expr::Int`, `Byte`, `Bool`, `Float`, `Str`, `Var`, `Unary`, `Binary`, `IfExpr` | yes, for a scalar body | — |
+| `Expr::Call`, `Expr::Spawn` | no | the callee's ABI: `Rhs::Call` names the callee and the arguments, and an emitter still decides the builtin, the monomorphisation key, the receiver and the destination. 13,135 bodies, the largest single row left |
+| `Expr::Field`, `Expr::StructLit`, `Expr::ArrayLit`, `Expr::MapLit`, `Expr::Consume` | no | the layout: `Rhs::Make` and `Rhs::Read` name the constructor and the place, and the emitter still places the parts |
+| `Expr::Match`, `Expr::Try`, `Expr::TryConstruct` | no | a tag on `Arm` |
+| `Expr::Lambda` | no | a lambda body on `Op::Closure` |
+
+**The censuses.** `direct.rs` is **16,412 lines before and 16,952 after** —
+540 added, and all of it is the driver, the two tables' new signatures and the
+docs that say what each reads. `core.rs` is **6,108 before and 6,158 after**:
+`body_of`, the `BODIES` table, and the `region` row with its doc. The emitter
+census gains one section — the driver, `Mapping` and `the core's rows` — and
+`lower_body` moves from `neither` to `the core's rows`, because it asks the
+core which walk emits the statements. The kind table: the mapping **5,720 →
+6,256**, shared machinery **2,388 → 2,392**, and the hand-emitted instruction
+count **573 → 586**, which is the driver's own thirteen. The read-class table:
+`neither` **47 sections and 6,251 lines → 46 and 5,993**, `the core's rows`
+**4 and 1,777 → 6 and 2,530**, and its row count **20 → 72**, because `rows`
+now counts the core's own statements the way `forms` counts the source's.
+RFC-0126 §3's surface census rises **1,435 → 1,450**: the driver names six
+scalar type constructors in `wasm` — `Type::Int` 47 to 52, `Str` 75 to 77,
+`Bool` 28 to 31, `Float` 20 to 23, `Float32` 17 to 18, `IntN` 13 to 14.
+RFC-0127 §3's form census does not move: the driver names no source form,
+which is the whole of what it is. `coretables`, `refusals`, `checker_census`
+and `lowered` are unmoved.
+
+**What is left, and the order it is worth taking in.** The list is the
+census's, with the driver's own counts against it.
+
+| # | what | bodies it would add | what it needs |
+|---|---|---|---|
+| 1 | the callee's ABI | 13,135 | a row that says which callee: a builtin, a variant constructor, a specialization, a projection. `Rhs::Call` names a string; an emitter still decides all four |
+| 2 | a value the row does not name | 3,468 | `Lit::Opaque` is a placeholder at a loop's exit condition, an element read's index and a `?`'s ok arm. Each is a row of its own |
+| 3 | the layout | 3,124 | nothing in the core: `Rhs::Make` and `Rhs::Read` are stated. The emitter's part is placement, which is target vocabulary |
+| 4 | a tag on `Arm` | 792 | the census's row 5, unchanged: the core keys an arm by index and the emitter reads the pattern |
+| 5 | the loop's exit | 219 | a shape rather than a row: `br_if` against `if { } else { break }` |
+| 6 | `&&` and `||` | 79 | `St::If` over a temporary, and it moves bytes |
+| 7 | a lambda body on `Op::Closure` | 30 | the captures are on the row; the BODY is a frame of its own already (`Body::lambdas`) |
+
+Rows 1 and 3 are the two that make a driver an emitter, and neither is a
+missing statement in `core.rs`: the core says what is called and what is made,
+and the emitter still decides how. That is the next reading, and it is §2.3's
+own sentence read the other way round.
+
+#### The driver slice's gates (2026-09-08)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 25 s |
+| `cargo test -p vyrn-cli`, no filter | 637 passed, 41 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 25 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 24 s — every placement count unmoved: 12,572 switch sites, 12,113 owning their scrutinee, 57,259 stores, 23,882 argument drops |
+| `typed` `--ignored`, release | 1, 52 s |
+| `effects` `--ignored`, release | 2, 44 s |
+| `fixtures` `--ignored`, release | 1, 19 s |
+| `testsweep` `--ignored`, release | 1, 56 s |
+| `coredrive` `--ignored`, release | 1, 48 s — 629 of 21,720 bodies from the core, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 3 and 1 — one section added, both tables re-pinned |
+| `forms` and `surface`, plain and `--ignored` | 7 and 1, 3 and 1 — `forms` unmoved, `surface` re-pinned at six rows |
+| `checker_census`, `refusals`, `lowered` plain and `--ignored` | 2 and 1, 19 and 3, 3 and 1 — all unmoved |
+| `lowered_dump`, plain and `--ignored` | 6 and 1 — the five snapshots do not move |
+| `vyrn-frontend` | 1,120 passed, 6 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,167 passed, 13 ignored |
+| `vyrn-lsp`'s own manifest | 77 passed, 5 ignored, and its 23 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 270 s |
+| the residue ratchet `--ignored`, release | 1, 281 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 16 s — and three rows of `rfcs/census/wasm-sha256.tsv` regenerated, for the one shape read above |
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |

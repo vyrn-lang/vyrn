@@ -2138,7 +2138,7 @@ impl<'b> Kernel<'b> {
                 self.equalize(&mut outs, site);
                 *st = self.join(&outs)?;
             }
-            St::Block { site, body } => {
+            St::Block { site, body, .. } => {
                 self.stmts_at(body, st, *site)?;
             }
             St::Loop(body) => {

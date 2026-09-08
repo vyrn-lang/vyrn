@@ -251,9 +251,10 @@ fn sections() -> Vec<Section> {
         ),
         sec(
             "fn lower_body(",
-            Mapping, Neither,
+            Mapping, Core,
             "a function body: the parameters into locals, the prologue, the \
-             epilogue, the return",
+             epilogue, the return — and which of the two walks emits the \
+             statements, which is the core's answer (`body_of`)",
         ),
         sec(
             "fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {",
@@ -622,6 +623,11 @@ fn sections() -> Vec<Section> {
             "the two WASI constants `_start` opens a log sink with, and the \
              small type helpers the I/O builtins ask for their result type",
         ),
+        sec(
+            "/// Whether the AST walk is asked for even where the core's rows carry the body",
+            Mapping, Core,
+            "RFC-0125 §2.3's own walk: the core's statements to wasm, its              operators through the one table `Expr::Binary` reaches, and the              screen that says which bodies the rows carry",
+        ),
         sec("#[cfg(test)]", Tests, Neither, "the file's own unit tests"),
     ]
 }
@@ -724,12 +730,17 @@ fn forms(lines: &[String], a: usize, b: usize) -> usize {
 }
 
 /// How many CORE rows a span reads: the queries on [`Cx`] that reach
-/// `vyrn_lower::core`, the two type answers the record carries, and
-/// [`Fn_::peek`], which is the node type read by another name. One list, so a
-/// query added to the emitter has to be added here before a section can be
-/// classified as reading it.
+/// `vyrn_lower::core`, the two type answers the record carries,
+/// [`Fn_::peek`], which is the node type read by another name, and — since
+/// RFC-0125 §3 M3's driver slice — the core's own STATEMENTS, named the way
+/// `forms` names the source's. One list, so a query added to the emitter has
+/// to be added here before a section can be classified as reading it.
 fn rows(lines: &[String], a: usize, b: usize) -> usize {
-    const Q: [&str; 13] = [
+    const Q: [&str; 17] = [
+        "body_of",
+        "St::",
+        "Rhs::",
+        "Lit::",
         "peek",
         "receiver_row",
         "store_row",
@@ -801,12 +812,12 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 5720, 573),
+        ("the mapping §2.3 names", 6256, 586),
         ("a decision §2.3 says it must not make", 2212, 356),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
         ("the wasm format", 334, 0),
-        ("shared machinery", 2388, 77),
+        ("shared machinery", 2392, 77),
         ("tests", 326, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
@@ -881,11 +892,11 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 47, 6251, 0, 0),
-        ("the core's rows", 4, 1777, 0, 20),
+        ("neither", 46, 5993, 0, 0),
+        ("the core's rows", 6, 2530, 0, 72),
         ("the source, and the core says it too", 1, 81, 1, 0),
         ("the source, and the core has no row", 9, 1847, 50, 0),
-        ("both, for two questions", 14, 6456, 93, 49),
+        ("both, for two questions", 14, 6501, 93, 49),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
     assert_eq!(
