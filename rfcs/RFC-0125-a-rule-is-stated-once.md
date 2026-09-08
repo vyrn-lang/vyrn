@@ -13606,6 +13606,103 @@ pointed at a shallow scratch directory outside the checkout.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
 
+#### Whose is an element: the core answers over its own build (2026-09-08, `track-dh`)
+
+The other input the census named. `own.droppable`'s `DropKind::FreeArr` row
+decided whether a `for`'s VARIABLE owns its element — the plan's
+`LetOwnership::elem_only`, round sixteen's "every take on this row came
+through the loop variable". The core read it at the loop
+(`handed_over`), so the core's own judgment rested on the pass it is
+replacing. It does not any more.
+
+**How big the read was.** With `handed_over` forced false, 18 corpus
+programs stop loading and the kernel corpus falls from 24,775 accepted to
+19,795. Over 626 `for` statements in the corpus it is true at 53, and every
+one of those 53 has an element type that owns heap. So it is a real
+decision at 53 sites and silence at 573.
+
+**What states it now: a third candidate.** `last_owner` already answers
+"which construct is this value's last owner" over the core's FIRST build,
+for a `match` (`Cand::Switch`) and for a `for`'s container (`Cand::Loop`).
+The element is the same shape of question about the loop's VARIABLE, so it
+is `Cand::Elem`, keyed by the variable's spelling (`own::for_var_key`), and
+the walk over the first build answers it: **the variable is HANDED ON
+somewhere in the body rather than only read.** Handed on is five positions
+in the core's own words — a declared `consume` argument, a part of a
+`Rhs::Make`, a stored value, the key a store writes at, a returned value —
+and a sixth: a `Rhs::Take` out of a sub-place of it, which is
+`out.push(consume p.value)` inside `for p in ..` (`std/tw.vyrn`'s
+`twSafelist`, `std/rpc.vyrn`'s `rpcApplyConfig`), where what is left of the
+element is still this turn's.
+
+**Two screens beside it, and each is a rule a test already pinned.**
+
+| screen | what it refuses, and where it was found |
+|---|---|
+| the container is not a BORROW | `fn pick(xs: Array<String>) { for x in xs { return x } }` — a lender's result is somebody else's buffer, so its elements are somebody else's too. Without it the refusal "`x` may not be returned — it is a loop variable" disappears and the program compiles to a use-after-free. `own.rs`'s `a_lent_snapshot_keeps_its_buffer_even_when_an_element_leaves` is the recorded round-fourteen trap |
+| the container has no name of its own | `let ns: Array<Array<Int64>> = [[1]] for r in ns { take(r) }` — a container the reader NAMED outlives the loop, so the loop only borrows its elements. Found by the structural census's third-exit pin (rows 01, 02, 03, 27, 34), which read `accepted` where it wants `fix: for r in consume ns` |
+
+Together they are one sentence: the loop is the container's only owner. The
+first build's answer and the plan's agree at all 626 `for` statements in the
+corpus — 53 true, 573 false, no disagreement — and `own.rs`'s `FreeArr`
+fold is not read by the core any more.
+
+**The licence.** Kernel corpus 24,775 accepted, 0 refused, 0 unlowered.
+`VYRN_WASM_MANIFEST=check` green with no manifest change: every one of the
+176 examples emits the same bytes. Residue 172 clean, 3 leaking, 0
+double-free on each engine. The corpus pins and all five censuses are
+unmoved.
+
+**The circle is broken, and this is what that means.** `core.rs` names
+`own.droppable` once, in the PLACER, where it writes the rows the kernel
+found — no read. It names `own.holes` nowhere. Both tables are outputs now,
+and the kernel's per-path answer is the only input to a release.
+
+**What is still in the way of deleting `elem_only`, said exactly.** The
+`FreeArr` row is TWO facts, and only one of them moved. The other is the
+container's own release: the emitter reads `own.droppable` at the loop
+statement for whether there is a release at all, and reads the row's KIND
+to make it `Rel::Buffers(vec![0])` — the buffer alone, because the elements
+left. Deleting `elem_only` without moving that half costs 14 of the 176
+examples their recorded wasm (`aliascontext`, `consumeloop`, `enumarray`,
+`enumcodec`, `graphql`, `jsoncodec`, `jsondecbytes`, `mapdemo`,
+`patchdemo`, `rest`, `storage`, `vlog`, `vyxdemo`, `wirekey`), measured.
+What moves it is the core stating the container's release at the loop as it
+states a consuming loop's (`Facts::loop_gives_back`), with "the buffer
+alone" on it — and `Fn_::loop_gives_back` reads the `Rel` the plan's row
+built, so the two go together. That is the next payer's, and the element
+half is done.
+
+**The lines.** `compiler/vyrn-lower/src/core.rs` 5,771 to **5,843**; every
+other file unmoved. The core grew by 72 for a walk it used to look up.
+
+#### Gates (2026-09-08, the element)
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok, the two pre-existing warnings unchanged |
+| `cargo test -p vyrn-cli`, no filter | 79 suites, all green |
+| `kernel` `--ignored`, release | 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — 30,197 functions judged, 0 unlowered |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 436 programs from 128 sources |
+| `emitter_census`, `refusals`, `forms`, `surface`, `checker_census` | all five unmoved |
+| `cargo test -p vyrn-frontend` | 10 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 17 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 334 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
