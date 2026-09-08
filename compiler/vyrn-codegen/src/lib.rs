@@ -999,128 +999,50 @@ pub(crate) fn global_append_candidates(program: &Program) -> std::collections::B
     targets.into_iter().collect()
 }
 
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6). This module's collectors read it.
+vyrn_frontend::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
+/// The collector's line at each site: a `let`, a loop variable, an `if let` or
+/// arm binder, a lambda parameter.
+struct BoundNames<'a>(&'a mut std::collections::HashSet<String>);
+
+impl BodyVisit<'_> for BoundNames<'_> {
+    // The union of every name bound anywhere, not what is in scope where.
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+        match s {
+            Stmt::Let { name, .. } => {
+                self.0.insert(name.clone());
+            }
+            Stmt::ForIn { var, .. } => {
+                self.0.insert(var.clone());
+            }
+            Stmt::IfLet { pattern, .. } => self.0.extend(pattern_names(pattern)),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        if let Expr::Lambda { params, .. } = e {
+            self.0.extend(params.iter().cloned());
+        }
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &Pattern, _: usize, _: &std::collections::HashSet<String>) {
+        self.0.extend(pattern_names(p));
+    }
+}
+
 /// Every name a block binds anywhere inside it — `let`s, loop variables, pattern
 /// binders and lambda parameters. Over-collecting is safe here: the only use is
 /// to decide that a body is talking about its own name rather than about module
 /// state, and an extra name only costs a global the in-place append path.
 fn bound_names(b: &Block, out: &mut std::collections::HashSet<String>) {
-    fn in_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
-        match e {
-            Expr::Lambda { params, body, .. } => {
-                out.extend(params.iter().cloned());
-                match body {
-                    LambdaBody::Expr(inner) => in_expr(inner, out),
-                    LambdaBody::Block(blk) => bound_names(blk, out),
-                }
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                in_expr(scrutinee, out);
-                for a in arms {
-                    out.extend(pattern_names(&a.pattern));
-                    match &a.body {
-                        ArmBody::Expr(e) => in_expr(e, out),
-                        ArmBody::Block(b) => bound_names(b, out),
-                    }
-                }
-            }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                in_expr(expr, out)
-            }
-            Expr::Consume { place, .. } => in_expr(place, out),
-            Expr::Binary { lhs, rhs, .. } => {
-                in_expr(lhs, out);
-                in_expr(rhs, out);
-            }
-            Expr::Call { args, .. }
-            | Expr::Spawn { args, .. }
-            | Expr::TryConstruct { args, .. }
-            | Expr::ArrayLit { elems: args, .. } => args.iter().for_each(|a| in_expr(a, out)),
-            Expr::StructLit { fields, .. } => fields.iter().for_each(|(_, v)| in_expr(v, out)),
-            Expr::MapLit { entries, .. } => entries.iter().for_each(|(k, v)| {
-                in_expr(k, out);
-                in_expr(v, out);
-            }),
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                in_expr(cond, out);
-                in_expr(then_branch, out);
-                if let Some(eb) = else_branch {
-                    in_expr(eb, out);
-                }
-            }
-            Expr::Int(_)
-            | Expr::Byte(_)
-            | Expr::Float(_)
-            | Expr::Bool(_)
-            | Expr::Str(_)
-            | Expr::Var { .. } => {}
-        }
-    }
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { name, value, .. } => {
-                out.insert(name.clone());
-                in_expr(value, out);
-            }
-            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } | Stmt::Expr(value) => {
-                in_expr(value, out)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                in_expr(index, out);
-                in_expr(value, out);
-            }
-            Stmt::Return { value, .. } => {
-                if let Some(e) = value {
-                    in_expr(e, out);
-                }
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                in_expr(cond, out);
-                bound_names(then_block, out);
-                if let Some(eb) = else_block {
-                    bound_names(eb, out);
-                }
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                out.extend(pattern_names(pattern));
-                in_expr(scrutinee, out);
-                bound_names(then_block, out);
-                if let Some(eb) = else_block {
-                    bound_names(eb, out);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                in_expr(cond, out);
-                bound_names(body, out);
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                out.insert(var.clone());
-                in_expr(iter, out);
-                bound_names(body, out);
-            }
-            Stmt::Region { body, .. } => bound_names(body, out),
-            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        }
-    }
+    let mut locals = std::collections::HashSet::new();
+    body_block(b, &mut locals, &mut BoundNames(out));
 }
 
 /// The names a refutable pattern binds.
