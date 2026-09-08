@@ -6,8 +6,8 @@
 carry the rules that make a value valid, not only its shape. Ownership is a
 capability you declare on a parameter — `read`, `modify`, or `consume` — so
 there is no garbage collector and no lifetime syntax. One program compiles to
-three targets: an interpreter, a native binary, and a WebAssembly module. All
-three produce the same bytes.
+one WebAssembly module, and that module becomes the native binary. Both print
+the same bytes.
 
 ```vyrn
 type Age = Int64 where value >= 18
@@ -85,11 +85,12 @@ reclaimed, how, and the reason when it is not. See
 [`examples/modify.vyrn`](examples/modify.vyrn) and
 [`examples/ownership.vyrn`](examples/ownership.vyrn).
 
-**Three targets, one meaning.** The tree-walking interpreter is the reference
-semantics. `vyrn build` emits textual LLVM IR and links it with `clang`.
-`vyrn build --target wasm` emits the WebAssembly module directly — no LLVM, no
-clang, no WASI sysroot. The parity harness scans `examples/`, runs each program
-three ways, and compares stdout, stderr and exit code.
+**One module, two ways to run it.** `vyrn build --target wasm` emits the
+WebAssembly module directly — no LLVM, no clang, no WASI sysroot. `vyrn run`
+compiles the same module and runs it in an embedded wasmtime. `vyrn build` puts
+the same bytes through `wasm2c` and `clang` into a native executable. The route
+harness scans `examples/`, runs each program both ways, and compares stdout,
+stderr and exit code.
 
 **No async.** Function suspension is not in the language. The host owns the
 loop: the browser page, the HTTP server, or the runtime you write. See
@@ -210,10 +211,9 @@ hand.
 
 **What needs what.** `vyrn run`, `check`, `test`, `fmt`, `doc` and
 `build --target wasm` need nothing beyond the archive. **`vyrn build` — a native
-binary — needs `clang` on `PATH`** (or `$CLANG`); it emits textual LLVM IR and
-links it. Running the three-way parity harness also needs a `wasmtime` binary:
-in a clone of this repository `vyrn update --locked` fetches the pinned one, and
-`$VYRN_WASMTIME` overrides it anywhere.
+binary — needs `clang` on `PATH`** (or `$CLANG`), plus wabt's `wasm2c` and
+simde: in a clone of this repository `vyrn update --locked` fetches the pinned
+ones, and `$VYRN_WASM2C` and `$VYRN_SIMDE` override them anywhere.
 
 ### Build from source
 
@@ -259,8 +259,8 @@ crate map, and how to build the excluded crates (`vyrn-lsp`, `vyrn-genwasm`).
 lang/
 ├── rfcs/         the design record, numbered from RFC-0001; rfcs/README.md indexes them
 ├── compiler/     the Rust workspace
-│   ├── vyrn-frontend/  lexer, parser, checker, move check, interpreter, diagnostics
-│   ├── vyrn-codegen/   textual LLVM IR emitter, and the direct wasm encoder
+│   ├── vyrn-frontend/  lexer, parser, checker, move check, diagnostics
+│   ├── vyrn-codegen/   the one emitter: a lowered program to a wasm module
 │   ├── vyrn-cli/       the `vyrn` driver
 │   ├── vyrn-lsp/       language server (excluded from the workspace)
 │   └── vyrn-genwasm/   runs `gen fn` generators as compiled wasm (excluded)
@@ -278,24 +278,30 @@ lang/
 
 ## What CI proves
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs four jobs. The first
-is a matrix over the four platforms releases ship — Linux x86_64, Linux arm64,
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs eight jobs. Three
+are a matrix over the four platforms releases ship — Linux x86_64, Linux arm64,
 macOS arm64, Windows x86_64 — so every published binary is built by a machine
-whose tests ran. The other three are Linux, where the toolchain lives.
+whose tests ran. The rest are Linux, where the toolchain lives.
 
 1. **tests (workspace + LSP)**, on all four platforms — `cargo fmt --check` over
    all three manifests, the workspace test suite, the LSP suite, the browser
    runtime tests, the `docs/api/` drift gate, the install scripts (they install,
    and they refuse an archive whose checksum does not match), and
    `vyrn bench --check` over every benchmark.
-2. **three-way parity** — the interpreter, the clang-linked native binary and
-   the wasm module must agree on every example. The known-divergent list is
-   empty and must stay empty. This job also runs the codegen integration tests
-   that need clang, a wasi sysroot and wasmtime, including the one that checks
-   the layout engine against clang's own answers on wasm32.
-3. **cross-engine generation** — every `gen fn` must produce identical source
-   under the interpreter and under wasm.
-4. **benchmarks**, on pushes to `main` only — every bench still builds and runs.
+2. **the judgments over the corpus** — the linear judgment, the plan's tables
+   against the core's, the effect judgment beside the audience and the floor,
+   and typed-by-construction, each over every program in the repository.
+3. **the native route** — the wasm module and the native executable `wasm2c`
+   and `clang` build from it must agree on every example. The
+   known-divergent list is empty and must stay empty. This job also runs the
+   codegen integration tests that need clang, including the one that checks the
+   layout engine against clang's own answers on wasm32.
+4. **wasm bytes identical across the matrix** — the same program compiles to
+   the same bytes on all four platforms.
+5. **the compiled run prints the recorded output** — the fixtures.
+6. **generation is deterministic over the corpus** — every `gen fn` produces
+   the same source twice.
+7. **benchmarks**, on pushes to `main` only — every bench still builds and runs.
    The regression half is not live: `bench/baseline.json` is a placeholder, so
    `--compare` reports every bench as new. `ci.yml` says exactly what that gate
    does and does not prove.

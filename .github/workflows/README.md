@@ -56,8 +56,8 @@ A step-by-step timing of all three workflows is in
 worth knowing before anyone tries to speed things up.
 
 **One minute per job is not reachable.** The floor is not the workflow. It is
-the Vyrn interpreter executing test corpora — the site's own test blocks in one
-case, forty parity programs in another. No change to a YAML file reaches it.
+Vyrn executing test corpora — the site's own test blocks in one case, forty
+route programs in another. No change to a YAML file reaches it.
 
 **What the site's test step is made of is now known.** Run
 `vyrn test --profile site/export.vyrn` and it answers in one command: `slice`
@@ -67,8 +67,8 @@ tune in the workflow and the write-up is
 `rfcs/census/slice-is-half-the-site-build.md`.
 
 **There are two bench gates and they check different things.**
-`Bench --check`, in the `checks` job, runs every bench body once under the
-interpreter. It never loads the bench harness at all, so nothing it does
+`Bench --check`, in the `checks` job, runs every bench body once, compiled. It
+never loads the bench harness at all, so nothing it does
 exercises the native timing path. The `benchmarks` job below does run that path.
 Knowing which is which matters: a defect lived in the harness merge for a long
 time and neither gate saw it, because the corpus is the project's own files and

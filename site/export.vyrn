@@ -1159,9 +1159,8 @@ fn has(haystack: String, needle: String) -> Bool {
 /// Every value of the attribute `name` in `html`, in document order.
 ///
 /// `split` and `indexOf` do the scanning, because both are builtins and this
-/// walks 56 documents: the same loop written byte by byte in Vyrn runs in the
-/// interpreter and takes minutes, which is how a gate becomes something people
-/// switch off.
+/// walks 56 documents: the same loop written byte by byte in Vyrn took minutes,
+/// which is how a gate becomes something people switch off.
 ///
 /// The needle carries the leading space — ` id="`, not `id="` — so `data-id="`
 /// and `aria-labelledby="` are not read as the attribute they end with. An id
@@ -1405,7 +1404,7 @@ test "every name in a module's index points at an export that is on the page" {
 /// documents over and over — one test walks every route for its masthead
 /// marker, the next walks them all for their fragments, a third for their
 /// stamps — and each ask re-rendered the page AND re-ran the whole stamp
-/// pipeline through the interpreter. On CI `The site's own tests` was 1392 s
+/// pipeline. On CI `The site's own tests` was 1392 s
 /// of a 1788 s job, and most of it was the same eighty pages drawn again.
 ///
 /// A page is a pure function of the tree here: nothing in a test mutates what

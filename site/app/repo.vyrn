@@ -72,10 +72,10 @@ export fn rawFile(gitRef: String, path: String) -> String {
     return ghRaw(gitRef, path)
 }
 
-/// How many backends a program compiles to: the tree-walking interpreter, the
-/// native binary, and the WebAssembly module.
+/// How many ways a program runs: the WebAssembly module, and the native binary
+/// `wasm2c` and `clang` build from the same bytes.
 export fn backendCount() -> Int64 {
-    return 3
+    return 2
 }
 
 // ---------------------------------------------------------------------------
