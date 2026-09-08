@@ -16767,6 +16767,146 @@ The one red in the first pass was the sentinel above. It and
 made outside `checker.rs`, `prelude.rs` and the censuses. The list was run
 again whole after the sentinel was answered, and it is the table above.
 
+#### The dispatcher stops restating the declaration it dispatches to (2026-09-07)
+
+The block census ranks the protocol dispatcher second, and it is the largest
+block in `Checker::call`: 235 lines and 10 refusals, and not a builtin at all.
+It types a call through a protocol method — RFC-0084's dispatch, RFC-0071 to
+RFC-0075's conformance, RFC-0120 and RFC-0123's capabilities. The rule it reads
+is the protocol DECLARATION: a member's signature, its receiver capability, its
+result. `ast::MethodSig` carries all three, and an impl method carries them
+again as an ordinary flattened function in `self.sigs`.
+
+The block read them by hand. It had its own arity check, its own argument loop,
+its own capability match, its own solve over the impl head's type variables and
+its own substitution of the result — every one of them a second statement of
+what the fall-through beside it already states for a user function and, since
+this milestone's first slice, for a seeded row.
+
+**What the two statements now are.** The fall-through's tail is a method:
+
+    fn check_declared_call(&self, d: &DeclaredCall, args, scope, expected, fn_ret, line)
+
+and `DeclaredCall` is what a call is checked against — a key, the name a
+refusal prints, the parameter types, the result, the type parameters, the
+bounds, the capabilities, and the receiver dispatch already typed. Four kinds
+of declaration reach it now: a user function, a seeded builtin row, an impl
+method (keyed by its mangled name), and a protocol member through a bound
+(where the impl is not selected and the member's own columns are the
+declaration). One reading, one set of sentences.
+
+Two rules the dispatcher keeps, because a declaration cannot state either:
+
+1. **The receiver is typed once, and it is SOLVED rather than coerced.**
+   Dispatch had to type argument 0 to select the impl. Typing it a second time
+   doubled every record the check writes — the stored function sources and the
+   stored calls — which is why the block stopped routing back through `call` in
+   the first place. `DeclaredCall::recv` carries that answer in. The receiver
+   is not coerced against the impl's own `self` slot either: the impl was
+   selected BY this type, so there is nothing left there to refuse.
+2. **Its capability still applies.** A `modify self` method demands a `mut`
+   binding, and a `consume self` method meets `region_consume_guard`, at index
+   0 of the same capability table every other argument reads.
+
+**What went.** 71 lines and 4 refusals. The block is 164 lines and 6 refusals,
+and 26 of the 164 are the two `DeclaredCall` constructions.
+
+| the refusal | where it goes |
+|---|---|
+| `m` expects N argument(s) besides `self`, got M | the shared arity check |
+| `m` argument is X, expected Y (through a bound) | the shared argument loop |
+| `m` expects N argument(s), got M (through an impl) | the shared arity check |
+| `m` argument is X, expected Y (through an impl) | the shared argument loop |
+
+The six that stay are the six about DISPATCH: no receiver at all, two
+ambiguities (several protocols declare the name, several implement it), the
+associated type a bound cannot name (RFC-0080 M2), and the two ways a receiver
+turns out not to implement the protocol.
+
+**What the impl method gains by being read like a declaration.** Three
+readings the block did not have. Its head's bounds are checked
+(`self.all_bounds` holds them — the parser copies the impl's `type_bounds` onto
+every flattened method). A `consume self` member reaches `region_consume_guard`
+through a BOUND as well as through an impl. And a `fn`-typed parameter of a
+protocol member goes through `check_fn_arg` on both paths rather than one. None
+of the three fires on this corpus.
+
+**The licence.** The method the three slices above used, on a corpus one
+testsweep lift larger again: `vyrn check` over `examples/`, `site/`,
+`compiler/vyrn-cli/tests/` and testsweep's 1,991-program lift, at the branch
+point `827ab268` and with the slice in, and the two streams compared WHOLE
+(exit code, stdout and stderr, per program).
+
+| the corpus | count |
+|---|---|
+| programs | 2,368 |
+| accepted, both | 1,109 |
+| refused, both | 1,259 |
+| byte-identical stderr | 2,368 |
+| differing text | 0 |
+| a refusal LOST | 0 |
+| a refusal GAINED | 0 |
+
+The corpus dispatches constantly — `site/` is protocols throughout — and it
+reaches none of the ten refusals, which is why all ten were witnessed one at a
+time under both binaries. All ten still refuse, on the same line.
+
+| the program | before | after |
+|---|---|---|
+| `show()` with no receiver | "`show` needs a `self` receiver" | the same |
+| two protocols declaring `m`, a `<T: A + B>` receiver | "`m` is ambiguous: protocols A, B all declare it for this receiver" | the same |
+| two protocols implementing `m` for `Int64` | "`m` is ambiguous: protocols A, B all implement it for this receiver" | the same |
+| `x.valueOr(0)` on a `<T: Unwrap>` | "`valueOr` mentions `Unwrap`'s associated type `Output`, and a `<T: Unwrap>` bound cannot name it — call `.valueOr(..)` on a concrete type" | the same |
+| `x.m(9)` on a `<T: A>`, `m` taking none | "`m` expects 0 argument(s) besides `self`, got 1" | "`m` expects 1 argument(s), got 2" |
+| `x.m("nine")` on a `<T: A>` | "`m` argument is String, expected Int64" | "`m` argument 2 expects Int64, found String" |
+| `7.m()` where `impl A for Int64` provides nothing | "Int64 does not implement protocol `A` (needed for `.m(..)`)" | the same |
+| `7.m(2)`, `m` taking none | "`m` expects 0 argument(s), got 1" | "`m` expects 1 argument(s), got 2" |
+| `7.m("x")` | "`m` argument is String, expected Int64" | "`m` argument 2 expects Int64, found String" |
+| `true.m()` with no `impl A for Bool` | "Bool does not implement protocol `A` (needed for `.m(..)`)" | the same |
+
+The four that change say the same thing in the shared words, and each pays the
+price this milestone has now paid four times. The arity sentence counts the
+RECEIVER, because the checker holds `m(x, 1)` by the time it types the call and
+subtracting one for a receiver is exactly the hand-written exception this
+milestone deletes — the trade `@join`'s row already made. The argument sentence
+NAMES the argument, which the block's did not.
+`a_dispatched_call_and_a_plain_call_are_refused_in_the_same_words` is the
+assertion: one mistake, three routes to the declaration, one sentence.
+
+**The numbers.**
+
+| measure | at `827ab268` | after this one |
+|---|---|---|
+| `checker.rs` | 15,864 | 15,925 |
+| `Checker::call` | 1,886 lines, 124 refusals | 1,677, 116 |
+| the protocol block | 235 lines, 10 refusals | 164, 6 |
+| refusals in `checker.rs` | 422 | 418 |
+| the census's `Surface` kind | 3,790 lines, 182 refusals | 3,581, 174 |
+| the census's `Judgment` kind | 3,184 lines, 136 refusals | 3,398, 140 |
+| RFC-0126 §3's six-file mentions | 1,458 | 1,457 |
+
+`checker.rs` GREW by 61 lines, and the shape of that is the same trade the
+migration hints recorded: what leaves `Checker::call` is 209 lines and 8 of its
+refusals, and what arrives is one shared reading (214 lines, 4 refusals) that
+serves four kinds of declaration, a 27-line `DeclaredCall`, and two unit tests.
+The largest thing in the file is smaller by 209 lines; the file is larger by 61.
+
+The census gains a section. `check_declared_call` is `Judgment`, not `Surface`:
+it has no arm per builtin, per form or per constructor. That is why the two
+kinds move in opposite directions above, and it is the first time this census
+has recorded a rule moving from the surface into the judgment rather than out
+of the file.
+
+The three censuses are re-pinned in the same commit: the structural census
+(`tests/checker_census.rs` — the new `fn check_declared_call` section, `Surface`
+3,790 lines and 182 refusals to 3,581 and 174, `Judgment` 3,184 and 136 to
+3,398 and 140, `Shared` 2,229 to 2,256 for `DeclaredCall`, `Tests` 4,752 to
+4,781, and the `fn call` section's reader), the surface census (`tests/surface.rs`
+and RFC-0126 §3, `Type::Fn` in the checker 27 to 26 and the six-file total 1,458
+to 1,457 — the protocol path's own `Type::Fn` arm is the shared one now), and
+the forms census (`tests/forms.rs` and RFC-0127 §3, unmoved — the slice touches
+no form).
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

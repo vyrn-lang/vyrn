@@ -20,18 +20,19 @@
 //! # The extra column, and why
 //!
 //! `movecheck.rs`'s census has a kind per section and nothing else, because
-//! every one of its rules is a section. The checker's are not: 124 of its 422
+//! every one of its rules is a section. The checker's are not: 116 of its 418
 //! refusal sites are inside `Checker::call`, which is a table with one arm per
-//! builtin, and a kind alone would file all 124 under the surface and lose
+//! builtin, and a kind alone would file all 116 under the surface and lose
 //! them. (It was 190 of 487 when this census was written; RFC-0125 §3 M6
 //! deleted the twenty-seven that restated a seeded row, then seven more when
 //! four names that had no row got one, then fifteen with the six `consume`
 //! rows, then nine when the ten migration hints became rows of one migration
-//! table, then eight with `@reserve` and `@tally`.) So each section also
-//! carries the number of `cerr!`/`cerr_at!` sites it holds, and
-//! [`the_structural_census_is_what_the_rfc_records`] pins the
-//! per-kind refusal tally beside the per-kind line tally. A rule that leaves
-//! the checker moves both numbers.
+//! table, then eight with `@reserve` and `@tally`, then four when the protocol
+//! dispatcher stopped restating the declaration it dispatches to.) So each
+//! section also carries the number of `cerr!`/`cerr_at!` sites it holds, and
+//! [`the_structural_census_is_what_the_rfc_records`] pins the per-kind refusal
+//! tally beside the per-kind line tally. A rule that leaves the checker moves
+//! both numbers.
 
 use std::path::{Path, PathBuf};
 
@@ -444,10 +445,20 @@ fn sections() -> Vec<Section> {
             Surface,
             "the builtin table: twenty-three guarded blocks naming a builtin, \
              each giving its arity, its argument types, its result and its \
-             refusals, then the fall-through, which since RFC-0125 §3 M6 types \
-             a seeded builtin against its row — twenty-eight names have no block \
-             at all. The single largest thing in the file and the `builtins` \
-             factor written out",
+             refusals, then the dispatcher — which impl answers — and the \
+             fall-through, which since RFC-0125 §3 M6 types a seeded builtin \
+             against its row; twenty-eight names have no block at all. The \
+             single largest thing in the file and the `builtins` factor \
+             written out",
+        ),
+        sec(
+            "fn check_declared_call(",
+            Judgment,
+            "the one reading of a DECLARATION at a call site (RFC-0125 §3 M6): \
+             arity, the parameter types, the generic solve, the bounds, the \
+             capability discipline, the coercion proof and the result. A user \
+             function, a seeded row, an impl method and a protocol member all \
+             arrive here",
         ),
         sec(
             "fn solve_fn_param(",
@@ -742,12 +753,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3184, 136),
+        ("the typing judgment", 3398, 140),
         ("a rule the checker states", 1455, 57),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
-        ("one arm per form, type constructor or builtin", 3790, 182),
-        ("shared machinery", 2229, 30),
-        ("tests", 4752, 0),
+        ("one arm per form, type constructor or builtin", 3581, 174),
+        ("shared machinery", 2256, 30),
+        ("tests", 4781, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(
