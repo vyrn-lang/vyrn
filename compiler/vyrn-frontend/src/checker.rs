@@ -9630,27 +9630,10 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
             }
         }
         Expr::Binary { op, lhs, rhs, .. } => {
-            let o = match op {
-                BinOp::Add => "+",
-                BinOp::Sub => "-",
-                BinOp::Mul => "*",
-                BinOp::Div => "/",
-                BinOp::Rem => "%",
-                BinOp::Lt => "<",
-                BinOp::LtEq => "<=",
-                BinOp::Gt => ">",
-                BinOp::GtEq => ">=",
-                BinOp::Eq => "==",
-                BinOp::NotEq => "!=",
-                BinOp::And => "&&",
-                BinOp::Or => "||",
-                BinOp::Match => "=~",
-                BinOp::BitAnd => "&",
-                BinOp::BitOr => "|",
-                BinOp::BitXor => "^",
-                BinOp::Shl => "<<",
-                BinOp::Shr => ">>",
-            };
+            // The spelling is the lexer's, reached through the parser's
+            // precedence table (RFC-0125 §3 M6). It was nineteen rows here,
+            // beside the nineteen the parser already had.
+            let o = crate::parser::binop_text(*op);
             format!("{} {o} {}", pred_summary(lhs), pred_summary(rhs))
         }
         // `@at(s, i)` is the desugaring of indexing — render it back as `s[i]`.

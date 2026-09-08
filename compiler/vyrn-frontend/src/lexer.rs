@@ -118,7 +118,6 @@ pub struct Token {
 /// spelling). `Eof` is included for completeness but callers filter it out.
 pub fn token_name_and_text(tok: &Tok) -> (String, String) {
     let kw = |s: &str| ("keyword".to_string(), s.to_string());
-    let p = |s: &str| ("punct".to_string(), s.to_string());
     match tok {
         Tok::Int(n) => ("int".to_string(), n.to_string()),
         // A byte literal is an integer literal for `lex()`'s purposes — its text
@@ -153,43 +152,15 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
         Tok::Spawn => kw("spawn"),
         Tok::Break => kw("break"),
         Tok::Continue => kw("continue"),
-        Tok::LParen => p("("),
-        Tok::RParen => p(")"),
-        Tok::LBrace => p("{"),
-        Tok::RBrace => p("}"),
-        Tok::LBracket => p("["),
-        Tok::RBracket => p("]"),
-        Tok::Comma => p(","),
-        Tok::Semi => p(";"),
-        Tok::Colon => p(":"),
-        Tok::Dot => p("."),
-        Tok::Arrow => p("->"),
-        Tok::FatArrow => p("=>"),
-        Tok::Plus => p("+"),
-        Tok::Minus => p("-"),
-        Tok::Star => p("*"),
-        Tok::Slash => p("/"),
-        Tok::Percent => p("%"),
-        Tok::Eq => p("="),
-        Tok::EqEq => p("=="),
-        Tok::TildeMatch => p("=~"),
-        Tok::NotEq => p("!="),
-        Tok::Lt => p("<"),
-        Tok::LtEq => p("<="),
-        Tok::Gt => p(">"),
-        Tok::GtEq => p(">="),
-        Tok::AndAnd => p("&&"),
-        Tok::OrOr => p("||"),
-        Tok::Bang => p("!"),
-        Tok::Question => p("?"),
-        Tok::QuestionQuestion => p("??"),
-        Tok::Pipe => p("|"),
-        Tok::Amp => p("&"),
-        Tok::Caret => p("^"),
-        Tok::Tilde => p("~"),
-        Tok::Shl => p("<<"),
-        Tok::Shr => p(">>"),
         Tok::Eof => ("eof".to_string(), String::new()),
+        // Everything left is punctuation, and [`punct_text`] is the one place
+        // its spelling is stated (RFC-0125 §3 M6). It was 36 rows here.
+        p => (
+            "punct".to_string(),
+            punct_text(p)
+                .expect("every token that is not a literal, a keyword or `Eof` is punctuation")
+                .to_string(),
+        ),
     }
 }
 
@@ -263,54 +234,105 @@ fn keyword_or_ident(text: &str) -> Tok {
     }
 }
 
-/// Two-character operator table (returns `None` if `(a, b)` is not one).
-fn two_char_op(a: char, b: char) -> Option<Tok> {
-    match (a, b) {
-        ('-', '>') => Some(Tok::Arrow),
-        ('=', '>') => Some(Tok::FatArrow),
-        ('=', '~') => Some(Tok::TildeMatch),
-        ('=', '=') => Some(Tok::EqEq),
-        ('!', '=') => Some(Tok::NotEq),
-        ('<', '=') => Some(Tok::LtEq),
-        ('>', '=') => Some(Tok::GtEq),
-        ('&', '&') => Some(Tok::AndAnd),
-        ('|', '|') => Some(Tok::OrOr),
-        ('?', '?') => Some(Tok::QuestionQuestion),
-        ('<', '<') => Some(Tok::Shl),
-        ('>', '>') => Some(Tok::Shr),
-        _ => None,
-    }
+/// Every punctuation and operator token with the characters that spell it —
+/// the ONE statement of the punctuation table (RFC-0125 §3 M6).
+///
+/// It was three, and nothing checked that they agreed: two tables map
+/// characters to a token and `token_name_and_text` mapped the token back to its
+/// spelling. It is a macro for `loader::type_head_descent!`'s reason — the
+/// readers want the list keyed both ways, and no other mechanism in Rust states
+/// a table once across both.
+macro_rules! punctuation {
+    (
+        two { $(($a:literal, $b:literal) => $tt:ident),* $(,)? }
+        one { $($c:literal => $ot:ident),* $(,)? }
+    ) => {
+        /// Two-character operator table (returns `None` if `(a, b)` is not one).
+        fn two_char_op(a: char, b: char) -> Option<Tok> {
+            match (a, b) {
+                $(($a, $b) => Some(Tok::$tt),)*
+                _ => None,
+            }
+        }
+
+        /// Single-character operator/punctuation table.
+        fn single_char_op(c: char) -> Option<Tok> {
+            match c {
+                $($c => Some(Tok::$ot),)*
+                _ => None,
+            }
+        }
+
+        /// The source spelling of a punctuation token — `None` for a token that
+        /// is not one. What [`token_name_and_text`] answers with, and what
+        /// `parser::binop_text` reaches through.
+        pub fn punct_text(tok: &Tok) -> Option<&'static str> {
+            Some(match tok {
+                $(Tok::$tt => concat!($a, $b),)*
+                $(Tok::$ot => concat!($c),)*
+                _ => return None,
+            })
+        }
+
+        /// The token a punctuation spelling names — [`punct_text`] read
+        /// backwards, which is how `parser::binop_text` gets from an operator
+        /// to the characters that write it without a second table.
+        pub(crate) fn punct_tok(text: &str) -> Option<Tok> {
+            match text {
+                $(concat!($a, $b) => Some(Tok::$tt),)*
+                $(concat!($c) => Some(Tok::$ot),)*
+                _ => None,
+            }
+        }
+
+        /// Every punctuation spelling, the two-character forms first. RFC-0127's
+        /// census counts a corpus's operators against this list rather than
+        /// against a copy of it.
+        pub const PUNCT_SPELLINGS: &[&str] = &[$(concat!($a, $b),)* $(concat!($c),)*];
+    };
 }
 
-/// Single-character operator/punctuation table.
-fn single_char_op(c: char) -> Option<Tok> {
-    Some(match c {
-        '(' => Tok::LParen,
-        ')' => Tok::RParen,
-        '{' => Tok::LBrace,
-        '}' => Tok::RBrace,
-        '[' => Tok::LBracket,
-        ']' => Tok::RBracket,
-        ',' => Tok::Comma,
-        ';' => Tok::Semi,
-        ':' => Tok::Colon,
-        '.' => Tok::Dot,
-        '+' => Tok::Plus,
-        '-' => Tok::Minus,
-        '*' => Tok::Star,
-        '/' => Tok::Slash,
-        '%' => Tok::Percent,
-        '=' => Tok::Eq,
-        '<' => Tok::Lt,
-        '>' => Tok::Gt,
-        '!' => Tok::Bang,
-        '?' => Tok::Question,
-        '|' => Tok::Pipe,
-        '&' => Tok::Amp,
-        '^' => Tok::Caret,
-        '~' => Tok::Tilde,
-        _ => return None,
-    })
+punctuation! {
+    two {
+        ('-', '>') => Arrow,
+        ('=', '>') => FatArrow,
+        ('=', '~') => TildeMatch,
+        ('=', '=') => EqEq,
+        ('!', '=') => NotEq,
+        ('<', '=') => LtEq,
+        ('>', '=') => GtEq,
+        ('&', '&') => AndAnd,
+        ('|', '|') => OrOr,
+        ('?', '?') => QuestionQuestion,
+        ('<', '<') => Shl,
+        ('>', '>') => Shr,
+    }
+    one {
+        '(' => LParen,
+        ')' => RParen,
+        '{' => LBrace,
+        '}' => RBrace,
+        '[' => LBracket,
+        ']' => RBracket,
+        ',' => Comma,
+        ';' => Semi,
+        ':' => Colon,
+        '.' => Dot,
+        '+' => Plus,
+        '-' => Minus,
+        '*' => Star,
+        '/' => Slash,
+        '%' => Percent,
+        '=' => Eq,
+        '<' => Lt,
+        '>' => Gt,
+        '!' => Bang,
+        '?' => Question,
+        '|' => Pipe,
+        '&' => Amp,
+        '^' => Caret,
+        '~' => Tilde,
+    }
 }
 
 /// Comment-preserving tokenizer (RFC-0017). Yields the same tokens as [`lex`]

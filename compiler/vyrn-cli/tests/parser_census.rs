@@ -5,10 +5,11 @@
 //! (`tests/checker_census.rs`), the ownership pass (`tests/refusals.rs`), the
 //! loader, the symbol map and the project pass (`tests/frontend_census.rs`).
 //! The emitter and the CLI have their own. **Nobody had counted the parser**,
-//! and `parser.rs` is 7,497 lines — the second largest file in the frontend
-//! after the checker. With `lexer.rs` (1,453), `ast.rs` (1,950) and `fmt.rs`
-//! (857) the front of the compiler is 11,757 lines, and RFC-0125 §2.7's
-//! estimate cannot be met without knowing what is in them.
+//! and at this census `parser.rs` was 7,497 lines — the second largest file
+//! in the frontend after the checker. With `lexer.rs` (1,453), `ast.rs`
+//! (1,950) and `fmt.rs` (857) the front of the compiler was 11,757 lines, and
+//! RFC-0125 §2.7's estimate cannot be met without knowing what is in them. The
+//! counts this test pins are the current ones, not those.
 //!
 //! `ast.rs` and `fmt.rs` are not tiled here and the record says why: `ast.rs`
 //! is the surface's declaration, which RFC-0126 and RFC-0127 already price a
@@ -121,7 +122,10 @@ fn parser_sections() -> Vec<Section> {
             "a fourteen-arm descent over a `Type`, which is the arm list \
              `loader::type_head_descent!` was written to state once (RFC-0125 \
              §3 M6, the first body slice). The macro is `loader.rs`'s and this \
-             is the fourth hand-written copy of its arms",
+             is the fourth hand-written copy of its arms. It does not fold onto \
+             the macro as it stands: the macro's hook is handed a type's NAME \
+             and this one REPLACES a `Type::Named` node with a `Type::Param`, \
+             which a `&mut String` cannot do",
         ),
         sec(
             "fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {",
@@ -196,7 +200,9 @@ fn parser_sections() -> Vec<Section> {
             "the cursor and the seven pieces of state a production reads: the \
              no-struct flag, the generic parameters in scope, the associated \
              types, the inline field refinements, the desugar's statement \
-             queue, the recovered errors and the nesting depth",
+             queue, the recovered errors and the nesting depth — and `binop_text`, \
+             which renders an operator for a diagnostic out of the precedence \
+             table and the lexer's spellings",
         ),
         sec(
             "fn is_index_field_chain(e: &Expr) -> bool {",
@@ -471,10 +477,10 @@ fn parser_sections() -> Vec<Section> {
             "fn binop(tok: &Tok) -> Option<(BinOp, u8)> {",
             Twice,
             "the 19 binary operators with their binding powers. The token is \
-             the lexer's, the `BinOp` is the AST's, and the SPELLING is stated \
-             again by `checker::pred_summary`, which renders a predicate for a \
-             diagnostic — two tables over one operator set, and either derives \
-             the other through `lexer::token_name_and_text`",
+             the lexer's, the `BinOp` is the AST's, and the SPELLING was stated \
+             a second time by `checker::pred_summary` until RFC-0125 §3 M6's \
+             operator slice, which derived that one from this table and the \
+             lexer's",
         ),
         sec(
             "const NULLISH_BP: u8 = 5;",
@@ -600,11 +606,14 @@ fn lexer_sections() -> Vec<Section> {
             "pub fn token_name_and_text(tok: &Tok) -> (String, String) {",
             Twice,
             "the canonical `(kind, text)` of a token, which `lex()` hands a \
-             generator (RFC-0054). Its keyword rows are `keyword_or_ident`'s \
-             read backwards and its punctuation rows are `two_char_op`'s and \
-             `single_char_op`'s read backwards — one spelling table stated \
-             three times, which is exactly the 3 RFC-0127 §3.4 measures \
-             against every keyword without exception",
+             generator (RFC-0054). Its 36 punctuation rows went in RFC-0125 \
+             §3 M6's operator slice and it asks `punct_text` instead. Its 24 \
+             KEYWORD rows stay, and they are `keyword_or_ident`'s read \
+             backwards — the 3 RFC-0127 §3.4 measures against every keyword \
+             without exception. Two readers outside this crate parse \
+             `keyword_or_ident`'s arms as text (`tests/forms.rs` and \
+             `editor/vscode/test/grammar.test.mjs`), so folding the keywords \
+             the same way costs two anchors and the RFC's keyword column",
         ),
         sec(
             "pub struct Triv {",
@@ -616,19 +625,25 @@ fn lexer_sections() -> Vec<Section> {
         sec(
             "fn keyword_or_ident(text: &str) -> Tok {",
             Twice,
-            "the 24 keyword spellings. The second statement of the table \
-             above, and the anchor `editor/vscode/test/grammar.test.mjs` and \
-             `tests/forms.rs` both read",
+            "the 24 keyword spellings, and the anchor \
+             `editor/vscode/test/grammar.test.mjs` and `tests/forms.rs` both \
+             read as text. Still a second statement of the keyword rows above",
         ),
         sec(
-            "fn two_char_op(a: char, b: char) -> Option<Tok> {",
+            "macro_rules! punctuation {",
             Twice,
-            "the 12 two-character operators. The third statement",
+            "**the one statement of the punctuation table** since RFC-0125 \
+             §3 M6's operator slice: 36 rows, expanded into the two scanners, \
+             into the spelling `token_name_and_text` answers with, into the \
+             reverse lookup `parser::binop_text` reaches through, and into the \
+             list `tests/forms.rs` counts a corpus's operators against. It was \
+             three tables and nothing checked that they agreed",
         ),
         sec(
             "fn single_char_op(c: char) -> Option<Tok> {",
             Twice,
-            "the 24 one-character operators. The fourth",
+            "the second scanner the table expands into, the invocation itself \
+             — 36 rows — and the two readers below it",
         ),
         sec(
             "pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {",
@@ -823,11 +838,11 @@ fn the_parser_census_is_what_the_rfc_records() {
         ("parser.rs", "a desugar the parser states", 928, 7),
         ("parser.rs", "a table stated a second time", 786, 1),
         ("parser.rs", "recovery and the diagnostic sentences", 175, 2),
-        ("parser.rs", "shared machinery", 176, 1),
+        ("parser.rs", "shared machinery", 196, 1),
         ("parser.rs", "tests", 1920, 0),
         ("lexer.rs", "the grammar's own arm", 583, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
-        ("lexer.rs", "a table stated a second time", 484, 7),
+        ("lexer.rs", "a table stated a second time", 506, 7),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
         ("lexer.rs", "shared machinery", 147, 2),
         ("lexer.rs", "tests", 239, 0),

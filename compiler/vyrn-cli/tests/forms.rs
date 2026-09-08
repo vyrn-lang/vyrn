@@ -1033,7 +1033,7 @@ fn use_labels() -> Vec<String> {
     let mut out = forms();
     out.extend(declarations().iter().map(|d| format!("decl {d}")));
     out.extend(keywords().iter().map(|(w, _)| format!("tok {w}")));
-    let mut puncts: Vec<String> = punct_spellings()
+    let mut puncts: Vec<String> = vyrn_frontend::lexer::PUNCT_SPELLINGS
         .iter()
         .map(|p| format!("tok {p}"))
         .collect();
@@ -1042,32 +1042,6 @@ fn use_labels() -> Vec<String> {
     out.extend(puncts);
     out.extend(CONTEXTUAL_WORDS.iter().map(|w| format!("word {w}")));
     out.extend(SURFACE_DESUGARS.iter().map(|w| format!("surface {w}")));
-    out
-}
-
-/// Every punctuation spelling the lexer's `token_name_and_text` names.
-fn punct_spellings() -> Vec<String> {
-    let src = compiler_file("vyrn-frontend/src/lexer.rs");
-    let at = src
-        .find("pub fn token_name_and_text(")
-        .expect("`token_name_and_text` is gone — this test needs a new anchor");
-    let body = &src[at..];
-    let end = body.find("\n}\n").expect("the end of token_name_and_text");
-    let mut out = Vec::new();
-    for line in body[..end].lines() {
-        let t = line.trim();
-        let Some(rest) = t.strip_prefix("Tok::") else {
-            continue;
-        };
-        let Some(arg) = rest.split("=> p(\"").nth(1) else {
-            continue;
-        };
-        let Some((spelling, _)) = arg.split_once('"') else {
-            continue;
-        };
-        out.push(spelling.to_string());
-    }
-    assert!(out.len() > 30, "only {} punctuation rows", out.len());
     out
 }
 
