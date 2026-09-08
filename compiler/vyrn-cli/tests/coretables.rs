@@ -154,6 +154,9 @@ fn an_if_let_over_a_parameter_owes_no_release() {
 /// reclaims storage the lender's own caller still owns.
 #[test]
 fn a_lender_forwarded_through_an_aggregate_lends_still() {
+    // The refusal is the kernel's, reached through the slot `install` fills;
+    // nextest runs each test in its own process, so this one installs it too.
+    vyrn_lower::install();
     let src = "type R = { name: String }                fn pick(xs: Array<String>) -> String                { for x in xs { return x } return \"\" }                fn g(a: Array<String>) -> R { return R { name: pick(a) } }                fn main() -> Int64 { let arr: Array<String> = [\"a\" + \"b\"]                let r = g(arr) return r.name.byteLength }";
     let program = vyrn_frontend::load(src, "lend.vyrn", &Default::default(), &Fs);
     assert!(
