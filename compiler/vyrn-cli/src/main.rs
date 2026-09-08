@@ -628,27 +628,14 @@ fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
     }
 }
 
-/// Filesystem module resolver for multi-file programs (RFC-0010): resolved
+/// The filesystem module resolver for multi-file programs (RFC-0010): resolved
 /// specifiers are normalized slash-paths relative to the root file.
-struct FsResolver;
-
-impl vyrn_frontend::loader::ModuleResolver for FsResolver {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        remote::list_dir(resolved)
-    }
-    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        remote::list_dir_kinds(resolved)
-    }
-    fn gen_cache_get(&self, key: &str) -> Option<String> {
-        remote::gen_cache_get(key)
-    }
-    fn gen_cache_put(&self, key: &str, value: &str) {
-        remote::gen_cache_put(key, value)
-    }
-}
+///
+/// It is `vyrn_frontend::loader`'s, beside the trait it implements. The driver
+/// wrote it out, and so did seven test suites, the frontend's own move-check
+/// tests, its `lspbench` example and its contracts test — eleven statements of
+/// "read a file, list a directory, use the generation cache".
+use vyrn_frontend::loader::DiskResolver;
 
 /// The project context — the manifest, the lock, the caches, and the two roots a
 /// toolchain binary walks up to find — is [`vyrn_frontend::manifest`]. It used
@@ -840,7 +827,7 @@ fn why_cmd(args: &[String]) -> ExitCode {
         .filter(|r| !r.is_empty())
     {
         Some(declared) => declared,
-        None => vyrn_frontend::contracts::discovered_roles(&roots, &opts, &FsResolver),
+        None => vyrn_frontend::contracts::discovered_roles(&roots, &opts, &DiskResolver),
     };
     let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
         println!("{path}");
@@ -865,7 +852,7 @@ fn why_cmd(args: &[String]) -> ExitCode {
         .to_string_lossy()
         .replace('\\', "/");
     let Some(view) =
-        vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &FsResolver)
+        vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &DiskResolver)
     else {
         eprintln!(
             "error: cannot resolve contract `{}:{}`",
@@ -1644,22 +1631,25 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (graph, root_key) =
-        match vyrn_frontend::loader::capability_graph(&source, &artifact.entry, &opts, &FsResolver)
-        {
-            Ok(g) => g,
-            Err(diags) => {
-                eprintln!("error: cannot link artifact `{}`", artifact.name);
-                for d in diags.iter().take(3) {
-                    eprintln!(
-                        "  {}: {}",
-                        d.file.as_deref().unwrap_or(&artifact.entry),
-                        d.message
-                    );
-                }
-                return ExitCode::from(2);
+    let (graph, root_key) = match vyrn_frontend::loader::capability_graph(
+        &source,
+        &artifact.entry,
+        &opts,
+        &DiskResolver,
+    ) {
+        Ok(g) => g,
+        Err(diags) => {
+            eprintln!("error: cannot link artifact `{}`", artifact.name);
+            for d in diags.iter().take(3) {
+                eprintln!(
+                    "  {}: {}",
+                    d.file.as_deref().unwrap_or(&artifact.entry),
+                    d.message
+                );
             }
-        };
+            return ExitCode::from(2);
+        }
+    };
     let edges: Vec<(String, String)> = graph
         .iter()
         .flat_map(|(k, imports, _)| imports.iter().map(|t| (k.clone(), t.clone())))
@@ -2193,7 +2183,7 @@ fn deps(name: Option<&str>) -> ExitCode {
             }
         };
         let opts = load_options(root_key);
-        match vyrn_frontend::loader::module_graph(&source, root_key, &opts, &FsResolver) {
+        match vyrn_frontend::loader::module_graph(&source, root_key, &opts, &DiskResolver) {
             Ok(graph) => {
                 for (module, imports) in graph {
                     println!("{module}");

@@ -142,17 +142,11 @@
 //! placer found owed in every body, and `VYRN_KERNEL_TRACE=<fn>` prints that
 //! body's core.
 
+use vyrn_frontend::loader::DiskResolver;
+
 use std::path::PathBuf;
 
 use vyrn_frontend::ast::Program;
-
-struct Fs;
-
-impl vyrn_frontend::loader::ModuleResolver for Fs {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-}
 
 fn repo_root() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -168,7 +162,7 @@ fn load(path: &std::path::Path) -> Result<Program, String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    vyrn_frontend::load(&src, &root, &opts, &Fs).map_err(|d| {
+    vyrn_frontend::load(&src, &root, &opts, &DiskResolver).map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())

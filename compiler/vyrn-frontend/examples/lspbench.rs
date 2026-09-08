@@ -14,13 +14,7 @@
 //! checker — which is the editor's behaviour on an idle buffer, not on a
 //! keystroke.
 
-struct DiskResolver;
-
-impl vyrn_frontend::loader::ModuleResolver for DiskResolver {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-}
+use vyrn_frontend::loader::DiskResolver;
 
 fn main() {
     let std_root = std::env::var("VYRN_STD").unwrap_or_else(|_| "std".to_string());

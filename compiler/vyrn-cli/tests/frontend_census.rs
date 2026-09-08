@@ -108,8 +108,13 @@ fn loader_sections() -> Vec<Section> {
         sec(
             "pub struct MapResolver(pub HashMap<String, String>);",
             Shared,
-            "the in-memory resolver and the recording one RFC-0031's \
-             `moduleInterface` wraps a real resolver in",
+            "the three resolvers this crate ships: the in-memory one tests \
+             load a corpus through, the filesystem one every program that \
+             loads a project off a disk uses (it was written out in the \
+             driver, seven CLI suites, this crate's move-check tests, its \
+             `lspbench` example, its contracts test and the language server), \
+             and the recording one RFC-0031's `moduleInterface` wraps a real \
+             resolver in",
         ),
         sec(
             "pub(crate) fn normalize(path: &str) -> String {",
@@ -823,7 +828,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             15,
             0,
         ),
-        ("loader.rs", "shared machinery", 462, 0),
+        ("loader.rs", "shared machinery", 518, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2897, 0),
         ("symbols.rs", "a rule stated a second time", 272, 0),

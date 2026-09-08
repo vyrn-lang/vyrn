@@ -200,7 +200,7 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             {
                 return Ok(text.clone());
             }
-            return std::fs::read_to_string(resolved).map_err(|e| e.to_string());
+            return vyrn_frontend::loader::DiskResolver.read(resolved);
         }
         let dir = self
             .manifest_dir
@@ -230,47 +230,24 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
         })
     }
 
-    /// Generation-time `listDir` (RFC-0021): read the local directory. The
-    /// generator's inputs are local files, so this is a plain read-only listing.
+    /// Generation-time `listDir` (RFC-0021), the kinded listing (RFC-0119) and
+    /// the shared generator cache: all three are the disk's, so all three are
+    /// `DiskResolver`'s. The editor differs from a build in ONE answer — `read`,
+    /// which prefers an open buffer and refuses an unpinned remote — and it used
+    /// to write the other four out again. The cache is the same
+    /// `~/.vyrn/cache/gen` the driver writes (honouring `VYRN_GEN_CACHE_DIR`),
+    /// so a keystroke reuses a build's generation instead of re-running it.
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let entries = std::fs::read_dir(resolved)
-            .map_err(|_| vyrn_frontend::trap::io_at("listerr", resolved))?;
-        let mut names: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        Ok(names)
+        vyrn_frontend::loader::DiskResolver.list(resolved)
     }
-
-    /// The kinded listing (RFC-0119): a directory entry's name carries a
-    /// trailing `/`.
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let entries = std::fs::read_dir(resolved)
-            .map_err(|_| vyrn_frontend::trap::io_at("listerr", resolved))?;
-        let mut names: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    format!("{name}/")
-                } else {
-                    name
-                }
-            })
-            .collect();
-        names.sort();
-        Ok(names)
+        vyrn_frontend::loader::DiskResolver.list_kinds(resolved)
     }
-
-    /// Participate in the shared generator cache (RFC-0021) so per-keystroke
-    /// re-analysis reuses a build's generation instead of re-running it. Same
-    /// `~/.vyrn/cache/gen` the CLI writes (honors `VYRN_GEN_CACHE_DIR`).
     fn gen_cache_get(&self, key: &str) -> Option<String> {
-        vyrn_frontend::manifest::gen_cache_get(key)
+        vyrn_frontend::loader::DiskResolver.gen_cache_get(key)
     }
     fn gen_cache_put(&self, key: &str, value: &str) {
-        vyrn_frontend::manifest::gen_cache_put(key, value)
+        vyrn_frontend::loader::DiskResolver.gen_cache_put(key, value)
     }
 }
 

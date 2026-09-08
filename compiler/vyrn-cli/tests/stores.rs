@@ -18,17 +18,11 @@
 //! The corpus half of the same rule is `coretables` (every store in every
 //! example) and `residue` (what a wrong answer costs in blocks).
 
+use vyrn_frontend::loader::DiskResolver;
+
 mod common;
 
 use vyrn_frontend::ast::{Block, Stmt};
-
-struct Fs;
-
-impl vyrn_frontend::loader::ModuleResolver for Fs {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-}
 
 /// Load one source string, run the analysis with the placer installed, and
 /// hand back the program beside the core's answers.
@@ -45,7 +39,7 @@ fn analyze(src: &str) -> (vyrn_frontend::ast::Program, vyrn_frontend::own::Owner
         std_root: Some(std_root.join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    let program = vyrn_frontend::load(src, &root, &opts, &Fs)
+    let program = vyrn_frontend::load(src, &root, &opts, &DiskResolver)
         .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
     let _lowered = vyrn_lower::lower(&program);
     let own = vyrn_frontend::own::analyze(&program);

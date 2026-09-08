@@ -108,6 +108,8 @@
 //! and the differences it leaves are named on [`InstRule`], the way [`Rule`]
 //! names the type differences. What M2 measured there is in RFC-0101 §3 M2.
 
+use vyrn_frontend::loader::DiskResolver;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -115,16 +117,6 @@ use vyrn_codegen::observe::{self, Site};
 use vyrn_frontend::ast::{Expr, Program, Type, TypeDecl};
 use vyrn_frontend::types::{decl_map, mentions_param, resolve};
 use vyrn_lower::Node;
-
-/// A filesystem resolver, which is all an example needs: the corpus imports
-/// `std/` and its own siblings, and nothing here fetches.
-struct Fs;
-
-impl vyrn_frontend::loader::ModuleResolver for Fs {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-}
 
 /// Not `canonicalize`: on Windows that returns a `\\?\` verbatim path, and a
 /// verbatim std root resolves to a spec the loader cannot read — which it treats
@@ -145,7 +137,7 @@ fn load(path: &std::path::Path) -> Result<Program, String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    vyrn_frontend::load(&src, &root, &opts, &Fs).map_err(|d| {
+    vyrn_frontend::load(&src, &root, &opts, &DiskResolver).map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())
