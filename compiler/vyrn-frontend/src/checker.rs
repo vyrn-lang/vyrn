@@ -8358,7 +8358,16 @@ impl<'a> Checker<'a> {
                 match caps.and_then(|c| c.get(i)) {
                     Some(&Capability::Modify) => {
                         let concrete_pty = crate::types::substitute(pty, &subst);
-                        self.check_modify_arg(shown, i, arg, &atys[i], &concrete_pty, scope, line)?;
+                        self.check_modify_arg(
+                            shown,
+                            i,
+                            arg,
+                            args,
+                            &atys[i],
+                            &concrete_pty,
+                            scope,
+                            line,
+                        )?;
                     }
                     Some(&Capability::Consume) => {
                         self.region_consume_guard(shown, i, &atys[i], line)?
@@ -8473,7 +8482,7 @@ impl<'a> Checker<'a> {
             // full discipline checked in the shared helper.
             match caps.and_then(|c| c.get(i)) {
                 Some(&Capability::Modify) => {
-                    self.check_modify_arg(shown, i, arg, &aty, pty, scope, line)?
+                    self.check_modify_arg(shown, i, arg, args, &aty, pty, scope, line)?
                 }
                 Some(&Capability::Consume) => self.region_consume_guard(shown, i, &aty, line)?,
                 _ => {}
@@ -9251,20 +9260,51 @@ impl<'a> Checker<'a> {
 
     /// The call-site discipline for a `modify` parameter, shared by concrete
     /// and generic calls: the argument must be a *mutable variable* (not a
-    /// temporary), and its type must be EXACTLY the parameter type. Width
-    /// subtyping is unsound here: the callee may whole-reassign the parameter
-    /// (`n = Named { .. }`), and writing that back through a wider caller
-    /// record would silently drop the caller's extra fields.
+    /// temporary), its type must be EXACTLY the parameter type, and no other
+    /// argument of the same call may name it. Width subtyping is unsound here:
+    /// the callee may whole-reassign the parameter (`n = Named { .. }`), and
+    /// writing that back through a wider caller record would silently drop the
+    /// caller's extra fields.
+    ///
+    /// EXCLUSIVITY (RFC-0090) is the third of the three and it came here from
+    /// `movecheck::check_exclusive` (RFC-0125 §3 M3, row 23). `modify` is
+    /// exclusive in-place access: handing one place to a `modify` parameter
+    /// and to any other parameter of the same call gives the callee two names
+    /// for one value, and the callee was told it had one. It is a rule about
+    /// the CALL — the capabilities a declaration wrote against the arguments
+    /// a reader wrote — which is the question the other two ask, so the three
+    /// are stated together and the memory judgment states none of them.
     fn check_modify_arg(
         &self,
         fname: &str,
         i: usize,
         arg: &Expr,
+        args: &[Expr],
         aty: &Type,
         pty: &Type,
         scope: &Scope,
         line: usize,
     ) -> Result<(), Diagnostic> {
+        if let Some((root, path)) = crate::movecheck::place_path(arg) {
+            for (j, b) in args.iter().enumerate() {
+                if j != i && crate::movecheck::mentions(b, &root) {
+                    let mut d = cerr!(
+                        line,
+                        "`{path}` is passed to `{fname}` as `modify` and read again in the \
+                         same call — a `modify` borrow is exclusive"
+                    );
+                    d.message.push_str(&format!(
+                        "
+  fix: `{root}.copy()` for the second argument"
+                    ));
+                    d.message.push_str(
+                        "
+  fix: or split the call so the two accesses do not overlap",
+                    );
+                    return Err(d);
+                }
+            }
+        }
         match arg {
             Expr::Var { name: vn, .. } => {
                 let b = self

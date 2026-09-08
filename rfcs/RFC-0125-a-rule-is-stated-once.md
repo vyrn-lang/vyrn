@@ -15475,6 +15475,70 @@ censuses do not move.
 `compiler/vyrn-lower/src/core.rs` 6,109 to **6,207**. 258 lines out of the
 pass, 157 into the two that outlive it, and the rule is stated once.
 
+#### `modify` is exclusive, and the checker says so beside its two other rules (2026-09-09, `track-dt`)
+
+The census's third row, and the last refusal in `movecheck.rs`. RFC-0090:
+`f(modify a, .. a ..)` hands the callee two names for one value and the callee
+was told it had one.
+
+**It goes to the checker, not to the kernel.** The rule reads two things and
+neither is a memory fact: the CAPABILITIES a declaration wrote, and the
+ARGUMENTS a reader wrote. `checker.rs` already states two rules over exactly
+that pair, in one place — `check_modify_arg`, the call-site discipline for a
+`modify` parameter: the argument must be a `mut` variable, and its type must
+be exactly the parameter's. Exclusivity is the third, and it is now stated
+with them. The kernel was the wrong home for the same reason it was the right
+one for row 24: by the time the core has built the call, every argument but
+the `modify` one is a temporary of its own, and the kernel would have to
+rebuild "which places does this argument name" — a fact about the SOURCE that
+the checker still has in its hand.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over the 280 corpus roots | byte-identical, **0 lost / 0 gained** |
+| `tests/refusals` and `tests/unlicensed`, `vyrn check` | byte-identical, sentence and menu alike |
+| the same with `VYRN_NO_MOVECHECK=1` | **three lines gained**: `r23`'s sentence and its two `fix:` lines. The knob stands the move check aside and the checker is not the move check, so the row's kernel column is `Elsewhere` now, not `No` |
+
+**`movecheck.rs` states no refusal.** With `check_exclusive` gone the free
+`menu` had no caller, and the structural census's two refusal columns are
+empty: `Kind::Checker` **35 to 0**, `Kind::Menu` **13 to 0**. Every sentence
+the file used to give is given by the kernel, by the checker, or by the
+must-use judgment, and each is pinned by its census row.
+
+**Two findings the empty column leaves standing**, both `Kind::Shared` and
+both the next slice's:
+
+1. **`run(program, Want::Check).diags` is always empty.** `movecheck::refusals`
+   still runs a whole-program walk to collect it. It is not measurable —
+   `vyrn check site/app/docs.vyrn` is 690/693/721 ms plain against
+   695/704/732 ms with `VYRN_NO_MOVECHECK=1`, which is noise — so the deletion
+   is worth lines and not milliseconds. What it takes with it is
+   `MoveCheck::errors`, `check_accum`, `borrow_store_sites`, the `refusal`
+   string shim, `in_source_order`, `Run::diags` and the `Result<_, Diagnostic>`
+   on `block`, `stmt` and `expr`.
+2. **`Consumed` is write-only** (recorded in the slice above): four `insert`s,
+   twelve `or_insert`s, one `revive`, ten `clone`s, no read. 92 mentions of
+   `consumed`, threaded through the same five functions.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,127 to **4,077**;
+`compiler/vyrn-frontend/src/checker.rs` 15,386 to **15,426**. 50 out, 40 in.
+
+**The censuses.** The structural census: `Checker` **35 to 0**, `Menu` **13 to
+0**, shared machinery **2,992 to 2,990**; `Rows` and `Tests` do not move. Two
+anchors go with their sections (`fn check_exclusive`, `fn menu`), and both
+kinds' doc comments now say the column is empty, as `Kind::Kernel`'s has since
+M3. Row 23's kernel column `No` to **`Elsewhere`**. The checker census
+(`compiler/vyrn-cli/tests/checker_census.rs`): "a rule the checker states"
+**1,354 lines / 57 refusals to 1,385 / 58**, the typing judgment **3,393 to
+3,402** — the two call sites that pass the argument list — and
+`fn check_modify_arg`'s row in §3 M6's section table **51 lines / 4 refusals to
+82 / 5**. The kind table beside it is `track-cv`'s snapshot and already stood
+apart from the test's counts before this slice; the test is the pin. The form
+census, the surface census, `emitter_census`, `frontend_census` and
+`cli_census` do not move.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
@@ -17528,7 +17592,7 @@ is a surface problem, not a duplication problem.
 | `fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), Diagnostic>` | 27 | 3 | a rule the checker states | which named functions may become values (RFC-0037) |
 | `fn check_lambda_body_captures` | 18 | 1 | a rule the checker states | a lambda's capture discipline (RFC-0023) |
 | `fn captures_block` | 210 | 0 | one arm per form, type constructor or builtin | one arm per form again, collecting the names a lambda body captures |
-| `fn check_modify_arg` | 51 | 4 | a rule the checker states | the call-site discipline for a `modify` parameter |
+| `fn check_modify_arg` | 82 | 5 | a rule the checker states | the call-site discipline for a `modify` parameter: a `mut` variable, the exact parameter type, and no other argument of the same call naming it (RFC-0090's exclusivity, row 23) |
 | `fn unify` | 120 | 11 | the typing judgment | match a generic parameter type against a concrete argument and extend the substitution |
 | `fn check_construction` | 51 | 3 | the typing judgment | `TypeName(arg)`, and the constant folded through its predicate |
 | `fn shadows_here(&self, name: &str) -> bool` | 44 | 0 | shared machinery | the three scope queries: shadowing, lookup, and whether a name is module state |

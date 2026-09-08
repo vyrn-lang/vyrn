@@ -274,7 +274,10 @@ fn census() -> Vec<Row> {
             "RFC-0090",
             "`a` is passed to `bump` as `modify` and read again in the same call — a `modify` \
              borrow is exclusive",
-            Kernel::No,
+            // The CHECKER states it now, beside the other two rules about a
+            // `modify` argument (`check_modify_arg`), so the knob that stands
+            // the move check aside does not reach it.
+            Kernel::Elsewhere,
         ),
         row(
             "r24_capture_that_outlives_the_call.vyrn",
@@ -2563,12 +2566,23 @@ enum Kind {
     Kernel,
     /// A refusal rule only the checker gives. The census above says `nothing`
     /// or `its own words`, so nothing may take this yet.
+    ///
+    /// **The column is empty** (RFC-0125 §3 M3). The three rules that stood
+    /// here left in one track: the `drop` of a binding with a hole and the
+    /// escaping closure's capture to the kernel, `modify` exclusivity to
+    /// `checker.rs`, beside the two other rules about a `modify` argument.
+    /// This file states no refusal at all, and the kind stays so one that
+    /// reappears is classified rather than lost.
     Checker,
     /// Placement rows for the engines: what `own.rs` reads and the plan
     /// carries. It is not a rule, and the kernel does not replace it — the
     /// own-side deletion track does.
     Rows,
     /// A `fix:` menu. Surface knowledge the kernel has no source for.
+    ///
+    /// **The column is empty** too, and for the same reason: a menu belongs to
+    /// a refusal, and there is none here to belong to. `kernel::menu` and
+    /// `core::BorrowKind::fixes` are where the ways out are written now.
     Menu,
     /// Shared machinery: the walk itself, the scope stacks, the path algebra,
     /// the entry points, the recorded measurements.
@@ -2766,12 +2780,6 @@ fn sections() -> Vec<Section> {
             "a lambda's captures, recorded for the enclosing block",
         ),
         sec(
-            "    fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) \
-             -> Result<(), Diagnostic> {",
-            Checker,
-            "a `modify` borrow is exclusive (row 23)",
-        ),
-        sec(
             "    fn expr(",
             Shared,
             "the walk over expressions: the same traversal does both jobs",
@@ -2803,11 +2811,6 @@ fn sections() -> Vec<Section> {
             "pub fn element_path(e: &Expr) -> Option<(String, String)> {",
             Shared,
             "the place spellings every rule above compares",
-        ),
-        sec(
-            "fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic {",
-            Menu,
-            "one diagnostic with its menu of fixes",
         ),
         sec(
             "fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>) {",
@@ -2925,10 +2928,10 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("a rule the kernel now gives", 0),
-        ("a rule only the checker gives", 35),
+        ("a rule only the checker gives", 0),
         ("placement rows for the engines", 494),
-        ("a fix menu", 13),
-        ("shared machinery", 2992),
+        ("a fix menu", 0),
+        ("shared machinery", 2990),
         ("tests", 593),
     ];
     assert_eq!(got, want, "the structural census has moved");

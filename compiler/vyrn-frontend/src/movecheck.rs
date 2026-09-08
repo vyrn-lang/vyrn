@@ -2615,41 +2615,6 @@ impl MoveCheck<'_> {
         }
     }
 
-    /// Exclusivity: `f(modify a, .. a ..)` is refused.
-    ///
-    /// `modify` is exclusive in-place access. Handing the same place to a
-    /// `modify` parameter and to any other parameter of the same call gives the
-    /// callee two names for one value, and the callee was told it had one.
-    fn check_exclusive(&self, callee: &str, args: &[Expr], line: usize) -> Result<(), Diagnostic> {
-        let Some(caps) = self.caps.get(callee) else {
-            return Ok(());
-        };
-        for (i, a) in args.iter().enumerate() {
-            if caps.get(i) != Some(&Capability::Modify) {
-                continue;
-            }
-            let Some((root, path)) = place_path(a) else {
-                continue;
-            };
-            for (j, b) in args.iter().enumerate() {
-                if i != j && mentions(b, &root) {
-                    return Err(menu(
-                        line,
-                        format!(
-                            "`{path}` is passed to `{callee}` as `modify` and read again in the \
-                             same call — a `modify` borrow is exclusive"
-                        ),
-                        vec![
-                            format!("`{root}.copy()` for the second argument"),
-                            "or split the call so the two accesses do not overlap".to_string(),
-                        ],
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn expr(
         &self,
         e: &Expr,
@@ -2846,7 +2811,6 @@ impl MoveCheck<'_> {
                 Ok(())
             }
             Expr::Call { name, args, line } => {
-                self.check_exclusive(name, args, *line)?;
                 let caps = self.caps.get(name);
                 // Round eighteen's soundness screen, re-anchored in round
                 // fifty-six: the question is whether the enclosing function's
@@ -3061,7 +3025,6 @@ impl MoveCheck<'_> {
             // `spawn f(args)` moves arguments exactly like a direct call: a
             // `consume` parameter takes ownership across the task boundary.
             Expr::Spawn { name, args, line } => {
-                self.check_exclusive(name, args, *line)?;
                 let caps = self.caps.get(name);
                 for (i, arg) in args.iter().enumerate() {
                     self.site("arg", *line, arg, None);
@@ -3178,8 +3141,8 @@ pub fn mentions_place(e: &Expr, base: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The AST predicates the must-use judgment reads, and `check_exclusive` with
-// it (RFC-0125 §3 M3, the obligation slice).
+// The AST predicates the must-use judgment reads, and the checker's
+// exclusivity rule with it (RFC-0125 §3 M3, the obligation slice and row 23).
 //
 // They were `mod linear`'s, and they are not the must-use RULE: they answer
 // what an expression NAMES and which of its paths name it, which is a question
@@ -3462,19 +3425,6 @@ fn root_var(e: &Expr) -> (&str, usize) {
         Expr::Var { name, line } => (name, *line),
         _ => ("", 0),
     }
-}
-
-/// One diagnostic with its menu of fixes (RFC-0087 U2).
-///
-/// Every rule-1/2/3 error names the ways out rather than only the problem. The
-/// shape is fixed — the offending line, then one `fix:` per way out — so the
-/// editor, `vyrn check` and a future `vyrn fix` all read the same thing.
-fn menu(line: usize, message: String, fixes: Vec<String>) -> Diagnostic {
-    let mut s = message;
-    for f in fixes {
-        s.push_str(&format!("\n  fix: {f}"));
-    }
-    Diagnostic::error(line, 0, "movecheck", s)
 }
 
 /// The payload names a `match` pattern binds.

@@ -497,7 +497,7 @@ fn sections() -> Vec<Section> {
         sec(
             "fn check_modify_arg(",
             Refusal,
-            "the call-site discipline for a `modify` parameter",
+            "the call-site discipline for a `modify` parameter: a `mut`              variable, the exact parameter type, and no other argument of the              same call naming it (RFC-0090's exclusivity, RFC-0125 §3 M3, row              23)",
         ),
         sec(
             "fn unify(",
@@ -736,8 +736,8 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3393, 140),
-        ("a rule the checker states", 1354, 57),
+        ("the typing judgment", 3402, 140),
+        ("a rule the checker states", 1385, 58),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 3418, 157),
         ("shared machinery", 2118, 29),
