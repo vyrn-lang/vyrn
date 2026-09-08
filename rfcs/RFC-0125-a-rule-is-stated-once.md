@@ -17144,6 +17144,15 @@ comment now names the bound rather than the advice its refusal used to give.
 `checker.rs`, `prelude.rs`, the three examples and the censuses are the only
 things these two slices touch.
 
+The licence was measured once more after the gates, and the corpus is larger
+than the two tables above say: testsweep lifts its programs out of the test
+SOURCES, and the four unit tests these slices add are themselves programs. The
+lift is 2,045 after them where it was 1,991 before, so the corpus is 2,422. The
+answer is the same one — 1,137 accepted under both binaries, 1,285 refused,
+2,419 byte-identical, and the same three fixtures differing. Each slice's own
+table above is its own measurement, against the corpus as it stood when the
+slice was taken.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
