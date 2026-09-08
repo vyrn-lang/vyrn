@@ -7946,7 +7946,7 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 6,633 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 6,671 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
@@ -9589,6 +9589,83 @@ the driver.** The interleave itself is 318 lines against the 705 the three
 slices before it added, and it is the first of them that moves a number an arm's
 deletion is read off. Nothing can be deleted until one of those numbers reaches
 zero, and the nearest is `Stmt::If` at 38,397.
+
+**The release half of the frame clause (2026-09-09, `track-dw`).** The
+measurement two slices back counted the screen's three clauses and put the
+frame clause first at **8,362** refusals: "a placed release, an aggregate
+destination, or a lambda of its own ... release PLACEMENT is the emitter's".
+That count is a per-BODY count, and it stopped being one when the unit became
+the statement. This slice asks the clause per statement.
+
+**What it is, read again.** A placed release is a row (`St::Drop`, `St::Row`)
+that the statement screen already refuses, so no run can take one by accident.
+What a frame with a placed release actually costs is the emission AROUND the
+statement: `Fn_::emit_releases` walks the plan's steps at four exits, and it is
+keyed by the exit's own node. So the clause is not "this frame places a
+release"; it is "the placement keyed a release AT this statement". Every other
+statement of the same frame is free, and the block's own fall-through releases
+still stand where they did, because `Fn_::block` is what drives the walk now
+and it still ends with its own `emit_releases`.
+
+**Three exceptions, and each is a byte the corpus counted.**
+
+1. An aggregate result travels through `dest` and a stream cursor is a release
+   at a function exit that no plan row names, so both belong to a `return` and
+   to nothing else. The clause moves onto `Stmt::Return`.
+2. A `where` type is a `check` the arm emits and the row does not, and the
+   clause for it has to read the type as WRITTEN. `autovalidate.vyrn` lost 16
+   bytes of `let a: Age = 25`: the arm parks the value in a temporary and calls
+   `Age`'s check, and `Age` resolved to `Int64` is a scalar the screen was
+   admitting. So the screen now asks `core_scalar` of the annotation, of the
+   type the frame holds a shared name at, of the declared return type at a
+   `return`, and of what the arm would bind — four readings of one rule, each at
+   the place the type enters the run unresolved.
+3. An `if` is the one form of the four whose run is a SUBTREE, so this clause
+   cannot be read off its own node: a `return` inside the branch carries the
+   release the plan keyed at IT, and `htmltree.vyrn` lost seven bytes of one. A
+   frame with any placed release keeps its `if`s, and what would lift that is
+   the driver placing the release itself.
+
+**The count.**
+
+| form | the arm before | the rows before | the arm after | the rows after |
+|---|---|---|---|---|
+| `Stmt::Let` | 56,044 | 19,296 | **39,759** | **35,581** |
+| `Stmt::Assign` | 35,558 | 17,598 | **16,307** | **36,339** |
+| `Stmt::Return` | 21,814 | 10,072 | **21,939** | **9,947** |
+| `Stmt::If` | 38,397 | 5,468 | **37,542** | **6,323** |
+
+**88,190 of 258,693 statements** come from the core's rows, which is 34.1 per
+cent against 20.2. `Stmt::Assign` is the nearest an arm has come to having no
+reader: **69.0 per cent** of its occurrences are the rows'. `Stmt::Return`
+falls by 125 and that is the `where`-type clause of the same slice, which is a
+correctness fix rather than a loss. The whole-body count is the same 986, and
+every emitted byte is the same: `VYRN_WASM_MANIFEST=check` green with
+`rfcs/census/wasm-sha256.tsv` untouched, and `coredrive`'s three differing
+programs still the three the driver slice explained, at the same byte counts.
+
+**What is left of the frame clause, and what the next slice is.** Two halves
+remain and neither is a missing row. The AGGREGATE destination is a layout
+question and §2.3 leaves placement to the emitter, so it stays where it is. The
+`if` over a frame with a placed release is the driver placing the release
+itself: `St::Drop` and `St::Row` in `Fn_::core_stmts`, walking the same
+`Fn_::rel_slots` the arm walks, at the exits the rows already name. That is one
+arm of the driver and it is what unblocks the `if` inside a releasing frame.
+
+Beside it stands the same list the measurement left: the three rows `St::Do`,
+`St::Loop` and `St::Switch` each carry a line and no site, so an expression
+statement, a `while`, a `for` and a `match` name no run in the map and their
+arms are at zero. Three fields, and four forms move off the floor.
+
+**The censuses.** `direct.rs` is **17,435 lines before and 17,473 after** — 38
+added, all in the screen. `core.rs` does not move: the clause is the emitter's
+own, which is the whole of this slice's argument. The emitter census's mapping
+kind moves **6,633 → 6,671 lines** with the instruction count unmoved at 596,
+and the read class `both, for two questions` **7,333 → 7,371 lines** with its
+form count **97 → 99**. RFC-0127 §3's form census rises **1,265 → 1,267**:
+`Stmt::Return` 6 → 7 in `wasm` and `Stmt::If` 4 → 5, which are the two
+exceptions above. RFC-0126 §3's surface census, `coretables`, `refusals`,
+`checker_census`, `lowered` and `lowered_dump` are unmoved.
 
 ### M4 — the runtime in Vyrn
 

@@ -16402,14 +16402,37 @@ impl<'p> Fn_<'_, 'p> {
     /// name the run names is one this walk reads. The STATEMENT screen:
     /// [`Fn_::core_readable`], unchanged.
     fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
-        // A stream cursor is a release at a function exit that no plan row
-        // names ([`Fn_::emit_releases`] walks `cursors` beside the steps), so
-        // it is the frame clause too: `streamlazy.vyrn` lost 51 bytes of one
-        // when the rows took its `return`.
-        if !self.placed.is_empty() || self.dest.is_some() || !self.cursors.is_empty() {
+        let at = s as *const Stmt as usize;
+        // THE FRAME CLAUSE, per statement. It was per BODY until the release
+        // half of it moved here: a frame with one placed release refused every
+        // statement it had, which is 8,362 of them. What a run may not take is
+        // a statement the placement keyed a release AT — the arm emits those
+        // through [`Fn_::emit_releases`] and the rows state them as `St::Drop`
+        // and `St::Row`, which [`Fn_::core_readable`] refuses anyway. Every
+        // other statement of the same frame is free, and the block's own
+        // fall-through releases still stand where they did, because
+        // [`Fn_::block`] is what drives the walk now.
+        let keyed = |node: usize| self.placed.keys().any(|(_, k)| *k == node);
+        if keyed(at) {
             return None;
         }
-        let run = self.core_at.get(&(s as *const Stmt as usize))?;
+        match s {
+            // An aggregate result travels through `dest` and a stream cursor is
+            // a release at a function exit that no plan row names, so both are
+            // the exit's business and neither is any other statement's:
+            // `streamlazy.vyrn` lost 51 bytes of a cursor when the rows took
+            // its `return`.
+            Stmt::Return { .. } if self.dest.is_some() || !self.cursors.is_empty() => return None,
+            // An `if` is the one form of the four whose run is a SUBTREE, so
+            // the clause cannot be read off its own node: a `return` inside
+            // the branch carries the release the plan keyed at IT, and
+            // `htmltree.vyrn` lost seven bytes of one. A frame with any placed
+            // release keeps its `if`s until the row for a placed release is
+            // the driver's own, which is the next slice.
+            Stmt::If { .. } if !self.placed.is_empty() => return None,
+            _ => {}
+        }
+        let run = self.core_at.get(&at)?;
         // A node is an ADDRESS. The row's FORM and the name it binds are
         // checked against the statement's, so a row is never read as a
         // statement it did not come from.
@@ -16424,7 +16447,13 @@ impl<'p> Fn_<'_, 'p> {
                 // instructions for it: `simd.vyrn`'s `a / b` on two `Float32`
                 // widens to `Float64` in the arm and stays single in the row.
                 if let Some(t) = ty {
-                    if self.cx.resolve(t) != self.cx.resolve(&body.names[*n as usize].ty) {
+                    // As WRITTEN, not resolved: `let a: Age = 25` is a `where`
+                    // type, the arm parks the value in a temporary and calls
+                    // its check, and `Age` resolved to `Int64` is the flow that
+                    // does not (M2d). The row states no check.
+                    if !core_scalar(t)
+                        || self.cx.resolve(t) != self.cx.resolve(&body.names[*n as usize].ty)
+                    {
                         return None;
                     }
                     annotated = Some(*n);
@@ -16437,12 +16466,14 @@ impl<'p> Fn_<'_, 'p> {
                     ..
                 },
             ) if named(n, name) => {}
-            (Stmt::Return { line, .. }, St::Return { line: at, .. }) if line == at => {}
+            // The DECLARED return type, for the same reason: a function
+            // returning `Age` validates at its `return` and the row does not.
+            (Stmt::Return { line, .. }, St::Return { line: at, .. })
+                if line == at && core_scalar(&self.ret_ty) => {}
             // RFC-0114 Rule N's edge releases are the plan's rows at the JOIN,
             // and the core states them as drops inside the branch — which the
             // statement screen refuses. An `if` that owes one is the arm's.
-            (Stmt::If { .. }, St::If { .. })
-                if self.cx.edge_rows(s as *const Stmt as usize).is_empty() => {}
+            (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
             _ => return None,
         }
         // Every OTHER binding of the run: the row types it by its destination
@@ -16463,6 +16494,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             let info = &body.names[n as usize];
             let want = self.core_arm_ty(body, rhs)?;
+            if !core_scalar(&want) {
+                return None;
+            }
             let got = self.cx.resolve(&info.ty);
             // A truth value is the one result an operator states and its
             // operands do not.
@@ -16496,8 +16530,12 @@ impl<'p> Fn_<'_, 'p> {
             let (_, ty) = self.core_place(&self.core_w, body, *n)?;
             // And the two walks have to agree about the type of a name they
             // share: `stringops.vyrn` compared two bytes at byte width from the
-            // row and at `Int64` from the frame, for the same source.
-            if self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty) {
+            // row and at `Int64` from the frame, for the same source. The
+            // frame's answer is as DECLARED, so a `where` type is refused here
+            // as it is at a `let`.
+            if !core_scalar(&ty)
+                || self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty)
+            {
                 return None;
             }
         }
