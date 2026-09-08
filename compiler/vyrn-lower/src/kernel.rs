@@ -1305,6 +1305,32 @@ impl<'b> Kernel<'b> {
             let state = self.holes_owned(st, n);
             // Every place that left must be under a hole the row skips.
             if let Some(h) = state.iter().find(|h| !holes.iter().any(|r| covers(r, h))) {
+                // A `drop` a reader WROTE is worded as the reader wrote it,
+                // with the two ways out (RFC-0125 §3 M3, row 22): `drop`
+                // reclaims storage by type and cannot be told to skip the
+                // places a take handed away, so the spelling is refused and
+                // the menu names the write-back and the deletion. A release
+                // this pass placed has no spelling in the program, so it is
+                // worded as a release — the same distinction `self.by` draws
+                // one refusal above.
+                if self.by == "`drop`" {
+                    let (s, l) = (self.src(n), self.hole_line(st, n, h));
+                    return self.refuse(menu(
+                        format!(
+                            "`{s}` may not be dropped — `{s}{h}` was taken out of it on \
+                             line {l}, and `drop` releases the whole binding"
+                        ),
+                        vec![
+                            format!(
+                                "write `{s}{h}` back before the `drop`, so the binding is \
+                                 whole again"
+                            ),
+                            "delete the `drop` — the parts still here are released when the \
+                             block exits"
+                                .to_string(),
+                        ],
+                    ));
+                }
                 return self.refuse(format!(
                     "{} is released whole although a `consume` took `{h}` out of it",
                     self.info(n)

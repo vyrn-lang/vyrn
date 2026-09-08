@@ -34,8 +34,8 @@
 //!     is owed here, and the close-out's attribution is corrected.
 //!
 //! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27 and 34,
-//! RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two must
+//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27, 34 and
+//! 22, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two must
 //! still agree. The row is what stops the sentence moving after the deletion,
 //! so it stays in the census.
 //!
@@ -262,8 +262,10 @@ fn census() -> Vec<Row> {
              releases the whole binding",
             // The kernel gives it too since the walk's deletion (RFC-0125 §3
             // M3): it used to read a record literal of literals as static
-            // data and so never judged the `drop`.
-            Kernel::Other("is released whole although a `consume` took `.name` out of it"),
+            // data and so never judged the `drop`. It gives it in these words
+            // since the drop-hole slice, which moved the sentence and its menu
+            // to `Kernel::drop` and took the checker's copy away.
+            Kernel::Same,
         ),
         row(
             "r23_modify_is_exclusive.vyrn",
@@ -2936,7 +2938,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 126),
         ("placement rows for the engines", 533),
         ("a fix menu", 37),
-        ("shared machinery", 3122),
+        ("shared machinery", 3096),
         ("tests", 593),
     ];
     assert_eq!(got, want, "the structural census has moved");

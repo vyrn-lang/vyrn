@@ -2679,44 +2679,18 @@ impl MoveCheck<'_> {
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
             Stmt::Drop { name, line } => {
-                // Two of this statement's three refusals have LEFT (RFC-0125
-                // §3 M3, rows 20 and 21): a `drop` of what a take already took,
-                // and a `drop` of a borrow. The kernel states both, in these
-                // words and at this line, and the accumulation driver puts them
-                // beside whatever else the file earns — which is what the two
-                // rows waited on, because the one program of the corpus that
-                // breaks either of them, `examples/mustuse_abandoned.vyrn`,
-                // breaks a must-use obligation as well.
-                //
-                // A PARTIAL take left a hole in the binding (RFC-0093), and the
-                // kernel accepts that program. The taken place belongs to
-                // whoever received it, and `drop`
-                // reclaims storage BY TYPE — it cannot be told to skip the
-                // places a take handed away. Dropping here would free what
-                // the receiver still holds, so the spelling is refused.
-                if let Some((path, c)) = consumed
-                    .overlapping(name)
-                    .find(|(k, c)| k.as_str() != name && c.hole)
-                {
-                    return Err(menu(
-                        *line,
-                        format!(
-                            "`{name}` may not be dropped — `{path}` was taken out of it on \
-                             line {}, and `drop` releases the whole binding",
-                            c.line
-                        ),
-                        vec![
-                            format!(
-                                "write `{path}` back before the `drop`, so the binding is \
-                                 whole again"
-                            ),
-                            format!(
-                                "delete the `drop` — the parts still here are released when \
-                                 the block exits"
-                            ),
-                        ],
-                    ));
-                }
+                // All THREE of this statement's refusals have left (RFC-0125
+                // §3 M3, rows 20, 21 and 22): a `drop` of what a take already
+                // took, a `drop` of a borrow, and a `drop` of a binding a take
+                // left a hole in. The kernel states all three, in these words
+                // and at this line, and the accumulation driver puts them
+                // beside whatever else the file earns — which is what the
+                // first two rows waited on, because the one program of the
+                // corpus that breaks either of them,
+                // `examples/mustuse_abandoned.vyrn`, breaks a must-use
+                // obligation as well. What is left here is the record: a
+                // `drop` consumes the binding, so a use after it is a
+                // use-after-drop for the walk's own table.
                 consumed.insert(
                     name.clone(),
                     Consumption {

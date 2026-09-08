@@ -15291,6 +15291,105 @@ inside `Builder::arg_released`. Nothing else in the file, and nothing in
 call site in `lower_with`.
 
 
+#### The census of what only `movecheck` refuses (2026-09-08, `track-dt`)
+
+`movecheck.rs` is 4,411 lines and states **three** refusals. That is the whole
+of what §2.7's delete key waits on, and this is each one with the pass that
+would have to say it instead.
+
+**The three sites.** Every `menu(..)` in the file, and the one `cerr!`-shaped
+`Err` beside them:
+
+| the site | the sentence | the rule | who else states it | the census row |
+|---|---|---|---|---|
+| `Stmt::Drop`, the hole screen | "`p` may not be dropped — `p.name` was taken out of it on line 17, and `drop` releases the whole binding" | RFC-0093: `drop` reclaims by TYPE and cannot skip what a take handed away | the KERNEL, `Kernel::drop`'s hole screen — in words of its own until the slice below | `r22` |
+| `MoveCheck::check_exclusive` | "`a` is passed to `bump` as `modify` and read again in the same call — a `modify` borrow is exclusive" | RFC-0090: mutation is exclusive | **nobody**. `checker.rs` has `check_modify_arg`, which asks that the argument be a `mut` variable of exactly the parameter's type, and asks nothing about the other arguments | `r23` |
+| `MoveCheck::check_capture` | "`s` may not be captured by a closure that outlives this call — it is a `read` parameter" | RFC-0037: a stored closure is a value, and a borrow inside one has no lifetime | **nobody**. `checker.rs`'s `check_lambda_body_captures` is RFC-0023's discipline — a capture may not be assigned, dropped or consumed — and says nothing about a borrow | `r24` |
+
+`Kind::Checker`'s 126 lines are the last two of these and `enum Borrow`, whose
+words both of them quote. `Kind::Menu`'s 37 are `Borrow::fixes` and the free
+`menu`, which the same two read.
+
+**The corpus, run twice.** Every row of `tests/refusals` and `tests/unlicensed`
+— 34 census programs and 9 counterexamples — under `vyrn check` and under
+`VYRN_NO_MOVECHECK=1 vyrn check`:
+
+| | rows |
+|---|---|
+| refused by both | **41** |
+| refused by the checker alone | **2** — `r23_modify_is_exclusive`, `r24_capture_that_outlives_the_call` |
+| refused by the kernel alone | 0 |
+
+So the file's deletion is two rules wide. The ranked list:
+
+1. **`r22`, the `drop` of a binding with a hole.** The kernel already refuses
+   the program at the same line; only the wording and the menu were the
+   checker's. Taken by the slice below.
+2. **`r24`, an escaping closure's borrowed capture.** The core builds the
+   closure as `St::Let(t, Rhs::Prim(Op::Closure, caps, ..))` with the captures
+   as operands, and `NameInfo::borrow` says which of them is a borrow. What the
+   kernel does not have is the ESCAPE: whether the closure value is returned,
+   stored, or handed to a parameter that may keep it. It is a forward question
+   and the kernel walks forward, so the row is stated at the escape and worded
+   at the lambda's line.
+3. **`r23`, `modify` exclusivity.** The core's `Rhs::Call` already carries a
+   `Capability` per argument, so the `modify` half is there. The other half is
+   not: the checker asks `mentions(other_arg, root)` over the SOURCE, and the
+   core has hoisted every argument into a name of its own, so the kernel would
+   need the roots a temporary's defining `Rhs` reads — a walk over the body's
+   own definitions, which is a fact and not a rule.
+
+**One rule the checker states and does not reach.** `Checker::captures_expr`
+tiles the expression tree by hand — `Call`, `Spawn`, `TryConstruct`,
+`ArrayLit`, `Unary`, `Try`, `Field`, `Binary`, `Match`, `IfExpr`, `StructLit`,
+`Lambda` — and falls to `_ => Ok(())` for the rest. Two forms fall through:
+`Expr::MapLit` and `Expr::Consume`. A `consume` of a captured binding inside a
+map literal is silent for RFC-0023's rule, and the same shape inside an array
+literal is refused. The program is refused all the same — the KERNEL says
+"`s` may not be passed to a `consume` parameter via `take(..)` — it is a
+captured binding" — so nothing is accepted that should not be; what is lost is
+the checker's own sentence. The fix is two arms and it is `checker.rs`'s, not
+this track's.
+
+
+#### The `drop` of a binding with a hole is the kernel's sentence (2026-09-08, `track-dt`)
+
+The census's first row. `Kernel::drop` refuses the program already and the
+placer's own wording is what a reader got: "`p` (line 16) is released whole
+although a `consume` took `.name` out of it". The checker's is the one that
+names the statement the reader wrote and the two ways out of it. So the
+sentence moves rather than the rule: `Kernel::drop`'s hole screen asks
+`self.by`, which is `` `drop` `` for a `drop` a reader wrote and something else
+for a release this pass placed — the same distinction the refusal one line
+above it already draws — and words the reader's case as the checker worded it,
+menu and all.
+
+**The licence.** Both corpora, whole stderr, plain and with the checker stood
+aside:
+
+| gate | result |
+|---|---|
+| the whole-stderr `vyrn check` over the 280 corpus roots under `examples/`, `std/`, `site/` and `site/app/` | byte-identical, **0 lost / 0 gained** |
+| the same over `tests/refusals` and `tests/unlicensed`, `vyrn check` | byte-identical |
+| the same with `VYRN_NO_MOVECHECK=1` | **one line moves**: `r22`'s kernel sentence becomes the checker's, and its two `fix:` lines appear. Nothing else, in either corpus |
+
+Every refused program stays refused, at the same file and line. The one
+sentence that changes changes TOWARD the checker's, which is why the census
+row can say `Kernel::Same` afterwards instead of `Kernel::Other`.
+
+**The censuses.** `compiler/vyrn-cli/tests/refusals.rs`: row 22's kernel column
+`Other` to **`Same`**, and the doc comment's list of rows whose site has left
+the file gains 22. The structural census: shared machinery **3,122 to 3,096**;
+`Kernel`, `Checker`, `Rows`, `Menu` and `Tests` do not move — the deleted
+screen sat inside `fn stmt`, which is the walk. RFC-0127 §3's form census does
+not move: the `Stmt::Drop` arm is still there and still records the
+consumption. `emitter_census`, `surface`, `checker_census`, `frontend_census`
+and `cli_census` are unmoved.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,411 to **4,385**;
+`compiler/vyrn-lower/src/kernel.rs` 2,591 to **2,617**. Net 0, and the rule is
+stated once.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
