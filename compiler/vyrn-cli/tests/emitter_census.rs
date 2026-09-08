@@ -262,10 +262,12 @@ fn sections() -> Vec<Section> {
             "fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {",
             Decision,
             "what releasing a type MEANS, derived here from the type's shape: a \
-             239-line recursive walk over records, elements, payloads and \
-             buffers. §2.3 says a drop is a call. Its home is a release function \
-             per type — monomorphised like any other, emitted once instead of at \
-             every drop site",
+             recursive walk over records, elements, payloads and buffers. §2.3 \
+             says a drop is a call, and since the two-shape-walks slice it IS \
+             one — `rel_at` emits a call and this walk is that function's body, \
+             written once per type. What is still filed here is the SHAPE, \
+             because every step of it is a byte offset and a byte offset is \
+             `layout.rs`'s: no pass above this crate can state it",
         ),
         sec(
             "fn addr_local(&mut self, b: &mut Frame, p: Place, off: u32) -> u32 {",
@@ -445,8 +447,8 @@ fn sections() -> Vec<Section> {
             "fn owns_heap(&self, ty: &Type) -> bool {",
             Decision,
             "the deep-copy family: what copying a type MEANS, derived here from \
-             its shape, in the same 200-line recursive-walk shape as the release \
-             above. A copy is a call the core should name",
+             its shape, in the same recursive-walk shape as the release above — \
+             and a call at the site for the same reason, one body per type",
         ),
         sec(
             "fn copy_word(",
@@ -682,13 +684,13 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 5764, 573),
-        ("a decision §2.3 says it must not make", 2211, 352),
+        ("the mapping §2.3 names", 5765, 573),
+        ("a decision §2.3 says it must not make", 2289, 356),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
         ("the wasm format", 334, 0),
-        ("shared machinery", 2339, 77),
-        ("tests", 328, 0),
+        ("shared machinery", 2415, 77),
+        ("tests", 329, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
     assert_eq!(

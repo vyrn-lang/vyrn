@@ -473,6 +473,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         fnvals: RefCell::new(Vec::new()),
         fnval_copy: 0,
         dispatch: RefCell::new(Dispatch::default()),
+        shapes: RefCell::new(Shapes::default()),
         globals: HashMap::new(),
         gappend: HashMap::new(),
         externs,
@@ -668,6 +669,25 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
                 }
                 Err(e) => return Err(e),
             }
+            continue;
+        }
+        // The release and the copy of a type, one body each (RFC-0125 §3 M3,
+        // the two shape walks). They are drained before the dispatchers and
+        // after the instances for the same reason the instances are drained
+        // this way: a shape body reaches a declared `release`, which is an
+        // ordinary call and may be a generic one, so writing it can put an
+        // instance on the list this loop has just read to the end. The
+        // substitution is EMPTY here — every shape's type was substituted at
+        // the site that asked for it.
+        let sh = {
+            let s = cx.shapes.borrow();
+            s.todo.get(s.done).cloned()
+        };
+        if let Some((index, (rel, ty, holes), line)) = sh {
+            cx.subst = HashMap::new();
+            let body = lower_shape(&mut m, &cx, rel, &ty, &holes, line)?;
+            m.fill(index, body);
+            cx.shapes.borrow_mut().done += 1;
             continue;
         }
         // A dispatcher's body is the one thing that cannot be written when its
@@ -1184,6 +1204,33 @@ struct Dispatch {
     done: usize,
 }
 
+/// The release and the copy of one type, each as a function of its own —
+/// RFC-0125 §2.3's "`drop` to a call" (§3 M3, the two shape walks).
+///
+/// The shape of a release is the TYPE: which fields, which elements, which
+/// payload slot under which tag. Nothing above this file can state it, because
+/// every step of it is a byte offset and a byte offset is [`crate::layout`]'s.
+/// What §2.3 asks for is the other half — that a drop SITE emit a call — and
+/// that is what this holds: one body per type, written once, called wherever a
+/// release or a copy of that type is reached.
+#[derive(Default)]
+struct Shapes {
+    /// `(a release rather than a copy, the substituted type, the take holes)`
+    /// → the function's index. A linear scan because [`Type`] is `Eq` and not
+    /// `Hash`, and a module has tens of these.
+    known: Vec<(ShapeKey, u32)>,
+    /// The bodies still to write, and how many of them are written. A body may
+    /// reach a type nothing has released yet, so the driver reads this list
+    /// afresh every turn exactly as it reads [`Mono`]'s.
+    todo: Vec<(u32, ShapeKey, usize)>,
+    done: usize,
+}
+
+/// What identifies one shape body. The holes are RFC-0093 M2's: a `consume`
+/// took a place, so a release that walks it would free what has an owner
+/// already — which makes a walk around them a DIFFERENT function.
+type ShapeKey = (bool, Type, Vec<String>);
+
 /// What a `fn`-typed argument resolved to (RFC-0023): the function a call through
 /// that parameter goes to **directly**, and how many of its leading parameters are
 /// captures the outer call site supplies.
@@ -1272,6 +1319,9 @@ struct Cx<'a> {
     /// complete once the last body is walked.
     fnval_copy: u32,
     dispatch: RefCell<Dispatch>,
+    /// One release and one copy per type, and the worklist of the bodies still
+    /// to write — see [`Shapes`].
+    shapes: RefCell<Shapes>,
     /// Module state (RFC-0013): name → its fixed address and declared type. Every
     /// body sees all of them, which is the textual backend's `globals` fallback in
     /// [`Gen::lookup`] — the checker already forbids an initializer reading a
@@ -2636,6 +2686,32 @@ fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {
     Ok(b)
 }
 
+/// One shape body: `(addr) -> ()`, releasing or copying the value at `addr`.
+///
+/// The parameter IS the address, which is what an aggregate in a wasm local
+/// already is — so the body is the walk it used to be inline, reading local 0
+/// where the site read the local it had made. Every place the walk reaches is
+/// under that address, so the function needs no frame of its own; a field with
+/// a DECLARED release is the one thing that does, and it takes it exactly as any
+/// other call site does.
+fn lower_shape(
+    m: &mut Module,
+    cx: &Cx<'_>,
+    rel: bool,
+    ty: &Type,
+    holes: &[String],
+    line: usize,
+) -> Result<Frame, String> {
+    let mut b = Frame::new(1, &[], 0);
+    let mut f = top_level(cx);
+    if rel {
+        f.rel_body(m, &mut b, 0, ty, holes, line)?;
+    } else {
+        f.copy_body(m, &mut b, 0, ty, line)?;
+    }
+    Ok(b)
+}
+
 fn lower_dispatcher(
     m: &mut Module,
     cx: &Cx<'_>,
@@ -3450,7 +3526,80 @@ impl<'p> Fn_<'_, 'p> {
         })
     }
 
-    /// Release the heap the value at `a` holds — the mirror of [`Fn_::copy_at`],
+    /// The index of the release (or the copy) of `ty`, reserving the function
+    /// and putting its body on the worklist the first time one is asked for.
+    ///
+    /// The type is SUBSTITUTED here rather than at the body, because the body is
+    /// written later — after the drain has moved on to another instance — and a
+    /// walk over `T` would then read a different `T` than the site meant.
+    fn shape_fn(&self, m: &mut Module, rel: bool, ty: &Type, line: usize) -> u32 {
+        let key: ShapeKey = (
+            rel,
+            self.cx.sub(ty),
+            if rel {
+                self.rel_holes.clone()
+            } else {
+                Vec::new()
+            },
+        );
+        let mut s = self.cx.shapes.borrow_mut();
+        if let Some((_, i)) = s.known.iter().find(|(k, _)| *k == key) {
+            return *i;
+        }
+        let index = m.reserve_func(&[ValType::I32], &[]);
+        s.known.push((key.clone(), index));
+        s.todo.push((index, key, line));
+        index
+    }
+
+    /// Release the heap the value at `a` holds: RFC-0125 §2.3's "`drop` to a
+    /// call", which is what this emits — the walk itself is the body of the
+    /// function the call names ([`Fn_::rel_body`]), written once per type.
+    ///
+    /// Two answers stay here, because neither is a call. A type that owns no
+    /// heap releases nothing. A type that DECLARED its release is already a
+    /// call, and one indirection is enough.
+    fn rel_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        // A type that declares its own release keeps it, so the walk CALLS that
+        // release rather than reaching past the declaration into its fields —
+        // which would reclaim what the declaration says it reclaims, in a
+        // different order, and without the print a user `release` may do.
+        //
+        // It used to return here and call nothing, which was right at the top of
+        // a drop (`emit_rel` has its own `Rel::Call` arm) and wrong for every
+        // place under one. An aggregate in a wasm local IS its address, so the
+        // place a walk holds is exactly what that arm parks under `@rel`.
+        // RFC-0092 M4 is where the gap is observable: a container carries its
+        // element's obligation now, so the compiler demands a discharge the
+        // discharge did not perform.
+        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
+            self.rel_holes.clear();
+            // `emit_rel`'s `Rel::Call` arm frees the payload boxes after the
+            // call (RFC-0096), so this reaches them too.
+            return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
+        }
+        if !self.owns_heap(ty) {
+            self.rel_holes.clear();
+            return Ok(());
+        }
+        let f = self.shape_fn(m, true, ty, line);
+        // RFC-0093 M2: the holes belong to the place this call is looking at.
+        // They are part of the key above, so the body is walked around exactly
+        // these, and every other reader starts empty — which is right: `own`
+        // refuses a hole under an element, a payload or a buffer.
+        self.rel_holes.clear();
+        b.ins(&Instruction::LocalGet(a)).ins(&Instruction::Call(f));
+        Ok(())
+    }
+
+    /// What releasing a value of `ty` MEANS — the mirror of [`Fn_::copy_body`],
     /// with `free` where that has `malloc`.
     ///
     /// One walk, both directions: `copy` decided what a value's own storage IS,
@@ -3465,39 +3614,15 @@ impl<'p> Fn_<'_, 'p> {
     /// back a buffer of somebody else's element words, copy them now. A `Map`
     /// and a `SmallArray` still give back their buffers alone: their element
     /// rows are M3.
-    fn rel_at(
+    fn rel_body(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         a: u32,
         ty: &Type,
+        holes: &[String],
         line: usize,
     ) -> Result<(), String> {
-        // RFC-0093 M2: the holes belong to the place this call is looking at,
-        // and only the record arm below can be told about them. Taking them here
-        // is what makes every other arm — an element, a payload, a buffer —
-        // start empty, which is right: `own` refuses a hole under any of them.
-        let holes = std::mem::take(&mut self.rel_holes);
-        // A type that declares its own release keeps it, so the walk CALLS that
-        // release rather than reaching past the declaration into its fields —
-        // which would reclaim what the declaration says it reclaims, in a
-        // different order, and without the print a user `release` may do.
-        //
-        // It used to return here and call nothing, which was right at the top of
-        // a drop (`emit_rel` has its own `Rel::Call` arm) and wrong for every
-        // place under one. An aggregate in a wasm local IS its address, so the
-        // place a walk holds is exactly what that arm parks under `@rel`.
-        // RFC-0092 M4 is where the gap is observable: a container carries its
-        // element's obligation now, so the compiler demands a discharge the
-        // discharge did not perform.
-        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
-            // `emit_rel`'s `Rel::Call` arm frees the payload boxes after the
-            // call (RFC-0096), so this reaches them too.
-            return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
-        }
-        if !self.owns_heap(ty) {
-            return Ok(());
-        }
         match self.cx.resolve(ty) {
             // This arm asks nothing about the region: the ownership test is the
             // block header and `free` states it once (an arena block carries a
@@ -3617,7 +3742,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Const(l.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
-                    self.rel_holes = vyrn_frontend::own::holes_under(&holes, &f.name);
+                    self.rel_holes = vyrn_frontend::own::holes_under(holes, &f.name);
                     self.rel_at(m, b, p, &f.ty, line)?;
                 }
                 Ok(())
@@ -8570,7 +8695,7 @@ impl<'p> Fn_<'_, 'p> {
                     return self.call(m, b, &f, args, line);
                 }
                 let ty = self.expr(m, b, &args[0])?;
-                self.copy_stack(b, &ty, line)?;
+                self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
             }
             "@push" if args.len() == 2 => return self.push(m, b, args, line),
@@ -9959,7 +10084,7 @@ impl<'p> Fn_<'_, 'p> {
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
                         if self.owns_heap(ty) {
-                            self.copy_stack(b, ty, line)?;
+                            self.copy_stack(m, b, ty, line)?;
                         }
                         b.ins(&store_of(&self.cx.ll(ty)));
                     }
@@ -9977,7 +10102,7 @@ impl<'p> Fn_<'_, 'p> {
                                 b.ins(&Instruction::I32Add);
                             }
                             b.ins(&Instruction::LocalSet(a));
-                            self.copy_at(b, a, ty, line)?;
+                            self.copy_at(m, b, a, ty, line)?;
                         }
                     }
                     Repr::Unit => return unsupported("a captured Unit value", line),
@@ -11990,7 +12115,13 @@ impl<'p> Fn_<'_, 'p> {
     /// A `String` is the only owning value this backend keeps in a wasm local;
     /// everything else is an aggregate in the frame, so the copy is a byte copy
     /// of the shape followed by [`Fn_::copy_at`] over what the bytes point at.
-    fn copy_stack(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<(), String> {
+    fn copy_stack(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         if !self.owns_heap(ty) {
             return Ok(());
         }
@@ -12013,7 +12144,7 @@ impl<'p> Fn_<'_, 'p> {
                 let a = b.local(ValType::I32);
                 b.slot(off);
                 b.ins(&Instruction::LocalSet(a));
-                self.copy_at(b, a, ty, line)?;
+                self.copy_at(m, b, a, ty, line)?;
                 b.ins(&Instruction::LocalGet(a));
                 Ok(())
             }
@@ -12139,6 +12270,7 @@ impl<'p> Fn_<'_, 'p> {
     /// itself. No loop is emitted at all when the element owns no heap.
     fn copy_each(
         &mut self,
+        m: &mut Module,
         b: &mut Frame,
         buf: u32,
         count: u32,
@@ -12172,7 +12304,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalSet(p));
-        self.copy_at(b, p, elem, line)?;
+        self.copy_at(m, b, p, elem, line)?;
         b.ins(&Instruction::LocalGet(i));
         b.ins(&Instruction::I32Const(1));
         b.ins(&Instruction::I32Add);
@@ -12187,11 +12319,33 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The bytes at `a` already hold a copy of a value of `ty`. Give that copy
-    /// its own heap.
-    fn copy_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
+    /// its own heap — as a CALL, the same shape a release takes
+    /// ([`Fn_::rel_at`]). The walk is [`Fn_::copy_body`], written once per type.
+    fn copy_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         if !self.owns_heap(ty) {
             return Ok(());
         }
+        let f = self.shape_fn(m, false, ty, line);
+        b.ins(&Instruction::LocalGet(a)).ins(&Instruction::Call(f));
+        Ok(())
+    }
+
+    /// What copying a value of `ty` MEANS: the storage it owns, duplicated.
+    fn copy_body(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         match self.cx.resolve(ty) {
             Type::Str => {
                 b.ins(&Instruction::LocalGet(a));
@@ -12226,7 +12380,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[1])));
                 b.ins(&Instruction::I64Store(at(l.fields[2])));
-                self.copy_each(b, nb, n, stride, &inner, line)
+                self.copy_each(m, b, nb, n, stride, &inner, line)
             }
             // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
             // header copy is the whole copy of its storage.
@@ -12272,7 +12426,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(base));
                 self.depth -= 1;
                 b.ins(&Instruction::End);
-                self.copy_each(b, base, n, stride, &inner, line)
+                self.copy_each(m, b, base, n, stride, &inner, line)
             }
             Type::Map(kt, vt) => {
                 // String keys are dup'd per entry; Int64 keys copy with the
@@ -12315,7 +12469,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
                     if !(ik && i == 0) {
-                        self.copy_each(b, nb, n, stride, &elem, line)?;
+                        self.copy_each(m, b, nb, n, stride, &elem, line)?;
                     }
                 }
                 // The index is copied rather than rebuilt: it holds POSITIONS,
@@ -12351,7 +12505,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Const(l.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
-                    self.copy_at(b, p, &f.ty, line)?;
+                    self.copy_at(m, b, p, &f.ty, line)?;
                 }
                 Ok(())
             }
@@ -12360,7 +12514,7 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(b, a, count, stride, &inner, line)
+                self.copy_each(m, b, a, count, stride, &inner, line)
             }
             // ANY sum: the payload slots of the live variant, and only the ones
             // whose declared type owns something. The tag is the variant's
@@ -12382,7 +12536,7 @@ impl<'p> Fn_<'_, 'p> {
                         }
                         let at = self.cx.payload_slot(&var.payload, j);
                         let w = self.word2(pty)?;
-                        self.copy_word(b, a, l.fields[at], pty, w, line)?;
+                        self.copy_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -12418,6 +12572,7 @@ impl<'p> Fn_<'_, 'p> {
     /// and everything wider is a pointer to a block this copies and then walks.
     fn copy_word(
         &mut self,
+        m: &mut Module,
         b: &mut Frame,
         a: u32,
         off: u32,
@@ -12446,7 +12601,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Const(size as i32));
                 b.ins(&Instruction::LocalSet(bytes));
                 let nb = self.dup_buf(b, src, bytes, bytes);
-                self.copy_at(b, nb, pty, line)?;
+                self.copy_at(m, b, nb, pty, line)?;
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::LocalGet(nb));
                 b.ins(&Instruction::I64ExtendI32U);
@@ -14393,7 +14548,7 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
             b.ins(&Instruction::LocalSet(buf));
             if mk == MapKey::Str {
-                self.copy_each(b, buf, len, 4, &Type::Str, line)?;
+                self.copy_each(m, b, buf, len, 4, &Type::Str, line)?;
             }
             let off = b.alloc(al.size, al.align);
             b.slot(off + al.fields[0]);
@@ -14766,7 +14921,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(len));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(b, buf, count, stride, inner, line)?;
+                self.copy_each(m, b, buf, count, stride, inner, line)?;
                 let off = b.alloc(al.size, al.align);
                 b.slot(off + al.fields[0]);
                 b.ins(&Instruction::LocalGet(buf));
@@ -16159,6 +16314,7 @@ mod tests {
             fnvals: RefCell::new(Vec::new()),
             fnval_copy: 0,
             dispatch: RefCell::new(Dispatch::default()),
+            shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
             gappend: HashMap::new(),
             early: HashMap::new(),
