@@ -2454,8 +2454,11 @@ impl<'a> Builder<'a> {
                     }
                 } else if *consuming && self.taken_by_loop(it, sid) {
                     // The loop took the container and is its last owner, so
-                    // the loop gives it back here.
-                    out.push(St::Drop(it, Site::None, 0));
+                    // the loop gives it back here. Keyed by the LOOP, so the
+                    // emitters read the judgment rather than the word
+                    // `consume` in the source (RFC-0125 §3 M3, the event
+                    // stream's slice).
+                    out.push(St::Drop(it, Site::Node(sid), 0));
                 }
                 self.drops_at(Exit::Scrutinee, sid, out)?;
             }
@@ -4741,6 +4744,19 @@ pub struct Facts {
     /// nothing binds and the core releases — a `St::Drop` at the
     /// statement's [`Site::Node`].
     pub discarded: std::collections::HashSet<usize>,
+    /// The `for x in consume xs` loops that give their container back where
+    /// the loop ends — a `St::Drop` of a `for_consume` name at the LOOP's
+    /// [`Site::Node`].
+    ///
+    /// A release the core states and no row names: the take is what the
+    /// kernel judges at the loop, and it is where a consuming loop over a
+    /// `read` parameter's field or over module state is refused (the
+    /// structural census, rows 10, 11 and 29). So the loop's own release and
+    /// an exit row for the container are exclusive by construction, and this
+    /// is the half a row cannot carry. An emitter asked the SOURCE for it
+    /// until RFC-0125 §3 M3's event-stream slice, which is a second reading
+    /// of `consume` beside the one the kernel already made.
+    pub loop_gives_back: std::collections::HashSet<usize>,
     /// RFC-0114 M1: the call-argument nodes whose temporary the caller
     /// releases after the call — [`NameInfo::arg_drop`], which the core sets
     /// wherever it lowers such an argument.
@@ -4856,7 +4872,11 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
             }
             St::Drop(n, at, _) => match at {
                 Site::Node(at) => {
-                    out.discarded.insert(*at);
+                    if body.names[*n as usize].for_consume {
+                        out.loop_gives_back.insert(*at);
+                    } else {
+                        out.discarded.insert(*at);
+                    }
                 }
                 Site::Edge(join, edge) => {
                     let name = body.names[*n as usize].source.clone();

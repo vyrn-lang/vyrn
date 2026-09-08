@@ -7946,7 +7946,7 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 5,736 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 5,748 | 573 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,211 | 352 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
@@ -13415,6 +13415,84 @@ pointed at a shallow scratch directory outside the checkout.
 | `route` `--ignored`, release | 2, 386 s |
 | the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, on a manifest regenerated with `write`: 16 of 176 rows moved, each read above |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
+#### The consuming loop stops being read off the source (2026-09-08, `track-dd`)
+
+The census's slice 3 was two halves. This is the half that could be taken.
+
+**The half that moved.** `for x in consume xs` gives its container back where
+the loop ends. The core states it — `St::Drop` of the iterable's name at the
+loop — and the last record said why it is a release and not a row: the TAKE is
+what the kernel judges at the loop, and it is where a consuming loop over a
+`read` parameter's field or over module state is refused (the structural
+census, rows 10, 11 and 29). But the core keyed that drop `Site::None`, which
+`fold_facts` gives to no emitter, so the wasm backend asked the SOURCE — the
+word `consume` on the statement — and paired it with `!releases_whole` to keep
+the two exclusive.
+
+That is the same `consume` the kernel already read, read a second time by a
+pass that is not allowed to judge. The drop carries the LOOP's node now
+(`Site::Node(sid)`), `fold_facts` files it under
+`Facts::loop_gives_back` — separated from `discarded` by
+`NameInfo::for_consume`, which is the core's own word for the take — and the
+emitter asks that. `Stmt::ForIn`'s `consuming` field is no longer bound in
+`direct.rs`'s pattern at all, which is the proof: the compiler says so.
+
+**The licence.** `VYRN_WASM_MANIFEST=check` is **green with no manifest
+change**: every one of the 176 examples emits the same bytes it emitted
+before. The core's judgment and the source's word agree at every consuming
+loop in the corpus, which is what a derivation slice wants to read. The kernel
+corpus is 24,775 accepted, 0 refused, 0 unlowered, and the residue ratchet is
+172 clean, 3 leaking, 0 double-free on each engine.
+
+**The half that is blocked, with the blocker named.** `Ownership::releases`
+has four readers outside the emitters, and the first one decides the other
+three:
+
+| reader | what it does | can it read the core's rows |
+|---|---|---|
+| `vyrn-lower/src/lib.rs`, per instance | substitutes the type a `DropKind::Deep` or `DropKind::Release` walks, then feeds `dispatched` — the monomorphisation QUEUE, which follows a declared `release` a row names to the instance it needs | **no.** The queue produces `lowered.instances`, and `lowered.instances` is what the core is BUILT from (`augment` calls `lower_with` before any body exists). A reader cannot ask a body that this reader's own answer is a precondition for |
+| `vyrn-lower/src/render.rs` | prints the releases under `vyrn lower --render` | it reads `Instance::releases`, which exists because of the row above |
+| `vyrn-cli/tests/lowered.rs`, `vyrn-cli/tests/kernel.rs` | assert against the same per-instance view | the same |
+
+So three of the four are downstream of one, and moving them alone would put a
+SECOND way to ask beside the first — which is the defect this RFC is about.
+What unblocks the first is a different question: whether the queue can follow
+a declared `release` from the TYPE table (`Owned::impls`, every reachable type
+that declares one) instead of from the placed rows. That is coarser — it would
+queue instances no row names, and `Module::sweep` would drop them — and it is
+a decision about the worklist, not about placement. It is the next payer's, and
+it is stated here rather than left to be found.
+
+**The lines.** `compiler/vyrn-lower/src/core.rs` 5,719 to **5,739**;
+`compiler/vyrn-codegen/src/direct.rs` 16,375 to **16,387**. The emitter census
+moves with them: the mapping **5,736 to 5,748**; no other column.
+
+#### Gates (2026-09-08, the consuming loop's fact)
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 79 suites, all green |
+| `kernel` `--ignored`, release | 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs |
+| `typed` `--ignored`, release | 1 — 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — 30,197 functions judged, 0 unlowered |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1 |
+| `cargo test -p vyrn-frontend` | 10 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 17 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 370 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move |
 | `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3, and its corpus test `--ignored` |
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |

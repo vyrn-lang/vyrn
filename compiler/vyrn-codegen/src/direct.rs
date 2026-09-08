@@ -1404,6 +1404,16 @@ impl<'a> Cx<'a> {
             .is_some_and(|f| f.discarded.contains(&self.plan.key_of(node)))
     }
 
+    /// Does this `for` give its container back where it ends? The core states
+    /// it at the loop ([`vyrn_lower::core::Facts::loop_gives_back`]); this
+    /// emitter read the word `consume` off the source until RFC-0125 §3 M3's
+    /// event-stream slice.
+    fn loop_gives_back(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.loop_gives_back.contains(&self.plan.key_of(node)))
+    }
+
     /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
     /// slice): does the caller free this argument's value after the call or
     /// operator above it? The core carries the key on the name the argument
@@ -4653,7 +4663,6 @@ impl<'p> Fn_<'_, 'p> {
                 iter,
                 body,
                 line,
-                consuming,
                 ..
             } => {
                 // RFC-0091 M3: a user container declares how it is iterated. The
@@ -4827,8 +4836,11 @@ impl<'p> Fn_<'_, 'p> {
                 // or over module state is refused (the census, rows 10, 11 and
                 // 29), so the core cannot leave it to an exit row — and a
                 // release only the core states is one no row names, which is
-                // why the two are exclusive here.
-                if *consuming && !self.releases_whole(key) {
+                // why the two are exclusive here. The core says WHICH loop
+                // gives one back; this pass no longer reads `consume` off the
+                // statement to guess (RFC-0125 §3 M3, the event stream's
+                // slice).
+                if self.cx.loop_gives_back(key) && !self.releases_whole(key) {
                     if let Some(r) = self.rel_slots.get(&key).cloned() {
                         self.emit_rel(m, b, r.place, &r.rel, *line)?;
                         self.rel_slots.remove(&key);
