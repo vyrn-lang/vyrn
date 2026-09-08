@@ -642,7 +642,10 @@ fn project_sections() -> Vec<Section> {
             "THE shared mutable walk over every expression a body holds, \
              innermost-last. Four readers in this file, plus `loader.rs`'s panic \
              stamping and `vyrn test`'s builtin rewrite and `vyrn-lower`'s \
-             effect scan. It is what the loader's three walks should have been",
+             effect scan. The descent is `ast::body_scope_descent!`'s since \
+             RFC-0125 §3 M6's second body slice, read through its `after_expr` \
+             hook; what is left here is the entry point and the one line these \
+             readers write",
         ),
         sec(
             "pub fn is_place(e: &Expr) -> bool {",
@@ -832,7 +835,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 861, 0),
-        ("project.rs", "the file's own job", 1110, 0),
+        ("project.rs", "the file's own job", 1108, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -841,8 +844,8 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("project.rs", "shared machinery", 376, 0),
-        ("project.rs", "tests", 305, 0),
+        ("project.rs", "shared machinery", 273, 0),
+        ("project.rs", "tests", 309, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
 }
