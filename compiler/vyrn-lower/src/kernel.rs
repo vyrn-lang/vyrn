@@ -345,8 +345,8 @@ pub enum TookHow {
 /// Which taker a right-hand side is.
 fn taker_of(rhs: &Rhs) -> Taker {
     match rhs {
-        Rhs::Call { declared: true, .. } => Taker::Declared,
-        Rhs::Call { ctor: true, .. } => Taker::Constructs,
+        Rhs::Call { kind, .. } if kind.declared() => Taker::Declared,
+        Rhs::Call { kind, .. } if kind.ctor() => Taker::Constructs,
         _ => Taker::Stores,
     }
 }
@@ -1612,7 +1612,7 @@ impl<'b> Kernel<'b> {
             Rhs::Call {
                 args,
                 write_back,
-                declared,
+                kind,
                 ..
             } => {
                 // Reads first, takes after: the call sees every argument
@@ -1630,7 +1630,7 @@ impl<'b> Kernel<'b> {
                         // callee owns what it is handed (RFC-0089 rule 1). A
                         // builtin sink and a variant constructor store the
                         // value, and storing one that owns no heap copies it.
-                        self.take_arg(st, v, *write_back && i == 0, *declared)?;
+                        self.take_arg(st, v, *write_back && i == 0, kind.declared())?;
                     }
                 }
                 // A `modify` argument does NOT end the aliases of what it is
@@ -1767,24 +1767,10 @@ impl<'b> Kernel<'b> {
             St::Drop(_, _, line) if *line > 0 => TookHow::Drop,
             _ => TookHow::Other,
         };
-        self.builtin = matches!(
-            s,
-            St::Let(
-                _,
-                Rhs::Call {
-                    declared: false,
-                    ctor: false,
-                    ..
-                }
-            ) | St::Do(
-                Rhs::Call {
-                    declared: false,
-                    ctor: false,
-                    ..
-                },
-                _
-            )
-        );
+        self.builtin = match s {
+            St::Let(_, Rhs::Call { kind, .. }) | St::Do(Rhs::Call { kind, .. }, _) => kind.stores(),
+            _ => false,
+        };
         match s {
             St::Let(n, rhs) => {
                 self.here = self.body.names[*n as usize].line;

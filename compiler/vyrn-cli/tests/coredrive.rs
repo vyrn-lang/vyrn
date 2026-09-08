@@ -22,7 +22,7 @@
 
 use std::path::PathBuf;
 use vyrn_frontend::ast::Program;
-use vyrn_lower::core::{Body, Op, Place, Rhs, St, Val};
+use vyrn_lower::core::{Body, Callee, Op, Place, Rhs, St, Val};
 
 struct Fs;
 
@@ -73,7 +73,7 @@ const CLASSES: [&str; 9] = [
     "a lambda body the row does not carry (`Op::Closure`)",
     "a tag the arm does not carry (`St::Switch`)",
     "a layout: an aggregate made, read or taken",
-    "a callee's ABI (`Rhs::Call`)",
+    "a callee that is no declared function of the program (`Rhs::Call`)",
     "a release the driver must place (`St::Drop`, `St::Row`)",
     "a loop, whose exit the row states as a branch the AST walk folds",
     "an `&&` or `||`: a prim row for a branch the emitter writes",
@@ -133,8 +133,20 @@ fn rhs(r: &Rhs, note: &mut impl FnMut(usize)) {
             note(3);
             at(p, note);
         }
-        Rhs::Call { args, .. } => {
-            note(4);
+        // Since the callee slice the row says WHO: a function this program
+        // declares is one the emitter's own table answers for, and only the
+        // other eight kinds — and a `spawn`, and a write-back — are still
+        // waiting on a row.
+        Rhs::Call {
+            args,
+            kind,
+            spawn,
+            write_back,
+            ..
+        } => {
+            if *kind != Callee::Fn || *spawn || *write_back {
+                note(4);
+            }
             for (v, _) in args {
                 val(v, note);
             }

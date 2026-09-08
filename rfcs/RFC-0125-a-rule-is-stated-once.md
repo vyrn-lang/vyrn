@@ -7946,7 +7946,7 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 6,256 | 586 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 6,360 | 588 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
@@ -9128,6 +9128,145 @@ pointed at a shallow scratch directory outside the checkout.
 | `route` `--ignored`, release | 2, 270 s |
 | the residue ratchet `--ignored`, release | 1, 281 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
 | `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 16 s — and three rows of `rfcs/census/wasm-sha256.tsv` regenerated, for the one shape read above |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+**Who the callee is, stated by the row (2026-09-08, `track-ds`).** The driver
+slice ranked what it could not walk and put one row at the top: a callee's
+ABI, 13,135 bodies, "the largest single row left". `Rhs::Call` named the
+callee and its arguments, and an emitter still decided which of fourteen rungs
+the name resolves to — a `std/mem` primitive, a routed builtin, a rendered
+`show`, a generation-time handle, `listDir`, one of the blocks the builtin
+census counts at 4,807 lines, a `where` type's constructor, a protocol method,
+an RFC-0023 specialization, a generic instantiation, a host-boundary reader, an
+RFC-0012 `extern`, a projection, or the function table. It walked that ladder
+over the SOURCE at every call site.
+
+**The row was already computed and thrown away.** `Builder::call` asks the same
+question once, because the capability of each argument position turns on it: a
+declared parameter's capability is the author's word, a builtin's is
+`prelude::capability`, a variant's is `consume`, a scalar conversion's is
+`read`. Ten branches, and the answer left the function as two bools —
+`declared`, true for the three whose parameters an author wrote, and `ctor`,
+true for the variant. A reader that needed a THIRD case had nothing to read, so
+it resolved the name again.
+
+So the two bools are one row: `core::Callee`, nine cases, one per branch of
+that ladder. `Fn`, `Method` and `Projection` are the three `declared` was;
+`Ctor` is what `ctor` was; `Builtin` is a seeded row of `prelude::signature`;
+`Scalar` is `Int32(n)` and its family; `Named` is a declared type's own
+constructor; `Value` is a call through a function value (RFC-0023); and
+`Reserved` folds the three branches that differ in the capability they
+synthesize and not in who the callee is — a reserved name with no seeded row, a
+`@`-spelled operation, and `print`. `Callee::declared`, `Callee::ctor` and
+`Callee::stores` are the three questions the kernel asks of it, and they are the
+same three the record of row 19 named: "a declared parameter TAKES, a builtin
+STORES, a variant PUTS the value into what it makes". The row is not one column
+wider than it was; it is one column instead of two.
+
+**What the emitter reads, and what it still reads from the declaration.**
+`Fn_::core_call` takes a `Callee::Fn` and asks `Cx::sigs` for its signature.
+That table holds exactly the functions the module DEFINES: a generic, a
+higher-order shell and a `std/mem` declaration are each skipped before it is
+filled, so a hit IS the last rung and a miss is one of the thirteen above it —
+which is why this walk needs no second ladder and asks no `Expr`. The ABI
+itself stays where RFC-0087 to RFC-0091 put it, on the DECLARATION: the wasm
+index, the parameter types the arguments are coerced to, whether a parameter
+crosses by address (`modify`), whether the result crosses through a hidden
+leading pointer. `Fn_::core_sig` stands down at the last two, because both are
+PLACEMENTS and §2.3 draws the emitter's line there; neither is reachable from a
+body of scalars anyway. One name hits the table and must not be called: the
+RFC-0114 §25 instrument, whose four hooks an unaudited build drops rather than
+emits, and the screen names it.
+
+`St::Do` reaches the walk with it. A call for its effect leaves its result on
+the stack and the row says what that result is — the callee's own declared
+return — so the driver drops it, which is the sentence the AST walk's statement
+arm writes against a node.
+
+**The count, and the honest half of it.** The probe re-run: **810 of 21,720
+bodies** from the core, against 629, and every emitted byte the same —
+`VYRN_WASM_MANIFEST=check` green with `rfcs/census/wasm-sha256.tsv` untouched,
+and `coredrive`'s three differing programs still the three the driver slice
+explained, at the same byte counts.
+
+The classification moves further than the driver does, and the gap is the
+finding. `coredrive` classes a body by the hardest thing in it, and a
+`Callee::Fn` call is no longer a blocker, so the class the driver slice
+recorded at 13,135 falls to **10,842** and "nothing: the rows carry it" rises
+**911 to 2,205**. The driver took 810 of those 2,205. The 1,395 it did not take
+are refused by the emitter's OWN screen and not by a missing row: a body whose
+every name must be a scalar the walk reads, which a `String` argument, a
+`String` result or a `where` type each fail. That screen is the emitter's to
+widen and the next slices' business, not a row the core owes.
+
+What the class table says now, and it is the ranked list for what is left:
+
+| what a body waits on | before | after |
+|---|---|---|
+| the row names no value (`Val::Lit(Opaque)`) | 3,468 | 3,468 |
+| a callee that is no declared function of the program | 13,135 | 10,842 |
+| a layout: an aggregate made, read or taken | 3,124 | 3,124 |
+| **nothing: the rows carry it** | **911** | **2,205** |
+| a loop, whose exit the row states as a branch the AST walk folds | 219 | 915 |
+| a tag the arm does not carry (`St::Switch`) | 792 | 792 |
+| an `&&` or `||` | 79 | 257 |
+| a release the driver must place | 6 | 131 |
+| a lambda body the row does not carry (`Op::Closure`) | 30 | 30 |
+
+Three rows rise because the call above them stopped hiding them: a body with a
+call and a loop was a CALL body and is a LOOP body now. The loop is the second
+row to take, at 915, and the switch's tag the third.
+
+**The censuses.** `direct.rs` is **16,952 lines before and 17,056 after** — 104
+added, all of it in the driver's one section: the call arm, the `St::Do` arm,
+the signature screen, and the readability screen moved onto `Fn_` because it
+now asks the emitter's own table. `core.rs` is **6,158 before and 6,222
+after**: `Callee`, its three questions, and the branch labels. `kernel.rs`
+loses two lines: `taker_of`'s two arms become guards and the builtin test
+becomes a `match` over one field instead of a `matches!` over two. The emitter
+census's mapping kind moves **6,256 to 6,360 lines and 586 to 588
+instructions**, and the read class `the core's rows` **2,530 to 2,634 lines**
+with its row count **72 to 82** — `Callee::` joins the list of core rows a
+section may be classified by reading. `forms`, `surface`, `coretables`,
+`refusals`, `checker_census`, `lowered` and `lowered_dump` are all unmoved: the
+driver names no source form, which is still the whole of what it is.
+
+**No arm is deleted.** The driver covers 3.7 per cent of the corpus's bodies
+against 2.9. `Expr::Call`'s arm keeps every one of its fourteen rungs, because
+thirteen of them are the callees this walk stands down at.
+
+#### The callee slice's gates (2026-09-08)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, 21 s |
+| `cargo test -p vyrn-cli`, no filter | 637 passed, 41 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 20 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 19 s — 12,572 switch sites, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 50 s |
+| `effects` `--ignored`, release | 2, 56 s — 30,197 functions judged, 0 unattributed |
+| `fixtures` `--ignored`, release | 1, 19 s |
+| `testsweep` `--ignored`, release | 1, 51 s |
+| `coredrive` `--ignored`, release | 1, 49 s — 810 of 21,720 bodies from the core, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 3 and 1 — both tables re-pinned |
+| `forms` and `surface`, plain and `--ignored` | 7 and 1, 3 and 1 — unmoved |
+| `checker_census`, `refusals`, `lowered` plain and `--ignored` | 2 and 1, 19 and 3, 3 and 1 — all unmoved |
+| `lowered_dump`, plain and `--ignored` | 6 and 1 — the five snapshots do not move |
+| `vyrn-frontend` | 1,120 passed, 6 ignored |
+| the workspace less `vyrn-cli` | 1,167 passed, 13 ignored |
+| `vyrn-lsp`'s own manifest | 100 passed, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 259 s |
+| the residue ratchet `--ignored`, release | 1, 295 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 16 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
