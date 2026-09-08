@@ -15,6 +15,17 @@ fn sum(xs: Array<Int64>) -> Int64 {
 
 /// A function whose `fn`-typed parameter is forwarded (pass-through) to another
 /// higher-order function — the monomorphization threads through transitively.
+/// A `Map`-returning function value: the lambda's body is a map literal, and
+/// the name it reads is captured like any other.
+type Counts = Map<String, Int64>
+
+fn firstOf(f: fn(Int64) -> Counts) -> Int64 {
+    let m = f(5)
+    return match m["a"] {
+        Some(v) => v,
+        None => 0 - 1,
+    }
+}
 fn mapThenSum(xs: Array<Int64>, f: fn(Int64) -> Int64) -> Int64 {
     return sum(map(xs, f))
 }
@@ -34,6 +45,13 @@ fn main() -> Int64 {
     let bump = 100
     let bumped = map(nums, x -> x + bump)
     print(sum(bumped)) // 515
+
+    // A capture read from inside a MAP LITERAL. The capture list is the body
+    // walk's since RFC-0125 §3 M6; before that it had its own arm list, which
+    // held no arm for a map literal, and the direct backend then refused to
+    // lower the name the literal read.
+    let tag = 7
+    print(firstOf(x -> ["a": x + tag])) // 12
 
     // filter + fold composed.
     let evens = filter(nums, x -> x % 2 == 0)
