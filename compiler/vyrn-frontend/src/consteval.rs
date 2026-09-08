@@ -195,57 +195,41 @@ pub fn eval(expr: &Expr, env: &HashMap<String, ConstVal>) -> Option<ConstVal> {
     }
 }
 
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6).
+crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
+/// The probe's line at each site: what is not const-analyzable.
+struct Calls(bool);
+
+impl BodyVisit<'_> for Calls {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        match e {
+            // Indexing (`s[i]` = `@at(s, i)`) is a pure, const-foldable
+            // builtin, so it is permitted in a refinement predicate; only its
+            // arguments are scanned.
+            Expr::Call { name, .. } if name == crate::project::AT => {}
+            // A lambda literal is not a constant and never appears in a
+            // refinement predicate (the checker forbids it outside a call
+            // argument), and a block arm (RFC-0118) cannot appear in one
+            // either — statement position only. Both count as a call, so a
+            // hole here refuses rather than folds.
+            Expr::Call { .. } | Expr::Spawn { .. } | Expr::Lambda { .. } => self.0 = true,
+            Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
+                self.0 = true
+            }
+            _ => {}
+        }
+        !self.0
+    }
+}
+
 /// True if `expr` contains any call (used to forbid calls in refinement
 /// predicates, keeping them purely const-analyzable in v0.1).
 pub fn contains_call(expr: &Expr) -> bool {
-    match expr {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => false,
-        Expr::Unary { expr, .. } => contains_call(expr),
-        Expr::Binary { lhs, rhs, .. } => contains_call(lhs) || contains_call(rhs),
-        // Indexing (`s[i]` = `@at(s, i)`) is a pure, const-foldable builtin, so it
-        // is permitted in a refinement predicate; only its arguments are scanned.
-        Expr::Call { name, args, .. } if name == crate::project::AT => {
-            args.iter().any(contains_call)
-        }
-        Expr::Call { .. } => true,
-        // A block arm (RFC-0118) cannot appear in a predicate (statement
-        // position only); counted as a call so a hole here refuses rather
-        // than folds.
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            contains_call(scrutinee)
-                || arms
-                    .iter()
-                    .any(|a| a.body.as_expr().is_none_or(contains_call))
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            contains_call(cond)
-                || contains_call(then_branch)
-                || else_branch.as_ref().is_some_and(|e| contains_call(e))
-        }
-        Expr::Try { expr, .. } => contains_call(expr),
-        Expr::StructLit { fields, .. } => fields.iter().any(|(_, e)| contains_call(e)),
-        Expr::Field { expr, .. } => contains_call(expr),
-        Expr::TryConstruct { args, .. } => args.iter().any(contains_call),
-        Expr::ArrayLit { elems, .. } => elems.iter().any(contains_call),
-        Expr::MapLit { entries, .. } => entries
-            .iter()
-            .any(|(k, v)| contains_call(k) || contains_call(v)),
-        Expr::Spawn { .. } => true,
-        Expr::Consume { place, .. } => contains_call(place),
-        // A lambda literal is not a constant and never appears in a refinement
-        // predicate (the checker forbids it outside a call argument).
-        Expr::Lambda { .. } => true,
-    }
+    let mut v = Calls(false);
+    body_expr(expr, &std::collections::HashSet::new(), &mut v);
+    v.0
 }
