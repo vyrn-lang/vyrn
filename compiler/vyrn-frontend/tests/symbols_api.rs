@@ -893,3 +893,66 @@ fn member_completion_offers_record_fields() {
         "refined field renders as written: {by_label:?}"
     );
 }
+
+/// Every diagnostic position `analyze` gives over the corpus, printed.
+///
+/// The pin for [`vyrn_frontend::analyze`]'s COLUMNS, which nothing else
+/// records. `vyrn check` does not go through this path — it reports what the
+/// loader and the checker say, at the column those give — so a change to the
+/// keyword-column map moves no byte of the corpus's `vyrn check` stderr and is
+/// invisible to the licence RFC-0125 §3 M6 uses everywhere else. This is the
+/// licence for that map: run it before and after and compare the whole output.
+///
+/// `cargo test -p vyrn-frontend --test symbols_api -- --ignored --nocapture
+/// the_pinned_columns_over_the_corpus`
+#[test]
+#[ignore]
+fn the_pinned_columns_over_the_corpus() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in ["examples", "site", "std", "compiler/vyrn-cli/tests"] {
+        let mut stack = vec![root.join(dir)];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("vyrn") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    // The corpus holds files a debug build cannot walk on the harness's own
+    // stack (`site/app/chart.vyrn` is 35 KB of one expression tree), so the
+    // whole scan runs on a thread with room.
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            for p in files {
+                let rel = p
+                    .strip_prefix(&root)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let Ok(src) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                let a = analyze(&src);
+                println!("===== {rel} ({} diagnostics)", a.diagnostics.len());
+                for d in &a.diagnostics {
+                    println!(
+                        "{}:{}:{}:{} {} | {}",
+                        rel, d.line, d.col, d.end_col, d.stage, d.message
+                    );
+                }
+            }
+        })
+        .expect("spawn")
+        .join()
+        .expect("the corpus scan");
+}

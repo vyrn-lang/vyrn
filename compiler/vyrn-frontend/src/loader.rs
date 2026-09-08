@@ -927,12 +927,6 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
         .map(|(_, reserved)| *reserved)
 }
 
-/// The reserved spelling of an injected runtime declaration (`std/json`'s, the
-/// only prefix the `toJson` desugar spells).
-pub fn rt_name(name: &str) -> String {
-    format!("{RT_PREFIX}{name}")
-}
-
 /// The synthesized source of every generator-produced module reachable from the
 /// root (RFC-0021), as `(banner, source)` pairs in load order — the data behind
 /// `vyrn emit-gen`. Runs the whole load (generators fire, cache included) but
@@ -3121,6 +3115,77 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     }
 }
 
+/// Every named or applied type HEAD inside a type, handed to a visitor, \
+/// innermost after outermost — the ONE descent this file makes over a `Type`.
+///
+/// Three readers ask the same question and used to write the same fourteen arms
+/// out to ask it (RFC-0125 §3 M6): [`type_names`] collects the heads,
+/// [`rewrite_type`] renames each one through a map, and
+/// [`NsResolver::rewrite_type`] resolves a `ns.User` spelling to the declaration
+/// it names. The three matched arm for arm, which is what a rule stated three
+/// times looks like when nobody has drifted yet.
+///
+/// It is a macro because the readers need two mutabilities — one collects
+/// through a shared borrow, two assign through a unique one — and no other
+/// mechanism in Rust states a descent once across both. The arm list below is
+/// the rule; the two definitions after it are spellings of it.
+macro_rules! type_head_descent {
+    ($name:ident $(, $mut_:tt)?) => {
+        fn $name(ty: &$($mut_)? Type, f: &mut impl FnMut(&$($mut_)? String)) {
+            match ty {
+                Type::Named(n) => f(n),
+                Type::App(n, args) => {
+                    f(n);
+                    for a in args {
+                        $name(a, f);
+                    }
+                }
+                Type::Array(a)
+                | Type::Task(a)
+                | Type::Stream(a)
+                | Type::Partial(a)
+                | Type::ArrayN(a, _)
+                | Type::SmallArray(a, _)
+                | Type::Omit(a, _)
+                | Type::Pick(a, _) => $name(a, f),
+                Type::Merge(a, b) => {
+                    $name(a, f);
+                    $name(b, f);
+                }
+                Type::Record(fs) => {
+                    for fl in fs {
+                        $name(&$($mut_)? fl.ty, f);
+                    }
+                }
+                Type::Enum(vs) => {
+                    for v in vs {
+                        for p in &$($mut_)? v.payload {
+                            $name(p, f);
+                        }
+                    }
+                }
+                // Stored function values (RFC-0037) and Maps carry decl
+                // references in their component types too (RFC-0040 §2 exposed
+                // this).
+                Type::Fn(params, ret) => {
+                    for p in params {
+                        $name(p, f);
+                    }
+                    $name(ret, f);
+                }
+                Type::Map(k, v) => {
+                    $name(k, f);
+                    $name(v, f);
+                }
+                _ => {}
+            }
+        }
+    };
+}
+
+type_head_descent!(type_heads);
+type_head_descent!(type_heads_mut, mut);
+
 /// Reinterprets namespace-qualified references (`ns.member`, RFC-0027) inside one
 /// importing module into the resolved program-wide decl symbols. A namespace is a
 /// compile-time name, not a value: any surviving bare use of it is an error.
@@ -3250,66 +3315,22 @@ impl NsResolver<'_> {
     }
 
     /// Rewrite a namespace-qualified named/applied type (`ns.User`, `ns.Box<T>`)
-    /// into its resolved decl name, recursing through the whole type tree.
+    /// into its resolved decl name, everywhere inside the type tree.
+    ///
+    /// The descent is [`type_head_descent`]'s; what is this pass's own is the
+    /// one line it does at each head.
     fn rewrite_type(&mut self, ty: &mut Type) {
-        match ty {
-            Type::Named(n) => {
-                if let Some((ns, member)) = n.clone().split_once('.') {
-                    if self.ns.contains_key(ns) {
-                        if let Some(sym) = self.resolve_member(ns, member, 0) {
-                            *n = sym;
-                        }
+        let mut visit = |n: &mut String| {
+            let head = n.clone();
+            if let Some((ns, member)) = head.split_once('.') {
+                if self.ns.contains_key(ns) {
+                    if let Some(sym) = self.resolve_member(ns, member, 0) {
+                        *n = sym;
                     }
                 }
             }
-            Type::App(n, args) => {
-                if let Some((ns, member)) = n.clone().split_once('.') {
-                    if self.ns.contains_key(ns) {
-                        if let Some(sym) = self.resolve_member(ns, member, 0) {
-                            *n = sym;
-                        }
-                    }
-                }
-                for a in args {
-                    self.rewrite_type(a);
-                }
-            }
-            Type::Array(a)
-            | Type::Task(a)
-            | Type::Stream(a)
-            | Type::Partial(a)
-            | Type::ArrayN(a, _)
-            | Type::SmallArray(a, _)
-            | Type::Omit(a, _)
-            | Type::Pick(a, _) => self.rewrite_type(a),
-            Type::Merge(a, b) => {
-                self.rewrite_type(a);
-                self.rewrite_type(b);
-            }
-            Type::Record(fs) => {
-                for f in fs {
-                    self.rewrite_type(&mut f.ty);
-                }
-            }
-            Type::Enum(vs) => {
-                for v in vs {
-                    for pl in &mut v.payload {
-                        self.rewrite_type(pl);
-                    }
-                }
-            }
-            Type::Fn(params, ret) => {
-                for pt in params {
-                    self.rewrite_type(pt);
-                }
-                self.rewrite_type(ret);
-            }
-            Type::Map(k, v) => {
-                self.rewrite_type(k);
-                self.rewrite_type(v);
-            }
-            _ => {}
-        }
+        };
+        type_heads_mut(ty, &mut visit);
     }
 
     /// Whether `ns` is an in-scope namespace at this use (not shadowed by a local).
@@ -4514,57 +4535,13 @@ fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(St
     }
 }
 
-/// Every named/applied type mentioned anywhere inside `ty`.
+/// Every named/applied type mentioned anywhere inside `ty`, in order.
+///
+/// The descent is [`type_head_descent`]'s; what is this reader's own is the
+/// clone it takes at each head.
 fn type_names(ty: &Type) -> Vec<String> {
     let mut out = Vec::new();
-    fn walk(t: &Type, out: &mut Vec<String>) {
-        match t {
-            Type::Named(n) => out.push(n.clone()),
-            Type::App(n, args) => {
-                out.push(n.clone());
-                for a in args {
-                    walk(a, out);
-                }
-            }
-            Type::Array(a)
-            | Type::Task(a)
-            | Type::Stream(a)
-            | Type::Partial(a)
-            | Type::ArrayN(a, _)
-            | Type::SmallArray(a, _) => walk(a, out),
-            Type::Merge(a, b) => {
-                walk(a, out);
-                walk(b, out);
-            }
-            Type::Omit(a, _) | Type::Pick(a, _) => walk(a, out),
-            Type::Record(fs) => {
-                for f in fs {
-                    walk(&f.ty, out);
-                }
-            }
-            Type::Enum(vs) => {
-                for v in vs {
-                    for p in &v.payload {
-                        walk(p, out);
-                    }
-                }
-            }
-            // Stored function values (RFC-0037) and Maps carry decl references
-            // in their component types too (RFC-0040 §2 exposed this).
-            Type::Fn(params, ret) => {
-                for p in params {
-                    walk(p, out);
-                }
-                walk(ret, out);
-            }
-            Type::Map(k, v) => {
-                walk(k, out);
-                walk(v, out);
-            }
-            _ => {}
-        }
-    }
-    walk(ty, &mut out);
+    type_heads(ty, &mut |n| out.push(n.clone()));
     out
 }
 
@@ -4607,55 +4584,11 @@ fn own_variant_names(p: &Program) -> HashSet<String> {
 }
 
 /// Rewrite every referenced type name in `ty` through `map`.
+///
+/// The descent is [`type_head_descent`]'s; what is this reader's own is the
+/// substitution it applies at each head.
 fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
-    match ty {
-        Type::Named(n) => *n = ren(map, n),
-        Type::App(n, args) => {
-            *n = ren(map, n);
-            for a in args {
-                rewrite_type(a, map);
-            }
-        }
-        Type::Array(a)
-        | Type::Task(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => rewrite_type(a, map),
-        Type::Merge(a, b) => {
-            rewrite_type(a, map);
-            rewrite_type(b, map);
-        }
-        Type::Record(fs) => {
-            for f in fs {
-                rewrite_type(&mut f.ty, map);
-            }
-        }
-        Type::Enum(vs) => {
-            for v in vs {
-                for p in &mut v.payload {
-                    rewrite_type(p, map);
-                }
-            }
-        }
-        // Stored function values (RFC-0037) and Map values reference decl names
-        // too — a generated module's `fn(Validation<T>)` callback type or
-        // `Map<String, fn(..)>` pending map must follow a co-naming/namespace
-        // rename of `T` like every other position (RFC-0040 §2 exposed this).
-        Type::Fn(params, ret) => {
-            for p in params {
-                rewrite_type(p, map);
-            }
-            rewrite_type(ret, map);
-        }
-        Type::Map(k, v) => {
-            rewrite_type(k, map);
-            rewrite_type(v, map);
-        }
-        _ => {}
-    }
+    type_heads_mut(ty, &mut |n| *n = ren(map, n));
 }
 
 /// Rewrite every referenced name in `e` (call/spawn/struct-lit/try-construct
