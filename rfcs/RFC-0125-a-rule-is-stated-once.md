@@ -17106,6 +17106,44 @@ rule refuses that. Spelling it as a sum type costs a construction at every call
 site. Leaving it costs the three blocks, which are one union written three
 times and are checked nowhere against each other.
 
+##### Gates (2026-09-07, the two slices)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Run over both slices
+together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 588 passed, no failure |
+| `kernel` `--ignored` | 1, 52 s |
+| `coretables` `--ignored` | 1, 44 s |
+| `typed` `--ignored` | 1, 53 s |
+| `effects` `--ignored` | 2, 64 s |
+| `fixtures` `--ignored` | 1, 15 s — 206 compared, and the three element-type recordings were rewritten in the same commit |
+| `testsweep` `--ignored` | 1, 46 s |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 300 s |
+| the residue ratchet | 1, 297 s — engine 172 clean and 3 leaking, route the same, 0 double-free |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, two checker slices move no byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 11 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 26 files |
+
+The one red in the first pass was `fixtures`, and it is the licence's three
+programs seen a second time: `appendowned.vyrn`, `clearowned.vyrn` and
+`copyfromowned.vyrn` are the recordings of the three sentences the bound
+replaces. They are rewritten in the slice's own commit, and each example's own
+comment now names the bound rather than the advice its refusal used to give.
+`checker.rs`, `prelude.rs`, the three examples and the censuses are the only
+things these two slices touch.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
