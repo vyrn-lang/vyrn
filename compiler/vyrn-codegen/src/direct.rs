@@ -487,12 +487,6 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         droppable: ownership.droppable,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
         // address, which is unique in the program.
-        holes: ownership
-            .holes
-            .values()
-            .flatten()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect(),
         owned: ownership.proto,
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
@@ -1303,9 +1297,6 @@ struct Cx<'a> {
     /// the exit that runs it, in the order it runs (RFC-0101 M4). One order for
     /// three engines, read at the exit instead of derived from a frame stack.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
-    /// Per `let` node, the places a `consume` took out of it (RFC-0093 M2). The
-    /// release walk skips them: the take already gave them an owner.
-    holes: HashMap<usize, Vec<String>>,
     /// The per-node release decisions (RFC-0114 §26) — the same artifact the
     /// textual backend reads, so the two cannot disagree about a site.
     plan: vyrn_frontend::own::ReleasePlan,
@@ -4296,16 +4287,7 @@ impl<'p> Fn_<'_, 'p> {
                 // what.
                 self.scope.push((name.clone(), place, bound.clone()));
                 if owns {
-                    if let Some(mut r) = self.rel_for(&bound, *line)? {
-                        // RFC-0093 M2: a take gave one of this binding's places
-                        // away, so the walk must not hand it back. `rel_for`
-                        // answers for the TYPE, and the hole is a fact about
-                        // this binding, so it is attached here.
-                        if let (Rel::Deep(_, holes), Some(h)) =
-                            (&mut r, self.cx.holes.get(&(s as *const Stmt as usize)))
-                        {
-                            *holes = h.clone();
-                        }
+                    if let Some(r) = self.rel_for(&bound, *line)? {
                         self.register_rel(b, s as *const Stmt as usize, place, r);
                     }
                 }
@@ -4797,10 +4779,7 @@ impl<'p> Fn_<'_, 'p> {
                 // release that rest at every exit of the body.
                 let vkey = vyrn_frontend::own::for_var_key(var);
                 if self.drops.contains_key(&vkey) {
-                    if let Some(mut r) = self.rel_for(&w.elem, *line)? {
-                        if let (Rel::Deep(_, holes), Some(h)) = (&mut r, self.cx.holes.get(&vkey)) {
-                            *holes = h.clone();
-                        }
+                    if let Some(r) = self.rel_for(&w.elem, *line)? {
                         self.register_rel(b, vkey, place, r);
                     }
                 }
@@ -16133,7 +16112,6 @@ mod tests {
             higher_order: HashMap::new(),
             protocol_methods: HashMap::new(),
             owned: Default::default(),
-            holes: HashMap::new(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             fnvals: RefCell::new(Vec::new()),

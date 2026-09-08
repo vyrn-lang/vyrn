@@ -13498,6 +13498,114 @@ moves with them: the mapping **5,736 to 5,748**; no other column.
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
 
+#### The holes are the core's, stated at the take (2026-09-08, `track-dh`)
+
+The census's slice 2 named a circle: the kernel says HELD per path, but
+`own.droppable` and `own.holes` are an INPUT to the core, so the core could
+not be the source of `gone`. This takes the hole half of it.
+
+**The circle, measured before it was cut.** `Builder::keyed` read
+`own.holes` for every named binding and put the set on `NameInfo::holes`.
+With that read forced empty, the kernel corpus does not move — 24,775
+accepted, 0 refused, 0 unlowered — and `VYRN_WASM_MANIFEST=check` moves
+exactly ONE of 176 examples, `graphql.vyrn`. So the plan's set was
+load-bearing at one site in the corpus, and that site is the one the
+kernel's own comment names: `gqlResolve` holds an `arg` whose `.err` a path
+before the `match` took, and the edge table refuses a name with holes.
+
+**What states it now.** A `consume p` is a take, and the core writes the
+take. `Builder::take_place_at` records the path on the base's name where the
+hole STAYS — the `consume` prefix — and not where the store after the call
+fills it again (`s.dense.push(i)`). It is the same fact the kernel already
+derives per path from the same statement (`Kernel::take_place` pushes
+`st.holes`); the difference is that a name's own set is the whole body's and
+the kernel's is the path's, which is exactly what the plan's set was.
+
+**One rule came with it, because it is a rule about the TYPE.** A hole the
+release walk cannot be told to skip must not be stated at all: a declared
+`release` is a user function and cannot be told to leave one field alone.
+`own::skippable` said that for the plan; it is a free function now and the
+core asks it at the take. Without it the corpus is still green and
+`refusals/r22_drop_with_a_hole.vyrn` moves — the kernel accepted a `drop` of
+a `Person` around `.name` that `impl Owned for Person` frees anyway. The
+structural census caught it, which is what the census is for.
+
+**Then the plan's copy had no reader.** `Ownership::holes` reached one
+place: `direct.rs`'s `Cx::holes`, read at a `let`'s release and at a `for`
+variable's. Both are byte-identical when the map is empty, because a placed
+row carries the kernel's own set (`Release::holes`) and the placed row wins
+at the exit. So the field is deleted, with `Emit::holes`, `FnResult::holes`
+and the two `Rel::Deep` overrides in the emitter.
+
+**The licence.** Kernel corpus 24,775 accepted, 0 refused, 0 unlowered.
+`VYRN_WASM_MANIFEST=check` green with no manifest change: every one of the
+176 examples emits the same bytes. The residue ratchet is 172 clean, 3
+leaking, 0 double-free on each engine, which is the baseline. The core's
+answer and the plan's agree at every site the corpus reaches.
+
+**Where the assertions went.** Three of `own.rs`'s hole tests asserted the
+SET — one field, a set of two, a chain of two hops — and the set is the
+core's now, so they are in `compiler/vyrn-cli/tests/coretables.rs`, which
+can see a built body. Two more asserted that a binding is NOT reclaimed (a
+write fills the hole; a declared `release` keeps leaking it), and those are
+about `own.droppable`, so they stay where they are with a helper that asks
+only that. `coretables` also counts the core's own sets over the corpus:
+**201 binding holes**, beside the 2 receiver holes it already counted.
+
+**The lines.** `compiler/vyrn-frontend/src/own.rs` 3,103 to **3,066**;
+`compiler/vyrn-lower/src/core.rs` 5,739 to **5,771**;
+`compiler/vyrn-codegen/src/direct.rs` 16,387 to **16,365**;
+`compiler/vyrn-frontend/src/movecheck.rs` and
+`compiler/vyrn-lower/src/kernel.rs` unmoved at 6,074 and 2,591. The core
+grew by 32 because it now says out loud what it used to look up.
+
+**The censuses.** The emitter census
+(`compiler/vyrn-cli/tests/emitter_census.rs` and the table above): the
+mapping **5,748 to 5,736**, shared machinery **2,335 to 2,326**, tests **327
+to 326**; no other column. The structural census
+(`compiler/vyrn-cli/tests/refusals.rs`) does not move: nothing here touches
+`movecheck.rs`, and `r22_drop_with_a_hole.vyrn`'s row reads as recorded
+again once the type rule is asked. RFC-0127 §3's form census does not move:
+no surface form is mentioned.
+
+**What is left of the circle.** `own.droppable` is still an INPUT, at one
+site: the `for` loop's `handed_over`, which reads a `DropKind::FreeArr` row
+to decide that the loop variable owns its element. That is the census's
+slice 3, and it is not cosmetic — with the read forced false, 18 corpus
+programs stop loading and the kernel corpus falls from 24,775 to 19,795.
+The plan answers it from `LetOwnership::elem_only`, and the core has no
+statement of it.
+
+#### Gates (2026-09-08, the holes)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 79 suites, all green |
+| `kernel` `--ignored`, release | 1 — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs, 201 binding holes |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — 30,197 functions judged, 0 unlowered |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 436 programs from 128 sources |
+| `emitter_census`, `refusals`, `forms`, `surface`, `checker_census` | re-pinned, and only the emitter's three rows move |
+| `cargo test -p vyrn-frontend` | 10 suites |
+| `cargo test --workspace --exclude vyrn-cli` | 17 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 318 s |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and the manifest does not move |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 35 + 154 blocks, 0 failed |
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

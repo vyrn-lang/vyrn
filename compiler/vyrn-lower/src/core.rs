@@ -1504,18 +1504,7 @@ impl<'a> Builder<'a> {
     /// Record the plan's key for a name, and the name for the key.
     fn keyed(&mut self, n: Name, binding: usize) {
         self.body.names[n as usize].binding = Some(binding);
-        self.body.names[n as usize].holes = self.plan_holes(binding);
         self.by_binding.insert(binding, n);
-    }
-
-    /// The plan's hole set for a binding, spelled for the kernel.
-    fn plan_holes(&self, binding: usize) -> Vec<String> {
-        self.own
-            .holes
-            .get(&self.func_name)
-            .and_then(|m| m.get(&binding))
-            .map(|hs| hs.iter().map(|h| format!(".{h}")).collect())
-            .unwrap_or_default()
     }
 
     /// A join whose arm handed out a name bound outside the enclosing loop,
@@ -3695,7 +3684,7 @@ impl<'a> Builder<'a> {
     fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
         take_names_a_place(e, line, false)?;
         self.consume_names_a_borrow(e, line)?;
-        self.take_place(e, out)
+        self.take_place_at(e, out, true)
     }
 
     /// RFC-0125 §3 M3, row 11: a prefix `consume` of a BORROW hands somebody
@@ -3782,9 +3771,52 @@ impl<'a> Builder<'a> {
     /// builtin hands back (`s.dense.push(i)` is `s.dense = @push(s.dense, i)`).
     /// The value leaves into an owned name and the base keeps a hole.
     fn take_place(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        self.take_place_at(e, out, false)
+    }
+
+    /// The same, saying whether the hole STAYS: a `consume x.f` empties the
+    /// place and nothing fills it, so the base's release walks around it
+    /// from here on (RFC-0093 M2). The write-back form fills the hole with
+    /// the store that follows the call, so its base keeps none.
+    ///
+    /// This is where the core states a binding's holes. It used to read them
+    /// off `own::Ownership::holes` at [`Builder::keyed`] — the plan's answer
+    /// to the question the core's own `take` already asks, and the input
+    /// half of the circle RFC-0125 §3 M3 names.
+    fn take_place_at(
+        &mut self,
+        e: &'a Expr,
+        out: &mut Vec<St>,
+        keeps_hole: bool,
+    ) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let place = self.place(e, out)?;
         self.pending_receiver = None;
+        if keeps_hole {
+            if let Some((n, path)) = crate::kernel::root_of(&place) {
+                // A hole the walk cannot be told to skip is not stated: the
+                // release would then hand back a place the take gave away,
+                // or — where the type declares its own `release` — free it
+                // twice, because a function cannot be told to leave one
+                // field alone (`refusals/r22_drop_with_a_hole.vyrn`). The
+                // rule about the TYPE is `Owned`'s, and it is asked here.
+                let bty = self.body.names[n as usize].ty.clone();
+                let rel = path.trim_start_matches('.').to_string();
+                if !rel.is_empty()
+                    && vyrn_frontend::own::skippable(
+                        &self.own.proto,
+                        &bty,
+                        std::slice::from_ref(&rel),
+                    )
+                {
+                    let hs = &mut self.body.names[n as usize].holes;
+                    if !hs.contains(&path) {
+                        hs.push(path);
+                        hs.sort();
+                    }
+                }
+            }
+        }
         let t = self.temp(ty, e.line());
         out.push(St::Let(t, Rhs::Take(place)));
         Ok(Val::Name(t))

@@ -857,6 +857,47 @@ pub fn owns_heap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
     go(ty, types, &mut Vec::new())
 }
 
+/// Whether the release walk of a value of `ty` can be told to skip every one
+/// of `paths` (RFC-0093 M2).
+///
+/// The walk carries a path and skips a place whose path is in the set, so the
+/// set has to name places the walk actually visits: a chain of RECORD fields,
+/// each hop resolved through the declarations. Two things end the chain and
+/// both answer false.
+///
+/// **A declared `release`.** `impl Owned for T` is a user function, and a
+/// function cannot be told to leave one field alone.
+///
+/// **Anything that is not a record.** An enum's live variant is a runtime tag,
+/// so a hole under a payload is not a place a static walk can skip; an array's
+/// element is chosen by an index the walk does not have. Both leak, and
+/// neither is reachable today — a take of a payload or of an element is
+/// refused (RFC-0093 M1) — so this is the guard for the rule rather than for
+/// the corpus.
+///
+/// The CORE asks it too, where it states a binding's hole at the `consume`
+/// that made it: a hole the walk cannot skip must not be stated, or a `drop`
+/// of the binding would walk around a place its declared `release` frees
+/// anyway (`tests/refusals/r22_drop_with_a_hole.vyrn`).
+pub fn skippable(proto: &Owned, ty: &Type, paths: &[String]) -> bool {
+    paths.iter().all(|p| {
+        let mut cur = ty.clone();
+        for seg in p.split('.') {
+            if matches!(proto.release_kind(&cur), Some(DropKind::Release(..))) {
+                return false;
+            }
+            let Type::Record(fields) = crate::types::resolve(&cur, &proto.types) else {
+                return false;
+            };
+            let Some(f) = fields.iter().find(|f| f.name == seg) else {
+                return false;
+            };
+            cur = f.ty.clone();
+        }
+        true
+    })
+}
+
 /// The holes that live INSIDE the field `name`, with the field's own hop
 /// removed — what a release walk carries one level down (RFC-0093 M2).
 ///
@@ -1044,14 +1085,6 @@ pub struct Ownership {
     pub owned_fns: HashMap<String, DropKind>,
     /// Per function: identity of each droppable `let` and how to reclaim it.
     pub droppable: HashMap<String, HashMap<usize, DropKind>>,
-    /// Per function: the places a `consume` took out of a droppable `let`
-    /// (RFC-0093 M2), keyed the same way and relative to the binding. A `let`
-    /// with no row here has no hole, which is nearly all of them.
-    ///
-    /// A second map rather than a field on [`DropKind`]: the kind answers for a
-    /// TYPE and every construction site of it would have to carry an empty set,
-    /// including the ones that answer for a store or for an explicit `drop`.
-    pub holes: HashMap<String, HashMap<usize, Vec<String>>>,
     /// Per function: every `let` in source order, and what happens to its
     /// value, in the words `vyrn why --memory` and the editor print
     /// (RFC-0087 U1).
@@ -1256,7 +1289,6 @@ fn analyze_now(program: &Program) -> Ownership {
     let lets = facts.lets;
 
     let mut droppable = HashMap::new();
-    let mut holes = HashMap::new();
     // Variant constructor names, the builtins included — see `Emit::constructs`.
     let mut constructs: std::collections::HashSet<String> = ["Some", "None", "Ok", "Err"]
         .iter()
@@ -1289,8 +1321,7 @@ fn analyze_now(program: &Program) -> Ownership {
                 r.droppable.insert(key, kind);
             }
         }
-        droppable.insert(name.clone(), r.droppable);
-        holes.insert(name, r.holes);
+        droppable.insert(name, r.droppable);
     };
     for f in &program.functions {
         emit(f.name.clone(), &f.params, &f.body);
@@ -1318,7 +1349,6 @@ fn analyze_now(program: &Program) -> Ownership {
         plan,
         owned_fns,
         droppable,
-        holes,
         memory: HashMap::new(),
         proto,
         // Every row in this table is the placer's now: the analysis injects
@@ -1460,7 +1490,6 @@ pub fn placed(steps: &[Release]) -> HashMap<(Exit, usize), Vec<(usize, Option<Ve
 
 struct FnResult {
     droppable: HashMap<usize, DropKind>,
-    holes: HashMap<usize, Vec<String>>,
 }
 
 /// One body's drop sites, in source order.
@@ -1473,7 +1502,6 @@ fn emit_body(
     let mut e = Emit {
         droppable: HashMap::new(),
         constructs,
-        holes: HashMap::new(),
         region_depth: 0,
         lets,
         proto,
@@ -1481,7 +1509,6 @@ fn emit_body(
     e.block(body);
     FnResult {
         droppable: e.droppable,
-        holes: e.holes,
     }
 }
 
@@ -1502,8 +1529,6 @@ struct Emit<'a> {
     /// malloc-side by itself (regionescape's payload route double-freed on
     /// the first version of round twenty-seven).
     constructs: &'a std::collections::HashSet<String>,
-    /// The places a take took out of a droppable `let` (RFC-0093 M2).
-    holes: HashMap<usize, Vec<String>>,
     region_depth: usize,
     /// What every `let` in the program still owns where its block ends.
     lets: &'a HashMap<usize, LetOwnership>,
@@ -1523,13 +1548,10 @@ impl Emit<'_> {
             Stmt::Let { value, line, .. } => {
                 self.exprs(value);
                 let _ = line;
-                if let Some((kind, holes)) =
+                if let Some((kind, _holes)) =
                     self.kept(id(s), matches!(s, Stmt::Let { mutable: true, .. }), value)
                 {
                     self.droppable.insert(id(s), kind);
-                    if !holes.is_empty() {
-                        self.holes.insert(id(s), holes);
-                    }
                 }
             }
             Stmt::If {
@@ -1799,22 +1821,7 @@ impl Emit<'_> {
     /// refused (RFC-0093 M1) — so this is the guard for the rule rather than for
     /// the corpus.
     fn skippable(&self, ty: &Type, paths: &[String]) -> bool {
-        paths.iter().all(|p| {
-            let mut cur = ty.clone();
-            for seg in p.split('.') {
-                if matches!(self.proto.release_kind(&cur), Some(DropKind::Release(..))) {
-                    return false;
-                }
-                let Type::Record(fields) = crate::types::resolve(&cur, &self.proto.types) else {
-                    return false;
-                };
-                let Some(f) = fields.iter().find(|f| f.name == seg) else {
-                    return false;
-                };
-                cur = f.ty.clone();
-            }
-            true
-        })
+        skippable(self.proto, ty, paths)
     }
 
     /// Whether this frame RECLAIMS one `let` binding's value where its block
@@ -2298,31 +2305,30 @@ pub(crate) mod tests {
     }
 
     /// What this walk decided for every `let` in `which`, in source order:
-    /// the release the frame reclaims with and the holes it walks around, or
-    /// `None` where the frame reclaims nothing.
+    /// the release the frame reclaims with, or `None` where the frame
+    /// reclaims nothing.
     ///
     /// The REASON for a `None` is the core's, and this crate installs no
     /// placer, so no test here may ask for one — the safety slice's rule.
-    fn kepts(src: &str, which: &str) -> Vec<Option<(DropKind, Vec<String>)>> {
+    /// The HOLES the release walks around are the core's too since the
+    /// input-circle slice: the core states them from its own take, and
+    /// `compiler/vyrn-cli/tests/coretables.rs` asserts them there.
+    fn kepts(src: &str, which: &str) -> Vec<Option<DropKind>> {
         let (o, p) = analyze_src(src);
         let f = p.functions.iter().find(|f| f.name == which).unwrap();
         let d = o.droppable.get(which).cloned().unwrap_or_default();
-        let h = o.holes.get(which).cloned().unwrap_or_default();
         let mut lets = Vec::new();
         let_stmts(&f.body, &mut lets);
         lets.iter()
             .map(|s| {
                 let k = *s as *const Stmt as usize;
-                d.get(&k)
-                    .cloned()
-                    .map(|kind| (kind, h.get(&k).cloned().unwrap_or_default()))
+                d.get(&k).cloned()
             })
             .collect()
     }
 
-    /// The hole set of the binding named `name`, or `None` where nothing
-    /// reclaims it.
-    fn holes_of(src: &str, name: &str) -> Option<Vec<String>> {
+    /// Whether this frame reclaims the binding named `name` at all.
+    fn reclaims(src: &str, name: &str) -> bool {
         let (o, p) = analyze_src(src);
         let f = p.functions.iter().find(|f| f.name == "main").unwrap();
         let mut lets = Vec::new();
@@ -2332,54 +2338,11 @@ pub(crate) mod tests {
             .find(|s| matches!(s, Stmt::Let { name: n, .. } if n == name))
             .unwrap();
         let k = *s as *const Stmt as usize;
-        o.droppable.get("main").unwrap().get(&k)?;
-        Some(
-            o.holes
-                .get("main")
-                .and_then(|m| m.get(&k))
-                .cloned()
-                .unwrap_or_default(),
-        )
+        o.droppable.get("main").unwrap().contains_key(&k)
     }
 
     const DOC: &str = "type Doc = { title: String, body: String } \
                        fn mk(a: String) -> Doc { return Doc { title: a + \"t\", body: a + \"b\" } } ";
-
-    #[test]
-    fn a_taken_field_is_the_only_place_the_walk_skips() {
-        let src = format!(
-            "{DOC} fn main() -> Int64 {{ let d = mk(\"x\"); let t = consume d.title; \
-             return Int64(t.byteLength) + Int64(d.body.byteLength); }}"
-        );
-        assert_eq!(holes_of(&src, "d"), Some(vec!["title".to_string()]));
-    }
-
-    /// The hole is a SET. `std/vyx.vyrn:1431` drains nine fields out of one
-    /// record, and `took` writes only where nothing is written yet — so a second
-    /// take had to stop going through it.
-    #[test]
-    fn every_take_of_one_record_joins_the_hole_set() {
-        let src = format!(
-            "{DOC} fn main() -> Int64 {{ let d = mk(\"x\"); let t = consume d.title; \
-             let b = consume d.body; return Int64(t.byteLength) + Int64(b.byteLength); }}"
-        );
-        assert_eq!(
-            holes_of(&src, "d"),
-            Some(vec!["title".to_string(), "body".to_string()])
-        );
-    }
-
-    /// The path is relative to the binding and may be more than one hop:
-    /// `std/vyx.vyrn:4091` writes `consume hs.head.err`.
-    #[test]
-    fn a_hole_can_be_a_chain_of_fields() {
-        let src = "type Inner = { err: String, n: Int64 } \
-                   type Outer = { head: Inner, tail: String } \
-                   fn mk(a: String) -> Outer { return Outer { head: Inner { err: a + \"e\", n: 1 }, tail: a + \"l\" } } \
-                   fn main() -> Int64 { let hs = mk(\"y\"); let e = consume hs.head.err; \
-                   return Int64(e.byteLength) + Int64(hs.tail.byteLength); }";
-        assert_eq!(holes_of(src, "hs"), Some(vec!["head.err".to_string()]));
-    }
 
     /// A write fills the hole, and the store that fills it releases what the
     /// place held — the buffer the take gave away. So the binding leaks whole
@@ -2391,7 +2354,7 @@ pub(crate) mod tests {
              d.title = \"z\"; return Int64(t.byteLength) + Int64(d.title.byteLength); }}"
         );
         assert!(
-            holes_of(&src, "d").is_none(),
+            !reclaims(&src, "d"),
             "a filled hole must not be skipped: {:?}",
             kepts(&src, "main")
         );
@@ -2424,7 +2387,7 @@ pub(crate) mod tests {
                    fn mk(a: String) -> Box { return Box { name: a + \"n\", n: 1 } } \
                    fn main() -> Int64 { let b = mk(\"x\"); let t = consume b.name; \
                    return Int64(t.byteLength) + b.n; }";
-        assert!(holes_of(src, "b").is_none(), "{:?}", kepts(src, "main"));
+        assert!(!reclaims(src, "b"), "{:?}", kepts(src, "main"));
     }
 
     // ---- auto-free for mutable arrays -----------------------------------
@@ -2758,23 +2721,23 @@ pub(crate) mod tests {
                    fn main() -> Int64 { let d = Doc { title: \"a\" + \"b\", body: \"c\" }; \
                    let t = consume d.title; return t.byteLength; }";
         // `t` is the String the record gave away, and `d` is the rest of it.
+        // WHICH place the walk skips is the core's answer since the
+        // input-circle slice (`tests/coretables.rs`); what this pass still
+        // says is that the record is reclaimed at all.
         assert_eq!(
             kepts(src, "main"),
             vec![
-                Some((
-                    DropKind::Deep(Type::Record(vec![
-                        Field {
-                            name: "title".into(),
-                            ty: Type::Str,
-                        },
-                        Field {
-                            name: "body".into(),
-                            ty: Type::Str,
-                        },
-                    ])),
-                    vec!["title".to_string()]
-                )),
-                Some((DropKind::FreeStr, Vec::new())),
+                Some(DropKind::Deep(Type::Record(vec![
+                    Field {
+                        name: "title".into(),
+                        ty: Type::Str,
+                    },
+                    Field {
+                        name: "body".into(),
+                        ty: Type::Str,
+                    },
+                ]))),
+                Some(DropKind::FreeStr),
             ]
         );
     }
