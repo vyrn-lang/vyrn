@@ -15539,6 +15539,117 @@ apart from the test's counts before this slice; the test is the pin. The form
 census, the surface census, `emitter_census`, `frontend_census` and
 `cli_census` do not move.
 
+#### The two closures, priced against the corpus (2026-09-09, `track-dt`)
+
+`track-dr` left `Facts::escapers` and `Facts::fnval_clear` standing and named
+the blocker as ORDER: both are asked WHILE a body is built, and the core folds
+its own facts AFTER. Two shapes were on the table — a second build against the
+fold (**181 ms in place of 74 ms** of a 304 ms placer on `site/app/docs.vyrn`,
+`track-dr`'s measurement), or a fold from the FIRST pass read at the build the
+emitter reads, which costs no build and leaves the first pass's rows made
+against an empty answer. This slice priced what an empty answer is worth,
+which is the number the second shape has to survive.
+
+**What each closure is worth, measured by emptying it.** A knob in
+`own::analyze_now` hands the core an empty set for one or both, and everything
+else is unchanged:
+
+| | `VYRN_WASM_MANIFEST=check` (176 examples) | the residue ratchet |
+|---|---|---|
+| both sets, as today | green, unmoved | engine 172 clean / 3 leaking, route 172 clean / 3 leaking, 0 failed |
+| `escapers` empty | **green, unmoved** | **172 clean / 3 leaking on each engine, 0 failed** |
+| `fnval_clear` empty | green, unmoved | *(not run alone; the pair below names its programs)* |
+| both empty | green, unmoved | **170 clean / 5 leaking on each engine, 4 failed** — `rpc` leaks 6 blocks and `rpcsplit` 5, on the engine and on the route alike |
+
+**So the two are not one question.** `fnval_clear` is load-bearing and its
+programs are named: `examples/rpc.vyrn` and `examples/rpcsplit.vyrn`, the call
+through a fn value where no capability row answers, which is the shape round
+forty-six wrote it for. `escapers` changes nothing the corpus can observe —
+not a byte of the 176 examples, not a row of the ratchet's 175 programs.
+
+**And `escapers` is not vacuous, which is the finding.** A dump at
+`Builder::store_is_fresh`'s screen counts **589 firings** over the 280 corpus
+roots: the set is consulted, it contains a mentioned callee, and it flips the
+store's answer from fresh to not-fresh — 589 times, with no emitted byte and
+no runtime block depending on the flip. That is a different situation from
+`lending` and `retains`, which `track-dh` measured EMPTY: this one fires and
+does not matter. Either the store rows it changes are re-decided by the second
+build, or the emitter reads the same code out of both answers. A slice that
+deletes it owes that explanation or a shaped program, exactly as the
+wrapped-lend slice owed its eleven.
+
+**The order question, answered by those numbers.** Neither shape is free.
+The second-build shape costs about a third more placer on the command a
+keystroke pays for. The fold-from-the-first-pass shape leaves the rows of the
+**1,314 bodies the second pass does not rebuild** (2,232 built, 918 rebuilt)
+made against an empty answer — and an empty answer, measured above, is worth
+two leaking programs and four failed runs. It could be made safe only by
+rebuilding exactly the bodies whose answer changed, which is the second shape
+under another name. So the numbers are recorded and the closures stand, and
+what moves next is the smaller question: `escapers` fires 589 times and is
+worth nothing, so it is the top of the list below and not an order question at
+all.
+
+
+#### What `own.rs` is, with a reader against every part (2026-09-09, `track-dt`)
+
+1,827 lines, and nothing in them is dead: every section below has a reader
+outside the file. The count is the file's own tiling — a section runs from its
+doc comment to the next item's.
+
+| section | lines | who reads it |
+|---|---|---|
+| the module comment | 46 | — |
+| `Exit`, `Release`, `DropKind` + `words`, `Linear` | 183 | the row vocabulary every pass shares: `Exit` in `kernel.rs`, `direct.rs`, `lib.rs`; `Release` in `core.rs`, `direct.rs`, `lib.rs`; `DropKind` in five files including `render.rs`'s printer; `Linear` in `declared.rs` and `typed.rs` |
+| `Owned` and its ten methods (`new`, `linear_kind`, `must_use`, `types`, `owns_heap`, `unbounded`, `reaches_declared`, `is_release_fn`, `release_kind`) | 434 | **the type table every pass asks**: `core.rs`, `declared.rs`, `direct.rs`, `typed.rs`, `types.rs`. `release_kind` alone is 189 lines and is the answer "what does releasing a value of this type do" |
+| the free type predicates: `self_referring`, `owns_heap`, `skippable`, `holes_under`, `str_temporary` | 286 | `checker.rs` (`self_referring`, `owns_heap`), `core.rs` (`skippable`), `direct.rs` (`holes_under`, `str_temporary`), `types.rs`, `declared.rs`, `tests/memory.rs` |
+| `MemoryRow`, `Bucket` | 43 | `vyrn why --memory` and the editor: `symbols.rs`, `vyrn-cli/src/main.rs` |
+| `ReleasePlan` and the alias machinery (`alias_clones`, `alias_clones_scoped`, `alias_scope`, `alias_unwind`, `resolve`, `key_of`) | 79 | `core.rs` and `direct.rs` |
+| `Ownership` — eight fields | 58 | ten sites in seven files. `plan`, `owned_fns`, `memory`, `proto`, `releases`, `escapers`, `fnval_clear`, `arg_caps` |
+| the memoized analysis: `Memo`, `ident`, `hand_on`, `forget_loaded`, `open`, `Drop`, `analyze`, `analyze_now` | 183 | `analyze` has **28 call sites in twelve files** — it is the door. `Memo` is the one-analysis-per-command scope (`checker.rs`, `symbols.rs`, `main.rs`) |
+| the two plan keys: `for_var_key`, `binder_key` | 22 | `core.rs` and `direct.rs`, which key the same rows |
+| the three installed slots: `Placer`, `Refusals`, `MustUse` and their six functions | 71 | `vyrn-lower/src/lib.rs` installs all three; `movecheck.rs` and `symbols.rs` read them. They are the inversion that lets `vyrn-frontend` be below `vyrn-lower` |
+| `placed` | 28 | `direct.rs` |
+| tests | 395 | the file's own |
+
+**What that says about §2.7's "delete `own.rs`".** The file is no longer a
+PASS. It is four things a reader can name, and only one of them is going
+anywhere:
+
+1. **The `Owned` type table and the free predicates — 720 lines, 39 per cent.**
+   Every pass in the compiler asks it, and RFC-0125 keeps the question: "what
+   does a value of this type own, and what does releasing it do" is a reading
+   of the DECLARATIONS. It moves to whatever file states declarations; it does
+   not go.
+2. **The row vocabulary and the plan — 340 lines.** `Exit`, `Release`,
+   `DropKind`, `ReleasePlan`, `Ownership`, `placed`, the two keys. Written by
+   the placer alone since the container slice, read by `core.rs` and
+   `direct.rs`. §2.7 keeps the table and renames it.
+3. **The analysis door and the three slots — 254 lines.** `analyze` with 28
+   callers and the inversion that lets the frontend call up into the lowering.
+   It goes when the two crates are one.
+4. **The report — 43 lines.** `MemoryRow` and `Bucket`, written by the core
+   through the placer slot and printed by `vyrn why --memory`.
+
+**The ranked list, for the next slice.**
+
+1. **`Ownership::escapers`** and everything behind it —
+   `movecheck::Facts::escapers`, `MoveCheck::param_escapers`,
+   `carries_param_storage`, and `Builder::store_is_fresh`'s last screen. Fires
+   589 times over the corpus and is worth zero bytes and zero blocks, measured
+   above. It is the only field of `Ownership` a measurement says nothing reads
+   the answer of.
+2. **`movecheck`'s refusal plumbing** — `run(program, Want::Check).diags` is
+   always empty since row 23 left, so `MoveCheck::errors`, `check_accum`,
+   `borrow_store_sites`, `refusal`, `in_source_order`, `Run::diags` and the
+   `Result<_, Diagnostic>` on `block`, `stmt` and `expr` all carry nothing.
+   Not `own.rs`'s, but it is what `own::kernel_refusals` and
+   `own::must_use_refusals` are still called through.
+3. **`Consumed`** — write-only, 92 mentions, five functions. Also
+   `movecheck.rs`'s.
+4. **`Ownership::owned_fns`** — "the return type and nothing else" by its own
+   comment, since RFC-0089 rule 3. A table whose rule is a declaration.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
