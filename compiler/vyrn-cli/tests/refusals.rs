@@ -2388,11 +2388,13 @@ fn sections() -> Vec<Section> {
             "what a run is for, and one run's outputs",
         ),
         sec(
-            "pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>> {",
+            "pub fn hands_back(name: &str) -> bool {",
             Rows,
-            "the capability of a position, the producer screens, and the \
-             verdict for one argument temporary — read at a position instead \
-             of at a binding, by this pass and by the core alike",
+            "the producer screens and the verdict for one argument temporary \
+             — read at a position instead of at a binding, by this pass and \
+             by the core alike. The CAPABILITY of a position is a reading of \
+             a declaration and lives with the other program-level tables \
+             (`declared::arg_caps`)",
         ),
         sec(
             "fn let_id(s: &Stmt) -> usize {",
@@ -2746,7 +2748,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 0),
         ("a rule only the checker gives", 126),
-        ("placement rows for the engines", 1608),
+        ("placement rows for the engines", 1565),
         ("a fix menu", 73),
         ("shared machinery", 3564),
         ("tests", 703),

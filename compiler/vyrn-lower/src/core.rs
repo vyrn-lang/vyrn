@@ -620,6 +620,12 @@ pub(crate) enum Cand {
     /// A `for`: the core loops over the value, and the construct is its last
     /// owner where the name's last read is INSIDE the loop.
     Loop,
+    /// A `for`'s VARIABLE: every element left the container through it, so
+    /// each turn owns its element and the container's release frees the
+    /// buffer alone. The name is handed on somewhere in the body — into a
+    /// `consume` position, a literal, a store, a map key or a `return` —
+    /// rather than only read.
+    Elem,
 }
 
 impl Body {
@@ -904,6 +910,7 @@ fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
             last: vec![0; f.names.len()],
             deep: vec![0; f.names.len()],
             bound: vec![usize::MAX; f.names.len()],
+            handed: vec![false; f.names.len()],
             switches: Vec::new(),
             order: 0,
             depth: 0,
@@ -923,6 +930,7 @@ fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
                 Cand::Loop => {
                     w.bound[*n as usize] != usize::MAX && w.deep[*n as usize] > w.bound[*n as usize]
                 }
+                Cand::Elem => w.handed[*n as usize],
             };
             if takes {
                 out.insert(*site);
@@ -932,6 +940,15 @@ fn last_owner(top: &Body) -> std::collections::HashSet<usize> {
     out
 }
 
+/// The name a place is rooted at, as a value. `None` for module state.
+fn root_name(p: &Place) -> Option<Val> {
+    match p {
+        Place::Name(n) => Some(Val::Name(*n)),
+        Place::Global(_) => None,
+        Place::Field(b, _) | Place::Elem(b, _) | Place::Key(b, _) => root_name(b),
+    }
+}
+
 /// One frame's last read of each name, the loop depth that read stood at,
 /// the loop depth each name was bound at, and every switch over a bare name
 /// with its depth and the order of its own read. See [`last_owner`].
@@ -939,12 +956,40 @@ struct Reads {
     last: Vec<usize>,
     deep: Vec<usize>,
     bound: Vec<usize>,
+    /// Whether the name was HANDED ON rather than only read: the element
+    /// question a [`Cand::Elem`] asks.
+    handed: Vec<bool>,
     switches: Vec<(usize, Name, usize, usize)>,
     order: usize,
     depth: usize,
 }
 
 impl Reads {
+    /// A value in a position that TRANSFERS it: a declared `consume`
+    /// argument, a part of a literal, a stored value, a map key a store
+    /// writes at, a returned value.
+    fn hand(&mut self, v: &Val) {
+        if let Val::Name(n) = v {
+            self.handed[*n as usize] = true;
+        }
+        self.val(v);
+    }
+
+    /// The place of a STORE: the key it writes at is handed to the container.
+    fn store_place(&mut self, p: &Place) {
+        match p {
+            Place::Key(b, v) => {
+                self.place(b);
+                self.hand(v);
+            }
+            Place::Field(b, _) | Place::Elem(b, _) => self.store_place(b),
+            _ => self.place(p),
+        }
+        if let Place::Elem(_, v) = p {
+            self.val(v);
+        }
+    }
+
     fn val(&mut self, v: &Val) {
         self.order += 1;
         if let Val::Name(n) = v {
@@ -972,15 +1017,35 @@ impl Reads {
     fn rhs(&mut self, r: &Rhs) {
         match r {
             Rhs::Val(v) => self.val(v),
-            Rhs::Read(p) | Rhs::Take(p) => self.place(p),
+            Rhs::Read(p) => self.place(p),
+            // A take out of a sub-place hands that part on, so the name is
+            // not whole any more and what is left of it is this turn's:
+            // `out.push(consume p.value)` inside a `for p in ..`
+            // (`std/tw.vyrn`'s `twSafelist`, `std/rpc.vyrn`'s
+            // `rpcApplyConfig`).
+            Rhs::Take(p) => {
+                self.place(p);
+                if let Some(Val::Name(n)) = root_name(p) {
+                    self.handed[n as usize] = true;
+                }
+            }
             Rhs::Call { args, .. } => {
-                for (v, _) in args {
+                for (v, c) in args {
+                    if *c == vyrn_frontend::ast::Capability::Consume {
+                        self.hand(v);
+                    } else {
+                        self.val(v);
+                    }
+                }
+            }
+            Rhs::Prim(vs, _) => {
+                for v in vs {
                     self.val(v);
                 }
             }
-            Rhs::Prim(vs, _) | Rhs::Make(vs) => {
+            Rhs::Make(vs) => {
                 for v in vs {
-                    self.val(v);
+                    self.hand(v);
                 }
             }
         }
@@ -1001,8 +1066,8 @@ impl Reads {
                     self.bound[*n as usize] = depth;
                 }
                 St::Store { place, value, .. } => {
-                    self.place(place);
-                    self.val(value);
+                    self.store_place(place);
+                    self.hand(value);
                 }
                 St::Drop(n, _, _) => self.name(*n),
                 // A row is the plan's, not the core's: see [`last_owner`].
@@ -1016,7 +1081,7 @@ impl Reads {
                 }
                 St::Loop(b) => self.stmts(b, depth + 1),
                 St::Block { body, .. } => self.stmts(body, depth),
-                St::Return { value: Some(v), .. } => self.val(v),
+                St::Return { value: Some(v), .. } => self.hand(v),
                 St::Switch { on, arms, .. } => {
                     self.val(on);
                     if let (Val::Name(n), Some(a)) = (on, arms.first()) {
@@ -1173,7 +1238,6 @@ fn build_seeded(
         scope: Vec::new(),
         by_binding: HashMap::new(),
         temps: 0,
-        func_name: inst.func.name.clone(),
         pending_receiver: None,
         drain: 0,
         after: Vec::new(),
@@ -1276,7 +1340,6 @@ pub fn build_module_state<'a>(
         scope: Vec::new(),
         by_binding: HashMap::new(),
         temps: 0,
-        func_name: String::new(),
         pending_receiver: None,
         drain: 0,
         after: Vec::new(),
@@ -1379,7 +1442,6 @@ fn build_outside_seeded<'a>(
         scope: Vec::new(),
         by_binding: HashMap::new(),
         temps: 0,
-        func_name: name.to_string(),
         pending_receiver: None,
         drain: 0,
         after: Vec::new(),
@@ -1412,8 +1474,6 @@ struct Builder<'a> {
     /// a parameter, or the construct that owns a temporary.
     by_binding: HashMap<usize, Name>,
     temps: u32,
-    /// The function's declared name — the key the plan's binding notes use.
-    func_name: String,
     /// An unnamed receiver `place` minted for a field or element read, with
     /// the node that produced it, so the read can release it afterwards when
     /// the plan says the frame owns it (R1').
@@ -1504,18 +1564,7 @@ impl<'a> Builder<'a> {
     /// Record the plan's key for a name, and the name for the key.
     fn keyed(&mut self, n: Name, binding: usize) {
         self.body.names[n as usize].binding = Some(binding);
-        self.body.names[n as usize].holes = self.plan_holes(binding);
         self.by_binding.insert(binding, n);
-    }
-
-    /// The plan's hole set for a binding, spelled for the kernel.
-    fn plan_holes(&self, binding: usize) -> Vec<String> {
-        self.own
-            .holes
-            .get(&self.func_name)
-            .and_then(|m| m.get(&binding))
-            .map(|hs| hs.iter().map(|h| format!(".{h}")).collect())
-            .unwrap_or_default()
     }
 
     /// A join whose arm handed out a name bound outside the enclosing loop,
@@ -2387,18 +2436,6 @@ impl<'a> Builder<'a> {
                     self.stream_loops.push(it);
                 }
                 let mut l = Vec::new();
-                // Whose is each element? The plan's row for the loop says:
-                // a `FreeArr` row frees the buffer only, because the body
-                // took the elements out through the variable (round sixteen's
-                // handover) — then each turn owns its element and must move or
-                // release it. Any other row, or none, releases the container
-                // deep, and the variable is an alias into it.
-                let handed_over = self
-                    .own
-                    .droppable
-                    .get(&self.func_name)
-                    .and_then(|m| m.get(&sid))
-                    .is_some_and(|k| matches!(k, DropKind::FreeArr));
                 // The loop leaves when the container is walked: the same
                 // `if .. else break` a `while` has at its top. Without it the
                 // kernel sees a loop nothing leaves, and the path after the
@@ -2413,12 +2450,36 @@ impl<'a> Builder<'a> {
                     els: vec![St::Break { site: 0 }],
                     site: 0,
                 });
-                let owned = handed_over && self.owns(&ety);
+                // Whose is each element? The loop VARIABLE is the last owner
+                // of every element that left the container, and the core
+                // answers that over its own first build ([`last_owner`],
+                // `Cand::Elem`): the variable is handed on somewhere in the
+                // body rather than only read. Then each turn owns its
+                // element and must move or release it, and the container's
+                // release frees the buffer alone. Read only where the
+                // element type owns heap; nothing else is a question.
+                let ekey = vyrn_frontend::own::for_var_key(var);
+                // …out of a container this frame owns: a lender's result is
+                // somebody else's buffer, so its elements are somebody
+                // else's too, and a `for x in xs` over a `read` parameter
+                // may not hand `x` on (`x` is the loop variable, and a
+                // return is owned).
+                // …out of a container the loop is the only owner of: a
+                // value with no name of its own that this frame owns. A
+                // lender's result is somebody else's buffer and its
+                // elements are somebody else's too; a container the reader
+                // NAMED outlives the loop, so `for r in ns` only borrows
+                // its elements and `take(r)` is refused (the structural
+                // census, rows 01, 02, 03, 27 and 34).
+                let ic = &self.body.names[it as usize];
+                let loops_alone = !ic.borrow && !ic.bound_by_let;
+                let owned = self.owns(&ety) && loops_alone && self.seed.contains(&ekey);
                 // In front of the variable: each turn binds its own element,
                 // so handing THAT out of a join arm frees once per turn. The
                 // container is below the mark and handing it out is refused.
                 self.loop_marks.push(self.body.names.len());
                 let x = self.name(var, ety, owned, *line);
+                self.body.cands.push((ekey, x, Cand::Elem));
                 // What the variable IS, for a refusal about it: the container
                 // outlives the loop, so the loop only names the element. The
                 // kernel read that off the alias table and said the element was
@@ -3257,7 +3318,7 @@ impl<'a> Builder<'a> {
         };
         let constructs = matches!(callee, "Some" | "Ok" | "Err" | "Success" | "Failure")
             || self.is_variant(callee);
-        let cap = mc::arg_cap(&self.own.arg_caps, callee, ix);
+        let cap = vyrn_frontend::declared::arg_cap(&self.own.arg_caps, callee, ix);
         if mc::arg_verdict(&s, constructs, cap, &self.own.retains, &self.own.lending)
             == mc::ArgVerdict::Released
         {
@@ -3695,7 +3756,7 @@ impl<'a> Builder<'a> {
     fn take_prefix(&mut self, e: &'a Expr, line: usize, out: &mut Vec<St>) -> Result<Val, Gap> {
         take_names_a_place(e, line, false)?;
         self.consume_names_a_borrow(e, line)?;
-        self.take_place(e, out)
+        self.take_place_at(e, out, true)
     }
 
     /// RFC-0125 §3 M3, row 11: a prefix `consume` of a BORROW hands somebody
@@ -3782,9 +3843,52 @@ impl<'a> Builder<'a> {
     /// builtin hands back (`s.dense.push(i)` is `s.dense = @push(s.dense, i)`).
     /// The value leaves into an owned name and the base keeps a hole.
     fn take_place(&mut self, e: &'a Expr, out: &mut Vec<St>) -> Result<Val, Gap> {
+        self.take_place_at(e, out, false)
+    }
+
+    /// The same, saying whether the hole STAYS: a `consume x.f` empties the
+    /// place and nothing fills it, so the base's release walks around it
+    /// from here on (RFC-0093 M2). The write-back form fills the hole with
+    /// the store that follows the call, so its base keeps none.
+    ///
+    /// This is where the core states a binding's holes. It used to read them
+    /// off `own::Ownership::holes` at [`Builder::keyed`] — the plan's answer
+    /// to the question the core's own `take` already asks, and the input
+    /// half of the circle RFC-0125 §3 M3 names.
+    fn take_place_at(
+        &mut self,
+        e: &'a Expr,
+        out: &mut Vec<St>,
+        keeps_hole: bool,
+    ) -> Result<Val, Gap> {
         let ty = self.ty_of(e)?;
         let place = self.place(e, out)?;
         self.pending_receiver = None;
+        if keeps_hole {
+            if let Some((n, path)) = crate::kernel::root_of(&place) {
+                // A hole the walk cannot be told to skip is not stated: the
+                // release would then hand back a place the take gave away,
+                // or — where the type declares its own `release` — free it
+                // twice, because a function cannot be told to leave one
+                // field alone (`refusals/r22_drop_with_a_hole.vyrn`). The
+                // rule about the TYPE is `Owned`'s, and it is asked here.
+                let bty = self.body.names[n as usize].ty.clone();
+                let rel = path.trim_start_matches('.').to_string();
+                if !rel.is_empty()
+                    && vyrn_frontend::own::skippable(
+                        &self.own.proto,
+                        &bty,
+                        std::slice::from_ref(&rel),
+                    )
+                {
+                    let hs = &mut self.body.names[n as usize].holes;
+                    if !hs.contains(&path) {
+                        hs.push(path);
+                        hs.sort();
+                    }
+                }
+            }
+        }
         let t = self.temp(ty, e.line());
         out.push(St::Let(t, Rhs::Take(place)));
         Ok(Val::Name(t))

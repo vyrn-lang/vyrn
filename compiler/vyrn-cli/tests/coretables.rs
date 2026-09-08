@@ -57,6 +57,61 @@ fn load(path: &std::path::Path) -> Result<Program, String> {
     })
 }
 
+/// The core's own hole set for the `let` named `binding` in `main`.
+///
+/// RFC-0125 §3 M3, the input-circle slice: a `consume p` states the hole
+/// where the take is written ([`vyrn_lower::core`]'s `take_place_at`), so
+/// the set is the core's own answer rather than a table it reads back out of
+/// `own.rs`. These three assertions were `own.rs`'s until the plan's copy
+/// lost its last reader.
+fn core_holes(src: &str, binding: &str) -> Vec<String> {
+    vyrn_lower::install();
+    let program = vyrn_frontend::load(src, "holes.vyrn", &Default::default(), &Fs)
+        .unwrap_or_else(|d| panic!("{}", d.first().map(|d| d.render()).unwrap_or_default()));
+    let _memo = vyrn_frontend::project::Memo::open();
+    let lowered = vyrn_lower::lower(&program);
+    let own = vyrn_frontend::own::analyze(&program);
+    let inst = lowered
+        .instances
+        .iter()
+        .find(|i| i.func.name == "main")
+        .expect("main is lowered");
+    let top = vyrn_lower::core::build(&program, inst, &own).expect("main builds");
+    top.names
+        .iter()
+        .find(|n| n.bound_by_let && n.source == binding)
+        .unwrap_or_else(|| panic!("no `let {binding}` in main"))
+        .holes
+        .clone()
+}
+
+/// A take of one field leaves one hole, and it is spelled relative to the
+/// binding.
+#[test]
+fn a_taken_field_is_the_only_place_the_walk_skips() {
+    let src = "type Doc = { title: String, body: String }                fn mk(a: String) -> Doc { return Doc { title: a + \"t\", body: a + \"b\" } }                fn main() -> Int64 { let d = mk(\"x\"); let t = consume d.title;                return Int64(t.byteLength) + Int64(d.body.byteLength); }";
+    assert_eq!(core_holes(src, "d"), vec![".title".to_string()]);
+}
+
+/// The hole is a SET. `std/vyx.vyrn:1431` drains nine fields out of one
+/// record, so a second take must join the set rather than replace it.
+#[test]
+fn every_take_of_one_record_joins_the_hole_set() {
+    let src = "type Doc = { title: String, body: String }                fn mk(a: String) -> Doc { return Doc { title: a + \"t\", body: a + \"b\" } }                fn main() -> Int64 { let d = mk(\"x\"); let t = consume d.title;                let b = consume d.body; return Int64(t.byteLength) + Int64(b.byteLength); }";
+    assert_eq!(
+        core_holes(src, "d"),
+        vec![".body".to_string(), ".title".to_string()]
+    );
+}
+
+/// The path may be more than one hop: `std/vyx.vyrn:4091` writes
+/// `consume hs.head.err`.
+#[test]
+fn a_hole_can_be_a_chain_of_fields() {
+    let src = "type Inner = { err: String, n: Int64 }                type Outer = { head: Inner, tail: String }                fn mk(a: String) -> Outer { return Outer { head: Inner { err: a + \"e\", n: 1 }, tail: a + \"l\" } }                fn main() -> Int64 { let hs = mk(\"y\"); let e = consume hs.head.err;                return Int64(e.byteLength) + Int64(hs.tail.byteLength); }";
+    assert_eq!(core_holes(src, "hs"), vec![".head.err".to_string()]);
+}
+
 fn corpus() -> Vec<PathBuf> {
     let mut names: Vec<PathBuf> = std::fs::read_dir(repo_root().join("examples"))
         .unwrap()
@@ -211,6 +266,14 @@ fn run() {
             };
             for body in top.frames() {
                 producers(&body.stmts, &mut produced);
+                // RFC-0125 §3 M3, the input-circle slice: the holes a
+                // binding's release walks around are the core's own answer,
+                // stated where the `consume` is written. `own.rs` kept a
+                // copy the core read back; the copy is gone, and the census
+                // counts what the core states.
+                for info in &body.names {
+                    *counted.entry("binding holes").or_default() += info.holes.len();
+                }
             }
         }
     }

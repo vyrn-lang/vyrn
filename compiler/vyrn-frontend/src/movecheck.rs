@@ -450,55 +450,12 @@ struct Run {
     fnval_clear: HashSet<String>,
 }
 
-/// The capability map [`arg_verdict`] answers a position under: a declared
-/// function's parameters, and a protocol method's over them (a method call
-/// reaches this pass under its SURFACE name, and the protocol is what both
-/// sides agreed on).
-///
-/// Public because a second pass states the same rule at the same position
-/// (RFC-0125 §3 M3, the argument slice): the core lowers the call and asks
-/// [`arg_verdict`] there, so both must read the position the same way.
-pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>> {
-    let mut caps: HashMap<String, Vec<Capability>> = program
-        .functions
-        .iter()
-        .map(|f| {
-            (
-                f.name.clone(),
-                f.params.iter().map(|p| p.capability).collect(),
-            )
-        })
-        .collect();
-    for p in &program.protocols {
-        for m in &p.methods {
-            let mut cs = vec![m.recv];
-            cs.extend(m.param_caps.iter().copied());
-            caps.insert(m.name.clone(), cs);
-        }
-    }
-    caps
-}
-
-/// The capability of one position: the declaration's word where there is one,
-/// the seeded row's otherwise, and `None` where neither answers — which is
-/// [`ArgVerdict::Unknown`] and frees nothing.
-pub fn arg_cap(
-    caps: &HashMap<String, Vec<Capability>>,
-    callee: &str,
-    ix: usize,
-) -> Option<Capability> {
-    caps.get(callee)
-        .and_then(|c| c.get(ix))
-        .copied()
-        .or_else(|| crate::prelude::capability(callee, ix))
-}
-
 /// Whether the producer of an argument HANDS ITS ARGUMENT BACK — `blackBox`,
 /// whose seeded row returns the same bare type parameter one of its own
 /// parameters has. The result IS the argument, so no temporary stands here.
 ///
-/// Public for the same reason [`arg_caps`] is: the core screens the same
-/// producer at the same position.
+/// Public for the same reason [`crate::declared::arg_caps`] is: the core
+/// screens the same producer at the same position.
 pub fn hands_back(name: &str) -> bool {
     crate::prelude::signature(name).is_some_and(|f| {
         matches!(&f.ret, Type::Param(r)
@@ -1101,8 +1058,8 @@ fn run(program: &Program, want: Want) -> Run {
     // both sides agree on (conformance compares capabilities), so its
     // declaration is the discipline every call site reads: without this the
     // exclusivity rule and the `consume` move would both go silent the moment a
-    // function became a method. Stated once, in [`arg_caps`].
-    let caps = arg_caps(program);
+    // function became a method. Stated once, in [`crate::declared::arg_caps`].
+    let caps = crate::declared::arg_caps(program);
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
     // `export extern fn` names. Rule 3 is stricter here, because the caller is
     // JS and JS frees every String it is handed (RFC-0089 M3b).

@@ -340,3 +340,48 @@ impl Declared {
             .cloned()
     }
 }
+
+/// The capability map [`crate::movecheck::arg_verdict`] answers a position under: a declared
+/// function's parameters, and a protocol method's over them (a method call
+/// reaches this pass under its SURFACE name, and the protocol is what both
+/// sides agreed on).
+///
+/// A reading of a DECLARATION and nothing else, so it lives with the other
+/// program-level tables rather than in the pass that used to own it: two
+/// passes state the same rule at the same position (RFC-0125 §3 M3, the
+/// argument slice) — `movecheck::arg_verdict` and the core at the call it
+/// lowers — and both read the position out of this one map.
+pub fn arg_caps(program: &Program) -> HashMap<String, Vec<Capability>> {
+    let mut caps: HashMap<String, Vec<Capability>> = program
+        .functions
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| p.capability).collect(),
+            )
+        })
+        .collect();
+    for p in &program.protocols {
+        for m in &p.methods {
+            let mut cs = vec![m.recv];
+            cs.extend(m.param_caps.iter().copied());
+            caps.insert(m.name.clone(), cs);
+        }
+    }
+    caps
+}
+
+/// The capability of one position: the declaration's word where there is one,
+/// the seeded row's otherwise, and `None` where neither answers — which is
+/// [`crate::movecheck::ArgVerdict::Unknown`] and frees nothing.
+pub fn arg_cap(
+    caps: &HashMap<String, Vec<Capability>>,
+    callee: &str,
+    ix: usize,
+) -> Option<Capability> {
+    caps.get(callee)
+        .and_then(|c| c.get(ix))
+        .copied()
+        .or_else(|| crate::prelude::capability(callee, ix))
+}
