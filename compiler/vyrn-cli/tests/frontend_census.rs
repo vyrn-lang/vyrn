@@ -235,13 +235,14 @@ fn loader_sections() -> Vec<Section> {
              fourteen-arm matches until then",
         ),
         sec(
-            "macro_rules! body_scope_descent {",
+            "crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);",
             Shared,
-            "the ONE scope-aware descent over a `Block`, written by a macro for \
-             the descent above's reason one binding form up: the collector reads \
-             through a shared borrow and the two rewriters assign through a \
-             unique one (RFC-0125 §3 M6). It was three thirty-five-arm walks — \
-             `scope_*`, `rewrite_*` and `NsResolver::walk_*` — until then, and \
+            "the two expansions of the ONE descent over a `Block`. The arm list \
+             itself is `ast::body_scope_descent!` since RFC-0125 §3 M6's second \
+             body slice, because seven more readers wanted it and the AST is \
+             where it is declared; this file states which two borrows it needs \
+             and nothing else. It was three thirty-five-arm walks — `scope_*`, \
+             `rewrite_*` and `NsResolver::walk_*` — until the first slice, and \
              the three had already drifted over an `Ok(x) =>` arm's binding",
         ),
         sec(
@@ -641,7 +642,10 @@ fn project_sections() -> Vec<Section> {
             "THE shared mutable walk over every expression a body holds, \
              innermost-last. Four readers in this file, plus `loader.rs`'s panic \
              stamping and `vyrn test`'s builtin rewrite and `vyrn-lower`'s \
-             effect scan. It is what the loader's three walks should have been",
+             effect scan. The descent is `ast::body_scope_descent!`'s since \
+             RFC-0125 §3 M6's second body slice, read through its `after_expr` \
+             hook; what is left here is the entry point and the one line these \
+             readers write",
         ),
         sec(
             "pub fn is_place(e: &Expr) -> bool {",
@@ -818,7 +822,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             15,
             0,
         ),
-        ("loader.rs", "shared machinery", 677, 0),
+        ("loader.rs", "shared machinery", 462, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2897, 0),
         ("symbols.rs", "a rule stated a second time", 360, 0),
@@ -831,7 +835,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 861, 0),
-        ("project.rs", "the file's own job", 1110, 0),
+        ("project.rs", "the file's own job", 1108, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -840,8 +844,8 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("project.rs", "shared machinery", 376, 0),
-        ("project.rs", "tests", 305, 0),
+        ("project.rs", "shared machinery", 273, 0),
+        ("project.rs", "tests", 309, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
 }

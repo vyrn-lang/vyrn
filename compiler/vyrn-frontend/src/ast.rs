@@ -1546,6 +1546,300 @@ impl Expr {
     }
 }
 
+/// Every statement and every expression a body holds, in source order, with the
+/// local names in scope at each one — the ONE descent this workspace makes over
+/// a `Block`.
+///
+/// Eight readers ask the same question and used to write the same thirty-five
+/// arms out to ask it (RFC-0125 §3 M6). Three are the loader's — `scope_*`
+/// collects the free names, `rewrite_*` renames them, `NsResolver` resolves the
+/// namespace-qualified ones; three are this file's — `lambdas`,
+/// `node_addrs` and `alias_embedded`; one is `project::walk_block`, the
+/// shared mutable walk seven passes call; and one is the direct backend's
+/// hoist. They had drifted, and each drift was a defect: only two of the
+/// loader's three put an `Ok(x) =>` arm's binding in scope, so a rename map
+/// spelling a success binder would have folded the binding into a declaration.
+///
+/// What differs between the readers is one line at a SITE, never the traversal.
+/// The loader's collector records a namespace-sugar call under its DOTTED
+/// spelling; its renamer SKIPS a namespace receiver; its resolver DELETES the
+/// receiver argument; `lambdas` keeps the body a literal holds;
+/// `alias_embedded` stops at a subtree equal to the one it is pairing; the
+/// hoist stops at a lambda. So the visitor is handed the node and the scope and
+/// writes its own line, and the walk owns the descent and the scope stack and
+/// nothing else.
+///
+/// It is a macro for `type_head_descent`'s reason, one binding form up: some
+/// readers read through a shared borrow and some assign through a unique one,
+/// and no other mechanism in Rust states a descent once across both. Each
+/// expansion defines its own trait, so the two borrows are two spellings of one
+/// arm list. The shared expansion carries the body's lifetime, because a reader
+/// may keep a borrow it is handed — `lambdas` hands back the `LambdaBody` at
+/// each address; the unique expansion cannot and does not need to.
+///
+/// Four hooks and one const:
+///
+/// * `stmt` and `expr` see a node before its children; `expr` answers `false`
+///   to skip them, which is what a reader that replaced the node itself says.
+/// * `after_expr` sees an expression after its children — the innermost-last
+///   order `project::walk_block`'s substituting readers need, so a substituted
+///   expression is never re-walked. It does not fire for a node whose children
+///   were skipped.
+/// * `arm_pattern` sees one `match` arm's pattern at the `match`'s line, before
+///   that arm's own bindings join the scope.
+/// * `SCOPED` is `false` for a reader that never looks at `locals`; the walk
+///   then binds no name and reads no pattern. Only the loader's three readers
+///   ask about scope, and the rest are walked per statement or per loop.
+#[macro_export]
+macro_rules! body_scope_descent {
+    ($visit:ident, $blk:ident, $st:ident, $ex:ident) => {
+        $crate::body_scope_descent!(@walk $visit, $blk, $st, $ex, ('a), ());
+    };
+    ($visit:ident, $blk:ident, $st:ident, $ex:ident, mut) => {
+        $crate::body_scope_descent!(@walk $visit, $blk, $st, $ex, (), (mut));
+    };
+    (@walk $visit:ident, $blk:ident, $st:ident, $ex:ident, ($($lt:lifetime)?), ($($mut_:tt)?)) => {
+        trait $visit$(<$lt>)? {
+            /// Whether this reader looks at `locals`. `false` skips the scope
+            /// stack: no name is bound and no pattern is read.
+            const SCOPED: bool = true;
+
+            /// One statement, before its children. `locals` is what is bound
+            /// where the statement starts; a `let`'s own name joins after it.
+            fn stmt(
+                &mut self,
+                s: &$($lt)? $($mut_)? $crate::ast::Stmt,
+                locals: &::std::collections::HashSet<String>,
+            ) {
+                let _ = (s, locals);
+            }
+
+            /// One expression, before its children. `false` skips them — the
+            /// answer a reader that replaced the node itself gives.
+            fn expr(
+                &mut self,
+                e: &$($lt)? $($mut_)? $crate::ast::Expr,
+                locals: &::std::collections::HashSet<String>,
+            ) -> bool {
+                let _ = (e, locals);
+                true
+            }
+
+            /// One expression, after its children — and not at all when `expr`
+            /// skipped them.
+            fn after_expr(
+                &mut self,
+                e: &$($lt)? $($mut_)? $crate::ast::Expr,
+                locals: &::std::collections::HashSet<String>,
+            ) {
+                let _ = (e, locals);
+            }
+
+            /// One `match` arm's pattern, at the `match`'s line, before that
+            /// arm's own bindings join the scope.
+            fn arm_pattern(
+                &mut self,
+                p: &$($lt)? $($mut_)? $crate::ast::Pattern,
+                line: usize,
+                locals: &::std::collections::HashSet<String>,
+            ) {
+                let _ = (p, line, locals);
+            }
+        }
+
+        fn $blk<$($lt,)? V: $visit$(<$lt>)? + ?Sized>(
+            b: &$($lt)? $($mut_)? $crate::ast::Block,
+            locals: &mut ::std::collections::HashSet<String>,
+            v: &mut V,
+        ) {
+            for s in &$($mut_)? b.stmts {
+                $st(s, locals, v);
+            }
+        }
+
+        fn $st<$($lt,)? V: $visit$(<$lt>)? + ?Sized>(
+            s: &$($lt)? $($mut_)? $crate::ast::Stmt,
+            locals: &mut ::std::collections::HashSet<String>,
+            v: &mut V,
+        ) {
+            use $crate::ast::Stmt;
+            v.stmt(&$($mut_)? *s, locals);
+            match s {
+                Stmt::Let { name, value, .. } => {
+                    $ex(value, locals, v);
+                    // In scope for subsequent statements (and shadows a
+                    // like-named export, namespace or renamed decl from here on).
+                    if V::SCOPED {
+                        locals.insert(name.clone());
+                    }
+                }
+                Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => $ex(value, locals, v),
+                Stmt::IndexSet { index, value, .. } => {
+                    $ex(index, locals, v);
+                    $ex(value, locals, v);
+                }
+                Stmt::Return { value: Some(e), .. } => $ex(e, locals, v),
+                Stmt::Return { value: None, .. } => {}
+                Stmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    $ex(cond, locals, v);
+                    let mut inner = locals.clone();
+                    $blk(then_block, &mut inner, v);
+                    if let Some(eb) = else_block {
+                        let mut inner2 = locals.clone();
+                        $blk(eb, &mut inner2, v);
+                    }
+                }
+                Stmt::IfLet {
+                    scrutinee,
+                    then_block,
+                    else_block,
+                    pattern,
+                    ..
+                } => {
+                    $ex(scrutinee, locals, v);
+                    let mut inner = locals.clone();
+                    if V::SCOPED {
+                        for b in $crate::movecheck::pattern_bindings(pattern) {
+                            inner.insert(b.to_string());
+                        }
+                    }
+                    $blk(then_block, &mut inner, v);
+                    if let Some(eb) = else_block {
+                        let mut inner2 = locals.clone();
+                        $blk(eb, &mut inner2, v);
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    $ex(cond, locals, v);
+                    let mut inner = locals.clone();
+                    $blk(body, &mut inner, v);
+                }
+                Stmt::ForIn {
+                    var, iter, body, ..
+                } => {
+                    $ex(iter, locals, v);
+                    let mut inner = locals.clone();
+                    if V::SCOPED {
+                        inner.insert(var.clone());
+                    }
+                    $blk(body, &mut inner, v);
+                }
+                Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+                Stmt::Expr(e) => $ex(e, locals, v),
+                Stmt::Region { body, .. } => {
+                    let mut inner = locals.clone();
+                    $blk(body, &mut inner, v);
+                }
+            }
+        }
+
+        fn $ex<$($lt,)? V: $visit$(<$lt>)? + ?Sized>(
+            e: &$($lt)? $($mut_)? $crate::ast::Expr,
+            locals: &::std::collections::HashSet<String>,
+            v: &mut V,
+        ) {
+            use $crate::ast::{ArmBody, Expr, LambdaBody};
+            if !v.expr(&$($mut_)? *e, locals) {
+                return;
+            }
+            match e {
+                // A call's args are walked whatever the visitor made of the
+                // callee — including one the namespace pass just removed. An
+                // array literal's elements are the same list under another name.
+                Expr::Call { args, .. }
+                | Expr::Spawn { args, .. }
+                | Expr::TryConstruct { args, .. }
+                | Expr::ArrayLit { elems: args, .. } => {
+                    for a in args {
+                        $ex(a, locals, v);
+                    }
+                }
+                Expr::StructLit { fields, .. } => {
+                    for (_, val) in fields {
+                        $ex(val, locals, v);
+                    }
+                }
+                Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                    $ex(expr, locals, v)
+                }
+                Expr::Consume { place, .. } => $ex(place, locals, v),
+                Expr::Binary { lhs, rhs, .. } => {
+                    $ex(lhs, locals, v);
+                    $ex(rhs, locals, v);
+                }
+                Expr::Match {
+                    scrutinee,
+                    arms,
+                    line,
+                    ..
+                } => {
+                    let l = *line;
+                    $ex(scrutinee, locals, v);
+                    for arm in arms {
+                        let mut inner = locals.clone();
+                        v.arm_pattern(&$($mut_)? arm.pattern, l, &inner);
+                        if V::SCOPED {
+                            for b in $crate::movecheck::pattern_bindings(&arm.pattern) {
+                                inner.insert(b.to_string());
+                            }
+                        }
+                        match &$($mut_)? arm.body {
+                            ArmBody::Expr(e2) => $ex(e2, &inner, v),
+                            ArmBody::Block(b2) => $blk(b2, &mut inner, v),
+                        }
+                    }
+                }
+                Expr::IfExpr {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    $ex(cond, locals, v);
+                    $ex(then_branch, locals, v);
+                    if let Some(eb) = else_branch {
+                        $ex(eb, locals, v);
+                    }
+                }
+                Expr::MapLit { entries, .. } => {
+                    for (k, val) in entries {
+                        $ex(k, locals, v);
+                        $ex(val, locals, v);
+                    }
+                }
+                // A lambda's params are new locals: they shadow a decl exactly
+                // as a `let` does (RFC-0023).
+                Expr::Lambda { params, body, .. } => {
+                    let mut inner = locals.clone();
+                    if V::SCOPED {
+                        for p in params {
+                            inner.insert(p.clone());
+                        }
+                    }
+                    match body {
+                        LambdaBody::Expr(e2) => $ex(e2, &inner, v),
+                        LambdaBody::Block(b2) => $blk(b2, &mut inner, v),
+                    }
+                }
+                Expr::Var { .. }
+                | Expr::Int(_)
+                | Expr::Byte(_)
+                | Expr::Float(_)
+                | Expr::Bool(_)
+                | Expr::Str(_) => {}
+            }
+            v.after_expr(&$($mut_)? *e, locals);
+        }
+    };
+}
+
+crate::body_scope_descent!(AstVisit, ast_block, ast_stmt, ast_expr);
+
 /// Every lambda literal the program holds, by node address (RFC-0101 M6).
 ///
 /// A backend walks a body through a recursion that has erased the program's
@@ -1560,67 +1854,41 @@ impl Expr {
 /// Function bodies and module-state initializers — what the backends lower. A
 /// literal inside a leaked desugar is not here, and a caller that misses keeps
 /// whatever it did before.
-pub fn lambdas(p: &Program) -> std::collections::HashMap<usize, &LambdaBody> {
-    let mut out = std::collections::HashMap::new();
+pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<usize, &'a LambdaBody> {
+    struct Lambdas<'a>(std::collections::HashMap<usize, &'a LambdaBody>);
+    impl<'a> AstVisit<'a> for Lambdas<'a> {
+        const SCOPED: bool = false;
+        fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Lambda { body, .. } = e {
+                self.0.insert(e as *const Expr as usize, body);
+            }
+            true
+        }
+    }
+    let mut v = Lambdas(std::collections::HashMap::new());
+    let mut locals = std::collections::HashSet::new();
     for f in &p.functions {
-        lambdas_block(&f.body, &mut out);
+        ast_block(&f.body, &mut locals, &mut v);
     }
     for g in &p.globals {
-        lambdas_expr(&g.init, &mut out);
+        ast_expr(&g.init, &locals, &mut v);
     }
-    out
+    v.0
 }
 
-fn lambdas_block<'a>(b: &'a Block, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
-    for s in &b.stmts {
-        lambdas_stmt(s, out);
-    }
-}
+/// A reader that records the address of every node it is handed, in walk order.
+struct Addrs<'o>(&'o mut Vec<usize>);
 
-fn lambdas_stmt<'a>(s: &'a Stmt, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
-    match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => lambdas_expr(value, out),
-        Stmt::IndexSet { index, value, .. } => {
-            lambdas_expr(index, out);
-            lambdas_expr(value, out);
-        }
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                lambdas_expr(e, out);
-            }
-        }
-        Stmt::If {
-            cond: scrutinee,
-            then_block,
-            else_block,
-            ..
-        }
-        | Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            lambdas_expr(scrutinee, out);
-            lambdas_block(then_block, out);
-            if let Some(eb) = else_block {
-                lambdas_block(eb, out);
-            }
-        }
-        Stmt::While {
-            cond: e, body: bl, ..
-        }
-        | Stmt::ForIn {
-            iter: e, body: bl, ..
-        } => {
-            lambdas_expr(e, out);
-            lambdas_block(bl, out);
-        }
-        Stmt::Region { body, .. } => lambdas_block(body, out),
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+impl AstVisit<'_> for Addrs<'_> {
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+        self.0.push(s as *const Stmt as usize);
+    }
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        self.0.push(e as *const Expr as usize);
+        true
     }
 }
 
@@ -1629,336 +1897,54 @@ fn lambdas_stmt<'a>(s: &'a Stmt, out: &mut std::collections::HashMap<usize, &'a 
 /// loop body against its clone with (RFC-0114 §26): two structurally equal
 /// trees walk to two same-length lists, and pairing them is the alias map
 /// that lets a release planned on the original discharge from the clone.
-/// Mirrors [`lambdas_block`]'s coverage; a variant missed here surfaces as a
-/// LOUD finish-check failure on the corpus, never a silent hole.
+/// The order is `body_scope_descent`'s, so it cannot drift from what any
+/// other reader of a body sees.
 pub fn node_addrs(b: &Block, out: &mut Vec<usize>) {
-    for s in &b.stmts {
-        node_addrs_stmt(s, out);
-    }
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Addrs(out));
 }
 
 /// [`node_addrs`] for one statement — the entry `iterate_loop` walks the
 /// cloned tail with, statement by statement.
 pub fn node_addrs_one(s: &Stmt, out: &mut Vec<usize>) {
-    node_addrs_stmt(s, out)
+    ast_stmt(s, &mut std::collections::HashSet::new(), &mut Addrs(out));
 }
 
 /// [`node_addrs`] for one expression — the entry a lifted lambda SHELL's
 /// value form is zipped with (the wrapper statement is synthesized and has
 /// no original; the expression inside does).
 pub fn node_addrs_val(e: &Expr, out: &mut Vec<usize>) {
-    node_addrs_expr(e, out)
+    ast_expr(e, &std::collections::HashSet::new(), &mut Addrs(out));
 }
 
 /// Pair every subtree of `tree` structurally equal to `orig` with it,
 /// node-for-node — how a rewrite's embedded argument clone is aliased
 /// (RFC-0114 §26): `toJson(x)` becomes a synthesized encoder call holding a
 /// clone of `x`, and the plan's rows live on the original.
+///
+/// A subtree that matches is paired whole and not descended into, which is the
+/// walk's `false`: its children are already paired, node for node, by the two
+/// address lists.
 pub fn alias_embedded(tree: &Expr, orig: &Expr, out: &mut Vec<(usize, usize)>) {
-    if tree == orig {
-        let (mut c, mut o) = (Vec::new(), Vec::new());
-        node_addrs_expr(tree, &mut c);
-        node_addrs_expr(orig, &mut o);
-        out.extend(c.into_iter().zip(o));
-        return;
+    struct Alias<'o> {
+        orig: &'o Expr,
+        out: &'o mut Vec<(usize, usize)>,
     }
-    match tree {
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(inner) => alias_embedded(inner, orig, out),
-            LambdaBody::Block(b) => alias_embedded_block(b, orig, out),
-        },
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            alias_embedded(expr, orig, out)
-        }
-        Expr::Consume { place, .. } => alias_embedded(place, orig, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            alias_embedded(lhs, orig, out);
-            alias_embedded(rhs, orig, out);
-        }
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                alias_embedded(a, orig, out);
+    impl AstVisit<'_> for Alias<'_> {
+        const SCOPED: bool = false;
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            if e != self.orig {
+                return true;
             }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            alias_embedded(scrutinee, orig, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => alias_embedded(e, orig, out),
-                    ArmBody::Block(b) => alias_embedded_block(b, orig, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            alias_embedded(cond, orig, out);
-            alias_embedded(then_branch, orig, out);
-            if let Some(eb) = else_branch {
-                alias_embedded(eb, orig, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                alias_embedded(v, orig, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                alias_embedded(k, orig, out);
-                alias_embedded(v, orig, out);
-            }
-        }
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-    }
-}
-
-fn alias_embedded_block(b: &Block, orig: &Expr, out: &mut Vec<(usize, usize)>) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { value, .. }
-            | Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::Expr(value) => alias_embedded(value, orig, out),
-            Stmt::IndexSet { index, value, .. } => {
-                alias_embedded(index, orig, out);
-                alias_embedded(value, orig, out);
-            }
-            Stmt::Return { value, .. } => {
-                if let Some(e) = value {
-                    alias_embedded(e, orig, out);
-                }
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                alias_embedded(cond, orig, out);
-                alias_embedded_block(then_block, orig, out);
-                if let Some(eb) = else_block {
-                    alias_embedded_block(eb, orig, out);
-                }
-            }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                alias_embedded(scrutinee, orig, out);
-                alias_embedded_block(then_block, orig, out);
-                if let Some(eb) = else_block {
-                    alias_embedded_block(eb, orig, out);
-                }
-            }
-            Stmt::While {
-                cond: e, body: bl, ..
-            }
-            | Stmt::ForIn {
-                iter: e, body: bl, ..
-            } => {
-                alias_embedded(e, orig, out);
-                alias_embedded_block(bl, orig, out);
-            }
-            Stmt::Region { body, .. } => alias_embedded_block(body, orig, out),
-            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+            let (mut c, mut o) = (Vec::new(), Vec::new());
+            node_addrs_val(e, &mut c);
+            node_addrs_val(self.orig, &mut o);
+            self.out.extend(c.into_iter().zip(o));
+            false
         }
     }
-}
-
-fn node_addrs_stmt(s: &Stmt, out: &mut Vec<usize>) {
-    out.push(s as *const Stmt as usize);
-    match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => node_addrs_expr(value, out),
-        Stmt::IndexSet { index, value, .. } => {
-            node_addrs_expr(index, out);
-            node_addrs_expr(value, out);
-        }
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                node_addrs_expr(e, out);
-            }
-        }
-        Stmt::If {
-            cond: scrutinee,
-            then_block,
-            else_block,
-            ..
-        }
-        | Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            node_addrs_expr(scrutinee, out);
-            node_addrs(then_block, out);
-            if let Some(eb) = else_block {
-                node_addrs(eb, out);
-            }
-        }
-        Stmt::While {
-            cond: e, body: bl, ..
-        }
-        | Stmt::ForIn {
-            iter: e, body: bl, ..
-        } => {
-            node_addrs_expr(e, out);
-            node_addrs(bl, out);
-        }
-        Stmt::Region { body, .. } => node_addrs(body, out),
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
-    }
-}
-
-fn node_addrs_expr(e: &Expr, out: &mut Vec<usize>) {
-    out.push(e as *const Expr as usize);
-    match e {
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(inner) => node_addrs_expr(inner, out),
-            LambdaBody::Block(b) => node_addrs(b, out),
-        },
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            node_addrs_expr(expr, out)
-        }
-        Expr::Consume { place, .. } => node_addrs_expr(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            node_addrs_expr(lhs, out);
-            node_addrs_expr(rhs, out);
-        }
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                node_addrs_expr(a, out);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            node_addrs_expr(scrutinee, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => node_addrs_expr(e, out),
-                    ArmBody::Block(b) => node_addrs(b, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            node_addrs_expr(cond, out);
-            node_addrs_expr(then_branch, out);
-            if let Some(eb) = else_branch {
-                node_addrs_expr(eb, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                node_addrs_expr(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                node_addrs_expr(k, out);
-                node_addrs_expr(v, out);
-            }
-        }
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-    }
-}
-
-fn lambdas_expr<'a>(e: &'a Expr, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
-    match e {
-        Expr::Lambda { body, .. } => {
-            out.insert(e as *const Expr as usize, body);
-            match body {
-                LambdaBody::Expr(inner) => lambdas_expr(inner, out),
-                LambdaBody::Block(b) => lambdas_block(b, out),
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            lambdas_expr(expr, out)
-        }
-        Expr::Consume { place, .. } => lambdas_expr(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            lambdas_expr(lhs, out);
-            lambdas_expr(rhs, out);
-        }
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                lambdas_expr(a, out);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            lambdas_expr(scrutinee, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => lambdas_expr(e, out),
-                    ArmBody::Block(b) => lambdas_block(b, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            lambdas_expr(cond, out);
-            lambdas_expr(then_branch, out);
-            if let Some(eb) = else_branch {
-                lambdas_expr(eb, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                lambdas_expr(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                lambdas_expr(k, out);
-                lambdas_expr(v, out);
-            }
-        }
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-    }
+    ast_expr(
+        tree,
+        &std::collections::HashSet::new(),
+        &mut Alias { orig, out },
+    );
 }

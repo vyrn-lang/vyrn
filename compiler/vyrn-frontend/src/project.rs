@@ -32,9 +32,7 @@
 //! whose `place at` yields `self.data[i]` inlines to the same `@slot` through
 //! one more level of the same machinery.
 
-use crate::ast::{
-    ArmBody, BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type,
-};
+use crate::ast::{BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type};
 use std::collections::HashMap;
 
 /// The element-place primitive: `@slot(container, index)`. Unspellable (no
@@ -1250,133 +1248,30 @@ fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
 }
 
 /// Apply `f` to every expression node in `b`, innermost-last: `f` sees a node
-/// after its children, so a substituted expression is never re-walked.
+/// after its children, so a substituted expression is never re-walked. That is
+/// `body_scope_descent`'s `after_expr` hook, and the walk itself is
+/// `ast::body_scope_descent!` since RFC-0125 §3 M6 — this file wrote out the
+/// same thirty-five arms until then.
 ///
 /// `pub(crate)` since census U5: the loader stamps every `panic` with its source
 /// site and needs the same complete walk this one already is. `pub` since
 /// RFC-0125 M5: `vyrn test` rewrites a body's test-only builtins
 /// before the direct backend sees them, and needs the same walk again.
 pub fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
-    for s in &mut b.stmts {
-        walk_stmt(s, f);
-    }
-}
+    crate::body_scope_descent!(ExprVisit, expr_block, expr_stmt, expr_expr, mut);
 
-fn walk_stmt(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
-    match s {
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
-            walk_expr(value, f)
-        }
-        Stmt::IndexSet { index, value, .. } => {
-            walk_expr(index, f);
-            walk_expr(value, f);
-        }
-        Stmt::Return { value: Some(e), .. } => walk_expr(e, f),
-        Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            walk_expr(cond, f);
-            walk_block(then_block, f);
-            if let Some(e) = else_block {
-                walk_block(e, f);
-            }
-        }
-        Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            walk_expr(scrutinee, f);
-            walk_block(then_block, f);
-            if let Some(e) = else_block {
-                walk_block(e, f);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            walk_expr(cond, f);
-            walk_block(body, f);
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            walk_expr(iter, f);
-            walk_block(body, f);
-        }
-        Stmt::Drop { .. } => {}
-        Stmt::Expr(e) => walk_expr(e, f),
-        Stmt::Region { body, .. } => walk_block(body, f),
-    }
-}
+    /// The one line this walk's readers write: an expression, after its
+    /// children. None of them looks at a name in scope.
+    struct Innermost<'f, F: FnMut(&mut Expr)>(&'f mut F);
 
-fn walk_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
-    match e {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            walk_expr(expr, f)
+    impl<F: FnMut(&mut Expr)> ExprVisit for Innermost<'_, F> {
+        const SCOPED: bool = false;
+        fn after_expr(&mut self, e: &mut Expr, _: &std::collections::HashSet<String>) {
+            (self.0)(e)
         }
-        Expr::Consume { place, .. } => walk_expr(place, f),
-        Expr::Binary { lhs, rhs, .. } => {
-            walk_expr(lhs, f);
-            walk_expr(rhs, f);
-        }
-        Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
-            for a in args {
-                walk_expr(a, f);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            walk_expr(scrutinee, f);
-            for a in arms {
-                match &mut a.body {
-                    ArmBody::Expr(e) => walk_expr(e, f),
-                    ArmBody::Block(b) => walk_block(b, f),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            walk_expr(cond, f);
-            walk_expr(then_branch, f);
-            if let Some(e) = else_branch {
-                walk_expr(e, f);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                walk_expr(v, f);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                walk_expr(v, f);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                walk_expr(k, f);
-                walk_expr(v, f);
-            }
-        }
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e) => walk_expr(e, f),
-            LambdaBody::Block(b) => walk_block(b, f),
-        },
     }
-    f(e);
+
+    expr_block(b, &mut std::collections::HashSet::new(), &mut Innermost(f));
 }
 
 /// Apply `f` to every expression a whole program can hold, innermost-last.
@@ -1767,8 +1662,11 @@ mod tests {
             "the caller's argument binds a temporary, not a capture"
         );
         let mut seen_lambda = false;
-        for s in &mut pr.prologue {
-            walk_stmt(s, &mut |e: &mut Expr| match e {
+        let mut prologue = Block {
+            stmts: std::mem::take(&mut pr.prologue),
+        };
+        {
+            walk_block(&mut prologue, &mut |e: &mut Expr| match e {
                 Expr::Lambda { params, body, .. } => {
                     seen_lambda = true;
                     assert_eq!(params.len(), 1);
@@ -1786,6 +1684,7 @@ mod tests {
                 _ => {}
             });
         }
+        pr.prologue = prologue.stmts;
         assert!(seen_lambda, "the lambda should have been walked");
     }
 }
