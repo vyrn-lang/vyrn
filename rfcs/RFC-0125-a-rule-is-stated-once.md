@@ -16069,6 +16069,85 @@ byte-identical, 0 lost / 0 gained.
 the report asks. The `cli_census`: "a command's own path" 5,295 to **5,298**.
 No other census moves.
 
+#### Gates (2026-09-09, `track-dx`)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Over the five
+commits of this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok — one warning, `kernel.rs`'s unreachable pattern, which stood at the branch point |
+| `cargo test -p vyrn-cli`, no filter | **83 suites**, 641 tests, all green — one suite more than the branch point, `columns.rs` |
+| `kernel` `--ignored`, release | 1 — **24,762 accepted**, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs, every count unmoved |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — **30,184 functions judged**, 0 differ |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 435 programs from 134 sources — one source more, this track's `columns.rs` |
+| `refusals`, `forms`, `frontend_census`, `cli_census` | re-pinned, each in the commit that moved it; `surface`, `emitter_census` and `checker_census` unmoved |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and `rfcs/census/wasm-sha256.tsv` does not move |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 189 blocks, 0 failed |
+
+**The whole-stderr licence, run at every commit.** `vyrn check` over 323
+programs — the 280 corpus roots under `examples/`, `std/`, `site/` and
+`site/app/`, plus the 34 of `tests/refusals` and the 9 of `tests/unlicensed` —
+whole standard error and the exit code, compared against the branch point:
+byte-identical at each of the five commits, 77 refused throughout. **0 lost / 0
+gained**, five times.
+
+**What this track touched, so a track beside it can read the overlap.** In
+`core.rs`: `Builder::store_is_fresh` and `read_only_mentions`'s doc, and nothing
+else — no row definition, no builder, no printer, no driver. Nothing in
+`kernel.rs`. In `own.rs`: the `Ownership` struct and `analyze_now`'s
+initializer. In `symbols.rs`: `pin_diagnostics` and the one branch that asked
+`movecheck::check_accum`. `movecheck.rs` is most of the diff.
+
+**The lines, over the track.** `compiler/vyrn-frontend/src/movecheck.rs` 4,003
+to **3,185**; `compiler/vyrn-frontend/src/own.rs` 1,827 to **1,790**;
+`compiler/vyrn-lower/src/core.rs` 6,207 to 6,210 and
+`compiler/vyrn-lower/src/kernel.rs` **2,676**, unmoved;
+`compiler/vyrn-frontend/src/symbols.rs` 4,781 to 4,796;
+`compiler/vyrn-cli/tests/refusals.rs` 3,069 to 2,948, and a new
+`compiler/vyrn-cli/tests/columns.rs` of 117. 818 lines out of the pass §2.7
+deletes, one wrong answer out of the placer's input, and a column on every
+refusal a reader gets.
+
+**What is left of `movecheck.rs`, and the blocker on each.**
+
+1. **The `Want::Lets` walk and `fnval_clear`** — the whole reason the file is
+   still run. It is priced: empty it and two programs leak. The blocker is
+   ORDER, and `track-dt` measured both shapes — a second build costs 181 ms in
+   place of 74 ms of a 304 ms placer, and a fold from the first pass leaves
+   1,314 unrebuilt bodies judged against an empty answer.
+2. **`Kind::Rows`, 361 lines** — `ArgVerdict`, the producer screens, `store`'s
+   projection instrument, `capture_site`. Each is a row an emitter reads
+   through the core. The blocker is the same one rows 2 and 3 of the emitter
+   census carry: the emitter reading the core at that position.
+3. **`Kind::Shared`, 2,420 lines** — the scope stacks, the borrow table, the
+   type environment, the path algebra, and `MoveCheck::stmt` and `::expr`, which
+   are one traversal doing four jobs. It goes when the four jobs have four
+   owners, which is §2.7's sentence and not a slice.
+4. **`Kind::Tests`, 404 lines** — RFC-0089's site census and RFC-0092's
+   projection instrument, both `--ignored` corpus measurements with no second
+   reader.
+
+`Kind::Kernel`, `Kind::Checker` and `Kind::Menu` are zero and have been since
+`track-dt`: **this file states no refusal at all**, and now no refusal
+plumbing, no consumed table and no call-graph answer but one.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
