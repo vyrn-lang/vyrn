@@ -147,7 +147,10 @@ Report every gate with its result. A red gate is reported as red, with the outpu
 
 ## Commits and pull requests
 
-- A commit title is one lower-case sentence in the repository's voice. Read `git log --oneline -30` before you write one.
+- A commit follows Conventional Commits: `type(scope): subject`, then a blank line, then the body. The subject is one lower-case sentence in the repository's voice, without a full stop. Read `git log --oneline -30` before you write one.
+- The type is one of `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`. A deletion that states a rule once is `refactor`. A change a user of the language can observe is `feat` or `fix`, and its body carries `BREAKING CHANGE:` when it breaks one.
+- The scope is the crate or the area the change touches: `lower`, `frontend`, `codegen`, `cli`, `lsp`, `std`, `rfc`, `site`, `agents`. Omit it when a change spans more than two.
+- The body says why. The diff already shows what. Numbers and the licence go in the record, and the body names the record.
 - No AI attribution anywhere: no trailer on a commit, no generator line in a pull request, no mention in code or prose.
 - One paragraph is one line in a pull request or issue body. GitHub renders a line break as a break.
 - A merge is a merge commit, never a squash. Merge only when CI is green.
