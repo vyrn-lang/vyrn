@@ -217,18 +217,7 @@ fn unshadow_method_builtins(program: &mut Program) {
 /// [`crate::prelude::type_decls`] parses `prelude.vyrn` through this, which is
 /// why it cannot use [`parse_accum`] — the prelude is what `parse_accum` adds.
 pub(crate) fn parse_bare(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
-    Parser {
-        tokens,
-        pos: 0,
-        no_struct: false,
-        type_params: Vec::new(),
-        type_aliases: Default::default(),
-        field_preds: None,
-        extra_stmts: Vec::new(),
-        errors: Vec::new(),
-        depth: 0,
-    }
-    .program_accum()
+    Parser::over(tokens).program_accum()
 }
 
 /// Parse a token stream into a [`Program`].
@@ -372,6 +361,18 @@ pub fn binop_text(op: BinOp) -> &'static str {
         })
         .copied()
         .unwrap_or_else(|| unreachable!("every `BinOp` is spelled by one token"))
+}
+
+/// A skeleton wrapped as a function body, for the statement-list mode of a
+/// code quote (RFC-0054).
+///
+/// [`Parser::parses_as_stmts`] tries a skeleton this way and
+/// [`Parser::skeleton_error_detail`] reports the error out of the same wrapper,
+/// which is why they are one statement: the detail's line is the wrapped line
+/// minus the wrapper's own, and a wrapper that grew a line in one place and not
+/// the other would point at the wrong row.
+fn as_fn_body(src: &str) -> String {
+    format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
 
 /// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `@at(a, i)`),
@@ -588,7 +589,129 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
     Some((hoists, post))
 }
 
+/// What a store through a place becomes — the ONE statement of RFC-0082 M1's
+/// rewrite.
+///
+/// Two callers write a store whose target is not a slot. `a[i] = v` is the
+/// surface one, and [`Parser::stmt`] reaches this after `postfix` has parsed
+/// `a[i]` as `@at(a, i)`. A store through a projection is the other, and
+/// `project.rs` reaches it for `@slot` (RFC-0091 M3). Both wanted the same
+/// statements and both used to spell them, down to the temporaries' names.
+///
+/// RFC-0091 7a refused the projection case by name: `a[i] = v` accepted a
+/// projection only where the yielded place was the binding's own element,
+/// because writing anywhere else "needs an address-of no backend has".
+/// **That reading was wrong, and the mechanism was already in the repo.**
+/// RFC-0082 M1 met the same problem for `r.a[i] = v` — a container that is not
+/// a slot — and answered it without an address-of: move the container out into
+/// a temp, mutate the temp, move it back. [`place_receiver`] is that desugar,
+/// it is pure AST, and it already handles the three shapes a place can take.
+///
+/// So a store through a user container is the same three statements the
+/// language emits for `r.a[i] = v`, wrapped around the store the projection
+/// resolved to. No engine gains an addressing mode.
+///
+/// The move-out is O(1) for a growable container — a header copy, sharing the
+/// buffer — and a whole-value copy for one held inline, which is what
+/// `a[i].f = v` has always cost.
+///
+/// `None` means the target is something no store can reach: a call result, a
+/// literal, a temporary. The caller keeps its own refusal.
+pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
+    match place {
+        // The whole receiver: `yield self` and nothing else.
+        Expr::Var { name, .. } => Some(vec![Stmt::Assign {
+            name: name.clone(),
+            value: value.clone(),
+            line,
+        }]),
+        // A field of a place: `return self.count`.
+        Expr::Field { expr, field, .. } => {
+            let (recv, mut out, moves, post) = place_receiver(expr, line)?;
+            let value = if moves.is_empty() {
+                value.clone()
+            } else {
+                hoist_operand(value.clone(), format!("{recv}.{field}=val"), &mut out, line)
+            };
+            out.extend(moves);
+            out.push(Stmt::SetField {
+                name: recv,
+                field: field.clone(),
+                value,
+                line,
+            });
+            out.extend(post);
+            Some(out)
+        }
+        // An element of a place: `return self.data[j]`, and the seeded row's
+        // `yield @slot(self, i)`.
+        Expr::Call { name, args, .. }
+            if (name == crate::project::AT || name == crate::project::ELEM) && args.len() == 2 =>
+        {
+            let (recv, mut out, moves, post) = place_receiver(&args[0], line)?;
+            // With a move-out in play the index and the value run before it, in
+            // source order: nothing may read the place while it is out.
+            let (index, value) = if moves.is_empty() {
+                (args[1].clone(), value.clone())
+            } else {
+                // `#`, not `[]`: the round-fifty rename, mirrored — a name
+                // spelled `{recv}[]idx` reads as DERIVED from the `{recv}[]`
+                // container temp under `mentions_place`, which vetoed the
+                // inner store's displaced-element row and left every
+                // overwritten user-container element with no owner
+                // (exit-residue round fifty-seven, std/slots).
+                let i = hoist_operand(args[1].clone(), format!("{recv}#idx"), &mut out, line);
+                let v = hoist_operand(value.clone(), format!("{recv}#val"), &mut out, line);
+                (i, v)
+            };
+            out.extend(moves);
+            out.push(Stmt::IndexSet {
+                name: recv,
+                index,
+                value,
+                line,
+            });
+            out.extend(post);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 impl Parser {
+    /// A parser over `tokens` with nothing in scope — what an entry point
+    /// starts from.
+    ///
+    /// **The nine fields are stated here and nowhere else.** Four places built
+    /// this record by hand, two of them adding the enclosing declaration's
+    /// scope to it, and a tenth field would have had to be added to all four.
+    fn over(tokens: Vec<Token>) -> Parser {
+        Parser {
+            tokens,
+            pos: 0,
+            no_struct: false,
+            type_params: Vec::new(),
+            type_aliases: Default::default(),
+            field_preds: None,
+            extra_stmts: Vec::new(),
+            errors: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    /// A sub-parser over `tokens` that inherits what the enclosing declaration
+    /// has in scope: its generic parameters and its type aliases, so a
+    /// re-lexed interpolation hole or code-quote skeleton that mentions `T`
+    /// still parses. Nothing else crosses — the desugar queue, the recovered
+    /// errors and the nesting depth are the sub-parse's own.
+    fn sub(&self, tokens: Vec<Token>) -> Parser {
+        Parser {
+            type_params: self.type_params.clone(),
+            type_aliases: self.type_aliases.clone(),
+            ..Parser::over(tokens)
+        }
+    }
+
     // ---- token cursor helpers -------------------------------------------
 
     fn peek(&self) -> &Tok {
@@ -3418,54 +3541,22 @@ impl Parser {
                             // The array may live in a slot already, or in a
                             // record field / array element that `place_receiver`
                             // moves out and back around the store (RFC-0082 M1).
-                            if let Some((recv, mut hoists, moves, post)) =
-                                place_receiver(&args[0], line)
-                            {
-                                let index = args[1].clone();
+                            // The statements are `store_stmts`'s, which is also
+                            // where a store through a projection goes — the
+                            // rewrite is stated once and the temporaries are
+                            // named once with it.
+                            //
+                            // The shape is asked BEFORE the value is parsed, so
+                            // an unreachable target is still this sentence and
+                            // not whatever the right side says.
+                            if place_receiver(&args[0], line).is_some() {
                                 self.advance(); // eat `=`
                                 let value = self.expr()?;
                                 self.eat_semi();
-                                // With a move-out in play the index and the value
-                                // must be evaluated before it, in source order
-                                // (RFC-0082 M2). Nothing moves when the base is
-                                // already a slot, so `a[i] = v` stays one
-                                // statement.
-                                let (index, value) = if moves.is_empty() {
-                                    (index, value)
-                                } else {
-                                    // `#`, not `[]`: a hoisted operand is
-                                    // its own binding, and a name spelled
-                                    // `{recv}[]val` reads as DERIVED from the
-                                    // `{recv}[]` container temp under
-                                    // `mentions_place` (the byte after the
-                                    // base is `[`), which stood the inner
-                                    // store's displaced-element release down
-                                    // forever (exit-residue round fifty). `#`
-                                    // is just as unspellable and derives from
-                                    // nothing.
-                                    let i = hoist_operand(
-                                        index,
-                                        format!("{recv}#idx"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    let v = hoist_operand(
-                                        value,
-                                        format!("{recv}#val"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    (i, v)
+                                let Some(stmts) = store_stmts(&e, &value, line) else {
+                                    unreachable!("`place_receiver` answered for this place")
                                 };
-                                hoists.extend(moves);
-                                hoists.push(Stmt::IndexSet {
-                                    name: recv,
-                                    index,
-                                    value,
-                                    line,
-                                });
-                                hoists.extend(post);
-                                return Ok(self.spliced(hoists));
+                                return Ok(self.spliced(stmts));
                             }
                             return Err(Diagnostic::error(
                                 line,
@@ -4440,17 +4531,7 @@ impl Parser {
                 format!("in interpolation: {}", e.render()),
             )
         })?;
-        let mut sub = Parser {
-            tokens: toks,
-            pos: 0,
-            no_struct: false,
-            type_params: self.type_params.clone(),
-            type_aliases: self.type_aliases.clone(),
-            field_preds: None,
-            extra_stmts: Vec::new(),
-            errors: Vec::new(),
-            depth: 0,
-        };
+        let mut sub = self.sub(toks);
         // A sub-parser diagnostic carries line numbers relative to the hole
         // snippet — anchor it at the template and embed the detail, exactly
         // like the lex-error wrapping above.
@@ -4654,18 +4735,7 @@ impl Parser {
     /// A fresh sub-parser over `src`, sharing the enclosing generic params (so a
     /// skeleton mentioning `T` inside a generic `gen fn` still parses).
     fn sub_parser(&self, src: &str) -> Option<Parser> {
-        let toks = crate::lexer::lex(src).ok()?;
-        Some(Parser {
-            tokens: toks,
-            pos: 0,
-            no_struct: false,
-            type_params: self.type_params.clone(),
-            type_aliases: self.type_aliases.clone(),
-            field_preds: None,
-            extra_stmts: Vec::new(),
-            errors: Vec::new(),
-            depth: 0,
-        })
+        Some(self.sub(crate::lexer::lex(src).ok()?))
     }
 
     /// Whether `src` parses cleanly as any of the four skeleton modes.
@@ -4688,7 +4758,7 @@ impl Parser {
     /// Statement-list mode: `src` is a function body (wrapped so `program_accum`
     /// parses it as one).
     fn parses_as_stmts(&self, src: &str) -> bool {
-        self.parses_as_decls(&format!("fn __vyrn_probe__() {{\n{src}\n}}"))
+        self.parses_as_decls(&as_fn_body(src))
     }
 
     /// Expression mode: `src` is a single expression consuming the whole stream.
@@ -4711,8 +4781,7 @@ impl Parser {
     /// parses in no mode. Prefers the statement-mode error (the common case is a
     /// declaration or statement skeleton).
     fn skeleton_error_detail(&self, skel: &str) -> (String, usize, usize) {
-        let wrapped = format!("fn __vyrn_probe__() {{\n{skel}\n}}");
-        if let Some(mut p) = self.sub_parser(&wrapped) {
+        if let Some(mut p) = self.sub_parser(&as_fn_body(skel)) {
             let (_prog, errs) = p.program_accum();
             if let Some(d) = errs.into_iter().next() {
                 let sl = d.line.saturating_sub(1).max(1); // undo the wrapper line
@@ -5886,17 +5955,7 @@ mod tests {
                    fn ok(x: T) -> T { return x } \
                    fn main() -> Int64 { return ok(1) }";
         let toks = lex(src).unwrap();
-        let mut p = Parser {
-            tokens: toks,
-            pos: 0,
-            no_struct: false,
-            type_params: Vec::new(),
-            type_aliases: Default::default(),
-            field_preds: None,
-            extra_stmts: Vec::new(),
-            errors: Vec::new(),
-            depth: 0,
-        };
+        let mut p = Parser::over(toks);
         let (prog, errors) = p.program_accum();
         assert!(!errors.is_empty(), "the broken decl must actually fail");
         let ok = prog

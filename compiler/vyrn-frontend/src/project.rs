@@ -391,7 +391,7 @@ fn memo(
 /// `None` is [`site`]'s `None`: the seeded row, whose store the caller's own
 /// element path writes. `Some` is a user container, whose store becomes the
 /// projection's prologue and the move-out/mutate/move-back group
-/// [`store_stmts`] builds.
+/// [`crate::parser::store_stmts`] builds.
 ///
 /// One function because it was two, byte for byte, in `lib.rs` and
 /// `direct.rs` — the shape RFC-0101 §1.1 counts, down to the refusal's wording.
@@ -421,7 +421,7 @@ pub fn store_index(
     else {
         return Ok(None);
     };
-    let Some(store) = store_stmts(&p.place, value, line) else {
+    let Some(store) = crate::parser::store_stmts(&p.place, value, line) else {
         return Err(format!(
             "line {line}: `{name}[..] = v` goes through an `atSet` projection whose              result has no address — a call result or a temporary. A projection              returns a place: a binding, a field of one, or an element of one"
         ));
@@ -655,101 +655,6 @@ pub fn is_miss_return(s: &Stmt) -> bool {
             &then_block.stmts[0],
             Stmt::Return { value: Some(Expr::Var { name, .. }), .. } if name == "None"
         )
-}
-
-/// What a store through a projected place becomes (RFC-0091 M3).
-///
-/// 7a refused this by name: `a[i] = v` accepted a projection only where the
-/// yielded place was the binding's own element, because writing anywhere else
-/// "needs an address-of no backend has". **That reading was wrong, and the
-/// mechanism was already in the repo.** RFC-0082 M1 met the same problem for
-/// `r.a[i] = v` — a container that is not a slot — and answered it without an
-/// address-of: move the container out into a temp, mutate the temp, move it
-/// back. [`crate::parser::place_receiver`] is that desugar, it is pure AST, and
-/// it already handles the three shapes a place can take.
-///
-/// So a store through a user container is the same three statements the
-/// language emits for `r.a[i] = v`, wrapped around the store the projection
-/// resolved to. No engine gains an addressing mode.
-///
-/// The move-out is O(1) for a growable container — a header copy, sharing the
-/// buffer — and a whole-value copy for one held inline, which is what
-/// `a[i].f = v` has always cost.
-///
-/// `None` means the projection yields something no store can reach: a call
-/// result, a literal, a temporary. The caller keeps its own refusal.
-pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
-    match place {
-        // The whole receiver: `yield self` and nothing else.
-        Expr::Var { name, .. } => Some(vec![Stmt::Assign {
-            name: name.clone(),
-            value: value.clone(),
-            line,
-        }]),
-        // A field of a place: `return self.count`.
-        Expr::Field { expr, field, .. } => {
-            let (recv, mut out, moves, post) = crate::parser::place_receiver(expr, line)?;
-            let value = if moves.is_empty() {
-                value.clone()
-            } else {
-                crate::parser::hoist_operand(
-                    value.clone(),
-                    format!("{recv}.{field}=val"),
-                    &mut out,
-                    line,
-                )
-            };
-            out.extend(moves);
-            out.push(Stmt::SetField {
-                name: recv,
-                field: field.clone(),
-                value,
-                line,
-            });
-            out.extend(post);
-            Some(out)
-        }
-        // An element of a place: `return self.data[j]`, and the seeded row's
-        // `yield @slot(self, i)`.
-        Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
-            let (recv, mut out, moves, post) = crate::parser::place_receiver(&args[0], line)?;
-            // With a move-out in play the index and the value run before it, in
-            // source order: nothing may read the place while it is out.
-            let (index, value) = if moves.is_empty() {
-                (args[1].clone(), value.clone())
-            } else {
-                // `#`, not `[]`: the round-fifty rename, mirrored — a name
-                // spelled `{recv}[]idx` reads as DERIVED from the `{recv}[]`
-                // container temp under `mentions_place`, which vetoed the
-                // inner store's displaced-element row and left every
-                // overwritten user-container element with no owner
-                // (exit-residue round fifty-seven, std/slots).
-                let i = crate::parser::hoist_operand(
-                    args[1].clone(),
-                    format!("{recv}#idx"),
-                    &mut out,
-                    line,
-                );
-                let v = crate::parser::hoist_operand(
-                    value.clone(),
-                    format!("{recv}#val"),
-                    &mut out,
-                    line,
-                );
-                (i, v)
-            };
-            out.extend(moves);
-            out.push(Stmt::IndexSet {
-                name: recv,
-                index,
-                value,
-                line,
-            });
-            out.extend(post);
-            Some(out)
-        }
-        _ => None,
-    }
 }
 
 /// The node the STORE of a [`store_index`] expansion stands on — RFC-0125 §3

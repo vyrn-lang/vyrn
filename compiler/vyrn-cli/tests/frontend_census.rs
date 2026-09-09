@@ -619,10 +619,13 @@ fn project_sections() -> Vec<Section> {
              place a hit yields",
         ),
         sec(
-            "pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {",
+            "pub fn store_node(blk: &Block) -> Option<&Stmt> {",
             Job,
-            "the statements a store becomes, and the node an engine writes \
-             through",
+            "the node an engine writes through, in an expansion this pass \
+             built. The STATEMENTS a store becomes are `parser::store_stmts` \
+             since RFC-0125 §3 M6's desugar slice: the parser stated the same \
+             rewrite for `a[i] = v`, down to the temporaries' names, and this \
+             pass calls it now",
         ),
         sec(
             "pub fn iterate_loop(",
@@ -844,7 +847,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 861, 0),
-        ("project.rs", "the file's own job", 1103, 0),
+        ("project.rs", "the file's own job", 1008, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (
