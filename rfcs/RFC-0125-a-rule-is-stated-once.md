@@ -23466,6 +23466,335 @@ The parser census's own list, with three taken and the rest re-priced.
    rule and belongs with RFC-0017, not here.
 
 
+#### Four desugars, a formatter rule and a type table (2026-09-09, `track-ed`)
+
+The parser census ranked what is left in `parser.rs`, and `track-dx` ranked what
+is left in `own.rs`. Five of those items are taken here. Four moved bytes, and
+each says which and why; one was a decision that changes no line and is recorded
+so a later reader does not re-open it.
+
+##### `a[i].f = v` was the write-through, written twice
+
+The census row said `movecheck.rs` asks `place_receiver`'s question of the same
+tree. It does — through `ast::is_place_temp`, which reads back a name the
+desugar minted, and through a second test spelled inline: `name.ends_with(
+"[]val")`. The parser mints `#val` and has since `3f4ac923`.
+
+**The reader was not stale, because a THIRD statement still minted the old
+spelling.** `Parser::stmt` built RFC-0082's move-out, field set and write-back by
+hand for `a[i].f = v`, beside `store_stmts`, which states the same three
+statements for `a[i] = v` and for a store through a projection. Round fifty
+renamed the hoisted operands from `[]val`/`[]idx` to `#val`/`#idx` in
+`store_stmts` alone — the rename that stopped `mentions_place` reading a hoisted
+operand as DERIVED from the container it was hoisted around — and the hand copy
+kept the old spelling, so half the language kept the defect the rename fixed and
+`movecheck.rs` had to keep a reader for both.
+
+A probe found it, not a reading. `parser::tests::the_desugars_temps_answer_the_one_predicate`
+collects every name three desugars mint and asks the predicate about each:
+
+| the name | what mints it | `is_place_temp` |
+|---|---|---|
+| `ps[]`, `s.xs[]` | the container moved out and written back | true |
+| `ps[]idx`, `s.xs[]#idx` | the index, hoisted ahead of the move | false |
+| `ps[]#val`, `s.xs[]#val` | the value, hoisted ahead of the move | false |
+| `s.xs[][]arg1` | a mutating method's remaining argument | false |
+
+That table is the test. It is pinned because a rename that leaves a reader
+behind is silent, which is exactly what happened, and because the next one will
+look the same.
+
+The statement arm calls `store_stmts` now, both value hoists spell `#val`, and
+the READING is `ast::is_place_temp` and the new `ast::hoisted_value` and nowhere
+else — `direct.rs` spelled `ends_with("[]")` itself and asks the predicate
+instead.
+
+**The fold costs one binding and buys a store.** `place_receiver` binds an
+element's index where the hand copy cloned a literal into the load and the
+write-back. That is what lets `direct::elem_field_store` fold the three
+statements into one store through the element's address (RFC-0125 M1), because
+the fold requires the index to be a name:
+
+| the example | `memory.copy` before | after | wat lines |
+|---|---|---|---|
+| `nbody.vyrn` | 38 | 32 | 4,874 to 4,775 |
+| `arrays.vyrn` | 12 | 8 | 2,164 to 2,084 |
+| `slots.vyrn` | 124 | 125 | 6,890 to 6,900 |
+| `graphql.vyrn` | 902 | 902 | 47,884 to 47,886 |
+
+`nbody`'s frame goes from 224 to 112 bytes. **The timing is a wash and is
+reported as one**, on both engines: `vyrn bench`, interleaved, best of four, min
+2.15–2.27 ms before and after; under wasmtime, warm, 38–45 ms both sides against
+a 95 ms outlier. §1.4 predicts the native wash — LLVM's scalar replacement
+deletes the copies either way — and `nbody`'s own `main` is 1,000 steps, which
+is too small for the wasm side to say anything. The structural numbers above are
+the claim; the speed is not.
+
+##### A brace inside an open bracket
+
+`vyrn fmt` indented by counting open brackets. `print(match e {` therefore put
+its arms two levels in and its `})` one, and so did `take(R {`. A reader writes
+both one level in, which is why five fixtures under
+`compiler/vyrn-cli/tests/boundaries/` have failed `fmt --check` since they were
+written, and why nothing in 357 corpus sources wrote the shape across lines.
+
+**A level is a LINE that opened something still open, not a bracket.** Openers on
+one line are one level together. `open_levels` counts the distinct lines in the
+open list; a leading closer still dedents one and a leading `|` still indents
+one. That is the rule the fixtures were written against.
+
+`std/von.vyrn` stated the old rule a second time in order to agree with it.
+`emitVariantArgs` emitted a payload one level deeper "because `vyrn fmt` counts
+the `(` as an indentation level of its own", and
+`von::the_canonical_text_is_a_fixed_point_of_fmt` is what proved the agreement
+held. The workaround goes with the defect it worked around, and the test that
+guarded the pair is what caught the second half.
+
+47 of 357 corpus sources and `examples/vondemo.von` are re-indented, 774 lines.
+`git diff -w` over them is empty: leading whitespace moved and nothing else.
+The five fixtures pass `fmt --check` now, and so does the corpus.
+
+##### The type table moves to the file that states declarations
+
+`track-dx` priced this at 720 lines and named the home in a sentence: "a reading
+of the declarations. It moves to whatever file states declarations; it does not
+go." `declared.rs` states them, by its own first paragraph — what a named type
+is, what a callable returns, and for a TYPE whether it owns heap, what releases
+it, and whether it carries an obligation. `Declared` already held an `Owned` and
+built it in its constructor.
+
+The `Owned` protocol table and the five free type predicates —
+`self_referring`, `owns_heap`, `skippable`, `holes_under`, `str_temporary` — are
+there now, with the two tests that are about them. Every other reader names the
+new path: `checker.rs`, `types.rs`, `core.rs`, `typed.rs`, `direct.rs`, and
+`own.rs` itself.
+
+`declared.rs` joins the form census's `own` column, and **the table does not
+move**: the two mentions `str_temporary` carried leave `own.rs` and arrive in
+`declared.rs`. That is the whole evidence that a block moved and nothing else
+did, and it is why the column is right rather than convenient.
+
+##### A keyword's spelling, and where an anchor lives
+
+RFC-0127 §3.4 measured 2 lexer mentions for every keyword without exception, and
+priced folding them at two anchors outside this crate: `tests/forms.rs` and
+`editor/vscode/test/grammar.test.mjs` both parse `keyword_or_ident`'s arms as
+text.
+
+**The anchor cost was one string each.** `keywords!` is the one table, in
+`punctuation!`'s shape and for its reason — the readers want the list keyed both
+ways and no other mechanism in Rust states a table once across both. It expands
+into `keyword_or_ident` and into `keyword_text`, the reverse lookup
+`token_name_and_text` answers with. The rows still read `"word" => Tok::Name`,
+one per line, so both readers move from `fn keyword_or_ident(` to `keywords! {`
+and parse the same shape. RFC-0127 §3.4's lexer column is 1 for every keyword
+and the table's total is 148 to 124.
+
+##### `storage_desugar` stays in the parser, and this is the blocker
+
+RFC-0044's `save`/`load`/`loadOr` are 112 lines of parser desugar. The question
+was which home, and there are two candidates and no second statement to delete:
+the rewrite is stated once, in `Parser::storage_desugar`, and nothing in the
+checker, the loader, the symbol map or `std/storage.vyrn` restates it.
+
+**A runtime module cannot hold them, and the compiler says so in two sentences.**
+A generic Vyrn body is checked once with `T` abstract:
+
+```
+`toJson` cannot encode `T` (not a codable type)
+`fromJson` needs a declared type name; `T` is not a type
+```
+
+The codec is type-name-directed, so these three need the call site's CONCRETE
+type. RFC-0044 §"the codec wall" recorded that when it was written and the
+refusals above are it, re-run.
+
+**Moving them beside the other desugars is a move to where they already are.**
+`place_receiver`, `hoist_operand` and `store_stmts` live in `parser.rs`;
+`project.rs` calls them. So the file move is `parser.rs` to `parser.rs`, and the
+slice is 0 lines and 0 statements.
+
+One door is open and it is an RFC, not a slice. `project.rs::site` rewrites at a
+site too, keyed by a type the checker resolved, which is the fact `save` needs.
+Routing the three through it would make the call-site rewrite a checker-driven
+expansion rather than a parser one, and would take `toJson`/`fromJson` with it.
+It is priced at that, and nothing here does it.
+
+The cost of the current home is one diagnostic. `save("out.json", c)` without
+the import reports `call to unknown function `writeAtomic``, which names a call
+the reader never wrote, because the rewrite runs before the checker. That is a
+diagnostic slice with a shape — a hint at the site — and it is recorded here
+rather than fixed.
+
+##### The licence
+
+Every clause, over the five commits together, against the branch point.
+
+| the measurement | before | after |
+|---|---|---|
+| `vyrn check` stderr over the corpus, byte-identical | 419 of 419 | 419 of 419 |
+| a refusal LOST or GAINED | — | 0 / 0 |
+| files the corpus refuses | 79 | 79 |
+| `lowered_dump::the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered | 8 roots moved, each named below |
+| the blessed lowering snapshots | 10 | unmoved |
+| `VYRN_WASM_MANIFEST=check` | green | 5 examples rewritten, each named below |
+| `symbols_api::the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics | byte-identical |
+| `columns::the_pinned_columns_of_the_refusal_corpora` | green | green |
+| RFC-0017's re-lex invariant | green | green on all 357 |
+| `vyrn fmt --check` over the corpus | 357 of 357 clean | 357 of 357 clean |
+| `vyrn fmt --check` over `tests/boundaries/` | **5 of 5 RED** | 5 of 5 clean |
+| the kernel corpus | 27,637 accepted, 0 refused, 0 unlowered | the same |
+| the residue ratchet | 172 clean, 3 leaking, both engines | the same |
+| `movecheck::rfc0092_projection_sites_over_the_corpus` | byte-identical | byte-identical |
+| the LSP suite | 77 | 77 |
+| `vyrn doc --verify` | 41 files up to date | 41 files up to date |
+
+**The eight roots whose lowering moved, and why.** Seven are the write-through
+fold binding an index that was cloned: `examples/arrays.vyrn` (+4 lines),
+`examples/nbody.vyrn` (+24), `examples/shelf/server/store.vyrn` (+2),
+`examples/slots.vyrn` (+2), `site/app/chart.vyrn` (+2),
+`site/app/snippets.vyrn` (+2), and `examples/placeorder.vyrn`, which moved its
+hash at the same 272 lines — that one is the `[]val` to `#val` rename alone. The
+eighth is `std/von.vyrn` (3,087 to 3,085), the deleted indentation level. The
+five manifest rows are `arrays`, `nbody`, `slots` and `graphql` from the fold and
+`vondemo` from the printer.
+
+**The whole-stderr licence, run at every commit.** `vyrn check` over 419 programs
+— the corpus roots under `examples/`, `std/`, `site/` and `site/app/`, plus
+`tests/refusals`, `tests/unlicensed` and `tests/boundaries` — whole standard
+error and the exit code, compared against the branch point: byte-identical at
+each of the five commits, 79 refused throughout. **0 lost / 0 gained**, five
+times.
+
+##### The numbers
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/own.rs` | 1,790 | 949 | −841 |
+| `compiler/vyrn-frontend/src/declared.rs` | 387 | 1,237 | +850 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 3,159 | 3,144 | −15 |
+| `compiler/vyrn-frontend/src/parser.rs` | 7,027 | 7,011 | −16 |
+| `compiler/vyrn-frontend/src/lexer.rs` | 1,192 | 1,202 | +10 |
+| `compiler/vyrn-frontend/src/fmt.rs` | 857 | 875 | +18 |
+| `compiler/vyrn-frontend/src/ast.rs` | 1,950 | 1,970 | +20 |
+| `compiler/vyrn-frontend/src/project.rs` | 1,590 | 1,590 | 0 |
+| **the eight** | **17,952** | **17,978** | **+26** |
+
+`parser.rs` deletes 75 lines of duplicated desugar and adds 43 of test and 16 of
+doc, which is where its −16 comes from. **The track costs 26 lines and buys four
+fewer statements of four rules**, which is RFC-0127 §5.1's shape again and worth
+saying plainly rather than dressing up. What it buys is that a keyword's
+spelling, a place temp's name, RFC-0082's write-through and the `Owned` table can
+no longer disagree with a copy, because there is no copy — and one of the four
+had already drifted and nothing caught it.
+
+##### The censuses that moved
+
+| census | row | before | after |
+|---|---|---|---|
+| parser (`parser.rs`) | the grammar's own arm | 3,480 | 3,421 |
+| parser (`parser.rs`) | tests | 1,910 | 1,953 |
+| parser (`lexer.rs`) | a table stated a second time | 185 | 164 |
+| parser (`lexer.rs`) | shared machinery | 190 | 221 |
+| checker (`checker.rs`) | the typing judgment | 3,406 | 3,407 |
+| structural (`movecheck.rs`) | shared machinery | 2,423 | 2,408 |
+| form (RFC-0127 §3.1) | `Stmt::Let`, `SetField`, `IndexSet`, `Expr::Var`, `Expr::Call` in the parser | 8, 5, 4, 26, 23 | 7, 4, 3, 24, 22 |
+| form (RFC-0127 §3.1) | the table's total | 1,014 | 1,008 |
+| form (RFC-0127 §3.1) | the `own` column's files | `own.rs` | `own.rs`, `declared.rs` |
+| keyword (RFC-0127 §3.4) | every keyword's lexer column | 2 | 1 |
+| keyword (RFC-0127 §3.4) | the table's total | 148 | 124 |
+
+Two census SECTIONS moved with the code and are re-pinned in the same commit:
+`token_name_and_text` is `Shared` rather than `Twice`, because both of its
+tables went, and `fn keyword_or_ident(text: &str) -> Tok {` is
+`macro_rules! keywords {`. The emitter census and the surface census are
+unmoved.
+
+##### What this track touched, so a track beside it can read the overlap
+
+In `parser.rs`: `store_stmts`'s field arm, `Parser::stmt`'s `a[i].f = v` arm,
+and two tests. In `movecheck.rs`: `MoveCheck::stmt`'s `Stmt::Let` arm and
+nothing else. In `ast.rs`: `is_place_temp`'s doc and the new `hoisted_value`. In
+`lexer.rs`: `token_name_and_text` and the new `keywords!`. In `fmt.rs`:
+`indent_level`, `bump_depth`, the new `open_levels`, and `print`'s four
+references to them. In `own.rs` and `declared.rs`: one block of 719 lines and
+one of 123 moved, plus the imports on both sides. In `direct.rs`: one line of
+`elem_field_store`. Nothing in `checker.rs` but a path, nothing in `kernel.rs`,
+nothing in `core.rs` but an import, nothing in `project.rs`.
+
+##### What is left, ranked
+
+1. **`code_quote`'s four parse modes — up to 220 lines, for 15 quotes.** Not
+   touched, by the brief: the question under it is a design one and it is the
+   lead's. The skeleton is validated by trying to parse it four ways, and it is
+   the highest line-per-use row in `parser.rs`.
+2. **`storage_desugar` as a checker-driven expansion — 112 lines.** Decided
+   above: it stays in the parser, and the blocker on the runtime-module home is
+   the codec wall, quoted in the compiler's own two sentences. The one door left
+   is `project.rs::site`'s shape, which is an RFC because it takes
+   `toJson`/`fromJson` with it.
+3. **`save`'s diagnostic names a call the reader never wrote.** One sentence,
+   `call to unknown function `writeAtomic``, from a rewrite that runs before the
+   checker. A hint at the site closes it. It is not a size item.
+4. **The capability words, four statements to one — 0 lines.** Unchanged from
+   the last ranking: `read`, `modify`, `consume` and `share` are matched three
+   times in `parser.rs` and rendered back in `checker.rs`, `symbols.rs` twice and
+   `core.rs`. All four render every word and none has drifted.
+5. **`METHOD_BUILTINS`'s second copy — 0 lines.** Unchanged: the copy carries a
+   completion detail per row and `symbols.rs`'s own test compares the two.
+
+#### Gates (2026-09-09, `track-ed`)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Over the five commits of
+this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok, **zero warnings** — the four that stood at the branch point are gone |
+| `cargo test -p vyrn-cli`, no filter | 85 suites, 645 tests, 0 failed |
+| `kernel` `--ignored`, release | 1 — 177 programs, 27,637 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1 — 177 programs, every count unmoved |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — 184 programs, 30,185 functions judged, 0 differ |
+| `fixtures` `--ignored`, release | 1 — 208 compared; RED on the first pass and re-recorded, see below |
+| `testsweep` `--ignored`, release | 1 — 435 programs from 136 sources |
+| `cargo test -p vyrn-frontend` | 11 suites, 0 failed |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 suites, 0 failed |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm --all-targets` | 3 |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed |
+| the residue ratchet `--ignored`, release | 1 — engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green over 176 examples, after the five rows above were rewritten |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 26 files, 0 failed |
+| `parser_census`, `frontend_census`, `checker_census`, `emitter_census`, `cli_census` | 2 passed and 1 ignored each; re-pinned in the commit that moved each |
+| `forms` | 8 passed, 2 ignored |
+| `refusals`, `surface`, `columns` | 21, 3, 1 |
+| `editor/vscode`'s `grammar.test.mjs` | 2 passed |
+| `the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics, byte-identical |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable; 8 root hashes moved and each is named above |
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused |
+| `vyrn fmt --check` over 357 sources and 5 fixtures | clean; the five were red at the branch point |
+
+**One gate was red on its first pass and is this line's.**
+`fixtures --ignored` diverged on `vondemo.vyrn`: the recorded stdout held the VON
+printer's old indentation. It is re-recorded in a commit of its own, three lines,
+and re-run green.
+
+**One `--ignored` measurement is red at the branch point and is not this
+line's.** `movecheck::rfc0092_projection_sites_over_the_corpus` asserts that no
+element store with heap comes back and one does — `left: 1, right: 0`, over 290
+linked files. It is not in the gate list. Its whole output is byte-identical
+before and after this track, which is the licence that mattered here: the
+`hoisted` flag this track re-stated is what feeds that instrument and it moved
+no row.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
