@@ -9895,6 +9895,55 @@ stays at 23 and the form that HOLDS it changes: `Stmt::Continue` is 24 now and
 RFC-0126 §3's surface census, `coretables`, `refusals`, `checker_census`,
 `lowered` and `lowered_dump` are unmoved.
 
+#### The site and release slices' gates (2026-09-09)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. The list was run once over
+both commits, because the second only narrows the screen the first widened and
+the licence is the same one: not an emitted byte moves either way.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and `vyrn-lsp`'s own manifest | clean, clean |
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 637 passed, 41 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 28 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 48 s — 12,572 switch sites, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 79 s |
+| `effects` `--ignored`, release | 2, 117 s — 30,197 functions judged, 0 unattributed |
+| `fixtures` `--ignored`, release | 1, 28 s |
+| `testsweep` `--ignored`, release | 1, 146 s |
+| `coredrive` `--ignored`, release | 1, 71 s — 91,867 of 251,819 statements from the core's rows, 986 of 21,720 bodies whole, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 4 — both tables re-pinned twice, once per commit |
+| `forms` and `surface`, plain and `--ignored` | 8, 4 — the form census re-pinned twice, the surface census unmoved |
+| `checker_census`, `refusals`, `lowered`, `lowered_dump` | 3, 22, 4, 7 — all unmoved |
+| `vyrn-frontend` | 1,120 passed, 6 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,167 passed |
+| `vyrn-lsp`'s own manifest | 77 passed, 5 ignored, and its 23 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 407 s |
+| the residue ratchet `--ignored`, release | 1, 387 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 28 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte, over both commits |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+**What the two slices leave.** The list the measurement wrote is shorter by two
+rows and no shorter at the top. `Stmt::Break` and `Stmt::Continue` are within
+nine and one occurrence of an arm with no reader, and both wait on the same
+thing: the emitter rewrites a `for` over a user container and a `for` over a
+stream into blocks it synthesizes, so the statements inside are nodes the core
+never saw. That is the next slice on this line, it is one of the emitter census's
+own "a decision §2.3 says it must not make" sections, and it is what deletes the
+first arm. `Stmt::ForIn` is at zero carried for the same reason plus one more —
+its element comes through `Rhs::Read`, a place row this walk does not read.
+`Stmt::IfLet` and the `match` statement carry a site and wait on the tag on
+`Arm`, which is row 6 of the ranked list and buys nothing today. `Stmt::Drop` at
+444 waits on `St::Drop` carrying the node the plan keys the binding by, which is
+the one release row the driver still does not take.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
