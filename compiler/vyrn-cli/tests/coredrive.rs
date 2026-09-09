@@ -122,9 +122,12 @@ const PIN: [(&str, usize, usize); 3] = [
 /// Each is loaded from source rather than added to `examples/`, where it would
 /// move every corpus census and the wasm manifest.
 ///
-/// Both below are the readers the exits slice attributed `Stmt::Continue`'s arm
-/// to, and neither is one.
-const SHAPES: [(&str, &str); 2] = [
+/// The first two are the readers the exits slice attributed `Stmt::Continue`'s
+/// arm to. The last two are the validation slice's: a `where` type reaches the
+/// core as the type of the annotated `let`'s VALUE, so the clause in
+/// `Fn_::core_walkable` that refuses one never saw it and the whole body was
+/// emitted from rows that state no check.
+const SHAPES: [(&str, &str); 4] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -138,6 +141,17 @@ const SHAPES: [(&str, &str); 2] = [
          region { if i % 2 == 0 { continue } n = n + 1 } } \
          return n }",
     ),
+    (
+        "a `let` annotated with a `where` type",
+        "type Age = Int64 where value >= 18 \
+         fn vyrnTestMain() -> Int64 { let mut x = 30 x = x - 25 \
+         let a: Age = x return a }",
+    ),
+    (
+        "a store into a binding of a `where` type",
+        "type Age = Int64 where value >= 18 \
+         fn vyrnTestMain() -> Int64 { let mut a: Age = 20 a = a - 15 return a }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -147,9 +161,11 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 2] = [
+const SHAPE_PIN: [(&str, usize, usize); 4] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
+    ("a `let` annotated with a `where` type", 0, 0),
+    ("a store into a binding of a `where` type", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count

@@ -2513,7 +2513,10 @@ fn lower_body(
     // core's rows carry the whole body, its statements are what this walks;
     // everywhere else the AST dispatch below is what it always was, and it
     // asks the core again at every statement ([`Fn_::core_took`]).
-    let from_core = cx_fn.core.clone().filter(|core| cx_fn.core_walkable(core));
+    let from_core = cx_fn
+        .core
+        .clone()
+        .filter(|core| cx_fn.core_walkable(core, stmts));
     WALKS.with(|w| {
         let (from, all) = w.get();
         w.set((from + usize::from(from_core.is_some()), all + 1));
@@ -17049,7 +17052,7 @@ impl<'p> Fn_<'_, 'p> {
     /// walks do not agree on yet, and §3 M3's residue table names each one
     /// with what it waits on. It is a screen and not a judgement: a body it
     /// stands down at is emitted from the AST exactly as before.
-    fn core_walkable(&self, body: &vyrn_lower::core::Body) -> bool {
+    fn core_walkable(&self, body: &vyrn_lower::core::Body, stmts: Option<&Block>) -> bool {
         // A frame with a release row, a region, an aggregate return or a
         // hoisted walk is one whose emission is more than its statements.
         if !self.placed.is_empty() || self.dest.is_some() || !body.lambdas.is_empty() {
@@ -17066,8 +17069,37 @@ impl<'p> Fn_<'_, 'p> {
                 return false;
             }
         }
+        // The type the READER wrote, which the clause above cannot see: the
+        // core names a `let` by the type of its VALUE (`core::Builder`'s `let`
+        // arm), so `let a: Age = 20` reads `Int64` there and the check the
+        // annotation asks for goes unrefused. The AST arm validates at the
+        // `let` and at every later store into the binding, and the row states
+        // neither. [`Fn_::core_run`] asks the same question per statement.
+        if stmts.is_some_and(|blk| self.annotates_a_check(blk)) {
+            return false;
+        }
         let reads = body.reads();
         self.core_readable(body, &body.stmts, &reads)
+    }
+
+    /// Whether any `let` of `blk` is annotated with a type that carries a
+    /// `where` clause (RFC-0079).
+    fn annotates_a_check(&self, blk: &Block) -> bool {
+        let mut found = false;
+        each_block(blk, &mut |_| {}, &mut |s| {
+            if let Stmt::Let { ty: Some(t), .. } = s {
+                found |= self.checks(t);
+            }
+        });
+        found
+    }
+
+    /// Whether a value of `t` is checked where it is made or stored: `t` names
+    /// a declaration with a `where` clause, under this instance's type
+    /// arguments.
+    fn checks(&self, t: &Type) -> bool {
+        matches!(self.cx.sub(t), Type::Named(n)
+            if self.cx.types.get(&n).is_some_and(|d| d.predicate.is_some()))
     }
 
     /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
