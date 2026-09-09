@@ -24406,6 +24406,46 @@ witnessed by `manifest.rs`'s own unit test, which is where the rule now lives:
 
 `tests/cli_census.rs` is re-pinned in this commit.
 
+#### A synthesized function, written once (2026-09-10, `track-ef`)
+
+Rank 3 of the census. `main.rs` builds an `ast::Function` at four sites and each
+wrote out all fifteen fields: `vyrn routes`'s printer over `mountedRows`, each
+body `vyrn bench` lifts out of a `bench` block, the harness `main` it puts in
+their place, and the doors `vyrn test` and `vyrn bench --check` knock on. Twelve
+of the fifteen fields are the same at every site, and they are the same because
+a function this driver synthesizes has no parameters, no type parameters, no
+doc, no module and no column.
+
+`synth_fn(name, body, ret, line, door)` is the one home. `door` is the only
+field that varies beyond the four an argument carries, and it varies for one
+reason the doc now states once instead of in a comment at one of the four sites:
+an export is what the host knocks on AND what makes the body a sweep root.
+
+**This one had no defect in it.** The four copies agreed field for field —
+`bodies_wasm` had already pulled its two into a local closure. What it cost was
+lines, and what it buys is that a sixteenth field on `ast::Function` is one edit
+rather than four.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,089 | 7,074 | −15 |
+| the command tile | 5,150 | 5,101 | −49 |
+| shared machinery | 1,495 | 1,529 | +34 |
+| `ast::Function` literals in the CLI | 4 | 1 | −3 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `benching`, `testing`, `route`, `derived` | 3 + 12 + 16 + 8 passed, 0 failed |
+| `cargo test -p vyrn-cli`, no filter | green in the track gate table below |
+
+`tests/cli_census.rs` gains a section for `synth_fn` and is re-pinned in this
+commit.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

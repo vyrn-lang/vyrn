@@ -32,7 +32,7 @@
 //!
 //! # The command tile, and why it is a second tiling
 //!
-//! "A command's own path" is 5,150 lines, two thirds of the crate's 7,945
+//! "A command's own path" is 5,101 lines, two thirds of the crate's 7,930
 //! non-test lines, and one heading that size says nothing about where to cut. So
 //! [`Kind::Cmd`] carries the command it belongs to and the same lines tile a
 //! second time, one entry per command. A section two commands share is one entry
@@ -314,6 +314,11 @@ fn main_sections() -> Vec<Section> {
             "`vyrn fix` — it applies the `.copy()` a move diagnostic already \
              names, by reading the menu `movecheck::menu` wrote, and refuses \
              rather than chooses when the line cannot say which occurrence",
+        ),
+        sec(
+            "fn synth_fn(",
+            Shared,
+            "the one `ast::Function` this driver builds: no parameters, no type              parameters, no doc, in the root module. `routes`, `bench` twice and              `test` each wrote out all fifteen fields until RFC-0125 §3 M5",
         ),
         sec(
             "fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {",
@@ -760,12 +765,12 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 5150, 167),
+        ("a command's own path", 5101, 167),
         ("a rule another pass also states", 167, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1133, 0),
-        ("shared machinery", 1495, 19),
+        ("shared machinery", 1529, 19),
         ("tests", 852, 2),
     ];
     assert_eq!(got, want, "the structural census has moved");
@@ -809,11 +814,11 @@ fn per_command() -> Vec<(&'static str, usize, usize)> {
 #[test]
 fn the_per_command_census_is_what_the_rfc_records() {
     let want = vec![
-        ("bench", 671, 17),
+        ("bench", 651, 17),
         ("why", 566, 19),
         ("serve, dev", 501, 7),
         ("doc", 391, 13),
-        ("routes", 367, 4),
+        ("routes", 357, 4),
         ("fmt", 289, 13),
         ("build", 277, 17),
         ("(dispatch)", 269, 12),
@@ -821,8 +826,8 @@ fn the_per_command_census_is_what_the_rfc_records() {
         ("fix", 247, 1),
         ("dev", 238, 18),
         ("update", 226, 7),
-        ("test, bench", 164, 2),
         ("build, bench", 163, 0),
+        ("test, bench", 145, 2),
         ("serve", 97, 8),
         ("run", 79, 3),
         ("emit-gen", 77, 3),
@@ -835,7 +840,7 @@ fn the_per_command_census_is_what_the_rfc_records() {
     assert_eq!(per_command(), want, "the per-command census has moved");
     let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
     assert_eq!(
-        total, 5150,
+        total, 5101,
         "the per-command tile does not add up to its kind"
     );
 }

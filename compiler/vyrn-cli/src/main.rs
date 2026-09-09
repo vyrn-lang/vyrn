@@ -1126,7 +1126,7 @@ fn mounted_routes_wasm(
     path: &str,
     program: &vyrn_frontend::ast::Program,
 ) -> Result<Vec<(String, String, String)>, String> {
-    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
+    use vyrn_frontend::ast::{Block, Expr, Stmt, Type};
     let mut prog = program.clone();
     let mut calls: Vec<Vec<Expr>> = Vec::new();
     for f in &mut prog.functions {
@@ -1166,23 +1166,13 @@ fn mounted_routes_wasm(
         value: Some(Expr::Int(0)),
         line: 0,
     });
-    prog.functions.push(Function {
-        name: "main".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        type_bounds: Default::default(),
-        params: Vec::new(),
-        ret: Type::Int,
-        body: Block { stmts },
-        line: 0,
-        col: 0,
-        is_extern: false,
-        is_export_extern: false,
-        is_gen: false,
-        is_mut: false,
-    });
+    prog.functions.push(synth_fn(
+        "main".to_string(),
+        Block { stmts },
+        Type::Int,
+        0,
+        false,
+    ));
     let bytes = vyrn_codegen::direct::compile(&prog)?;
     let out = wasmrun::run(
         &bytes,
@@ -3135,6 +3125,40 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
     }
 }
 
+/// A function this driver synthesizes: no parameters, no type parameters, no
+/// doc, in the root module, at column 0.
+///
+/// Four sites build one and each wrote out all fifteen fields — `vyrn routes`'s
+/// printer over `mountedRows`, `vyrn bench`'s lifted bodies, its harness `main`,
+/// and the doors `vyrn test` and `vyrn bench --check` knock on. `door` makes it
+/// an export, which is what the host knocks on AND what makes the body a sweep
+/// root, the same two facts `vyrn serve`'s doors rest on.
+fn synth_fn(
+    name: String,
+    body: vyrn_frontend::ast::Block,
+    ret: vyrn_frontend::ast::Type,
+    line: usize,
+    door: bool,
+) -> vyrn_frontend::ast::Function {
+    vyrn_frontend::ast::Function {
+        name,
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        type_bounds: Default::default(),
+        params: Vec::new(),
+        ret,
+        body,
+        line,
+        col: 0,
+        is_extern: false,
+        is_export_extern: door,
+        is_gen: false,
+        is_mut: false,
+    }
+}
+
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
@@ -3818,7 +3842,7 @@ fn bench_native(
     json: bool,
     capture: bool,
 ) -> (ExitCode, Option<String>) {
-    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
+    use vyrn_frontend::ast::{Block, Expr, Stmt, Type};
 
     // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`
     //    and `std/json`) by re-reading the user's source with the import
@@ -3879,23 +3903,13 @@ import {{ benchOne }} from \"std/bench\"
     // in parallel with the human `benchOne(...)` statements.
     let mut measure_calls: Vec<Expr> = Vec::new();
     for (slot, b) in selected.iter().enumerate() {
-        program.functions.push(Function {
-            name: format!("__vyrn_bench_body_{slot}"),
-            exported: false,
-            module: None,
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params: Vec::new(),
-            ret: Type::Unit,
-            body: b.body.clone(),
-            line: b.line,
-            col: 0,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        });
+        program.functions.push(synth_fn(
+            format!("__vyrn_bench_body_{slot}"),
+            b.body.clone(),
+            Type::Unit,
+            b.line,
+            false,
+        ));
         let body_ref = Expr::Var {
             name: format!("__vyrn_bench_body_{slot}"),
             line: 0,
@@ -3955,25 +3969,15 @@ import {{ benchOne }} from \"std/bench\"
 
     // 3. Replace the user's `main` (bench mode ignores it) with the harness.
     program.functions.retain(|f| f.name != "main");
-    program.functions.push(Function {
-        name: "main".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        type_bounds: Default::default(),
-        params: Vec::new(),
-        ret: Type::Int,
-        body: Block {
+    program.functions.push(synth_fn(
+        "main".to_string(),
+        Block {
             stmts: harness_stmts,
         },
-        line: 0,
-        col: 0,
-        is_extern: false,
-        is_export_extern: false,
-        is_gen: false,
-        is_mut: false,
-    });
+        Type::Int,
+        0,
+        false,
+    ));
     // Benches/tests are now either lifted or irrelevant — drop them so nothing
     // downstream mistakes them for live code.
     program.benches.clear();
@@ -6116,7 +6120,7 @@ fn bodies_wasm(
     kind: &str,
     bodies: &[Body],
 ) -> ExitCode {
-    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
+    use vyrn_frontend::ast::{Block, Expr, Stmt, Type};
     if bodies.is_empty() {
         // `test` said `no tests` before the filter; `bench` says it after.
         println!("no {kind}es");
@@ -6128,27 +6132,8 @@ fn bodies_wasm(
         .retain(|f| !(f.name == "main" && f.module.is_none()));
     prog.tests.clear();
     prog.benches.clear();
-    let function = |name: String, body: Block, ret: Type, line: usize, door: bool| Function {
-        name,
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        type_bounds: Default::default(),
-        params: Vec::new(),
-        ret,
-        body,
-        line,
-        col: 0,
-        is_extern: false,
-        // An export is what the host knocks on AND what makes the body a sweep
-        // root — the same two facts `vyrn serve`'s doors rest on.
-        is_export_extern: door,
-        is_gen: false,
-        is_mut: false,
-    };
     for (k, b) in bodies.iter().enumerate() {
-        prog.functions.push(function(
+        prog.functions.push(synth_fn(
             format!("__vyrn_body_{k}"),
             b.body.clone(),
             Type::Unit,
@@ -6166,7 +6151,7 @@ fn bodies_wasm(
         }],
     };
     prog.functions
-        .push(function("main".to_string(), main, Type::Int, 0, false));
+        .push(synth_fn("main".to_string(), main, Type::Int, 0, false));
 
     // RFC-0125 §3 M5: a door that reaches a `gen fn` is generation code, so the
     // whole module is compiled as a GENERATOR HOST — the same preparation and the
