@@ -394,8 +394,8 @@ pub const RESERVED: &[&str] = &[
 
 /// Where a name a program may still write has gone.
 ///
-/// Two things happened to a builtin spelling, and a reader needs a different
-/// sentence for each.
+/// Three things put a name in front of a reader who cannot resolve it, and each
+/// needs a different sentence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gone {
     /// RFC-0094 M2 took the name out of [`RESERVED`] and it is an ordinary
@@ -405,6 +405,14 @@ pub enum Gone {
     /// The free-function spelling was REMOVED, because the surface says the
     /// same thing another way. The sentence is what to write instead.
     Removed(&'static str),
+    /// A DESUGAR writes this name, so a reader is told about a call they never
+    /// wrote. The sentence names the spelling they DID write before it names
+    /// the import, and it is true for both readers — the one who wrote the
+    /// sugar and the one who wrote the primitive without importing it.
+    Desugared {
+        module: &'static str,
+        sugar: &'static str,
+    },
 }
 
 impl Gone {
@@ -415,6 +423,10 @@ impl Gone {
                 format!("`{name}` is `{m}`'s — add `import {{ {name} }} from \"{m}\"`")
             }
             Gone::Removed(s) => (*s).to_string(),
+            Gone::Desugared { module, sugar } => format!(
+                "`{name}` is `{module}`'s, and `{sugar}` writes through it — add \
+                 `import {{ {name} }} from \"{module}\"`"
+            ),
         }
     }
 }
@@ -451,6 +463,17 @@ pub const MOVED_TO_STD: &[(&str, Gone)] = &[
     ("base64Decode", Gone::Module("std/codecs")),
     ("urlEncode", Gone::Module("std/codecs")),
     ("urlDecode", Gone::Module("std/codecs")),
+    // `save(path, value)` is `writeAtomic(path, toJson(value))` after
+    // `parser::storage_desugar` (RFC-0044), so a module that never imported the
+    // primitive was told "call to unknown function `writeAtomic`" about a call
+    // it did not write.
+    (
+        "writeAtomic",
+        Gone::Desugared {
+            module: "std/storage",
+            sugar: "save(path, value)",
+        },
+    ),
     // The removed free-function spellings. Each fires for the BARE
     // user-written name only: the desugaring and the method forms carry the
     // unspellable `@`-prefixed internal names (`@str`, `@concat`, `@list`,
@@ -11748,7 +11771,10 @@ mod tests {
     fn every_moved_name_is_gone_from_reserved() {
         for (n, g) in MOVED_TO_STD {
             match g {
-                Gone::Module(_) => assert!(
+                // A desugared name is an ordinary export of its module, so it
+                // follows the `Module` rule: reserve it and the import line the
+                // sentence names could not be written.
+                Gone::Module(_) | Gone::Desugared { .. } => assert!(
                     !RESERVED.contains(n),
                     "`{n}` is both reserved and said to live in a std module"
                 ),
