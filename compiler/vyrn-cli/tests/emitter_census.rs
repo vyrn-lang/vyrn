@@ -624,8 +624,13 @@ fn sections() -> Vec<Section> {
              small type helpers the I/O builtins ask for their result type",
         ),
         sec(
+            "/// The forms of the AST dispatch whose arm the per-statement unit could retire",
+            Shared, Source,
+            "the count the interleave slice is judged by: per form of the AST              dispatch, how many occurrences the arm emitted and how many the              core's rows did",
+        ),
+        sec(
             "/// Whether the AST walk is asked for even where the core's rows carry the body",
-            Mapping, Core,
+            Mapping, Both,
             "RFC-0125 §2.3's own walk: the core's statements to wasm, its              operators through the one table `Expr::Binary` reaches, the callee              row read against the emitter's own function table, and the screen              that says which bodies the rows carry",
         ),
         sec("#[cfg(test)]", Tests, Neither, "the file's own unit tests"),
@@ -813,12 +818,12 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 6421, 596),
+        ("the mapping §2.3 names", 6671, 596),
         ("a decision §2.3 says it must not make", 2212, 356),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
         ("the wasm format", 334, 0),
-        ("shared machinery", 2392, 77),
+        ("shared machinery", 2498, 77),
         ("tests", 326, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
@@ -893,11 +898,11 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 46, 5993, 0, 0),
-        ("the core's rows", 6, 2695, 0, 91),
+        ("neither", 46, 6012, 0, 0),
+        ("the core's rows", 5, 2075, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
-        ("the source, and the core has no row", 9, 1847, 50, 0),
-        ("both, for two questions", 14, 6501, 93, 49),
+        ("the source, and the core has no row", 10, 1934, 88, 0),
+        ("both, for two questions", 15, 7371, 99, 124),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
     assert_eq!(

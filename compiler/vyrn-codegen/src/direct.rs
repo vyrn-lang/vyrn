@@ -2159,6 +2159,22 @@ struct Fn_<'a, 'p> {
     /// itself, or for a lifted lambda the function that holds the literal
     /// (RFC-0125 M3, third slice).
     owner: String,
+    /// This frame's own core body, and where each of its names lives — RFC-0125
+    /// §3 M3, the interleave slice.
+    ///
+    /// The driver used to pick its walk per FUNCTION, so an AST arm could only
+    /// go when every body of the corpus went through the core. The unit is the
+    /// STATEMENT now: the two walks share this frame — its locals, its scope
+    /// and the places below — and each statement goes to whichever walk carries
+    /// it. `None` for a frame the core states no body for.
+    core: Option<std::rc::Rc<vyrn_lower::core::Body>>,
+    /// The core's rows for each source statement of this body
+    /// ([`vyrn_lower::core::Body::rows_by_statement`]).
+    core_at: HashMap<usize, Vec<St>>,
+    /// Where the core's names live, and what the operand stack is holding.
+    /// Shared by the two walks: a name the AST arm bound is found through
+    /// [`Fn_::scope`], and one this walk bound is pushed onto it.
+    core_w: Walked,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -2194,6 +2210,9 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         dest_used: false,
         call_dest: None,
         owner: String::new(),
+        core: None,
+        core_at: HashMap::new(),
+        core_w: Walked::default(),
     }
 }
 
@@ -2352,7 +2371,23 @@ fn lower_body(
         dest_used: false,
         call_dest: None,
         owner,
+        // `VYRN_NO_CORE_WALK=1` takes the AST walk back for the whole body,
+        // which is how the two are compared (`compiler/vyrn-cli/tests/coredrive.rs`).
+        core: (!core_walk_off())
+            .then(|| vyrn_lower::core::body_of(&f.name))
+            .flatten()
+            .map(std::rc::Rc::new),
+        core_at: HashMap::new(),
+        core_w: Walked::default(),
     };
+    if let Some(core) = cx_fn.core.clone() {
+        cx_fn.core_at = core.rows_by_statement();
+        cx_fn.core_w = Walked {
+            at: vec![None; core.names.len()],
+            reads: core.reads(),
+            held: None,
+        };
+    }
 
     // By-value parameter semantics: an aggregate arrives as the caller's
     // address, so the prologue copies it into a slot of our own. M0 measured
@@ -2427,6 +2462,16 @@ fn lower_body(
         }
         cx_fn.scope.push((p.name.clone(), place, ty));
     }
+    // The core's parameters are the declaration's in order, and the prologue
+    // has just put each one where it lives, so the two walks agree about them
+    // before either runs.
+    if let Some(core) = cx_fn.core.clone() {
+        for (i, n) in core.params.iter().enumerate() {
+            if let Some((_, place, ty)) = cx_fn.scope.get(i) {
+                cx_fn.core_w.at[*n as usize] = Some((*place, ty.clone()));
+            }
+        }
+    }
 
     // Audit A5.3: one frame of the language's call-depth budget. A lifted lambda
     // is skipped — it has no name to call itself by (RFC-0037), so it cannot
@@ -2466,14 +2511,9 @@ fn lower_body(
     cx_fn.depth += 1;
     // RFC-0125 §2.3: "the emitter reads the core and writes wasm". Where the
     // core's rows carry the whole body, its statements are what this walks;
-    // everywhere else the AST dispatch below is what it always was, and the
-    // residue table in §3 M3 names the row each remaining form waits on.
-    // `VYRN_NO_CORE_WALK=1` takes the AST walk back, which is how the two are
-    // compared (`compiler/vyrn-cli/tests/coredrive.rs`).
-    let from_core = (!core_walk_off())
-        .then(|| vyrn_lower::core::body_of(&f.name))
-        .flatten()
-        .filter(|core| cx_fn.core_walkable(core));
+    // everywhere else the AST dispatch below is what it always was, and it
+    // asks the core again at every statement ([`Fn_::core_took`]).
+    let from_core = cx_fn.core.clone().filter(|core| cx_fn.core_walkable(core));
     WALKS.with(|w| {
         let (from, all) = w.get();
         w.set((from + usize::from(from_core.is_some()), all + 1));
@@ -4317,6 +4357,14 @@ impl<'p> Fn_<'_, 'p> {
     /// something. A statement kind added to the AST is now a compile error naming
     /// this match. Expressions keep theirs — `expr_name` still has work.
     fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {
+        // RFC-0125 §2.3, per STATEMENT: where the core's rows carry this one,
+        // they are what is emitted and no arm below runs. The unit was the
+        // function until the interleave slice, which is why an arm could not go
+        // while one body of the corpus still needed it.
+        if self.core_took(m, b, s)? {
+            return Ok(());
+        }
+        count(stmt_form(s), false);
         match s {
             Stmt::Let {
                 name,
@@ -5808,6 +5856,9 @@ impl<'p> Fn_<'_, 'p> {
     /// refuses one of its blocks by the class word in its header. So the
     /// temporary is handed back at whatever depth it was made.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
+        if let Some(f) = expr_form(e) {
+            count(f, false);
+        }
         let t = self.expr_inner(m, b, e)?;
         if self.cx.arg_drop_row(e as *const Expr as usize) {
             let l = b.local(ValType::I32);
@@ -16148,6 +16199,93 @@ fn expr_name(e: &Expr) -> String {
     .to_string()
 }
 
+/// The forms of the AST dispatch whose arm the per-statement unit could retire
+/// — RFC-0125 §3 M3, the interleave slice.
+///
+/// An arm goes when nothing reaches it. Against each name the count below says
+/// how many occurrences the ARM emitted and how many the core's rows did, so a
+/// form whose first number is zero over the whole corpus is one whose arm has
+/// no reader left.
+pub const FORMS: [&str; 20] = [
+    "Stmt::Let",
+    "Stmt::Assign",
+    "Stmt::Return",
+    "Stmt::If",
+    "Stmt::Expr",
+    "Stmt::While",
+    "Stmt::ForIn",
+    "Stmt::Break",
+    "Stmt::Continue",
+    "Stmt::IfLet",
+    "Stmt::Drop",
+    "a statement of another form",
+    "Expr::Int",
+    "Expr::Byte",
+    "Expr::Bool",
+    "Expr::Float",
+    "Expr::Str",
+    "Expr::Var",
+    "Expr::Unary",
+    "Expr::Binary",
+];
+
+thread_local! {
+    /// Per [`FORMS`] entry: how many occurrences the AST arm emitted, and how
+    /// many the core's rows did.
+    static COUNTS: std::cell::RefCell<[(usize, usize); FORMS.len()]> =
+        const { std::cell::RefCell::new([(0, 0); FORMS.len()]) };
+}
+
+/// How many occurrences of each of [`FORMS`] the AST arm emitted, and how many
+/// the core's rows did, since [`forget_walks`].
+pub fn forms() -> [(usize, usize); FORMS.len()] {
+    COUNTS.with(|c| *c.borrow())
+}
+
+fn count(form: usize, carried: bool) {
+    COUNTS.with(|c| {
+        let mut c = c.borrow_mut();
+        if carried {
+            c[form].1 += 1;
+        } else {
+            c[form].0 += 1;
+        }
+    });
+}
+
+/// Which of [`FORMS`] a statement is.
+fn stmt_form(s: &Stmt) -> usize {
+    match s {
+        Stmt::Let { .. } => 0,
+        Stmt::Assign { .. } => 1,
+        Stmt::Return { .. } => 2,
+        Stmt::If { .. } => 3,
+        Stmt::Expr(_) => 4,
+        Stmt::While { .. } => 5,
+        Stmt::ForIn { .. } => 6,
+        Stmt::Break { .. } => 7,
+        Stmt::Continue { .. } => 8,
+        Stmt::IfLet { .. } => 9,
+        Stmt::Drop { .. } => 10,
+        _ => 11,
+    }
+}
+
+/// Which of [`FORMS`] an expression is, for the eight the driver reads.
+fn expr_form(e: &Expr) -> Option<usize> {
+    Some(match e {
+        Expr::Int(_) => 12,
+        Expr::Byte(_) => 13,
+        Expr::Bool(_) => 14,
+        Expr::Float(_) => 15,
+        Expr::Str(_) => 16,
+        Expr::Var { .. } => 17,
+        Expr::Unary { .. } => 18,
+        Expr::Binary { .. } => 19,
+        _ => return None,
+    })
+}
+
 /// Whether the AST walk is asked for even where the core's rows carry the body
 /// — RFC-0125 §3 M3, the driver slice.
 ///
@@ -16177,6 +16315,7 @@ pub fn walks() -> (usize, usize) {
 /// Start the count again.
 pub fn forget_walks() {
     WALKS.with(|w| w.set((0, 0)));
+    COUNTS.with(|c| *c.borrow_mut() = [(0, 0); FORMS.len()]);
 }
 
 /// Where the core's names live while one body is walked, and what the wasm
@@ -16187,6 +16326,7 @@ pub fn forget_walks() {
 /// AST walk does not. `held` is the one name the stack is carrying: a value
 /// bound by the statement just walked and read by this one. Where a name is
 /// not stack-shaped it gets a local, in the order the AST walk allocates one.
+#[derive(Default)]
 struct Walked {
     /// The wasm place of each of the core's names, by [`vyrn_lower::core::Name`].
     at: Vec<Option<(Place, Type)>>,
@@ -16217,20 +16357,212 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         body: &vyrn_lower::core::Body,
     ) -> Result<(), String> {
-        let mut w = Walked {
-            at: vec![None; body.names.len()],
-            reads: core_reads(body),
-            held: None,
-        };
-        // The parameters are bound already: the prologue put each one where it
-        // lives, and the core's `params` are the declaration's in order.
-        for (i, n) in body.params.iter().enumerate() {
-            let Some((_, place, ty)) = self.scope.get(i) else {
-                return unsupported("a core body whose parameters are not the frame's", 0);
-            };
-            w.at[*n as usize] = Some((*place, ty.clone()));
+        if body.params.len() > self.scope.len() {
+            return unsupported("a core body whose parameters are not the frame's", 0);
         }
-        self.core_stmts(m, b, body, &mut w, &body.stmts)
+        let mut w = std::mem::take(&mut self.core_w);
+        let r = self.core_stmts(m, b, body, &mut w, &body.stmts);
+        self.core_w = w;
+        r
+    }
+
+    /// One SOURCE statement, emitted from the core's rows where they carry it —
+    /// RFC-0125 §3 M3, the interleave slice.
+    ///
+    /// [`Fn_::core_body`] picks its walk per FUNCTION, so an arm of the AST
+    /// dispatch could only go when every body of the corpus went through the
+    /// core. This is the same walk asked one statement at a time: where the
+    /// rows carry the statement it is emitted from them, and where they do not
+    /// the arm below emits it, into the same frame with the same locals and
+    /// the same scope. An arm goes when no occurrence of its form reaches it.
+    ///
+    /// Returns whether the statement was emitted. The screen
+    /// ([`Fn_::core_run`]) stands before the first instruction, so a `false`
+    /// costs nothing and the arm emits exactly what it always did.
+    fn core_took(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<bool, String> {
+        let Some(body) = self.core.clone() else {
+            return Ok(false);
+        };
+        let Some(run) = self.core_run(&body, s) else {
+            return Ok(false);
+        };
+        let mut w = std::mem::take(&mut self.core_w);
+        let r = self.core_stmts(m, b, &body, &mut w, &run);
+        self.core_w = w;
+        count(stmt_form(s), true);
+        r.map(|()| true)
+    }
+
+    /// The core's rows for one source statement, where this walk reads all of
+    /// them — RFC-0125 §3 M3, the interleave slice's screen.
+    ///
+    /// Three clauses, and each one is a line of the record. The FRAME clause: a
+    /// placed release and an aggregate destination are emissions the rows do
+    /// not carry. The SCALAR clause, per statement rather than per body: every
+    /// name the run names is one this walk reads. The STATEMENT screen:
+    /// [`Fn_::core_readable`], unchanged.
+    fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
+        let at = s as *const Stmt as usize;
+        // THE FRAME CLAUSE, per statement. It was per BODY until the release
+        // half of it moved here: a frame with one placed release refused every
+        // statement it had, which is 8,362 of them. What a run may not take is
+        // a statement the placement keyed a release AT — the arm emits those
+        // through [`Fn_::emit_releases`] and the rows state them as `St::Drop`
+        // and `St::Row`, which [`Fn_::core_readable`] refuses anyway. Every
+        // other statement of the same frame is free, and the block's own
+        // fall-through releases still stand where they did, because
+        // [`Fn_::block`] is what drives the walk now.
+        let keyed = |node: usize| self.placed.keys().any(|(_, k)| *k == node);
+        if keyed(at) {
+            return None;
+        }
+        match s {
+            // An aggregate result travels through `dest` and a stream cursor is
+            // a release at a function exit that no plan row names, so both are
+            // the exit's business and neither is any other statement's:
+            // `streamlazy.vyrn` lost 51 bytes of a cursor when the rows took
+            // its `return`.
+            Stmt::Return { .. } if self.dest.is_some() || !self.cursors.is_empty() => return None,
+            // An `if` is the one form of the four whose run is a SUBTREE, so
+            // the clause cannot be read off its own node: a `return` inside
+            // the branch carries the release the plan keyed at IT, and
+            // `htmltree.vyrn` lost seven bytes of one. A frame with any placed
+            // release keeps its `if`s until the row for a placed release is
+            // the driver's own, which is the next slice.
+            Stmt::If { .. } if !self.placed.is_empty() => return None,
+            _ => {}
+        }
+        let run = self.core_at.get(&at)?;
+        // A node is an ADDRESS. The row's FORM and the name it binds are
+        // checked against the statement's, so a row is never read as a
+        // statement it did not come from.
+        let named =
+            |n: &vyrn_lower::core::Name, name: &String| &body.names[*n as usize].source == name;
+        let mut annotated = None;
+        match (s, run.last()?) {
+            (Stmt::Let { name, ty, .. }, St::Let(n, _)) if named(n, name) => {
+                // The arm binds the ANNOTATION where the reader wrote one and
+                // the recorded type of the initializer otherwise, and the two
+                // walks have to bind the same type or they pick different
+                // instructions for it: `simd.vyrn`'s `a / b` on two `Float32`
+                // widens to `Float64` in the arm and stays single in the row.
+                if let Some(t) = ty {
+                    // As WRITTEN, not resolved: `let a: Age = 25` is a `where`
+                    // type, the arm parks the value in a temporary and calls
+                    // its check, and `Age` resolved to `Int64` is the flow that
+                    // does not (M2d). The row states no check.
+                    if !core_scalar(t)
+                        || self.cx.resolve(t) != self.cx.resolve(&body.names[*n as usize].ty)
+                    {
+                        return None;
+                    }
+                    annotated = Some(*n);
+                }
+            }
+            (
+                Stmt::Assign { name, .. },
+                St::Store {
+                    place: vyrn_lower::core::Place::Name(n),
+                    ..
+                },
+            ) if named(n, name) => {}
+            // The DECLARED return type, for the same reason: a function
+            // returning `Age` validates at its `return` and the row does not.
+            (Stmt::Return { line, .. }, St::Return { line: at, .. })
+                if line == at && core_scalar(&self.ret_ty) => {}
+            // RFC-0114 Rule N's edge releases are the plan's rows at the JOIN,
+            // and the core states them as drops inside the branch — which the
+            // statement screen refuses. An `if` that owes one is the arm's.
+            (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
+            _ => return None,
+        }
+        // Every OTHER binding of the run: the row types it by its destination
+        // and the arm by what it evaluated, and the two are not always the
+        // same. `simd.vyrn`'s `let neg = 0.0 - o` is `Float32` to the checker
+        // and to the row, and `Float64` to the arm, which reads the literal's
+        // own width and promotes `o` to meet it — so the row divides single
+        // where the arm promotes and divides double. Where the two disagree
+        // the rows do not carry the statement, and the disagreement is a
+        // finding of its own.
+        let mut lets = Vec::new();
+        for st in run {
+            core_lets(st, &mut lets);
+        }
+        for (n, rhs) in lets {
+            if Some(n) == annotated {
+                continue;
+            }
+            let info = &body.names[n as usize];
+            let want = self.core_arm_ty(body, rhs)?;
+            if !core_scalar(&want) {
+                return None;
+            }
+            let got = self.cx.resolve(&info.ty);
+            // A truth value is the one result an operator states and its
+            // operands do not.
+            if got != self.cx.resolve(&want) && got != Type::Bool {
+                return None;
+            }
+        }
+        let mut names = Vec::new();
+        for st in run {
+            vyrn_lower::core::names_in(st, &mut names);
+        }
+        for n in &names {
+            let info = &body.names[*n as usize];
+            if !core_scalar(&info.ty) {
+                return None;
+            }
+        }
+        // Every name the run READS has to have a place before the first
+        // instruction is written: one this walk bound, one the arm below bound
+        // (a local of the scope), or a parameter.
+        let mut bound: Vec<vyrn_lower::core::Name> = Vec::new();
+        for st in run {
+            if let St::Let(n, _) = st {
+                bound.push(*n);
+            }
+        }
+        for n in &names {
+            if bound.contains(n) {
+                continue;
+            }
+            let (_, ty) = self.core_place(&self.core_w, body, *n)?;
+            // And the two walks have to agree about the type of a name they
+            // share: `stringops.vyrn` compared two bytes at byte width from the
+            // row and at `Int64` from the frame, for the same source. The
+            // frame's answer is as DECLARED, so a `where` type is refused here
+            // as it is at a `let`.
+            if !core_scalar(&ty)
+                || self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty)
+            {
+                return None;
+            }
+        }
+        self.core_readable(body, run, &self.core_w.reads)
+            .then(|| run.clone())
+    }
+
+    /// Where one of the core's names lives: the place this walk bound it at, or
+    /// the one the AST arm bound it at, which is the scope's.
+    fn core_place(
+        &self,
+        w: &Walked,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<(Place, Type)> {
+        if let Some(p) = w.at[n as usize].clone() {
+            return Some(p);
+        }
+        let info = &body.names[n as usize];
+        // `@t3` is the naming pass's own spelling for a temporary, and no
+        // reader wrote one — so a name that starts with it is this walk's or
+        // nobody's.
+        if info.source.starts_with('@') {
+            return None;
+        }
+        let p = self.lookup(&info.source, info.line).ok()?;
+        matches!(p.0, Place::Local(_)).then_some(p)
     }
 
     fn core_stmts(
@@ -16265,6 +16597,14 @@ impl<'p> Fn_<'_, 'p> {
                     };
                     b.ins(&Instruction::LocalSet(l));
                     w.at[*n as usize] = Some((place, info.ty.clone()));
+                    // A binding the READER wrote goes on the scope too, so a
+                    // statement the AST arm emits after this one finds it
+                    // exactly where that arm would have put it (RFC-0125 §3
+                    // M3, the interleave slice).
+                    if !info.source.starts_with('@') {
+                        self.scope
+                            .push((info.source.clone(), place, info.ty.clone()));
+                    }
                 }
                 St::Store {
                     place: vyrn_lower::core::Place::Name(n),
@@ -16272,7 +16612,7 @@ impl<'p> Fn_<'_, 'p> {
                     line,
                     ..
                 } => {
-                    let Some((Place::Local(l), ty)) = w.at[*n as usize].clone() else {
+                    let Some((Place::Local(l), ty)) = self.core_place(w, body, *n) else {
                         return unsupported("a core store into a place with no local", *line);
                     };
                     self.core_val(m, b, body, w, value, &ty, *line)?;
@@ -16315,7 +16655,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::Loop(BlockType::Empty));
                     self.depth += 1;
                     self.loops.push((brk, cont, self.region_depth));
+                    let scope = self.scope.len();
                     let r = self.core_stmts(m, b, body, w, inner);
+                    self.scope.truncate(scope);
                     self.loops.pop();
                     r?;
                     let back = self.br_to(cont);
@@ -16343,10 +16685,13 @@ impl<'p> Fn_<'_, 'p> {
                     self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
+                    let mark = self.scope.len();
                     self.core_stmts(m, b, body, w, then)?;
+                    self.scope.truncate(mark);
                     if !els.is_empty() {
                         b.ins(&Instruction::Else);
                         self.core_stmts(m, b, body, w, els)?;
+                        self.scope.truncate(mark);
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -16362,6 +16707,7 @@ impl<'p> Fn_<'_, 'p> {
                     region,
                     ..
                 } => {
+                    let scope = self.scope.len();
                     if *region {
                         self.region_enter(b);
                         self.region_depth += 1;
@@ -16373,6 +16719,7 @@ impl<'p> Fn_<'_, 'p> {
                     } else {
                         self.core_stmts(m, b, body, w, inner)?;
                     }
+                    self.scope.truncate(scope);
                 }
                 St::Return { value, line, .. } => {
                     match value {
@@ -16388,6 +16735,11 @@ impl<'p> Fn_<'_, 'p> {
                             )
                         }
                     }
+                    // Every region scope this return leaves, as the AST arm
+                    // does: a returned value built inside a region points into
+                    // the arena and its caller owns it, so the scope POPS
+                    // rather than frees.
+                    self.exit_regions_above(b, 0, false);
                     b.ins(&Instruction::Br(self.depth));
                 }
                 St::Trap => {
@@ -16570,15 +16922,16 @@ impl<'p> Fn_<'_, 'p> {
     ) -> Result<(), String> {
         let got = match v {
             Val::Name(n) => {
-                let (place, ty) = match w.at[*n as usize].clone() {
-                    Some(p) => p,
-                    // Not a place: the stack is already holding it.
-                    None if w.held == Some(*n) => {
-                        w.held = None;
-                        let ty = body.names[*n as usize].ty.clone();
-                        return self.coerce(m, b, None, &ty, want, line);
-                    }
-                    None => return unsupported("a core name with no place", line),
+                // Not a place: the stack is already holding it.
+                if w.held == Some(*n) {
+                    w.held = None;
+                    let ty = body.names[*n as usize].ty.clone();
+                    return self.coerce(m, b, None, &ty, want, line);
+                }
+                // The place is this walk's, or — since the interleave slice —
+                // the one the AST arm bound the name at, which is the scope's.
+                let Some((place, ty)) = self.core_place(w, body, *n) else {
+                    return unsupported("a core name with no place", line);
                 };
                 let Place::Local(l) = place else {
                     return unsupported("a core name that is not a local", line);
@@ -16618,6 +16971,28 @@ impl<'p> Fn_<'_, 'p> {
         self.coerce(m, b, None, &got, want, line)
     }
 
+    /// What the AST arm would bind for one row — the screen's type clause.
+    ///
+    /// It is not the operator table stated twice: what it asks is which VALUE
+    /// the arm evaluates, whose type is the arm's answer for the binding. An
+    /// operator's is its first operand's, because that is the one the width
+    /// rule ([`Fn_::op_width`]) adopts from.
+    fn core_arm_ty(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> Option<Type> {
+        Some(match rhs {
+            Rhs::Val(Val::Lit(l)) => match l {
+                Lit::Int(_) | Lit::Byte(_) => Type::Int,
+                Lit::Float(_) => Type::Float,
+                Lit::Bool(_) => Type::Bool,
+                Lit::Str(_) => Type::Str,
+                Lit::Opaque => return None,
+            },
+            Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
+            Rhs::Call { callee, kind, .. } => self.core_sig(callee, *kind)?.ret_ty,
+            Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
+            _ => return None,
+        })
+    }
+
     /// The type of one value: the checker's, off the name the row carries.
     fn core_ty(&self, body: &vyrn_lower::core::Body, v: &Val, lit: &Type) -> Type {
         match v {
@@ -16649,14 +17024,11 @@ impl<'p> Fn_<'_, 'p> {
             // A scalar of a type that needs no validation: a `where` type
             // (RFC-0079) is a `check` row the core does not carry, which is
             // the census's row 7.
-            if !matches!(
-                info.ty,
-                Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool
-            ) {
+            if !core_scalar(&info.ty) {
                 return false;
             }
         }
-        let reads = core_reads(body);
+        let reads = body.reads();
         self.core_readable(body, &body.stmts, &reads)
     }
 
@@ -16720,51 +17092,6 @@ impl<'p> Fn_<'_, 'p> {
     }
 }
 
-/// How many times each of a body's names is read.
-fn core_reads(body: &vyrn_lower::core::Body) -> Vec<u32> {
-    let mut out = vec![0u32; body.names.len()];
-    count_reads(&body.stmts, &mut out);
-    out
-}
-
-fn count_reads(ss: &[St], out: &mut [u32]) {
-    fn hit(v: &Val, out: &mut [u32]) {
-        if let Val::Name(n) = v {
-            out[*n as usize] += 1;
-        }
-    }
-    for s in ss {
-        match s {
-            St::Let(_, rhs) | St::Do(rhs, _) => match rhs {
-                Rhs::Val(v) => hit(v, out),
-                Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
-                    vs.iter().for_each(|v| hit(v, out));
-                }
-                Rhs::Call { args, .. } => args.iter().for_each(|(v, _)| hit(v, out)),
-                Rhs::Read(_) | Rhs::Take(_) => {}
-            },
-            St::Store { value, .. } => hit(value, out),
-            St::Return { value: Some(v), .. } => hit(v, out),
-            St::If { cond, .. } => hit(cond, out),
-            St::Switch { on, .. } => hit(on, out),
-            _ => {}
-        }
-        match s {
-            St::If { then, els, .. } => {
-                count_reads(then, out);
-                count_reads(els, out);
-            }
-            St::Loop(b) | St::Block { body: b, .. } => count_reads(b, out),
-            St::Switch { arms, .. } => {
-                for a in arms {
-                    count_reads(&a.body, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// The first name a statement READS, which is the only one the operand stack
 /// can be carrying for it.
 fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
@@ -16787,6 +17114,35 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
 
 fn core_val_readable(v: &Val) -> bool {
     !matches!(v, Val::Lit(Lit::Opaque))
+}
+
+/// Every `let` a statement's rows bind, itself and everything under it.
+fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
+    match s {
+        St::Let(n, rhs) => out.push((*n, rhs)),
+        St::If { then, els, .. } => {
+            then.iter().for_each(|s| core_lets(s, out));
+            els.iter().for_each(|s| core_lets(s, out));
+        }
+        St::Loop(inner) | St::Block { body: inner, .. } => {
+            inner.iter().for_each(|s| core_lets(s, out));
+        }
+        St::Switch { arms, .. } => {
+            for a in arms {
+                a.body.iter().for_each(|s| core_lets(s, out));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A type this walk reads a name of: a scalar that needs no validation. A
+/// `where` type (RFC-0079) is a `check` row the core does not carry.
+fn core_scalar(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool
+    )
 }
 
 #[cfg(test)]

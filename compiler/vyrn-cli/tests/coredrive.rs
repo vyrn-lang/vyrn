@@ -15,9 +15,12 @@
 //! finding the RFC's record has to explain: either the AST arm was wrong, or
 //! the core states a shape the AST arm did not.
 //!
-//! The count beside it is what the driver reaches: how many of the corpus's
-//! bodies the core's rows carry end to end, out of how many the emitter
-//! lowers. The classification below says what each of the rest waits on, and
+//! The unit of selection is the STATEMENT since the interleave slice, so the
+//! count beside the licence is per FORM: how many occurrences of each form of
+//! the AST dispatch the arm emitted, and how many the core's rows did. An arm
+//! goes when nothing reaches it, which is what the count is for. The body
+//! count stands beside it: how many of the corpus's bodies the rows carry end
+//! to end, out of how many the emitter lowers. The classification below says what each of the rest waits on, and
 //! it is the same list §3 M3 records.
 
 use std::path::PathBuf;
@@ -239,6 +242,7 @@ fn run() {
     let mut programs = 0usize;
     let mut from_core = 0usize;
     let mut emitted = 0usize;
+    let mut forms = [(0usize, 0usize); vyrn_codegen::direct::FORMS.len()];
     let mut differ: Vec<String> = Vec::new();
     let mut same = 0usize;
     for path in corpus() {
@@ -273,6 +277,10 @@ fn run() {
         let (f, e) = vyrn_codegen::direct::walks();
         from_core += f;
         emitted += e;
+        for (i, (arm, took)) in vyrn_codegen::direct::forms().iter().enumerate() {
+            forms[i].0 += arm;
+            forms[i].1 += took;
+        }
         let ast = emit(&program, true);
         match (core, ast) {
             (Ok(a), Ok(b)) if a == b => same += 1,
@@ -295,10 +303,33 @@ fn run() {
         carried.len()
     );
     eprintln!("the emitter took the core's walk for {from_core} of {emitted} bodies");
+    // The unit of selection is the STATEMENT since the interleave slice, so
+    // the count that says what an AST arm still costs is per FORM: how many
+    // occurrences the arm emitted, and how many the core's rows did.
+    eprintln!("what each form of the AST dispatch still emits:");
+    for (i, what) in vyrn_codegen::direct::FORMS.iter().enumerate() {
+        let (arm, core) = forms[i];
+        eprintln!("  {arm:8} the arm   {core:8} the core's rows   {what}");
+    }
     eprintln!("{same} of {programs} programs emit the same module either way");
     for d in &differ {
         eprintln!("  {d}");
     }
+    // The forms whose arm the rows have started to relieve. An arm goes when
+    // its first number reaches zero, and this pin says which four are on that
+    // road: a form that drops off the list has lost a reader the record has to
+    // explain, and one that joins it is a slice's own count.
+    let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| forms[*i].1 > 0)
+        .map(|(_, w)| *w)
+        .collect();
+    assert_eq!(
+        carrying,
+        ["Stmt::Let", "Stmt::Assign", "Stmt::Return", "Stmt::If"],
+        "the forms the core's rows carry are not the ones the record names"
+    );
     // The driver is a screen and not a judgement: where it stands down, the
     // AST walk emits exactly what it did. So a body it takes has to reach the
     // corpus at all, or this test measures nothing.
