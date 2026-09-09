@@ -147,9 +147,9 @@ fn sums() {
     }
     let ok: Result<String, String> = Ok(built("fine"))
     print(match ok.copy() {
-            Ok(s) => s,
-            Err(s) => s,
-        })
+        Ok(s) => s,
+        Err(s) => s,
+    })
 }
 
 /// A handle copies as a handle. A store through the copy is visible through the

@@ -55,8 +55,8 @@ fn main() -> Int64 {
     }
 
     let doc = JObj([
-            JsonField { key: "name", value: JStr("a heap string a copy would duplicate") },
-        ])
+        JsonField { key: "name", value: JStr("a heap string a copy would duplicate") },
+    ])
     if let Some(v) = doc.tryField("name") {
         if let JStr(s) = v {
             print("name len: \{s.byteLength}")

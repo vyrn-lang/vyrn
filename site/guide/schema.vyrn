@@ -15,10 +15,10 @@ fn bound(o: Option<Int64>) -> String {
 export fn demo() -> String {
     let s = schemaOf(Port)
     return joinWith([
-            "name    \{s.name}",
-            "base    \{s.base}",
-            "minimum \{bound(s.min)}",
-            "maximum \{bound(s.max)}",
-            "schema  \{jsonSchema(Port)}",
-        ], "\n")
+        "name    \{s.name}",
+        "base    \{s.base}",
+        "minimum \{bound(s.min)}",
+        "maximum \{bound(s.max)}",
+        "schema  \{jsonSchema(Port)}",
+    ], "\n")
 }

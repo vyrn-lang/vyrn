@@ -118,10 +118,10 @@ fn gridOf(full: Int64, step: Int64, per: Int64, unit: String) -> Array<Grid> {
     let mut v = 0
     while v * per <= full {
         out.push(Grid {
-                id: v.toString(),
-                x: px(barLeftN() + barRoom() * v * per / full),
-                label: v.toString(),
-            })
+            id: v.toString(),
+            x: px(barLeftN() + barRoom() * v * per / full),
+            label: v.toString(),
+        })
         v = v + step
     }
     // The unit is named once, on the last gridline, rather than repeated four
@@ -181,16 +181,16 @@ export fn moduleLadder() -> Array<Bar> {
     while i < rows.length {
         let m = rows[i]
         out.push(Bar {
-                id: m.name.copy(),
-                y: rowY(i),
-                hy: hitY(i),
-                w: px(barRoom() * m.size / full),
-                label: m.name.copy(),
-                value: kbOf(m.size),
-                title: "examples/" + m.name + ".vyrn -> " + m.size.toString() + " bytes of wasm",
-                href: blob("examples/" + m.name + ".vyrn"),
-                tone: if i == 0 { "bar focal" } else { "bar" },
-            })
+            id: m.name.copy(),
+            y: rowY(i),
+            hy: hitY(i),
+            w: px(barRoom() * m.size / full),
+            label: m.name.copy(),
+            value: kbOf(m.size),
+            title: "examples/" + m.name + ".vyrn -> " + m.size.toString() + " bytes of wasm",
+            href: blob("examples/" + m.name + ".vyrn"),
+            tone: if i == 0 { "bar focal" } else { "bar" },
+        })
         i = i + 1
     }
     return out
@@ -312,16 +312,16 @@ export fn heroBars() -> Array<Bar> {
         let key = rows[i]
         let us = medianUs(heroBench(), key)
         out.push(Bar {
-                id: key.copy(),
-                y: rowY(i),
-                hy: hitY(i),
-                w: px(barRoom() * us / full),
-                label: heroName(key),
-                value: benchMs(us),
-                title: heroName(key) + " ran " + heroBench() + " in " + benchMs(us),
-                href: hrefOf("/compare") + "#numbers",
-                tone: if i == 0 { "bar focal" } else { "bar" },
-            })
+            id: key.copy(),
+            y: rowY(i),
+            hy: hitY(i),
+            w: px(barRoom() * us / full),
+            label: heroName(key),
+            value: benchMs(us),
+            title: heroName(key) + " ran " + heroBench() + " in " + benchMs(us),
+            href: hrefOf("/compare") + "#numbers",
+            tone: if i == 0 { "bar focal" } else { "bar" },
+        })
         i = i + 1
     }
     return out
@@ -437,16 +437,16 @@ export fn leakBars(declared: Bool) -> Array<Bar> {
     while i < rows.length {
         let r = rows[i]
         out.push(Bar {
-                id: tag + i.toString(),
-                y: rowY(i),
-                hy: hitY(i),
-                w: px(barRoom() * r.hundredths / leakFull()),
-                label: r.turns.copy(),
-                value: mbOf(r.hundredths),
-                title: word + ", " + r.turns + ": " + mbOf(r.hundredths),
-                href: blob("rfcs/census-call-arguments.md"),
-                tone: if i == rows.length - 1 { "bar focal" } else { "bar" },
-            })
+            id: tag + i.toString(),
+            y: rowY(i),
+            hy: hitY(i),
+            w: px(barRoom() * r.hundredths / leakFull()),
+            label: r.turns.copy(),
+            value: mbOf(r.hundredths),
+            title: word + ", " + r.turns + ": " + mbOf(r.hundredths),
+            href: blob("rfcs/census-call-arguments.md"),
+            tone: if i == rows.length - 1 { "bar focal" } else { "bar" },
+        })
         i = i + 1
     }
     return out
@@ -562,16 +562,16 @@ export fn engineBars() -> Array<Bar> {
     while i < rows.length {
         let e = rows[i]
         out.push(Bar {
-                id: e.id.copy(),
-                y: rowY(i),
-                hy: hitY(i),
-                w: px(barRoom() * e.work / full),
-                label: e.name.copy(),
-                value: msOf(e.work),
-                title: e.name + ": " + e.work.toString() + " ms of work, over a floor of " + e.floor.toString() + " ms",
-                href: blob("bench/engines.sh"),
-                tone: if e.id == "native" { "bar focal" } else { "bar" },
-            })
+            id: e.id.copy(),
+            y: rowY(i),
+            hy: hitY(i),
+            w: px(barRoom() * e.work / full),
+            label: e.name.copy(),
+            value: msOf(e.work),
+            title: e.name + ": " + e.work.toString() + " ms of work, over a floor of " + e.floor.toString() + " ms",
+            href: blob("bench/engines.sh"),
+            tone: if e.id == "native" { "bar focal" } else { "bar" },
+        })
         i = i + 1
     }
     return out
@@ -677,11 +677,11 @@ export fn ownRows() -> Array<OwnRow> {
     while i < lines.length {
         let n = firstLine() + i
         out.push(OwnRow {
-                n: n,
-                html: lines[i].copy(),
-                a: laneAt(lives[0], "a", n),
-                b: laneAt(lives[1], "b", n),
-            })
+            n: n,
+            html: lines[i].copy(),
+            a: laneAt(lives[0], "a", n),
+            b: laneAt(lives[1], "b", n),
+        })
         i = i + 1
     }
     return out
@@ -906,43 +906,43 @@ export fn targetsBox() -> String {
 export fn targetsNodes() -> Array<Node> {
     let mut out: Array<Node> = []
     out.push(Node {
-            id: "source",
-            x: "0",
-            y: px(axisY() - 28),
-            w: "176",
-            h: "56",
-            cx: "88",
-            name: "one program",
-            sub: "hello.vyrn",
-            tone: "node focal",
-        })
+        id: "source",
+        x: "0",
+        y: px(axisY() - 28),
+        w: "176",
+        h: "56",
+        cx: "88",
+        name: "one program",
+        sub: "hello.vyrn",
+        tone: "node focal",
+    })
     let rows = backends()
     let mut i = 0
     while i < rows.length {
         out.push(Node {
-                id: rows[i][0].copy(),
-                x: "328",
-                y: px(laneY(i)),
-                w: "232",
-                h: "56",
-                cx: "444",
-                name: rows[i][1].copy(),
-                sub: rows[i][2].copy(),
-                tone: "node",
-            })
+            id: rows[i][0].copy(),
+            x: "328",
+            y: px(laneY(i)),
+            w: "232",
+            h: "56",
+            cx: "444",
+            name: rows[i][1].copy(),
+            sub: rows[i][2].copy(),
+            tone: "node",
+        })
         i = i + 1
     }
     out.push(Node {
-            id: "result",
-            x: "712",
-            y: px(axisY() - 28),
-            w: "192",
-            h: "56",
-            cx: "808",
-            name: "identical bytes",
-            sub: "stdout, stderr, exit code",
-            tone: "node focal",
-        })
+        id: "result",
+        x: "712",
+        y: px(axisY() - 28),
+        w: "192",
+        h: "56",
+        cx: "808",
+        name: "identical bytes",
+        sub: "stdout, stderr, exit code",
+        tone: "node focal",
+    })
     return out
 }
 

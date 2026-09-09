@@ -9,10 +9,10 @@ export fn demo() -> String {
     let rejoined = joinWith(parts, " + ")
 
     return joinWith([
-            "upper     \{toUpper(name)}",
-            "bytes     \{mixed.byteLength}",
-            "chars     \{mixed.charCount()}",
-            "parts     \{parts.length}",
-            "rejoined  \{rejoined}",
-        ], "\n")
+        "upper     \{toUpper(name)}",
+        "bytes     \{mixed.byteLength}",
+        "chars     \{mixed.charCount()}",
+        "parts     \{parts.length}",
+        "rejoined  \{rejoined}",
+    ], "\n")
 }

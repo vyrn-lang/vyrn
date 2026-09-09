@@ -38,22 +38,22 @@ fn fetchUser(p: Params) -> Validation<Data> {
 
 export fn page(p: Params, d: Data) -> Html {
     return el("div", [Id("root")], [
-            el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
-            el("nav", [], [el("a", [A("href", "/")], [text("← home")])]),
-            el("h1", [], [text("User \{p.id}")]),
-            el("p", [Cls("out")], [text("\{d.name} · age \{d.age}")]),
-            el("p", [Cls("sub")], [
-                    text("Server-rendered by "),
-                    el("code", [], [text("pages/users/[id].vyrn")]),
-                    text(" through its "),
-                    el("code", [], [text("data")]),
-                    text(" + "),
-                    el("code", [], [text("page")]),
-                    text(" — try "),
-                    el("code", [], [text("/users/42")]),
-                    text(" (error page) or "),
-                    el("code", [], [text("/users/abc")]),
-                    text(" (404)."),
-                ]),
-        ])
+        el("link", [A("rel", "stylesheet"), A("href", "/style.css")], []),
+        el("nav", [], [el("a", [A("href", "/")], [text("← home")])]),
+        el("h1", [], [text("User \{p.id}")]),
+        el("p", [Cls("out")], [text("\{d.name} · age \{d.age}")]),
+        el("p", [Cls("sub")], [
+            text("Server-rendered by "),
+            el("code", [], [text("pages/users/[id].vyrn")]),
+            text(" through its "),
+            el("code", [], [text("data")]),
+            text(" + "),
+            el("code", [], [text("page")]),
+            text(" — try "),
+            el("code", [], [text("/users/42")]),
+            text(" (error page) or "),
+            el("code", [], [text("/users/abc")]),
+            text(" (404)."),
+        ]),
+    ])
 }

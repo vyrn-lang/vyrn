@@ -554,15 +554,15 @@ test "emitPretty indents nested structures" {
 
 test "sortKeys orders every object recursively and moves nothing stored" {
     let j = JObj([
-            JsonField { key: "b", value: JNum("1") },
-            JsonField {
-                key: "a",
-                value: JObj([
-                        JsonField { key: "z", value: JNull },
-                        JsonField { key: "y", value: JNull },
-                    ]),
-            },
-        ])
+        JsonField { key: "b", value: JNum("1") },
+        JsonField {
+            key: "a",
+            value: JObj([
+                JsonField { key: "z", value: JNull },
+                JsonField { key: "y", value: JNull },
+            ]),
+        },
+    ])
     assertEq(emit(sortKeys(j)), "{\"a\":{\"y\":null,\"z\":null},\"b\":1}")
     // The source tree still emits in its stored order — sortKeys is a copy.
     assertEq(emit(j), "{\"b\":1,\"a\":{\"z\":null,\"y\":null}}")

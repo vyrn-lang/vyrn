@@ -181,19 +181,19 @@ export fn valOf(v: Json) -> Json {
 /// `json.type`: `expected <what>, found <kind>`.
 export fn pushType(iss: modify Array<Issue>, path: String, expected: String, found: String) -> Unit {
     iss.push(Issue {
-            key: "json.type",
-            path: path.copy(),
-            message: "expected " + expected + ", found " + found,
-        })
+        key: "json.type",
+        path: path.copy(),
+        message: "expected " + expected + ", found " + found,
+    })
 }
 
 /// ``json.missing``: ``missing required field `name` ``.
 export fn pushMissing(iss: modify Array<Issue>, path: String, field: String) -> Unit {
     iss.push(Issue {
-            key: "json.missing",
-            path: path.copy(),
-            message: "missing required field `" + field + "`",
-        })
+        key: "json.missing",
+        path: path.copy(),
+        message: "missing required field `" + field + "`",
+    })
 }
 
 /// `validate`: a refined type's `where` clause did not hold. The message is the
@@ -465,9 +465,9 @@ test "the one-wire-form-per-value accessors" {
     assertEq(keyOf(JObj([])), "")
     assertEq(
         keyOf(JObj([
-                    JsonField { key: "a", value: JNull },
-                    JsonField { key: "b", value: JNull },
-                ])),
+            JsonField { key: "a", value: JNull },
+            JsonField { key: "b", value: JNull },
+        ])),
         "",
     )
     assertEq(tagOf(JStr("Dot")), "Dot")

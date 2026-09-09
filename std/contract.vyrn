@@ -460,10 +460,10 @@ export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue>
         if at < 0 {
             if nameOptional(alts) == false {
                 issues.push(issue(
-                        "contract.missing",
-                        name,
-                        "module must export `\{name}`: `\{want}` (\{site})",
-                    ))
+                    "contract.missing",
+                    name,
+                    "module must export `\{name}`: `\{want}` (\{site})",
+                ))
             }
         } else {
             let e = exports[at]
@@ -471,10 +471,10 @@ export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue>
                 let got = exportSpelling(e)
                 let verb = if alts.length > 1 { "must be one of" } else { "must be" }
                 issues.push(issue(
-                        "contract.type",
-                        name,
-                        "`\{name}` \{verb} `\{want}`, found `\{got}` (\{site})",
-                    ))
+                    "contract.type",
+                    name,
+                    "`\{name}` \{verb} `\{want}`, found `\{got}` (\{site})",
+                ))
             }
         }
     }
@@ -491,24 +491,24 @@ export fn checkContract(iface: ModuleInterface, c: ContractInfo) -> Array<Issue>
                     let want = memberSpelling(rule)
                     let got = exportSpelling(e)
                     issues.push(issue(
-                            "contract.open",
-                            e.name,
-                            "`\{e.name}` must match the open rule `\{want}`, found `\{got}` (\{site})",
-                        ))
+                        "contract.open",
+                        e.name,
+                        "`\{e.name}` must match the open rule `\{want}`, found `\{got}` (\{site})",
+                    ))
                 }
             } else {
                 if let Some(near) = didYouMean(c, e.name) {
                     issues.push(issue(
-                            "contract.unknown.didYouMean",
-                            e.name,
-                            "unknown export `\{e.name}` — did you mean `\{near}`? (\{site})",
-                        ))
+                        "contract.unknown.didYouMean",
+                        e.name,
+                        "unknown export `\{e.name}` — did you mean `\{near}`? (\{site})",
+                    ))
                 } else {
                     issues.push(issue(
-                            "contract.unknown",
-                            e.name,
-                            "unknown export `\{e.name}` (\{site} is closed)",
-                        ))
+                        "contract.unknown",
+                        e.name,
+                        "unknown export `\{e.name}` (\{site} is closed)",
+                    ))
                 }
             }
         }

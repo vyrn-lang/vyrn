@@ -589,11 +589,11 @@ export gen fn apiDocs(stdDir: String) -> String {
             }
             let toks = lex(src)
             mods.push(Mod {
-                    name: substring(entry, 0, entry.byteLength - 5),
-                    doc: headerDoc(toks),
-                    entries: exportsOf(src, toks),
-                    tests: testNames(toks),
-                })
+                name: substring(entry, 0, entry.byteLength - 5),
+                doc: headerDoc(toks),
+                entries: exportsOf(src, toks),
+                tests: testNames(toks),
+            })
         }
     }
 

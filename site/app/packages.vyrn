@@ -654,9 +654,9 @@ test "every install line is a specifier the compiler's grammar accepts" {
         assert(endsWith(importFrom(slug), " } from \"" + o.alias + "\""))
         // The two files the command writes, both naming the same specifier.
         assert(match indexOf(manifestShape(slug), "\"" + o.alias + "\": \"" + o.spec + "\"") {
-                Some(at) => true,
-                None => false,
-            })
+            Some(at) => true,
+            None => false,
+        })
         assert(startsWith(lockShape(slug), o.spec + "\thttps://raw.githubusercontent.com/vyrn-lang/vyrn/"))
     }
 }

@@ -298,12 +298,12 @@ export fn programs() -> Array<Prog> {
     for p in progNames() {
         let slice = objectAt(results, "    ", p[0])
         out.push(Prog {
-                key: p[0].copy(),
-                name: p[1].copy(),
-                n: grouped(scalarAt(slice, "      ", "n")),
-                note: textAt(slice, "      ", "note"),
-                game: gameHref(p[2]),
-            })
+            key: p[0].copy(),
+            name: p[1].copy(),
+            n: grouped(scalarAt(slice, "      ", "n")),
+            note: textAt(slice, "      ", "note"),
+            game: gameHref(p[2]),
+        })
     }
     progs = out.copy()
     return out
@@ -371,18 +371,18 @@ fn loadCells() {
             let cell1 = objectAt(box1, "        ", s.key)
             let cell2 = objectAt(box2, "        ", s.key)
             cells.push(Measure {
-                    program: p[0].copy(),
-                    contestant: s.key.copy(),
-                    us1: microsOf(scalarAt(cell1, "          ", "median_s")),
-                    us2: microsOf(scalarAt(cell2, "          ", "median_s")),
-                    spread1: scalarAt(cell1, "          ", "spread_pct"),
-                    spread2: scalarAt(cell2, "          ", "spread_pct"),
-                    runs1: rawRuns(cell1),
-                    cpuUs: microsOf(scalarAt(cell1, "          ", "cpu_median_s")),
-                    peakBytes: wholeOf(scalarAt(cell1, "          ", "peak_bytes")),
-                    makeUs: microsOf(scalarAt(cell1, "          ", "make_s")),
-                    gzBytes: wholeOf(scalarAt(cell1, "          ", "gz_bytes")),
-                })
+                program: p[0].copy(),
+                contestant: s.key.copy(),
+                us1: microsOf(scalarAt(cell1, "          ", "median_s")),
+                us2: microsOf(scalarAt(cell2, "          ", "median_s")),
+                spread1: scalarAt(cell1, "          ", "spread_pct"),
+                spread2: scalarAt(cell2, "          ", "spread_pct"),
+                runs1: rawRuns(cell1),
+                cpuUs: microsOf(scalarAt(cell1, "          ", "cpu_median_s")),
+                peakBytes: wholeOf(scalarAt(cell1, "          ", "peak_bytes")),
+                makeUs: microsOf(scalarAt(cell1, "          ", "make_s")),
+                gzBytes: wholeOf(scalarAt(cell1, "          ", "gz_bytes")),
+            })
         }
     }
 }
@@ -705,13 +705,13 @@ export fn radarRings() -> Array<Ring> {
         let r = ringRadius(step)
         let power = step - belowBase()
         out.push(Ring {
-                id: step.toString(),
-                r: r.toString(),
-                points: ringPoints(r),
-                label: ringLabel(power),
-                y: (cy() - r).toString(),
-                tone: if power == 0 { "ring base" } else { "ring" },
-            })
+            id: step.toString(),
+            r: r.toString(),
+            points: ringPoints(r),
+            label: ringLabel(power),
+            y: (cy() - r).toString(),
+            tone: if power == 0 { "ring base" } else { "ring" },
+        })
         step = step + 1
     }
     return out
@@ -743,15 +743,15 @@ export fn radarSpokes() -> Array<Spoke> {
         let tip = split(pointAt(i, radius()), ",")
         let label = split(pointAt(i, radius() + 32), ",")
         out.push(Spoke {
-                key: progs[i].key.copy(),
-                name: progs[i].name.copy(),
-                x: tip[0].copy(),
-                y: tip[1].copy(),
-                lx: label[0].copy(),
-                ly: labelBaseline(i, label[1]),
-                anchor: anchorOf(i),
-                wedge: wedgeOf(i),
-            })
+            key: progs[i].key.copy(),
+            name: progs[i].name.copy(),
+            x: tip[0].copy(),
+            y: tip[1].copy(),
+            lx: label[0].copy(),
+            ly: labelBaseline(i, label[1]),
+            anchor: anchorOf(i),
+            wedge: wedgeOf(i),
+        })
         i = i + 1
     }
     return out
@@ -827,12 +827,12 @@ export fn radarLines() -> Array<Line> {
     let mut out: Array<Line> = []
     for s in contestants() {
         out.push(Line {
-                key: s.key.copy(),
-                name: s.name.copy(),
-                tone: s.tone.copy(),
-                points: polygonFor(s.key, "c"),
-                marks: marksFor(s.key, "c"),
-            })
+            key: s.key.copy(),
+            name: s.name.copy(),
+            tone: s.tone.copy(),
+            points: polygonFor(s.key, "c"),
+            marks: marksFor(s.key, "c"),
+        })
     }
     return out
 }
@@ -885,10 +885,10 @@ fn marksFor(contestant: String, base: String) -> Array<Mark> {
         let h = ratioOf(progs[i].key, contestant, base)
         if offScale(h) {
             out.push(Mark {
-                    id: progs[i].key.copy(),
-                    d: chevronAt(i),
-                    title: progs[i].name + ": " + ratioText(h) + " " + baseName + ", past the " + ringLabel(decades() - belowBase()) + " rim of this scale",
-                })
+                id: progs[i].key.copy(),
+                d: chevronAt(i),
+                title: progs[i].name + ": " + ratioText(h) + " " + baseName + ", past the " + ringLabel(decades() - belowBase()) + " rim of this scale",
+            })
         }
         i = i + 1
     }
@@ -916,23 +916,23 @@ fn readingsFor(program: String) -> Array<Reading> {
         let cell = cellOf(program, s.key)
         let spread = pctOf(cell.spread1)
         out.push(Reading {
-                key: s.key.copy(),
-                name: s.name.copy(),
-                tone: s.tone.copy(),
-                cpu: secsOf(cell.cpuUs),
-                secs: secsOf(cell.us1),
-                mem: memOf(cell.peakBytes),
-                gz: bytesOf(cell.gzBytes),
-                make: makeOf(cell.makeUs),
-                norm: normText(program, s.key),
-                ms: msOf(cell.us1),
-                vsC: ratioText(ratioOf(program, s.key, "c")),
-                vsRust: ratioText(ratioOf(program, s.key, "rust")),
-                spread: spread,
-                noisy: noisy(cell.spread1),
-                pct: trackPct(cell.us1, base),
-                over: base > 0 && cell.us1 > base * trackTimes(),
-            })
+            key: s.key.copy(),
+            name: s.name.copy(),
+            tone: s.tone.copy(),
+            cpu: secsOf(cell.cpuUs),
+            secs: secsOf(cell.us1),
+            mem: memOf(cell.peakBytes),
+            gz: bytesOf(cell.gzBytes),
+            make: makeOf(cell.makeUs),
+            norm: normText(program, s.key),
+            ms: msOf(cell.us1),
+            vsC: ratioText(ratioOf(program, s.key, "c")),
+            vsRust: ratioText(ratioOf(program, s.key, "rust")),
+            spread: spread,
+            noisy: noisy(cell.spread1),
+            pct: trackPct(cell.us1, base),
+            over: base > 0 && cell.us1 > base * trackTimes(),
+        })
     }
     return out
 }
@@ -1052,13 +1052,13 @@ export fn panelBars(program: String) -> Array<BarRow> {
     for c in order {
         let us = medianUs(program, c.key)
         out.push(BarRow {
-                key: c.key.copy(),
-                name: c.name.copy(),
-                tone: c.tone.copy(),
-                ms: c.ms.copy(),
-                pct: barPct(us, top),
-                mem: c.mem.copy(),
-            })
+            key: c.key.copy(),
+            name: c.name.copy(),
+            tone: c.tone.copy(),
+            ms: c.ms.copy(),
+            pct: barPct(us, top),
+            mem: c.mem.copy(),
+        })
     }
     return out
 }
@@ -1246,16 +1246,16 @@ export fn axisPanels() -> Array<Panel> {
     let mut out: Array<Panel> = []
     for p in programs() {
         out.push(Panel {
-                key: p.key.copy(),
-                name: p.name.copy(),
-                n: p.n.copy(),
-                note: p.note.copy(),
-                cause: causeOf(p.key),
-                label: labelOf(p.key),
-                verdict: verdictOf(p.key),
-                game: p.game.copy(),
-                cells: readingsFor(p.key),
-            })
+            key: p.key.copy(),
+            name: p.name.copy(),
+            n: p.n.copy(),
+            note: p.note.copy(),
+            cause: causeOf(p.key),
+            label: labelOf(p.key),
+            verdict: verdictOf(p.key),
+            game: p.game.copy(),
+            cells: readingsFor(p.key),
+        })
     }
     return out
 }
@@ -1418,23 +1418,23 @@ export fn floorRows() -> Array<Reading> {
     for s in contestants() {
         let cell = objectAt(box, "    ", s.key)
         out.push(Reading {
-                key: s.key.copy(),
-                name: s.name.copy(),
-                tone: s.tone.copy(),
-                cpu: secsOf(microsOf(scalarAt(cell, "      ", "cpu_median_s"))),
-                secs: secsOf(microsOf(scalarAt(cell, "      ", "median_s"))),
-                mem: memOf(wholeOf(scalarAt(cell, "      ", "peak_bytes"))),
-                gz: "",
-                make: "",
-                norm: "",
-                ms: msOf(microsOf(scalarAt(cell, "      ", "median_s"))),
-                vsC: "",
-                vsRust: "",
-                spread: "",
-                noisy: false,
-                pct: "0.0",
-                over: false,
-            })
+            key: s.key.copy(),
+            name: s.name.copy(),
+            tone: s.tone.copy(),
+            cpu: secsOf(microsOf(scalarAt(cell, "      ", "cpu_median_s"))),
+            secs: secsOf(microsOf(scalarAt(cell, "      ", "median_s"))),
+            mem: memOf(wholeOf(scalarAt(cell, "      ", "peak_bytes"))),
+            gz: "",
+            make: "",
+            norm: "",
+            ms: msOf(microsOf(scalarAt(cell, "      ", "median_s"))),
+            vsC: "",
+            vsRust: "",
+            spread: "",
+            noisy: false,
+            pct: "0.0",
+            over: false,
+        })
     }
     return out
 }
@@ -1453,19 +1453,19 @@ export fn detailRows(program: String) -> Array<Detail> {
     for s in contestants() {
         let cell = cellOf(program, s.key)
         out.push(Detail {
-                key: s.key.copy(),
-                name: s.name.copy(),
-                one: msOf(cell.us1),
-                two: msOf(cell.us2),
-                drift: driftText(cell.us1, cell.us2),
-                cpu: secsOf(cell.cpuUs),
-                mem: memOf(cell.peakBytes),
-                gz: bytesOf(cell.gzBytes),
-                make: makeOf(cell.makeUs),
-                spread: pctOf(cell.spread1),
-                noisy: noisy(cell.spread1),
-                runs: cell.runs1.copy(),
-            })
+            key: s.key.copy(),
+            name: s.name.copy(),
+            one: msOf(cell.us1),
+            two: msOf(cell.us2),
+            drift: driftText(cell.us1, cell.us2),
+            cpu: secsOf(cell.cpuUs),
+            mem: memOf(cell.peakBytes),
+            gz: bytesOf(cell.gzBytes),
+            make: makeOf(cell.makeUs),
+            spread: pctOf(cell.spread1),
+            noisy: noisy(cell.spread1),
+            runs: cell.runs1.copy(),
+        })
     }
     return out
 }

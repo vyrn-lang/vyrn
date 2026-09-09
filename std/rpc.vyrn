@@ -819,10 +819,10 @@ gen fn rpcRoutesOf(mods: Array<RpcModule>, cfg: RpcConfig) -> Array<RpcRoute> {
             // the move, so the comparison has to happen first.
             let pinned = path != rpcTemplatePath(cfg, m.rel, f.name)
             out.push(RpcRoute {
-                    path: path,
-                    key: m.rel + "/" + f.name,
-                    pinned: pinned,
-                })
+                path: path,
+                key: m.rel + "/" + f.name,
+                pinned: pinned,
+            })
         }
     }
     return out

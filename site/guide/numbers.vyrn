@@ -11,10 +11,10 @@ export fn demo() -> String {
     let widened = Int64(small) + 1
 
     return joinWith([
-            "small  \{small}",
-            "widened \{widened}",
-            "count  \{count}",
-            "ratio  \{ratio}",
-            "flag   \{flag}",
-        ], "\n")
+        "small  \{small}",
+        "widened \{widened}",
+        "count  \{count}",
+        "ratio  \{ratio}",
+        "flag   \{flag}",
+    ], "\n")
 }

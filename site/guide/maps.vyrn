@@ -24,9 +24,9 @@ export fn demo() -> String {
     let hopper = score(scores, "hopper")
 
     return joinWith([
-            "keys    \{keys}",
-            "ada     \{ada}",
-            "hopper  \{hopper}",
-            "length  \{scores.length}",
-        ], "\n")
+        "keys    \{keys}",
+        "ada     \{ada}",
+        "hopper  \{hopper}",
+        "length  \{scores.length}",
+    ], "\n")
 }

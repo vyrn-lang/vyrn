@@ -41,29 +41,29 @@ fn labelFor(id: Int64) -> String {
 
 fn counterView() -> Html {
     return el("section", [Id("counter")], [
-            el("h2", [], [text("Counter")]),
-            el("p", [Id("count")], [text("count = \{count}")]),
-            el("button", [Id("inc"), on("click", "increment", "")], [text("+1")]),
-            el("button", [Id("dec"), on("click", "decrement", "")], [text("-1")]),
-            el("button", [Id("reset"), on("click", "resetCount", "")], [text("reset")]),
-        ])
+        el("h2", [], [text("Counter")]),
+        el("p", [Id("count")], [text("count = \{count}")]),
+        el("button", [Id("inc"), on("click", "increment", "")], [text("+1")]),
+        el("button", [Id("dec"), on("click", "decrement", "")], [text("-1")]),
+        el("button", [Id("reset"), on("click", "resetCount", "")], [text("reset")]),
+    ])
 }
 
 fn inputView() -> Html {
     return el("section", [Id("inputbox")], [
-            el("h2", [], [text("Text input")]),
-            el("input", [Id("field"), attr("placeholder", "type here…"), on("input", "onType", "")], []),
-            el("p", [Id("echo")], [text("you typed: \{typed}")]),
-        ])
+        el("h2", [], [text("Text input")]),
+        el("input", [Id("field"), attr("placeholder", "type here…"), on("input", "onType", "")], []),
+        el("p", [Id("echo")], [text("you typed: \{typed}")]),
+    ])
 }
 
 fn itemRow(id: Int64) -> Html {
     return keyed("\{id}", el("li", [cls("row")], [
-                el("span", [cls("tag")], [text("#\{id} \{labelFor(id)}")]),
-                // An UNCONTROLLED input: whatever you type stays in the DOM node, so a
-                // keyed reorder that reuses the node carries your text with its row.
-                el("input", [attr("placeholder", "note…")], []),
-            ]))
+        el("span", [cls("tag")], [text("#\{id} \{labelFor(id)}")]),
+        // An UNCONTROLLED input: whatever you type stays in the DOM node, so a
+        // keyed reorder that reuses the node carries your text with its row.
+        el("input", [attr("placeholder", "note…")], []),
+    ]))
 }
 
 fn rowsView() -> Array<Html> {
@@ -76,10 +76,10 @@ fn rowsView() -> Array<Html> {
 
 fn listView() -> Html {
     return el("section", [Id("list")], [
-            el("h2", [], [text("Keyed list")]),
-            el("button", [Id("rotate"), on("click", "rotate", "")], [text("rotate (first → last)")]),
-            el("ul", [Id("rows")], rowsView()),
-        ])
+        el("h2", [], [text("Keyed list")]),
+        el("button", [Id("rotate"), on("click", "rotate", "")], [text("rotate (first → last)")]),
+        el("ul", [Id("rows")], rowsView()),
+    ])
 }
 
 fn toggleLabel() -> String {
@@ -91,23 +91,23 @@ fn toggleLabel() -> String {
 
 fn subsView() -> Html {
     return el("section", [Id("subs")], [
-            el("h2", [], [text("Subscription — Every 1s")]),
-            el("p", [Id("ticks")], [text("ticks = \{ticks}")]),
-            el("button", [Id("toggle"), on("click", "toggleTimer", "")], [text(toggleLabel())]),
-        ])
+        el("h2", [], [text("Subscription — Every 1s")]),
+        el("p", [Id("ticks")], [text("ticks = \{ticks}")]),
+        el("button", [Id("toggle"), on("click", "toggleTimer", "")], [text(toggleLabel())]),
+    ])
 }
 
 fn view() -> Html {
     return el("main", [], [
-            el("h1", [], [text("vyrn-dom demo")]),
-            counterView(),
-            el("hr", [], []),
-            inputView(),
-            el("hr", [], []),
-            listView(),
-            el("hr", [], []),
-            subsView(),
-        ])
+        el("h1", [], [text("vyrn-dom demo")]),
+        counterView(),
+        el("hr", [], []),
+        inputView(),
+        el("hr", [], []),
+        listView(),
+        el("hr", [], []),
+        subsView(),
+    ])
 }
 
 /// The declared subscriptions — effects as data. When `timerOn` is false the

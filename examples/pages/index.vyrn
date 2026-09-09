@@ -4,7 +4,7 @@ import { el, text, Html } from "std/html"
 
 export fn page() -> Html {
     return el("main", [], [
-            el("h1", [], [text("Home")]),
-            el("p", [], [text("Welcome to the std/ui pages demo (RFC-0026 M3).")]),
-        ])
+        el("h1", [], [text("Home")]),
+        el("p", [], [text("Welcome to the std/ui pages demo (RFC-0026 M3).")]),
+    ])
 }
