@@ -1910,7 +1910,7 @@ impl<'b> Kernel<'b> {
                 self.by = String::new();
                 self.released.borrow_mut()[*n as usize] = Some(holes.clone());
             }
-            St::Drop(n, ..) | St::Row { name: n, .. } => {
+            St::Drop(n, ..) => {
                 self.here = self.body.names[*n as usize].line;
                 self.by = String::new();
             }
