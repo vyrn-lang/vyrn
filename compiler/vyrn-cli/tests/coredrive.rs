@@ -118,7 +118,7 @@ fn walk(ss: &[St], note: &mut impl FnMut(usize)) {
             // Since the loop slice the exit is the row's: the pass makes up
             // the two-way branch and the `break` at the head of the loop it
             // desugared, and the walk emits wasm's conditional branch for it.
-            St::Loop(b) => walk(b, note),
+            St::Loop { body: b, .. } => walk(b, note),
             St::Block { body, .. } => walk(body, note),
             St::Break { .. } | St::Continue { .. } | St::Trap => {}
             St::Return { value, .. } => {
@@ -133,7 +133,7 @@ fn walk(ss: &[St], note: &mut impl FnMut(usize)) {
                     walk(&a.body, note);
                 }
             }
-            St::Do(r, _) => rhs(r, note),
+            St::Do { rhs: r, .. } => rhs(r, note),
         }
     }
 }
@@ -316,7 +316,7 @@ fn run() {
         eprintln!("  {d}");
     }
     // The forms whose arm the rows have started to relieve. An arm goes when
-    // its first number reaches zero, and this pin says which four are on that
+    // its first number reaches zero, and this pin says which eight are on that
     // road: a form that drops off the list has lost a reader the record has to
     // explain, and one that joins it is a slice's own count.
     let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
@@ -327,7 +327,16 @@ fn run() {
         .collect();
     assert_eq!(
         carrying,
-        ["Stmt::Let", "Stmt::Assign", "Stmt::Return", "Stmt::If"],
+        [
+            "Stmt::Let",
+            "Stmt::Assign",
+            "Stmt::Return",
+            "Stmt::If",
+            "Stmt::Expr",
+            "Stmt::While",
+            "Stmt::Break",
+            "Stmt::Continue"
+        ],
         "the forms the core's rows carry are not the ones the record names"
     );
     // The driver is a screen and not a judgement: where it stands down, the

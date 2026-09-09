@@ -16403,36 +16403,33 @@ impl<'p> Fn_<'_, 'p> {
     /// [`Fn_::core_readable`], unchanged.
     fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
         let at = s as *const Stmt as usize;
+        let run = self.core_at.get(&at)?;
         // THE FRAME CLAUSE, per statement. It was per BODY until the release
-        // half of it moved here: a frame with one placed release refused every
-        // statement it had, which is 8,362 of them. What a run may not take is
-        // a statement the placement keyed a release AT — the arm emits those
-        // through [`Fn_::emit_releases`] and the rows state them as `St::Drop`
-        // and `St::Row`, which [`Fn_::core_readable`] refuses anyway. Every
-        // other statement of the same frame is free, and the block's own
-        // fall-through releases still stand where they did, because
-        // [`Fn_::block`] is what drives the walk now.
-        let keyed = |node: usize| self.placed.keys().any(|(_, k)| *k == node);
-        if keyed(at) {
+        // half of it moved here, and then it refused any statement the
+        // placement keyed a release AT — 8,362 of them per body, and the `if`s
+        // of every frame that placed one. Since the release slice it names the
+        // three exits this walk gives back at itself: a `break`, a `continue`
+        // and a `return` each run the same [`Fn_::emit_releases`] the arm runs,
+        // keyed by the row's own site. A block's fall-through release and a
+        // scrutinee's stay the arm's, and their rows are what
+        // [`Fn_::core_readable`] refuses, so no run reaches this walk holding
+        // one.
+        if self
+            .placed
+            .keys()
+            .any(|(kind, node)| *node == at && !CORE_EXITS.contains(kind))
+        {
             return None;
         }
-        match s {
-            // An aggregate result travels through `dest` and a stream cursor is
-            // a release at a function exit that no plan row names, so both are
-            // the exit's business and neither is any other statement's:
-            // `streamlazy.vyrn` lost 51 bytes of a cursor when the rows took
-            // its `return`.
-            Stmt::Return { .. } if self.dest.is_some() || !self.cursors.is_empty() => return None,
-            // An `if` is the one form of the four whose run is a SUBTREE, so
-            // the clause cannot be read off its own node: a `return` inside
-            // the branch carries the release the plan keyed at IT, and
-            // `htmltree.vyrn` lost seven bytes of one. A frame with any placed
-            // release keeps its `if`s until the row for a placed release is
-            // the driver's own, which is the next slice.
-            Stmt::If { .. } if !self.placed.is_empty() => return None,
-            _ => {}
+        // An aggregate result travels through `dest` and a stream cursor is a
+        // release at a function exit that no plan row names, so both belong to
+        // a `return` and to nothing else: `streamlazy.vyrn` lost 51 bytes of a
+        // cursor when the rows took its `return`. The clause is about the RUN
+        // rather than about the form, because a subtree carries the `return` of
+        // every branch under it.
+        if (self.dest.is_some() || !self.cursors.is_empty()) && run.iter().any(core_returns) {
+            return None;
         }
-        let run = self.core_at.get(&at)?;
         // A node is an ADDRESS. The row's FORM and the name it binds are
         // checked against the statement's, so a row is never read as a
         // statement it did not come from.
@@ -16474,6 +16471,17 @@ impl<'p> Fn_<'_, 'p> {
             // and the core states them as drops inside the branch — which the
             // statement screen refuses. An `if` that owes one is the arm's.
             (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
+            // The four forms the site slice took off the floor. Each names its
+            // own node on the row now, so the FORM is the whole of the
+            // agreement: no binding to check and no type the arm would bind.
+            // What each still waits on is the statement screen below — a `for`
+            // reads its element through a place row, an `if let` is a switch,
+            // and the tag on `Arm` is the list's row 6.
+            (Stmt::Expr(_), St::Do { .. }) => {}
+            (Stmt::Break { .. }, St::Break { .. }) => {}
+            (Stmt::Continue { .. }, St::Continue { .. }) => {}
+            (Stmt::While { .. } | Stmt::ForIn { .. }, St::Loop { .. }) => {}
+            (Stmt::IfLet { .. }, St::Switch { .. }) => {}
             _ => return None,
         }
         // Every OTHER binding of the run: the row types it by its destination
@@ -16488,11 +16496,11 @@ impl<'p> Fn_<'_, 'p> {
         for st in run {
             core_lets(st, &mut lets);
         }
-        for (n, rhs) in lets {
-            if Some(n) == annotated {
+        for (n, rhs) in &lets {
+            if Some(*n) == annotated {
                 continue;
             }
-            let info = &body.names[n as usize];
+            let info = &body.names[*n as usize];
             let want = self.core_arm_ty(body, rhs)?;
             if !core_scalar(&want) {
                 return None;
@@ -16506,6 +16514,15 @@ impl<'p> Fn_<'_, 'p> {
         }
         let mut names = Vec::new();
         for st in run {
+            // A release row names a binding the PLACEMENT holds, and the
+            // emitter reads its place off `rel_slots` rather than off this
+            // walk's own table. So the name is not one this walk has to read,
+            // and the scalar clause below is not asked about it — a released
+            // name is a String or an array by definition, and asking would
+            // refuse every run that carries one.
+            if matches!(st, St::Row { .. }) {
+                continue;
+            }
             vyrn_lower::core::names_in(st, &mut names);
         }
         for n in &names {
@@ -16516,15 +16533,13 @@ impl<'p> Fn_<'_, 'p> {
         }
         // Every name the run READS has to have a place before the first
         // instruction is written: one this walk bound, one the arm below bound
-        // (a local of the scope), or a parameter.
-        let mut bound: Vec<vyrn_lower::core::Name> = Vec::new();
-        for st in run {
-            if let St::Let(n, _) = st {
-                bound.push(*n);
-            }
-        }
+        // (a local of the scope), or a parameter. What the run binds is the
+        // same walk the type clause above already did, branches and loop bodies
+        // included — a top-level reading of it left every name a `while` binds
+        // inside its own body with no place, which is why that form stood at
+        // zero until the site slice asked the question once.
         for n in &names {
-            if bound.contains(n) {
+            if lets.iter().any(|(b, _)| b == n) {
                 continue;
             }
             let (_, ty) = self.core_place(&self.core_w, body, *n)?;
@@ -16647,7 +16662,7 @@ impl<'p> Fn_<'_, 'p> {
                 // pair `St::Break` and `St::Continue` name. `St::Loop` is the
                 // infinite loop the row states, so the back edge is this
                 // walk's and unconditional.
-                St::Loop(inner) => {
+                St::Loop { body: inner, .. } => {
                     let brk = self.depth;
                     b.ins(&Instruction::Block(BlockType::Empty));
                     self.depth += 1;
@@ -16667,10 +16682,17 @@ impl<'p> Fn_<'_, 'p> {
                     self.depth -= 1;
                     b.ins(&Instruction::End);
                 }
-                St::Break { .. } | St::Continue { .. } => {
+                St::Break { site } | St::Continue { site } => {
                     let Some(&(brk, cont, regions)) = self.loops.last() else {
                         return unsupported("a core exit outside a loop", 0);
                     };
+                    let kind = match s {
+                        St::Break { .. } => ExitKind::Break,
+                        _ => ExitKind::Continue,
+                    };
+                    // Every frame the loop body opened, before the branch, as
+                    // the AST arm does.
+                    self.emit_releases(m, b, kind, *site)?;
                     self.exit_regions_above(b, regions, true);
                     let to = match s {
                         St::Break { .. } => brk,
@@ -16721,7 +16743,9 @@ impl<'p> Fn_<'_, 'p> {
                     }
                     self.scope.truncate(scope);
                 }
-                St::Return { value, line, .. } => {
+                St::Return {
+                    value, line, site, ..
+                } => {
                     match value {
                         Some(v) => {
                             let want = self.ret_ty.clone();
@@ -16735,6 +16759,10 @@ impl<'p> Fn_<'_, 'p> {
                             )
                         }
                     }
+                    // Every open frame, before the branch, as the AST arm
+                    // does: the value is on the operand stack already and a
+                    // release does not disturb it.
+                    self.emit_releases(m, b, ExitKind::Return, *site)?;
                     // Every region scope this return leaves, as the AST arm
                     // does: a returned value built inside a region points into
                     // the arena and its caller owns it, so the scope POPS
@@ -16742,6 +16770,13 @@ impl<'p> Fn_<'_, 'p> {
                     self.exit_regions_above(b, 0, false);
                     b.ins(&Instruction::Br(self.depth));
                 }
+                // A placed release, one row per step. The exit row below asks
+                // [`Fn_::emit_releases`] for the whole group in the placement's
+                // own order — the same walk over `rel_slots` the AST arm makes
+                // at the same exit — so a step of its own emits nothing here.
+                // §2.3 leaves the PLACEMENT to the emitter; what the row adds
+                // is which exit, and which node the plan keys it by.
+                St::Row { exit, .. } if CORE_EXITS.contains(exit) => {}
                 St::Trap => {
                     b.ins(&Instruction::Unreachable);
                 }
@@ -16749,7 +16784,7 @@ impl<'p> Fn_<'_, 'p> {
                 // is dropped, or the enclosing block's type will not check —
                 // the same sentence the AST walk's statement arm writes, on
                 // the row rather than on the node.
-                St::Do(rhs, line) => {
+                St::Do { rhs, line, .. } => {
                     let got = self.core_rhs_ty(rhs, *line)?;
                     self.core_rhs(m, b, body, w, rhs, &got, *line)?;
                     if self.cx.repr(&got, *line)? != Repr::Unit {
@@ -17054,10 +17089,21 @@ impl<'p> Fn_<'_, 'p> {
                     && self.core_readable(body, els, reads)
             }
             St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
-            St::Loop(inner) => self.core_readable(body, inner, reads),
+            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads),
             St::Break { .. } | St::Continue { .. } => true,
+            // A placed release runs at an exit. At the three exits this walk
+            // takes itself, the exit's own row asks [`Fn_::emit_releases`] for
+            // the whole group, so the steps before it are already accounted
+            // for. A block's fall-through release and a scrutinee's are the
+            // arm's, and they are refused.
+            St::Row { exit, .. } => CORE_EXITS.contains(exit),
             St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
-            St::Do(rhs, _) => self.core_rhs_readable(rhs),
+            // A discarded value is dropped at the type the ROW produces, and
+            // only a call row states one — a `St::Do` of anything else would
+            // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
+            St::Do { rhs, line, .. } => {
+                self.core_rhs_readable(rhs) && self.core_rhs_ty(rhs, *line).is_ok()
+            }
             St::Trap => true,
             _ => false,
         })
@@ -17104,9 +17150,11 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
         St::Let(_, Rhs::Prim(_, vs, _)) => vs.first().and_then(name),
         // A call pushes its arguments in order, so only the FIRST of them can
         // be the value the stack is already carrying.
-        St::Let(_, Rhs::Call { args, .. }) | St::Do(Rhs::Call { args, .. }, _) => {
-            args.first().and_then(|(v, _)| name(v))
-        }
+        St::Let(_, Rhs::Call { args, .. })
+        | St::Do {
+            rhs: Rhs::Call { args, .. },
+            ..
+        } => args.first().and_then(|(v, _)| name(v)),
         St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
         _ => None,
     }
@@ -17124,7 +17172,7 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
             then.iter().for_each(|s| core_lets(s, out));
             els.iter().for_each(|s| core_lets(s, out));
         }
-        St::Loop(inner) | St::Block { body: inner, .. } => {
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
             inner.iter().for_each(|s| core_lets(s, out));
         }
         St::Switch { arms, .. } => {
@@ -17133,6 +17181,27 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
             }
         }
         _ => {}
+    }
+}
+
+/// The exits this walk gives back at itself — RFC-0125 §3 M3, the release
+/// slice. A `break`, a `continue` and a `return` each carry the node the plan
+/// keys their releases by, so the walk asks [`Fn_::emit_releases`] for the
+/// group there. A block's fall-through release and a scrutinee's are keyed by
+/// the block and by the construct, which no statement of a run names.
+const CORE_EXITS: [ExitKind; 3] = [ExitKind::Break, ExitKind::Continue, ExitKind::Return];
+
+/// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
+/// [`Fn_::core_run`]'s screen, which a subtree carries for every branch.
+fn core_returns(s: &St) -> bool {
+    match s {
+        St::Return { .. } => true,
+        St::If { then, els, .. } => then.iter().any(core_returns) || els.iter().any(core_returns),
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+            inner.iter().any(core_returns)
+        }
+        St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_returns)),
+        _ => false,
     }
 }
 

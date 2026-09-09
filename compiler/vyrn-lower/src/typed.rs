@@ -219,13 +219,13 @@ impl<'a> Walk<'a, '_> {
                 self.stmts(then);
                 self.stmts(els);
             }
-            St::Loop(body) | St::Block { body, .. } => self.stmts(body),
+            St::Loop { body, .. } | St::Block { body, .. } => self.stmts(body),
             St::Switch { arms, .. } => {
                 for a in arms {
                     self.stmts(&a.body);
                 }
             }
-            St::Do(..)
+            St::Do { .. }
             | St::Drop(..)
             | St::Row { .. }
             | St::Break { .. }

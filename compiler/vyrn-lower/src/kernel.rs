@@ -1838,7 +1838,11 @@ impl<'b> Kernel<'b> {
             _ => TookHow::Other,
         };
         self.builtin = match s {
-            St::Let(_, Rhs::Call { kind, .. }) | St::Do(Rhs::Call { kind, .. }, _) => kind.stores(),
+            St::Let(_, Rhs::Call { kind, .. })
+            | St::Do {
+                rhs: Rhs::Call { kind, .. },
+                ..
+            } => kind.stores(),
             _ => false,
         };
         match s {
@@ -1881,7 +1885,7 @@ impl<'b> Kernel<'b> {
                 self.by = "a `return`".to_string();
                 self.takes = Taker::Stores;
             }
-            St::Do(rhs, line) => {
+            St::Do { rhs, line, .. } => {
                 self.here = *line;
                 self.takes = taker_of(rhs);
                 self.by = self.by_of(rhs, None);
@@ -2212,7 +2216,7 @@ impl<'b> Kernel<'b> {
             St::Block { site, body, .. } => {
                 self.stmts_at(body, st, *site)?;
             }
-            St::Loop(body) => {
+            St::Loop { body, .. } => {
                 self.loops.push(LoopCtx {
                     entry: st.clone(),
                     breaks: Vec::new(),
@@ -2310,7 +2314,7 @@ impl<'b> Kernel<'b> {
                 self.scope_end(st, &all_names(self.body), exit, *site)?;
                 st.ended = true;
             }
-            St::Do(rhs, _) => self.rhs(st, rhs)?,
+            St::Do { rhs, .. } => self.rhs(st, rhs)?,
             St::Trap => st.ended = true,
         }
         Ok(())

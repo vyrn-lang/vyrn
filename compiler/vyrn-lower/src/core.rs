@@ -710,7 +710,13 @@ pub enum St {
         /// an `if` this pass made up.
         site: usize,
     },
-    Loop(Vec<St>),
+    /// A loop, and the source statement it came from: a `while`, whose exit
+    /// this pass desugars into a two-way branch at the head, or a `for`. `0`
+    /// for a loop this pass made up.
+    Loop {
+        body: Vec<St>,
+        site: usize,
+    },
     /// A source block: its own scope, and the site the plan keys its
     /// fall-through release rows by.
     Block {
@@ -775,10 +781,21 @@ pub enum St {
         /// Stated here rather than read off the source, which is where each
         /// compiled backend read it until RFC-0125 §3 M3's box slice.
         owns: bool,
+        /// The node the plan keys this switch by, which is the one every
+        /// [`Arm`] of it carries: an `if let` statement's own node, or the
+        /// `match` or `?` EXPRESSION's where the construct is one. `0` for a
+        /// switch this pass made up.
+        site: usize,
         line: usize,
     },
-    /// An expression for its effect, on its line.
-    Do(Rhs, usize),
+    /// An expression for its effect, on its line, and the statement it came
+    /// from. `0` for a row this pass made up — the `panic` call it states
+    /// before a [`St::Trap`].
+    Do {
+        rhs: Rhs,
+        line: usize,
+        site: usize,
+    },
     /// A refusal or a `panic`: the path ends here and owes nothing.
     Trap,
 }
@@ -884,8 +901,10 @@ impl Body {
     ///
     /// The correspondence is already stated. A `let`'s row carries the node
     /// the plan keys the binding by ([`NameInfo::binding`]), and `St::Store`,
-    /// `St::If`, `St::Return`, `St::Break` and `St::Continue` each carry the
-    /// statement's own node. What this adds is the run BEFORE that row: the
+    /// `St::If`, `St::Return`, `St::Break`, `St::Continue`, `St::Loop`,
+    /// `St::Do` and `St::Switch` each carry the statement's own node — the
+    /// last three since the site slice, which is what took a `while`, a `for`,
+    /// an expression statement and an `if let` off the floor. What this adds is the run BEFORE that row: the
     /// temporaries the statement computes first, which are the `let`s of
     /// minted names it reads, walked back until a row that is not one. A
     /// statement whose row names no node is not in the map, and the reader
@@ -912,7 +931,7 @@ impl Body {
                     self.rows_in(then, out, twice);
                     self.rows_in(els, out, twice);
                 }
-                St::Loop(b) | St::Block { body: b, .. } => self.rows_in(b, out, twice),
+                St::Loop { body: b, .. } | St::Block { body: b, .. } => self.rows_in(b, out, twice),
                 St::Switch { arms, .. } => {
                     for a in arms {
                         self.rows_in(&a.body, out, twice);
@@ -969,9 +988,12 @@ impl Body {
                 is_try: false,
                 ..
             } => (*site != 0).then_some(*site),
-            St::If { site, .. } | St::Break { site } | St::Continue { site } => {
-                (*site != 0).then_some(*site)
-            }
+            St::If { site, .. }
+            | St::Break { site }
+            | St::Continue { site }
+            | St::Loop { site, .. }
+            | St::Do { site, .. }
+            | St::Switch { site, .. } => (*site != 0).then_some(*site),
             _ => None,
         }
     }
@@ -1104,7 +1126,7 @@ impl Body {
                     out.push_str(&format!("{pad}else\n"));
                     self.render_stmts(els, depth + 1, out);
                 }
-                St::Loop(b) => {
+                St::Loop { body: b, .. } => {
                     out.push_str(&format!("{pad}loop\n"));
                     self.render_stmts(b, depth + 1, out);
                 }
@@ -1143,7 +1165,7 @@ impl Body {
                         self.render_stmts(&a.body, depth + 2, out);
                     }
                 }
-                St::Do(r, _) => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
+                St::Do { rhs: r, .. } => out.push_str(&format!("{pad}do {}\n", self.rhs(r))),
                 St::Trap => out.push_str(&format!("{pad}trap\n")),
             }
         }
@@ -1437,7 +1459,7 @@ impl Reads {
                     self.stmts(then, depth);
                     self.stmts(els, depth);
                 }
-                St::Loop(b) => self.stmts(b, depth + 1),
+                St::Loop { body: b, .. } => self.stmts(b, depth + 1),
                 St::Block { body, .. } => self.stmts(body, depth),
                 St::Return { value: Some(v), .. } => self.hand(v),
                 St::Switch { on, arms, .. } => {
@@ -1452,7 +1474,7 @@ impl Reads {
                         self.stmts(&a.body, depth);
                     }
                 }
-                St::Do(r, _) => self.rhs(r),
+                St::Do { rhs: r, .. } => self.rhs(r),
                 _ => {}
             }
         }
@@ -2358,6 +2380,7 @@ impl<'a> Builder<'a> {
                     consuming,
                     carries: true,
                     owns,
+                    site: mid,
                     line: *mline,
                 });
                 Ok(true)
@@ -2734,6 +2757,7 @@ impl<'a> Builder<'a> {
                     consuming,
                     carries: false,
                     owns,
+                    site: sid,
                     line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, sid, out)?;
@@ -2751,7 +2775,7 @@ impl<'a> Builder<'a> {
                 let r = self.block(body, &mut l);
                 self.loop_marks.pop();
                 r?;
-                out.push(St::Loop(l));
+                out.push(St::Loop { body: l, site: sid });
             }
             Stmt::ForIn {
                 var,
@@ -2909,7 +2933,7 @@ impl<'a> Builder<'a> {
                 self.loop_marks.pop();
                 r?;
                 self.scope.truncate(mark);
-                out.push(St::Loop(l));
+                out.push(St::Loop { body: l, site: sid });
                 if streaming {
                     self.stream_loops.pop();
                     // The loop pulled the stream to its end, or a `break`
@@ -2950,7 +2974,11 @@ impl<'a> Builder<'a> {
                         out.push(St::Drop(t, Site::Node(sid), 0));
                     }
                 } else {
-                    out.push(St::Do(rhs, e.line()));
+                    out.push(St::Do {
+                        rhs,
+                        line: e.line(),
+                        site: sid,
+                    });
                     for t in std::mem::take(&mut self.after_of_rhs) {
                         out.push(St::Drop(t, Site::None, 0));
                     }
@@ -4440,7 +4468,11 @@ impl<'a> Builder<'a> {
             }
             Expr::Call { name, args, line } if name == "panic" || name == "@panicAt" => {
                 let r = self.call(name, args, *line, self.produced(e), out)?;
-                out.push(St::Do(r, *line));
+                out.push(St::Do {
+                    rhs: r,
+                    line: *line,
+                    site: 0,
+                });
                 out.push(St::Trap);
                 Ok(Rhs::Val(Val::Lit(Lit::Opaque)))
             }
@@ -4622,6 +4654,7 @@ impl<'a> Builder<'a> {
                     consuming,
                     carries: false,
                     owns,
+                    site: mid,
                     line: *line,
                 });
                 self.drops_at(Exit::Scrutinee, mid, out)?;
@@ -4711,6 +4744,7 @@ impl<'a> Builder<'a> {
                     consuming,
                     carries: false,
                     owns,
+                    site: tid,
                     line: *line,
                 });
                 Ok(Rhs::Val(Val::Name(res)))
@@ -4799,6 +4833,7 @@ impl<'a> Builder<'a> {
             consuming: false,
             carries: false,
             owns,
+            site: tid,
             line,
         });
         Ok(Rhs::Val(Val::Name(res)))
@@ -5507,7 +5542,7 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
     }
     for s in ss {
         match s {
-            St::Let(_, rhs) | St::Do(rhs, _) => match rhs {
+            St::Let(_, rhs) | St::Do { rhs, .. } => match rhs {
                 Rhs::Val(v) => hit(v, out),
                 Rhs::Prim(_, vs, _) | Rhs::Make(_, vs) => {
                     vs.iter().for_each(|v| hit(v, out));
@@ -5526,7 +5561,7 @@ fn count_reads(ss: &[St], out: &mut [u32]) {
                 count_reads(then, out);
                 count_reads(els, out);
             }
-            St::Loop(b) | St::Block { body: b, .. } => count_reads(b, out),
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => count_reads(b, out),
             St::Switch { arms, .. } => {
                 for a in arms {
                     count_reads(&a.body, out);
@@ -5549,7 +5584,7 @@ pub fn names_in(s: &St, out: &mut Vec<Name>) {
             out.push(*n);
             names_in_rhs(rhs, out);
         }
-        St::Do(rhs, _) => names_in_rhs(rhs, out),
+        St::Do { rhs, .. } => names_in_rhs(rhs, out),
         St::Store { place, value, .. } => {
             names_in_place(place, out);
             names_in_val(value, out);
@@ -5562,7 +5597,9 @@ pub fn names_in(s: &St, out: &mut Vec<Name>) {
             then.iter().for_each(|s| names_in(s, out));
             els.iter().for_each(|s| names_in(s, out));
         }
-        St::Loop(b) | St::Block { body: b, .. } => b.iter().for_each(|s| names_in(s, out)),
+        St::Loop { body: b, .. } | St::Block { body: b, .. } => {
+            b.iter().for_each(|s| names_in(s, out))
+        }
         St::Switch { on, arms, .. } => {
             names_in_val(on, out);
             for a in arms {
@@ -5619,7 +5656,7 @@ fn fold_facts(body: &Body, proto: &Owned, stmts: &[St], out: &mut Facts) {
                 fold_facts(body, proto, then, out);
                 fold_facts(body, proto, els, out);
             }
-            St::Loop(b) | St::Block { body: b, .. } => fold_facts(body, proto, b, out),
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => fold_facts(body, proto, b, out),
             St::Store {
                 releases,
                 site: Site::Node(at),
@@ -5733,7 +5770,7 @@ fn collect_drops(stmts: &[St], out: &mut std::collections::HashSet<Name>) {
                 collect_drops(then, out);
                 collect_drops(els, out);
             }
-            St::Loop(b) | St::Block { body: b, .. } => collect_drops(b, out),
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => collect_drops(b, out),
             St::Switch { arms, .. } => {
                 for a in arms {
                     collect_drops(&a.body, out);

@@ -7946,7 +7946,7 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 6,671 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 6,740 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
@@ -9702,6 +9702,247 @@ wrote and the licence is the same one.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+**Three rows learn which statement they came from (2026-09-09, `track-dz`).**
+The slice before this one ended on a list: `St::Do`, `St::Loop` and `St::Switch`
+each carry a LINE and no site, so `Body::rows_by_statement` can key no run by
+them, so an expression statement, a `while`, a `for`, an `if let` and a `match`
+statement have no run at all and their arms stand at zero occurrences carried.
+Three fields close it. Each is built where the row is built, in `Builder::stmt`'s
+own arms: a `while` and a `for` name the loop statement, an expression statement
+names itself, an `if let` names itself, and a `match` or a `?` in expression
+position names the node its own [`Arm`]s already carry. The one row this pass
+makes up — the `panic` call it states before a `St::Trap` — names 0, which is
+this pass's word for "no statement of the source".
+
+**Two clauses of the screen were wrong before the sites made it possible to see
+it, and both are findings.**
+
+1. **The exit clause was stated about a FORM and it is about a RUN.** An
+   aggregate destination and an open stream cursor were refused at
+   `Stmt::Return` alone. A subtree carries the `return` of every branch under
+   it, so the same sentence had to be said again at every form the sites added.
+   It is said once instead, over the rows: a run that leaves the function
+   anywhere under it is refused while the frame holds either. `Stmt::Return`'s
+   own case is the one-row instance of it, and the clause is 855 `if`s wider
+   than the form-shaped version — which is the whole of the difference between
+   the two readings, measured.
+2. **The screen asked what a run BINDS at the top level only.** Every name a run
+   reads must have a place before the first instruction, and the set it was
+   compared against was the run's top-level `let`s. A `while` binds everything
+   inside its own loop body, so every one of its names looked placeless and the
+   form could not have moved off zero whatever site it carried. The type clause
+   two statements above already walks the branches and the loop bodies for the
+   same rows, so the answer was in the function and read twice, once correctly
+   and once not. The two readings are one now, and that is what took `while`
+   off the floor and `if` from 6,323 to 8,368.
+
+**The count. Two forms come off the floor and no byte moves.**
+
+| form | the arm before | the rows before | the arm after | the rows after |
+|---|---|---|---|---|
+| `Stmt::Let` | 39,759 | 35,581 | **39,759** | **35,581** |
+| `Stmt::Assign` | 16,307 | 36,339 | **16,307** | **33,279** |
+| `Stmt::Return` | 21,939 | 9,947 | **21,939** | **9,432** |
+| `Stmt::If` | 37,542 | 6,323 | **35,327** | **8,368** |
+| `Stmt::Expr` | 34,706 | 0 | **31,064** | **3,472** |
+| `Stmt::While` | 14,879 | 0 | **14,538** | **341** |
+
+**90,473 of 254,778 statements** come from the core's rows, which is 35.5 per
+cent against 34.1. The denominator falls by 3,915 and the fall is the measure
+working: a statement inside a subtree the rows carry is never dispatched, so it
+is counted neither way, and `Stmt::Assign` and `Stmt::Return` lose rows to the
+`if`s and the `while`s that now swallow them. `Stmt::ForIn`, `Stmt::IfLet` and
+the `match` statement carry a site and stay at zero, and each one names what
+stops it: a `for` reads its element through `Rhs::Read`, which is a place row
+this walk does not read; an `if let` and a `match` are `St::Switch`, which the
+statement screen refuses, and the tag on `Arm` is row 6 of the list — 792 bodies
+and none of them scalar-only. The whole-body count is the same 986 of 21,720,
+every emitted byte is the same (`VYRN_WASM_MANIFEST=check` green,
+`rfcs/census/wasm-sha256.tsv` untouched), and `coredrive`'s three differing
+programs are the same three at the same byte counts.
+
+**A third finding, fixed rather than screened.** `Fn_::core_readable` admitted a
+`St::Do` of any right-hand side the walk reads, and `Fn_::core_stmts` types a
+discarded value through `Fn_::core_rhs_ty`, which answers for a call row and for
+nothing else. A `St::Do` of a value would have reached it and FAILED the
+compilation rather than standing down. No body of the corpus reached it, because
+no form carried a `St::Do` until this slice; the clause is stated where the
+screen is now.
+
+**The functions touched.** In `core.rs`: the three row definitions,
+`Builder::stmt`'s `While`, `ForIn`, `Expr` and `IfLet` arms, `Builder::rhs`'s
+`Match` and `Try` arms, `Builder::stmt_returns`, `Builder::fallible_try` and
+`Body::node_of`. In `direct.rs`: `Fn_::core_run`, `Fn_::core_readable` and the
+three row patterns of `Fn_::core_stmts`. `direct.rs` is **17,473 lines before and
+17,507 after** — 34 added, all in the screen, less the eleven lines the two
+readings of a run's bindings were written in. `core.rs` is **6,427 before and
+6,464 after**: 37, which is the three fields, their doc comments and `node_of`'s
+three arms.
+
+**The censuses.** The emitter census's mapping kind moves **6,671 → 6,705
+lines** with the hand-emitted instruction count unmoved at 596, and the read
+class `both, for two questions` **7,371 → 7,405 lines** with its form count
+**99 → 105**. RFC-0127 §3's form census rises **1,267 → 1,273**: `Stmt::Return`
+in `wasm` 7 → 6, `Stmt::IfLet` 4 → 6, `Stmt::While` 3 → 5, `Stmt::ForIn` 4 → 6,
+`Stmt::Expr` 5 → 6 — the one fall is the exit clause that stopped naming the
+form. §3.1.1's `Stmt::Return` row moves 38 → 37 with it and the floor stays 23.
+RFC-0126 §3's surface census, `coretables`, `refusals`, `checker_census`,
+`lowered` and `lowered_dump` are unmoved.
+
+**The driver gives back at its own three exits (2026-09-09, `track-dz`).** The
+frame clause was the largest of the screen's three and the slice before this one
+left half of it standing: an `if`, a `while`, a `for` or an `if let` in a frame
+that places any release at all was refused, because its run is a subtree and the
+clause could not be read off its own node. This slice takes the half.
+
+**The first reading was the wrong one, and the corpus said so with the subtree
+clause switched off.** The row is there — `St::Row` names the binding, the exit
+and the node the plan keys the release by — so the obvious slice is a `St::Row`
+arm in `Fn_::core_stmts` that walks `rel_slots` per step. It was written, and it
+moved NOTHING: not one statement of the corpus changed hands, and the 23
+programs that lose bytes when the subtree clause comes off lost exactly the same
+bytes with it as without. `wasm2wat` on `controlflow.vyrn` says why in four
+instructions — `local.get 13`, `i32.const 8`, `i32.sub`, `call 3`, three times,
+each inside an `if` before a `continue` or a `break`. Those releases have no
+`St::Row` at all: `Builder::drops_at_but` drops a placed step when the core says
+the binding does not release (`NameInfo::releases`), which is the named-binding
+slice's own rule, and the emitter has a slot for it and emits it. **A reader for
+a row that never arrives is the same failure as a row for a reader that does not
+exist**, and it is the failure this RFC is named after read a third way.
+
+**What is stated once is the EXIT, not the step.** §2.3 leaves release PLACEMENT
+to the emitter, and `Fn_::emit_releases` is the whole of it: a walk over
+`rel_slots` for one `(exit, node)` pair, with the stream cursors interleaved by
+sequence. What the core adds is which exit a row is, and which node the plan
+keys it by — and `St::Break`, `St::Continue` and `St::Return` already carry that
+node. So the driver asks `emit_releases` at those three rows, exactly where the
+AST arm asks it, and the `St::Row` steps before them emit nothing because the
+exit row answered for the group. A block's fall-through release and a
+scrutinee's are keyed by the BLOCK and by the construct, which no statement of a
+run names, so their rows stay refused by `Fn_::core_readable` and no run reaches
+this walk holding one.
+
+**The screen loses two clauses and gains none.** The frame clause is now "the
+placement keys an exit at this statement that is not one of the three", and the
+subtree clause — a whole form-shaped guard — is deleted: what it was protecting
+against is refused by the readable rule one level down, because an edge release
+is a `St::Drop` and a block's is a `St::Row` of an exit this walk does not take.
+
+**The count. Two more forms come off the floor, and one is within one occurrence
+of zero.**
+
+| form | the arm before | the rows before | the arm after | the rows after |
+|---|---|---|---|---|
+| `Stmt::Let` | 39,759 | 35,581 | **39,759** | **35,581** |
+| `Stmt::Assign` | 16,307 | 33,279 | **16,307** | **30,432** |
+| `Stmt::Return` | 21,939 | 9,432 | **21,609** | **9,660** |
+| `Stmt::If` | 35,327 | 8,368 | **33,245** | **10,448** |
+| `Stmt::Expr` | 31,064 | 3,472 | **31,064** | **3,472** |
+| `Stmt::While` | 14,538 | 341 | **14,366** | **513** |
+| `Stmt::Break` | 1,766 | 0 | **9** | **1,752** |
+| `Stmt::Continue` | 12 | 0 | **1** | **9** |
+
+**91,867 of 251,819 statements** come from the core's rows, which is 36.5 per
+cent against 35.5. The form agreement for a `break` and a `continue` is two
+lines and it is worth measuring on its own: without the releases it takes
+`Stmt::Break` to 54 and `Stmt::Continue` to 3, and the exit releases take those
+to 9 and 1. Every emitted byte is the same — `VYRN_WASM_MANIFEST=check` green,
+`rfcs/census/wasm-sha256.tsv` untouched, `coredrive`'s three differing programs
+the same three at the same byte counts — and the whole-body count is the same
+986 of 21,720.
+
+**No arm reaches zero, and the residue is ten occurrences of one cause.**
+`Stmt::Continue` stands at 1 and `Stmt::Break` at 9, and every one of the ten is
+the same thing: the emitter is holding a statement the core never saw. A `for`
+over a user container is emitted from a block `project::iterate_loop`
+SYNTHESIZES (RFC-0091 M3's `iterate` protocol), and a `for` over a stream from
+`Fn_::for_stream`; the statements inside are nodes the rewrite BUILT, so the
+source `continue` the core lowered and the `continue` the emitter dispatches are
+two different addresses. The probe counts it exactly: for `container.vyrn`'s
+`main` the core holds five exit rows and none of them names the node the arm is
+asked about, and for the three stream programs it holds none. That is not a
+clause of the screen and no clause can close it. It is the emitter performing a
+rewrite, which the emitter census already classes as "a decision §2.3 says it
+must not make", and moving `iterate_loop` before the core is what deletes the
+first arm.
+
+**The residue, per clause, for the two forms nearest zero.**
+
+| what stands the form down | `Stmt::Break` | `Stmt::Continue` |
+|---|---|---|
+| the emitter rewrote the loop and the core never saw the statement | 9 | 1 |
+| the placement keyed an exit the walk does not take | 0 | 0 |
+| the frame clause, the scalar clause, the statement screen | 0 | 0 |
+
+**The functions touched.** `direct.rs` only: `Fn_::core_run` (the frame clause,
+the subtree clause deleted), `Fn_::core_readable`, and `Fn_::core_stmts`'s
+`St::Break`, `St::Continue`, `St::Return` and `St::Row` arms. `core.rs` does not
+move, which is this slice's own argument: the rows were already there and what
+was missing was the emitter asking its own placement at them. `direct.rs` is
+**17,507 lines before and 17,542 after** — 35 added, less the twelve the subtree
+clause was written in.
+
+**The censuses.** The emitter census's mapping kind moves **6,705 → 6,740
+lines** with the hand-emitted instruction count unmoved at 596, and the read
+class `both, for two questions` **7,405 → 7,440 lines**, its form count **105 →
+103** and its row count **131 → 137**. RFC-0127 §3's form census falls **1,273 →
+1,271**: `Stmt::Break` in `wasm` 3 → 4 and `Stmt::Continue` 3 → 4, against
+`Stmt::If` 5 → 4, `Stmt::IfLet` 6 → 5, `Stmt::While` 5 → 4 and `Stmt::ForIn` 6 →
+5, which is the subtree clause that named four forms and is gone. §3.1.1's floor
+stays at 23 and the form that HOLDS it changes: `Stmt::Continue` is 24 now and
+`Stmt::Drop` holds the floor, which is the first time that row has moved.
+RFC-0126 §3's surface census, `coretables`, `refusals`, `checker_census`,
+`lowered` and `lowered_dump` are unmoved.
+
+#### The site and release slices' gates (2026-09-09)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. The list was run once over
+both commits, because the second only narrows the screen the first widened and
+the licence is the same one: not an emitted byte moves either way.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and `vyrn-lsp`'s own manifest | clean, clean |
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 637 passed, 41 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 28 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 48 s — 12,572 switch sites, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 79 s |
+| `effects` `--ignored`, release | 2, 117 s — 30,197 functions judged, 0 unattributed |
+| `fixtures` `--ignored`, release | 1, 28 s |
+| `testsweep` `--ignored`, release | 1, 146 s |
+| `coredrive` `--ignored`, release | 1, 71 s — 91,867 of 251,819 statements from the core's rows, 986 of 21,720 bodies whole, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 4 — both tables re-pinned twice, once per commit |
+| `forms` and `surface`, plain and `--ignored` | 8, 4 — the form census re-pinned twice, the surface census unmoved |
+| `checker_census`, `refusals`, `lowered`, `lowered_dump` | 3, 22, 4, 7 — all unmoved |
+| `vyrn-frontend` | 1,120 passed, 6 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,167 passed |
+| `vyrn-lsp`'s own manifest | 77 passed, 5 ignored, and its 23 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 407 s |
+| the residue ratchet `--ignored`, release | 1, 387 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 28 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte, over both commits |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
+**What the two slices leave.** The list the measurement wrote is shorter by two
+rows and no shorter at the top. `Stmt::Break` and `Stmt::Continue` are within
+nine and one occurrence of an arm with no reader, and both wait on the same
+thing: the emitter rewrites a `for` over a user container and a `for` over a
+stream into blocks it synthesizes, so the statements inside are nodes the core
+never saw. That is the next slice on this line, it is one of the emitter census's
+own "a decision §2.3 says it must not make" sections, and it is what deletes the
+first arm. `Stmt::ForIn` is at zero carried for the same reason plus one more —
+its element comes through `Rhs::Read`, a place row this walk does not read.
+`Stmt::IfLet` and the `match` statement carry a site and wait on the tag on
+`Arm`, which is row 6 of the ranked list and buys nothing today. `Stmt::Drop` at
+444 waits on `St::Drop` carrying the node the plan keys the binding by, which is
+the one release row the driver still does not take.
 
 ### M4 — the runtime in Vyrn
 

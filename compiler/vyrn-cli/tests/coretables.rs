@@ -223,7 +223,7 @@ fn producers(
                 *out.entry(row).or_default() += 1;
                 operation(rhs, ops);
             }
-            St::Do(rhs, _) => operation(rhs, ops),
+            St::Do { rhs, .. } => operation(rhs, ops),
             St::Store { value, .. } => literal(value, ops),
             St::Return { value: Some(v), .. } => literal(v, ops),
             St::Switch { on, arms, .. } => {
@@ -236,7 +236,7 @@ fn producers(
                 producers(then, out, ops);
                 producers(els, out, ops);
             }
-            St::Loop(b) | St::Block { body: b, .. } => producers(b, out, ops),
+            St::Loop { body: b, .. } | St::Block { body: b, .. } => producers(b, out, ops),
             _ => {}
         }
     }
