@@ -24268,7 +24268,70 @@ its record.
   generic impl's `success` row as a type when it is a variable, so the
   copied-out payload leaked. One example, one manifest row. RFC-0126 §8.16.
 
-#### The arm's blocker was a missing line, and five defects were behind it (2026-09-10, `track-ee`)
+#### A validated binding lost its check, and the driver was the reason (2026-09-10, `track-ee`)
+
+**The safety strand's finding, and it goes first because it is the only one of
+this track's six that a program could not see.** The other five refuse to
+compile. This one compiled, ran, and answered with a value its own type forbids.
+
+`Age` is `Int64 where value >= 18`. Both of these returned 5, on the compiled
+route, at the branch point:
+
+| program | the compiled route | every other engine |
+|---|---|---|
+| `let mut x = 30  x = x - 25  let a: Age = x  return a` | returns 5 | `validation failed for `Age`` |
+| `let mut a: Age = 20  a = a - 15  return a` | returns 5 | `validation failed for `Age`` |
+
+That is the annotated `let` itself and every later store into the binding. It is
+two of the boundaries RFC-0079 and M2d put a check at, and both were silent.
+
+**The cause is one clause reading the wrong type.** `Fn_::core_walkable` stands
+the whole-body walk down at a name whose type needs a check, and the clause that
+says so reads `NameInfo::ty`. `core::Builder`'s `let` arm names a binding by the
+type of its VALUE (`let ty = self.ty_of(value)?`), not by the annotation, so
+`let a: Age = 20` reaches that clause as `Int64`. The clause was written to
+refuse a `where` type and its own comment says so — "a `where` type (RFC-0079)
+is a `check` row the core does not carry, which is the census's row 7" — and it
+had never refused one. It was a rule stated in a comment and not in the code,
+which is the defect this RFC is named after, in the file that states the rule.
+
+The per-STATEMENT screen was right all along. `Fn_::core_run`'s `Stmt::Let` arm
+reads the annotation off the AST and refuses a type that is not a core scalar,
+with a comment that spells out the reason. The two screens ask the same question
+at two scales and only one of them asked it.
+
+**The fix asks the AST, where the reader wrote it.** `core_walkable` takes the
+function's block and refuses a body in which any `let` is annotated with a type
+that carries a `where` clause. `Fn_::checks` is the one place that says what
+carries one — `Type::Named(n)` under this instance's substitution, whose
+declaration has a predicate — which is the same test `Fn_::emit_validation`
+gates on and `join_ty` asks.
+
+**Not one emitted byte moves.** `VYRN_WASM_MANIFEST=check` is green over 176
+examples with `rfcs/census/wasm-sha256.tsv` untouched, and `coredrive`'s
+per-form counts and its 986 of 21,722 whole bodies are unchanged: no example
+writes an annotated `where` `let` in a frame the rows carried. So no row of the
+manifest is named here, because none moved.
+
+**The witnesses.** Two, both through the real path and both in the gate list.
+`an_annotated_let_validates_a_value_the_checker_cannot_prove` in
+`vyrn-frontend/tests/semantics.rs` runs the first program and asserts the trap;
+the store is the boundary sweep's own second case, which had been failing on
+`unwrap_err` of `Ok(5)` from the moment the install landed. Both are compared
+byte for byte in `coredrive`'s shape table as well, where the two walks emit the
+same module for each. Against the emitter at the branch point they fail; after,
+they pass.
+
+**Why no test held this before.** `direct.rs`'s own
+`a_validated_type_is_checked_wherever_it_is_reached` is the sharpest case in the
+repository. It asserts on `let a: Age = n` — the exact shape — and it passed
+throughout, because it looks for the trap message in the module's data and the
+message is the constructor's own `panic` string, present whether or not anything
+calls it, and because that test compiles with no lowering installed and so never
+ran the walk that dropped the check. The test names both hazards in its own doc
+comment and was caught by neither.
+
+#### The arm's blocker was a missing line, and four more defects behind it (2026-09-10, `track-ee`)
 
 The exits slice left `Stmt::Continue`'s arm at zero occurrences over the corpus
 and named two readers off it, both in `vyrn-frontend/tests/semantics.rs`: a
@@ -24297,33 +24360,13 @@ of the `region` block, which `core_stmts` has emitted since the driver slice.
 | a `for` over an array literal | 0 | **0** |
 | a `continue` under a `region` | 0 | **0** |
 
-##### Five defects were behind that line, and four are compile failures
+##### Four more defects were behind that line, and all four are compile failures
 
-Every one of the five is the DRIVER's. Each compiles and runs correctly under
-`VYRN_NO_CORE_WALK=1` and failed with the driver on, which is what makes the
-missing install the thing that hid them: `examples/` writes none of these shapes
-and the file that writes all of them compiles with no core at all.
-
-**A `where` type was refused by the type the value had.** `Fn_::core_walkable`
-stands the whole-body walk down at a name whose type needs a check, and the
-clause that says so reads `NameInfo::ty`. The core names a `let` by the type of
-its VALUE (`core::Builder`'s `let` arm takes `self.ty_of(value)`), so `let a: Age
-= 20` reaches that clause as `Int64`. No `where` type was ever refused by it,
-the body was emitted from rows that state no check, and TWO boundaries lost
-theirs:
-
-| program | before | every other engine |
-|---|---|---|
-| `let mut x = 30  x = x - 25  let a: Age = x  return a` | returns 5 | `validation failed for `Age`` |
-| `let mut a: Age = 20  a = a - 15  return a` | returns 5 | `validation failed for `Age`` |
-
-`Age` is `Int64 where value >= 18`. This is the one defect of the five that is
-not a compile failure: the program ran, and it ran holding a value its type
-forbids. The screen asks the AST for the annotation now, which is where the
-reader wrote it and where the AST arm reads it to emit the check.
-`Fn_::core_run` already asked the same question per statement; this is the same
-question per body, and `Fn_::checks` is the one place that says what carries a
-check.
+The fifth is the record above. Every one is the DRIVER's: each compiles and runs
+correctly under `VYRN_NO_CORE_WALK=1` and failed with the driver on, which is
+what makes the missing install the thing that hid them. `examples/` writes none
+of these shapes and the file that writes all of them compiles with no core at
+all.
 
 **A String is a type a literal carries and a name does not.** The scalar screen
 is asked of NAMES — `core_scalar(&info.ty)`, in `core_walkable` and in
@@ -24353,22 +24396,52 @@ local`. Every `let` of an `if` expression failed to compile. `core_readable`
 asks for a name the reader wrote, which is the AST arm's local and is always
 placed; a temporary is this walk's to bind, never to store into.
 
-##### The four stale programs, and what they were stale about
+##### The four stale programs, and whether the refusal that stops them is right
 
-With the install in place, four of this file's programs stop compiling and the
-CLI refuses them today: `fn mk(s: String) -> Name { return Name(s) }` stores a
-`read` parameter into a constructor. Each takes the value now
-(`s: consume String`), which is the second fix line the refusal itself prints.
-The fact each test asserts is unchanged and 193 pass.
+With the install in place, four of this file's programs stop compiling. All four
+are one shape:
+
+```
+type Name = String where value.byteLength >= 3
+fn mk(s: String) -> Name { return Name(s) }
+```
+
+and the refusal is the kernel's:
+
+```
+`s` may not be stored into `Name(..)` — it is a `read` parameter
+  fix: declare the parameter `s: consume ..` if this function should own it
+  fix: `s.copy()` if both sides need a value
+```
+
+**The refusal is right, and the rule is RFC-0089 rule 2.** A parameter is the
+CALLER's; `read` is the default and says the callee does not own what it is
+handed. `Name(..)` is a constructor whose value owns its payload, so storing `s`
+into it would give one `String` buffer two owners, and both would release it —
+which is the double free `kernel.rs`'s own header names, with a probe beside it
+(`rfcs/probes-0125/take-out-of-a-read-parameter.vyrn`). The refusal is not about
+the `where` clause and not about validation: the same program with a plain
+`type Name = String` alias is refused in the same words for the same reason.
+Nothing here is a finding, and no test edit is hiding one.
+
+**These programs were never accepted by the language.** They were accepted by
+this file, which ran no kernel, and the CLI refuses each of them today at the
+branch point. So the tests were asserting validation behaviour on programs a
+user cannot write.
+
+**Which of the two fixes.** The refusal offers both, and they mean different
+things. `s.copy()` allocates a second buffer and leaves the caller's alone;
+`consume` moves the caller's in. A constructor that KEEPS the value wants the
+move, and a writer would write the move, so each `mk` takes its argument now.
+The copy would also have passed, and would have made the test assert on a
+program with an allocation nobody asked for.
+
+The fact each test asserts is unchanged. 194 pass.
 
 ##### The licence
 
-Every emitted byte is the same for the first commit and for the last: the
-validation slice moves no row of `rfcs/census/wasm-sha256.tsv` and no per-form
-count of `coredrive`, because no example writes an annotated `where` `let` in a
-frame the rows carried.
-
-The two screens move two rows, and both are the same shape, read off `wasm2wat`.
+The validation slice moves no byte and the record above says so. The two screens
+move two rows, and both are the same shape, read off `wasm2wat`.
 One function each in `ifexpr.vyrn` and `strpredbytes.vyrn` returns a String
 literal through an `if` join. Each stands down at the literal screen now, and
 the AST walk writes what it has always written for that shape:
@@ -24476,11 +24549,21 @@ projection's own `Body`, and neither is written. This track did not reach it.
 
 `coredrive` gains the shape table, its pin, and the sentence saying what a zero
 in the per-program table means; its differing-program pin falls from three names
-to two. The emitter census's line counts move with `direct.rs`. RFC-0127 §3's
-form census and §3.1.1's floor do not move, because no arm went. `coretables`,
-`refusals`, `checker_census`, `lowered`, `lowered_dump`, RFC-0126 §3's surface
-census and the kernel corpus are unmoved. `rfcs/census/wasm-sha256.tsv` moves two
-rows, explained above.
+to two.
+
+Three censuses move because `direct.rs` does, and they are re-pinned in one
+commit that says which change each number is worth. The emitter census's mapping
+kind goes 6,743 to 6,790 with the hand-emitted instruction count unmoved at 596;
+its read class `the core's rows` 2,075 to 2,078 lines and `both, for two
+questions` 7,443 to 7,487, with the form count 103 to 104 and the row count 137
+to 138. RFC-0127 §3's form census reads `Stmt::Let` in `wasm` at 8 against 7 —
+the annotation the validation screen asks the AST for — and its row sums to 32.
+RFC-0126 §3's surface census reads `Type::Named` in `wasm` at 10 against 9, for
+`Fn_::checks`, and its row sums to 69.
+
+RFC-0127 §3.1.1's floor does not move, because no arm went. `coretables`,
+`refusals`, `checker_census`, `lowered`, `lowered_dump` and the kernel corpus
+are unmoved. `rfcs/census/wasm-sha256.tsv` moves two rows, explained above.
 
 ##### Gates (2026-09-07, the two slices)
 
@@ -24523,7 +24606,7 @@ things these two slices touch.
 #### Gates (2026-09-10, `track-ee`)
 
 The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
-at a shallow scratch directory outside the checkout. Over the five commits of
+at a shallow scratch directory outside the checkout. Over the seven commits of
 this track together.
 
 | gate | result |
@@ -24539,7 +24622,7 @@ this track together.
 | `fixtures` `--ignored`, release | 1, 28 s |
 | `testsweep` `--ignored`, release | 1, 81 s |
 | `coredrive` `--ignored`, release | 1, 38 s — seven shapes, 168 of 170 programs byte-identical either way |
-| `cargo test -p vyrn-frontend` | 1,113 passed, 0 failed, 5 ignored |
+| `cargo test -p vyrn-frontend` | 1,114 passed, 0 failed, 5 ignored |
 | the workspace less `vyrn-cli`, `--skip _natively` | 1,160 passed, 0 failed |
 | `vyrn-lsp`'s own manifest | 100 passed, 0 failed |
 | `vyrn-genwasm`'s own tests | 3 |
@@ -24551,6 +24634,7 @@ this track together.
 | `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
 | the site export | 82 routes, 14 assets |
 | `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 26 files |
+| `semantics` against the emitter at the branch point | 188 passed, 6 failed — one witness per defect; 194 pass after |
 | `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable, byte-identical |
 | `the_pinned_columns_over_the_corpus` | green, unmoved |
 | `emitter_census`, `forms`, `surface` | 3, 8, 3 — re-pinned, and named above |
