@@ -235,9 +235,14 @@ fn main_sections() -> Vec<Section> {
              where the floor's refusal shows only the shortest",
         ),
         sec(
+            "const MAX_CHAINS: usize = 24;",
+            Shared,
+            "what either import walk answers with. Both walks stated it and had              drifted — one stopped at thirteen modules and the other at twelve              (RFC-0125 §3 M5)",
+        ),
+        sec(
             "fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {",
             Shared,
-            "the bounded forward path enumeration the capability report prints",
+            "the bounded forward path enumeration the capability report prints.              The backward one is in `project_imports`'s section below; the two              differ in direction, in where they stop and in the order they              answer in, and merging them was measured at +13 lines",
         ),
         sec(
             "fn rel_to(path: &str, base: &str) -> String {",
@@ -766,7 +771,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     .collect();
     let want = vec![
         ("a command's own path", 5101, 167),
-        ("a rule another pass also states", 167, 0),
+        ("a rule another pass also states", 165, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1133, 0),

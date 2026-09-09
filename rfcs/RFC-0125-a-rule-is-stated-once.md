@@ -24446,6 +24446,58 @@ rather than four.
 `tests/cli_census.rs` gains a section for `synth_fn` and is re-pinned in this
 commit.
 
+#### The bound was stated twice; the walk was not worth merging (2026-09-10, `track-ef`)
+
+Rank 5 of the census, and the one that came back with a negative answer.
+`chains_from` and `import_chains` are the two import-graph walks behind
+`vyrn why`: forward from an artifact's entry to the module that brings a
+capability in, and backward from a file to the roots that reach it. 74 lines,
+and the census ranked them as one rule stated twice.
+
+**Only part of it was.** Each declared `MAX_CHAINS` and `MAX_DEPTH` for itself,
+and the two had drifted: `chains_from` guarded on `seen.len() > MAX_DEPTH` and
+`import_chains` on `>=`, so one enumerated chains of thirteen modules and the
+other stopped at twelve. That is a rule stated twice, and it is now two
+file-level constants with one doc, read by both. The forward walk is the one
+that moved: it stops at twelve now, like the other.
+
+**The walks themselves were merged and the merge was measured and reverted.**
+One `simple_paths(start, next, keep)` over `&dyn Fn` neighbours and a `&dyn Fn`
+stop predicate does express both — the forward one is `keep = node == target`,
+the backward one is `keep = no importers left` — and it compiles and passes.
+It is **13 lines longer** than the two walks it replaces. The two differ in
+three ways at once: direction, where they stop, and the order they answer in
+(the backward one reverses each chain and drops the one-element answer), and in
+Rust each of those costs more to abstract over than to write down. `main.rs`
+went 7,074 to 7,087 and the change was thrown away.
+
+This is what "delete more than you add, or say why not" is for. The rule that
+was stated twice was the bound, and the bound is four lines. The walk was never
+one rule stated twice; it was two walks that happened to share a shape.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,074 | 7,072 | −2 |
+| statements of the bound | 2 | 1 | −1 |
+| `main.rs` with the walks merged, not taken | 7,074 | 7,087 | +13 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `floor` (`why --capability`, forward walk) | 16 passed, 0 failed |
+| `audience` (`why <file>`, backward walk) | 13 passed, 0 failed |
+
+The forward walk's depth bound is the one observable change in this track, and
+no corpus chain is thirteen modules deep, so nothing moved. It is recorded here
+rather than left implicit.
+
+`tests/cli_census.rs` gains a section for the bound and is re-pinned in this
+commit.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

@@ -1669,15 +1669,15 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// What either import walk answers with: an exhaustive enumeration of an
+/// interesting graph does not return, and a report that hangs is worse than one
+/// that stops at two dozen answers.
+const MAX_CHAINS: usize = 24;
+const MAX_DEPTH: usize = 12;
+
 /// Every simple path forward from `entry` to `target` in the import graph, the
 /// entry first. Empty when `target` is not in the artifact's closure at all.
-///
-/// Bounded the way [`import_chains`] is bounded, and for the same reason: an
-/// exhaustive enumeration of an interesting graph does not return, and a report
-/// that hangs is worse than one that stops at two dozen answers.
 fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
-    const MAX_CHAINS: usize = 24;
-    const MAX_DEPTH: usize = 12;
     fn walk(
         node: &str,
         target: &str,
@@ -1685,7 +1685,7 @@ fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec
         seen: &mut Vec<String>,
         out: &mut Vec<Vec<String>>,
     ) {
-        if out.len() >= MAX_CHAINS || seen.len() > MAX_DEPTH {
+        if out.len() >= MAX_CHAINS || seen.len() >= MAX_DEPTH {
             return;
         }
         if node == target {
@@ -1832,8 +1832,6 @@ fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
 /// imports (a composition root). Walks the edges BACKWARD from the target, so
 /// the answer is "how does anything get here", not "what does this reach".
 fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
-    const MAX_CHAINS: usize = 24;
-    const MAX_DEPTH: usize = 12;
     let mut out: Vec<Vec<String>> = Vec::new();
     // Depth-first backward walk, carrying the path built so far (target-last).
     fn back(
