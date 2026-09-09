@@ -24498,6 +24498,94 @@ rather than left implicit.
 `tests/cli_census.rs` gains a section for the bound and is re-pinned in this
 commit.
 
+#### Gates (2026-09-10, `track-ef`)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Over the six commits of
+this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok, 0 warnings |
+| `cargo test -p vyrn-cli`, no filter | 85 binaries, 646 passed, 0 failed |
+| `kernel` `--ignored`, release | 1, 28 s |
+| `coretables` `--ignored`, release | 1, 30 s |
+| `typed` `--ignored`, release | 1, 60 s |
+| `effects` `--ignored`, release | 2, 66 s |
+| `fixtures` `--ignored`, release | 1, 23 s — every command's stdout and stderr over the corpus, byte-identical |
+| `testsweep` `--ignored`, release | 1, 62 s |
+| `cargo test -p vyrn-frontend` | 11 binaries, 1,113 passed, 0 failed |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 binaries, 1,160 passed, 0 failed |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm --all-targets` | 3 passed |
+| `memory` `--test-threads=1` | 9 passed |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed |
+| the residue ratchet `--ignored`, release | 1 — engine 172 clean and 3 leaking, route the same, 0 failed |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, no byte moved |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 29 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files, 0 failed |
+| `parser_census`, `frontend_census`, `checker_census`, `emitter_census`, `cli_census` | green; `cli_census` re-pinned in each commit that moved it |
+| `forms` | 8 passed, 2 ignored; RFC-0127 §3.2 re-pinned in the serving-loop commit |
+| `refusals`, `surface`, `columns` | 21, 2, 3 |
+| `symbols_api::the_pinned_columns_over_the_corpus` | green |
+| `lowered_dump::the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable |
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after, at every commit |
+
+No red in the first pass, and no gate was weakened or skipped.
+
+**One environment note, not a gate result.** `vyrn run site/export.vyrn <out>`
+writes through the guest's preopen, which is the working directory. An absolute
+output path outside the checkout fails all 241 writes and says so on each one.
+Give it a path under the repository, as the file's own doc comment does.
+
+##### What the track moved
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,154 | 7,072 | −82 |
+| `compiler/vyrn-cli/tests/cli_census.rs` | 795 | 904 | +109 |
+| `compiler/vyrn-frontend/src/manifest.rs` | 766 | 769 | +3 |
+
+| the tile | before | after | moved |
+|---|---|---|---|
+| a command's own path | 5,224 | 5,101 | −123 |
+| a rule another pass also states | 168 | 165 | −3 |
+| shared machinery | 1,485 | 1,529 | +44 |
+| the crate, less tests | 8,010 | 7,928 | −82 |
+
+Five rules that were stated more than once are stated once: the serving loop,
+the diagnostic printer, the path spelling, the synthesized function and the
+chain bound. Two statements were weighed and left standing, each with its reason
+in its own record: the checker's third reading of what a served root is, and the
+two import walks, whose merge was measured at +13 lines.
+
+##### What is left, with its blocker named
+
+**`project_imports`, 165 lines, the whole of "a rule another pass also states".**
+It is the CLI's own walk over a project's import graph, and `loader.rs` builds
+the same edge set on every load. It cannot go until the loader can answer "what
+imports what" WITHOUT loading, which is the question `vyrn why` asks about a
+project that need not compile. The blocker is a loader API, not this file.
+
+**The checker's third statement of the served-root signature.** Named in the
+serving-loop record. The blocker is that the checker asks its own `sigs` table
+and a walk over `program.functions` would gain a refusal on an `extern handle`.
+It needs a witness program and a licence of its own.
+
+**`vyrn bench` is 651 lines, the largest command, and nothing here touched it.**
+The census found no second statement in it: `bench_native` drives clang, and the
+harness it builds is Vyrn, in `std/bench`. What it costs is its own four modes,
+which is surface, not duplication.
+
+**`check`, `run`, `emit-wat` and `emit-lowered` still have no section.** Their
+78 lines are match arms inside `real_main` and a census cannot tile below an
+item. Pulling each into a function would let the next census price them; nothing
+in this track needed that, so nothing did it.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
