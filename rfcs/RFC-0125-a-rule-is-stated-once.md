@@ -24380,6 +24380,21 @@ reader wants it. The crate root's `pub use movecheck::pattern_bindings` goes too
 — its comment named codegen's lambda capture analysis as the reader and codegen
 has not called it for some time.
 
+**What the form census says about slice four.** RFC-0127's table counts every
+mention of every AST form per pass, and it moved by exactly what the fold
+deleted: `Pattern::Variant` 27 -> 25, `Pattern::Success` 21 -> 18,
+`Pattern::Failure` 15 -> 12, `Pattern::Other` 13 -> 10 — one arm out of the
+checker, one out of the move check, and one out of the editor for the three
+unspellable forms. 935 mentions -> 924. It is re-pinned in a commit of its own
+rather than the fold's, which is a rule this track broke and is recording.
+
+Two numbers in §3.1's prose were already stale when this track read them, and
+they are not this track's to fix: the range reads "13 to 129" where the table
+says 10 to 120, and §3.1.1's floor table reads `Stmt::Continue` at 15 and
+`Stmt::Let` at 34 where the census table says 14 and 31. The guard pins the main
+table and the total and nothing else, which is how the prose beside it drifted.
+Only the sentence this track made false was corrected.
+
 **What is left in `index_locals`, and it is the blocker the M6 record named.**
 267 lines. The descent is `ast::body_scope_descent!`'s and the pattern rule is
 `ast::Pattern::bindings`', so what is stated a second time is the PASS and the
