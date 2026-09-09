@@ -94,10 +94,7 @@ const HOSTS: &[(&str, Core)] = &[
         ),
     ),
     ("compiler/vyrn-lsp/src/main.rs", Installed),
-    (
-        "compiler/vyrn-play/src/lib.rs",
-        None_("the playground compiles what the page runs"),
-    ),
+    ("compiler/vyrn-play/src/lib.rs", Installed),
 ];
 
 /// A file compiles a program in this process.

@@ -29,6 +29,12 @@ vyrn-frontend = { path = "../vyrn-frontend" }
 # is pure Rust plus `wasm-encoder`, so it needs no LLVM and no sysroot, which is
 # what makes it the one backend that compiles for this target.
 vyrn-codegen = { path = "../vyrn-codegen" }
+# RFC-0125 §3 M3: the page compiles with the SAME compiler `vyrn run` does. This
+# crate reached `vyrn-lower` transitively through `vyrn-codegen` and never
+# installed it, so the placer never ran and the kernel's refusals never reached
+# the page. It is a direct dependency because `load` calls `install` on it. Its
+# only dependency is `vyrn-frontend`, so it costs this target nothing new.
+vyrn-lower = { path = "../vyrn-lower" }
 
 [lib]
 name = "vyrn_play"
