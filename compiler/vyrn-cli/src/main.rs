@@ -616,13 +616,7 @@ fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(diags) => {
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                if let Some(note) = &d.note {
-                    eprintln!("  note: {note}");
-                }
-            }
+            print_diagnostics(&diags, &root_key, "");
             ExitCode::FAILURE
         }
     }
@@ -1018,10 +1012,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     let mods = match result {
         Ok(m) => m,
         Err(diags) => {
-            for d in &diags {
-                let f = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", f, d.line, d.col, d.message);
-            }
+            print_diagnostics(&diags, &root_key, "");
             return ExitCode::FAILURE;
         }
     };
@@ -2159,13 +2150,7 @@ fn deps(name: Option<&str>) -> ExitCode {
                 }
             }
             Err(diags) => {
-                for d in &diags {
-                    let file = d.file.as_deref().unwrap_or(root_key);
-                    eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                    if let Some(note) = &d.note {
-                        eprintln!("  note: {note}");
-                    }
-                }
+                print_diagnostics(&diags, root_key, "");
                 failed = true;
             }
         }
@@ -2457,13 +2442,7 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
         Err(diags) => {
             // A graph error (e.g. an unresolvable import) — fall back to just the
             // main file so `fmt` is still useful on a partly-broken project.
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                if let Some(note) = &d.note {
-                    eprintln!("  note: {note}");
-                }
-            }
+            print_diagnostics(&diags, &root_key, "");
             Ok(vec![root_key])
         }
     }
@@ -2649,10 +2628,7 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
     let graph = match result {
         Ok(g) => g,
         Err(diags) => {
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-            }
+            print_diagnostics(&diags, &root_key, "");
             return Err(ExitCode::FAILURE);
         }
     };
@@ -3183,13 +3159,7 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
             Ok(p)
         }
         Err(diags) => {
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                if let Some(note) = &d.note {
-                    eprintln!("  note: {note}");
-                }
-            }
+            print_diagnostics(&diags, &root_key, "");
             Err(ExitCode::FAILURE)
         }
     }
@@ -3231,6 +3201,28 @@ fn shared_desugars(program: &vyrn_frontend::ast::Program) -> vyrn_frontend::own:
     vyrn_frontend::own::Memo::open(program)
 }
 
+/// How this driver prints a diagnostic: `file:line:col: message`, the file being
+/// the diagnostic's own or the root key when it names none, and the note under
+/// it when it carries one.
+///
+/// Seven sites wrote this out and two of them dropped the note, so `vyrn routes`
+/// and `vyrn doc` silently threw away the half of a load error that says what to
+/// do about it (RFC-0125 §3 M5). `marker` is the empty string for an error and
+/// `"warning: "` for a warning; nothing else uses it.
+fn print_diagnostics(
+    diags: &[vyrn_frontend::diagnostics::Diagnostic],
+    root_key: &str,
+    marker: &str,
+) {
+    for d in diags {
+        let file = d.file.as_deref().unwrap_or(root_key);
+        eprintln!("{}:{}:{}: {}{}", file, d.line, d.col, marker, d.message);
+        if let Some(note) = &d.note {
+            eprintln!("  note: {note}");
+        }
+    }
+}
+
 /// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
 /// use with a `warning: ` marker. Returns whether the run should FAIL — only
 /// under `--deny-warnings`, and never otherwise (RFC-0071 M2b).
@@ -3238,13 +3230,7 @@ fn print_warnings(warnings: &[vyrn_frontend::diagnostics::Diagnostic], root_key:
     if warnings.is_empty() {
         return false;
     }
-    for d in warnings {
-        let file = d.file.as_deref().unwrap_or(root_key);
-        eprintln!("{}:{}:{}: warning: {}", file, d.line, d.col, d.message);
-        if let Some(note) = &d.note {
-            eprintln!("  note: {note}");
-        }
-    }
+    print_diagnostics(warnings, root_key, "warning: ");
     if deny_warnings() {
         eprintln!(
             "error: {} warning(s) — refused by --deny-warnings",

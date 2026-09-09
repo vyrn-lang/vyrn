@@ -24316,6 +24316,49 @@ this commit. `RFC-0127 §3.2`'s declaration census is re-pinned too: the CLI's
 `.functions` mentions go 15 to 14 and the row total 65 to 64, because one of the
 two walks over `program.functions` is gone.
 
+#### One diagnostic printer, and the two commands that were dropping the note (2026-09-10, `track-ef`)
+
+Rank 2 of the census. Seven sites in `main.rs` wrote out how this driver prints
+a diagnostic — the file, the line, the column, the message, and the note under
+it. Five printed the note. Two did not: `vyrn routes` and `vyrn doc` each wrote
+their own four-line loop with the `if let Some(note)` missing.
+
+**That is not a repetition, it is a silent loss.** A `Diagnostic::note` is the
+half of a load error that says what to do about it. Two commands threw it away
+whenever a load failed under them, and nothing said so, because each loop looked
+correct on its own. This is what "one home per fact" is FOR: the copies agreed
+about the shape and disagreed about the content, and only a reader holding all
+seven at once could see it.
+
+`print_diagnostics(diags, root_key, marker)` is the one home. `marker` is the
+empty string for an error and `"warning: "` for a warning, which is the only
+thing `print_warnings` was ever adding; `print_warnings` keeps the
+`--deny-warnings` rule and prints through it.
+
+**The gained output is a gain, not a moved refusal.** No refusal is lost or
+gained: nothing changed about which programs are refused or with what message.
+What changed is that two commands now print a note they were already given. It
+is not visible on the corpus at all, because the corpus exercises `vyrn check`,
+whose printer already had it.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,110 | 7,096 | −14 |
+| the command tile | 5,180 | 5,156 | −24 |
+| shared machinery | 1,485 | 1,495 | +10 |
+| `eprintln!` sites, whole crate | 198 | 188 | −10 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `cargo test -p vyrn-cli`, no filter | green in the track gate table below |
+
+`tests/cli_census.rs` is re-pinned in this commit.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
