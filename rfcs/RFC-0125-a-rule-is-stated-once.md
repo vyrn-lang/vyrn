@@ -23466,6 +23466,250 @@ The parser census's own list, with three taken and the rest re-priced.
    rule and belongs with RFC-0017, not here.
 
 
+#### The last plain collector, the statement's line, and the four flat matches (2026-09-09)
+
+The descent arc's ranked list said six of twenty were left: two plain
+collectors in another track's files, and twelve where the arm list is the rule.
+This slice takes what is left of the first group, counts the second at HEAD, and
+answers the question the arc kept deferring — whether `Expr::line`, `Node::kind`,
+`expr_kind` and `stmt_line`, four flat matches over the same twenty
+constructors, have one home.
+
+##### The count at HEAD, and what three later tracks had already taken
+
+The ranked list was written before tracks dm, dp, dr, dx and ea landed, and four
+of its six rows were gone before this track branched. `own::Emit` went with the
+walk-order event stream (`fe4cd7d0`), which is why `own.rs` holds no descent at
+all now. `movecheck::carries_param_storage` went with the escape closure
+(`350010c2`). `checker::captures_*`, `codegen::captures_of_*`,
+`checker::global_ref_*`, `checker::init_restrictions`, `contains_spawn` and
+`movecheck::mentions_place` are all readers of `ast::body_scope_descent!`
+already; the brief's list of them was the ranking's, one slice stale.
+
+So one row of the six stood, and it is the one this slice folds.
+
+| the descent | file | lines | after |
+|---|---|---|---|
+| `Checker::stmt` + `expr_inner` | `checker.rs` | 1,281 | the typing judgment |
+| `Fn_::stmt` + `expr_inner` | `direct.rs` | 1,168 | one emitter, §2.3's whole job |
+| `Builder::stmt` + `rhs_inner` | `core.rs` | 927 | the builder |
+| `MoveCheck::stmt` + `expr` | `movecheck.rs` | 694 | a fact per arm |
+| `block` + `stmt` + `expr` | `vyrn-lower/src/lib.rs` | 277 | a row per arm |
+| `typed::scan` | `typed.rs` | 164 | the merge is the judgment |
+| `consteval::eval` | `consteval.rs` | 145 | a value per arm |
+| `ban_append_expr` + `ban_append_read` | `vyrn-codegen/src/lib.rs` | 103 | a decision per EDGE |
+| `movecheck::paths` | `movecheck.rs` | 74 | the same merge one question down |
+| `scan_append_block` | `vyrn-codegen/src/lib.rs` | 71 | the statement half of the edge rule |
+| `movecheck::stmt_mentions` | `movecheck.rs` | 19 | a different judgment per statement |
+| `mentions_in_lambda` + `_block` + `_expr` | `vyrn-lower/src/core.rs` | 127 | **folded** |
+
+Twelve descents over a body at the branch point, 5,050 lines; eleven after,
+4,923. Every one that stands is on the "the arm list is the rule" list the two
+records before this one built, and none of them has moved.
+
+`ast::body_scope_descent!` has twelve expansions and twenty-one readers, in
+eleven files. The count is a grep for `impl` against the seven visitor traits
+the expansions define.
+
+##### The fold: what the core's capture scan asks
+
+`mentions_in_*` collects two things from a lambda's body — every `Var` node,
+which is what the frame captures, and every callee name, which is where an
+untyped parameter's type can be read. Both are one line at a node, and the
+thirty-four arms under them matched the walk's arm for arm, in the same order.
+`SCOPED` is `false`: the reader never asks what shadows what.
+
+`Expr::Var`, `Expr::Call` and `Expr::Spawn` keep their mention in the form
+census, because those three are what the reader is FOR. The other thirty-one
+forms lose one each.
+
+##### The four flat matches: `line` has one home, `kind` has three
+
+The last two records named these four and said the macro does not reach them.
+Read against each other, they are not one question but two, and the two have
+different answers.
+
+**`line` is one table stated three times, and now it is stated once.**
+`checker::stmt_source_line` and `vyrn_lower::stmt_line` were the same thirteen
+arms, byte for byte, in two crates; `Expr::line` was their expression half, with
+a home in `ast.rs` and no statement sibling. `Stmt::line` now stands beside it.
+The doc carries the one thing the arms cannot: a literal `Expr` answers 0, which
+is why the checker records the enclosing statement's line and its three range
+diagnostics report that.
+
+**`kind` is three tables and each says a different word.** They are not copies
+and one home does not reach them.
+
+| the table | file | lines | what a word is | for `Expr::StructLit` |
+|---|---|---|---|---|
+| `Node::kind` | `vyrn-lower/src/lib.rs` | 42 | the dump's axis word | `record` |
+| `core::expr_kind` | `vyrn-lower/src/core.rs` | 26 | a gap's detail | `record literal` |
+| `kind` | `vyrn-cli/tests/lowered.rs` | 24 | the Rust constructor's NAME | `StructLit` |
+
+Two more name a form and are not this shape at all: `direct::expr_name` (13
+lines) writes a phrase a diagnostic quotes and falls through on fourteen of the
+twenty, and `render::names` (40) answers with the node's own name or value
+rather than its kind. `direct::stmt_form`/`expr_form` (29) index a partial
+twenty-entry table and answer `None` for twelve forms.
+
+So one fold, and two that are recorded as not folding. **`expr_kind` now reads
+`Node::kind` for thirteen of its fifteen arms.** What it keeps is the two
+distinctions a gap wants and a dump axis does not: the five literals answer as
+one, and a builtin call is named apart from a user's. Five words change —
+`try construct`, `array literal`, `record literal`, `map literal` and
+`if expression` become `tryconstruct`, `array`, `record`, `map` and `ifexpr` —
+and nothing reads them: `kernel` over the corpus reports **0 unlowered**, so no
+gap is produced at all, and a gap's detail reaches a test's output and a debug
+line, never a diagnostic.
+
+`lowered.rs`'s stays because the answer it wants is the Rust constructor's own
+name, which no other table in the workspace holds and which Rust does not
+derive. Serving it would mean an `Expr::name()` in `ast.rs` of exactly the same
+twenty arms — the copy moved, not deleted — so it is one home for one reader and
+buys nothing.
+
+##### The findings
+
+**Three of the six left were already gone, and the ranking is what went stale.**
+The ranked list is written per slice and read three slices later. Nothing checks
+it, which is the same shape RFC-0125 §1.6 records for a fact restated in prose:
+the list was right when written and wrong when used. Every row of this slice's
+table above was measured at HEAD before it was believed.
+
+**RFC-0127 §3.1.1's floor prose had drifted from its own §3.1 table.** It read
+15 for `Stmt::Continue` where the table summed to 17, and 16 for `Stmt::Break`
+where the table summed to 18. The table is checked by
+`the_form_census_is_what_the_rfc_records` and the prose under it by nothing, so
+the prose had absorbed two slices of movement without moving. Both are
+recomputed from the table here.
+
+**The three floors have met at 13, and the argument for one of them is dead.**
+The statement floor is 14 (`Stmt::Continue`, `Stmt::Region`), the expression
+floor 13 (`Expr::Try`, `Expr::TryConstruct`) and `Pattern::Other` 13. §3.1.1
+used to say an expression's floor was HIGHER "because an expression is walked by
+more collectors than a statement is". That was true and is not: the collectors
+are what M6 folded onto one descent, and the expression floor has fallen through
+the statement one.
+
+**A rule moved to its declaration falls off the form census, by design.**
+`Stmt::line` in `ast.rs` gains no mention, because `ast.rs` is not one of the
+census's eight columns — the census counts where a form is RESTATED and `ast.rs`
+is where it is declared. So the census reads 28 mentions gone and none arrived.
+That is the same accounting `body_scope_descent!` itself gets, and it is the
+right one: the table is a count of second statements.
+
+##### The licence
+
+The same four measurements, over the same 419 programs, after every one of the
+three commits.
+
+| the measurement | every commit |
+|---|---|
+| `vyrn check` stderr and exit code, byte-identical | 419 of 419 |
+| refused under both binaries | 79 |
+| a refusal LOST or GAINED | 0 / 0 |
+| `the_pinned_lowering_over_the_corpus`, hashes identical | 419 of 419 rows |
+| rows the pin cannot speak for | 0 |
+| `the_pinned_columns_over_the_corpus` | green, unmoved |
+| `VYRN_WASM_MANIFEST=check` | 176 hashed, 0 moved |
+
+The two rows the last three records could not speak for — `std/von.vyrn` and
+`std/vyx.vyrn`, whose release placement ordered its lines differently on every
+run — are stable at this branch point. `7293d083` is what fixed them, and the
+pin now reports 341 lowered and **0 unstable** where it reported 2.
+
+`mentions_in_*` feeds the core's frame capture, so the manifest and the kernel
+corpus are the readings that matter for it; `expr_kind` sits on the gap path, so
+`kernel`'s 0 unlowered is the statement that nothing reaches it.
+
+##### The numbers
+
+| the file | at `7293d083` | after | lost |
+|---|---|---|---|
+| `compiler/vyrn-lower/src/core.rs` | 6,566 | 6,465 | 101 |
+| `compiler/vyrn-frontend/src/checker.rs` | 15,102 | 15,079 | 23 |
+| `compiler/vyrn-lower/src/lib.rs` | 1,443 | 1,424 | 19 |
+| `compiler/vyrn-frontend/src/ast.rs` | 1,950 | 1,978 | 28 gained |
+| `compiler/vyrn-frontend/src/own.rs` | 1,790 | 1,790 | 0 |
+| `compiler/vyrn-frontend/src/movecheck.rs` | 3,159 | 3,159 | 0 |
+| `compiler/vyrn-codegen/src/lib.rs` | 2,296 | 2,296 | 0 |
+| **the seven** | **32,306** | **32,191** | **115** |
+
+The three files that lose nothing hold only descents where the arm list is the
+rule, which is why they lose nothing.
+
+The censuses that moved. The checker census's `shared machinery`, 2,247 to
+2,224, and one anchor gone with `stmt_source_line`. The form census: 1,014
+mentions to 941 — 31 to the collector, 28 to the statement line, 14 to the gap's
+word — with §3.1.1's floor table, its two floor sentences and §5's `Stmt::Break`
+row recomputed, and §3.1's range sentence with them.
+
+##### What is left, and what blocks it
+
+**Eleven descents, 4,923 lines, and nothing in this direction reaches them.**
+Every one is on the list the two records before this built: seven where a
+judgment is made per arm, two where the decision is per EDGE and the hooks are
+handed a node, one that dispatches a different judgment per statement, and one
+that is an emitter. What reaches them is §2.2's three judgments and §2.3's one
+emitter, which is a milestone and not a fold.
+
+**Two `kind` tables stay, each with its blocker named.** `lowered.rs`'s wants
+the Rust constructor's name and Rust does not derive one; serving it from
+`ast.rs` moves twenty arms rather than deleting them. `direct::expr_name` and
+`render::names` are partial by design — a phrase for a diagnostic and a node's
+own text — and neither is a kind table.
+
+**`Checker::call`'s three still need a language decision**, unchanged: the four
+log levels, the three type-name parameters, and the union `print`, `@str` and
+`toJson` take. Each is recorded above with what its answer costs.
+
+##### Gates (2026-09-09, the last plain collector)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok, 0 warnings |
+| `cargo test -p vyrn-cli`, no filter | 644 passed, 0 failed |
+| `kernel` `--ignored` | 1, 31 s — 177 programs, 27,637 instances accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored` | 1, 35 s |
+| `typed` `--ignored` | 1, 37 s |
+| `effects` `--ignored` | 2, 44 s |
+| `fixtures` `--ignored` | 1, 23 s |
+| `testsweep` `--ignored` | 1, 85 s |
+| `vyrn-frontend` | 1,112 passed, 0 failed |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,159 passed, 0 failed |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored` | 2, 303 s |
+| the residue ratchet | 1, 326 s — engine 172 clean and 3 leaking, route the same, 0 failed |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, no byte moved |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 27 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 26 files, 0 failed |
+| `frontend_census`, `checker_census`, `parser_census`, `cli_census` | 2 passed and 1 ignored each |
+| `emitter_census` | 3 passed, 1 ignored |
+| `forms` | 8 passed, 2 ignored |
+| `refusals`, `surface` | 21, 3 |
+| `the_pinned_columns_over_the_corpus` | green, unmoved |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable, 419 rows byte-identical |
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+
+No red in the first pass. The three warnings the earlier records name at their
+branch points are gone: `cargo build --release` is clean here.
+
+**One environment note, not a gate result.** `site/export.vyrn` documents that
+its output directory and five subdirectories must exist before it runs, because
+RFC-0014 has `writeFile` and no way to create a directory. Running it against an
+empty `out` fails 197 writes and says so on every one. Make them first, as the
+file's own doc comment says.
+
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
