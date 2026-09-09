@@ -5,10 +5,10 @@
 //! a census already: the checker (`tests/checker_census.rs`), the ownership pass
 //! (`tests/refusals.rs`), the emitter (`tests/emitter_census.rs`) and the CLI
 //! (`tests/cli_census.rs`). Nobody had counted `vyrn-frontend` outside the
-//! checker, and it is 30,000 lines with the checker taken out. This is the same
-//! measurement for the three largest of the rest: `loader.rs` (5,363),
-//! `symbols.rs` (4,801) and `project.rs` (1,791) — 11,955 lines, a fifth of the
-//! crate.
+//! checker, and it is 47,000 lines with the checker taken out. This is the same
+//! measurement for the three largest of the rest: `loader.rs` (4,891),
+//! `symbols.rs` (4,676) and `project.rs` (1,590) — 11,157 lines, a fifth of what
+//! is left. They were 11,955 when this census was written.
 //!
 //! # The method, which is `checker_census.rs`'s, which is `refusals.rs`'s
 //!
@@ -327,8 +327,9 @@ fn loader_sections() -> Vec<Section> {
             "fn program_ref_names(p: &Program) -> HashSet<String> {",
             Job,
             "the program-wide reference sets the alias check and the runtime \
-             injection both ask for. It READS the walk above rather than writing \
-             a fourth one, which is what the other two rows should do",
+             injection both ask for. It reads `fn_body_ref_names` rather than \
+             walking a body itself, and since RFC-0125 §3 M6's body slices \
+             every walk in this file reads `body_scope_descent!`",
         ),
         sec(
             "fn rename_decls_in_module(p: &mut Program, map: &HashMap<String, String>, ns: &HashSet<String>) {",
