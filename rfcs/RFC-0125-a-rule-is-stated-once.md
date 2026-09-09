@@ -16002,6 +16002,73 @@ stderr cannot be.
 `symbols.rs`'s "the file's own job" 2,898 to **2,912**. No other census moves —
 this slice deletes nothing and adds no arm to any walk.
 
+#### What `own.rs` is after the closures, with a reader against every part (2026-09-09, `track-dx`)
+
+`track-dt` censused the file and found nothing dead. Three slices later one
+field is: **`Ownership::owned_fns`**, "the return type and nothing else" by its
+own comment since RFC-0089 rule 3. It is built in one `filter_map` —
+`proto.release_kind(&f.ret)` keyed by function name — and it has one reader
+outside the tests, `vyrn why --memory`'s "transfers:" line. A name-keyed copy of
+a question the type table answers is the shape this milestone deletes
+everywhere else, so the report asks the table: `own.proto.release_kind(&f.ret)`,
+at the one site that wants it. The three tests that read the copy read the table
+now, which is what they were about all along.
+
+Two more things were dead and are gone with it: `own.rs`'s test helper
+`opt_row`, which lost its last caller when the `Option` rows moved, and a `mut`
+on a `HashMap` nothing writes to. `vyrn-frontend`'s `tests/isolation.rs` had
+imported `checker` since its rules left; that import goes too. The file builds
+warning-free now.
+
+**The count, and a reader against every part.** 1,790 lines, and the tiling is
+the file's own — a section runs from its doc comment to the next item's.
+
+| section | lines | who reads it |
+|---|---|---|
+| the module comment | 45 | — |
+| `Exit`, `Release`, `DropKind` + `words`, `Linear` | 183 | the row vocabulary every pass shares: `Exit` in `kernel.rs`, `direct.rs`, `lib.rs`; `Release` in `core.rs`, `direct.rs`, `lib.rs`; `DropKind` in five files including `render.rs`'s printer; `Linear` in `declared.rs` and `typed.rs` |
+| `Owned` and its ten methods | 434 | **the type table every pass asks**: `core.rs`, `declared.rs`, `direct.rs`, `typed.rs`, `types.rs`, and now `vyrn-cli`'s report. `release_kind` alone is 189 lines |
+| the free type predicates: `self_referring`, `owns_heap`, `skippable`, `holes_under`, `str_temporary` | 286 | `checker.rs`, `core.rs`, `direct.rs`, `types.rs`, `declared.rs`, `tests/memory.rs` |
+| `MemoryRow`, `Bucket` | 43 | `vyrn why --memory` and the editor: `symbols.rs`, `vyrn-cli/src/main.rs` |
+| `ReleasePlan` and the alias machinery | 79 | `core.rs` and `direct.rs` |
+| `Ownership` — **six** fields | 42 | `plan`, `memory`, `proto`, `releases`, `fnval_clear`, `arg_caps` |
+| the memoized analysis: `Memo`, `ident`, `hand_on`, `forget_loaded`, `open`, `Drop`, `analyze`, `analyze_now` | 175 | `analyze` is the door, with 28 call sites in twelve files |
+| the two plan keys | 22 | `core.rs` and `direct.rs` |
+| the three installed slots | 71 | `vyrn-lower`'s `install` fills all three; `symbols.rs` reads two |
+| `placed` | 22 | `direct.rs` |
+| tests | 388 | the file's own |
+
+**Two fields went in three slices, and they were not the same kind of thing.**
+`escapers` was an ANSWER — a closure over the call graph, wrong on both of the
+functions it fired on. `owned_fns` was a COPY — a table restating a declaration.
+The four that are left divide the same way. `plan`, `releases` and `memory` are
+written by the placer and read by the emitters and the report: rows, which §2.7
+keeps and renames. `proto` and `arg_caps` are readings of the DECLARATIONS,
+which every pass asks and none of them stores twice. `fnval_clear` is the last
+answer only a pass that read every body can give, and `track-dt` priced it:
+empty it and `examples/rpc.vyrn` leaks 6 blocks, `rpcsplit` 5, on both engines.
+
+**What §2.7's "delete `own.rs`" means after this track.** The file is not a
+pass. Four things stand, and only one of them is going anywhere:
+
+1. **The `Owned` type table and the free predicates — 720 lines, 40 per cent.**
+   A reading of the declarations. It moves to whatever file states
+   declarations; it does not go.
+2. **The row vocabulary and the plan — 326 lines.** Written by the placer
+   alone, read by `core.rs` and `direct.rs`.
+3. **The analysis door and the three slots — 246 lines.** The inversion that
+   lets `vyrn-frontend` be below `vyrn-lower`. It goes when the two crates are
+   one, and not before.
+4. **The report — 43 lines.**
+
+**The licence.** `vyrn check`, whole stderr and exit code, 323 programs:
+byte-identical, 0 lost / 0 gained.
+
+**The lines.** `compiler/vyrn-frontend/src/own.rs` 1,818 to **1,790**;
+`compiler/vyrn-cli/src/main.rs` gains three lines of prose about which table
+the report asks. The `cli_census`: "a command's own path" 5,295 to **5,298**.
+No other census moves.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

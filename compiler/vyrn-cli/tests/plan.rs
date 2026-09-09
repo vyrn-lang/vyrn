@@ -482,8 +482,8 @@ fn a_user_type_declares_how_it_is_released() {
                fn main() -> Int64 { let r = make(); return 0; }";
     let (o, _) = analyze_src(src);
     assert_eq!(
-        o.owned_fns.get("make"),
-        Some(&DropKind::Release(
+        o.proto.release_kind(&Type::Named("Ring".into())),
+        Some(DropKind::Release(
             "Owned__Ring__release".to_string(),
             Type::Named("Ring".into())
         ))
@@ -512,7 +512,10 @@ fn a_record_releases_its_places() {
         name: "slots".into(),
         ty: Type::Array(Box::new(Type::Int)),
     }]));
-    assert_eq!(o.owned_fns.get("make"), Some(&want));
+    assert_eq!(
+        o.proto.release_kind(&Type::Named("Ring".into())),
+        Some(want.clone())
+    );
     assert_eq!(drop_kinds(src, "main"), vec![want]);
 }
 
@@ -523,7 +526,7 @@ fn a_record_of_scalars_is_reclaimed_by_nothing() {
                fn make() -> Point { return Point { x: 1, y: 2 } } \
                fn main() -> Int64 { let p = make(); return 0; }";
     let (o, _) = analyze_src(src);
-    assert!(!o.owned_fns.contains_key("make"));
+    assert_eq!(o.proto.release_kind(&Type::Named("Point".into())), None);
     assert_eq!(drop_count(src, "main"), 0);
 }
 
@@ -636,7 +639,10 @@ fn a_sum_owns_its_payload() {
                    let o = pick(a, b); return 0; }";
     let (o, _) = analyze_src(src);
     let want = opt_row(Type::Str);
-    assert_eq!(o.owned_fns.get("pick"), Some(&want));
+    assert_eq!(
+        o.proto.release_kind(&Type::option(Type::Str)),
+        Some(want.clone())
+    );
     assert_eq!(drop_kinds(src, "main"), vec![want]);
 }
 
@@ -646,6 +652,6 @@ fn a_sum_of_scalars_is_reclaimed_by_nothing() {
     let src = "fn pick(n: Int64) -> Option<Int64> { return Some(n); } \
                fn main() -> Int64 { let o = pick(1); return 0; }";
     let (o, _) = analyze_src(src);
-    assert!(!o.owned_fns.contains_key("pick"));
+    assert_eq!(o.proto.release_kind(&Type::option(Type::Int)), None);
     assert_eq!(drop_count(src, "main"), 0);
 }
