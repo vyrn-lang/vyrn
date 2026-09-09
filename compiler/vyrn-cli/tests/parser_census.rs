@@ -120,13 +120,14 @@ fn parser_sections() -> Vec<Section> {
         sec(
             "fn mark_member_type_params(ty: &mut Type) {",
             Twice,
-            "a fourteen-arm descent over a `Type`, which is the arm list \
-             `loader::type_head_descent!` was written to state once (RFC-0125 \
-             §3 M6, the first body slice). The macro is `loader.rs`'s and this \
-             is the fourth hand-written copy of its arms. It does not fold onto \
-             the macro as it stands: the macro's hook is handed a type's NAME \
-             and this one REPLACES a `Type::Named` node with a `Type::Param`, \
-             which a `&mut String` cannot do",
+            "a contract member's implicit type parameter turned into a \
+             `Type::Param` (RFC-0071). The DESCENT is \
+             `loader::type_head_descent!`'s since RFC-0125 §3 M6, where the \
+             macro's hook moved from a type's NAME to the node — a `&mut \
+             String` cannot replace a `Type::Named` with a `Type::Param`, \
+             which is why this stayed the fourth hand-written copy of those \
+             arms until then. What is left is the one node it replaces, and \
+             the `Twice` is the spelling rule above stated at a second site",
         ),
         sec(
             "fn at_contract_decl(tokens: &[Token], pos: usize) -> bool {",
@@ -831,7 +832,7 @@ fn the_parser_census_is_what_the_rfc_records() {
     let want = vec![
         ("parser.rs", "the grammar's own arm", 3512, 52),
         ("parser.rs", "a desugar the parser states", 928, 7),
-        ("parser.rs", "a table stated a second time", 251, 1),
+        ("parser.rs", "a table stated a second time", 221, 1),
         ("parser.rs", "recovery and the diagnostic sentences", 175, 2),
         ("parser.rs", "shared machinery", 212, 1),
         ("parser.rs", "tests", 1920, 0),

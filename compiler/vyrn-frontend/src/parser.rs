@@ -25,50 +25,20 @@ pub fn is_member_type_param(name: &str) -> bool {
 /// Rewrite every `Named(n)` in `ty` for which [`is_member_type_param`] holds
 /// into a [`Type::Param`], recursively. Applied to each contract member's types
 /// right after parsing them.
+///
+/// The descent is [`crate::loader::type_nodes_mut`]'s; what is this reader's own
+/// is the one node it replaces. It was a fourteen-arm copy of that macro's arms
+/// until RFC-0125 §3 M6 put the hook on the node — a `&mut String` could not
+/// replace a `Type::Named` with a `Type::Param`, which is the whole of what this
+/// does.
 fn mark_member_type_params(ty: &mut Type) {
-    match ty {
-        Type::Named(n) => {
+    crate::loader::type_nodes_mut(ty, &mut |t| {
+        if let Type::Named(n) = t {
             if is_member_type_param(n) {
-                *ty = Type::Param(std::mem::take(n));
+                *t = Type::Param(std::mem::take(n));
             }
         }
-        Type::App(_, args) => {
-            for a in args {
-                mark_member_type_params(a);
-            }
-        }
-        Type::Array(a)
-        | Type::Task(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => mark_member_type_params(a),
-        Type::Merge(a, b) | Type::Map(a, b) => {
-            mark_member_type_params(a);
-            mark_member_type_params(b);
-        }
-        Type::Record(fields) => {
-            for f in fields {
-                mark_member_type_params(&mut f.ty);
-            }
-        }
-        Type::Enum(variants) => {
-            for v in variants {
-                for p in &mut v.payload {
-                    mark_member_type_params(p);
-                }
-            }
-        }
-        Type::Fn(params, ret) => {
-            for p in params {
-                mark_member_type_params(p);
-            }
-            mark_member_type_params(ret);
-        }
-        _ => {}
-    }
+    });
 }
 
 /// Whether the cursor sits on a `contract Name {` declaration starter.
