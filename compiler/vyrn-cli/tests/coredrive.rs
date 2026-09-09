@@ -316,7 +316,7 @@ fn run() {
         eprintln!("  {d}");
     }
     // The forms whose arm the rows have started to relieve. An arm goes when
-    // its first number reaches zero, and this pin says which six are on that
+    // its first number reaches zero, and this pin says which eight are on that
     // road: a form that drops off the list has lost a reader the record has to
     // explain, and one that joins it is a slice's own count.
     let carrying: Vec<&str> = vyrn_codegen::direct::FORMS
@@ -333,7 +333,9 @@ fn run() {
             "Stmt::Return",
             "Stmt::If",
             "Stmt::Expr",
-            "Stmt::While"
+            "Stmt::While",
+            "Stmt::Break",
+            "Stmt::Continue"
         ],
         "the forms the core's rows carry are not the ones the record names"
     );
