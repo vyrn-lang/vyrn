@@ -82,6 +82,34 @@ const CLASSES: [&str; 8] = [
     "nothing: the rows carry it",
 ];
 
+/// The two entries of [`vyrn_codegen::direct::FORMS`] this probe tables per
+/// program: the exits whose arm is nearest retirement.
+///
+/// **A zero here is a zero over `examples/` and not over the language.**
+/// `Stmt::Continue` reads zero since the exits slice and its arm still has two
+/// readers, both in `vyrn-frontend/tests/semantics.rs`: a `for` over an array
+/// LITERAL, which `core::Builder` refuses to build a body for, and a
+/// `continue` under a `region`, which the statement screen stands down at. An
+/// arm goes when the whole gate list says so, not when this table does.
+const BREAK: usize = 7;
+const CONT: usize = 8;
+
+/// Per program: how many `break` and how many `continue` occurrences the AST
+/// arm emitted, for every program where either is not zero. The residue the
+/// next slice on this line has to empty, program by program and not as one sum.
+///
+/// Every one is `project::site`: a projection's body is INLINED at its caller,
+/// so the rows for the `break` in `std/json`'s `field` and `tryField` are in
+/// their own core body and not in the caller's. The other rewrite that put an
+/// exit out of the core's reach, `project::iterate_loop`'s clone of a user
+/// container's loop body, is off this table since the exits slice —
+/// `own::ReleasePlan::key_of` maps a clone back to the node the core keyed.
+const PIN: [(&str, usize, usize); 3] = [
+    ("jchain.vyrn", 3, 0),
+    ("jsonplace.vyrn", 2, 0),
+    ("tryplace.vyrn", 3, 0),
+];
+
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
 /// beside each class is the emitter's own screen and not a second rule.
 fn scalar(t: &vyrn_frontend::ast::Type) -> bool {
@@ -244,6 +272,7 @@ fn run() {
     let mut emitted = 0usize;
     let mut forms = [(0usize, 0usize); vyrn_codegen::direct::FORMS.len()];
     let mut differ: Vec<String> = Vec::new();
+    let mut exits: Vec<(String, usize, usize)> = Vec::new();
     let mut same = 0usize;
     for path in corpus() {
         let Ok(program) = load(&path) else { continue };
@@ -277,9 +306,13 @@ fn run() {
         let (f, e) = vyrn_codegen::direct::walks();
         from_core += f;
         emitted += e;
-        for (i, (arm, took)) in vyrn_codegen::direct::forms().iter().enumerate() {
+        let per = vyrn_codegen::direct::forms();
+        for (i, (arm, took)) in per.iter().enumerate() {
             forms[i].0 += arm;
             forms[i].1 += took;
+        }
+        if per[BREAK].0 > 0 || per[CONT].0 > 0 {
+            exits.push((name.clone(), per[BREAK].0, per[CONT].0));
         }
         let ast = emit(&program, true);
         match (core, ast) {
@@ -311,10 +344,20 @@ fn run() {
         let (arm, core) = forms[i];
         eprintln!("  {arm:8} the arm   {core:8} the core's rows   {what}");
     }
+    eprintln!("where a `break` or a `continue` still reaches the AST arm:");
+    for (name, brk, cont) in &exits {
+        eprintln!("  {brk:4} break   {cont:4} continue   {name}");
+    }
     eprintln!("{same} of {programs} programs emit the same module either way");
     for d in &differ {
         eprintln!("  {d}");
     }
+    let named_exits: Vec<(&str, usize, usize)> =
+        exits.iter().map(|(n, b, c)| (n.as_str(), *b, *c)).collect();
+    assert_eq!(
+        named_exits, PIN,
+        "a `break` or a `continue` reaches the AST arm somewhere the record does not name"
+    );
     // The forms whose arm the rows have started to relieve. An arm goes when
     // its first number reaches zero, and this pin says which eight are on that
     // road: a form that drops off the list has lost a reader the record has to

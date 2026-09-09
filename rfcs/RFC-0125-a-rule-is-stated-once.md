@@ -7946,7 +7946,7 @@ where it is, which is what catches a deletion that deleted prose.
 
 | kind | lines | wasm | what it is, and why it is a kind |
 |---|---|---|---|
-| the mapping §2.3 names | 6,740 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
+| the mapping §2.3 names | 6,743 | 596 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
 | one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
@@ -9943,6 +9943,148 @@ its element comes through `Rhs::Read`, a place row this walk does not read.
 `Arm`, which is row 6 of the ranked list and buys nothing today. `Stmt::Drop` at
 444 waits on `St::Drop` carrying the node the plan keys the binding by, which is
 the one release row the driver still does not take.
+
+**A `continue` stops reaching the arm, and the arm stays (2026-09-09,
+`track-eb`).** The slice before this one left `Stmt::Break` at 9 occurrences of
+the AST arm and `Stmt::Continue` at 1, and put all ten on one cause: a `for` the
+emitter rewrites. The probe counts them per PROGRAM, and the table names two
+causes, not one.
+
+| program | `break` | `continue` | what the emitter is holding |
+|---|---|---|---|
+| `container.vyrn` | 1 | 1 | `project::iterate_loop`'s clone of the loop body |
+| `jchain.vyrn` | 3 | 0 | `project::site` inlining `std/json`'s `field` |
+| `jsonplace.vyrn` | 2 | 0 | the same, `field` and `tryField` |
+| `tryplace.vyrn` | 3 | 0 | the same |
+
+**The second payer is not `Fn_::for_stream`, and that is the first finding.**
+No program of the corpus emits a `break` or a `continue` from a stream loop:
+`for_stream` walks the reader's OWN body, so its nodes are the ones the core
+keyed and its exits were never in the residue. The eight the record put on it
+are RFC-0121's projection inlining. `j.field(key)` inlines the body of
+`std/json`'s `field` at the caller — `break` and all — and the rows for that
+`break` are in `field`'s core body and not in `main`'s. No mapping reaches
+across two bodies, so those eight stand where they were.
+
+**The first payer needed no move, and that is the second finding.** The residue
+was read as "the core never saw the statement", and for `container.vyrn` the
+core HAD seen it: `iterate_loop`'s expansion is memoized and every engine gets
+the same leaked block, the checker types the copy (`Checker::record_desugar`),
+and `own::ReleasePlan::key_of` maps a clone's address back to the node the core
+keyed. What was stated twice was not the rewrite — it is one function with three
+callers — but the way a reader of this file asks the plan about a node. Ten
+readers of `direct.rs` ask through `key_of`; `Fn_::core_run` keyed the raw
+address. It asks the same way now, and `container.vyrn`'s `break`, its
+`continue`, two `Stmt::Assign` and two `Stmt::If` come off the arm. Nothing
+moves in `project.rs` or in `core.rs`.
+
+**The count. One form reaches zero over the corpus.**
+
+| form | the arm before | the rows before | the arm after | the rows after |
+|---|---|---|---|---|
+| `Stmt::Assign` | 16,307 | 30,432 | **16,305** | **30,434** |
+| `Stmt::If` | 33,245 | 10,448 | **33,243** | **10,450** |
+| `Stmt::Break` | 9 | 1,752 | **8** | **1,752** |
+| `Stmt::Continue` | 1 | 9 | **0** | **9** |
+
+**91,872 of 251,821 statements** come from the core's rows against 91,868 of
+251,823, which is 36.5 per cent either way: this slice moves four statements.
+Every emitted byte is the same — `VYRN_WASM_MANIFEST=check` green over 176
+examples, `rfcs/census/wasm-sha256.tsv` untouched — the whole-body count is the
+same 986 of 21,722, and `coredrive`'s three differing programs are the same
+three at the same byte counts.
+
+**A zero in the census is a zero over `examples/`, and that is the third
+finding.** `Stmt::Continue`'s arm was deleted on the strength of the count and
+the gate list refused it, at `vyrn-frontend/tests/semantics.rs`:
+`continue_skips_to_the_next_iteration` and
+`continue_under_a_region_still_frees_the_region` both compile through this
+backend and neither is in `examples/`. Two shapes reach the arm. A `for` over an
+array LITERAL has no core body at all — `Builder::stmt`'s `for` arm returns
+`gap("a `for` over a literal")` — so no run of that function reaches the driver.
+A `continue` under a `region` is inside a form the statement screen stands down
+at. The arm is restored and the sentence naming both readers is beside the
+count, in `coredrive`, which is where the next reader of the zero will be. An
+arm goes when the whole gate list says so.
+
+**A fourth finding, and the gate said it first.** `tests/lowered.rs` holds a
+FLOOR under `peek`'s share of the off-program residue — the answers RFC-0101
+§2.3 assigns to a backend on purpose — and the comment beside it says a FALL
+means §2.3 moved. It fell, from 53 to 46, and the emitter's own share fell 1,239
+to 919 with the whole off-program count 847 to 711. That is this slice measured
+from the other end: a statement the rows take is one no arm emits, so no arm
+asks `peek` about the nodes of a body `iterate_loop` cloned. The one class that
+emptied is `residue Peek/call`, 7 answers first seen in `show.vyrn`. The band
+moves **50..=100 to 32..=64** and the comment carries the new step of its
+history.
+
+**The lines. This slice adds three and deletes none, and the record says why.**
+`direct.rs` is **17,542 lines before and 17,545 after**: the three are the
+sentence that says a rewrite gives a statement a second address, which is the
+whole of the change. The emitter census's mapping kind moves **6,740 → 6,743**
+lines with the hand-emitted instruction count unmoved at 596, and the read class
+`both, for two questions` **7,440 → 7,443**. `core.rs` and `project.rs` are
+unmoved. What the slice buys is not lines: it is four statements off the arm, an
+arm at zero over the corpus with its two remaining readers named, and a class of
+backend answers that RFC-0101 §2.3 owns falling by seven.
+
+**The censuses.** `coredrive` gains the per-program table of the two exits,
+pinned, and the sentence about what a zero in it means. The emitter census moves
+as above. `lowered`'s `peek` floor moves as above. RFC-0127 §3's form census and
+§3.1.1's floor do not move, because no arm went. RFC-0126 §3's surface census,
+`coretables`, `refusals`, `checker_census`, `lowered_dump` and the wasm hash
+table are unmoved.
+
+**What is left on this line.** `Stmt::Break` stands at 8 and every one is
+`project::site`: a projection's body inlined at its caller, whose rows are in
+the projection's own core body. Nothing in this file can reach them, and the
+mapping that took `container.vyrn` cannot either — it maps a node to a node, and
+this needs a body to a body. The payer is the core stating an inlined
+projection's rows at the call site, or the emitter reading the projection's own
+`Body`, and neither is written. `Stmt::Continue` stands at 0 over the corpus and
+its arm waits on the core building a body for a `for` over a literal, and on the
+statement screen reading a `region`.
+
+#### The exits slice's gates (2026-09-09)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. The corpus suites ran in
+debug and the release-only ones as marked.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and `vyrn-lsp`'s own manifest | clean, clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 644 passed, 44 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 79 s |
+| `coretables` `--ignored` | 1, 76 s |
+| `typed` `--ignored` | 1, 123 s |
+| `effects` `--ignored` | 2, 154 s |
+| `fixtures` `--ignored` | 1, 69 s |
+| `testsweep` `--ignored` | 1, 159 s |
+| `coredrive` `--ignored`, release | 1, 47 s — 91,872 of 251,821 statements from the core's rows, 986 of 21,722 bodies whole, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 3 and 1 — both tables re-pinned |
+| `forms` and `surface`, plain and `--ignored` | 8 and 2, 3 and 1 — unmoved |
+| `checker_census`, `refusals`, `lowered`, `lowered_dump` | 2, 21, 3, 6 plain and 1, 3, 1 ignored — only `lowered`'s `peek` floor moves |
+| `vyrn-frontend` | 1,112 passed, 5 ignored |
+| the workspace less `vyrn-cli` | 1,159 passed, 12 ignored |
+| `vyrn-lsp`'s own manifest | 100 passed, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2, 362 s |
+| the residue ratchet `--ignored`, release | 1, 351 s — the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 28 s, 176 examples, and `rfcs/census/wasm-sha256.tsv` is untouched |
+| `vyrn check` over `examples/`, head against `7293d083` | 683 lines of stdout and stderr identical, every exit code identical |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks, none short of its file's declared count |
+
+**One environment note, and it is not a finding.** `site/export.vyrn` writes
+through `writeFile`, which does not make a directory, so the export needs `out`
+and its subdirectories to exist before it runs. It reports every miss as `FAIL
+<path>: cannot write` and exits 1. The workflow's checkout has them from an
+earlier step; a fresh worktree does not.
 
 ### M4 — the runtime in Vyrn
 

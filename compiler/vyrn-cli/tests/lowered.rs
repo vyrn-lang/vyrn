@@ -1118,16 +1118,17 @@ fn gate() {
     // purpose: the type of a release receiver or of a dispatched call the
     // emitter builds at an emit site, which is a fact about a wasm local rather
     // than about a program. It was 299 while two clones were live, 109 once
-    // both were measured away, and 72 once `peek` stopped deriving types and
-    // started reading the checker's record — which did not move §2.3, it
-    // emptied everything that was not §2.3 out of the class. It is not waiting
-    // for a mechanism, and a milestone that drives it to zero is moving a
-    // decision INTO the form that §2.3 puts in the backend. Both bounds fail
+    // both were measured away, 72 once `peek` stopped deriving types and
+    // started reading the checker's record, and 46 once the driver started
+    // asking the core through `own::ReleasePlan::key_of` — a cloned loop body's
+    // statements are the rows' now, so no arm asks about their nodes. It is not
+    // waiting for a mechanism, and a milestone that drives it to zero is moving
+    // a decision INTO the form that §2.3 puts in the backend. Both bounds fail
     // loudly rather than one: a rise means a new engine-built tree, a fall
     // means §2.3 moved.
     assert!(
-        (50..=100).contains(&t.peek_off),
-        "`peek` answered {} questions about AST no instantiation holds. RFC-0125 §3 M5          measured this class at 72 and §2.3 owns every one of them; outside          50..100 the class has changed and the RFC's §2.3 leaves need re-reading",
+        (32..=64).contains(&t.peek_off),
+        "`peek` answered {} questions about AST no instantiation holds. RFC-0125 §3 M3          measured this class at 46 and §2.3 owns every one of them; outside          32..64 the class has changed and the RFC's §2.3 leaves need re-reading",
         t.peek_off
     );
 
