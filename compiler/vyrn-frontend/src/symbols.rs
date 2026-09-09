@@ -1035,25 +1035,30 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
 /// ONE TABLE. These six names were written in four places: here, the completion
 /// loop that offers them, `CONSTRUCTOR_BUILTINS` for semantic colouring, and
 /// `loader::builtin_alias_exports` for what `std/result` and `std/option`
-/// export. The first three read this now; the fourth keeps its own shape because
-/// it splits the six across two module names, and a test compares it.
+/// export. All four read this now — the module column is what the loader was
+/// carrying, and a test that compared the two lists is what it cost.
 ///
 /// The `SymbolKind` is what tells a type from a constructor, so the colouring
 /// list is a filter over this rather than a second list to keep in step.
-static BUILTIN_TYPES_AND_CTORS: &[(&str, SymbolKind, &str)] = &[
-    ("Result", SymbolKind::Type, "Result<T, E> — the builtin result type (`Ok(T)` | `Err(E)`). Spelled explicitly by `import { Result, Ok, Err } from \"std/result\"`."),
-    ("Ok", SymbolKind::Variant, "Ok(value: T) -> Result<T, E> — the success variant of the builtin `Result`."),
-    ("Err", SymbolKind::Variant, "Err(error: E) -> Result<T, E> — the failure variant of the builtin `Result`."),
-    ("Option", SymbolKind::Type, "Option<T> — the builtin option type (`Some(T)` | `None`). Spelled explicitly by `import { Option, Some, None } from \"std/option\"`."),
-    ("Some", SymbolKind::Variant, "Some(value: T) -> Option<T> — the present variant of the builtin `Option`."),
-    ("None", SymbolKind::Variant, "None -> Option<T> — the absent variant of the builtin `Option`."),
+///
+/// It lives in the editor's file rather than the loader's because the hover
+/// prose is the bulk of it and has nowhere else to be, and because that is the
+/// direction `keyword_text` already reads in — the reader goes to the table, the
+/// table does not move to the reader.
+pub(crate) static BUILTIN_TYPES_AND_CTORS: &[(&str, &str, SymbolKind, &str)] = &[
+    ("Result", "std/result", SymbolKind::Type, "Result<T, E> — the builtin result type (`Ok(T)` | `Err(E)`). Spelled explicitly by `import { Result, Ok, Err } from \"std/result\"`."),
+    ("Ok", "std/result", SymbolKind::Variant, "Ok(value: T) -> Result<T, E> — the success variant of the builtin `Result`."),
+    ("Err", "std/result", SymbolKind::Variant, "Err(error: E) -> Result<T, E> — the failure variant of the builtin `Result`."),
+    ("Option", "std/option", SymbolKind::Type, "Option<T> — the builtin option type (`Some(T)` | `None`). Spelled explicitly by `import { Option, Some, None } from \"std/option\"`."),
+    ("Some", "std/option", SymbolKind::Variant, "Some(value: T) -> Option<T> — the present variant of the builtin `Option`."),
+    ("None", "std/option", SymbolKind::Variant, "None -> Option<T> — the absent variant of the builtin `Option`."),
 ];
 
 fn builtin_type_or_ctor(name: &str) -> Option<(SymbolKind, String)> {
     BUILTIN_TYPES_AND_CTORS
         .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, kind, detail)| (*kind, detail.to_string()))
+        .find(|(n, _, _, _)| *n == name)
+        .map(|(_, _, kind, detail)| (*kind, detail.to_string()))
 }
 
 /// The function whose line range contains `cursor_line`, if any. A function's
@@ -1121,7 +1126,7 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
     // RFC-0062: the ambient `Result`/`Option` builtins and their constructors are
     // always in scope — offer them alongside user symbols (they are exactly what
     // `std/result` / `std/option` name explicitly), so `Ok`/`Some`/… complete.
-    for (name, _, _) in BUILTIN_TYPES_AND_CTORS {
+    for (name, _, _, _) in BUILTIN_TYPES_AND_CTORS {
         if let Some((kind, detail)) = builtin_type_or_ctor(name) {
             out.push(Completion {
                 label: name.to_string(),
@@ -3153,7 +3158,7 @@ static MACRO_BUILTINS: &[&str] = &[
 fn is_constructor_builtin(name: &str) -> bool {
     BUILTIN_TYPES_AND_CTORS
         .iter()
-        .any(|(n, kind, _)| *n == name && matches!(kind, SymbolKind::Variant))
+        .any(|(n, _, kind, _)| *n == name && matches!(kind, SymbolKind::Variant))
 }
 
 /// Map a [`SymbolKind`] to the semantic-token [`SemKind`].
@@ -3849,38 +3854,6 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
 mod tests {
     use super::*;
 
-    /// What `std/result` and `std/option` export is what the editor describes.
-    ///
-    /// `Result`, `Ok`, `Err`, `Option`, `Some`, `None` were written in four
-    /// places. Three read [`BUILTIN_TYPES_AND_CTORS`] now. The fourth,
-    /// `loader::builtin_alias_exports`, cannot: it answers a different question
-    /// — which of the six each module name brings in — so it keeps its own
-    /// split. This is what stops the split drifting from the table.
-    ///
-    /// A seventh name in the loader with no row here is a name you can import
-    /// and get no hover for. A seventh row here that no module exports is a
-    /// completion for a name no import can bring in.
-    #[test]
-    fn the_alias_modules_export_exactly_the_names_the_editor_knows() {
-        let mut exported: Vec<&str> = ["std/result", "std/option"]
-            .iter()
-            .flat_map(|spec| {
-                crate::loader::builtin_alias_exports(spec)
-                    .unwrap_or_else(|| panic!("`{spec}` exports nothing"))
-                    .iter()
-                    .copied()
-            })
-            .collect();
-        let mut described: Vec<&str> = BUILTIN_TYPES_AND_CTORS.iter().map(|(n, _, _)| *n).collect();
-        exported.sort_unstable();
-        described.sort_unstable();
-        assert_eq!(
-            exported, described,
-            "`std/result` + `std/option` export names the editor has no row for, \
-             or the editor describes names no module exports"
-        );
-    }
-
     /// The colouring filter answers for the constructors and no others.
     ///
     /// It replaced a hand-written `["Some", "None", "Ok", "Err"]`. `Result` and
@@ -3890,8 +3863,8 @@ mod tests {
     fn only_the_constructors_colour_as_variants() {
         let ctors: Vec<&str> = BUILTIN_TYPES_AND_CTORS
             .iter()
-            .filter(|(n, _, _)| is_constructor_builtin(n))
-            .map(|(n, _, _)| *n)
+            .filter(|(n, _, _, _)| is_constructor_builtin(n))
+            .map(|(n, _, _, _)| *n)
             .collect();
         assert_eq!(ctors, ["Ok", "Err", "Some", "None"]);
         assert!(!is_constructor_builtin("Result"));

@@ -144,12 +144,12 @@ fn loader_sections() -> Vec<Section> {
              and a remote key's immutable base",
         ),
         sec(
-            "pub fn builtin_alias_exports(spec: &str) -> Option<&'static [&'static str]> {",
-            Copy,
-            "the fixed export lists of `std/result` and `std/option` (RFC-0062) \
-             — the same six names `symbols::BUILTIN_TYPES_AND_CTORS` carries, \
-             split across two module names here. A test compares the two, which \
-             is what a copy costs when it cannot be deleted",
+            "pub fn builtin_alias_exports(spec: &str) -> Option<Vec<&'static str>> {",
+            Job,
+            "what `std/result` and `std/option` export (RFC-0062) — a filter \
+             over `symbols::BUILTIN_TYPES_AND_CTORS` since RFC-0125 §3 M6's \
+             table slice, where it was a second spelling of those six names, \
+             split across two module names, and a test compared the two",
         ),
         sec(
             "pub fn resolve_spec(spec: &str, importer: &str, opts: &LoadOptions) -> Result<String, String> {",
@@ -410,12 +410,14 @@ fn symbols_sections() -> Vec<Section> {
              names, and where it is declared",
         ),
         sec(
-            "static BUILTIN_TYPES_AND_CTORS: &[(&str, SymbolKind, &str)] = &[",
-            Copy,
-            "the six builtin sum names with their hover text. ONE TABLE inside \
-             this file — the completion loop and the colouring list are filters \
-             over it — but the same six names are `loader::builtin_alias_exports` \
-             too, split across two module names, and a test compares them",
+            "pub(crate) static BUILTIN_TYPES_AND_CTORS: &[(&str, &str, SymbolKind, &str)] = &[",
+            Job,
+            "the six builtin sum names, the alias module each belongs to, and \
+             the hover text for each. ONE TABLE, and since RFC-0125 §3 M6's \
+             table slice all four readers are filters over it: the completion \
+             loop, the colouring list, the hover lookup, and \
+             `loader::builtin_alias_exports`, which carried the module column \
+             as a split list of its own",
         ),
         sec(
             "fn enclosing_fn_line(analysis: &Analysis, cursor_line: usize) -> Option<usize> {",
@@ -825,28 +827,28 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4192, 23),
+        ("loader.rs", "the file's own job", 4211, 23),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
             "loader.rs",
             "a copy of a table another module carries",
-            15,
+            0,
             0,
         ),
         ("loader.rs", "shared machinery", 543, 0),
         ("loader.rs", "tests", 137, 0),
-        ("symbols.rs", "the file's own job", 2912, 0),
+        ("symbols.rs", "the file's own job", 2947, 0),
         ("symbols.rs", "a rule stated a second time", 272, 0),
         ("symbols.rs", "a path only a deleted route reached", 0, 0),
         (
             "symbols.rs",
             "a copy of a table another module carries",
-            228,
+            198,
             0,
         ),
         ("symbols.rs", "shared machinery", 435, 0),
-        ("symbols.rs", "tests", 861, 0),
+        ("symbols.rs", "tests", 829, 0),
         ("project.rs", "the file's own job", 1008, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),

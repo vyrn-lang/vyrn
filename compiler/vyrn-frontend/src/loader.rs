@@ -498,14 +498,18 @@ fn normalize_remote(key: &str) -> String {
 /// no-op — the loader recognizes the specifier before any file resolution,
 /// checks the imported names against this fixed export list, and binds nothing
 /// (the names keep resolving to the builtins they already were). Returns the
-/// module's fixed export list, or `None` for any other specifier. Public so the
-/// editor can offer completion/hover for these names.
-pub fn builtin_alias_exports(spec: &str) -> Option<&'static [&'static str]> {
-    match spec {
-        "std/result" => Some(&["Result", "Ok", "Err"]),
-        "std/option" => Some(&["Option", "Some", "None"]),
-        _ => None,
-    }
+/// module's fixed export list, or `None` for any other specifier.
+///
+/// The split is READ off `symbols::BUILTIN_TYPES_AND_CTORS` since RFC-0125 §3
+/// M6, where it was a second spelling of those six names and a test compared
+/// the two. Each row names its module, so this is the filter.
+pub fn builtin_alias_exports(spec: &str) -> Option<Vec<&'static str>> {
+    let names: Vec<&'static str> = crate::symbols::BUILTIN_TYPES_AND_CTORS
+        .iter()
+        .filter(|(_, m, _, _)| *m == spec)
+        .map(|(n, _, _, _)| *n)
+        .collect();
+    (!names.is_empty()).then_some(names)
 }
 
 /// Resolve an import specifier written inside `importer` to a module key.
