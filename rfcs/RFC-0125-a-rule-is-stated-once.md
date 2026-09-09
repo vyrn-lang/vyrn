@@ -9667,6 +9667,42 @@ form count **97 → 99**. RFC-0127 §3's form census rises **1,265 → 1,267**:
 exceptions above. RFC-0126 §3's surface census, `coretables`, `refusals`,
 `checker_census`, `lowered` and `lowered_dump` are unmoved.
 
+#### The interleave slices' gates (2026-09-09)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. The list was run
+once over both commits, because the second only narrows the screen the first
+wrote and the licence is the same one.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok |
+| `cargo test -p vyrn-cli`, no filter | 637 passed, 41 ignored, 0 failed |
+| `kernel` `--ignored`, release | 1, 54 s — 24,775 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 45 s — 12,572 switch sites, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 73 s |
+| `effects` `--ignored`, release | 2, 93 s — 30,197 functions judged, 0 unattributed |
+| `fixtures` `--ignored`, release | 1, 34 s |
+| `testsweep` `--ignored`, release | 1, 95 s |
+| `coredrive` `--ignored`, release | 1, 70 s — 88,190 of 258,693 statements from the core's rows, 986 of 21,720 bodies whole, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 4 — both tables re-pinned, one section added, one reclassified |
+| `forms` and `surface`, plain and `--ignored` | 8, 4 — both re-pinned |
+| `checker_census`, `refusals`, `lowered` plain and `--ignored` | 3, 22, 4 — all unmoved |
+| `lowered_dump`, plain and `--ignored` | 7 — the five snapshots do not move |
+| `vyrn-frontend` | 1,120 passed, 6 ignored |
+| the workspace less `vyrn-cli` | 1,167 passed, 13 ignored |
+| `vyrn-lsp`'s own manifest | 77 passed, 5 ignored, and its 23 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored`, release | 2, 310 s |
+| the residue ratchet `--ignored`, release | 1, 434 s — engine 172 clean and 3 leaking, route 172 clean and 3 leaking, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 21 s, and `rfcs/census/wasm-sha256.tsv` is untouched: not one emitted byte |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 27 files |
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
