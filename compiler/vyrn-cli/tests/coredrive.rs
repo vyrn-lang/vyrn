@@ -84,21 +84,26 @@ const CLASSES: [&str; 8] = [
 
 /// The two entries of [`vyrn_codegen::direct::FORMS`] this probe tables per
 /// program: the exits whose arm is nearest retirement.
+///
+/// **A zero here is a zero over `examples/` and not over the language.**
+/// `Stmt::Continue` reads zero since the exits slice and its arm still has two
+/// readers, both in `vyrn-frontend/tests/semantics.rs`: a `for` over an array
+/// LITERAL, which `core::Builder` refuses to build a body for, and a
+/// `continue` under a `region`, which the statement screen stands down at. An
+/// arm goes when the whole gate list says so, not when this table does.
 const BREAK: usize = 7;
 const CONT: usize = 8;
 
 /// Per program: how many `break` and how many `continue` occurrences the AST
 /// arm emitted, for every program where either is not zero.
 ///
-/// Two REWRITES put them out of the core's reach and each is a different
-/// payer. `container.vyrn` is `project::iterate_loop`: a user container's
-/// `for` clones its body, so the emission walks nodes the core never keyed,
-/// and `own::ReleasePlan::key_of` is the mapping back. The other three are
-/// `project::site`: a projection's body is INLINED at its caller, so the rows
-/// for `std/json`'s `field` and `tryField` are in their own core body and not
-/// in the caller's, and no mapping reaches them.
-const PIN: [(&str, usize, usize); 4] = [
-    ("container.vyrn", 1, 1),
+/// Every one is `project::site`: a projection's body is INLINED at its caller,
+/// so the rows for the `break` in `std/json`'s `field` and `tryField` are in
+/// their own core body and not in the caller's. The other rewrite that put an
+/// exit out of the core's reach, `project::iterate_loop`'s clone of a user
+/// container's loop body, is off this table since the exits slice —
+/// `own::ReleasePlan::key_of` maps a clone back to the node the core keyed.
+const PIN: [(&str, usize, usize); 3] = [
     ("jchain.vyrn", 3, 0),
     ("jsonplace.vyrn", 2, 0),
     ("tryplace.vyrn", 3, 0),

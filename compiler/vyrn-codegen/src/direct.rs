@@ -16402,7 +16402,10 @@ impl<'p> Fn_<'_, 'p> {
     /// name the run names is one this walk reads. The STATEMENT screen:
     /// [`Fn_::core_readable`], unchanged.
     fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
-        let at = s as *const Stmt as usize;
+        // A node is an ADDRESS, and `project::iterate_loop`'s copy of a loop
+        // body gives a statement a second one. `key_of` is the mapping back,
+        // and ten other readers of the plan in this file ask through it.
+        let at = self.cx.plan.key_of(s as *const Stmt as usize);
         let run = self.core_at.get(&at)?;
         // THE FRAME CLAUSE, per statement. It was per BODY until the release
         // half of it moved here, and then it refused any statement the
