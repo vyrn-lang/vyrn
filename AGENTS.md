@@ -141,7 +141,7 @@ Do not optimize on a guess. A micro-optimization that the numbers do not license
 
 ## The gate list, in order
 
-`cargo fmt --all --check`; `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check`; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`; the ignored corpus suites `kernel`, `coretables`, `typed`, `effects`, `fixtures`, `testsweep`; `cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`; the `vyrn-lsp` and `vyrn-genwasm` suites; `memory` single-threaded; `route --ignored` in release; `residue --ignored` in release; `VYRN_WASM_MANIFEST=check` on `wasmhash`; `genwasm --ignored` on a fresh cache; `vyrn doc --verify`; the site export; `vyrn test` per site file.
+`cargo fmt --all --check`; `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check`; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`; the ignored corpus suites `kernel`, `coretables`, `typed`, `effects`, `fixtures`, `testsweep`, `projections`; `cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`; the `vyrn-lsp` and `vyrn-genwasm` suites; `memory` single-threaded; `route --ignored` in release; `residue --ignored` in release; `VYRN_WASM_MANIFEST=check` on `wasmhash`; `genwasm --ignored` on a fresh cache; `vyrn doc --verify`; the site export; `vyrn test` per site file.
 
 Report every gate with its result. A red gate is reported as red, with the output.
 
