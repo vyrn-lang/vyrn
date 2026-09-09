@@ -232,7 +232,6 @@ pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) ->
 /// for it — so neither record is built unless somebody asked.
 #[derive(PartialEq, Clone, Copy)]
 enum Want {
-    Check,
     Sites,
     Lets,
     /// RFC-0092 M0: record every projection the rule would refuse, refuse none.
@@ -241,7 +240,6 @@ enum Want {
 
 /// One run's outputs.
 struct Run {
-    diags: Vec<Diagnostic>,
     sites: Vec<OwningSite>,
     projections: Vec<ProjectionSite>,
     param_escapers: HashSet<String>,
@@ -412,34 +410,16 @@ fn projection_call(name: &str) -> bool {
     name == crate::project::AT || named_projection(name)
 }
 
-/// Check every function for use-after-consume, returning **all** problems found
-/// as structured [`Diagnostic`]s. Each function is checked independently, so
-/// a use-after-consume error in one function does not suppress errors in others.
-/// Within a function, errors accumulate at **statement boundaries** (the same
-/// RFC-0006 model as the type checker): `block` push-and-continues, so two
-/// independent consume bugs in one body are both reported. A statement's
-/// internals still use `?`, so within a single statement (and a single expression)
-/// the first error wins — this is sound because every statement does its
-/// sub-expression checking *before* mutating `consumed`/`scope`, so after an
-/// error the flow state is consistent for the next statement.
 /// **The order a file's refusals come out in is the source's** (RFC-0125 §3
-/// M3, the corpus slice). This pass walks top-level functions before `impl`
+/// M3, the corpus slice). This pass walked top-level functions before `impl`
 /// methods and the placer walks bodies in the lowering's order, so the same
 /// two sentences came out swapped and the whole standard error moved even
 /// where every sentence was identical. Neither walk order is a rule anybody
 /// wrote down; the source's is, and it is the only one a reader can predict.
-/// So both passes sort by line before they print, and the other statement of
+/// So [`refusals`] sorts by line before it prints, and the other statement of
 /// the same rule is `vyrn-cli`'s `kernel_refuses`. Files keep the order they
 /// were first named in — a module's refusals stay together — and two on one
 /// line keep the walk's order, which is why the sort is stable.
-pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    let mut diags = run(program, Want::Check).diags;
-    in_source_order(&mut diags);
-    diags
-}
-
-/// Put a file's refusals in the order the source states them — see
-/// [`check_accum`], which is where the rule is written down.
 fn in_source_order(diags: &mut [Diagnostic]) {
     let mut files: Vec<Option<String>> = Vec::new();
     for d in diags.iter() {
@@ -490,18 +470,11 @@ fn in_source_order(diags: &mut [Diagnostic]) {
 ///    nothing else does. Measured over the corpus, six programs turn on it.
 /// 3. **The order is the source's**, for the whole list at once — the rule
 ///    [`check_accum`] states, applied after the two passes are one.
-///
-/// `VYRN_NO_MOVECHECK=1` stands the checker aside so the kernel's own sentence
-/// is reachable, which is the licence table's instrument, and it belongs here
-/// now that this is the only place both passes are asked.
 pub fn refusals(program: &Program) -> Vec<Diagnostic> {
-    let mut diags = if std::env::var("VYRN_NO_MOVECHECK").is_ok_and(|v| v == "1") {
-        Vec::new()
-    } else {
-        run(program, Want::Check).diags
-    };
-    // The must-use judgment, which `VYRN_NO_MOVECHECK=1` does NOT stand aside:
-    // it is not the move check's, and the knob names the file it stands aside.
+    // The must-use judgment, and nothing beside it out of this file: the move
+    // check states no rule of its own any more (RFC-0125 §3 M3, the plumbing
+    // slice), so what a reader gets is the kernel's list and the obligation's.
+    let mut diags = Vec::new();
     let owed = crate::own::must_use_refusals(program);
     let mustuse: HashSet<(Option<String>, String)> = owed
         .iter()
@@ -805,20 +778,7 @@ fn subject(message: &str) -> Option<&str> {
     (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
 }
 
-/// Every place rule 2 refuses a **store** of a borrow, out of `program`.
-///
-/// A filter over [`check_accum`] rather than a mode of its own: rule 2 is
-/// enforced on every check since Phase 4b-2, so this is a reading of the
-/// diagnostics rather than a second walk. The corpus test below asks for it by
-/// name and expects zero.
-pub fn borrow_store_sites(program: &Program) -> Vec<Diagnostic> {
-    check_accum(program)
-        .into_iter()
-        .filter(|d| d.message.contains("may not be stored into"))
-        .collect()
-}
-
-/// The one walk, shared by [`check_accum`], [`owning_sites`] and [`ownership`].
+/// The one walk, shared by [`owning_sites`], [`facts`] and [`projection_sites`].
 /// `want` turns each record on; with neither the pass still builds and carries
 /// its type environment, and asks `owns_heap` nowhere.
 fn run(program: &Program, want: Want) -> Run {
@@ -853,7 +813,6 @@ fn run(program: &Program, want: Want) -> Run {
         caps: &caps,
         impls: &program.impls,
         globals: &globals,
-        errors: RefCell::new(Vec::new()),
         decl: &decl,
         // Module state is the outermost frame and is built once, not per body.
         vars: RefCell::new(Scopes::new(decl.globals())),
@@ -883,7 +842,6 @@ fn run(program: &Program, want: Want) -> Run {
         lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
     };
-    let mut out = Vec::new();
     let mut projections = Vec::new();
     // A projection site is stamped with the module of the body it was found in,
     // the same way an error is — the sink itself has no idea which file it is
@@ -897,43 +855,25 @@ fn run(program: &Program, want: Want) -> Run {
         }
     };
     for f in &program.functions {
-        mc.errors.borrow_mut().clear();
         mc.function(f);
         drain(&mut projections, &mc, &f.module);
-        for s in mc.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = f.module.clone();
-            out.push(d);
-        }
     }
     // Test bodies (RFC-0015) move-check as ordinary Unit function bodies, so
     // use-after-consume inside a test is caught unchanged. The body is walked
     // **in place**: a clone would carry different node addresses, and Phase 4c
     // keys reclamation on them.
     for (i, t) in program.tests.iter().enumerate() {
-        mc.errors.borrow_mut().clear();
         // The synthetic name `own::analyze` keys this body's rows by — the
         // finish check (RFC-0114 §26) matches owners against emitted names.
         *mc.cur_fn.borrow_mut() = format!("test@{i}");
         mc.body(&[], &Type::Unit, &t.body);
         drain(&mut projections, &mc, &t.module);
-        for s in mc.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = t.module.clone();
-            out.push(d);
-        }
     }
     // Bench bodies (RFC-0055) move-check identically.
     for (i, b) in program.benches.iter().enumerate() {
-        mc.errors.borrow_mut().clear();
         *mc.cur_fn.borrow_mut() = format!("bench@{i}");
         mc.body(&[], &Type::Unit, &b.body);
         drain(&mut projections, &mc, &b.module);
-        for s in mc.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = b.module.clone();
-            out.push(d);
-        }
     }
     // RFC-0075's disposal obligation is NOT here, and RFC-0125 §3 M3's
     // obligation slice is why: it is a rule about a TYPE and this file states
@@ -990,7 +930,6 @@ fn run(program: &Program, want: Want) -> Run {
         }
     }
     Run {
-        diags: out,
         sites: mc.sites.map(RefCell::into_inner).unwrap_or_default(),
         projections,
         param_escapers: mc
@@ -998,37 +937,6 @@ fn run(program: &Program, want: Want) -> Run {
             .map(RefCell::into_inner)
             .unwrap_or_default(),
         fnval_clear,
-    }
-}
-
-/// The refusal THIS PASS states about `program`, rendered as the historical
-/// `"line {N}: {message}"` string. Thin shim over [`check_accum`], and the one
-/// door a test asks this pass through.
-///
-/// **There is no acceptance answer here, and there may not be one**
-/// (RFC-0125 §3 M3, the safety slice). Two passes judge ownership: this one and
-/// the kernel, which states rules this file no longer holds and which
-/// `vyrn-frontend` does not link. So this pass going quiet means it has nothing
-/// to say, and a reader who takes that for "the compiler accepts the program"
-/// states a second, weaker rule. Three unit tests did. One of them pinned
-/// `for x in consume r.xs` as compiling; the compiler has refused it since the
-/// kernel came in.
-///
-/// A test that wants "this program compiles" asks the whole compiler, in
-/// `compiler/vyrn-cli/tests/refusals.rs`, which links the kernel and runs
-/// `vyrn check`. This function panics where the pass is silent, and that is the
-/// guard: the wrong pin cannot be written, because there is no value to write
-/// it against.
-pub fn refusal(program: &Program) -> String {
-    match check_accum(program).into_iter().next() {
-        Some(d) => d.render(),
-        None => panic!(
-            "this pass states no refusal about the program, and silence is not \
-             acceptance: the kernel states ownership rules it does not, and \
-             `vyrn-frontend` does not link the kernel. Pin acceptance in \
-             `compiler/vyrn-cli/tests/refusals.rs`, which asks the whole compiler \
-             (RFC-0125 §3 M3, the safety slice)."
-        ),
     }
 }
 
@@ -1043,7 +951,6 @@ struct MoveCheck<'a> {
     globals: &'a HashSet<String>,
     /// Per-function statement-boundary error sink (RFC-0006 accumulation).
     /// Cleared at the start of each function, drained by `check_accum`.
-    errors: RefCell<Vec<Diagnostic>>,
     /// The declared-types reading (RFC-0089 M2, Phase 4a) — the same one
     /// `own.rs` decides releases with. **Nothing in this pass's diagnostics
     /// reads it yet**; 4b is where it starts to decide.
@@ -1384,7 +1291,7 @@ impl MoveCheck<'_> {
         value: &Expr,
         consumed: &mut Consumed,
         scope: &mut Vec<HashSet<String>>,
-    ) -> Result<(), Diagnostic> {
+    ) {
         let writeback = matches!(
             value,
             Expr::Call { name: callee, args, .. }
@@ -1394,9 +1301,8 @@ impl MoveCheck<'_> {
         if writeback {
             *self.writeback.borrow_mut() = Some(target.to_string());
         }
-        let walked = self.expr(value, consumed, scope);
+        self.expr(value, consumed, scope);
         *self.writeback.borrow_mut() = None;
-        walked
     }
 
     /// Whether `name` is a NULLARY constructor rather than a binding.
@@ -2025,14 +1931,7 @@ impl MoveCheck<'_> {
                 // (the `return` precedent — code after it is unreachable-clean).
                 break;
             }
-            match self.stmt(s, consumed, scope) {
-                Ok(d) => diverged = d,
-                Err(msg) => {
-                    self.errors.borrow_mut().push(msg);
-                    // Keep going: the statement's sub-expression check ran before
-                    // any mutation, so state is consistent for the next statement.
-                }
-            }
+            diverged = self.stmt(s, consumed, scope);
         }
         self.exit();
         scope.pop();
@@ -2045,12 +1944,7 @@ impl MoveCheck<'_> {
 
     /// Returns whether this statement **diverges** (leaves via
     /// `return`/`break`/`continue` on every path) — see [`MoveCheck::block`].
-    fn stmt(
-        &self,
-        s: &Stmt,
-        consumed: &mut Consumed,
-        scope: &mut Vec<HashSet<String>>,
-    ) -> Result<bool, Diagnostic> {
+    fn stmt(&self, s: &Stmt, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {
         match s {
             Stmt::Let {
                 name,
@@ -2059,7 +1953,7 @@ impl MoveCheck<'_> {
                 line,
                 ..
             } => {
-                self.expr(value, consumed, scope)?;
+                self.expr(value, consumed, scope);
                 // The binding's type: what it was declared, else what the
                 // initializer yields — read against the PRE-binding environment,
                 // so `let x = x + b` resolves the old `x`.
@@ -2126,14 +2020,13 @@ impl MoveCheck<'_> {
                 }
                 revive(consumed, name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
-                Ok(false)
+                false
             }
             Stmt::Assign { name, value, line } => {
                 // The write-back form of a rebuilding row: `xs = xs.push(v)`.
                 // The receiver comes back through the result and the store
                 // revives the binding, so its take is not recorded.
-                let walked = self.walk_writeback(name, value, consumed, scope);
-                walked?;
+                self.walk_writeback(name, value, consumed, scope);
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
                 // so 4b treats a store into it differently from a local's.
                 let global = self.globals.contains(name) && !Self::in_scope(scope, name);
@@ -2185,7 +2078,7 @@ impl MoveCheck<'_> {
                     }
                 }
                 revive(consumed, name); // reassignment revives it
-                Ok(false)
+                false
             }
             Stmt::SetField {
                 name,
@@ -2194,7 +2087,7 @@ impl MoveCheck<'_> {
                 line,
             } => {
                 self.site("field", *line, value, None);
-                self.walk_writeback(&format!("{name}.{field}"), value, consumed, scope)?;
+                self.walk_writeback(&format!("{name}.{field}"), value, consumed, scope);
                 self.store(
                     value,
                     &|| format!("the field `{name}.{field}`"),
@@ -2207,7 +2100,7 @@ impl MoveCheck<'_> {
                 // down — and the reason no drop flag is needed to say it.
                 revive(consumed, &format!("{name}.{field}"));
                 self.note_carrying_store(name, value);
-                Ok(false)
+                false
             }
             // `a[i] = v` — the stored value is consumed like a `push` argument
             // (neither `push` nor the store marks it consumed, since no user
@@ -2240,13 +2133,13 @@ impl MoveCheck<'_> {
                                 eprintln!("proj-store walked: {name} line {line}");
                             }
                             self.block(blk, consumed, scope);
-                            return Ok(false);
+                            return false;
                         }
                     }
                 }
-                self.expr(index, consumed, scope)?;
+                self.expr(index, consumed, scope);
                 self.site("element", *line, value, None);
-                self.expr(value, consumed, scope)?;
+                self.expr(value, consumed, scope);
                 self.store(value, &|| format!("`{name}`"), *line, true, consumed);
                 // A map takes its KEY. Both backends write the key pointer into
                 // `keys[len]` and copy nothing, so `hs[k] = v` moves `k` — and
@@ -2274,12 +2167,12 @@ impl MoveCheck<'_> {
                 // OWNED element and the store still records the move.
                 self.store(index, &|| format!("`{name}`"), *line, true, consumed);
                 self.note_carrying_store(name, value);
-                Ok(false)
+                false
             }
             Stmt::Return { value, line } => {
                 if let Some(e) = value {
                     self.site("return", *line, e, None);
-                    self.expr(e, consumed, scope)?;
+                    self.expr(e, consumed, scope);
                     // Round fifty-six: the escape screen's record, at the one
                     // site a result actually leaves — BEFORE `check_return`'s
                     // own refusals, so a shape the checker also refuses still
@@ -2292,18 +2185,18 @@ impl MoveCheck<'_> {
                     }
                     self.note_returned_projection(e, *line);
                 }
-                Ok(true)
+                true
             }
             // `break`/`continue` (RFC-0060) consume nothing but terminate the
             // path — code after them in the same block is unreachable.
-            Stmt::Break { .. } => Ok(true),
+            Stmt::Break { .. } => true,
             // A `continue` also diverges here, but it jumps to the NEXT
             // iteration: the loop body re-runs. Marking it is what stops the
             // loop arms from counting it as the "runs at most once"
             // divergence that skips the next-iteration reuse check.
             Stmt::Continue { .. } => {
                 self.continue_seen.set(true);
-                Ok(true)
+                true
             }
             Stmt::If {
                 cond,
@@ -2311,7 +2204,7 @@ impl MoveCheck<'_> {
                 else_block,
                 ..
             } => {
-                self.expr(cond, consumed, scope)?;
+                self.expr(cond, consumed, scope);
                 let mut then_c = consumed.clone();
                 let then_div = self.block(then_block, &mut then_c, scope);
                 let mut else_c = consumed.clone();
@@ -2341,7 +2234,7 @@ impl MoveCheck<'_> {
                         consumed.or_insert(k, v);
                     }
                 }
-                Ok(then_div && else_div)
+                then_div && else_div
             }
             // `if let PAT = e { .. } else { .. }` (RFC-0060): the scrutinee is
             // consumed eagerly (like a `match` scrutinee), the binders are fresh
@@ -2354,7 +2247,7 @@ impl MoveCheck<'_> {
                 else_block,
                 ..
             } => {
-                self.expr(scrutinee, consumed, scope)?;
+                self.expr(scrutinee, consumed, scope);
                 let mut then_c = consumed.clone();
                 scope.push(HashSet::new());
                 self.enter();
@@ -2423,7 +2316,7 @@ impl MoveCheck<'_> {
                         consumed.or_insert(k, v);
                     }
                 }
-                Ok(then_div && else_div)
+                then_div && else_div
             }
             Stmt::While { cond, body, .. } => {
                 // The condition re-runs on every iteration, so consumption in it
@@ -2431,14 +2324,14 @@ impl MoveCheck<'_> {
                 // would use `x` again next time around) — track both in the
                 // in-loop map and run the same next-iteration check.
                 let mut body_c = consumed.clone();
-                self.expr(cond, &mut body_c, scope)?;
+                self.expr(cond, &mut body_c, scope);
                 let outer_continue = self.continue_seen.replace(false);
                 let _ = self.block(body, &mut body_c, scope);
                 self.continue_seen.set(outer_continue);
                 for (k, v) in body_c {
                     consumed.or_insert(k, v);
                 }
-                Ok(false)
+                false
             }
             // A `for` loop consumes like a `while`: the iterable is read once,
             // and consuming an outer binding in the body is a use-again error.
@@ -2449,7 +2342,7 @@ impl MoveCheck<'_> {
                 line,
                 consuming,
             } => {
-                self.expr(iter, consumed, scope)?;
+                self.expr(iter, consumed, scope);
                 self.site("iterate", *line, iter, None);
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
                 // RFC-0089 rule 2: the loop variable is a borrow only while the
@@ -2524,7 +2417,7 @@ impl MoveCheck<'_> {
                         consumed.insert(path.clone(), Consumption);
                     }
                 }
-                Ok(false)
+                false
             }
             // A `panic(..)` statement diverges (RFC-0079), which here means
             // exactly what `break`/`continue` mean: what follows is unreachable
@@ -2536,8 +2429,8 @@ impl MoveCheck<'_> {
                 // statement-position call whose OWNED heap result nothing
                 // binds. The core states it as a `St::Drop` at the
                 // `Stmt::Expr`, and the emitter reads the core alone.
-                self.expr(e, consumed, scope)
-                    .map(|_| matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name)))
+                self.expr(e, consumed, scope);
+                matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name))
             }
             // A `region` is an ordinary nested block for move checking; it
             // diverges iff its body does (a `break` inside it exits the loop).
@@ -2562,7 +2455,7 @@ impl MoveCheck<'_> {
                         consumed.or_insert(k, v);
                     }
                 }
-                Ok(div)
+                div
             }
             // `drop name;` consumes the binding: using it afterward is a
             // use-after-drop, caught by the same machinery as `consume`.
@@ -2580,7 +2473,7 @@ impl MoveCheck<'_> {
                 // `drop` consumes the binding, so a use after it is a
                 // use-after-drop for the walk's own table.
                 consumed.insert(name.clone(), Consumption);
-                Ok(false)
+                false
             }
         }
     }
@@ -2615,21 +2508,15 @@ impl MoveCheck<'_> {
         }
     }
 
-    fn expr(
-        &self,
-        e: &Expr,
-        consumed: &mut Consumed,
-        scope: &mut Vec<HashSet<String>>,
-    ) -> Result<(), Diagnostic> {
+    fn expr(&self, e: &Expr, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) {
         match e {
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
+            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
             Expr::Var { name, line } => {
                 self.capture_site(name, *line);
-                Ok(())
             }
             Expr::Unary { expr, .. } => self.expr(expr, consumed, scope),
             Expr::Binary { lhs, rhs, .. } => {
-                self.expr(lhs, consumed, scope)?;
+                self.expr(lhs, consumed, scope);
                 // An operand of a String `+`, of a String comparison and of
                 // `=~` is a call argument — `@concat`'s — and the core states
                 // its release row from the lowered operator (RFC-0125 §3 M3,
@@ -2645,7 +2532,6 @@ impl MoveCheck<'_> {
                 Some(_) => {
                     let (root, rline) = root_var(e);
                     self.capture_site(root, rline);
-                    Ok(())
                 }
                 None => {
                     // RFC-0114 R1′ was recorded here: a receiver with no
@@ -2662,11 +2548,11 @@ impl MoveCheck<'_> {
             // RFC-0093 — the take. The record below is what makes a later read
             // of this place, or of anything overlapping it, a rule-1 error.
             Expr::Consume { place, line: _ } => {
-                self.expr(place, consumed, scope)?;
+                self.expr(place, consumed, scope);
                 // A `consume` of what names no place is the desugar's refusal
                 // now (rows 08 and 09), so this walk records nothing for it.
                 let Some((_, path)) = place_path(place) else {
-                    return Ok(());
+                    return;
                 };
                 // A whole binding writes the same `Gone::Moved` the consuming
                 // loop writes, so `own.rs` suppresses its drop through the two
@@ -2679,7 +2565,6 @@ impl MoveCheck<'_> {
                 // root joins the set, because a record is drained a field at a
                 // time.
                 consumed.insert(path.clone(), Consumption);
-                Ok(())
             }
             Expr::Try { expr, .. } => {
                 let r = self.expr(expr, consumed, scope);
@@ -2698,7 +2583,7 @@ impl MoveCheck<'_> {
             Expr::StructLit { name, fields, line } => {
                 for (f, v) in fields {
                     self.site("literal", *line, v, None);
-                    self.expr(v, consumed, scope)?;
+                    self.expr(v, consumed, scope);
                     self.store(
                         v,
                         &|| format!("the field `{name}.{f}`"),
@@ -2707,20 +2592,18 @@ impl MoveCheck<'_> {
                         consumed,
                     );
                 }
-                Ok(())
             }
             Expr::TryConstruct { name, args, line } => {
                 for a in args {
                     self.site("literal", *line, a, None);
-                    self.expr(a, consumed, scope)?;
+                    self.expr(a, consumed, scope);
                     self.store(a, &|| format!("`{name}`"), *line, true, consumed);
                 }
-                Ok(())
             }
             Expr::Match {
                 scrutinee, arms, ..
             } => {
-                self.expr(scrutinee, consumed, scope)?;
+                self.expr(scrutinee, consumed, scope);
                 let base = consumed.clone();
                 let mut arm_cs: Vec<Consumed> = Vec::new();
                 for arm in arms {
@@ -2739,18 +2622,16 @@ impl MoveCheck<'_> {
                     self.arm_binders
                         .borrow_mut()
                         .push(binders.iter().map(|b| b.to_string()).collect());
-                    let r = match &arm.body {
+                    match &arm.body {
                         ArmBody::Expr(body) => self.expr(body, &mut c, scope),
                         // The statements walk as statements, inside the same
                         // binder scope and branch stamp an expression arm gets.
                         ArmBody::Block(b) => {
                             self.block(b, &mut c, scope);
-                            Ok(())
                         }
-                    };
+                    }
                     self.arm_binders.borrow_mut().pop();
                     self.exit();
-                    r?;
                     scope.pop();
                     arm_cs.push(c);
                 }
@@ -2778,7 +2659,6 @@ impl MoveCheck<'_> {
                 if let Some(m) = merged {
                     *consumed = m;
                 }
-                Ok(())
             }
             // `if` as an expression (RFC-0030): its two branches are match arms —
             // the condition consumes eagerly, then each branch runs from the same
@@ -2789,15 +2669,13 @@ impl MoveCheck<'_> {
                 else_branch,
                 ..
             } => {
-                self.expr(cond, consumed, scope)?;
+                self.expr(cond, consumed, scope);
                 let base = consumed.clone();
                 let mut then_c = base.clone();
-                let r = self.expr(then_branch, &mut then_c, scope);
-                r?;
+                self.expr(then_branch, &mut then_c, scope);
                 let mut else_c = base.clone();
                 if let Some(eb) = else_branch {
-                    let r = self.expr(eb, &mut else_c, scope);
-                    r?;
+                    self.expr(eb, &mut else_c, scope);
                 }
                 // RFC-0114 Rule N at an `if`-expression join — the statement
                 // rule with the match's value guard: the releasing branch's
@@ -2808,7 +2686,6 @@ impl MoveCheck<'_> {
                 for (k, v) in then_c.into_iter().chain(else_c) {
                     consumed.or_insert(k, v);
                 }
-                Ok(())
             }
             Expr::Call { name, args, line } => {
                 let caps = self.caps.get(name);
@@ -2847,7 +2724,7 @@ impl MoveCheck<'_> {
                         }
                     }
                     self.site("arg", *line, arg, None);
-                    self.expr(arg, consumed, scope)?;
+                    self.expr(arg, consumed, scope);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         // A NULLARY constructor is a value with no owner, not a
                         // name (RFC-0126 §8.8): `take(None)` twice hands the
@@ -2931,12 +2808,11 @@ impl MoveCheck<'_> {
                         );
                     }
                 }
-                Ok(())
             }
             Expr::ArrayLit { elems, line } => {
                 for e in elems {
                     self.site("literal", *line, e, None);
-                    self.expr(e, consumed, scope)?;
+                    self.expr(e, consumed, scope);
                     self.store(
                         e,
                         &|| "the array literal".to_string(),
@@ -2945,17 +2821,15 @@ impl MoveCheck<'_> {
                         consumed,
                     );
                 }
-                Ok(())
             }
             Expr::MapLit { entries, line } => {
                 for (k, v) in entries {
-                    self.expr(k, consumed, scope)?;
+                    self.expr(k, consumed, scope);
                     self.site("literal", *line, v, None);
-                    self.expr(v, consumed, scope)?;
+                    self.expr(v, consumed, scope);
                     self.store(k, &|| "the map literal".to_string(), *line, true, consumed);
                     self.store(v, &|| "the map literal".to_string(), *line, true, consumed);
                 }
-                Ok(())
             }
             // A lambda body (RFC-0023): its untyped params are fresh locals; walk
             // the body so a `consume`-misuse inside it is still caught. Captured
@@ -3014,7 +2888,6 @@ impl MoveCheck<'_> {
                                 consumed.or_insert(k, v);
                             }
                         }
-                        Ok(())
                     }
                 };
                 self.lambda_base.borrow_mut().pop();
@@ -3028,7 +2901,7 @@ impl MoveCheck<'_> {
                 let caps = self.caps.get(name);
                 for (i, arg) in args.iter().enumerate() {
                     self.site("arg", *line, arg, None);
-                    self.expr(arg, consumed, scope)?;
+                    self.expr(arg, consumed, scope);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         // A nullary constructor is not a name — see the
                         // ordinary call above (RFC-0126 §8.8).
@@ -3039,7 +2912,6 @@ impl MoveCheck<'_> {
                         }
                     }
                 }
-                Ok(())
             }
         }
     }
@@ -3487,46 +3359,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    /// The suite's own corpus, and the instrument that measures the deletion
-    /// licence with it (RFC-0125 §3 M3). These tests are three times the
-    /// census and they are the only corpus of programs the checker REFUSES:
-    /// `examples/`, `std/` and `site/` all compile, so they say nothing about
-    /// a refusal. `VYRN_DUMP_MOVECHECK=<dir> cargo test -p vyrn-frontend
-    /// movecheck` writes every program checked here to that directory,
-    /// `no_*` for them, and each through `VYRN_NO_MOVECHECK=1 vyrn check` is
-    /// the licence: a program the checker refuses and the kernel accepts is a
-    /// rule that may not leave this file.
-    ///
-    /// Every program asked here is refused, because [`super::refusal`] is the
-    /// only door and it panics on silence (RFC-0125 §3 M3, the safety slice).
-    /// The programs these tests read as ACCEPTED are asked of the whole
-    /// compiler instead, in `compiler/vyrn-cli/tests/refusals.rs`.
-    fn run(src: &str) -> String {
-        let program = crate::parser::parse(crate::lexer::lex(src).unwrap()).unwrap();
-        record(src);
-        super::refusal(&program)
-    }
-
-    /// One program of the corpus, written out.
-    fn record(src: &str) {
-        let Ok(dir) = std::env::var("VYRN_DUMP_MOVECHECK") else {
-            return;
-        };
-        let _ = std::fs::create_dir_all(&dir);
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(src, &mut h);
-        let n = std::hash::Hasher::finish(&h);
-        let _ = std::fs::write(format!("{dir}/no_{n:016x}.vyrn"), src);
-    }
-
-    /// The guard itself: a program this pass says nothing about has no answer
-    /// here to assert on (RFC-0125 §3 M3, the safety slice).
-    #[test]
-    #[should_panic(expected = "silence is not acceptance")]
-    fn this_pass_has_no_acceptance_answer() {
-        run("fn main() -> Int64 { return 0 }");
-    }
-
     /// What `views` and `sinks` answer, now that both read a signature.
     ///
     /// The lists they read are gone (RFC-0094 M1) and the reservation check
@@ -3569,33 +3401,6 @@ mod tests {
             assert!(!sinks(&decl, name, 0));
         }
     }
-
-    // ---- RFC-0089 Phase 4b: rules 1 and 3 --------------------------------
-
-    // ---- RFC-0093: the take ---------------------------------------------
-
-    // ---- rule 2 at the third exit: a borrow may not be consumed -----------
-
-    // ---- RFC-0075: what a stream producer TAKES --------------------------
-    //
-    // The obligation itself left this file with the rule (RFC-0125 §3 M3, the
-    // obligation slice): it is a TYPE's, and it is stated in the typed
-    // judgment. What is left here is rule 1's question about the same
-    // programs — what a producer takes, and what a combinator does to the
-    // ownership of what it is handed — which is this file's.
-
-    /// The producer every stream case below acquires from, and a consumer that
-    /// discharges one — a call, so it fits in an expression position.
-    const FEED: &str = "fn feed() -> Stream<Int64> { let xs: Array<Int64> = [1, 2] \
-                        return fromArray(xs) } \
-                        fn drain(s: Stream<Int64>) -> Int64 { let mut t = 0 \
-                        for v in s { t = t + v } return t } ";
-
-    /// A combinator, spelled locally rather than imported: nothing in the
-    /// compiler knows about std/stream, and the point is that nothing has to.
-    const TWICE: &str = "fn twice(s: Stream<Int64>) -> Stream<Int64> { \
-                         let mut out: Array<Int64> = [] for x in s { out.push(x * 2) } \
-                         return fromArray(out) } ";
 
     // ---- RFC-0089 Phase 4a: the site census ------------------------------
 
@@ -3754,54 +3559,6 @@ mod tests {
         for (f, t, p, u) in &per_file {
             println!("  {t:>5} {p:>5} {u:>5}  {f}");
         }
-    }
-
-    /// RFC-0089 rule 2 over the whole corpus: **zero**.
-    ///
-    /// The number Phase 4b measured and gated off. It parses each file ALONE,
-    /// like the other corpus measurements here, which under-counts a linked
-    /// program — `vyrn check` over every root is the reading that migrated the
-    /// corpus, and it is also zero.
-    ///
-    /// Ignored by default: it reads the repository. Run it with
-    /// `cargo test -p vyrn-frontend --lib borrow_store_sites -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn borrow_store_sites_over_the_corpus() {
-        let mut files = Vec::new();
-        crate::own::tests::sources("examples", &mut files);
-        crate::own::tests::sources("std", &mut files);
-        files.sort();
-
-        let mut rows: Vec<String> = Vec::new();
-        let mut parsed = 0;
-        for path in &files {
-            let Ok(src) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let Ok(tokens) = crate::lexer::lex(&src) else {
-                continue;
-            };
-            let (program, errs) = crate::parser::parse_accum(tokens);
-            if !errs.is_empty() {
-                continue;
-            }
-            parsed += 1;
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            for d in borrow_store_sites(&program) {
-                rows.push(format!(
-                    "{name}:{} {}",
-                    d.line,
-                    d.message.lines().next().unwrap_or("")
-                ));
-            }
-        }
-        println!("corpus: {} files ({parsed} parsed)", files.len());
-        println!("rule 2 store refusals: {}", rows.len());
-        for r in &rows {
-            println!("    {r}");
-        }
-        assert!(rows.is_empty(), "{rows:#?}");
     }
 
     /// RFC-0092 M0 — the gate. How many sites the rule "a projection is a borrow

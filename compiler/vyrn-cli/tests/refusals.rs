@@ -1,45 +1,29 @@
-//! RFC-0125 §3 M3, the census: every refusal the move checker can give, one
-//! minimal program each, and what the kernel says about the same program.
+//! RFC-0125 §3 M3, the census: every refusal the move checker could once give,
+//! one minimal program each, and which pass states it now.
 //!
-//! The deletion slice after this one takes `movecheck.rs`'s placement code
-//! away. It may take away only what something else states. So each row here
-//! is one refusal site — a `menu(..)` or a `Diagnostic::error(..)` in
-//! `movecheck.rs`, or a guard in `checker.rs` the close-out attributed to the
-//! move check — with the program that reaches it, the rule's RFC, and the
-//! column the whole census exists for: whether the kernel gives the same
-//! answer today.
+//! Each row is one refusal site the close-out attributed to the move check,
+//! with the program that reaches it, the rule's RFC, and the column the whole
+//! census exists for: who says the sentence a reader gets. Every one of them
+//! has left `movecheck.rs`, so the census is no longer a deletion licence — it
+//! is the pin that stops the sentences moving after the deletion.
 //!
-//! Two runs per row. `vyrn check` is the checker's answer, and it must be the
-//! wording in the table. `VYRN_NO_MOVECHECK=1 vyrn check` stands the checker
-//! aside so the kernel's own sentence is reachable — the checker refuses each
-//! of these first, so without the knob the kernel is never asked (RFC-0125 §3
-//! M3, "wordings"). The kernel's refusal needs no flag of its own since the
-//! default slice: the second run is the licence the deletion track reads, and
-//! a row that says `the same` or `its own words` is a rule `movecheck.rs`
-//! may lose without the program it refuses becoming one the compiler accepts.
+//! Two runs per row. `vyrn check` is the compiler's answer, and it must be the
+//! wording in the table. `VYRN_NO_KERNEL=1 vyrn check` stands the KERNEL aside,
+//! which is what attributes the sentence now that the move check states no rule
+//! of its own (RFC-0125 §3 M3, the plumbing slice). The instrument was the
+//! other way round until then — `VYRN_NO_MOVECHECK=1` reached past the checker
+//! to the kernel — and it became inert the day the checker's last rule left:
+//! `vyrn check` over the whole corpus is byte-identical with the knob and
+//! without it, which is the licence the plumbing slice spent.
 //!
-//! The column has four values, and each is asserted:
+//! The column has two values, and each is asserted:
 //!
-//!   - [`Kernel::Same`] — the kernel prints the checker's sentence at the same
-//!     file and line, minus the `fix:` menu. The menu names `.copy()` and
-//!     write-back as ways out, which is the checker's knowledge of the surface
-//!     and not the kernel's; it is the next slice's.
-//!   - [`Kernel::Other`] — the kernel refuses the program, in words of its
-//!     own. A row here is not closed: the sentence a reader gets would change
-//!     the day the checker goes.
-//!   - [`Kernel::No`] — the kernel accepts the program. The rule has no kernel
-//!     equivalent, and `movecheck.rs` cannot lose this site yet.
-//!   - [`Kernel::Elsewhere`] — the refusal is not the move check's at all: it
-//!     survives `VYRN_NO_MOVECHECK=1` because another pass gives it. Nothing
-//!     is owed here, and the close-out's attribution is corrected.
+//!   - [`Kernel::Its`] — the kernel states it. `VYRN_NO_KERNEL=1` accepts the
+//!     program, so the sentence in the table is the kernel's own.
+//!   - [`Kernel::Elsewhere`] — another pass states it: the refusal survives
+//!     `VYRN_NO_KERNEL=1` word for word.
 //!
-//! A row whose site has already LEFT `movecheck.rs` — rows 12, 08, 09, 04, 05,
-//! 28, 06, 20, 21, 07, 19, 25, 13, 14, 26, 10, 11, 29, 01, 02, 03, 27, 34, 22
-//! and 24, RFC-0125 §3 M3 — is refused by the kernel in both runs, and the two
-//! must
-//! still agree. The row is what stops the sentence moving after the deletion,
-//! so it stays in the census.
-//!
+
 //! A census row is one program with one error in it, which is what makes it a
 //! census and what it cannot see. Accumulation — a file with two kinds of error
 //! — is pinned separately, below the rows: see
@@ -51,16 +35,12 @@ use std::path::{Path, PathBuf};
 mod common;
 use common::vyrn;
 
-/// What the kernel says about a program the checker refuses.
+/// Which pass states a row's refusal, measured by standing the kernel aside.
 #[derive(PartialEq, Eq, Debug)]
 enum Kernel {
-    /// The checker's sentence, at the same line, minus the menu.
-    Same,
-    /// A refusal of its own. The needle is what its message must contain.
-    Other(&'static str),
-    /// Nothing: the program compiles for the kernel.
-    No,
-    /// Another pass gives it, so the move check is not its only source.
+    /// The kernel's own. `VYRN_NO_KERNEL=1` accepts the program.
+    Its,
+    /// Another pass's: the refusal survives `VYRN_NO_KERNEL=1`, word for word.
     Elsewhere,
 }
 
@@ -100,21 +80,21 @@ fn census() -> Vec<Row> {
             "rule 2: an element read may not be stored",
             "RFC-0092",
             "`b.xs[0]` may not be stored into `push(..)` — it is read out of a place that owns it",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r02_store_read_parameter_field.vyrn",
             "rule 2: a field of a `read` parameter may not be stored",
             "RFC-0089",
             "`h.meta[0]` may not be stored into `push(..)` — it is a `read` parameter",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r03_store_projection.vyrn",
             "rule 2: a projection is a borrow of its root, whatever the root is",
             "RFC-0092",
             "`d.title` may not be stored into `push(..)` — it is read out of a place that owns it",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r04_whole_after_a_hole.vyrn",
@@ -122,7 +102,7 @@ fn census() -> Vec<Row> {
             "RFC-0093",
             "`p.name` was taken out of `p` here\nline 10: ... and `p` is used as a whole here, \
              with the hole still in it",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r05_alias_then_write.vyrn",
@@ -130,7 +110,7 @@ fn census() -> Vec<Row> {
             "RFC-0090",
             "`t.xs[..]` is written here while `before` still reads out of it\nline 9: ... and \
              `before` is used again here",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r06_use_after_consume.vyrn",
@@ -138,21 +118,21 @@ fn census() -> Vec<Row> {
             "RFC-0089",
             "`x` is used here but was already consumed by `take(..)` on line 8\n  (a `consume` \
              parameter takes ownership; the value can't be used afterward)",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r07_moved_into_a_binding.vyrn",
             "rule 1: a move into a binding, and a use of the source after it",
             "RFC-0089",
             "`s` was moved here into the binding `t`\nline 5: ... and `s` is used again here",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r08_take_an_element.vyrn",
             "`consume` reaches a field, never an element",
             "RFC-0093",
             "`xs[0]` may not be taken — an element is not a place a take reaches",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r09_nothing_to_take.vyrn",
@@ -160,7 +140,7 @@ fn census() -> Vec<Row> {
             "RFC-0093",
             "`consume` here has nothing to take — the value is already owned, so there is no \
              place to leave a hole in",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r10_consume_module_state.vyrn",
@@ -169,7 +149,7 @@ fn census() -> Vec<Row> {
             "module state `names` may not be passed to a `consume` parameter via `take(..)` — \
              nothing may take ownership of module state (it lives for the whole module and is \
              never dropped)",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r11_consume_a_read_parameter.vyrn",
@@ -177,7 +157,7 @@ fn census() -> Vec<Row> {
             "RFC-0089",
             "`ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
              parameter",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r12_module_state_to_a_consume_parameter.vyrn",
@@ -186,7 +166,7 @@ fn census() -> Vec<Row> {
             "module state `names` may not be passed to a `consume` parameter via `take(..)` — \
              nothing may take ownership of module state (it lives for the whole module and is \
              never dropped)",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r13_read_parameter_to_a_consume_parameter.vyrn",
@@ -194,7 +174,7 @@ fn census() -> Vec<Row> {
             "RFC-0089",
             "`ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` \
              parameter",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r14_projection_to_a_consume_parameter.vyrn",
@@ -202,7 +182,7 @@ fn census() -> Vec<Row> {
             "RFC-0092",
             "`d.title` may not be passed to a `consume` parameter via `take(..)` — it is read \
              out of a place that owns it",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r15_return_module_state.vyrn",
@@ -210,14 +190,14 @@ fn census() -> Vec<Row> {
             "RFC-0013",
             "`names` may not be returned — it is module state, which nothing may take, and a \
              return is owned",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r16_return_a_field_of_a_read_parameter.vyrn",
             "rule 2 at the return: a field of a `read` parameter",
             "RFC-0089",
             "`d.title` may not be returned — it is a `read` parameter, and a return is owned",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r17_export_returns_a_borrow.vyrn",
@@ -225,35 +205,35 @@ fn census() -> Vec<Row> {
             "RFC-0012",
             "`s` may not be returned from an exported function — it is a `read` parameter, and \
              the JS caller releases what it is handed",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r18_return_a_read_parameter.vyrn",
             "rule 2 at the return: a whole `read` parameter",
             "RFC-0089",
             "`ys` may not be returned — it is a `read` parameter, and a return is owned",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r19_read_parameter_wrapped_in_the_result.vyrn",
             "rule 2 through a wrapper: a `read` parameter put into the result",
             "RFC-0089",
             "`s` may not be put into `Some(..)` — it is a `read` parameter",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r20_drop_after_consume.vyrn",
             "rule 1 at the drop: what a `consume` parameter took is gone",
             "RFC-0089",
             "`a` is dropped here but was already consumed by `take(..)` on line 6",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r21_drop_a_borrow.vyrn",
             "rule 4 at the drop: the place that owns a value releases it",
             "RFC-0089",
             "`owned` may not be dropped — it is read out of a place that owns it",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r22_drop_with_a_hole.vyrn",
@@ -266,7 +246,7 @@ fn census() -> Vec<Row> {
             // data and so never judged the `drop`. It gives it in these words
             // since the drop-hole slice, which moved the sentence and its menu
             // to `Kernel::drop` and took the checker's copy away.
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r23_modify_is_exclusive.vyrn",
@@ -289,7 +269,7 @@ fn census() -> Vec<Row> {
             // RFC-0037 over the two.
             "`s` may not be captured by a closure that outlives this call — it is a `read` \
              parameter",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r25_consume_inside_a_loop.vyrn",
@@ -297,7 +277,7 @@ fn census() -> Vec<Row> {
             "RFC-0089",
             "`x` is consumed by `take(..)` inside a loop, so it would be used again on the next \
              iteration",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r26_rebuild_a_borrowed_receiver.vyrn",
@@ -305,14 +285,14 @@ fn census() -> Vec<Row> {
             "RFC-0125",
             "`mt` is read out of `h.meta` here — a place that owns it\nline 7: ... and \
              `push(..)` takes `mt`, so `mt` must be a value of its own",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r27_borrow_to_a_builtin_consume.vyrn",
             "rule 2: a `read` parameter to a builtin that declares `consume`",
             "RFC-0089",
             "`xs` may not be stored into `fromArray(..)` — it is a `read` parameter",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r28_return_a_capture_from_a_closure.vyrn",
@@ -320,7 +300,7 @@ fn census() -> Vec<Row> {
             "RFC-0037",
             "`s` may not be returned from a closure — it is a captured binding, and the \
              closure's result is its caller's",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r29_for_in_consume_module_state.vyrn",
@@ -329,7 +309,7 @@ fn census() -> Vec<Row> {
             "module state `names` may not be consumed by the `for .. in consume` loop — nothing \
              may take ownership of module state (it lives for the whole module and is never \
              dropped)",
-            Kernel::Same,
+            Kernel::Its,
         ),
         row(
             "r30_stream_never_disposed.vyrn",
@@ -368,7 +348,7 @@ fn census() -> Vec<Row> {
             "rule 2: a `read` parameter into a builtin's `consume` argument",
             "RFC-0089",
             "`s` may not be stored into `push(..)` — it is a `read` parameter",
-            Kernel::Same,
+            Kernel::Its,
         ),
     ]
 }
@@ -384,16 +364,16 @@ fn unlicensed_dir() -> PathBuf {
 
 /// The command's standard error, with the `fix:` and `note:` menu lines and
 /// the file prefix taken off, so what is left is the sentence.
-fn refusal(file: &str, kernel_mode: bool) -> (bool, String) {
-    refusal_in(dir(), file, kernel_mode)
+fn refusal(file: &str, no_kernel: bool) -> (bool, String) {
+    refusal_in(dir(), file, no_kernel)
 }
 
 /// The command's WHOLE standard error, menu and all: what a reader sees.
-fn whole_refusal_in(dir: PathBuf, file: &str, kernel_mode: bool) -> (bool, String) {
+fn whole_refusal_in(dir: PathBuf, file: &str, no_kernel: bool) -> (bool, String) {
     let mut cmd = vyrn();
     cmd.arg("check").arg(dir.join(file));
-    if kernel_mode {
-        cmd.env("VYRN_NO_MOVECHECK", "1");
+    if no_kernel {
+        cmd.env("VYRN_NO_KERNEL", "1");
     }
     let out = cmd.output().expect("vyrn check");
     (
@@ -402,12 +382,12 @@ fn whole_refusal_in(dir: PathBuf, file: &str, kernel_mode: bool) -> (bool, Strin
     )
 }
 
-fn refusal_in(dir: PathBuf, file: &str, kernel_mode: bool) -> (bool, String) {
+fn refusal_in(dir: PathBuf, file: &str, no_kernel: bool) -> (bool, String) {
     let path = dir.join(file);
     let mut cmd = vyrn();
     cmd.arg("check").arg(&path);
-    if kernel_mode {
-        cmd.env("VYRN_NO_MOVECHECK", "1");
+    if no_kernel {
+        cmd.env("VYRN_NO_KERNEL", "1");
     }
     let out = cmd.output().expect("vyrn check");
     let err = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
@@ -473,42 +453,22 @@ fn the_census_is_what_the_two_passes_say() {
         }
         let (kok, ktext) = refusal(r.file, true);
         match &r.kernel {
-            Kernel::No => {
-                if !kok {
-                    bad.push(format!(
-                        "{}: the table says the kernel gives nothing, and it said\n    {}",
-                        r.file,
-                        ktext.replace('\n', "\n    ")
-                    ));
-                }
-            }
             Kernel::Elsewhere => {
                 if kok || ktext != text {
                     bad.push(format!(
-                        "{}: the table says another pass gives this, so the two runs must \
-                         agree; they said\n    {}\n  and\n    {}",
+                        "{}: the table says another pass gives this, so standing the kernel \
+                         aside may not change it; the two runs said\n    {}\n  and\n    {}",
                         r.file,
                         text.replace('\n', "\n    "),
                         ktext.replace('\n', "\n    ")
                     ));
                 }
             }
-            Kernel::Same => {
-                let (khead, kmsg) = split_head(&ktext);
-                if kok || khead != head || kmsg != r.says {
+            Kernel::Its => {
+                if !kok {
                     bad.push(format!(
-                        "{}: the table says the kernel gives the checker's sentence at \
-                         {head}; it said\n    {}",
-                        r.file,
-                        ktext.replace('\n', "\n    ")
-                    ));
-                }
-            }
-            Kernel::Other(needle) => {
-                if kok || !ktext.contains(needle) {
-                    bad.push(format!(
-                        "{}: the table says the kernel refuses it with `{needle}`; it said\n    \
-                         {}",
+                        "{}: the table says the sentence at {head} is the kernel's, so \
+                         standing it aside must accept the program; it said\n    {}",
                         r.file,
                         ktext.replace('\n', "\n    ")
                     ));
@@ -546,16 +506,14 @@ fn the_census_covers_the_directory() {
 #[test]
 #[ignore]
 fn the_census_as_a_table() {
-    println!("| # | rule | RFC | the checker's sentence | the kernel |");
+    println!("| # | rule | RFC | the sentence | who states it |");
     println!("|---|---|---|---|---|");
     for r in census() {
         let n = &r.file[1..3];
         let says = r.says.replace('\n', " / ").replace('|', r"|");
         let k = match r.kernel {
-            Kernel::Same => "the same".to_string(),
-            Kernel::Other(_) => "its own words".to_string(),
-            Kernel::No => "nothing".to_string(),
-            Kernel::Elsewhere => "not the move check's".to_string(),
+            Kernel::Its => "the kernel",
+            Kernel::Elsewhere => "another pass",
         };
         println!("| {n} | {} | {} | {says} | {k} |", r.rule, r.rfc);
     }
@@ -597,11 +555,6 @@ struct Uncovered {
     row: &'static str,
     says: &'static str,
     why: &'static str,
-    /// `None`: the kernel refuses it in the checker's words, whole. `Some(s)`:
-    /// the kernel refuses it and says `s` instead, so the row's rule may NOT
-    /// leave `movecheck.rs` — the sentence a reader gets would move (RFC-0125
-    /// §3 M3, the containment slice).
-    kernel: Option<&'static str>,
 }
 
 const fn covered(
@@ -615,24 +568,6 @@ const fn covered(
         row,
         says,
         why,
-        kernel: None,
-    }
-}
-
-/// The same, for a program whose two passes do not agree on the wording.
-const fn worded(
-    file: &'static str,
-    row: &'static str,
-    says: &'static str,
-    why: &'static str,
-    kernel: &'static str,
-) -> Uncovered {
-    Uncovered {
-        file,
-        row,
-        says,
-        why,
-        kernel: Some(kernel),
     }
 }
 
@@ -704,58 +639,38 @@ fn counterexamples() -> Vec<Uncovered> {
     ]
 }
 
-/// Each counterexample is refused by the checker AND by the kernel. A row with
-/// no `kernel` wording is refused in the same words at the same line, which is
-/// the licence the census column could not give on its own; a row that names
-/// one is refused in DIFFERENT words, which is why its census row's rule stays
-/// (RFC-0125 §3 M3, the containment slice).
+/// Each counterexample is refused, in the words the table records, and the
+/// kernel is what refuses it: `VYRN_NO_KERNEL=1` accepts every one of them.
+///
+/// The `kernel` column these rows carried is gone with the plumbing slice. It
+/// held the OTHER pass's wording, and no row ever filled it — all nine were
+/// refused in the same words at the same line, which is the licence the census
+/// column could not give on its own (RFC-0125 §3 M3, the containment slice).
 #[test]
 fn the_licence_is_per_program_and_these_are_the_counterexamples() {
     let mut bad: Vec<String> = Vec::new();
     for u in counterexamples() {
         let (ok, text) = refusal_in(unlicensed_dir(), u.file, false);
         if ok {
-            bad.push(format!("{}: the checker accepted it", u.file));
+            bad.push(format!("{}: it is accepted", u.file));
             continue;
         }
         let (_, msg) = split_head(&text);
         let first = msg.lines().next().unwrap_or_default();
         if first != u.says {
             bad.push(format!(
-                "{} (row {}): the checker said `{first}` and the table says `{}`",
+                "{} (row {}): it said `{first}` and the table says `{}`",
                 u.file, u.row, u.says
             ));
             continue;
         }
-        let (kok, ktext) = refusal_in(unlicensed_dir(), u.file, true);
-        if kok {
+        let (kok, _) = refusal_in(unlicensed_dir(), u.file, true);
+        if !kok {
             bad.push(format!(
-                "{} (row {}, found by {}): the kernel is supposed to refuse it and it said                  nothing",
+                "{} (row {}, found by {}): the sentence is supposed to be the kernel's, and \
+                 standing the kernel aside still refused it",
                 u.file, u.row, u.why
             ));
-            continue;
-        }
-        let (_, kmsg) = split_head(&ktext);
-        match u.kernel {
-            // The licence: the same refusal, whole.
-            None => {
-                if ktext != text {
-                    bad.push(format!(
-                        "{} (row {}): the checker said `{text}` and the kernel said `{ktext}`",
-                        u.file, u.row
-                    ));
-                }
-            }
-            // The rule stays: the two passes refuse and word it differently.
-            Some(k) => {
-                let first = kmsg.lines().next().unwrap_or_default();
-                if first != k {
-                    bad.push(format!(
-                        "{} (row {}): the kernel is supposed to say `{k}` and it said `{first}`",
-                        u.file, u.row
-                    ));
-                }
-            }
         }
     }
     assert!(bad.is_empty(), "the licence has moved: {}", bad.join("; "));
@@ -1080,14 +995,13 @@ fn the_shapes_rule_twos_unit_tests_pinned_are_still_refused() {
                 bad.push(format!("{what}: still offers `{needle}`, got {text}"));
             }
         }
-        // The licence, per program: the whole refusal survives the deletion,
-        // menu included.
-        let (kok, ktext) = whole_refusal_in(dir.to_path_buf(), &name, true);
-        if kok || ktext != text {
-            bad.push(format!(
-                "{what}: the kernel said `{}`",
-                if kok { "nothing".to_string() } else { ktext }
-            ));
+        // The attribution: the kernel is what refuses it, so standing the
+        // kernel aside accepts the program. The whole-refusal licence this
+        // read before — the same text with the checker stood aside — was spent
+        // by the plumbing slice, which deleted the checker's half.
+        let (kok, _) = whole_refusal_in(dir.to_path_buf(), &name, true);
+        if !kok {
+            bad.push(format!("{what}: it is not the kernel that refuses it"));
         }
     }
     // The ways out compile, which is the other half of what these tests asked.
@@ -1307,13 +1221,11 @@ fn the_shapes_rule_threes_unit_tests_pinned_are_still_refused() {
             bad.push(format!("{what}: said `{first}`"));
             continue;
         }
-        // The licence, per program: the whole refusal survives the deletion.
-        let (kok, ktext) = refusal_in(dir.to_path_buf(), &name, true);
-        if kok || ktext != text {
-            bad.push(format!(
-                "{what}: the kernel said `{}`",
-                if kok { "nothing".to_string() } else { ktext }
-            ));
+        // The attribution: standing the kernel aside accepts it, so the
+        // sentence above is the kernel's.
+        let (kok, _) = refusal_in(dir.to_path_buf(), &name, true);
+        if !kok {
+            bad.push(format!("{what}: it is not the kernel that refuses it"));
         }
     }
     assert!(
@@ -1762,18 +1674,11 @@ fn a_record_literals_part_names_its_field_at_both_doors() {
     for (what, needle, body) in cases {
         let name = format!("{}.vyrn", what.replace(' ', "_"));
         std::fs::write(dir.join(&name), format!("{DECLS} {body}")).expect("write the program");
-        for kernel_mode in [false, true] {
-            let (ok, text) = refusal_in(dir.to_path_buf(), &name, kernel_mode);
-            let pass = if kernel_mode {
-                "the kernel"
-            } else {
-                "the checker"
-            };
-            if ok {
-                bad.push(format!("{what}: {pass} accepted it"));
-            } else if !text.contains(needle) {
-                bad.push(format!("{what}: {pass} wanted `{needle}`, got {text}"));
-            }
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if ok {
+            bad.push(format!("{what}: accepted"));
+        } else if !text.contains(needle) {
+            bad.push(format!("{what}: wanted `{needle}`, got {text}"));
         }
     }
     assert!(
@@ -1829,19 +1734,9 @@ fn a_nullary_constructor_is_a_value_and_not_a_name() {
     for (what, src) in cases {
         let name = format!("{}.vyrn", what.replace(' ', "_"));
         std::fs::write(dir.join(&name), src).expect("write the program");
-        for kernel_only in [false, true] {
-            let (ok, text) = refusal_in(dir.to_path_buf(), &name, kernel_only);
-            if !ok {
-                let by = if kernel_only {
-                    "the kernel"
-                } else {
-                    "the compiler"
-                };
-                bad.push(format!(
-                    "{what}, {by}:\n    {}",
-                    text.replace('\n', "\n    ")
-                ));
-            }
+        let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
+        if !ok {
+            bad.push(format!("{what}:\n    {}", text.replace('\n', "\n    ")));
         }
     }
     assert!(
@@ -2196,17 +2091,10 @@ fn the_counterexamples_cover_their_directory() {
 #[test]
 #[ignore]
 fn the_counterexamples_as_a_table() {
-    println!("| census row | the program | the checker's sentence | found by | the kernel |");
-    println!("|---|---|---|---|---|");
+    println!("| census row | the program | the sentence | found by |");
+    println!("|---|---|---|---|");
     for u in counterexamples() {
-        let k = match u.kernel {
-            None => "the same, whole".to_string(),
-            Some(k) => format!("its own words: {k}"),
-        };
-        println!(
-            "| {} | `{}` | {} | {} | {k} |",
-            u.row, u.file, u.says, u.why
-        );
+        println!("| {} | `{}` | {} | {} |", u.row, u.file, u.says, u.why);
     }
 }
 
@@ -2516,20 +2404,13 @@ fn a_lend_through_a_wrapper_is_refused_and_the_kernel_is_what_refuses_it() {
         let (ok, err) = refusal_in(root.clone(), &file, false);
         assert!(!ok, "{} ({}) is accepted:\n{err}", w.stem, w.seeds);
         assert_eq!(split_head(&err).1, w.says, "{} ({})", w.stem, w.seeds);
-        // The same sentence with the checker stood aside: the door is the
-        // kernel's, so deleting `movecheck.rs` does not reopen it.
-        let (ok, err) = refusal_in(root.clone(), &file, true);
+        // And the door is the kernel's: stand it aside and the program is
+        // accepted, which is what the test's name claims.
+        let (ok, _) = refusal_in(root.clone(), &file, true);
         assert!(
-            !ok,
-            "{} ({}) is accepted with the checker aside:\n{err}",
+            ok,
+            "{} ({}) is refused with the kernel aside, so the door is not the kernel's",
             w.stem, w.seeds
-        );
-        assert_eq!(
-            split_head(&err).1,
-            w.says,
-            "{} ({}), kernel alone",
-            w.stem,
-            w.seeds
         );
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -2546,11 +2427,14 @@ fn a_lend_through_a_wrapper_is_refused_and_the_kernel_is_what_refuses_it() {
 #[test]
 fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
     const END: &str = " fn main() -> Int64 { return 0 }";
-    let cases: &[(&str, &str, String)] = &[
+    // The last flag is who states it: `true` for the kernel, `false` for the
+    // checker's own two, which is what the doc above says in numbers.
+    let cases: &[(&str, &str, bool, String)] = &[
         (
             "a drop after a partial take",
             "`t` may not be dropped — `t.name` was taken out of it on line 1, and `drop` \
              releases the whole binding",
+            true,
             format!(
                 "type T = {{ id: Int64, name: String }} \
                  impl Owned for T {{ fn release(consume self) \
@@ -2563,6 +2447,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
             "a modify borrow read again in the same call",
             "`xs` is passed to `f` as `modify` and read again in the same call — a `modify` \
              borrow is exclusive",
+            false,
             format!(
                 "fn f(a: modify Array<Int64>, b: Array<Int64>) -> Int64 {{ return a.length }} \
                  fn go() -> Int64 {{ let mut xs: Array<Int64> = [] return f(xs, xs) }}{END}"
@@ -2572,6 +2457,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
             "a modify receiver read again in the same call",
             "`t` is passed to `merge` as `modify` and read again in the same call — a `modify` \
              borrow is exclusive",
+            false,
             format!(
                 "type T = {{ n: Int64 }} \
                  protocol Merging {{ fn merge(modify self, other: T) -> Unit }} \
@@ -2584,6 +2470,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
             "a stored closure captures a borrow",
             "`s` may not be captured by a closure that outlives this call — it is a `read` \
              parameter",
+            true,
             format!(
                 "fn go(s: String) -> Int64 \
                  {{ let f: fn(Int64) -> Int64 = n -> n + s.byteLength \
@@ -2594,6 +2481,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
             "a closure at a consume fn parameter captures a borrow",
             "`q` may not be captured by a closure that outlives this call — it is a `read` \
              parameter",
+            true,
             format!(
                 "fn reg(f: consume fn(Int64) -> Int64) -> Int64 {{ return f(0) }} \
                  fn go(q: read String) -> Int64 {{ return reg(n -> n + q.byteLength) }}{END}"
@@ -2602,7 +2490,7 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
     ];
     let dir = common::scratch("last-three-shapes");
     let mut bad: Vec<String> = Vec::new();
-    for (what, says, src) in cases {
+    for (what, says, by_kernel, src) in cases {
         let name = format!("{}.vyrn", what.replace(' ', "_"));
         std::fs::write(dir.join(&name), src).expect("write the program");
         let (ok, text) = refusal_in(dir.to_path_buf(), &name, false);
@@ -2616,13 +2504,14 @@ fn the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused() {
             bad.push(format!("{what}: said `{first}`"));
             continue;
         }
-        // The licence, per program: the whole refusal survives the deletion.
+        // The attribution: stand the kernel aside and the three rules it holds
+        // are accepted, while the checker's own two say the same sentence.
         let (kok, ktext) = refusal_in(dir.to_path_buf(), &name, true);
-        if kok || ktext != text {
-            bad.push(format!(
-                "{what}: without the move check it said `{}`",
-                if kok { "nothing".to_string() } else { ktext }
-            ));
+        if *by_kernel && !kok {
+            bad.push(format!("{what}: it is not the kernel that refuses it"));
+        }
+        if !*by_kernel && (kok || ktext != text) {
+            bad.push(format!("{what}: the checker's sentence did not survive"));
         }
     }
     assert!(
@@ -2759,21 +2648,16 @@ fn sections() -> Vec<Section> {
             "the lending builtins and the projection names",
         ),
         sec(
-            "pub fn check_accum(program: &Program) -> Vec<Diagnostic> {",
+            "fn in_source_order(diags: &mut [Diagnostic]) {",
             Shared,
-            "the entry points a caller uses",
+            "the entry points a caller uses: the one driver, and the order a \
+             file's refusals come out in",
         ),
         sec(
             "fn run(program: &Program, want: Want) -> Run {",
             Shared,
             "the one walk: the capability tables, every body, the drains and the \
              stamps",
-        ),
-        sec(
-            "pub fn refusal(program: &Program) -> String {",
-            Shared,
-            "the historical string shim, and the door that has no acceptance \
-             answer in it",
         ),
         sec(
             "struct MoveCheck<'a> {",
@@ -2866,7 +2750,7 @@ fn sections() -> Vec<Section> {
             "a block, and whether it diverges",
         ),
         sec(
-            "    fn stmt(",
+            "fn stmt(&self, s: &Stmt, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {",
             Shared,
             "the walk over statements: it calls the refusal helpers and writes \
              the plan's rows in the same arm",
@@ -2877,7 +2761,7 @@ fn sections() -> Vec<Section> {
             "a lambda's captures, recorded for the enclosing block",
         ),
         sec(
-            "    fn expr(",
+            "fn expr(&self, e: &Expr, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) {",
             Shared,
             "the walk over expressions: the same traversal does both jobs",
         ),
@@ -3028,8 +2912,8 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 0),
         ("placement rows for the engines", 494),
         ("a fix menu", 0),
-        ("shared machinery", 2990),
-        ("tests", 519),
+        ("shared machinery", 2862),
+        ("tests", 404),
     ];
     assert_eq!(got, want, "the structural census has moved");
     assert_eq!(

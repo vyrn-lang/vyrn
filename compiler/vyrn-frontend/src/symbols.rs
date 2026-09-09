@@ -465,10 +465,11 @@ fn analyze_inner(
             // is shown here too. The kernel is asked only of a program the core
             // can lower, which is one the type check accepted — the gate
             // `check_and_synthesize` states for the command line.
+            // A program the type check refused has no ownership answer at all
+            // now: the move check states no rule of its own (RFC-0125 §3 M3,
+            // the plumbing slice), and the kernel needs a body it cannot build.
             if checked_diags.is_empty() {
                 checked_diags.extend(movecheck::refusals(prog));
-            } else {
-                checked_diags.extend(movecheck::check_accum(prog));
             }
             // RFC-0033: a diagnostic at an origin-governed line in a synthesized
             // module is relocated to its input file (`.vyx`, …) and set aside so

@@ -15725,6 +15725,79 @@ to **4,003**; `compiler/vyrn-lower/src/kernel.rs` 2,591 to **2,676**;
 and moved nothing in it. 408 lines out of the pass §2.7 deletes, and three
 rules each stated once.
 
+#### The move check states no refusal, and the plumbing goes (2026-09-09, `track-dx`)
+
+`track-dt` left the walk with one `Err(..)` in it, and that one was the
+propagation site: `MoveCheck::block` pushed what `stmt` returned into
+`MoveCheck::errors`, and `stmt` never returned one. So
+`run(program, Want::Check).diags` was an empty vector, built by a full walk of
+every body, on every `vyrn check` and every keystroke the editor pays for.
+
+**The licence is that the knob no longer moves a byte.** `VYRN_NO_MOVECHECK=1`
+stood the checker's refusals aside, and it was the instrument every deletion of
+this milestone measured with. Over the whole corpus — 280 roots under
+`examples/`, `std/`, `site/` and `site/app/`, plus the 34 programs of
+`tests/refusals` and the 9 of `tests/unlicensed`, 323 programs, whole standard
+error and the exit code — the two runs are the same run:
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 323 | 323 |
+| refused | 77 | 77 |
+| `vyrn check`, whole stderr, before against after | — | byte-identical, **0 lost / 0 gained** |
+| the same with `VYRN_NO_MOVECHECK=1`, before the change | byte-identical to the plain run | — |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, `rfcs/census/wasm-sha256.tsv` untouched | |
+| the residue ratchet | engine 172 clean / 3 leaking, route 172 clean / 3 leaking, 0 failed | |
+
+**What went.** `MoveCheck::errors`, `Run::diags`, `Want::Check`, `check_accum`,
+`borrow_store_sites` and its corpus test, `refusal` and the safety guard whose
+subject it was, and the `Result<_, Diagnostic>` on `block`, `stmt`, `expr` and
+`walk_writeback` — 41 `Ok(..)` wrappers and 20 `?`s over a walk that could not
+fail. `in_source_order` stays and takes `check_accum`'s doc with it: the rule
+that a file's refusals come out in the source's order is about the merged list,
+which is `refusals`'s. Two readers moved with it. `symbols.rs` asked
+`check_accum` for a program the type check had refused, because the kernel
+needs a body it cannot build for one; that branch has no answer at all now, and
+says so. `movecheck.rs`'s own test module lost the door it asked through and
+the seven stream constants that had no test left to name them.
+
+**And the instrument flips, because an inert one is a false licence.**
+`VYRN_NO_MOVECHECK=1` is gone from the compiler; keeping an `if` whose two arms
+are both `Vec::new()` would be the census measuring itself. What replaces it in
+`tests/refusals.rs` is the knob beside it, `VYRN_NO_KERNEL=1` (`core::refuses`),
+and the census's second run asks the opposite question — not "is the kernel's
+sentence reachable past the checker" but "is this sentence the kernel's". Every
+one of the 34 rows answered it on the first run: **29 are the kernel's**, and
+standing the kernel aside accepts all 29; **5 survive it word for word**, which
+is what `Kernel::Elsewhere` meant and still means. `Kernel::Same` becomes
+`Kernel::Its`, and `Kernel::Other` and `Kernel::No` go — no row has held either
+since row 24 left.
+
+The same flip covers the seven other places a second run measured the deletion
+this slice took: the nine counterexamples of `tests/unlicensed`, rule 2's and
+rule 3's shapes, the wrapped lend's eleven, and the last three rules' five. The
+licence they carried is spent — the checker's half is deleted, so the plain run
+IS the measurement — and what they assert instead is the attribution. It is not
+uniform, and the two rules `track-dt` gave the CHECKER are the proof it is
+measuring something: `f(xs, xs)` and `t.merge(t)` still refuse with the kernel
+stood aside, in the same words, because `checker::check_modify_arg` is what
+says them. The `Uncovered` rows' `kernel` column goes with the run that read
+it: it held the other pass's wording and no row ever filled it.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,003 to **3,760**;
+`compiler/vyrn-cli/tests/refusals.rs` 3,069 to **2,953**;
+`compiler/vyrn-frontend/src/symbols.rs` 4,781 to 4,782.
+
+**The censuses.** The structural census: `Shared` **2,990 to 2,862**, `Tests`
+**519 to 404**, `Rows` 494 unmoved, `Kernel`, `Checker` and `Menu` still zero.
+The `check_accum` section's anchor becomes `in_source_order`'s and the
+`refusal` section goes; `fn stmt` and `fn expr` are anchored by their whole
+signature, because both fit on one line now that neither returns a `Result`.
+The frontend census: `symbols.rs`'s "the file's own job" 2,897 to **2,898**.
+The form census (RFC-0127 §3), the surface census, `emitter_census`,
+`checker_census` and `cli_census` do not move — this slice deletes no arm of
+any walk.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
