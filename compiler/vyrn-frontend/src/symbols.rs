@@ -2415,7 +2415,7 @@ impl LetVisit<'_> for Lets<'_> {
             // (RFC-0060): surface each for hover / go-to-def / completion /
             // highlight, typed from the checker's retained payload types.
             Stmt::IfLet { pattern, line, .. } => {
-                for b in movecheck::pattern_bindings(pattern) {
+                for b in pattern.bindings() {
                     let (col, end_col) = name_col_on_line(self.tok_info, b, *line);
                     let ty = self.let_types.get(&(*line, b.to_string())).cloned();
                     self.out.push(LocalBinding {
@@ -2468,25 +2468,20 @@ impl LetVisit<'_> for Lets<'_> {
         _: &std::collections::HashSet<String>,
     ) {
         // Arm binders surface like `if let`'s, minus the type: the checker
-        // retains no match-arm payload types. Each binder's spelling is
-        // anchored on its pattern shape ([`binder_pos`]): the variant head (and
-        // any earlier payload) immediately precedes it in the token stream,
-        // which keeps a same-named USE in an earlier arm's body from being taken
-        // for it. A desugar's `@`-prefixed binder is unspellable and never
-        // surfaces.
-        let (head, payloads): (Option<&str>, &[String]) = match p {
-            ast::Pattern::Variant(head, payloads) => (Some(head.as_str()), payloads),
-            ast::Pattern::Other | ast::Pattern::Success(_) | ast::Pattern::Failure(_) => {
-                (None, &[])
-            }
+        // retains no match-arm payload types. WHICH names a pattern binds is
+        // `ast::Pattern::bindings`; what is this reader's own is where each is
+        // SPELLED. The anchor is the pattern's shape ([`binder_pos`]): the
+        // variant head, and any earlier payload, immediately precedes a binder
+        // in the token stream, which keeps a same-named USE in an earlier arm's
+        // body from being taken for it. A desugar's `@`-prefixed binder is
+        // unspellable, so `binder_pos` finds nothing and it never surfaces.
+        let head = match p {
+            ast::Pattern::Variant(head, _) => Some(head.as_str()),
+            _ => None,
         };
-        for (k, b) in payloads.iter().enumerate() {
-            let prefix: Vec<&str> = match head {
-                Some(h) => std::iter::once(h)
-                    .chain(payloads[..k].iter().map(String::as_str))
-                    .collect(),
-                None => Vec::new(),
-            };
+        let binds = p.bindings();
+        for (k, b) in binds.iter().enumerate() {
+            let prefix: Vec<&str> = head.into_iter().chain(binds[..k].iter().copied()).collect();
             if let Some((l, col, end_col)) = binder_pos(self.tok_info, b, &prefix, line, self.out) {
                 self.out.push(LocalBinding {
                     name: b.to_string(),

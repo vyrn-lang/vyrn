@@ -1723,9 +1723,9 @@ fn let_borrows_from(e: &Expr, roots: &std::collections::HashSet<String>) -> bool
                 return true;
             }
         }
-        let binders = pattern_binders(&arm.pattern);
+        let binders = arm.pattern.bindings();
         crate::project::is_place(body)
-            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r))
+            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r.as_str()))
     })
 }
 
@@ -10179,22 +10179,6 @@ fn sum_arm_arity(name: &str, binds: usize, line: usize) -> Result<(), Diagnostic
         ));
     }
     Ok(())
-}
-
-/// The names a pattern binds — `Some(x)`, `Ok(e)`, `Circle(w, h)`.
-///
-/// A match arm's binder shadows a module global for the length of that arm, and
-/// nothing used to collect these: `JArr(items) => emitArr(items)` in `std/json`
-/// read as a reference to some *other* module's `items` state, so a project that
-/// happened to name a global `items` made every generator reaching `emit`
-/// impure. Naming a binder after a global in a module it cannot see is not a
-/// purity violation; it is a coincidence.
-fn pattern_binders(p: &Pattern) -> Vec<String> {
-    match p {
-        Pattern::Success(n) | Pattern::Failure(n) => vec![n.clone()],
-        Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::Other => Vec::new(),
-    }
 }
 
 /// The purity walk's line at each site: a name that a global answers to and no

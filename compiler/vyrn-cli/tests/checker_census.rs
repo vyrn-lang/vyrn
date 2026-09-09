@@ -575,11 +575,6 @@ fn sections() -> Vec<Section> {
             "the payload count a built-in sum's variant carries",
         ),
         sec(
-            "fn pattern_binders(p: &Pattern) -> Vec<String> {",
-            Shared,
-            "what a pattern binds",
-        ),
-        sec(
             "struct GlobalRef<'a> {",
             Shared,
             "whether a body reads or writes a global: the purity walk's line at \
@@ -739,7 +734,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule the checker states", 1486, 58),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 2883, 157),
-        ("shared machinery", 2224, 29),
+        ("shared machinery", 2208, 29),
         ("tests", 4652, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");

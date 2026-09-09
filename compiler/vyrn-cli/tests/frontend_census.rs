@@ -482,11 +482,12 @@ fn symbols_sections() -> Vec<Section> {
             Twice,
             "a second walk over every body, for the binder POSITIONS the checker \
              does not record. The types are the checker's — `let_types` is \
-             passed in — and since RFC-0125 §3 M6's third slice the descent is \
-             `ast::body_scope_descent!`'s, so what is stated twice is the PASS \
-             and the binding forms it knows, beside `checker::Scope` and \
-             `pattern_binders`. A checker that recorded a binder's column would \
-             delete this",
+             passed in — the descent is `ast::body_scope_descent!`'s, and WHICH \
+             names a pattern binds is `ast::Pattern::bindings` since RFC-0125 \
+             §3 M6's binder slice. What is stated twice is the PASS and the \
+             binding forms it knows, beside `checker::Scope`. A checker that \
+             recorded a binder's column would delete it, and its AST nodes \
+             carry a line and no column",
         ),
         sec(
             "fn with_doc(detail: &str, doc: &Option<String>) -> String {",
@@ -839,7 +840,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ("loader.rs", "shared machinery", 543, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2947, 0),
-        ("symbols.rs", "a rule stated a second time", 272, 0),
+        ("symbols.rs", "a rule stated a second time", 267, 0),
         ("symbols.rs", "a path only a deleted route reached", 0, 0),
         (
             "symbols.rs",

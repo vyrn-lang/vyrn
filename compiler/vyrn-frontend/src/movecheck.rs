@@ -1225,7 +1225,7 @@ impl MoveCheck<'_> {
                 let arm = arms.first()?;
                 let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                 self.enter();
-                for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
+                for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                 }
                 // A block arm (RFC-0118) yields nothing to have a type.
@@ -1335,9 +1335,7 @@ impl MoveCheck<'_> {
             let all_borrow = arms.iter().all(|arm| match arm.body.as_expr() {
                 None => false,
                 Some(Expr::Call { name, .. }) if crate::ast::is_panic(name) => true,
-                Some(Expr::Var { name, .. }) => {
-                    pattern_bindings(&arm.pattern).contains(&name.as_str())
-                }
+                Some(Expr::Var { name, .. }) => arm.pattern.bindings().contains(&name.as_str()),
                 Some(_) => false,
             });
             if all_borrow {
@@ -1395,7 +1393,7 @@ impl MoveCheck<'_> {
         scrutinee: &Expr,
         p: &Pattern,
     ) -> (Vec<Option<Type>>, Option<Borrow>) {
-        let n = pattern_bindings(p).len();
+        let n = p.bindings().len();
         let ty = self.type_of(scrutinee);
         let tys: Vec<Option<Type>> = match (
             ty.as_ref()
@@ -1499,7 +1497,7 @@ impl MoveCheck<'_> {
                 for arm in arms {
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
                     self.enter();
-                    for (i, b) in pattern_bindings(&arm.pattern).into_iter().enumerate() {
+                    for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                     }
                     // A block arm (RFC-0118) is never a return value.
@@ -1926,17 +1924,15 @@ impl MoveCheck<'_> {
                 // is given a reclamation row, and it is the same question here:
                 // a borrow, module state, a field read or a view builtin owns
                 // nothing this block may release.
-                for (i, b) in pattern_bindings(pattern).into_iter().enumerate() {
+                for (i, b) in pattern.bindings().into_iter().enumerate() {
                     scope.last_mut().unwrap().insert(b.to_string());
                     // Recording it is the point: an unrecorded binder falls
                     // through to whatever the enclosing scope calls that name
                     // (`own.rs`'s shadowing lesson).
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                 }
-                let binders: HashSet<String> = pattern_bindings(pattern)
-                    .into_iter()
-                    .map(str::to_string)
-                    .collect();
+                let binders: HashSet<String> =
+                    pattern.bindings().into_iter().map(str::to_string).collect();
                 self.arm_binders.borrow_mut().push(binders);
                 let then_div = self.block(then_block, scope);
                 self.arm_binders.borrow_mut().pop();
@@ -2146,7 +2142,9 @@ impl MoveCheck<'_> {
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
-                    let binders: Vec<String> = pattern_bindings(&arm.pattern)
+                    let binders: Vec<String> = arm
+                        .pattern
+                        .bindings()
                         .into_iter()
                         .map(str::to_string)
                         .collect();
@@ -2755,15 +2753,6 @@ fn root_var(e: &Expr) -> (&str, usize) {
         Expr::Field { expr, .. } => root_var(expr),
         Expr::Var { name, line } => (name, *line),
         _ => ("", 0),
-    }
-}
-
-/// The payload names a `match` pattern binds.
-pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
-    match p {
-        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-        Pattern::Variant(_, binds) => binds.iter().map(|s| s.as_str()).collect(),
-        Pattern::Other => vec![],
     }
 }
 

@@ -2788,11 +2788,6 @@ fn sections() -> Vec<Section> {
             Shared,
             "the place spellings every rule above compares",
         ),
-        sec(
-            "pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {",
-            Shared,
-            "a pattern's binders",
-        ),
         sec("mod tests {", Tests, "the pass's own unit tests"),
     ]
 }
@@ -2907,7 +2902,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 0),
         ("placement rows for the engines", 361),
         ("a fix menu", 0),
-        ("shared machinery", 2408),
+        ("shared machinery", 2399),
         ("tests", 207),
     ];
     assert_eq!(got, want, "the structural census has moved");
