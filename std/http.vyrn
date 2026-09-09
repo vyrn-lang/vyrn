@@ -881,12 +881,12 @@ export fn mount(req: Request, groups: Array<Array<Route>>, live: Array<Live>, so
     // matches nothing get the same answer as the one that does.
     if httpIsUrl(req.path) == false {
         return Some(Response {
-                status: 400,
-                contentType: "text/plain",
-                body: "the request path is not percent-encoded text",
-                vary: "",
-                headers: [:],
-            })
+            status: 400,
+            contentType: "text/plain",
+            body: "the request path is not percent-encoded text",
+            vary: "",
+            headers: [:],
+        })
     }
     for w in sockets {
         if let Some(ps) = httpSocketMatch(w, req) {

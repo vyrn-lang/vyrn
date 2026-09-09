@@ -1171,9 +1171,9 @@ fn attrValues(html: String, name: String) -> Array<String> {
     let mut i = 1
     while i < parts.length {
         out.push(match indexOf(parts[i], "\"") {
-                Some(at) => substring(parts[i], 0, at),
-                None => "",
-            })
+            Some(at) => substring(parts[i], 0, at),
+            None => "",
+        })
         i = i + 1
     }
     return out

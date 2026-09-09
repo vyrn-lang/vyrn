@@ -62,9 +62,9 @@ fn main() -> Int64 {
     let names: Map<Int64, String> = [1: "one", 2: "two", 1: "uno"]
     print("\{names.length}")
     print(match names[1] {
-            Some(s) => s,
-            None => "?",
-        })
+        Some(s) => s,
+        None => "?",
+    })
 
     // The counting loop: ACGTACGT… has exactly four distinct 3-mers, and each
     // window is one multiply, one add, one modulo, one probe.

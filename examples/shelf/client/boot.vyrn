@@ -120,14 +120,14 @@ fn bookViews() -> Array<BookView> {
         }
         if show {
             out.push(BookView {
-                    id: b.id,
-                    title: b.title.copy(),
-                    url: b.url.copy(),
-                    rating: b.rating,
-                    tagsText: tagsText(b.tags),
-                    confirming: b.id == confirmId,
-                    detailHref: "/books/\{b.id}",
-                })
+                id: b.id,
+                title: b.title.copy(),
+                url: b.url.copy(),
+                rating: b.rating,
+                tagsText: tagsText(b.tags),
+                confirming: b.id == confirmId,
+                detailHref: "/books/\{b.id}",
+            })
         }
     }
     return out
@@ -399,9 +399,9 @@ export extern fn clearFilter(arg: String) {
 
 export extern fn toggleLang(arg: String) {
     setLocale(match locale() {
-            En => Uk,
-            Uk => En,
-        })
+        En => Uk,
+        Uk => En,
+    })
 }
 
 /// The view as JSON for vyrn-dom.js (the boot view; the host builds the DOM once

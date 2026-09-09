@@ -31,11 +31,11 @@ fn bookRow(b: Book) -> Html {
         tagKids.push(el("span", [Cls("tag")], [text(label)]))
     }
     return el("li", [Cls("book")], [
-            el("a", [A("href", b.url.copy())], [text(b.title.copy())]),
-            el("a", [A("href", "/books/\{b.id}"), A("data-nav", "prefetch"), Cls("detail")], [text("details →")]),
-            el("span", [Cls("rating")], [text(rating)]),
-            el("span", [Cls("tags")], tagKids),
-        ])
+        el("a", [A("href", b.url.copy())], [text(b.title.copy())]),
+        el("a", [A("href", "/books/\{b.id}"), A("data-nav", "prefetch"), Cls("detail")], [text("details →")]),
+        el("span", [Cls("rating")], [text(rating)]),
+        el("span", [Cls("tags")], tagKids),
+    ])
 }
 
 /// The home page body — SSR the live shelf list AND a tag summary read straight
@@ -52,21 +52,21 @@ export fn homePage(list: BookList, tags: TagCounts) -> Html {
         body = [el("ul", [Cls("books")], items)]
     }
     return el("main", [], [
-            el("p", [Cls("sub")], [text(tAppTagline())]),
-            el("p", [Cls("count")], [text(tShelfCount(list.books.length))]),
-            el("div", [Id("app")], body),
-            el("script", [A("type", "module"), A("src", "/app.js")], []),
-        ])
+        el("p", [Cls("sub")], [text(tAppTagline())]),
+        el("p", [Cls("count")], [text(tShelfCount(list.books.length))]),
+        el("div", [Id("app")], body),
+        el("script", [A("type", "module"), A("src", "/app.js")], []),
+    ])
 }
 
 /// One row of the plural table: locale label, then the plural rendered in `loc`.
 /// The stateful accessor reads `currentLocale`, so we flip it per group.
 fn pluralRow(label: consume String, n: Int64) -> Html {
     return el("tr", [], [
-            el("td", [], [text(label)]),
-            el("td", [], [text("\{n}")]),
-            el("td", [], [text(tShelfCount(n))]),
-        ])
+        el("td", [], [text(label)]),
+        el("td", [], [text("\{n}")]),
+        el("td", [], [text(tShelfCount(n))]),
+    ])
 }
 
 /// The About page: static prose plus a live CLDR-plural demonstration rendered in
@@ -87,18 +87,18 @@ export fn aboutPage() -> Html {
     let uk5 = pluralRow("uk", 5)
     setLocale(saved)
     return el("main", [], [
-            el("h2", [], [text("About")]),
-            el("p", [], [text("Shelf is a tiny dogfood app exercising the whole Vyrn UI stack: std/html, std/ui pages, std/rpc, std/i18n, and Map on the wire.")]),
-            el("h3", [], [text("CLDR plurals")]),
-            el("p", [Cls("sub")], [text("The same message for counts 1 / 2 / 5 — English has two forms, Ukrainian has three (one / few / many).")]),
-            el("table", [Cls("plurals")], [
-                    el("thead", [], [el("tr", [], [el("th", [], [text("locale")]), el("th", [], [text("n")]), el("th", [], [text("message")])])]),
-                    el("tbody", [], [
-                            en1, en2, en5,
-                            uk1, uk2, uk5,
-                        ]),
-                ]),
-        ])
+        el("h2", [], [text("About")]),
+        el("p", [], [text("Shelf is a tiny dogfood app exercising the whole Vyrn UI stack: std/html, std/ui pages, std/rpc, std/i18n, and Map on the wire.")]),
+        el("h3", [], [text("CLDR plurals")]),
+        el("p", [Cls("sub")], [text("The same message for counts 1 / 2 / 5 — English has two forms, Ukrainian has three (one / few / many).")]),
+        el("table", [Cls("plurals")], [
+            el("thead", [], [el("tr", [], [el("th", [], [text("locale")]), el("th", [], [text("n")]), el("th", [], [text("message")])])]),
+            el("tbody", [], [
+                en1, en2, en5,
+                uk1, uk2, uk5,
+            ]),
+        ]),
+    ])
 }
 
 /// The book-detail page: SSR the real record read from the store (the loader
@@ -117,12 +117,12 @@ export fn detailPage(b: Book) -> Html {
         tagKids.push(el("span", [Cls("tag")], [text(label)]))
     }
     return el("main", [], [
-            el("p", [], [navLink("/", tNavHomeLabel())]),
-            el("h2", [], [text("Book #\{b.id}")]),
-            el("div", [Id("book"), theme.cls("p-4 rounded-lg border")], [
-                    el("h3", [], [el("a", [A("href", b.url.copy())], [text(b.title.copy())])]),
-                    el("p", [Cls("rating")], [text(rating)]),
-                    el("p", [Cls("tags")], tagKids),
-                ]),
-        ])
+        el("p", [], [navLink("/", tNavHomeLabel())]),
+        el("h2", [], [text("Book #\{b.id}")]),
+        el("div", [Id("book"), theme.cls("p-4 rounded-lg border")], [
+            el("h3", [], [el("a", [A("href", b.url.copy())], [text(b.title.copy())])]),
+            el("p", [Cls("rating")], [text(rating)]),
+            el("p", [Cls("tags")], tagKids),
+        ]),
+    ])
 }

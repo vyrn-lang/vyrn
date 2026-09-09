@@ -8,9 +8,9 @@ AppConfig {
     port: 8443,
     workers: Some(8),
     tls: Enabled(TlsFiles {
-            cert: "/etc/vondemo/fullchain.pem",
-            key: "/etc/vondemo/privkey.pem",
-        }),
+        cert: "/etc/vondemo/fullchain.pem",
+        key: "/etc/vondemo/privkey.pem",
+    }),
     // `Warn` is a variant of `Level`, not the string "warn"; `0.0.0.0` is a
     // string because it is quoted, and for no other reason.
     level: Warn,

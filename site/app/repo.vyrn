@@ -266,9 +266,9 @@ test "the baked release is a tag, a date, and a rule about the suffix" {
         assert(releaseUrl().byteLength > "https://github.com/vyrn-lang/vyrn/releases/tag/".byteLength)
         assert(releaseDate().byteLength == 10)
         assertEq(releasePre(), match indexOf(releaseTag(), "-") {
-                Some(at) => true,
-                None => false,
-            })
+            Some(at) => true,
+            None => false,
+        })
     } else {
         // The other state, which the pages also render.
         assertEq(releaseTag(), "")

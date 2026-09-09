@@ -171,3 +171,31 @@ fn a_vyx_component_is_left_alone() {
         .unwrap();
     assert_eq!(check.status.code(), Some(0));
 }
+
+/// A brace opened inside an open bracket is a CONTINUATION of the call, not a
+/// second step in from it. `print(match e { .. })` is the shape that caught it:
+/// counting brackets put the arms two levels in and the `})` one, so the five
+/// `tests/boundaries/` fixtures a reader wrote by hand failed `fmt --check`
+/// while nothing in the corpus wrote the shape at all (RFC-0017).
+#[test]
+fn a_brace_inside_an_open_bracket_indents_one_level() {
+    let dir = scratch("brace-in-bracket");
+    let file = dir.join("a.vyrn");
+    let src =
+        "fn main() -> Int64 {\n    print(match 1 {\n        _ => \"x\",\n    })\n    return 0\n}\n";
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("fmt")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), src);
+}

@@ -1676,21 +1676,12 @@ impl MoveCheck<'_> {
                 // so `let x = x + b` resolves the old `x`.
                 let bty = ty.clone().or_else(|| self.type_of(value));
                 self.site("bind", *line, value, bty.as_ref());
-                // The `a[i].f = v` desugar's ELEMENT TEMP is exempt from rule 2:
-                // the place is read out, mutated, and written straight back to
-                // where it came from, so the round trip is not a store of a
-                // borrow — the parser built both halves and there is no second
-                // owner. [`is_place_temp`] is what says which: a round-trip temp
-                // ends in `[]`.
-                //
-                // The test used to be `name.contains('[')`, which also caught
-                // `ps[]val` and `ps[]idx` — the operands RFC-0082 M2 hoists so
-                // they run before the move-out. Those are arbitrary expressions,
-                // and `[]val` is the statement's right-hand side, so the exemption
-                // made `ps[1].xs = ps[0].xs` an unchecked store of a projection:
-                // two elements naming one buffer. It leaked while nothing released
-                // an element and corrupts the heap now that RFC-0092 M3 does
-                // (`examples/placeorder.vyrn`, native exit `0xC0000374`).
+                // The `a[i].f = v` desugar's round-trip temp is exempt from
+                // rule 2: the place is read out, mutated, and written straight
+                // back to where it came from, so it is not a store of a borrow
+                // — the parser built both halves and there is no second owner.
+                // The desugar names the temp and [`ast::is_place_temp`] reads
+                // that name back; this pass does not spell a suffix of its own.
                 let borrow = if crate::ast::is_place_temp(name) {
                     None
                 } else {
@@ -1703,24 +1694,18 @@ impl MoveCheck<'_> {
                 // one. RFC-0082 M2's hoisted VALUE temp is the exception: it is
                 // the right-hand side of a place assignment, lifted out so it
                 // runs before the move-out, so it outlives exactly as the store
-                // it feeds does. Refusing it HERE rather than at that store is
-                // what makes the diagnostic name `ps[0].xs`, which the reader
-                // wrote, instead of `ps[]val`, which the parser minted.
-                let hoisted = name.ends_with("[]val");
+                // it feeds does. Asking HERE rather than at that store is what
+                // names `ps`, which the reader wrote, rather than the temp the
+                // parser minted.
+                let hoisted = crate::ast::hoisted_value(name);
                 self.store(
                     value,
-                    &|| {
-                        if hoisted {
-                            format!(
-                                "`{}`",
-                                name.trim_end_matches("[]val").trim_end_matches("[]")
-                            )
-                        } else {
-                            format!("the binding `{name}`")
-                        }
+                    &|| match hoisted {
+                        Some(place) => format!("`{place}`"),
+                        None => format!("the binding `{name}`"),
                     },
                     *line,
-                    hoisted,
+                    hoisted.is_some(),
                 );
                 let is_borrow = borrow.is_some();
                 self.bind(name, bty, borrow);

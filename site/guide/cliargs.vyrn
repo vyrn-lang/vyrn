@@ -14,9 +14,9 @@ export fn demo() -> String {
     let rest = joinWith(positionals(a), ", ")
 
     return joinWith([
-            "-v          \{short}",
-            "--verbose   \{long}",
-            "port        \{port}",
-            "positionals \{rest}",
-        ], "\n")
+        "-v          \{short}",
+        "--verbose   \{long}",
+        "port        \{port}",
+        "positionals \{rest}",
+    ], "\n")
 }

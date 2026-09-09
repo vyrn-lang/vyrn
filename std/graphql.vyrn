@@ -478,10 +478,10 @@ fn gqlRecordMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
             let ftypeRaw = gqlTrim(gqlSlice(bytes(f), colon + 1, bytes(f).length))
             let ftype = gqlStripWhere(ftypeRaw)
             out.push(GqlMember {
-                    name: fname,
-                    ref: gqlRef(ftype, false, iface),
-                    inputRef: gqlRef(ftype, true, iface),
-                })
+                name: fname,
+                ref: gqlRef(ftype, false, iface),
+                inputRef: gqlRef(ftype, true, iface),
+            })
         }
     }
     return out
@@ -1708,9 +1708,9 @@ fn gqlErrJson(errs: Array<GqlErr>) -> Json {
     let mut out: Array<Json> = []
     for e in errs {
         out.push(JObj([
-                    JsonField { key: "message", value: JStr(e.message.copy()) },
-                    JsonField { key: "path", value: JArr(copyJsonArray(e.path)) },
-                ]))
+            JsonField { key: "message", value: JStr(e.message.copy()) },
+            JsonField { key: "path", value: JArr(copyJsonArray(e.path)) },
+        ]))
     }
     return JArr(out)
 }
@@ -2330,10 +2330,10 @@ fn gqlTestProject(query: String) -> String {
     let sels = gqlParseQuery(query).sels
     let r = gqlProject(gqlTestValue(), sels[0].subs, "BookList!", [], gqlTestSchema)
     return emit(JObj([
-                JsonField { key: "value", value: consume r.value },
-                JsonField { key: "errors", value: gqlErrJson(r.errs) },
-                JsonField { key: "climbing", value: JBool(r.failed) },
-            ]))
+        JsonField { key: "value", value: consume r.value },
+        JsonField { key: "errors", value: gqlErrJson(r.errs) },
+        JsonField { key: "climbing", value: JBool(r.failed) },
+    ]))
 }
 
 test "gqlParseQuery reads a nested selection set" {

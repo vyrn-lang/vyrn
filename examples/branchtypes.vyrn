@@ -26,9 +26,9 @@ fn first(xs: Array<Int64>) -> Option<Int64> {
 fn head(xs: Array<Int64>) -> Option<Int64> {
     let pick: Option<Int64> = Some(1)
     return Some(match pick {
-            Some(n) => first(xs)?,
-            None => 0,
-        })
+        Some(n) => first(xs)?,
+        None => 0,
+    })
 }
 
 fn main() -> Int64 {

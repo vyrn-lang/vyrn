@@ -11,7 +11,7 @@
 //! expression ([`crate::Row`]), the ownership plan's decisions
 //! ([`vyrn_frontend::own::ReleasePlan`] and the placed [`Release`] rows), and
 //! the declarations' answer to "does this type own heap"
-//! ([`vyrn_frontend::own::Owned`]). It derives nothing about ownership itself:
+//! ([`vyrn_frontend::declared::Owned`]). It derives nothing about ownership itself:
 //! where the plan placed a release, a `Drop` stands; where it did not, nothing
 //! stands, and the kernel says whether that is a leak. That is the point of M2:
 //! the kernel re-checks the plan's decisions per program, so a decision the
@@ -29,7 +29,8 @@ use vyrn_frontend::ast::{
     ArmBody, BinOp, Block, Capability, Expr, Function, LambdaBody, MatchArm, Pattern, Program,
     Stmt, Type, UnOp,
 };
-use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Owned, Ownership, Release};
+use vyrn_frontend::declared::Owned;
+use vyrn_frontend::own::{Bucket, DropKind, Exit, Linear, MemoryRow, Ownership, Release};
 use vyrn_frontend::prelude;
 
 use crate::kernel::MissingKind;
@@ -4357,7 +4358,7 @@ impl<'a> Builder<'a> {
                 let bty = self.body.names[n as usize].ty.clone();
                 let rel = path.trim_start_matches('.').to_string();
                 if !rel.is_empty()
-                    && vyrn_frontend::own::skippable(
+                    && vyrn_frontend::declared::skippable(
                         &self.own.proto,
                         &bty,
                         std::slice::from_ref(&rel),
@@ -5277,7 +5278,7 @@ pub struct Facts {
     pub receivers: std::collections::HashMap<usize, Vec<String>>,
     /// Round forty's table: `(match, arm) -> [(binder, holes, kind)]`, the
     /// payload binders the arm's own body releases at its end. The kind is
-    /// the binder type's release rule ([`vyrn_frontend::own::Owned`]), which
+    /// the binder type's release rule ([`vyrn_frontend::declared::Owned`]), which
     /// the interpreter needs and the two compiled backends read off the type
     /// themselves.
     pub arms: std::collections::HashMap<(usize, u32), Vec<(String, Vec<String>, Option<DropKind>)>>,

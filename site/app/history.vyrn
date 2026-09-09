@@ -219,13 +219,13 @@ fn numberAt(fields: Array<JsonField>, key: String) -> Int64 {
     for f in fields {
         if f.key == key {
             return wholeOf(match copyJson(f.value) {
-                    JNum(s) => s.copy(),
-                    JObj(fs) => "",
-                    JArr(xs) => "",
-                    JStr(s) => "",
-                    JBool(b) => "",
-                    JNull => "",
-                })
+                JNum(s) => s.copy(),
+                JObj(fs) => "",
+                JArr(xs) => "",
+                JStr(s) => "",
+                JBool(b) => "",
+                JNull => "",
+            })
         }
     }
     return 0

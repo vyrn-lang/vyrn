@@ -119,16 +119,16 @@ export fn searchRows() -> Array<SearchRow> {
         }
         let joined = joinWith(names, " ")
         out.push(SearchRow {
-                name: m.name.copy(),
-                href: apiHref(m.name),
-                summary: m.summary.copy(),
-                count: m.count,
-                exports: names.copy(),
-                // One lowercased haystack per row: the module name, every export
-                // name, and the words of the summary.
-                q: toLower(m.name + " " + joined + " " + plainText(m.summary)),
-                e: joined,
-            })
+            name: m.name.copy(),
+            href: apiHref(m.name),
+            summary: m.summary.copy(),
+            count: m.count,
+            exports: names.copy(),
+            // One lowercased haystack per row: the module name, every export
+            // name, and the words of the summary.
+            q: toLower(m.name + " " + joined + " " + plainText(m.summary)),
+            e: joined,
+        })
     }
     return out
 }
@@ -148,14 +148,14 @@ export fn searchGroups() -> Array<SearchGroup> {
             for r in rows {
                 if r.name == m.name {
                     got.push(SearchRow {
-                            name: r.name.copy(),
-                            href: r.href.copy(),
-                            summary: r.summary.copy(),
-                            count: r.count,
-                            exports: r.exports.copy(),
-                            q: r.q.copy(),
-                            e: r.e.copy(),
-                        })
+                        name: r.name.copy(),
+                        href: r.href.copy(),
+                        summary: r.summary.copy(),
+                        count: r.count,
+                        exports: r.exports.copy(),
+                        q: r.q.copy(),
+                        e: r.e.copy(),
+                    })
                 }
             }
         }
@@ -319,21 +319,21 @@ export fn graphNodes() -> Array<GraphNode> {
     let mut out: Array<GraphNode> = []
     for m in apiModules() {
         out.push(GraphNode {
-                name: m.name.copy(),
-                href: apiHref(m.name),
-                x: nodeX(m.name).toString(),
-                y: nodeY(m.name).toString(),
-                // The label sits to the right of the dot, and the hit area
-                // covers both, so a name is as clickable as it looks.
-                tx: (nodeX(m.name) + 10).toString(),
-                ty: (nodeY(m.name) + 4).toString(),
-                hx: (nodeX(m.name) - 6).toString(),
-                hy: (nodeY(m.name) - 9).toString(),
-                w: (labelWidth(m.name) + 20).toString(),
-                uses: joinWith(depUses(m.name), " "),
-                usedBy: joinWith(depUsedBy(m.name), " "),
-                label: nodeLabel(m.name),
-            })
+            name: m.name.copy(),
+            href: apiHref(m.name),
+            x: nodeX(m.name).toString(),
+            y: nodeY(m.name).toString(),
+            // The label sits to the right of the dot, and the hit area
+            // covers both, so a name is as clickable as it looks.
+            tx: (nodeX(m.name) + 10).toString(),
+            ty: (nodeY(m.name) + 4).toString(),
+            hx: (nodeX(m.name) - 6).toString(),
+            hy: (nodeY(m.name) - 9).toString(),
+            w: (labelWidth(m.name) + 20).toString(),
+            uses: joinWith(depUses(m.name), " "),
+            usedBy: joinWith(depUsedBy(m.name), " "),
+            label: nodeLabel(m.name),
+        })
     }
     return out
 }

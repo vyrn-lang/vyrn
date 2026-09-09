@@ -9,9 +9,9 @@ import { elemAt, fieldAt } from "std/jsondec"
 
 fn smallDoc() -> Json {
     return JObj([
-            JsonField { key: "name", value: JStr("a heap string a copy would duplicate") },
-            JsonField { key: "items", value: JArr([JStr("zero"), JStr("one")]) },
-        ])
+        JsonField { key: "name", value: JStr("a heap string a copy would duplicate") },
+        JsonField { key: "items", value: JArr([JStr("zero"), JStr("one")]) },
+    ])
 }
 
 let mut benchDoc: Json = JNull

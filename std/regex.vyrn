@@ -484,14 +484,14 @@ export fn compile(pattern: String) -> Result<Regex, String> {
     // so the record is constructed once and nothing is copied.
     let head = firstBytes(bd, f.start)
     return Ok(Regex {
-            op: consume bd.op,
-            a: consume bd.a,
-            b: consume bd.b,
-            sets: consume bd.sets,
-            start: f.start,
-            first: consume head.set,
-            firstKnown: head.known,
-        })
+        op: consume bd.op,
+        a: consume bd.a,
+        b: consume bd.b,
+        sets: consume bd.sets,
+        start: f.start,
+        first: consume head.set,
+        firstKnown: head.known,
+    })
 }
 
 // ---------------------------------------------------------------------------

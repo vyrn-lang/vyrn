@@ -11,7 +11,8 @@
 //! file untouched — a formatter must never corrupt source.
 //!
 //! Line structure is the author's: v1 **never joins or splits lines**. It
-//! normalizes indentation (4 spaces × brace/bracket depth), intra-line spacing
+//! normalizes indentation (4 spaces per LINE that opened something still open,
+//! so a brace inside an open bracket is a continuation), intra-line spacing
 //! (the RFC's table), drops semicolons, collapses 2+ blank lines to one, and
 //! trims trailing whitespace to a single trailing newline.
 
@@ -290,23 +291,38 @@ fn wants_space(
     true
 }
 
+/// How deep the open brackets in `opens` indent a line, in 4-space units.
+///
+/// A level is a LINE that opened something still open, not a bracket. Openers
+/// on one line are one level together, which is what `take(R {` and
+/// `print(match e {` need: the brace is a continuation of the call, not a
+/// second step in from it. Counting brackets put their bodies two levels in
+/// and their closers one, and every corpus file avoided the shape.
+fn open_levels(opens: &[usize]) -> i32 {
+    opens.windows(2).filter(|w| w[0] != w[1]).count() as i32 + i32::from(!opens.is_empty())
+}
+
 /// Indentation level (in 4-space units) for a line whose first token is `first`
-/// at running bracket `depth`. A line starting with a closer dedents first; a
+/// with `opens` still open. A line starting with a closer dedents first; a
 /// line starting with a leading `|` (enum-variant style) indents one extra.
-fn indent_level(depth: i32, first: Option<&Tok>) -> usize {
+fn indent_level(opens: &[usize], first: Option<&Tok>) -> usize {
+    let d = open_levels(opens);
     let d = match first {
-        Some(Tok::RParen | Tok::RBracket | Tok::RBrace) => depth - 1,
-        Some(Tok::Pipe) => depth + 1,
-        _ => depth,
+        Some(Tok::RParen | Tok::RBracket | Tok::RBrace) => d - 1,
+        Some(Tok::Pipe) => d + 1,
+        _ => d,
     };
     d.max(0) as usize
 }
 
-/// Update the running bracket depth as a token is emitted.
-fn bump_depth(depth: &mut i32, tok: &Tok) {
+/// Record or forget an opener as a token is emitted, keyed by the line it is
+/// written on.
+fn bump_depth(opens: &mut Vec<usize>, tok: &Tok, line: usize) {
     match tok {
-        Tok::LParen | Tok::LBracket | Tok::LBrace => *depth += 1,
-        Tok::RParen | Tok::RBracket | Tok::RBrace => *depth -= 1,
+        Tok::LParen | Tok::LBracket | Tok::LBrace => opens.push(line),
+        Tok::RParen | Tok::RBracket | Tok::RBrace => {
+            opens.pop();
+        }
         _ => {}
     }
 }
@@ -315,7 +331,8 @@ fn bump_depth(depth: &mut i32, tok: &Tok) {
 fn print(items: &[Triv]) -> String {
     let roles = compute_roles(items);
     let mut out = String::new();
-    let mut depth: i32 = 0;
+    // The source line each still-open bracket was written on.
+    let mut opens: Vec<usize> = Vec::new();
     // The previous *token* item (index into `items`) actually emitted, for
     // spacing and role lookups. Comments/dropped semicolons don't update it.
     let mut prev_tok: Option<usize> = None;
@@ -342,9 +359,9 @@ fn print(items: &[Triv]) -> String {
             // First emitted item: no leading newlines, just its line's indent.
             None => {
                 let indent = if is_comment || is_doc {
-                    depth.max(0) as usize
+                    open_levels(&opens).max(0) as usize
                 } else {
-                    indent_level(depth, tok)
+                    indent_level(&opens, tok)
                 };
                 out.push_str(&"    ".repeat(indent));
                 out.push_str(&it.text);
@@ -406,9 +423,9 @@ fn print(items: &[Triv]) -> String {
                         out.push('\n');
                     }
                     let indent = if is_comment || is_doc {
-                        depth.max(0) as usize
+                        open_levels(&opens).max(0) as usize
                     } else {
-                        indent_level(depth, tok)
+                        indent_level(&opens, tok)
                     };
                     out.push_str(&"    ".repeat(indent));
                     out.push_str(&it.text);
@@ -416,9 +433,10 @@ fn print(items: &[Triv]) -> String {
             }
         }
 
-        // Bookkeeping: depth follows real tokens; `prev_tok` skips comments.
+        // Bookkeeping: the open list follows real tokens; `prev_tok` skips
+        // comments.
         if let Some(t) = tok {
-            bump_depth(&mut depth, t);
+            bump_depth(&mut opens, t, it.start_line);
             prev_tok = Some(idx);
         }
         prev_end_line = Some(it.end_line);

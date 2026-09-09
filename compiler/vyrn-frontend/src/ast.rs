@@ -131,13 +131,33 @@ pub enum LogSink {
 ///
 /// `t.xs[k] = v` becomes `let mut t.xs[] = t.xs` / `t.xs[][k] = v` /
 /// `t.xs = t.xs[]`. The name is unspellable — `[` cannot appear in an identifier
-/// — and by convention ONLY the container that is moved out and written back
-/// ends in `[]`; the operand temps the desugar hoists ahead of the move carry a
-/// further suffix (`[]i`, `[]v`) so they do not match. The interpreter keys its
-/// take on this (`Interp::take_place`); `symbols.rs` filters all of them out of
-/// the completion index on the looser `contains('[')`.
+/// — and ONLY the container that is moved out and written back ends in `[]`.
+/// The operand temps the desugar hoists ahead of the move carry a further
+/// suffix (`[]idx`, `#idx`, `#val`, `[]arg1`) so they do not match, and `#` is
+/// what keeps a hoisted operand from reading as DERIVED from the container
+/// under [`movecheck::mentions_place`](crate::movecheck::mentions_place).
+///
+/// **`parser::place_receiver` is the one statement of the naming and this is
+/// the one statement of the reading.** Every pass below asks here —
+/// `movecheck.rs` for rule 2's exemption, `direct.rs` to recognise the idiom —
+/// so a rename of the suffix moves one line and trips
+/// `parser::tests::the_desugars_temps_answer_the_one_predicate`.
+/// `symbols.rs` filters all of them out of the completion index on the looser
+/// `contains('[')`.
 pub fn is_place_temp(name: &str) -> bool {
     name.ends_with("[]")
+}
+
+/// The place RFC-0082 M2's hoisted VALUE temp was lifted out of, if `name` is
+/// one — `Some("ps")` for `ps[]#val`.
+///
+/// The desugar lifts a place assignment's right-hand side ahead of the move-out
+/// so it runs before the container leaves its home. The temp therefore outlives
+/// exactly as the store it feeds does, which is what `movecheck.rs` asks this
+/// for, and the place it names is what a reader wrote rather than what the
+/// parser minted.
+pub fn hoisted_value(name: &str) -> Option<&str> {
+    Some(name.strip_suffix("#val")?.trim_end_matches("[]"))
 }
 
 /// The default logging threshold — `Info`: `trace`/`debug` are suppressed unless

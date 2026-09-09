@@ -3660,7 +3660,7 @@ impl<'a> Checker<'a> {
             // The compiler's own bound (RFC-0125 §3 M6): the element of a
             // collection an operation forgets or overwrites without releasing
             // it. Unlexable, so only a seeded row can carry it.
-            crate::prelude::HEAPLESS => !crate::own::owns_heap(&base, self.types),
+            crate::prelude::HEAPLESS => !crate::declared::owns_heap(&base, self.types),
             "Num" | "Ord" => matches!(
                 base,
                 Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
@@ -4540,7 +4540,8 @@ impl<'a> Checker<'a> {
                         | Type::SmallArray(..)
                         | Type::Map(..)
                         | Type::Task(_)
-                ) || (crate::types::is_sum_alias(&t) && crate::own::owns_heap(&t, &self.types))
+                ) || (crate::types::is_sum_alias(&t)
+                    && crate::declared::owns_heap(&t, &self.types))
                 {
                     return Ok(false);
                 }
@@ -7532,7 +7533,7 @@ impl<'a> Checker<'a> {
             // the value needs recursion in the code, so the answer is a function
             // (`std/json`'s `copyJson` is the worked example), and since
             // RFC-0091 M1 `impl Copy for T` is where that function goes.
-            if let Some(name) = crate::own::self_referring(&t, &self.types) {
+            if let Some(name) = crate::declared::self_referring(&t, &self.types) {
                 return Err(cerr!(
                     line,
                     "`copy` cannot copy `{name}`: it refers to itself, so a \

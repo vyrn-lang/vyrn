@@ -24,7 +24,7 @@
 //!    declaration table, whose rows are read out of `Program`'s `Vec` fields —
 //!    so a tenth declaration form fails here too.
 //! 4. [`the_keyword_census_is_what_the_rfc_records`] reads the lexer's
-//!    `keyword_or_ident` map and asserts the RFC's keyword table lists the same
+//!    `keywords!` table and asserts the RFC's keyword table lists the same
 //!    spellings against the same tokens, with the same counts. This is the third
 //!    reader of that map: `editor/vscode/test/grammar.test.mjs` is the second.
 //! 5. [`the_contextual_words_are_what_the_rfc_records`] does the same for the
@@ -45,7 +45,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// The nine files a FORM is stated in, in the RFC's order. A column may be more
+/// The ten files a FORM is stated in, in the RFC's order. A column may be more
 /// than one file when one pass is written in two (`vyrn-lower`).
 ///
 /// The `shared` column was `native` until RFC-0125 §3 M4's fourth slice: it read
@@ -56,7 +56,16 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
     ("parser", &["vyrn-frontend/src/parser.rs"]),
     ("checker", &["vyrn-frontend/src/checker.rs"]),
     ("movecheck", &["vyrn-frontend/src/movecheck.rs"]),
-    ("own", &["vyrn-frontend/src/own.rs"]),
+    (
+        "own",
+        &[
+            "vyrn-frontend/src/own.rs",
+            // The `Owned` type table and the free type predicates moved here
+            // with what they are — a reading of the declarations, which is
+            // what this file states (RFC-0125 §3 M6, the type-table slice).
+            "vyrn-frontend/src/declared.rs",
+        ],
+    ),
     (
         "lower",
         &[
@@ -74,7 +83,7 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
 ];
 
 /// The seven files a DECLARATION is stated in. Not the same set: a declaration
-/// is linked by the loader and selected by the CLI, and three of the nine above
+/// is linked by the loader and selected by the CLI, and three of the ten above
 /// never see one.
 const DECL_COLUMNS: &[(&str, &[&str])] = &[
     ("parser", &["vyrn-frontend/src/parser.rs"]),
@@ -300,15 +309,15 @@ fn declarations() -> Vec<String> {
     out
 }
 
-/// Every `"word" => Tok::Name` arm of the lexer's `keyword_or_ident`, in order.
+/// Every `"word" => Tok::Name` row of the lexer's `keywords!` table, in order.
 ///
 /// The same anchor `editor/vscode/test/grammar.test.mjs` reads. A keyword added
 /// to the language and not to RFC-0127 fails here.
 fn keywords() -> Vec<(String, String)> {
     let src = compiler_file("vyrn-frontend/src/lexer.rs");
     let at = src
-        .find("fn keyword_or_ident(")
-        .expect("`keyword_or_ident` is gone from lexer.rs — this test needs a new anchor");
+        .find("keywords! {")
+        .expect("the `keywords!` table is gone from lexer.rs — this test needs a new anchor");
     let body = &src[at..src[at..].find("\n}").map(|e| at + e).unwrap_or(src.len())];
     let mut out = Vec::new();
     for line in body.lines() {

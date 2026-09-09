@@ -94,12 +94,12 @@ fn loadDemo() {
     for s in arrayAt(fields, "steps") {
         let f = fieldsOf(s.copy())
         stepRows.push(DemoStep {
-                id: stringAt(f, "id"),
-                title: stringAt(f, "title"),
-                cmd: stringAt(f, "cmd"),
-                out: stringAt(f, "out"),
-                note: stringAt(f, "note"),
-            })
+            id: stringAt(f, "id"),
+            title: stringAt(f, "title"),
+            cmd: stringAt(f, "cmd"),
+            out: stringAt(f, "out"),
+            note: stringAt(f, "note"),
+        })
     }
 }
 

@@ -28,7 +28,7 @@ fn fetchUser(p: Params) -> Validation<Data> {
 
 export fn page(p: Params, d: Data) -> Html {
     return el("main", [], [
-            el("h1", [], [text("User \{p.id}")]),
-            el("p", [], [text("\{d.name}, age \{d.age}")]),
-        ])
+        el("h1", [], [text("User \{p.id}")]),
+        el("p", [], [text("\{d.name}, age \{d.age}")]),
+    ])
 }

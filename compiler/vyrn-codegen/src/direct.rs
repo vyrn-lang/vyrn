@@ -1351,7 +1351,7 @@ struct Cx<'a> {
     facts: Option<vyrn_lower::core::Facts>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
-    owned: vyrn_frontend::own::Owned,
+    owned: vyrn_frontend::declared::Owned,
     /// RFC-0008's threshold, as an ordinal. Compile-time, and that is the point:
     /// with `logging { level: warn }` a `.debug(..)` call emits no write at all,
     /// which is what makes a disabled log site cost nothing on every engine. A
@@ -2944,7 +2944,7 @@ impl<'p> Fn_<'_, 'p> {
     /// scratch doc says so itself — "a nested expression evaluates to completion
     /// before the outer one touches scratch" is exactly what is false here.
     fn tee_str_temp(&mut self, b: &mut Frame, e: &Expr) -> Option<u32> {
-        if !vyrn_frontend::own::str_temporary(e) {
+        if !vyrn_frontend::declared::str_temporary(e) {
             return None;
         }
         let l = b.local(ValType::I32);
@@ -3112,7 +3112,7 @@ impl<'p> Fn_<'_, 'p> {
         else {
             return Ok(None);
         };
-        if !tmp.ends_with("[]") || t2 != tmp || t3 != tmp {
+        if !vyrn_frontend::ast::is_place_temp(tmp) || t2 != tmp || t3 != tmp {
             return Ok(None);
         }
         let Expr::Call { name: at, args, .. } = load else {
@@ -3790,7 +3790,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Const(l.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
-                    self.rel_holes = vyrn_frontend::own::holes_under(holes, &f.name);
+                    self.rel_holes = vyrn_frontend::declared::holes_under(holes, &f.name);
                     self.rel_at(m, b, p, &f.ty, line)?;
                 }
                 Ok(())
@@ -7918,7 +7918,7 @@ impl<'p> Fn_<'_, 'p> {
                     // `t` and `s` then released one buffer twice. The two
                     // engines now say the same thing about who owns a rendered
                     // String, which is what lets one rule
-                    // ([`vyrn_frontend::own::str_temporary`]) answer for both.
+                    // ([`vyrn_frontend::declared::str_temporary`]) answer for both.
                     Type::Str => {
                         let k = self.tee_str_temp(b, &args[0]);
                         self.str_dup(b);
@@ -12177,7 +12177,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether a value of `ty` transitively owns heap — the frontend's own
     /// predicate, so this backend copies exactly what the textual one does.
     fn owns_heap(&self, ty: &Type) -> bool {
-        vyrn_frontend::own::owns_heap(&self.cx.sub(ty), &self.cx.types)
+        vyrn_frontend::declared::owns_heap(&self.cx.sub(ty), &self.cx.types)
     }
 
     /// `x.copy()`: the receiver's value is on the stack; replace it with one

@@ -230,12 +230,12 @@ export gen fn guideCode(dir: String) -> String {
             // — the generator chapter's `gen fn`. It keeps the file as it is.
             let shown = if hasDemo(toks) { file + mainTail() } else { file.copy() }
             blocks.push(Block {
-                    id: substring(entry, 0, entry.byteLength - 5),
-                    src: shown,
-                    uses: found.uses.copy(),
-                    names: found.names.copy(),
-                    playable: found.standalone && hasDemo(toks),
-                })
+                id: substring(entry, 0, entry.byteLength - 5),
+                src: shown,
+                uses: found.uses.copy(),
+                names: found.names.copy(),
+                playable: found.standalone && hasDemo(toks),
+            })
         }
     }
 

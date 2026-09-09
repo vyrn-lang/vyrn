@@ -631,7 +631,7 @@ pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>>
             let value = if moves.is_empty() {
                 value.clone()
             } else {
-                hoist_operand(value.clone(), format!("{recv}.{field}=val"), &mut out, line)
+                hoist_operand(value.clone(), format!("{recv}#val"), &mut out, line)
             };
             out.extend(moves);
             out.push(Stmt::SetField {
@@ -3568,86 +3568,27 @@ impl Parser {
                             ));
                         }
                     }
-                    // `a[i].f = v` — write-through to a record field of an array
-                    // element (RFC-0011 addendum). `a[i].f` parsed as
-                    // `Field { @at(a, i), f }`; a trailing `=` makes it a
-                    // copy-modify-store: load element `i`, set field `f` on the
-                    // copy, store it back into slot `i`. Desugars to the exact
-                    // idiom `let mut @tmp = a[i]  @tmp.f = v  a[i] = @tmp`, so it
-                    // inherits SetField's field/validated-data rules and
-                    // IndexSet's bounds-check + coercion unchanged, in all three
-                    // backends.
-                    if let Expr::Field { expr, field, .. } = &e {
+                    // `a[i].f = v` — write-through to a record field of an
+                    // array element (RFC-0011 addendum). The statements are
+                    // `store_stmts`'s, the same ones `a[i] = v` above and a
+                    // store through a projection both take: move the container
+                    // out, set the field on the temp, move it back. The rewrite
+                    // is stated once and the temporaries are named once with it.
+                    //
+                    // The shape is asked BEFORE the value is parsed, so an
+                    // unreachable target is still this sentence and not
+                    // whatever the right side says.
+                    if let Expr::Field { expr, .. } = &e {
                         if let Expr::Call { name, args, .. } = expr.as_ref() {
                             if name == "@at" && args.len() == 2 {
-                                if let Some((recv, mut hoists, mut pre, post)) =
-                                    place_receiver(&args[0], line)
-                                {
-                                    let field = field.clone();
+                                if place_receiver(&args[0], line).is_some() {
                                     self.advance(); // eat `=`
                                     let value = self.expr()?;
                                     self.eat_semi();
-                                    // The element copy's binding name. Unspellable
-                                    // (contains `[`), so it can't collide with a
-                                    // real identifier and is filtered from the
-                                    // symbol/completion index; but it reads
-                                    // naturally if it surfaces in a SetField
-                                    // diagnostic ("record `ps[]` has no field ..").
-                                    let tmp = format!("{recv}[]");
-                                    // The element load and the store back both
-                                    // need the index, and it must run once, so it
-                                    // is hoisted whether or not it reads a place;
-                                    // the value is hoisted because the element is
-                                    // TAKEN out of the array in the interpreter
-                                    // (RFC-0082 M2) — `a[i].f = a[i].g` would
-                                    // otherwise read the hole.
-                                    let index = hoist_operand(
-                                        args[1].clone(),
-                                        format!("{tmp}idx"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    let value = hoist_operand(
-                                        value,
-                                        format!("{tmp}val"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    // `let mut @tmp = a[i]`, `@tmp.f = v`, then
-                                    // `a[i] = @tmp` — inside whatever move-out /
-                                    // move-back `place_receiver` asked for.
-                                    pre.push(Stmt::Let {
-                                        name: tmp.clone(),
-                                        mutable: true,
-                                        ty: None,
-                                        value: Expr::Call {
-                                            name: "@at".to_string(),
-                                            args: vec![
-                                                Expr::Var {
-                                                    name: recv.clone(),
-                                                    line,
-                                                },
-                                                index.clone(),
-                                            ],
-                                            line,
-                                        },
-                                        line,
-                                    });
-                                    pre.push(Stmt::SetField {
-                                        name: tmp.clone(),
-                                        field,
-                                        value,
-                                        line,
-                                    });
-                                    pre.push(Stmt::IndexSet {
-                                        name: recv,
-                                        index,
-                                        value: Expr::Var { name: tmp, line },
-                                        line,
-                                    });
-                                    hoists.extend(pre);
-                                    hoists.extend(post);
-                                    return Ok(self.spliced(hoists));
+                                    let Some(stmts) = store_stmts(&e, &value, line) else {
+                                        unreachable!("`place_receiver` answered for this place")
+                                    };
+                                    return Ok(self.spliced(stmts));
                                 }
                                 return Err(Diagnostic::error(
                                     line,
@@ -6236,14 +6177,18 @@ mod tests {
 
     #[test]
     fn index_field_assign_desugars_to_load_setfield_store() {
-        // `a[i].f = v` becomes exactly `let mut a[] = a[i]  a[].f = v  a[i] = a[]`
-        // (three statements spliced into the block, in order).
+        // `a[i].f = v` is `store_stmts`'s field arm: the index binds, the
+        // element moves out, the field is set on the temp, the temp moves back.
         let p =
             parse_src("fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f = 9  return 0 }");
         let stmts = &p.functions[0].body.stmts;
-        // let a  |  let mut a[]=a[0]  |  a[].f=9  |  a[0]=a[]  |  return
-        assert_eq!(stmts.len(), 5);
-        match &stmts[1] {
+        // let a | let a[]idx=0 | let mut a[]=a[a[]idx] | a[].f=9 | a[a[]idx]=a[] | return
+        assert_eq!(stmts.len(), 6);
+        assert!(
+            matches!(&stmts[1], Stmt::Let { name, .. } if name == "a[]idx"),
+            "the index binds once, so the load and the write-back name one              value — and `direct::elem_field_store` can fold the three              statements into one store through the element's address"
+        );
+        match &stmts[2] {
             Stmt::Let {
                 name,
                 mutable,
@@ -6257,14 +6202,14 @@ mod tests {
             }
             other => panic!("expected `let mut a[] = a[0]`, got {other:?}"),
         }
-        match &stmts[2] {
+        match &stmts[3] {
             Stmt::SetField { name, field, .. } => {
                 assert_eq!(name, "a[]");
                 assert_eq!(field, "f");
             }
             other => panic!("expected SetField on the temp, got {other:?}"),
         }
-        match &stmts[3] {
+        match &stmts[4] {
             Stmt::IndexSet {
                 name,
                 value: Expr::Var { name: v, .. },
@@ -6407,6 +6352,45 @@ mod tests {
                 && !shape[3].contains(r#"name: "f""#)
                 && !shape[3].contains(r#"name: "g""#),
             "the store names only temps, so it re-evaluates nothing: {shape:#?}"
+        );
+    }
+
+    /// The desugar names a temp and [`crate::ast::is_place_temp`] reads that
+    /// name back; every pass below asks the one predicate rather than spelling
+    /// a suffix. A rename that leaves a reader behind is silent otherwise —
+    /// which is what `3f4ac923` did when the hoisted operands went from
+    /// `[]val`/`[]idx` to `#val`/`#idx` and `movecheck.rs`'s own copy of the
+    /// spelling stayed on the old one.
+    #[test]
+    fn the_desugars_temps_answer_the_one_predicate() {
+        let mut minted: Vec<(String, bool)> = Vec::new();
+        for src in [
+            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[f()] = g()  return 0 }",
+            "fn main() -> Int64 { let mut ps: Array<S> = []  ps[1].xs = g()  return 0 }",
+            "fn main() -> Int64 { let mut s: S = S { xs: [1] }  s.xs.swapRemove(h())  return 0 }",
+        ] {
+            for st in &parse_src(src).functions[0].body.stmts {
+                if let Stmt::Let { name, .. } = st {
+                    if name.contains('[') || name.contains('#') {
+                        minted.push((name.clone(), crate::ast::is_place_temp(name)));
+                    }
+                }
+            }
+        }
+        minted.sort();
+        minted.dedup();
+        assert_eq!(
+            minted,
+            [
+                ("ps[]", true),
+                ("ps[]#val", false),
+                ("ps[]idx", false),
+                ("s.xs[]", true),
+                ("s.xs[]#idx", false),
+                ("s.xs[]#val", false),
+                ("s.xs[][]arg1", false),
+            ]
+            .map(|(n, p)| (n.to_string(), p))
         );
     }
 
