@@ -15,7 +15,7 @@
 //! record says so: the refusal names the effects it found rather than saying
 //! "does I/O or touches shared mutable state" about all of them.
 
-use vyrn_frontend::{ast::Program, checker, lexer::lex, parser::parse};
+use vyrn_frontend::{ast::Program, lexer::lex, parser::parse};
 
 /// A source, checked the way a driver checks it: the generation engine and the
 /// judgments installed, then `check_and_synthesize`, which is where the

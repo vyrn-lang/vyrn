@@ -465,10 +465,11 @@ fn analyze_inner(
             // is shown here too. The kernel is asked only of a program the core
             // can lower, which is one the type check accepted — the gate
             // `check_and_synthesize` states for the command line.
+            // A program the type check refused has no ownership answer at all
+            // now: the move check states no rule of its own (RFC-0125 §3 M3,
+            // the plumbing slice), and the kernel needs a body it cannot build.
             if checked_diags.is_empty() {
                 checked_diags.extend(movecheck::refusals(prog));
-            } else {
-                checked_diags.extend(movecheck::check_accum(prog));
             }
             // RFC-0033: a diagnostic at an origin-governed line in a synthesized
             // module is relocated to its input file (`.vyx`, …) and set aside so
@@ -820,6 +821,20 @@ fn pin_diagnostics(
                 d.col = col;
                 d.end_col = end_col;
                 break;
+            }
+            // A PATH is not a token: `b.xs[0]`, `d.title`, `x.id`, `t.xs[..]`.
+            // The kernel words its refusals about places, and a place is what
+            // a reader wrote — so the pin is its ROOT, which is a token on the
+            // line (RFC-0125 §3 M3, the column slice). Without this the five
+            // path-subject refusals of the census stayed whole-line, which is
+            // the standing gap every rule that moved to the kernel was in.
+            let root = &target[..target.find(['.', '[']).unwrap_or(target.len())];
+            if root != target && !root.is_empty() {
+                if let Some(t) = tok_info.iter().find(|t| t.line == d.line && t.text == root) {
+                    d.col = t.col;
+                    d.end_col = t.end_col;
+                    break;
+                }
             }
         }
         // No backtick target found on the line → stays `col == 0` (whole-line

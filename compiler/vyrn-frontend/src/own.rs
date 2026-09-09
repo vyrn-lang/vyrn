@@ -1074,14 +1074,6 @@ impl ReleasePlan {
 pub struct Ownership {
     /// The per-node release decisions — see [`ReleasePlan`].
     pub plan: ReleasePlan,
-    /// Functions whose return value transfers heap ownership to the caller,
-    /// with the kind of value returned.
-    ///
-    /// Since RFC-0089 rule 3 this is the return type and nothing else: a return
-    /// is owned, and `movecheck` refuses the program where it is not. The
-    /// fixpoint that used to compute it asked a question the language now
-    /// answers.
-    pub owned_fns: HashMap<String, DropKind>,
     /// Per function: every `let` in source order, and what happens to its
     /// value, in the words `vyrn why --memory` and the editor print
     /// (RFC-0087 U1).
@@ -1102,14 +1094,6 @@ pub struct Ownership {
     /// the one order that used to be asserted separately by `Gen::drop_stack`,
     /// `Fn_::releases` and the interpreter's per-block `Vec`.
     pub releases: HashMap<String, Vec<Release>>,
-    /// Round nineteen's closure over the call graph, handed on so the CORE
-    /// can screen the store it is lowering (RFC-0125 §3 M3, the fresh-store
-    /// slice).
-    ///
-    /// Not a table: it says nothing a body states. It names the functions
-    /// whose result can HOLD a borrowed parameter's storage, which is an
-    /// answer only a pass that has read every body can give.
-    pub escapers: std::collections::HashSet<String>,
     /// Round forty-six's meet, by signature key — see
     /// [`crate::movecheck::Facts::fnval_clear`]. The fourth answer only a
     /// pass that has read every body can give, and the core asks it at a call
@@ -1278,22 +1262,14 @@ fn analyze_now(program: &Program) -> Ownership {
     let fs = crate::prof::phase("own: movecheck::facts");
     let facts = crate::movecheck::facts(program);
     drop(fs);
-    // Rule 3: a return is owned. The return type is the whole answer.
-    let owned_fns: HashMap<String, DropKind> = program
-        .functions
-        .iter()
-        .filter_map(|f| proto.release_kind(&f.ret).map(|k| (f.name.clone(), k)))
-        .collect();
     let plan = ReleasePlan::default();
     let mut ownership = Ownership {
         plan,
-        owned_fns,
         memory: HashMap::new(),
         proto,
         // Every row in this table is the placer's now: the analysis injects
         // none, and the fold that did is deleted (RFC-0125 §3 M3).
         releases: HashMap::new(),
-        escapers: facts.escapers.clone(),
         fnval_clear: facts.fnval_clear.clone(),
         arg_caps: crate::declared::arg_caps(program),
     };
@@ -1441,44 +1417,31 @@ pub(crate) mod tests {
 
     // ---- shadowing (an inner binder is not the outer binding) ------------
 
-    #[test]
-    fn factory_returning_concat_is_owned() {
-        let src = "fn make(a: String, b: String) -> String { return a + b; } \
-                   fn main() -> Int64 { return 0; }";
-        let (o, _) = analyze_src(src);
-        assert!(o.owned_fns.contains_key("make"));
-    }
-
     /// RFC-0089 rule 3, Phase 4c. A return is owned, so the return TYPE is the
-    /// whole answer and the fixpoint that used to look for a borrowed return path
-    /// asked a question the language now answers. `movecheck` refuses the
-    /// programs this used to describe (`return s` on a `read` parameter).
+    /// whole answer and the fixpoint that used to look for a borrowed return
+    /// path asked a question the language now answers. The kernel refuses the
+    /// programs that fixpoint used to describe (`return s` on a `read`
+    /// parameter).
+    ///
+    /// The table it left behind — `Ownership::owned_fns`, a name-keyed copy of
+    /// `release_kind(&f.ret)` — went with it (RFC-0125 §3 M3, the
+    /// ownership-file slice). What is asserted is the question its one reader
+    /// asks now.
     #[test]
     fn a_heap_return_type_always_transfers() {
-        let src = "fn id(s: String) -> String { return s.copy(); } \
+        let src = "fn make(a: String, b: String) -> String { return a + b; } \
                    fn count(s: String) -> Int64 { return s.byteLength; } \
                    fn main() -> Int64 { return 0; }";
         let (o, _) = analyze_src(src);
-        assert_eq!(o.owned_fns.get("id"), Some(&DropKind::FreeStr));
-        assert!(!o.owned_fns.contains_key("count"));
+        assert_eq!(
+            o.proto.release_kind(&Type::Str),
+            Some(DropKind::FreeStr),
+            "`make`'s return type"
+        );
+        assert_eq!(o.proto.release_kind(&Type::Int), None, "`count`'s");
     }
 
     // ---- census §14 at a `match`: the scrutinee and its payload ----------
-
-    /// `Option<T>`'s row as `release_kind` records it since RFC-0126 §8.11's M4b:
-    /// the RESOLVED type, which is the variant list `resolve` answers.
-    fn opt_row(t: Type) -> DropKind {
-        DropKind::Deep(Type::Enum(vec![
-            EnumVariant {
-                name: "None".to_string(),
-                payload: Vec::new(),
-            },
-            EnumVariant {
-                name: "Some".to_string(),
-                payload: vec![t],
-            },
-        ]))
-    }
 
     // ---- auto-free for mutable arrays -----------------------------------
 
@@ -1657,7 +1620,7 @@ pub(crate) mod tests {
 
         let (mut lines, mut parsed) = (0, 0);
         let (mut param_returns, mut aliases): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
-        let mut reasons: HashMap<&'static str, usize> = HashMap::new();
+        let reasons: HashMap<&'static str, usize> = HashMap::new();
         let mut total = 0usize;
 
         for path in &files {

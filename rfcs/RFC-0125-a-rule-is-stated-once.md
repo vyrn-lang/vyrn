@@ -16907,6 +16907,429 @@ to **4,003**; `compiler/vyrn-lower/src/kernel.rs` 2,591 to **2,676**;
 and moved nothing in it. 408 lines out of the pass §2.7 deletes, and three
 rules each stated once.
 
+#### The move check states no refusal, and the plumbing goes (2026-09-09, `track-dx`)
+
+`track-dt` left the walk with one `Err(..)` in it, and that one was the
+propagation site: `MoveCheck::block` pushed what `stmt` returned into
+`MoveCheck::errors`, and `stmt` never returned one. So
+`run(program, Want::Check).diags` was an empty vector, built by a full walk of
+every body, on every `vyrn check` and every keystroke the editor pays for.
+
+**The licence is that the knob no longer moves a byte.** `VYRN_NO_MOVECHECK=1`
+stood the checker's refusals aside, and it was the instrument every deletion of
+this milestone measured with. Over the whole corpus — 280 roots under
+`examples/`, `std/`, `site/` and `site/app/`, plus the 34 programs of
+`tests/refusals` and the 9 of `tests/unlicensed`, 323 programs, whole standard
+error and the exit code — the two runs are the same run:
+
+| measure | before | after |
+|---|---|---|
+| programs checked | 323 | 323 |
+| refused | 77 | 77 |
+| `vyrn check`, whole stderr, before against after | — | byte-identical, **0 lost / 0 gained** |
+| the same with `VYRN_NO_MOVECHECK=1`, before the change | byte-identical to the plain run | — |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, `rfcs/census/wasm-sha256.tsv` untouched | |
+| the residue ratchet | engine 172 clean / 3 leaking, route 172 clean / 3 leaking, 0 failed | |
+
+**What went.** `MoveCheck::errors`, `Run::diags`, `Want::Check`, `check_accum`,
+`borrow_store_sites` and its corpus test, `refusal` and the safety guard whose
+subject it was, and the `Result<_, Diagnostic>` on `block`, `stmt`, `expr` and
+`walk_writeback` — 41 `Ok(..)` wrappers and 20 `?`s over a walk that could not
+fail. `in_source_order` stays and takes `check_accum`'s doc with it: the rule
+that a file's refusals come out in the source's order is about the merged list,
+which is `refusals`'s. Two readers moved with it. `symbols.rs` asked
+`check_accum` for a program the type check had refused, because the kernel
+needs a body it cannot build for one; that branch has no answer at all now, and
+says so. `movecheck.rs`'s own test module lost the door it asked through and
+the seven stream constants that had no test left to name them.
+
+**And the instrument flips, because an inert one is a false licence.**
+`VYRN_NO_MOVECHECK=1` is gone from the compiler; keeping an `if` whose two arms
+are both `Vec::new()` would be the census measuring itself. What replaces it in
+`tests/refusals.rs` is the knob beside it, `VYRN_NO_KERNEL=1` (`core::refuses`),
+and the census's second run asks the opposite question — not "is the kernel's
+sentence reachable past the checker" but "is this sentence the kernel's". Every
+one of the 34 rows answered it on the first run: **29 are the kernel's**, and
+standing the kernel aside accepts all 29; **5 survive it word for word**, which
+is what `Kernel::Elsewhere` meant and still means. `Kernel::Same` becomes
+`Kernel::Its`, and `Kernel::Other` and `Kernel::No` go — no row has held either
+since row 24 left.
+
+The same flip covers the seven other places a second run measured the deletion
+this slice took: the nine counterexamples of `tests/unlicensed`, rule 2's and
+rule 3's shapes, the wrapped lend's eleven, and the last three rules' five. The
+licence they carried is spent — the checker's half is deleted, so the plain run
+IS the measurement — and what they assert instead is the attribution. It is not
+uniform, and the two rules `track-dt` gave the CHECKER are the proof it is
+measuring something: `f(xs, xs)` and `t.merge(t)` still refuse with the kernel
+stood aside, in the same words, because `checker::check_modify_arg` is what
+says them. The `Uncovered` rows' `kernel` column goes with the run that read
+it: it held the other pass's wording and no row ever filled it.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 4,003 to **3,760**;
+`compiler/vyrn-cli/tests/refusals.rs` 3,069 to **2,953**;
+`compiler/vyrn-frontend/src/symbols.rs` 4,781 to 4,782.
+
+**The censuses.** The structural census: `Shared` **2,990 to 2,862**, `Tests`
+**519 to 404**, `Rows` 494 unmoved, `Kernel`, `Checker` and `Menu` still zero.
+The `check_accum` section's anchor becomes `in_source_order`'s and the
+`refusal` section goes; `fn stmt` and `fn expr` are anchored by their whole
+signature, because both fit on one line now that neither returns a `Result`.
+The frontend census: `symbols.rs`'s "the file's own job" 2,897 to **2,898**.
+The form census (RFC-0127 §3), the surface census, `emitter_census`,
+`checker_census` and `cli_census` do not move — this slice deletes no arm of
+any walk.
+
+#### The consumed table is written and never read (2026-09-09, `track-dx`)
+
+`Consumed` is a `HashMap<String, HashMap<String, Consumption>>` with an
+`insert`, an `or_insert`, a `remove`, a `revive`, two `IntoIterator`s and a
+bucket-by-root layout a measurement earned — 250 / 500 / 1,000 / 2,000 drops at
+10 / 15 / 31 / 99 ms is quadratic, and the root cut it. Every one of those
+readers reads the table back into itself: an `if` clones it twice and unions the
+two clones, a `match` folds the arms, a region and a lambda block filter their
+own declarations out of the union. Nothing asks it a question. The last reader
+was the use-after-consume refusal, and that left with row 06.
+
+`Consumption` is already an empty struct — it carried the line and the hole flag
+until row 22 — so the table is a set of strings the pass computes and drops. The
+walk carried it in a `&mut` parameter through `block`, `stmt`, `expr`,
+`walk_writeback` and `store`, which is why deleting it is 92 mentions.
+
+**The licence, the same instrument as the plumbing slice's.**
+
+| gate | result |
+|---|---|
+| `vyrn check`, whole stderr and exit code, 323 programs | byte-identical, **0 lost / 0 gained** |
+| refused | 77 before, 77 after |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, the manifest does not move |
+| `cargo test -p vyrn-cli`, no filter | 82 suites green |
+
+**Two findings, both of them dead by the same reader.** `MoveCheck::store`
+returns a `bool` — "this store is a move" — and every one of its eleven call
+sites has discarded it since the refusal left. The value fed `consumed.insert`,
+through a caller that no longer exists. With it go the three screens at the end
+of the function that only decided it: a scalar copies, a borrow does not move, a
+projection does not move. What `store` does now is RFC-0092's instrument, and it
+says so. And `declared_in` — every name a block's statements declare, at any
+depth — had two callers, the region's filter and the lambda block's, both of
+them filters over the union. It goes whole.
+
+**What the walk keeps.** The scope stacks, the borrow table, the type
+environment, the site and projection instruments, the escape screen, and the
+four call-graph sets `Want::Lets` fills. `Stmt::Drop` keeps an arm and it does
+nothing but say the statement does not diverge; `Stmt::Region` is one line;
+`Expr::Consume` carries its operand and records nothing; `Expr::Spawn` no longer
+reads the capability row, because the only thing it did with it was mark the
+argument consumed.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 3,760 to **3,363**.
+
+**The censuses.** The structural census: `Rows` **492 to 479** (`store`'s three
+screens), `Shared` **2,862 to 2,480**, `Tests` 404 unmoved. Two anchors move
+because the signatures they name lost a parameter and `cargo fmt` put them on
+one line — `block`, `stmt`, `expr` and `walk_writeback` — and `declared_in`'s
+section becomes `pattern_bindings`'s. RFC-0127 §3's form census moves for the
+first time on this track: `Stmt::Let` 3 to 2, `Stmt::If`, `Stmt::IfLet`,
+`Stmt::While` and `Stmt::ForIn` 4 to 3, `Stmt::Region` 3 to 2 and `Expr::Var` 15
+to 14 in the `movecheck` column, and the total 1,205 to **1,198 mentions in
+eight files for 38 forms**. Each of the seven is one arm's clone-and-union, and
+no form loses its arm. The surface census, `emitter_census`, `frontend_census`,
+`checker_census` and `cli_census` do not move.
+
+#### The escape closure fires 589 times and is wrong every time (2026-09-09, `track-dx`)
+
+`track-dt` left `Ownership::escapers` at the top of the list and named what a
+deleting slice owes: the explanation of a set that fires 589 times over the 280
+corpus roots and changes no emitted byte and no runtime block. Here it is,
+measured at three depths.
+
+**What the screen does.** `core::Builder::store_is_fresh` decides whether
+`xs = f(xs)` hands the old buffer back. It reads the shape off the statement —
+every mention of `xs` in the value must be a READ argument — and then asks the
+closure whether any callee named there can HOLD a borrowed parameter's storage.
+A hit makes the store `Old::Transferred`: nothing is released.
+
+**Depth one: where it fires.** A dump at the screen counts **589 firings** over
+the corpus, and every one of them is at `placed=false owes=true` — the placer
+places no store row there, so the store's `releases` flag is `false` either way.
+The flip changes one WORD, `Old::Transferred` in place of `Old::Pending`.
+
+**Depth two: which callees.** Two, over the whole corpus, and no others:
+`std/strings.vyrn`'s `substring` and `std/vyx.vyrn`'s `vyxRelocateComp`. Both
+are false positives, and both are readable in ten seconds. `substring` returns
+`slice(s, start, end)`'s `Ok` payload, and `slice` allocates. `vyxRelocateComp`
+returns a `VyxComp` literal whose every field is `comp.<f>.copy()` except two
+freshly built arrays and one rebuilt tree. Neither result holds a byte of what
+it was handed. The closure marks them because `carries_param_storage` is
+conservative in the leak direction: a user call forwards until proven otherwise,
+and `return` of a value derived from a `read` parameter is the proof it wants.
+
+**Depth three: what the answer costs.** `Old::Transferred` at a name the kernel
+sees as `Own::Held` is a release that never happens. Standing the closure aside
+and re-running the placer, `site/app/docs.vyrn` gains **15 placed store rows**
+(1,371 to 1,386) and the corpus gains **258** stores that were `Transferred` at a
+`Held` name. They are releases the program owes, and the screen was the only
+thing suppressing them.
+
+**So it is not subsumed and it is not load-bearing: it is wrong.** The question
+it asks — "can this callee's result hold my storage" — is answered by the
+DECLARATION since RFC-0120: a result not spelled `read` or `modify` is owned,
+and returning a borrow of a parameter is the kernel's refusal (row 17). The
+closure is a call-graph guess at a declaration, it guesses wrong on both of the
+two functions it ever fires on, and the guess is a leak. It goes, with
+`movecheck::Facts::escapers`, `MoveCheck::param_escapers`, `carrying_locals`,
+`carries_param_storage`, `note_carrying_store` and the five record sites that
+fed them. `call_may_forward` stays: the core asks it at the same call, and its
+one method wrapper goes with the walk that used it.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check`, whole stderr and exit code, 323 programs | byte-identical, **0 lost / 0 gained** |
+| `kernel` `--ignored`, with the closure emptied | 24,762 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, with the closure emptied | every count unmoved, 2,744 stores that release and 54,502 stood down |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, `rfcs/census/wasm-sha256.tsv` untouched |
+| the residue ratchet `--ignored` | engine 172 clean / 3 leaking, route 172 clean / 3 leaking, 0 failed |
+| `route` `--ignored` | 175 checked, 34 skipped, 0 failed |
+| `memory` `--test-threads=1` | 9 |
+| the site export, and `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 82 routes and 14 assets; 189 blocks, 0 failed |
+
+The extra releases are in the site's own build, which is why the residue
+ratchet — 175 programs under `examples/` — cannot see them and the site's own
+gates can.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 3,363 to **3,185**;
+`compiler/vyrn-frontend/src/own.rs` 1,827 to **1,818**;
+`compiler/vyrn-lower/src/core.rs` 6,207 to 6,210 — three lines of prose about
+where the rule is stated instead. `Ownership` is seven fields.
+
+**The censuses.** The structural census: `Rows` **479 to 361** — the escape
+screen was the largest single `Kind::Rows` section — and `Shared` **2,480 to
+2,420**. RFC-0127 §3's form census moves in fourteen rows, one arm each out of
+`carries_param_storage`'s hand-tiled expression walk: `Expr::Int` 6 to 5,
+`Expr::Float`, `Expr::Bool` and `Expr::Str` 5 to 4, `Expr::Var` 14 to 13,
+`Expr::Unary`, `Expr::Binary`, `Expr::StructLit`, `Expr::ArrayLit` and
+`Expr::MapLit` 4 to 3, `Expr::Call` 11 to 10, `Expr::Match` 7 to 6,
+`Expr::IfExpr` 5 to 4 and `Expr::Consume` 6 to 5; the total 1,198 to **1,184**.
+`emitter_census`, `surface`, `checker_census`, `frontend_census` and
+`cli_census` do not move.
+
+**What is left of the call graph.** `fnval_clear` alone — round forty-six's
+meet, which the core asks by signature at a call through a fn value.
+`track-dt` measured what it is worth by emptying it: `examples/rpc.vyrn` leaks
+6 blocks and `examples/rpcsplit.vyrn` 5, on the engine and on the route alike.
+`Facts` is one field now, and the walk that fills it is `Want::Lets`.
+
+#### The editor's column, measured before it was built (2026-09-09, `track-dx`)
+
+`track-dt` recorded a standing gap and named the answer: "`vyrn-lsp` installs
+the lowering so a kernel refusal does reach a reader, but the kernel refuses at
+a LINE and the pinner works from a column. Every rule that left since row 06 is
+in that position; the answer is one slice about `Refusal`, not one test."
+
+**The gap is one fifth of what it says, and the measurement is the whole
+slice.** `vyrn_lower::install()` and then `vyrn_frontend::symbols::analyze` —
+the call the editor makes — over the 43 programs of `tests/refusals` and
+`tests/unlicensed`: **38 of them were already pinned to a token**, because
+`symbols::pin_diagnostics` works from the message and the line, not from the
+node, and the kernel's sentences backtick-quote their subject exactly as the
+checker's do. `r06`'s `x` was at line 9, columns 18 to 19, before this slice
+touched anything.
+
+**The five that were not are the five whose subject is a PATH.** `b.xs[0]`,
+`h.meta[0]`, `d.title`, `t.xs[..]`, `x.id`. A path is not a token, so the
+identifier path of the pinner missed it, the keyword map missed it, and the
+diagnostic stayed whole-line. So the rule the slice adds is one sentence — **a
+place pins to its root**, which is a token on the line — and it is stated where
+every other column is stated, in the pinner. A field on `Refusal` would have
+been a second statement of the same column, and a worse one: the kernel would
+have to carry a column through `NameInfo`, `Site` and every `St` that carries a
+line, to arrive at the identifier the pinner already finds.
+
+**What moved, read row by row.** The refusal corpora: five programs gain a
+column (`r02` 6:0 to 6:14, `r05` 8:0 to 8:5, `r08` 6:0 to 6:26, `r16` 5:0 to
+5:12, `u06` 9:0 to 9:13) and one moves from a keyword to its subject (`u25b`
+12:9-16, the `consume` keyword, to 12:17-19, the `er` the sentence is about).
+Not one line moves, and no program loses a column. The wider corpus, through
+`symbols_api::the_pinned_columns_over_the_corpus` — every `.vyrn` under
+`examples/`, `site/`, `std/` and `compiler/vyrn-cli/tests` — **31 rows move and
+every one of them is `unknown type` on a namespaced name**: `api.RpcIssue`,
+`stream.Cursor`, `shapes.Color`, from column 0 to the namespace identifier.
+Nothing else in 3,688 lines of that print differs.
+
+**And the pin, where the kernel is reachable.**
+`compiler/vyrn-cli/tests/columns.rs` is new: `vyrn-frontend` cannot reach a
+kernel refusal, which is why `diagnostics_api.rs` and `symbols_api.rs` lost
+their ownership pins with the last rule, and this crate links both halves. It
+asserts the two halves of the one sentence over both refusal corpora — the
+refusal keeps its LINE, and its column is a span over a real token of that
+line — and prints the table under `--ignored`.
+
+**What is left, with its blocker named.** `vyrn check` prints `file:line:0:`
+for every one of these, because the command reports what the loader and the
+checker say and does not run the pinner. Giving the command the editor's column
+is a one-line change and a 77-program change to the whole-stderr licence every
+census in this milestone reads, so it is its own slice with its own re-recorded
+corpus — not a rider on this one.
+
+**The licence.** `vyrn check`, whole stderr and exit code, 323 programs:
+byte-identical, 0 lost / 0 gained. The pinner runs on the editor's path only,
+which is exactly why the corpus print above is its licence and the command's
+stderr cannot be.
+
+**The lines.** `compiler/vyrn-frontend/src/symbols.rs` 4,782 to **4,796**; a new
+`compiler/vyrn-cli/tests/columns.rs` of 117. The frontend census:
+`symbols.rs`'s "the file's own job" 2,898 to **2,912**. No other census moves —
+this slice deletes nothing and adds no arm to any walk.
+
+#### What `own.rs` is after the closures, with a reader against every part (2026-09-09, `track-dx`)
+
+`track-dt` censused the file and found nothing dead. Three slices later one
+field is: **`Ownership::owned_fns`**, "the return type and nothing else" by its
+own comment since RFC-0089 rule 3. It is built in one `filter_map` —
+`proto.release_kind(&f.ret)` keyed by function name — and it has one reader
+outside the tests, `vyrn why --memory`'s "transfers:" line. A name-keyed copy of
+a question the type table answers is the shape this milestone deletes
+everywhere else, so the report asks the table: `own.proto.release_kind(&f.ret)`,
+at the one site that wants it. The three tests that read the copy read the table
+now, which is what they were about all along.
+
+Two more things were dead and are gone with it: `own.rs`'s test helper
+`opt_row`, which lost its last caller when the `Option` rows moved, and a `mut`
+on a `HashMap` nothing writes to. `vyrn-frontend`'s `tests/isolation.rs` had
+imported `checker` since its rules left; that import goes too. The file builds
+warning-free now.
+
+**The count, and a reader against every part.** 1,790 lines, and the tiling is
+the file's own — a section runs from its doc comment to the next item's.
+
+| section | lines | who reads it |
+|---|---|---|
+| the module comment | 45 | — |
+| `Exit`, `Release`, `DropKind` + `words`, `Linear` | 183 | the row vocabulary every pass shares: `Exit` in `kernel.rs`, `direct.rs`, `lib.rs`; `Release` in `core.rs`, `direct.rs`, `lib.rs`; `DropKind` in five files including `render.rs`'s printer; `Linear` in `declared.rs` and `typed.rs` |
+| `Owned` and its ten methods | 434 | **the type table every pass asks**: `core.rs`, `declared.rs`, `direct.rs`, `typed.rs`, `types.rs`, and now `vyrn-cli`'s report. `release_kind` alone is 189 lines |
+| the free type predicates: `self_referring`, `owns_heap`, `skippable`, `holes_under`, `str_temporary` | 286 | `checker.rs`, `core.rs`, `direct.rs`, `types.rs`, `declared.rs`, `tests/memory.rs` |
+| `MemoryRow`, `Bucket` | 43 | `vyrn why --memory` and the editor: `symbols.rs`, `vyrn-cli/src/main.rs` |
+| `ReleasePlan` and the alias machinery | 79 | `core.rs` and `direct.rs` |
+| `Ownership` — **six** fields | 42 | `plan`, `memory`, `proto`, `releases`, `fnval_clear`, `arg_caps` |
+| the memoized analysis: `Memo`, `ident`, `hand_on`, `forget_loaded`, `open`, `Drop`, `analyze`, `analyze_now` | 175 | `analyze` is the door, with 28 call sites in twelve files |
+| the two plan keys | 22 | `core.rs` and `direct.rs` |
+| the three installed slots | 71 | `vyrn-lower`'s `install` fills all three; `symbols.rs` reads two |
+| `placed` | 22 | `direct.rs` |
+| tests | 388 | the file's own |
+
+**Two fields went in three slices, and they were not the same kind of thing.**
+`escapers` was an ANSWER — a closure over the call graph, wrong on both of the
+functions it fired on. `owned_fns` was a COPY — a table restating a declaration.
+The four that are left divide the same way. `plan`, `releases` and `memory` are
+written by the placer and read by the emitters and the report: rows, which §2.7
+keeps and renames. `proto` and `arg_caps` are readings of the DECLARATIONS,
+which every pass asks and none of them stores twice. `fnval_clear` is the last
+answer only a pass that read every body can give, and `track-dt` priced it:
+empty it and `examples/rpc.vyrn` leaks 6 blocks, `rpcsplit` 5, on both engines.
+
+**What §2.7's "delete `own.rs`" means after this track.** The file is not a
+pass. Four things stand, and only one of them is going anywhere:
+
+1. **The `Owned` type table and the free predicates — 720 lines, 40 per cent.**
+   A reading of the declarations. It moves to whatever file states
+   declarations; it does not go.
+2. **The row vocabulary and the plan — 326 lines.** Written by the placer
+   alone, read by `core.rs` and `direct.rs`.
+3. **The analysis door and the three slots — 246 lines.** The inversion that
+   lets `vyrn-frontend` be below `vyrn-lower`. It goes when the two crates are
+   one, and not before.
+4. **The report — 43 lines.**
+
+**The licence.** `vyrn check`, whole stderr and exit code, 323 programs:
+byte-identical, 0 lost / 0 gained.
+
+**The lines.** `compiler/vyrn-frontend/src/own.rs` 1,818 to **1,790**;
+`compiler/vyrn-cli/src/main.rs` gains three lines of prose about which table
+the report asks. The `cli_census`: "a command's own path" 5,295 to **5,298**.
+No other census moves.
+
+#### Gates (2026-09-09, `track-dx`)
+
+Run in §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP`
+pointed at a shallow scratch directory outside the checkout. Over the five
+commits of this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok — one warning, `kernel.rs`'s unreachable pattern, which stood at the branch point |
+| `cargo test -p vyrn-cli`, no filter | **83 suites**, 641 tests, all green — one suite more than the branch point, `columns.rs` |
+| `kernel` `--ignored`, release | 1 — **24,762 accepted**, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 170 programs, every count unmoved |
+| `typed` `--ignored`, release | 1 — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2 — **30,184 functions judged**, 0 differ |
+| `fixtures` `--ignored`, release | 1 |
+| `testsweep` `--ignored`, release | 1, 435 programs from 134 sources — one source more, this track's `columns.rs` |
+| `refusals`, `forms`, `frontend_census`, `cli_census` | re-pinned, each in the commit that moved it; `surface`, `emitter_census` and `checker_census` unmoved |
+| `cargo test -p vyrn-frontend` | 11 suites |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 suites |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm` | 3 |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed |
+| the residue ratchet `--ignored`, release | **engine 172 clean, 3 leaking; route 172 clean, 3 leaking; 0 failed** |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, and `rfcs/census/wasm-sha256.tsv` does not move |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 189 blocks, 0 failed |
+
+**The whole-stderr licence, run at every commit.** `vyrn check` over 323
+programs — the 280 corpus roots under `examples/`, `std/`, `site/` and
+`site/app/`, plus the 34 of `tests/refusals` and the 9 of `tests/unlicensed` —
+whole standard error and the exit code, compared against the branch point:
+byte-identical at each of the five commits, 77 refused throughout. **0 lost / 0
+gained**, five times.
+
+**What this track touched, so a track beside it can read the overlap.** In
+`core.rs`: `Builder::store_is_fresh` and `read_only_mentions`'s doc, and nothing
+else — no row definition, no builder, no printer, no driver. Nothing in
+`kernel.rs`. In `own.rs`: the `Ownership` struct and `analyze_now`'s
+initializer. In `symbols.rs`: `pin_diagnostics` and the one branch that asked
+`movecheck::check_accum`. `movecheck.rs` is most of the diff.
+
+**The lines, over the track.** `compiler/vyrn-frontend/src/movecheck.rs` 4,003
+to **3,185**; `compiler/vyrn-frontend/src/own.rs` 1,827 to **1,790**;
+`compiler/vyrn-lower/src/core.rs` 6,207 to 6,210 and
+`compiler/vyrn-lower/src/kernel.rs` **2,676**, unmoved;
+`compiler/vyrn-frontend/src/symbols.rs` 4,781 to 4,796;
+`compiler/vyrn-cli/tests/refusals.rs` 3,069 to 2,948, and a new
+`compiler/vyrn-cli/tests/columns.rs` of 117. 818 lines out of the pass §2.7
+deletes, one wrong answer out of the placer's input, and a column on every
+refusal a reader gets.
+
+**What is left of `movecheck.rs`, and the blocker on each.**
+
+1. **The `Want::Lets` walk and `fnval_clear`** — the whole reason the file is
+   still run. It is priced: empty it and two programs leak. The blocker is
+   ORDER, and `track-dt` measured both shapes — a second build costs 181 ms in
+   place of 74 ms of a 304 ms placer, and a fold from the first pass leaves
+   1,314 unrebuilt bodies judged against an empty answer.
+2. **`Kind::Rows`, 361 lines** — `ArgVerdict`, the producer screens, `store`'s
+   projection instrument, `capture_site`. Each is a row an emitter reads
+   through the core. The blocker is the same one rows 2 and 3 of the emitter
+   census carry: the emitter reading the core at that position.
+3. **`Kind::Shared`, 2,420 lines** — the scope stacks, the borrow table, the
+   type environment, the path algebra, and `MoveCheck::stmt` and `::expr`, which
+   are one traversal doing four jobs. It goes when the four jobs have four
+   owners, which is §2.7's sentence and not a slice.
+4. **`Kind::Tests`, 404 lines** — RFC-0089's site census and RFC-0092's
+   projection instrument, both `--ignored` corpus measurements with no second
+   reader.
+
+`Kind::Kernel`, `Kind::Checker` and `Kind::Menu` are zero and have been since
+`track-dt`: **this file states no refusal at all**, and now no refusal
+plumbing, no consumed table and no call-graph answer but one.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

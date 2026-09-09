@@ -737,7 +737,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 5221, 179),
+        ("a command's own path", 5224, 179),
         ("a rule another pass also states", 168, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),

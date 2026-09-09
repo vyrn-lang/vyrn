@@ -1405,8 +1405,11 @@ fn why_memory(file: &str) -> ExitCode {
             .collect();
         println!();
         println!("  fn {}({}) -> {}", f.name, params.join(", "), f.ret);
-        match own.owned_fns.get(&f.name) {
-            Some(kind) => println!(
+        // Rule 3: a return is owned, so the return TYPE is the whole answer,
+        // and the report asks the type table the automatic path asks
+        // (RFC-0125 §3 M3, the ownership-file slice).
+        match own.proto.release_kind(&f.ret) {
+            Some(ref kind) => println!(
                 "    transfers: yes — the caller owns the result, and releases it by {}",
                 kind.words()
             ),

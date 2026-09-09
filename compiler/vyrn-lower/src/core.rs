@@ -3604,8 +3604,15 @@ impl<'a> Builder<'a> {
     /// Round eighteen's rule, stated by the core (RFC-0125 §3 M3): a store
     /// whose value mentions the place it writes into may be handing the old
     /// buffer back, UNLESS every mention is a read the value cannot hand
-    /// back. The shape is read off the statement; the escape closure over the
-    /// call graph is the checker's, handed on beside the plan.
+    /// back. The shape is read off the statement.
+    ///
+    /// It asked a call-graph closure as well until RFC-0125 §3 M3's escape
+    /// slice — the set of functions whose result may HOLD a borrowed
+    /// parameter's storage. A declared result answers that: a function whose
+    /// result is not spelled `read`/`modify` returns an owned value, and
+    /// returning a borrow of a parameter is the kernel's refusal (row 17). So
+    /// the closure was a guess at a declaration, and both of the two members
+    /// it ever fired on returned a value every field of which is a copy.
     fn store_is_fresh(&self, value: &'a Expr, name: &str) -> bool {
         // The recording gate: a value whose type owns no heap has nothing to
         // hand back and no row is written for it.
@@ -3613,15 +3620,11 @@ impl<'a> Builder<'a> {
             return false;
         }
         let mut ms = Vec::new();
-        if !self.read_only_mentions(value, name, &mut ms) {
-            return false;
-        }
-        ms.iter().all(|c| !self.own.escapers.contains(c))
+        self.read_only_mentions(value, name, &mut ms)
     }
 
     /// Whether every mention of `root` in `e` is a read that cannot hand
-    /// `root`'s own storage back, collecting the callees the escape closure
-    /// then screens.
+    /// `root`'s own storage back.
     fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<String>) -> bool {
         use vyrn_frontend::movecheck as mc;
         if !mc::mentions_place(e, root) {
