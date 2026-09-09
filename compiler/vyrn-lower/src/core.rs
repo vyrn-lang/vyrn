@@ -1496,30 +1496,15 @@ fn arms_span(line: usize, arms: &[MatchArm]) -> (usize, usize) {
 }
 
 /// The kind of an expression, for a gap's detail.
+///
+/// The word for a form is [`Node::kind`]'s. What a gap wants on top of a dump
+/// axis is two distinctions: the five literals answer as one, and a builtin
+/// call is named apart from a user's.
 fn expr_kind(e: &Expr) -> &'static str {
     match e {
         Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => "literal",
-        Expr::Var { .. } => "var",
-        Expr::Unary { .. } => "unary",
-        Expr::Binary { .. } => "binary",
-        Expr::Field { .. } => "field",
-        Expr::Call { name, .. } => {
-            if name.starts_with('@') {
-                "builtin call"
-            } else {
-                "call"
-            }
-        }
-        Expr::TryConstruct { .. } => "try construct",
-        Expr::ArrayLit { .. } => "array literal",
-        Expr::StructLit { .. } => "record literal",
-        Expr::MapLit { .. } => "map literal",
-        Expr::Spawn { .. } => "spawn",
-        Expr::IfExpr { .. } => "if expression",
-        Expr::Match { .. } => "match",
-        Expr::Try { .. } => "try",
-        Expr::Lambda { .. } => "lambda",
-        Expr::Consume { .. } => "consume",
+        Expr::Call { name, .. } if name.starts_with('@') => "builtin call",
+        _ => Node::Expr(e).kind(),
     }
 }
 
@@ -5093,132 +5078,46 @@ impl<'a> Builder<'a> {
     }
 }
 
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6).
+vyrn_frontend::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
 /// Every `Var` node and every callee name in a lambda's body, nested
 /// lambdas included: what the frame captures, and where an untyped
 /// parameter's type can be read.
+///
+/// The descent is `ast::body_scope_descent!`'s; what is this reader's own is
+/// the two names it records.
 fn mentions_in_lambda<'e>(
     body: &'e LambdaBody,
     vars: &mut Vec<&'e Expr>,
     calls: &mut Vec<&'e str>,
 ) {
+    struct Mentions<'e, 'o> {
+        vars: &'o mut Vec<&'e Expr>,
+        calls: &'o mut Vec<&'e str>,
+    }
+
+    impl<'e> BodyVisit<'e> for Mentions<'e, '_> {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, e: &'e Expr, _: &std::collections::HashSet<String>) -> bool {
+            match e {
+                Expr::Var { .. } => self.vars.push(e),
+                Expr::Call { name, .. } | Expr::Spawn { name, .. } => {
+                    self.calls.push(name.as_str())
+                }
+                _ => {}
+            }
+            true
+        }
+    }
+
+    let mut v = Mentions { vars, calls };
+    let mut locals = std::collections::HashSet::new();
     match body {
-        LambdaBody::Expr(e) => mentions_in_expr(e, vars, calls),
-        LambdaBody::Block(b) => mentions_in_block(b, vars, calls),
-    }
-}
-
-fn mentions_in_block<'e>(b: &'e Block, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&'e str>) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
-                mentions_in_expr(value, vars, calls)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                mentions_in_expr(index, vars, calls);
-                mentions_in_expr(value, vars, calls);
-            }
-            Stmt::Return { value, .. } => {
-                if let Some(v) = value {
-                    mentions_in_expr(v, vars, calls);
-                }
-            }
-            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                mentions_in_expr(cond, vars, calls);
-                mentions_in_block(then_block, vars, calls);
-                if let Some(e) = else_block {
-                    mentions_in_block(e, vars, calls);
-                }
-            }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                mentions_in_expr(scrutinee, vars, calls);
-                mentions_in_block(then_block, vars, calls);
-                if let Some(e) = else_block {
-                    mentions_in_block(e, vars, calls);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                mentions_in_expr(cond, vars, calls);
-                mentions_in_block(body, vars, calls);
-            }
-            Stmt::ForIn { iter, body, .. } => {
-                mentions_in_expr(iter, vars, calls);
-                mentions_in_block(body, vars, calls);
-            }
-            Stmt::Expr(e) => mentions_in_expr(e, vars, calls),
-            Stmt::Region { body, .. } => mentions_in_block(body, vars, calls),
-        }
-    }
-}
-
-fn mentions_in_expr<'e>(e: &'e Expr, vars: &mut Vec<&'e Expr>, calls: &mut Vec<&'e str>) {
-    match e {
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-        Expr::Var { .. } => vars.push(e),
-        Expr::Unary { expr, .. }
-        | Expr::Field { expr, .. }
-        | Expr::Try { expr, .. }
-        | Expr::Consume { place: expr, .. } => mentions_in_expr(expr, vars, calls),
-        Expr::Binary { lhs, rhs, .. } => {
-            mentions_in_expr(lhs, vars, calls);
-            mentions_in_expr(rhs, vars, calls);
-        }
-        Expr::Call { name, args, .. } | Expr::Spawn { name, args, .. } => {
-            calls.push(name.as_str());
-            for a in args {
-                mentions_in_expr(a, vars, calls);
-            }
-        }
-        Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                mentions_in_expr(a, vars, calls);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, a) in fields {
-                mentions_in_expr(a, vars, calls);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                mentions_in_expr(k, vars, calls);
-                mentions_in_expr(v, vars, calls);
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            mentions_in_expr(cond, vars, calls);
-            mentions_in_expr(then_branch, vars, calls);
-            if let Some(b) = else_branch {
-                mentions_in_expr(b, vars, calls);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            mentions_in_expr(scrutinee, vars, calls);
-            for arm in arms {
-                match &arm.body {
-                    ArmBody::Expr(a) => mentions_in_expr(a, vars, calls),
-                    ArmBody::Block(b) => mentions_in_block(b, vars, calls),
-                }
-            }
-        }
-        Expr::Lambda { body, .. } => mentions_in_lambda(body, vars, calls),
+        LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+        LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
     }
 }
 

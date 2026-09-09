@@ -4028,8 +4028,8 @@ impl<'a> Checker<'a> {
 
     fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<bool, Diagnostic> {
         // The literal `Expr` variants carry no line, so a range error on one
-        // is attributed to the statement being checked (see `stmt_source_line`).
-        *self.stmt_line.borrow_mut() = stmt_source_line(stmt);
+        // is attributed to the statement being checked (see `Stmt::line`).
+        *self.stmt_line.borrow_mut() = stmt.line();
         match stmt {
             Stmt::Let {
                 name,
@@ -9588,29 +9588,6 @@ fn type_mentions_self(ty: &Type) -> bool {
         }
     });
     found
-}
-
-/// The line of the statement a literal's range error is attributed to. The
-/// literal `Expr` variants carry no line of their own ([`Expr::line`] answers
-/// 0 for them), so the checker records the enclosing statement's line as it
-/// walks and the three range diagnostics report that.
-fn stmt_source_line(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let { line, .. }
-        | Stmt::Assign { line, .. }
-        | Stmt::SetField { line, .. }
-        | Stmt::IndexSet { line, .. }
-        | Stmt::Return { line, .. }
-        | Stmt::Break { line }
-        | Stmt::Continue { line }
-        | Stmt::If { line, .. }
-        | Stmt::IfLet { line, .. }
-        | Stmt::While { line, .. }
-        | Stmt::ForIn { line, .. }
-        | Stmt::Drop { line, .. }
-        | Stmt::Region { line, .. } => *line,
-        Stmt::Expr(e) => e.line(),
-    }
 }
 
 /// Whether an integer literal `n` fits the sized type. The lexer wraps

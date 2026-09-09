@@ -529,11 +529,6 @@ fn sections() -> Vec<Section> {
             "whether a type names `Self`, one arm per constructor",
         ),
         sec(
-            "fn stmt_source_line(s: &Stmt) -> usize {",
-            Shared,
-            "the line a literal's range error is attributed to",
-        ),
-        sec(
             "fn int_literal_fits(n: i64, bits: u8, signed: bool) -> bool {",
             Judgment,
             "the sized-integer literal rules: the value a literal denotes, \
@@ -744,7 +739,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule the checker states", 1486, 58),
         ("the checker's part in a rewrite stated elsewhere", 454, 16),
         ("one arm per form, type constructor or builtin", 2860, 157),
-        ("shared machinery", 2247, 29),
+        ("shared machinery", 2224, 29),
         ("tests", 4649, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
