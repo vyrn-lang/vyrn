@@ -121,6 +121,7 @@ const STD: &[(&str, &str)] = &[
 /// wording, which is the other half of the signature.
 fn run(source: &str) -> Result<i64, String> {
     vyrn_genwasm::install();
+    vyrn_lower::install();
     scratch();
     let wrapped = format!(
         "{}
@@ -192,6 +193,7 @@ fn main() -> Int64 {{
 /// what makes the refusal name it.
 fn run_without(missing: &str, source: &str) -> Result<i64, String> {
     vyrn_genwasm::install();
+    vyrn_lower::install();
     scratch();
     let files: HashMap<String, String> = STD
         .iter()
@@ -1190,7 +1192,7 @@ fn string_predicate_methods() {
 #[test]
 fn indexing_in_refinement_predicate() {
     let ok = "type G = String where value.byteLength >= 1 && value[0] == 'H'; \
-                  fn mk(s: String) -> G { return G(s); } \
+                  fn mk(s: consume String) -> G { return G(s); } \
                   fn main() -> Int64 { let g = mk(\"Hi\"); return g.byteLength; }";
     assert_eq!(run(ok).unwrap(), 2);
     // A provably-wrong constant is rejected at compile time (via consteval).
@@ -1202,7 +1204,7 @@ fn indexing_in_refinement_predicate() {
 #[test]
 fn validated_string_accepts_valid_value() {
     let src = "type Name = String where value.byteLength >= 3; \
-                   fn mk(s: String) -> Name { return Name(s); } \
+                   fn mk(s: consume String) -> Name { return Name(s); } \
                    fn main() -> Int64 { let n = mk(\"bob\"); return n.byteLength; }";
     assert_eq!(run(src).unwrap(), 3);
 }
@@ -1211,7 +1213,7 @@ fn validated_string_accepts_valid_value() {
 fn validated_string_traps_on_too_short() {
     // Runtime construction of an invalid string aborts (matches native exit 1).
     let src = "type Name = String where value.byteLength >= 3; \
-                   fn mk(s: String) -> Name { return Name(s); } \
+                   fn mk(s: consume String) -> Name { return Name(s); } \
                    fn main() -> Int64 { let n = mk(\"x\"); return 0; }";
     assert!(run(src)
         .unwrap_err()
@@ -1601,7 +1603,7 @@ fn regex_match_operator() {
 #[test]
 fn validated_string_via_regex_traps() {
     let src = "type Code = String where value =~ \"[A-Z][A-Z][A-Z]\"; \
-                   fn mk(s: String) -> Code { return Code(s); } \
+                   fn mk(s: consume String) -> Code { return Code(s); } \
                    fn main() -> Int64 { let c = mk(\"ab\"); return 0; }";
     assert!(run(src)
         .unwrap_err()

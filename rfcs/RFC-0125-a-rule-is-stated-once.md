@@ -24268,6 +24268,303 @@ its record.
   generic impl's `success` row as a type when it is a variable, so the
   copied-out payload leaked. One example, one manifest row. RFC-0126 §8.16.
 
+#### The arm's blocker was a missing line, and five defects were behind it (2026-09-10, `track-ee`)
+
+The exits slice left `Stmt::Continue`'s arm at zero occurrences over the corpus
+and named two readers off it, both in `vyrn-frontend/tests/semantics.rs`: a
+`for` over an array LITERAL, and a `continue` under a `region`. Neither is one.
+The shape of those two programs has nothing to do with it.
+
+**That file never calls `vyrn_lower::install()`, and that is the whole of it.**
+`install` is what puts `core::augment` into `own::analyze` (`own::install_placer`).
+Without it the placer never runs, `core::BODIES` is never filled, `body_of`
+answers `None` for every function, `Fn_::core` is `None`, `Fn_::core_took`
+returns at its first line, and every statement of every program in that file
+falls to the AST arm. The file's own doc comment calls `run` "the two lines
+`vyrn run` is, minus the filesystem" and it was one line short. 193 tests over
+the emitter, and not one of them ran the walk the emitter has taken since the
+driver slice.
+
+**The count says so.** `coredrive` emits both shapes itself now, from source
+rather than from a file in `examples/` where they would move every corpus census
+and the wasm manifest, and compares the two walks over each exactly as it does
+over a corpus program. Both read zero at the arm. In the first, the `continue`
+is carried by the rows of the `Stmt::If` around it; in the second, by the rows
+of the `region` block, which `core_stmts` has emitted since the driver slice.
+
+| shape | the `break` arm | the `continue` arm |
+|---|---|---|
+| a `for` over an array literal | 0 | **0** |
+| a `continue` under a `region` | 0 | **0** |
+
+##### Five defects were behind that line, and four are compile failures
+
+Every one of the five is the DRIVER's. Each compiles and runs correctly under
+`VYRN_NO_CORE_WALK=1` and failed with the driver on, which is what makes the
+missing install the thing that hid them: `examples/` writes none of these shapes
+and the file that writes all of them compiles with no core at all.
+
+**A `where` type was refused by the type the value had.** `Fn_::core_walkable`
+stands the whole-body walk down at a name whose type needs a check, and the
+clause that says so reads `NameInfo::ty`. The core names a `let` by the type of
+its VALUE (`core::Builder`'s `let` arm takes `self.ty_of(value)`), so `let a: Age
+= 20` reaches that clause as `Int64`. No `where` type was ever refused by it,
+the body was emitted from rows that state no check, and TWO boundaries lost
+theirs:
+
+| program | before | every other engine |
+|---|---|---|
+| `let mut x = 30  x = x - 25  let a: Age = x  return a` | returns 5 | `validation failed for `Age`` |
+| `let mut a: Age = 20  a = a - 15  return a` | returns 5 | `validation failed for `Age`` |
+
+`Age` is `Int64 where value >= 18`. This is the one defect of the five that is
+not a compile failure: the program ran, and it ran holding a value its type
+forbids. The screen asks the AST for the annotation now, which is where the
+reader wrote it and where the AST arm reads it to emit the check.
+`Fn_::core_run` already asked the same question per statement; this is the same
+question per body, and `Fn_::checks` is the one place that says what carries a
+check.
+
+**A String is a type a literal carries and a name does not.** The scalar screen
+is asked of NAMES — `core_scalar(&info.ty)`, in `core_walkable` and in
+`core_run`. A `Val::Lit(Lit::Str(..))` has no name, so `"a" < "b"` and `"a" =~
+"re"` arrived at `Op::Lt` and `Op::Match` with nothing for the screen to refuse:
+`no lowering for `Lt` on `String``, and the same for `Match`. With a bound name
+on either side the same programs compiled, because then there was a name to
+refuse. `core_val_readable` spells the same screen for a literal.
+
+**A store's destination needs a place before the store runs.** This walk gives a
+temporary a place only where it BINDS it, and the temporary an `if` expression
+joins through is stored into by each branch and bound by the `let` after them
+(RFC-0030). The rows read, for `fn f(n: Int64) -> Int64 { let x = if n > 1 { 10
+} else { 20 }  return x }`:
+
+```
+if @t2
+  @t1 = lit 10
+else
+  @t1 = lit 20
+let x = @t1
+```
+
+`@t1` is stored into twice and bound nowhere, so `core_place` had nothing to
+give and the walk answered `no lowering for a core store into a place with no
+local`. Every `let` of an `if` expression failed to compile. `core_readable`
+asks for a name the reader wrote, which is the AST arm's local and is always
+placed; a temporary is this walk's to bind, never to store into.
+
+##### The four stale programs, and what they were stale about
+
+With the install in place, four of this file's programs stop compiling and the
+CLI refuses them today: `fn mk(s: String) -> Name { return Name(s) }` stores a
+`read` parameter into a constructor. Each takes the value now
+(`s: consume String`), which is the second fix line the refusal itself prints.
+The fact each test asserts is unchanged and 193 pass.
+
+##### The licence
+
+Every emitted byte is the same for the first commit and for the last: the
+validation slice moves no row of `rfcs/census/wasm-sha256.tsv` and no per-form
+count of `coredrive`, because no example writes an annotated `where` `let` in a
+frame the rows carried.
+
+The two screens move two rows, and both are the same shape, read off `wasm2wat`.
+One function each in `ifexpr.vyrn` and `strpredbytes.vyrn` returns a String
+literal through an `if` join. Each stands down at the literal screen now, and
+the AST walk writes what it has always written for that shape:
+
+```
+-        if ;; label = @3              +        if (result i32) ;; label = @3
+           i32.const 8258672                      i32.const 8258672
+-          br 2 (;@1;)
+         else                                   else
+           i32.const 8258684                      i32.const 8258684
+-          br 2 (;@1;)
+         end                                    end
+                                       +        br 1 (;@1;)
+```
+
+A typed `if` with one `br` after the join, where the rows wrote a `br` per arm.
+Both move TOWARD the walk the manifest was recorded from before the driver
+existed, and the measurement says so from the other end: `strpredbytes.vyrn` now
+emits the same module either way, so `coredrive`'s differing count falls from
+three programs to two, and `ifexpr.vyrn`'s difference falls from seven bytes to
+two. `strpredbytes.vyrn` had been on that list since the driver slice.
+
+##### The count, over the corpus
+
+| form | the arm before | the rows before | the arm after | the rows after |
+|---|---|---|---|---|
+| `Stmt::Let` | 39,756 | 35,597 | **39,756** | **35,597** |
+| `Stmt::Assign` | 16,305 | 30,434 | **16,306** | **30,435** |
+| `Stmt::Return` | 21,610 | 9,660 | **21,643** | **9,660** |
+| `Stmt::If` | 33,243 | 10,450 | **33,253** | **10,445** |
+| `Stmt::Expr` | 31,065 | 3,472 | **31,112** | **3,425** |
+| `Stmt::While` | 14,366 | 513 | **14,367** | **512** |
+| `Stmt::Break` | 8 | 1,752 | **8** | **1,752** |
+| `Stmt::Continue` | 0 | 9 | **0** | **9** |
+
+The rows carry fewer statements after this track, which is the screens doing
+what a screen does: a body the walk could not emit correctly stood down. That is
+the trade every one of the four fixes makes, and it is not a loss — a row taken
+wrongly is worse than a row not taken.
+
+##### The lines
+
+`direct.rs` is **17,545 lines before and 17,592 after**: 47 added, of which 34
+are the validation screen and its two helpers and 13 the literal and store
+screens with the sentences that say why each exists. `core.rs` does not move,
+which is this track's own argument twice over: nothing was missing from the
+core, and what was missing was the emitter asking its own screens the questions
+they were written to ask. `coredrive.rs` is **420 lines before and 518 after**,
+which is the seven shapes and the machinery that emits them both ways.
+
+##### What is left, and the blocker is not a shape
+
+`Stmt::Continue`'s arm reads zero over the corpus and zero over all seven
+shapes, and it still cannot go. Two things reach it, and the probe that says so
+is one `panic!` in the arm and `cargo test --workspace --no-fail-fast`: 72 test
+binaries, one hit.
+
+**The hit is `vyrn-cli/tests/lowered.rs`, and it is the same missing line.**
+That gate asks "wherever a compiled backend derived the type of an expression,
+either it is the type the lowering recorded, or the difference is one of the
+four this file names" — and it runs the backend with `vyrn_genwasm::install()`
+alone, so the lowering it compares against was never installed, the core holds
+no body, and the AST walk answers every question. It measures the same compiler
+`semantics.rs` measured. Adding the line turns the gate RED, and not on a type:
+`a backend instantiated 7 bodies the lowering's worklist does not have`, every
+one an `Owned__Slots__release<T>` the emitter synthesizes for a release row that
+does not exist until the placer runs. The gate's own note says what that is: "a
+body only a backend knows about is a decision that is still in a backend". That
+is a §2.3 finding this gate has been blind to, it needs the lowering's worklist
+to carry those bodies, and it is a slice of its own. The line is not in this
+track's commits, because a slice that cannot show its licence stops after the
+last green commit.
+
+The exits slice's fourth finding reads differently in this light. It attributed
+a fall in `lowered.rs`'s `peek` floor, 53 to 46, to the driver taking statements
+no arm emits. The driver does not run in that binary, so whatever moved that
+floor, it was not that.
+
+**The second is `compiler/vyrn-play`**: it
+compiles with `vyrn_codegen::direct::compile` and never calls
+`vyrn_lower::install()`, so the playground's emitter has no core for any
+function of any program and the AST dispatch is its whole compiler. That is not
+a fact about `Stmt::Continue` — it holds for every one of the twenty entries of
+`FORMS`, so it is the precondition the whole "an arm goes when nothing reaches
+it" programme has and nobody had stated. `vyrn-play` reaches `vyrn-lower`
+transitively through `vyrn-codegen`, so the fix is a direct dependency and one
+line; what it costs is that the playground gains the kernel's refusals and the
+placer's rows, which is a change to a shipping surface and a slice of its own.
+The same question is open for `vyrn-codegen`'s own tests, for
+`vyrn-cli/tests/lowered.rs` and for `vyrn-frontend/tests/common/mod.rs`, each of
+which compiles the same way — and `direct.rs`'s own
+`a_validated_type_is_checked_wherever_it_is_reached` is the sharpest case, since
+it asserts on `let a: Age = n`, the exact shape of the validation defect, and
+passed throughout.
+
+`Stmt::Break` stands at 8 and its blocker is unchanged from the exits slice:
+every one is `project::site` inlining a projection's body at its caller, so the
+rows for the `break` in `std/json`'s `field` and `tryField` are in their own core
+body and not in the caller's. The mapping that took `container.vyrn` maps a node
+to a node and this needs a body to a body. The payer is the core stating an
+inlined projection's rows at the call site, or the emitter reading the
+projection's own `Body`, and neither is written. This track did not reach it.
+
+##### The censuses
+
+`coredrive` gains the shape table, its pin, and the sentence saying what a zero
+in the per-program table means; its differing-program pin falls from three names
+to two. The emitter census's line counts move with `direct.rs`. RFC-0127 §3's
+form census and §3.1.1's floor do not move, because no arm went. `coretables`,
+`refusals`, `checker_census`, `lowered`, `lowered_dump`, RFC-0126 §3's surface
+census and the kernel corpus are unmoved. `rfcs/census/wasm-sha256.tsv` moves two
+rows, explained above.
+
+##### Gates (2026-09-07, the two slices)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Run over both slices
+together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo build --release` | ok, no new warning |
+| `cargo test -p vyrn-cli`, no filter | 588 passed, no failure |
+| `kernel` `--ignored` | 1, 52 s |
+| `coretables` `--ignored` | 1, 44 s |
+| `typed` `--ignored` | 1, 53 s |
+| `effects` `--ignored` | 2, 64 s |
+| `fixtures` `--ignored` | 1, 15 s — 206 compared, and the three element-type recordings were rewritten in the same commit |
+| `testsweep` `--ignored` | 1, 46 s |
+| `vyrn-frontend` | 1,172 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,219 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 300 s |
+| the residue ratchet | 1, 297 s — engine 172 clean and 3 leaking, route the same, 0 double-free |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, two checker slices move no byte |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 11 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 26 files |
+
+The one red in the first pass was `fixtures`, and it is the licence's three
+programs seen a second time: `appendowned.vyrn`, `clearowned.vyrn` and
+`copyfromowned.vyrn` are the recordings of the three sentences the bound
+replaces. They are rewritten in the slice's own commit, and each example's own
+comment now names the bound rather than the advice its refusal used to give.
+`checker.rs`, `prelude.rs`, the three examples and the censuses are the only
+things these two slices touch.
+
+#### Gates (2026-09-10, `track-ee`)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Over the five commits of
+this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok, 0 warnings |
+| `cargo test -p vyrn-cli`, no filter | 645 passed, 0 failed, 44 ignored |
+| `kernel` `--ignored`, release | 1, 29 s — 177 programs, 27,637 instances accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, release | 1, 26 s — 13,514 switch sites, every placement count unmoved |
+| `typed` `--ignored`, release | 1, 55 s — 184 programs, 238,668 stores judged, 0 unjudged |
+| `effects` `--ignored`, release | 2, 52 s — 30,185 functions judged, 0 unattributed |
+| `fixtures` `--ignored`, release | 1, 28 s |
+| `testsweep` `--ignored`, release | 1, 81 s |
+| `coredrive` `--ignored`, release | 1, 38 s — seven shapes, 168 of 170 programs byte-identical either way |
+| `cargo test -p vyrn-frontend` | 1,113 passed, 0 failed, 5 ignored |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,160 passed, 0 failed |
+| `vyrn-lsp`'s own manifest | 100 passed, 0 failed |
+| `vyrn-genwasm`'s own tests | 3 |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2, 364 s |
+| the residue ratchet `--ignored`, release | 1, 376 s — engine 172 clean and 3 leaking, route the same, 0 failed, the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 176 examples — two rows regenerated in the screens commit, explained above |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 34 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 35 and 154, over 26 files |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable, byte-identical |
+| `the_pinned_columns_over_the_corpus` | green, unmoved |
+| `emitter_census`, `forms`, `surface` | 3, 8, 3 — re-pinned, and named above |
+| `refusals`, `checker_census`, `lowered`, `lowered_dump`, `rfc_index` | green and unmoved |
+| `vyrn check` stderr over the corpus | 209 programs, byte-identical against the branch point, 33 refused before and after |
+
+No red. The one gate that is red on purpose is not in these commits:
+`lowered.rs` with `vyrn_lower::install()` added, which is the finding above.
+
+One environment note, not a gate result. The site export writes through the
+engine's preopened directory, so its output path has to be inside the checkout;
+`out/` is gitignored and is the one the workflow uses. Its five subdirectories
+must exist first, as the file's own doc comment says.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the

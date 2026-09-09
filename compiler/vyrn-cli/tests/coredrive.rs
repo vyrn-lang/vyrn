@@ -42,18 +42,21 @@ fn repo_root() -> PathBuf {
     d
 }
 
-fn load(path: &std::path::Path) -> Result<Program, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let root = path.to_string_lossy().replace('\\', "/");
+fn load_src(src: &str, root: &str) -> Result<Program, String> {
     let opts = vyrn_frontend::loader::LoadOptions {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    vyrn_frontend::load(&src, &root, &opts, &Fs).map_err(|d| {
+    vyrn_frontend::load(src, root, &opts, &Fs).map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())
     })
+}
+
+fn load(path: &std::path::Path) -> Result<Program, String> {
+    let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    load_src(&src, &path.to_string_lossy().replace('\\', "/"))
 }
 
 fn corpus() -> Vec<PathBuf> {
@@ -85,12 +88,15 @@ const CLASSES: [&str; 8] = [
 /// The two entries of [`vyrn_codegen::direct::FORMS`] this probe tables per
 /// program: the exits whose arm is nearest retirement.
 ///
-/// **A zero here is a zero over `examples/` and not over the language.**
-/// `Stmt::Continue` reads zero since the exits slice and its arm still has two
-/// readers, both in `vyrn-frontend/tests/semantics.rs`: a `for` over an array
-/// LITERAL, which `core::Builder` refuses to build a body for, and a
-/// `continue` under a `region`, which the statement screen stands down at. An
-/// arm goes when the whole gate list says so, not when this table does.
+/// **A zero here is a zero over `examples/` and not over the language**, which
+/// is what [`SHAPES`] is for: a shape the corpus does not write is emitted
+/// beside it, both ways, and counted into the same table.
+///
+/// The exits slice named two readers of `Stmt::Continue`'s arm in
+/// `vyrn-frontend/tests/semantics.rs` and neither is one. Both are in [`SHAPES`]
+/// and both read zero: that file compiles without `vyrn_lower::install()`, so
+/// `own::analyze` never runs the placer, the core holds no body at all, and
+/// every statement of every program in it falls to the AST arm.
 const BREAK: usize = 7;
 const CONT: usize = 8;
 
@@ -108,6 +114,72 @@ const PIN: [(&str, usize, usize); 3] = [
     ("jchain.vyrn", 3, 0),
     ("jsonplace.vyrn", 2, 0),
     ("tryplace.vyrn", 3, 0),
+];
+
+/// The shapes `examples/` does not write, emitted both ways here so the licence
+/// above and the exit count below are the LANGUAGE's and not one directory's.
+///
+/// Each is loaded from source rather than added to `examples/`, where it would
+/// move every corpus census and the wasm manifest.
+///
+/// The first two are the readers the exits slice attributed `Stmt::Continue`'s
+/// arm to, and neither is one. The other five are shapes the driver got wrong
+/// and nothing asked: `examples/` writes none of them, and the file that does
+/// compiles with no core at all.
+const SHAPES: [(&str, &str); 7] = [
+    (
+        "a `for` over an array literal",
+        "fn vyrnTestMain() -> Int64 { let mut s = 0 \
+         for i in [0, 1, 2, 3, 4, 5] { if i % 2 == 1 { continue } s = s + i } \
+         return s }",
+    ),
+    (
+        "a `continue` under a `region`",
+        "fn vyrnTestMain() -> Int64 { let mut n = 0 let mut i = 0 \
+         while i < 100 { i = i + 1 \
+         region { if i % 2 == 0 { continue } n = n + 1 } } \
+         return n }",
+    ),
+    (
+        "a `let` annotated with a `where` type",
+        "type Age = Int64 where value >= 18 \
+         fn vyrnTestMain() -> Int64 { let mut x = 30 x = x - 25 \
+         let a: Age = x return a }",
+    ),
+    (
+        "a store into a binding of a `where` type",
+        "type Age = Int64 where value >= 18 \
+         fn vyrnTestMain() -> Int64 { let mut a: Age = 20 a = a - 15 return a }",
+    ),
+    (
+        "a `let` of an `if` expression",
+        "fn vyrnTestMain() -> Int64 { let x = if 2 > 1 { 10 } else { 20 } return x }",
+    ),
+    (
+        "a match on two string literals",
+        "fn vyrnTestMain() -> Int64 { if \"abc\" =~ \"[a-z]+\" { return 1 } return 0 }",
+    ),
+    (
+        "an order on two string literals",
+        "fn vyrnTestMain() -> Int64 { if \"abc\" < \"abd\" { return 1 } return 0 }",
+    ),
+];
+
+/// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
+/// program that test compiles: the answer is printed, which puts a String and
+/// its release in the frame the loop sits in.
+const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return 0 }";
+
+/// Per shape: how many `break` and how many `continue` occurrences the AST arm
+/// emitted. An arm goes when this table and [`PIN`] both read zero.
+const SHAPE_PIN: [(&str, usize, usize); 7] = [
+    ("a `for` over an array literal", 0, 0),
+    ("a `continue` under a `region`", 0, 0),
+    ("a `let` annotated with a `where` type", 0, 0),
+    ("a store into a binding of a `where` type", 0, 0),
+    ("a `let` of an `if` expression", 0, 0),
+    ("a match on two string literals", 0, 0),
+    ("an order on two string literals", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
@@ -326,6 +398,24 @@ fn run() {
             (a, b) => differ.push(format!("{name}: {a:?} against {b:?}")),
         }
     }
+    // The same two walks over the shapes the corpus does not write. Their
+    // counts stay out of `forms` above, so the corpus totals a record compares
+    // against the slice before it are the same measurement.
+    let mut shapes: Vec<(&str, usize, usize)> = Vec::new();
+    for (what, src) in SHAPES {
+        let root = repo_root().join("examples/@shape.vyrn");
+        let src = format!("{src}\n{WRAP}\n");
+        let program = match load_src(&src, &root.to_string_lossy().replace('\\', "/")) {
+            Ok(p) => p,
+            Err(e) => panic!("{what} does not load: {e}"),
+        };
+        let core = emit(&program, false);
+        let per = vyrn_codegen::direct::forms();
+        let ast = emit(&program, true);
+        assert_eq!(core, ast, "{what}: the two walks emit different modules");
+        shapes.push((what, per[BREAK].0, per[CONT].0));
+    }
+
     eprintln!("{programs} programs, {bodies} bodies");
     eprintln!("what a body waits on before the core's rows could carry it:");
     for (i, what) in CLASSES.iter().enumerate() {
@@ -352,11 +442,19 @@ fn run() {
     for d in &differ {
         eprintln!("  {d}");
     }
+    eprintln!("and off the corpus, in the shapes `examples/` does not write:");
+    for (what, brk, cont) in &shapes {
+        eprintln!("  {brk:4} break   {cont:4} continue   {what}");
+    }
     let named_exits: Vec<(&str, usize, usize)> =
         exits.iter().map(|(n, b, c)| (n.as_str(), *b, *c)).collect();
     assert_eq!(
         named_exits, PIN,
         "a `break` or a `continue` reaches the AST arm somewhere the record does not name"
+    );
+    assert_eq!(
+        shapes, SHAPE_PIN,
+        "a shape off the corpus reaches the AST arm a different number of times"
     );
     // The forms whose arm the rows have started to relieve. An arm goes when
     // its first number reaches zero, and this pin says which eight are on that
@@ -386,13 +484,13 @@ fn run() {
     // AST walk emits exactly what it did. So a body it takes has to reach the
     // corpus at all, or this test measures nothing.
     assert!(from_core > 0, "the core walk emitted no body");
-    // The licence. Three programs emit a different module, all for ONE shape,
+    // The licence. Two programs emit a different module, both for ONE shape,
     // and RFC-0125 §3 M3's record explains it: `return if c { a } else { b }`
     // reaches the AST walk as a join it writes with a typed `if` and one
     // branch out, and the core rewrites it into a `return` per arm
     // (`Builder::return_through`) so the linear judgment sees each exit. The
     // driver emits what the row says, which is one `br` per arm where the join
-    // had one after the `if`. A FOURTH differing program is a shape nobody has
+    // had one after the `if`. A THIRD differing program is a shape nobody has
     // read, and this is where a reader is told to read it.
     let named: Vec<&str> = differ
         .iter()
@@ -400,7 +498,7 @@ fn run() {
         .collect();
     assert_eq!(
         named,
-        ["ifexpr.vyrn", "knucleotide.vyrn", "strpredbytes.vyrn"],
+        ["ifexpr.vyrn", "knucleotide.vyrn"],
         "the two walks differ somewhere the record does not explain"
     );
 }
