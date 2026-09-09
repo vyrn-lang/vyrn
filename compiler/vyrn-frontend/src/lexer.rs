@@ -117,7 +117,6 @@ pub struct Token {
 /// the token's source spelling (a literal's decoded value, a keyword/punct's
 /// spelling). `Eof` is included for completeness but callers filter it out.
 pub fn token_name_and_text(tok: &Tok) -> (String, String) {
-    let kw = |s: &str| ("keyword".to_string(), s.to_string());
     match tok {
         Tok::Int(n) => ("int".to_string(), n.to_string()),
         // A byte literal is an integer literal for `lex()`'s purposes — its text
@@ -128,39 +127,19 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
         Tok::TemplateStr { parts, .. } => ("template".to_string(), parts.join("")),
         Tok::Doc(s) => ("doc".to_string(), s.clone()),
         Tok::Ident(s) => ("ident".to_string(), s.clone()),
-        Tok::Fn => kw("fn"),
-        Tok::Let => kw("let"),
-        Tok::Mut => kw("mut"),
-        Tok::If => kw("if"),
-        Tok::Else => kw("else"),
-        Tok::While => kw("while"),
-        Tok::For => kw("for"),
-        Tok::In => kw("in"),
-        Tok::Drop => kw("drop"),
-        Tok::Protocol => kw("protocol"),
-        Tok::Import => kw("import"),
-        Tok::Export => kw("export"),
-        Tok::Impl => kw("impl"),
-        Tok::Vself => kw("self"),
-        Tok::Return => kw("return"),
-        Tok::True => kw("true"),
-        Tok::False => kw("false"),
-        Tok::Type => kw("type"),
-        Tok::Where => kw("where"),
-        Tok::Match => kw("match"),
-        Tok::Region => kw("region"),
-        Tok::Spawn => kw("spawn"),
-        Tok::Break => kw("break"),
-        Tok::Continue => kw("continue"),
         Tok::Eof => ("eof".to_string(), String::new()),
-        // Everything left is punctuation, and [`punct_text`] is the one place
-        // its spelling is stated (RFC-0125 §3 M6). It was 36 rows here.
-        p => (
-            "punct".to_string(),
-            punct_text(p)
-                .expect("every token that is not a literal, a keyword or `Eof` is punctuation")
-                .to_string(),
-        ),
+        // Everything left is a keyword or punctuation, and [`keywords`] and
+        // [`punct_text`] are the one place each spelling is stated (RFC-0125
+        // §3 M6). It was 24 keyword rows and 36 punctuation rows here.
+        t => match keyword_text(t) {
+            Some(w) => ("keyword".to_string(), w.to_string()),
+            None => (
+                "punct".to_string(),
+                punct_text(t)
+                    .expect("every token that is not a literal, a keyword or `Eof` is punctuation")
+                    .to_string(),
+            ),
+        },
     }
 }
 
@@ -217,36 +196,67 @@ pub struct Scan {
     pub end_col: usize,
 }
 
-/// Map an identifier's text to its keyword token, or [`Tok::Ident`]. Shared
-/// spelling table so [`lex`] and [`lex_with_trivia`] agree exactly.
-fn keyword_or_ident(text: &str) -> Tok {
-    match text {
-        "fn" => Tok::Fn,
-        "let" => Tok::Let,
-        "mut" => Tok::Mut,
-        "if" => Tok::If,
-        "else" => Tok::Else,
-        "while" => Tok::While,
-        "for" => Tok::For,
-        "in" => Tok::In,
-        "drop" => Tok::Drop,
-        "protocol" => Tok::Protocol,
-        "import" => Tok::Import,
-        "export" => Tok::Export,
-        "impl" => Tok::Impl,
-        "self" => Tok::Vself,
-        "return" => Tok::Return,
-        "true" => Tok::True,
-        "false" => Tok::False,
-        "type" => Tok::Type,
-        "where" => Tok::Where,
-        "match" => Tok::Match,
-        "region" => Tok::Region,
-        "spawn" => Tok::Spawn,
-        "break" => Tok::Break,
-        "continue" => Tok::Continue,
-        _ => Tok::Ident(text.to_string()),
-    }
+/// Every keyword with the word that spells it — the ONE statement of the
+/// keyword table (RFC-0125 §3 M6).
+///
+/// It was two, and nothing checked that they agreed: `keyword_or_ident` mapped
+/// a word to a token and `token_name_and_text` mapped the token back to its
+/// word. It is a macro for [`punctuation`]'s reason — the readers want the list
+/// keyed both ways, and no other mechanism in Rust states a table once across
+/// both.
+///
+/// **The invocation below is an anchor two readers outside this crate parse as
+/// text**: `tests/forms.rs` and `editor/vscode/test/grammar.test.mjs` both take
+/// the `"word" => Tok::Name` rows from it, so a keyword added to the language
+/// and not to RFC-0127 §3.4 fails there. Keep the rows one per line and spelled
+/// that way.
+macro_rules! keywords {
+    ($($w:literal => Tok::$t:ident),* $(,)?) => {
+        /// Map an identifier's text to its keyword token, or [`Tok::Ident`].
+        fn keyword_or_ident(text: &str) -> Tok {
+            match text {
+                $($w => Tok::$t,)*
+                _ => Tok::Ident(text.to_string()),
+            }
+        }
+
+        /// The word a keyword token is written with, or `None` when the token
+        /// is not one — [`keyword_or_ident`] read backwards, which is how
+        /// [`token_name_and_text`] answers without a second table.
+        fn keyword_text(tok: &Tok) -> Option<&'static str> {
+            Some(match tok {
+                $(Tok::$t => $w,)*
+                _ => return None,
+            })
+        }
+    };
+}
+
+keywords! {
+    "fn" => Tok::Fn,
+    "let" => Tok::Let,
+    "mut" => Tok::Mut,
+    "if" => Tok::If,
+    "else" => Tok::Else,
+    "while" => Tok::While,
+    "for" => Tok::For,
+    "in" => Tok::In,
+    "drop" => Tok::Drop,
+    "protocol" => Tok::Protocol,
+    "import" => Tok::Import,
+    "export" => Tok::Export,
+    "impl" => Tok::Impl,
+    "self" => Tok::Vself,
+    "return" => Tok::Return,
+    "true" => Tok::True,
+    "false" => Tok::False,
+    "type" => Tok::Type,
+    "where" => Tok::Where,
+    "match" => Tok::Match,
+    "region" => Tok::Region,
+    "spawn" => Tok::Spawn,
+    "break" => Tok::Break,
+    "continue" => Tok::Continue,
 }
 
 /// Every punctuation and operator token with the characters that spell it —

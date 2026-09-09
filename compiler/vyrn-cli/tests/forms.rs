@@ -24,7 +24,7 @@
 //!    declaration table, whose rows are read out of `Program`'s `Vec` fields —
 //!    so a tenth declaration form fails here too.
 //! 4. [`the_keyword_census_is_what_the_rfc_records`] reads the lexer's
-//!    `keyword_or_ident` map and asserts the RFC's keyword table lists the same
+//!    `keywords!` table and asserts the RFC's keyword table lists the same
 //!    spellings against the same tokens, with the same counts. This is the third
 //!    reader of that map: `editor/vscode/test/grammar.test.mjs` is the second.
 //! 5. [`the_contextual_words_are_what_the_rfc_records`] does the same for the
@@ -309,15 +309,15 @@ fn declarations() -> Vec<String> {
     out
 }
 
-/// Every `"word" => Tok::Name` arm of the lexer's `keyword_or_ident`, in order.
+/// Every `"word" => Tok::Name` row of the lexer's `keywords!` table, in order.
 ///
 /// The same anchor `editor/vscode/test/grammar.test.mjs` reads. A keyword added
 /// to the language and not to RFC-0127 fails here.
 fn keywords() -> Vec<(String, String)> {
     let src = compiler_file("vyrn-frontend/src/lexer.rs");
     let at = src
-        .find("fn keyword_or_ident(")
-        .expect("`keyword_or_ident` is gone from lexer.rs — this test needs a new anchor");
+        .find("keywords! {")
+        .expect("the `keywords!` table is gone from lexer.rs — this test needs a new anchor");
     let body = &src[at..src[at..].find("\n}").map(|e| at + e).unwrap_or(src.len())];
     let mut out = Vec::new();
     for line in body.lines() {

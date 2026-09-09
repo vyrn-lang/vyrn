@@ -620,18 +620,13 @@ fn lexer_sections() -> Vec<Section> {
         ),
         sec(
             "pub fn token_name_and_text(tok: &Tok) -> (String, String) {",
-            Twice,
+            Shared,
             "the canonical `(kind, text)` of a token, which `lex()` hands a \
              generator (RFC-0054). Its 36 punctuation rows went in RFC-0125 \
-             §3 M6's operator slice and it asks `punct_text` instead. Its 24 \
-             KEYWORD rows stay, and they are `keyword_or_ident`'s read \
-             backwards — the 3 RFC-0127 §3.4 measures against every keyword \
-             without exception. Two readers outside this crate parse \
-             `keyword_or_ident`'s arms as text (`tests/forms.rs` and \
-             `editor/vscode/test/grammar.test.mjs`), so folding the keywords \
-             the same way costs two anchors and the RFC's keyword column. \
-             That count is 2 since the two scans became one — the third was \
-             `lex`'s own copy of the spellings",
+             §3 M6's operator slice and its 24 keyword rows in the same \
+             milestone's keyword slice. It asks `punct_text` and \
+             `keyword_text`, and what is left is the literals, `Eof`, and \
+             which of the two tables to ask",
         ),
         sec(
             "pub struct Triv {",
@@ -641,11 +636,9 @@ fn lexer_sections() -> Vec<Section> {
              from the token before. Both readers of the source take these",
         ),
         sec(
-            "fn keyword_or_ident(text: &str) -> Tok {",
+            "macro_rules! keywords {",
             Twice,
-            "the 24 keyword spellings, and the anchor \
-             `editor/vscode/test/grammar.test.mjs` and `tests/forms.rs` both \
-             read as text. Still a second statement of the keyword rows above",
+            "**the one statement of the keyword table** since RFC-0125 §3 M6's              keyword slice: 24 rows, expanded into `keyword_or_ident` and into              the reverse lookup `token_name_and_text` answers with. RFC-0127              §3.4 measures 1 against every keyword now, where it measured 3              and then 2. The invocation is the anchor              `editor/vscode/test/grammar.test.mjs` and `tests/forms.rs` both              read as text, so the rows stay one per line and spelled              `word => Tok::Name`",
         ),
         sec(
             "macro_rules! punctuation {",
@@ -861,9 +854,9 @@ fn the_parser_census_is_what_the_rfc_records() {
         ("parser.rs", "tests", 1953, 0),
         ("lexer.rs", "the grammar's own arm", 578, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
-        ("lexer.rs", "a table stated a second time", 185, 0),
+        ("lexer.rs", "a table stated a second time", 164, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
-        ("lexer.rs", "shared machinery", 190, 2),
+        ("lexer.rs", "shared machinery", 221, 2),
         ("lexer.rs", "tests", 239, 0),
     ];
     assert_eq!(got, want, "the parser census has moved");
