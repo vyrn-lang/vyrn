@@ -32,7 +32,7 @@
 //!
 //! # The command tile, and why it is a second tiling
 //!
-//! "A command's own path" is 5,156 lines, two thirds of the crate's 7,952
+//! "A command's own path" is 5,150 lines, two thirds of the crate's 7,945
 //! non-test lines, and one heading that size says nothing about where to cut. So
 //! [`Kind::Cmd`] carries the command it belongs to and the same lines tile a
 //! second time, one entry per command. A section two commands share is one entry
@@ -760,8 +760,8 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 5156, 167),
-        ("a rule another pass also states", 168, 0),
+        ("a command's own path", 5150, 167),
+        ("a rule another pass also states", 167, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
         ("the WASI host and the wasmtime embedding", 1133, 0),
@@ -810,14 +810,14 @@ fn per_command() -> Vec<(&'static str, usize, usize)> {
 fn the_per_command_census_is_what_the_rfc_records() {
     let want = vec![
         ("bench", 671, 17),
-        ("why", 575, 19),
+        ("why", 566, 19),
         ("serve, dev", 501, 7),
-        ("doc", 388, 13),
+        ("doc", 391, 13),
         ("routes", 367, 4),
         ("fmt", 289, 13),
         ("build", 277, 17),
         ("(dispatch)", 269, 12),
-        ("deps", 265, 5),
+        ("deps", 263, 5),
         ("fix", 247, 1),
         ("dev", 238, 18),
         ("update", 226, 7),
@@ -825,7 +825,7 @@ fn the_per_command_census_is_what_the_rfc_records() {
         ("build, bench", 163, 0),
         ("serve", 97, 8),
         ("run", 79, 3),
-        ("emit-gen", 75, 3),
+        ("emit-gen", 77, 3),
         ("add", 73, 6),
         ("vendor", 65, 6),
         ("test", 51, 2),
@@ -835,7 +835,7 @@ fn the_per_command_census_is_what_the_rfc_records() {
     assert_eq!(per_command(), want, "the per-command census has moved");
     let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
     assert_eq!(
-        total, 5156,
+        total, 5150,
         "the per-command tile does not add up to its kind"
     );
 }

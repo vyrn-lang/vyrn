@@ -576,7 +576,7 @@ fn real_main() -> ExitCode {
 /// no second artifact to invalidate: the map is an export of the module, so this
 /// prints what the generator cache already holds.
 fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(path);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     let result = vyrn_frontend::loader::generated_modules(source, &root_key, &opts, &resolver);
@@ -637,7 +637,9 @@ use vyrn_frontend::loader::DiskResolver;
 /// binary crate is not linkable. The copy drifted: it served a cached module
 /// without verifying its hash, and it accepted a `vyrn.lock` this reader
 /// refuses. There is one reader now, and both programs are consumers.
-use vyrn_frontend::manifest::{find as find_manifest, real_path, std_root, web_root, Manifest};
+use vyrn_frontend::manifest::{
+    dos_to_slash, find as find_manifest, real_path, std_root, web_root, Manifest,
+};
 
 /// [`find_manifest`], with the CLI's answer to an unreadable one: say which file
 /// and why, and stop. Every command reads the manifest, and none of them can do
@@ -789,10 +791,7 @@ fn why_cmd(args: &[String]) -> ExitCode {
         return why_audience(&file);
     }
     let path = match Path::new(&file).canonicalize() {
-        Ok(p) => p
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/"),
+        Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
             return ExitCode::from(2);
@@ -836,10 +835,7 @@ fn why_cmd(args: &[String]) -> ExitCode {
         }
         return ExitCode::FAILURE;
     };
-    let manifest = app_dir
-        .join("vyrn.json")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let manifest = dos_to_slash(&app_dir.join("vyrn.json").to_string_lossy());
     let Some(view) =
         vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &DiskResolver)
     else {
@@ -993,7 +989,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(&path);
     let source = match std::fs::read_to_string(&root_key) {
         Ok(s) => s,
         Err(e) => {
@@ -1341,10 +1337,7 @@ fn json_str(s: &str) -> String {
 /// It reports; it does not gate. Exit 0 whenever it could answer.
 fn why_memory(file: &str) -> ExitCode {
     let path = match Path::new(file).canonicalize() {
-        Ok(p) => p
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/"),
+        Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
             return ExitCode::from(2);
@@ -1473,7 +1466,7 @@ fn why_audience(file: &str) -> ExitCode {
         .as_ref()
         .map(|m| PathBuf::from(&m.dir))
         .unwrap_or_else(|| dir.clone());
-    let app_slash = app_dir.to_string_lossy().replace('\\', "/");
+    let app_slash = dos_to_slash(&app_dir.to_string_lossy());
     let map = manifest.as_ref().and_then(|m| m.audience.clone());
 
     println!("{path}");
@@ -1833,8 +1826,7 @@ fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
                 Some("vyrn") | Some("vyx")
             ) {
                 if let Ok(text) = std::fs::read_to_string(&p) {
-                    let key = p.to_string_lossy().replace('\\', "/");
-                    let key = key.trim_start_matches("//?/").to_string();
+                    let key = dos_to_slash(&p.to_string_lossy());
                     out.push((key, text));
                 }
             }
@@ -1949,11 +1941,9 @@ fn tool_row(
     }
 }
 
-/// A path as this repository writes paths: forward slashes, on every host.
+/// The same rule as [`normalize_slashes`], from a `Path`.
 fn show_path(p: &Path) -> String {
-    p.to_string_lossy()
-        .trim_start_matches(r"\\?\")
-        .replace('\\', "/")
+    dos_to_slash(&p.to_string_lossy())
 }
 
 /// The `toolchain:` section of `vyrn deps` (RFC-0102 M3): one row per tool, with
@@ -2351,7 +2341,7 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
     };
     // A key beside the input file, so `std/` resolves the same way it would for
     // a program written there. Nothing reads it: the source is the constant above.
-    let norm = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let norm = normalize_slashes(path);
     let key = match norm.rfind('/') {
         Some(i) => format!("{}/from-json.vyrn", &norm[..i]),
         None => "from-json.vyrn".to_string(),
@@ -2420,7 +2410,7 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
             return Err(ExitCode::FAILURE);
         }
     };
-    let root_key = main.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(&main);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     match vyrn_frontend::loader::module_graph(&source, &root_key, &opts, &resolver) {
@@ -2666,9 +2656,12 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
     Ok(out)
 }
 
-/// A slash-normalized path with the Windows verbatim prefix stripped.
+/// A path as this toolchain spells it, from a string. The rule is
+/// `manifest::dos_to_slash`'s, which is the one `real_path` answers with — so a
+/// path this driver keys on and a path a module key carries are the same string
+/// (RFC-0125 §3 M5; seven copies of it here got UNC wrong).
 fn normalize_slashes(p: &str) -> String {
-    p.trim_start_matches(r"\\?\").replace('\\', "/")
+    dos_to_slash(p)
 }
 
 /// A module path relative to `base`, without its `.vyrn` extension — the module
@@ -2944,7 +2937,7 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// line, re-loads, and keeps the result only if the diagnostic count went down.
 /// The tool therefore cannot leave a file that compiles worse than it found it.
 fn fix_cmd(path: &str, source: &str) -> ExitCode {
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(path);
     let mut text = source.to_string();
     let mut rounds = 0usize;
     let mut applied: Vec<String> = Vec::new();
@@ -3145,7 +3138,7 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(path);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     let (result, warnings) = vyrn_frontend::load_warned(source, &root_key, &opts, &resolver);

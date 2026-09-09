@@ -24359,6 +24359,53 @@ whose printer already had it.
 
 `tests/cli_census.rs` is re-pinned in this commit.
 
+#### How this toolchain spells a path, stated once (2026-09-10, `track-ef`)
+
+Rank 4 of the census, and the only rank that is a defect rather than a
+repetition. `main.rs` spelled a path thirteen times: strip Windows's verbatim
+prefix, turn backslashes into slashes. Two of the thirteen were named functions
+(`normalize_slashes`, `show_path`) and eleven were written inline at the top of
+a command. `vyrn_frontend::manifest::dos_to_slash` states it a fourteenth time,
+which `real_path` returns through, and it is the only one that is right.
+
+**All thirteen are wrong on a network path.** `canonicalize` yields
+`\?\C:\..` for a drive and `\?\UNC\server\share\..` for a UNC location.
+`dos_to_slash` spells the second back to `//server/share/..`; the CLI's copies
+strip only `\?\` and leave the literal letters `UNC/` in front of a string that
+matches no module key anywhere else in the toolchain. A project on a share had
+`vyrn why`, `vyrn fix`, `vyrn fmt`, `vyrn doc`, `vyrn routes`, `vyrn emit-gen`
+and every load site keyed on a spelling the loader does not use.
+
+`dos_to_slash` is public now, and the CLI's two adapters are one line each: the
+`&str` one keeps the name `normalize_slashes`, the `&Path` one keeps `show_path`.
+Neither states the rule; both call it. The eleven inline copies call one of them.
+
+**One copy was stranger than the rest.** `project_sources` replaced backslashes
+FIRST and then stripped `//?/` — the prefix as it looks after the replacement.
+Same rule, spelled backwards, and the same UNC hole. It is one call now.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,096 | 7,089 | −7 |
+| the command tile | 5,156 | 5,150 | −6 |
+| statements of the rule in the CLI | 13 | 0 | −13 |
+| statements of the rule in the compiler | 14 | 1 | −13 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `cargo test -p vyrn-cli`, no filter | green in the track gate table below |
+
+No corpus path is a UNC path, so the fix is invisible to every gate. It is
+witnessed by `manifest.rs`'s own unit test, which is where the rule now lives:
+`dos_to_slash(r"\?\UNC\server\share\proj")` is `//server/share/proj`.
+
+`tests/cli_census.rs` is re-pinned in this commit.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
