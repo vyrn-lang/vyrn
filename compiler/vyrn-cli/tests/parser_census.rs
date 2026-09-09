@@ -605,14 +605,16 @@ fn lexer_sections() -> Vec<Section> {
              without exception. Two readers outside this crate parse \
              `keyword_or_ident`'s arms as text (`tests/forms.rs` and \
              `editor/vscode/test/grammar.test.mjs`), so folding the keywords \
-             the same way costs two anchors and the RFC's keyword column",
+             the same way costs two anchors and the RFC's keyword column. \
+             That count is 2 since the two scans became one — the third was \
+             `lex`'s own copy of the spellings",
         ),
         sec(
             "pub struct Triv {",
             Shared,
-            "the formatter's view of an item (RFC-0017): the raw text \
-             verbatim, the lines it spans, and whether anything separated it \
-             from the token before",
+            "one lexical item (RFC-0017): the raw text verbatim, where it \
+             starts, the lines it spans, and whether anything separated it \
+             from the token before. Both readers of the source take these",
         ),
         sec(
             "fn keyword_or_ident(text: &str) -> Tok {",
@@ -638,15 +640,16 @@ fn lexer_sections() -> Vec<Section> {
              — 36 rows — and the two readers below it",
         ),
         sec(
-            "pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {",
-            Twice,
-            "**the whole lexical grammar, scanned a second time.** RFC-0017's \
-             formatter needs comments and raw text, so this scans comments, \
-             plain and triple-quoted strings, interpolation holes, byte and \
-             char literals, numbers, identifiers and operators — the same \
-             boundaries `lex` finds, by its own admission: *the two lexers \
-             must agree on what is a legal token*. What it does not do is \
-             decode a literal or split a template's parts from its holes",
+            "pub fn scan(src: &str) -> Result<Scan, Diagnostic> {",
+            Grammar,
+            "**the whole lexical grammar, stated once** (RFC-0125 §3 M6): \
+             comments, plain and triple-quoted strings, interpolation holes, \
+             byte literals, numbers, identifiers and operators, with every \
+             literal DECODED where it is found. It was scanned twice until \
+             then — once here, keeping raw text for RFC-0017's formatter, and \
+             once inside `lex`, decoding as it went — and the two disagreed \
+             about what is a legal token, which the older doc comment claimed \
+             they could not",
         ),
         sec(
             "fn parse_unicode_escape(",
@@ -657,11 +660,11 @@ fn lexer_sections() -> Vec<Section> {
         ),
         sec(
             "pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {",
-            Grammar,
-            "the scanner every pass but the formatter reads: the same \
-             boundaries as above, plus the decoding — escapes resolved, a \
-             template split into parts and holes, a number read, a doc \
-             comment kept and a plain comment dropped",
+            Shared,
+            "one of the scan's two readers: the comments dropped, a doc line \
+             unwrapped into the token that carries its markdown, and the \
+             stream closed with `Eof`. The other reader is `lex_with_trivia`, \
+             which is the scan and nothing else",
         ),
         sec("mod tests {", Tests, "the file's own unit tests"),
     ]
@@ -832,11 +835,11 @@ fn the_parser_census_is_what_the_rfc_records() {
         ("parser.rs", "recovery and the diagnostic sentences", 175, 2),
         ("parser.rs", "shared machinery", 212, 1),
         ("parser.rs", "tests", 1920, 0),
-        ("lexer.rs", "the grammar's own arm", 583, 11),
+        ("lexer.rs", "the grammar's own arm", 578, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
-        ("lexer.rs", "a table stated a second time", 506, 7),
+        ("lexer.rs", "a table stated a second time", 185, 0),
         ("lexer.rs", "recovery and the diagnostic sentences", 0, 0),
-        ("lexer.rs", "shared machinery", 147, 2),
+        ("lexer.rs", "shared machinery", 190, 2),
         ("lexer.rs", "tests", 239, 0),
     ];
     assert_eq!(got, want, "the parser census has moved");

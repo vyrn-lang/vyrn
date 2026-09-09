@@ -335,7 +335,7 @@ fn print(items: &[Triv]) -> String {
             continue;
         }
 
-        let is_doc = matches!(it.kind, TrivKind::Doc);
+        let is_doc = matches!(it.kind, TrivKind::Doc(_));
         let is_comment = matches!(it.kind, TrivKind::Comment);
 
         match prev_end_line {
