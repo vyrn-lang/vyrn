@@ -1496,30 +1496,15 @@ fn arms_span(line: usize, arms: &[MatchArm]) -> (usize, usize) {
 }
 
 /// The kind of an expression, for a gap's detail.
+///
+/// The word for a form is [`Node::kind`]'s. What a gap wants on top of a dump
+/// axis is two distinctions: the five literals answer as one, and a builtin
+/// call is named apart from a user's.
 fn expr_kind(e: &Expr) -> &'static str {
     match e {
         Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => "literal",
-        Expr::Var { .. } => "var",
-        Expr::Unary { .. } => "unary",
-        Expr::Binary { .. } => "binary",
-        Expr::Field { .. } => "field",
-        Expr::Call { name, .. } => {
-            if name.starts_with('@') {
-                "builtin call"
-            } else {
-                "call"
-            }
-        }
-        Expr::TryConstruct { .. } => "try construct",
-        Expr::ArrayLit { .. } => "array literal",
-        Expr::StructLit { .. } => "record literal",
-        Expr::MapLit { .. } => "map literal",
-        Expr::Spawn { .. } => "spawn",
-        Expr::IfExpr { .. } => "if expression",
-        Expr::Match { .. } => "match",
-        Expr::Try { .. } => "try",
-        Expr::Lambda { .. } => "lambda",
-        Expr::Consume { .. } => "consume",
+        Expr::Call { name, .. } if name.starts_with('@') => "builtin call",
+        _ => Node::Expr(e).kind(),
     }
 }
 
