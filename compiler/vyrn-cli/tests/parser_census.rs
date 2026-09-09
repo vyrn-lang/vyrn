@@ -220,7 +220,7 @@ fn parser_sections() -> Vec<Section> {
              (RFC-0082 M1). `pub` for `project.rs`, which asks the same \
              question of the same tree when a projection resolves to a place. \
              `movecheck.rs` does NOT call it — it recognises the temporary the \
-             parser mints by its name, through `ast::is_place_temp`",
+             parser mints by its name, through `ast::is_place_temp` and \n             `ast::hoisted_value`, which are the one statement of that reading",
         ),
         sec(
             "fn reads_place(e: &Expr) -> bool {",
@@ -853,12 +853,12 @@ fn the_parser_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3480, 52),
+        ("parser.rs", "the grammar's own arm", 3421, 52),
         ("parser.rs", "a desugar the parser states", 1008, 7),
         ("parser.rs", "a table stated a second time", 221, 1),
         ("parser.rs", "recovery and the diagnostic sentences", 174, 2),
         ("parser.rs", "shared machinery", 234, 1),
-        ("parser.rs", "tests", 1910, 0),
+        ("parser.rs", "tests", 1953, 0),
         ("lexer.rs", "the grammar's own arm", 578, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
         ("lexer.rs", "a table stated a second time", 185, 0),

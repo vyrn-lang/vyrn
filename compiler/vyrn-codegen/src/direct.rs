@@ -3112,7 +3112,7 @@ impl<'p> Fn_<'_, 'p> {
         else {
             return Ok(None);
         };
-        if !tmp.ends_with("[]") || t2 != tmp || t3 != tmp {
+        if !vyrn_frontend::ast::is_place_temp(tmp) || t2 != tmp || t3 != tmp {
             return Ok(None);
         }
         let Expr::Call { name: at, args, .. } = load else {
