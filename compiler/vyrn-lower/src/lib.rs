@@ -830,7 +830,7 @@ fn block<'a>(b: &'a Block, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) 
 }
 
 fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
-    let line = stmt_line(s) as u32;
+    let line = s.line() as u32;
     let here = w.rows.len();
     w.rows.push(Row {
         depth,
@@ -910,7 +910,7 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
                             name,
                             &args[0],
                             &args[1..],
-                            stmt_line(s),
+                            s.line(),
                         ) {
                             for ps in &p.prologue {
                                 stmt(ps, d, chain, w);
@@ -1235,25 +1235,6 @@ fn iterate<'a>(
     let ty = apply(w.recorded.node_types.get(&key)?, chain);
     let (size_fn, nth) = vyrn_frontend::types::iterate_impl(w.impls, &ty)?;
     vyrn_frontend::project::iterate_loop(&size_fn, nth, var, iter, body, iter.line()).ok()
-}
-
-fn stmt_line(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let { line, .. }
-        | Stmt::Assign { line, .. }
-        | Stmt::SetField { line, .. }
-        | Stmt::IndexSet { line, .. }
-        | Stmt::Return { line, .. }
-        | Stmt::Break { line }
-        | Stmt::Continue { line }
-        | Stmt::If { line, .. }
-        | Stmt::IfLet { line, .. }
-        | Stmt::While { line, .. }
-        | Stmt::ForIn { line, .. }
-        | Stmt::Drop { line, .. }
-        | Stmt::Region { line, .. } => *line,
-        Stmt::Expr(e) => e.line(),
-    }
 }
 
 // ---- the lint ------------------------------------------------------------

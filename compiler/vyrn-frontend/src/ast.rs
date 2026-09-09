@@ -1522,6 +1522,34 @@ pub enum Pattern {
     Other,
 }
 
+impl Stmt {
+    /// The source line this statement starts on.
+    ///
+    /// Every statement form carries a line and `Stmt::Expr` answers its
+    /// expression's, so this is total where [`Expr::line`] is best effort: the
+    /// five literal `Expr` variants carry no line and answer 0. That is why the
+    /// checker records the enclosing statement's line as it walks and its three
+    /// range diagnostics report that.
+    pub fn line(&self) -> usize {
+        match self {
+            Stmt::Let { line, .. }
+            | Stmt::Assign { line, .. }
+            | Stmt::SetField { line, .. }
+            | Stmt::IndexSet { line, .. }
+            | Stmt::Return { line, .. }
+            | Stmt::Break { line }
+            | Stmt::Continue { line }
+            | Stmt::If { line, .. }
+            | Stmt::IfLet { line, .. }
+            | Stmt::While { line, .. }
+            | Stmt::ForIn { line, .. }
+            | Stmt::Drop { line, .. }
+            | Stmt::Region { line, .. } => *line,
+            Stmt::Expr(e) => e.line(),
+        }
+    }
+}
+
 impl Expr {
     /// The source line this expression starts on (best effort).
     pub fn line(&self) -> usize {
