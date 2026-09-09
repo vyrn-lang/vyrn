@@ -4657,9 +4657,8 @@ fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
 }
 
 /// One request, one stream frame, or one release, answered by a resident
-/// instance (RFC-0125 §3 M6). The shape is `interp::serve`'s handler exactly, so
-/// the accept loop, the response writer and the stream pump below are the same
-/// code on both engines.
+/// instance (RFC-0125 §3 M6). It is what [`serve_loop`] puts behind
+/// `call_handle`, on both of its routes.
 fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<ServeAnswer, String> {
     match call {
         ServeCall::Handle(req) => {
@@ -4768,17 +4767,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     let program = program;
     let _memo = shared_desugars(&program);
 
-    // `vyrn serve` requires `fn handle(req: Request) -> Response` (exactly this
-    // signature — the checker's no-`main` exemption uses the same rule).
-    use vyrn_frontend::ast::Type;
-    let has_handle = program.functions.iter().any(|f| {
-        f.name == "handle"
-            && !f.is_extern
-            && f.params.len() == 1
-            && f.params[0].ty == Type::Named("Request".to_string())
-            && f.ret == Type::Named("Response".to_string())
-    });
-    if !has_handle {
+    if !has_served_handle(&program) {
         eprintln!("error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}");
         return ExitCode::FAILURE;
     }
@@ -4795,29 +4784,83 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let file_label = path.to_string();
 
-    // `--workers N` (RFC-0025): N worker threads, each owning an independent
-    // interpreter, gated on the isolation analysis — refused (with the call
-    // path) when `handle` touches module state.
+    serve_loop(
+        &program,
+        vec![path.to_string()],
+        listener,
+        workers,
+        None,
+        "serve",
+        move |n| {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            match n {
+                Some(n) => eprintln!(
+                    "serving {file_label} on http://localhost:{actual_port} with {n} workers"
+                ),
+                None => eprintln!("serving {file_label} on http://localhost:{actual_port}"),
+            }
+        },
+    )
+}
+
+/// The signature a served root must have (RFC-0016): `fn handle(req: Request) ->
+/// Response`, exactly.
+///
+/// `vyrn serve` and `vyrn dev` both require it and each used to write the
+/// predicate out. The checker states it a THIRD time, over its own signature
+/// table, and that one stays where it is: `sigs` holds one entry per name, so a
+/// program with two `handle`s has already been refused by the time it is asked,
+/// and a walk over `program.functions` would answer about a program the checker
+/// never sees.
+fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {
+    use vyrn_frontend::ast::Type;
+    program.functions.iter().any(|f| {
+        f.name == "handle"
+            && !f.is_extern
+            && f.params.len() == 1
+            && f.params[0].ty == Type::Named("Request".to_string())
+            && f.ret == Type::Named("Response".to_string())
+    })
+}
+
+/// The serving loop, which is one loop: `vyrn serve` and `vyrn dev` differ in
+/// what they say and what they put in front of the doors, not in how they serve.
+///
+/// Without `--workers`, one resident instance answers every request: `_start`
+/// initializes module state and runs `main`, and the store stays open behind it
+/// so the doors read what `main` wrote (RFC-0125 §3 M6). With it, RFC-0025's
+/// pool of N instances answers, behind [`refuse_workers_if_stateful`].
+///
+/// `banner` is the command's own greeting, printed once the port is bound and
+/// `main` has run, and it is handed the worker count so a pooled run can say so.
+/// `assets` is `vyrn dev`'s static tree; `vyrn serve` has none.
+fn serve_loop(
+    program: &vyrn_frontend::ast::Program,
+    argv: Vec<String>,
+    listener: std::net::TcpListener,
+    workers: Option<usize>,
+    assets: Option<&DevAssets>,
+    what: &str,
+    banner: impl Fn(Option<usize>) + Send,
+) -> ExitCode {
     if let Some(n) = workers {
-        if let Some(exit) = refuse_workers_if_stateful(&program) {
+        if let Some(exit) = refuse_workers_if_stateful(program) {
             return exit;
         }
         let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
         let rx = std::sync::Mutex::new(rx);
-        let pool_argv = vec![path.to_string()];
         let each =
             |_i: usize, call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>| loop {
                 // spmc over std: each idle worker takes the next connection.
                 let stream = rx.lock().unwrap().recv();
                 match stream {
-                    Ok(mut s) => serve_one(&mut s, None, call_handle),
+                    Ok(mut s) => serve_one(&mut s, assets, call_handle),
                     Err(_) => break, // accept loop gone; drain out
                 }
             };
         let listen = move || {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            eprintln!("serving {file_label} on http://localhost:{actual_port} with {n} workers");
+            banner(Some(n));
             for stream in listener.incoming() {
                 match stream {
                     Ok(s) => {
@@ -4830,7 +4873,7 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             }
             Ok(())
         };
-        return match serve_pool_wasm(&program, pool_argv, n, each, listen) {
+        return match serve_pool_wasm(program, argv, n, each, listen) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -4838,64 +4881,55 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             }
         };
     }
-
-    // The compiled route (RFC-0125 §3 M6): the program's own wasm, compiled once
-    // and instantiated once. `_start` initializes module state and runs `main`,
-    // and the store stays open behind it, so the doors read what `main` wrote.
-    {
-        let bytes = match vyrn_codegen::direct::compile(&program) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let run = wasmrun::Run {
-            argv: vec![path.to_string()],
-            stdin_prefix: Vec::new(),
-            capture_stdout: false,
-            // The guest's own standard error is read per call: a trap inside a
-            // door writes its wording there and the serving loop logs THAT,
-            // rather than a wasm backtrace.
-            capture_stderr: true,
-            meter: false,
-        };
-        let mut res = match wasmrun::start(&bytes, &run, None) {
-            Ok((res, 0)) => res,
-            Ok((mut res, code)) => {
-                eprint!("{}", res.drain_err());
-                eprintln!("error: main returned {code}, aborting serve");
-                return ExitCode::FAILURE;
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        use std::io::Write;
-        eprint!("{}", res.drain_err());
-        let _ = std::io::stdout().flush();
-        eprintln!("serving {file_label} on http://localhost:{actual_port}");
-        let mut call_handle = |call| serve_wasm_call(&mut res, call);
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut s) => serve_one(&mut s, None, &mut call_handle),
-                Err(_) => continue,
-            }
+    let bytes = match vyrn_codegen::direct::compile(program) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
         }
-        ExitCode::SUCCESS
+    };
+    let run = wasmrun::Run {
+        argv,
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        // The guest's own standard error is read per call: a trap inside a door
+        // writes its wording there and the serving loop logs THAT, rather than a
+        // wasm backtrace.
+        capture_stderr: true,
+        meter: false,
+    };
+    let mut res = match wasmrun::start(&bytes, &run, None) {
+        Ok((res, 0)) => res,
+        Ok((mut res, code)) => {
+            eprint!("{}", res.drain_err());
+            eprintln!("error: main returned {code}, aborting {what}");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprint!("{}", res.drain_err());
+    banner(None);
+    let mut call_handle = |call| serve_wasm_call(&mut res, call);
+    for stream in listener.incoming() {
+        match stream {
+            Ok(mut s) => serve_one(&mut s, assets, &mut call_handle),
+            Err(_) => continue,
+        }
     }
+    ExitCode::SUCCESS
 }
 
 /// RFC-0025's pool on the compiled route: N resident instances, one per worker
 /// thread, over one Cranelift compile.
 ///
-/// The signature is `interp::serve_pool`'s, because the accept loop, the request
-/// handler and the spmc channel above it are the same code on both engines —
-/// only the thing behind `call_handle` differs (RFC-0125 §3 M5).
+/// [`serve_loop`] owns the accept loop, the request handler and the spmc channel
+/// above it; what this owns is the compile and the instances.
 ///
-/// `main` runs ONCE, on a setup instance that is then dropped, which is what the
-/// tree-walker's setup interpreter is. The workers run a program whose `main`
+/// `main` runs ONCE, on a setup instance that is then dropped. The workers run a
+/// program whose `main`
 /// returns 0 and does nothing else, so each instance still initializes its own
 /// module state (RFC-0013) and no worker repeats `main`'s effects. That is sound
 /// here and nowhere else: [`refuse_workers_if_stateful`] has already proved
@@ -4972,9 +5006,8 @@ where
     })
 }
 
-/// One worker thread's stack. The interpreter's pool sizes its threads for the
-/// tree-walker's frames; a compiled worker needs room for the guest's own
-/// recursion under Cranelift, which is the same order of magnitude.
+/// One worker thread's stack: room for the guest's own recursion under
+/// Cranelift, which a served program has as much of as any other.
 const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// The RFC-0025 worker gate: `--workers` requires a module-state-free `handle`
@@ -5114,15 +5147,7 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
     serve_rewrite(&mut program);
     let program = program;
     let _memo = shared_desugars(&program);
-    use vyrn_frontend::ast::Type;
-    let has_handle = program.functions.iter().any(|f| {
-        f.name == "handle"
-            && !f.is_extern
-            && f.params.len() == 1
-            && f.params[0].ty == Type::Named("Request".to_string())
-            && f.ret == Type::Named("Response".to_string())
-    });
-    if !has_handle {
+    if !has_served_handle(&program) {
         eprintln!(
             "error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`"
         );
@@ -5143,99 +5168,30 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         wasm: wasm_out,
     };
 
-    let banner = move |assets: &DevAssets| {
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
-        eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
-        eprintln!("dev:   /client.wasm   -> built from {client_rel}");
-        eprintln!(
-            "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
-        );
-        eprintln!("dev:   /              -> {}/", assets.public_dir.display());
-    };
+    let public_shown = assets.public_dir.display().to_string();
 
-    // `--workers N` passes through to the same RFC-0025 pool as `vyrn serve`,
-    // behind the same module-state gate.
-    if let Some(n) = workers {
-        if let Some(exit) = refuse_workers_if_stateful(&program) {
-            return exit;
-        }
-        let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
-        let rx = std::sync::Mutex::new(rx);
-        let assets = &assets;
-        let each =
-            |_i: usize, call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>| loop {
-                let stream = rx.lock().unwrap().recv();
-                match stream {
-                    Ok(mut s) => serve_one(&mut s, Some(assets), call_handle),
-                    Err(_) => break,
-                }
-            };
-        let listen = move || {
-            banner(assets);
-            eprintln!("dev:   workers        -> {n}");
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(s) => {
-                        if tx.send(s).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => continue,
-                }
+    serve_loop(
+        &program,
+        vec![server_path.clone()],
+        listener,
+        workers,
+        Some(&assets),
+        "dev",
+        move |n| {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
+            eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
+            eprintln!("dev:   /client.wasm   -> built from {client_rel}");
+            eprintln!(
+                "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
+            );
+            eprintln!("dev:   /              -> {public_shown}/");
+            if let Some(n) = n {
+                eprintln!("dev:   workers        -> {n}");
             }
-            Ok(())
-        };
-        return match serve_pool_wasm(&program, vec![server_path.clone()], n, each, listen) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
-        };
-    }
-
-    // The compiled route (RFC-0125 §3 M5): the same resident instance `vyrn
-    // serve` runs, with the dev command's static assets in front of the doors.
-    {
-        let bytes = match vyrn_codegen::direct::compile(&program) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        let run = wasmrun::Run {
-            argv: vec![server_path.clone()],
-            stdin_prefix: Vec::new(),
-            capture_stdout: false,
-            capture_stderr: true,
-            meter: false,
-        };
-        let mut res = match wasmrun::start(&bytes, &run, None) {
-            Ok((res, 0)) => res,
-            Ok((mut res, code)) => {
-                eprint!("{}", res.drain_err());
-                eprintln!("error: main returned {code}, aborting dev");
-                return ExitCode::FAILURE;
-            }
-            Err(e) => {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
-            }
-        };
-        eprint!("{}", res.drain_err());
-        banner(&assets);
-        let mut call_handle = |call| serve_wasm_call(&mut res, call);
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut s) => serve_one(&mut s, Some(&assets), &mut call_handle),
-                Err(_) => continue,
-            }
-        }
-        ExitCode::SUCCESS
-    }
+        },
+    )
 }
 
 /// Static asset roots for `vyrn dev`.

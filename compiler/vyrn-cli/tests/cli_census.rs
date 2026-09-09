@@ -32,7 +32,7 @@
 //!
 //! # The command tile, and why it is a second tiling
 //!
-//! "A command's own path" is 5,224 lines, two thirds of the crate's 8,010
+//! "A command's own path" is 5,180 lines, two thirds of the crate's 7,966
 //! non-test lines, and one heading that size says nothing about where to cut. So
 //! [`Kind::Cmd`] carries the command it belongs to and the same lines tile a
 //! second time, one entry per command. A section two commands share is one entry
@@ -405,6 +405,11 @@ fn main_sections() -> Vec<Section> {
             "`vyrn serve [--port N] [--workers N]` (RFC-0016)",
         ),
         sec(
+            "fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {",
+            Cmd("serve, dev"),
+            "the one serving loop and the one signature a served root must              have. `vyrn serve` and `vyrn dev` each wrote both out until              RFC-0125 §3 M5; what differs between them is the greeting and the              static tree in front of the doors, and both are arguments now",
+        ),
+        sec(
             "fn serve_pool_wasm<W, A>(",
             Cmd("serve, dev"),
             "`--workers N` (RFC-0025): N resident instances over one Cranelift \
@@ -755,7 +760,7 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("a command's own path", 5224, 179),
+        ("a command's own path", 5180, 175),
         ("a rule another pass also states", 168, 0),
         ("a path only a deleted route reached", 0, 0),
         ("machinery with a copy elsewhere", 0, 0),
@@ -806,19 +811,19 @@ fn the_per_command_census_is_what_the_rfc_records() {
     let want = vec![
         ("bench", 671, 17),
         ("why", 575, 19),
+        ("serve, dev", 501, 7),
         ("doc", 391, 14),
-        ("serve, dev", 386, 3),
         ("routes", 370, 5),
-        ("dev", 315, 22),
         ("fmt", 295, 15),
         ("build", 277, 17),
         ("deps", 271, 7),
         ("(dispatch)", 269, 12),
         ("fix", 247, 1),
+        ("dev", 238, 18),
         ("update", 226, 7),
-        ("serve", 179, 12),
         ("test, bench", 164, 2),
         ("build, bench", 163, 0),
+        ("serve", 97, 8),
         ("emit-gen", 81, 5),
         ("run", 79, 3),
         ("add", 73, 6),
@@ -830,7 +835,7 @@ fn the_per_command_census_is_what_the_rfc_records() {
     assert_eq!(per_command(), want, "the per-command census has moved");
     let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
     assert_eq!(
-        total, 5224,
+        total, 5180,
         "the per-command tile does not add up to its kind"
     );
 }

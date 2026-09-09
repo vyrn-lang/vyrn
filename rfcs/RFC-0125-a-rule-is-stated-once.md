@@ -24255,6 +24255,67 @@ ones they touch.
 its pin and its table. It adds lines because it is the count, and the count is
 what the slices spend.
 
+#### One serving loop, and the two commands that wrote it twice (2026-09-10, `track-ef`)
+
+Rank 1 of the census above. `serve_cmd` and `dev_cmd` each wrote out the whole
+of how a Vyrn program is served: gate on module state, open a channel, spawn N
+workers over one Cranelift compile, accept and hand each connection over — or,
+without `--workers`, compile once, start one resident instance, drain its
+standard error, greet, accept, answer. 152 lines, said twice, arm for arm.
+
+**What actually differs between them is two arguments.** `vyrn dev` puts a
+static tree in front of the doors and `vyrn serve` does not; each prints its own
+greeting. `serve_loop` takes both — `assets: Option<&DevAssets>` and a `banner`
+closure handed the worker count — and everything else is one body. The greeting
+moved into the closure whole, so the bytes on standard error are the same bytes
+in the same order: the pooled path prints it inside the accept closure, after
+`serve_pool_wasm` has drained the setup instance, exactly where each command
+printed it before.
+
+**The third statement stays where it is, and the record says why.** The
+signature a served root must have — `fn handle(req: Request) -> Response`,
+exactly — was written out in both commands and is written a third time in
+`checker.rs`, where it exempts a served module from needing `main`. The two in
+the CLI are now `has_served_handle`. The checker's is not, and merging it would
+be a bug: the checker asks its own `sigs` table, which holds one entry per name
+and is built after "function defined twice" and "reserved name" have already
+refused, and it does not filter `is_extern`. A walk over `program.functions`
+would answer about a program the checker never sees, and an `extern handle` that
+is exempt today would stop being exempt. That is a gained refusal, which the
+licence does not permit without a witness. It is recorded as the one statement
+this slice left standing.
+
+**Three comments named a module that does not exist.** `serve_wasm_call` said
+its shape was `interp::serve`'s, `serve_pool_wasm` said its signature was
+`interp::serve_pool`'s, and `WORKER_STACK_BYTES` sized itself against "the
+interpreter's pool". The interpreter went at M5. Each now names `serve_loop`,
+which is the thing that is actually there.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,154 | 7,110 | −44 |
+| `serve` alone | 179 | 97 | −82 |
+| `dev` alone | 315 | 238 | −77 |
+| `serve, dev` shared | 386 | 501 | +115 |
+| the three together | 880 | 836 | −44 |
+| the command tile | 5,224 | 5,180 | −44 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `fixtures::every_example_prints_what_was_recorded` `--ignored` | byte-identical |
+| `cargo test -p vyrn-cli --test serve --test http --test pages` | 17 + 31 + 27 passed, 0 failed |
+| `cargo test -p vyrn-cli`, no filter | 646 passed, 0 failed |
+
+`tests/cli_census.rs` gains a section for the shared loop and is re-pinned in
+this commit. `RFC-0127 §3.2`'s declaration census is re-pinned too: the CLI's
+`.functions` mentions go 15 to 14 and the row total 65 to 64, because one of the
+two walks over `program.functions` is gone.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one
