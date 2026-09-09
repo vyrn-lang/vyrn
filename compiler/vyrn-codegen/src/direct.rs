@@ -16416,23 +16416,29 @@ impl<'p> Fn_<'_, 'p> {
         if keyed(at) {
             return None;
         }
-        match s {
-            // An aggregate result travels through `dest` and a stream cursor is
-            // a release at a function exit that no plan row names, so both are
-            // the exit's business and neither is any other statement's:
-            // `streamlazy.vyrn` lost 51 bytes of a cursor when the rows took
-            // its `return`.
-            Stmt::Return { .. } if self.dest.is_some() || !self.cursors.is_empty() => return None,
-            // An `if` is the one form of the four whose run is a SUBTREE, so
-            // the clause cannot be read off its own node: a `return` inside
-            // the branch carries the release the plan keyed at IT, and
-            // `htmltree.vyrn` lost seven bytes of one. A frame with any placed
-            // release keeps its `if`s until the row for a placed release is
-            // the driver's own, which is the next slice.
-            Stmt::If { .. } if !self.placed.is_empty() => return None,
-            _ => {}
-        }
         let run = self.core_at.get(&at)?;
+        // An aggregate result travels through `dest` and a stream cursor is a
+        // release at a function exit that no plan row names, so both belong to
+        // a `return` and to nothing else: `streamlazy.vyrn` lost 51 bytes of a
+        // cursor when the rows took its `return`. The clause is about the RUN
+        // rather than about the form, because a subtree carries the `return` of
+        // every branch under it.
+        if (self.dest.is_some() || !self.cursors.is_empty()) && run.iter().any(core_returns) {
+            return None;
+        }
+        // A form whose run is a SUBTREE cannot read the frame clause off its
+        // own node: a `return` inside the branch or the loop carries the
+        // release the plan keyed at IT, and `htmltree.vyrn` lost seven bytes of
+        // one. A frame with any placed release keeps its `if`s, its loops and
+        // its `if let`s until the row for a placed release is the driver's own.
+        if !self.placed.is_empty()
+            && matches!(
+                s,
+                Stmt::If { .. } | Stmt::While { .. } | Stmt::ForIn { .. } | Stmt::IfLet { .. }
+            )
+        {
+            return None;
+        }
         // A node is an ADDRESS. The row's FORM and the name it binds are
         // checked against the statement's, so a row is never read as a
         // statement it did not come from.
@@ -16474,6 +16480,15 @@ impl<'p> Fn_<'_, 'p> {
             // and the core states them as drops inside the branch — which the
             // statement screen refuses. An `if` that owes one is the arm's.
             (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
+            // The four forms the site slice took off the floor. Each names its
+            // own node on the row now, so the FORM is the whole of the
+            // agreement: no binding to check and no type the arm would bind.
+            // What each still waits on is the statement screen below — a `for`
+            // reads its element through a place row, an `if let` is a switch,
+            // and the tag on `Arm` is the list's row 6.
+            (Stmt::Expr(_), St::Do { .. }) => {}
+            (Stmt::While { .. } | Stmt::ForIn { .. }, St::Loop { .. }) => {}
+            (Stmt::IfLet { .. }, St::Switch { .. }) => {}
             _ => return None,
         }
         // Every OTHER binding of the run: the row types it by its destination
@@ -16488,11 +16503,11 @@ impl<'p> Fn_<'_, 'p> {
         for st in run {
             core_lets(st, &mut lets);
         }
-        for (n, rhs) in lets {
-            if Some(n) == annotated {
+        for (n, rhs) in &lets {
+            if Some(*n) == annotated {
                 continue;
             }
-            let info = &body.names[n as usize];
+            let info = &body.names[*n as usize];
             let want = self.core_arm_ty(body, rhs)?;
             if !core_scalar(&want) {
                 return None;
@@ -16516,15 +16531,13 @@ impl<'p> Fn_<'_, 'p> {
         }
         // Every name the run READS has to have a place before the first
         // instruction is written: one this walk bound, one the arm below bound
-        // (a local of the scope), or a parameter.
-        let mut bound: Vec<vyrn_lower::core::Name> = Vec::new();
-        for st in run {
-            if let St::Let(n, _) = st {
-                bound.push(*n);
-            }
-        }
+        // (a local of the scope), or a parameter. What the run binds is the
+        // same walk the type clause above already did, branches and loop bodies
+        // included — a top-level reading of it left every name a `while` binds
+        // inside its own body with no place, which is why that form stood at
+        // zero until the site slice asked the question once.
         for n in &names {
-            if bound.contains(n) {
+            if lets.iter().any(|(b, _)| b == n) {
                 continue;
             }
             let (_, ty) = self.core_place(&self.core_w, body, *n)?;
@@ -16647,7 +16660,7 @@ impl<'p> Fn_<'_, 'p> {
                 // pair `St::Break` and `St::Continue` name. `St::Loop` is the
                 // infinite loop the row states, so the back edge is this
                 // walk's and unconditional.
-                St::Loop(inner) => {
+                St::Loop { body: inner, .. } => {
                     let brk = self.depth;
                     b.ins(&Instruction::Block(BlockType::Empty));
                     self.depth += 1;
@@ -16749,7 +16762,7 @@ impl<'p> Fn_<'_, 'p> {
                 // is dropped, or the enclosing block's type will not check —
                 // the same sentence the AST walk's statement arm writes, on
                 // the row rather than on the node.
-                St::Do(rhs, line) => {
+                St::Do { rhs, line, .. } => {
                     let got = self.core_rhs_ty(rhs, *line)?;
                     self.core_rhs(m, b, body, w, rhs, &got, *line)?;
                     if self.cx.repr(&got, *line)? != Repr::Unit {
@@ -17054,10 +17067,15 @@ impl<'p> Fn_<'_, 'p> {
                     && self.core_readable(body, els, reads)
             }
             St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
-            St::Loop(inner) => self.core_readable(body, inner, reads),
+            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads),
             St::Break { .. } | St::Continue { .. } => true,
             St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
-            St::Do(rhs, _) => self.core_rhs_readable(rhs),
+            // A discarded value is dropped at the type the ROW produces, and
+            // only a call row states one — a `St::Do` of anything else would
+            // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
+            St::Do { rhs, line, .. } => {
+                self.core_rhs_readable(rhs) && self.core_rhs_ty(rhs, *line).is_ok()
+            }
             St::Trap => true,
             _ => false,
         })
@@ -17104,9 +17122,11 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
         St::Let(_, Rhs::Prim(_, vs, _)) => vs.first().and_then(name),
         // A call pushes its arguments in order, so only the FIRST of them can
         // be the value the stack is already carrying.
-        St::Let(_, Rhs::Call { args, .. }) | St::Do(Rhs::Call { args, .. }, _) => {
-            args.first().and_then(|(v, _)| name(v))
-        }
+        St::Let(_, Rhs::Call { args, .. })
+        | St::Do {
+            rhs: Rhs::Call { args, .. },
+            ..
+        } => args.first().and_then(|(v, _)| name(v)),
         St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
         _ => None,
     }
@@ -17124,7 +17144,7 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
             then.iter().for_each(|s| core_lets(s, out));
             els.iter().for_each(|s| core_lets(s, out));
         }
-        St::Loop(inner) | St::Block { body: inner, .. } => {
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
             inner.iter().for_each(|s| core_lets(s, out));
         }
         St::Switch { arms, .. } => {
@@ -17133,6 +17153,20 @@ fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
+/// [`Fn_::core_run`]'s screen, which a subtree carries for every branch.
+fn core_returns(s: &St) -> bool {
+    match s {
+        St::Return { .. } => true,
+        St::If { then, els, .. } => then.iter().any(core_returns) || els.iter().any(core_returns),
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+            inner.iter().any(core_returns)
+        }
+        St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_returns)),
+        _ => false,
     }
 }
 

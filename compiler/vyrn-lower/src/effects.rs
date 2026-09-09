@@ -247,7 +247,7 @@ impl Walk<'_> {
                     self.own = self.own.with(Effect::Alloc);
                 }
             }
-            St::Do(rhs, line) => {
+            St::Do { rhs, line, .. } => {
                 self.rhs(rhs, *line);
             }
             St::Trap => self.own = self.own.with(Effect::Trap),
@@ -255,7 +255,7 @@ impl Walk<'_> {
                 self.stmts(then);
                 self.stmts(els);
             }
-            St::Loop(body) | St::Block { body, .. } => self.stmts(body),
+            St::Loop { body, .. } | St::Block { body, .. } => self.stmts(body),
             St::Switch { arms, .. } => {
                 for a in arms {
                     self.stmts(&a.body);
