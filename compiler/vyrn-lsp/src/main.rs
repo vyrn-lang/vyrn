@@ -2579,12 +2579,8 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     if entry.sig != sig || !entry.derived {
         entry.sig = sig;
         entry.derived = true;
-        entry.roles = vyrn_frontend::contracts::roles_for_project(
-            doc.as_ref(),
-            &roots,
-            &opts,
-            &resolver,
-        );
+        entry.roles =
+            vyrn_frontend::contracts::roles_for_project(doc.as_ref(), &roots, &opts, &resolver);
         entry.views.clear();
     }
     let role = vyrn_frontend::contracts::role_for(&path, &entry.roles)?.clone();
