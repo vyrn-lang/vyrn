@@ -198,6 +198,15 @@ fn parser_sections() -> Vec<Section> {
              table and the lexer's spellings",
         ),
         sec(
+            "fn as_fn_body(src: &str) -> String {",
+            Desugar,
+            "a code-quote skeleton wrapped as a function body — the \
+             statement-list mode's one statement, which the mode and the \
+             error detail both read (RFC-0054). Spelled twice until \
+             RFC-0125 §3 M6's desugar slice, and the error's line is the \
+             wrapped line minus the wrapper's own",
+        ),
+        sec(
             "fn is_index_field_chain(e: &Expr) -> bool {",
             Desugar,
             "whether a write target bottoms out in `a[i]`, which is what \
@@ -208,9 +217,10 @@ fn parser_sections() -> Vec<Section> {
             "pub fn place_receiver(",
             Desugar,
             "the plain variable an in-place container mutation writes through \
-             (RFC-0082 M1). `pub` because `movecheck.rs` asks the same \
-             question of the same tree — the parser mints the temporary and \
-             the ownership pass has to recognise it",
+             (RFC-0082 M1). `pub` for `project.rs`, which asks the same \
+             question of the same tree when a projection resolves to a place. \
+             `movecheck.rs` does NOT call it — it recognises the temporary the \
+             parser mints by its name, through `ast::is_place_temp`",
         ),
         sec(
             "fn reads_place(e: &Expr) -> bool {",
@@ -233,9 +243,22 @@ fn parser_sections() -> Vec<Section> {
              backends demand a plain variable there",
         ),
         sec(
+            "pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {",
+            Desugar,
+            "the statements a store through a place becomes — the ONE \
+             statement of RFC-0082 M1's rewrite. `Parser::stmt` reaches it for \
+             `a[i] = v` and `project.rs` for a store through a projection \
+             (RFC-0091 M3); the two spelled the same rewrite, down to the \
+             temporaries' names, until RFC-0125 §3 M6's desugar slice",
+        ),
+        sec(
             "impl Parser {",
             Shared,
-            "where the productions begin",
+            "where the productions begin — and the parser's own state, stated \
+             once: `over` for an entry point's nine fields and `sub` for a \
+             re-lexing desugar's, which adds the enclosing declaration's \
+             generic parameters and type aliases to them. Four places built \
+             that record by hand",
         ),
         sec(
             "fn peek(&self) -> &Tok {",
@@ -830,12 +853,12 @@ fn the_parser_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("parser.rs", "the grammar's own arm", 3512, 52),
-        ("parser.rs", "a desugar the parser states", 928, 7),
+        ("parser.rs", "the grammar's own arm", 3480, 52),
+        ("parser.rs", "a desugar the parser states", 1008, 7),
         ("parser.rs", "a table stated a second time", 221, 1),
-        ("parser.rs", "recovery and the diagnostic sentences", 175, 2),
-        ("parser.rs", "shared machinery", 212, 1),
-        ("parser.rs", "tests", 1920, 0),
+        ("parser.rs", "recovery and the diagnostic sentences", 174, 2),
+        ("parser.rs", "shared machinery", 234, 1),
+        ("parser.rs", "tests", 1910, 0),
         ("lexer.rs", "the grammar's own arm", 578, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
         ("lexer.rs", "a table stated a second time", 185, 0),
