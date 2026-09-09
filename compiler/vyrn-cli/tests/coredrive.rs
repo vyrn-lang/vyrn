@@ -95,7 +95,8 @@ const BREAK: usize = 7;
 const CONT: usize = 8;
 
 /// Per program: how many `break` and how many `continue` occurrences the AST
-/// arm emitted, for every program where either is not zero.
+/// arm emitted, for every program where either is not zero. The residue the
+/// next slice on this line has to empty, program by program and not as one sum.
 ///
 /// Every one is `project::site`: a projection's body is INLINED at its caller,
 /// so the rows for the `break` in `std/json`'s `field` and `tryField` are in
@@ -310,10 +311,6 @@ fn run() {
             forms[i].0 += arm;
             forms[i].1 += took;
         }
-        // The two forms nearest zero, per PROGRAM. Every occurrence left is a
-        // `break` or a `continue` the emitter dispatches inside a loop it
-        // REWROTE, so the core's rows are filed under a node this walk never
-        // reaches. The per-program table is what names them.
         if per[BREAK].0 > 0 || per[CONT].0 > 0 {
             exits.push((name.clone(), per[BREAK].0, per[CONT].0));
         }
@@ -355,9 +352,6 @@ fn run() {
     for d in &differ {
         eprintln!("  {d}");
     }
-    // The per-program pin. An occurrence here is one the emitter's own rewrite
-    // put out of the core's reach, so this table is the residue the loop slice
-    // has to empty — program by program, not as one sum.
     let named_exits: Vec<(&str, usize, usize)> =
         exits.iter().map(|(n, b, c)| (n.as_str(), *b, *c)).collect();
     assert_eq!(
