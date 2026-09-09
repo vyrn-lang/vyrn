@@ -24175,6 +24175,86 @@ before and after this track, which is the licence that mattered here: the
 `hoisted` flag this track re-stated is what feeds that instrument and it moved
 no row.
 
+#### The driver, counted per command (2026-09-10, `track-ef`)
+
+`compiler/vyrn-cli/src/main.rs` is the third-largest file in the compiler and
+`tests/cli_census.rs` already tiles it by kind. One heading holds two thirds of
+it: "a command's own path", 5,224 lines of the crate's 8,010 non-test lines.
+A heading that size names nothing to cut. So [`Kind::Cmd`] carries the command a
+section belongs to, and the same lines tile a second time — one entry per
+command. The two tilings are asserted against each other: the per-command entries
+sum to 5,224, the kind total.
+
+**A section two commands share is one entry.** `serve` and `dev` both reach
+`SERVE_SHIM`, `serve_rewrite` and `serve_pool_wasm`; `test` and `bench` both
+reach `Body` and `bodies_wasm`; `build` and `bench` both read `NativeTarget`.
+Splitting those by a guess would be a worse number than naming both. `(global)`
+is the flags read before the subcommand. `(dispatch)` is `real_main`.
+
+**Four commands have no entry of their own, and that is the first finding.**
+`check`, `run`, `emit-wat` and `emit-lowered` are match arms inside `real_main`,
+not functions. The census cannot tile below an item, so their 78 lines are
+inside `(dispatch)`'s 269. Every other command is a function.
+
+**What each command costs.**
+
+| command | lines | stderr |
+|---|---|---|
+| `bench` | 671 | 17 |
+| `why` | 575 | 19 |
+| `doc` | 391 | 14 |
+| `serve, dev` | 386 | 3 |
+| `routes` | 370 | 5 |
+| `dev` | 315 | 22 |
+| `fmt` | 295 | 15 |
+| `build` | 277 | 17 |
+| `deps` | 271 | 7 |
+| `(dispatch)` | 269 | 12 |
+| `fix` | 247 | 1 |
+| `update` | 226 | 7 |
+| `serve` | 179 | 12 |
+| `test, bench` | 164 | 2 |
+| `build, bench` | 163 | 0 |
+| `emit-gen` | 81 | 5 |
+| `run` | 79 | 3 |
+| `add` | 73 | 6 |
+| `vendor` | 65 | 6 |
+| `test` | 51 | 2 |
+| `new` | 41 | 4 |
+| `(global)` | 35 | 0 |
+
+**The distribution is flat, and that decides the method.** No command is a
+runaway: the largest is 12.8 per cent of the tile, and the top five are 46 per
+cent of it. There is no one command to delete lines out of. What repeats is
+across commands, not inside one, so the ranking below is by RULE — how many lines
+a rule costs and how many times the file states it — not by command.
+
+**The ranking, by lines per rule.**
+
+| rank | the rule | statements | lines it costs | where one home is |
+|---|---|---|---|---|
+| 1 | the serving loop: bind, gate on module state, spawn the pool or start one resident instance, accept, answer | 2 (`serve_cmd`, `dev_cmd`) | 152 | neither; both write it out |
+| 2 | how the CLI prints a diagnostic | 6 | 34 | `load_program`, and 2 of the 6 drop the note |
+| 3 | a synthesized `main`, and a synthesized function beside it | 3 | 62 | `bodies_wasm`'s local closure |
+| 4 | how this toolchain spells a path: verbatim prefix off, backslashes to slashes | 10 in the CLI | 12 | `manifest::real_path`, which the CLI's copies do not match |
+| 5 | the import-chain walk, bounded at 24 chains and depth 12 | 2 (`chains_from`, `import_chains`) | 74 | neither; one walks forward, one backward |
+| 6 | the signature a served root must have | 3 (`serve_cmd`, `dev_cmd`, `checker.rs`) | 21 | the checker states it over its own table |
+
+**Rank 4 is a defect, not only a repetition.** `manifest::real_path` strips
+`\?\UNC\` to `//server/share` and the CLI's ten copies strip only `\?\`,
+leaving the literal `UNC/` in front. Nine of the ten are wrong on a network path.
+
+**Kind (3) is still empty.** `cargo check -p vyrn-cli --all-targets` reports no
+`dead_code` under `src/`. What the deleted routes left is prose: nine comments in
+`main.rs` name `interp::serve`, `interp::serve_pool`, a tree-walking interpreter
+and a parity invariant, and none of those exists. The slices below delete the
+ones they touch.
+
+**The count.** `compiler/vyrn-cli/tests/cli_census.rs`, 795 to 886 lines
+(+91): one `Kind::Cmd` payload per Command section, the per-command aggregation,
+its pin and its table. It adds lines because it is the count, and the count is
+what the slices spend.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

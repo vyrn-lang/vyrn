@@ -30,6 +30,16 @@
 //! through. A rule that leaves `main.rs` for `wasmrun.rs` has not left the CLI,
 //! and a census of `main.rs` alone would record that move as a deletion.
 //!
+//! # The command tile, and why it is a second tiling
+//!
+//! "A command's own path" is 5,224 lines, two thirds of the crate's 8,010
+//! non-test lines, and one heading that size says nothing about where to cut. So
+//! [`Kind::Cmd`] carries the command it belongs to and the same lines tile a
+//! second time, one entry per command. A section two commands share is one entry
+//! naming both, because splitting it would be a guess. The ranking that follows
+//! is lines per rule: an entry is worth cutting when its lines state something
+//! another entry, or another crate, already states.
+//!
 //! # The second column, and why
 //!
 //! The checker's census counts refusals beside lines and the emitter's counts
@@ -48,7 +58,15 @@ enum Kind {
     /// A command's own path: parsing its arguments, calling the frontend, the
     /// lowering or the emitter, printing what came back, and choosing the exit
     /// code. Nothing replaces this — it is what a driver is.
-    Command,
+    ///
+    /// The payload names the command, so this kind tiles a second time: every
+    /// line of it belongs to exactly one entry of the per-command table. Two
+    /// commands that share a path share an entry (`"serve, dev"`), which is the
+    /// only honest way to tile a section both of them reach. `"(global)"` is the
+    /// flags read before the subcommand and `"(dispatch)"` is `real_main`, which
+    /// is no one command's — it holds the `check`, `run` and `emit-*` arms
+    /// inline, so those four commands have no section of their own.
+    Cmd(&'static str),
     /// A rule the CLI states that `vyrn-frontend`, `vyrn-lower` or the emitter
     /// also states: a re-check, a second wording of a refusal, or a second walk
     /// over the program. Each names the other site. These are the deletion
@@ -82,7 +100,7 @@ enum Kind {
 impl Kind {
     fn label(self) -> &'static str {
         match self {
-            Kind::Command => "a command's own path",
+            Kind::Cmd(_) => "a command's own path",
             Kind::Restated => "a rule another pass also states",
             Kind::Dead => "a path only a deleted route reached",
             Kind::Library => "machinery with a copy elsewhere",
@@ -127,14 +145,14 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn offline(args: &[String]) -> bool {",
-            Command,
+            Cmd("(global)"),
             "the global flags `--offline`, `--version` and `--deny-warnings`: \
              read before the subcommand, normalized into the environment so \
              every nested construction sees them, and stripped",
         ),
         sec(
             "enum NativeTarget {",
-            Command,
+            Cmd("build, bench"),
             "`--native-target` and `vyrn.json`'s `nativeTarget`: the curated \
              `-march` set, its default, its resolution and the clang flags. LIVE \
              — `bench_native` and `build_wasm2c` are the two native clang \
@@ -148,14 +166,14 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn real_main() -> ExitCode {",
-            Command,
+            Cmd("(dispatch)"),
             "the dispatcher: the global flags, then one branch per subcommand, \
              then the four that read the file themselves (`fix`, `check`, `run`, \
              the three `emit-*`)",
         ),
         sec(
             "fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {",
-            Command,
+            Cmd("emit-gen"),
             "`vyrn emit-gen [--maps]` (RFC-0021, RFC-0073 M1)",
         ),
         sec(
@@ -166,25 +184,25 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn scaffold(name: &str) -> ExitCode {",
-            Command,
+            Cmd("new"),
             "`vyrn new <name>`",
         ),
         sec(
             "fn why_cmd(args: &[String]) -> ExitCode {",
-            Command,
+            Cmd("why"),
             "`vyrn why --contract <file>` (RFC-0071 M4), and the argument \
              parsing of the other three `why` questions",
         ),
         sec(
             "fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {",
-            Command,
+            Cmd("routes"),
             "`vyrn routes` (RFC-0072 M3): the derived channel out of the \
              mounting generator's `//@route` directives, and the hand-written \
              channel read by running every `mount(..)` as wasm",
         ),
         sec(
             "fn routes_json(",
-            Command,
+            Cmd("routes"),
             "`vyrn routes --json` (RFC-0073 M4): the merged wire table, each \
              route carrying the declaration its symbol map names",
         ),
@@ -199,19 +217,19 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn why_memory(file: &str) -> ExitCode {",
-            Command,
+            Cmd("why"),
             "`vyrn why --memory <file>` (RFC-0087 U1): a printer over \
              `own::Ownership::memory`, which the core writes",
         ),
         sec(
             "fn why_audience(file: &str) -> ExitCode {",
-            Command,
+            Cmd("why"),
             "`vyrn why <file>` (RFC-0072 M1): the audience, and the path segment \
              that decided it, from the same `audience` the loader enforces with",
         ),
         sec(
             "fn why_capability(cap: &str, name: &str) -> ExitCode {",
-            Command,
+            Cmd("why"),
             "`vyrn why --capability <cap> <artifact>` (RFC-0103 M3): every \
              import chain that pulls a capability into one artifact's closure, \
              where the floor's refusal shows only the shortest",
@@ -238,49 +256,49 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "type ToolRow = (String, String, String, String);",
-            Command,
+            Cmd("deps"),
             "the `toolchain:` section of `vyrn deps` (RFC-0102 M3): one row per \
              tool, with the path that would be used, its version, and why that \
              path was chosen",
         ),
         sec(
             "fn deps(name: Option<&str>) -> ExitCode {",
-            Command,
+            Cmd("deps"),
             "`vyrn deps [artifact]`: every declared artifact's module graph",
         ),
         sec(
             "fn fmt_cmd(rest: &[String]) -> ExitCode {",
-            Command,
+            Cmd("fmt"),
             "`vyrn fmt [file ...] [--check]` (RFC-0017)",
         ),
         sec(
             "const FROM_JSON_SRC: &str = r#\"import { parseJson } from \"std/jsonread\"",
-            Command,
+            Cmd("fmt"),
             "`vyrn fmt --from-json` (RFC-0097 M1) — the converter is Vyrn, run \
              as wasm, so there is no second JSON reader and no second VON writer \
              in Rust. The CLI carries bytes and nothing else",
         ),
         sec(
             "fn fmt_project_files() -> Result<Vec<String>, ExitCode> {",
-            Command,
+            Cmd("fmt"),
             "the default target set for a bare `vyrn fmt`: the project `main` \
              plus its local imports",
         ),
         sec(
             "struct DocModule {",
-            Command,
+            Cmd("doc"),
             "`vyrn doc` (RFC-0065) and the module-set discovery its four \
              argument shapes select",
         ),
         sec(
             "fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>, ExitCode> {",
-            Command,
+            Cmd("doc"),
             "the local-import closure `vyrn doc` documents, and the module names \
              it gives the files in it",
         ),
         sec(
             "fn render_doc_index(modules: &[DocModule]) -> String {",
-            Command,
+            Cmd("doc"),
             "the Markdown renderers, the writer that prunes what it did not \
              write, and `--verify`, the drift gate",
         ),
@@ -292,7 +310,7 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn fix_cmd(path: &str, source: &str) -> ExitCode {",
-            Command,
+            Cmd("fix"),
             "`vyrn fix` — it applies the `.copy()` a move diagnostic already \
              names, by reading the menu `movecheck::menu` wrote, and refuses \
              rather than chooses when the line cannot say which occurrence",
@@ -306,24 +324,24 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn add(rest: &[String], _offline: bool) -> ExitCode {",
-            Command,
+            Cmd("add"),
             "`vyrn add <specifier>`",
         ),
         sec(
             "fn update_tool(name: &str, version: &str, lock: &mut remote::Lock) -> Result<(), String> {",
-            Command,
+            Cmd("update"),
             "the pinned-tool half of `vyrn update` (RFC-0102 M1/M4): fetch and \
              pin every platform's artifact, or make this machine hold what the \
              lock already pins and change nothing",
         ),
         sec(
             "fn update(alias: Option<&str>, locked: bool) -> ExitCode {",
-            Command,
+            Cmd("update"),
             "`vyrn update [--locked] [alias]`",
         ),
         sec(
             "fn vendor(check: bool) -> ExitCode {",
-            Command,
+            Cmd("vendor"),
             "`vyrn vendor [--check]`",
         ),
         sec(
@@ -336,29 +354,29 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn test_cmd(path: &str, rest: &[String]) -> ExitCode {",
-            Command,
+            Cmd("test"),
             "`vyrn test [--name <substring>]` (RFC-0015)",
         ),
         sec(
             "fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {",
-            Command,
+            Cmd("bench"),
             "`vyrn bench` (RFC-0055 + RFC-0063) and its four modes",
         ),
         sec(
             "fn bench_native(",
-            Command,
+            Cmd("bench"),
             "the default bench mode: lift each selected body to a function, \
              synthesize the harness `main` over `std/bench`, build native, run \
              it. The harness is Vyrn; the CLI drives clang",
         ),
         sec(
             "fn bench_ungate_list(text: &str) -> Vec<String> {",
-            Command,
+            Cmd("bench"),
             "the readers of a `--json` report and a baseline",
         ),
         sec(
             "fn bench_compare(",
-            Command,
+            Cmd("bench"),
             "`vyrn bench --compare` (RFC-0063 §2): the verdicts, the host-scale \
              correction and its quorum",
         ),
@@ -370,25 +388,25 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "const SERVE_SHIM: &str = r#\"",
-            Command,
+            Cmd("serve, dev"),
             "the Vyrn `vyrn serve` appends to a served program before it loads \
              it, so the checker, the move checker and the release planner judge \
              every line of it as they judge the program",
         ),
         sec(
             "fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {",
-            Command,
+            Cmd("serve, dev"),
             "the two name substitutions that turn a loaded program into the \
              served one, and the one resident instance that answers a request",
         ),
         sec(
             "fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {",
-            Command,
+            Cmd("serve"),
             "`vyrn serve [--port N] [--workers N]` (RFC-0016)",
         ),
         sec(
             "fn serve_pool_wasm<W, A>(",
-            Command,
+            Cmd("serve, dev"),
             "`--workers N` (RFC-0025): N resident instances over one Cranelift \
              compile, and the isolation gate that refuses the flag when `handle` \
              touches module state — the analysis is the frontend's, the refusal \
@@ -396,13 +414,13 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn dev_cmd(rest: &[String]) -> ExitCode {",
-            Command,
+            Cmd("dev"),
             "`vyrn dev [--port N]` (RFC-0019): build the client to wasm, serve \
              the server root with static assets in front",
         ),
         sec(
             "struct DevAssets {",
-            Command,
+            Cmd("dev"),
             "static asset resolution and its traversal refusals: no `..` on \
              either separator, no absolute or drive-letter target, and the join \
              confirmed by canonicalization",
@@ -444,25 +462,25 @@ fn main_sections() -> Vec<Section> {
         ),
         sec(
             "fn run_wasm(",
-            Command,
+            Cmd("run"),
             "`vyrn run`: the program compiled by the one emitter and run in the \
              embedded wasmtime, with the arguments, streams and exit code, and \
              the profile of a compiled run",
         ),
         sec(
             "struct Body {",
-            Command,
+            Cmd("test, bench"),
             "`vyrn test` and `vyrn bench --check`: one module, one instance, one \
              RFC-0012 door per body, the store left open behind `_start`",
         ),
         sec(
             "fn build(path: &str, rest: &[String]) -> ExitCode {",
-            Command,
+            Cmd("build"),
             "`vyrn build [-o out] [--target wasm]`",
         ),
         sec(
             "fn build_wasm2c(",
-            Command,
+            Cmd("build"),
             "the native route (RFC-0125 §2.5): the same wasm `--target wasm` \
              writes, through wasm2c and clang at the native target's flags",
         ),
@@ -714,12 +732,12 @@ fn the_structural_census_is_what_the_rfc_records() {
         total += lines.len();
         total_msgs += messages(&lines, 1, lines.len());
         for (i, a, b) in spans(rel, &lines, &secs) {
-            *by_kind.entry(secs[i].kind as usize).or_insert(0usize) += b - a + 1;
-            *msg_by_kind.entry(secs[i].kind as usize).or_insert(0usize) += messages(&lines, a, b);
+            *by_kind.entry(secs[i].kind.label()).or_insert(0usize) += b - a + 1;
+            *msg_by_kind.entry(secs[i].kind.label()).or_insert(0usize) += messages(&lines, a, b);
         }
     }
     let got: Vec<(&'static str, usize, usize)> = [
-        Kind::Command,
+        Kind::Cmd(""),
         Kind::Restated,
         Kind::Dead,
         Kind::Library,
@@ -731,8 +749,8 @@ fn the_structural_census_is_what_the_rfc_records() {
     .map(|k| {
         (
             k.label(),
-            by_kind.get(&(*k as usize)).copied().unwrap_or(0),
-            msg_by_kind.get(&(*k as usize)).copied().unwrap_or(0),
+            by_kind.get(k.label()).copied().unwrap_or(0),
+            msg_by_kind.get(k.label()).copied().unwrap_or(0),
         )
     })
     .collect();
@@ -758,14 +776,86 @@ fn the_structural_census_is_what_the_rfc_records() {
     );
 }
 
+/// The lines and stderr sentences of every entry of the per-command tile, in the
+/// order the table prints them: most lines first, then by name.
+fn per_command() -> Vec<(&'static str, usize, usize)> {
+    let mut by_cmd: std::collections::BTreeMap<&'static str, (usize, usize)> =
+        std::collections::BTreeMap::new();
+    for (rel, secs) in files() {
+        let lines = source(rel);
+        for (i, a, b) in spans(rel, &lines, &secs) {
+            let Kind::Cmd(name) = secs[i].kind else {
+                continue;
+            };
+            let row = by_cmd.entry(name).or_insert((0, 0));
+            row.0 += b - a + 1;
+            row.1 += messages(&lines, a, b);
+        }
+    }
+    let mut got: Vec<(&'static str, usize, usize)> =
+        by_cmd.into_iter().map(|(k, (n, m))| (k, n, m)).collect();
+    got.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    got
+}
+
+/// What each command's own path costs, as RFC-0125 §3 M5 records it. The kind
+/// table above says the driver spends most of itself on commands; this says
+/// which ones, so a deletion is ranked before it is made rather than after.
+#[test]
+fn the_per_command_census_is_what_the_rfc_records() {
+    let want = vec![
+        ("bench", 671, 17),
+        ("why", 575, 19),
+        ("doc", 391, 14),
+        ("serve, dev", 386, 3),
+        ("routes", 370, 5),
+        ("dev", 315, 22),
+        ("fmt", 295, 15),
+        ("build", 277, 17),
+        ("deps", 271, 7),
+        ("(dispatch)", 269, 12),
+        ("fix", 247, 1),
+        ("update", 226, 7),
+        ("serve", 179, 12),
+        ("test, bench", 164, 2),
+        ("build, bench", 163, 0),
+        ("emit-gen", 81, 5),
+        ("run", 79, 3),
+        ("add", 73, 6),
+        ("vendor", 65, 6),
+        ("test", 51, 2),
+        ("new", 41, 4),
+        ("(global)", 35, 0),
+    ];
+    assert_eq!(per_command(), want, "the per-command census has moved");
+    let total: usize = per_command().iter().map(|(_, n, _)| n).sum();
+    assert_eq!(
+        total, 5224,
+        "the per-command tile does not add up to its kind"
+    );
+}
+
+/// The per-command table for RFC-0125 §3 M5:
+/// `cargo test -p vyrn-cli --test cli_census -- --ignored --nocapture
+/// the_per_command_census_as_a_table`.
+#[test]
+#[ignore]
+fn the_per_command_census_as_a_table() {
+    println!("| command | lines | stderr |");
+    println!("|---|---|---|");
+    for (name, lines, msgs) in per_command() {
+        println!("| `{name}` | {lines} | {msgs} |");
+    }
+}
+
 /// The table for RFC-0125 §3 M5, printed from the sections above:
 /// `cargo test -p vyrn-cli --test cli_census -- --ignored --nocapture
 /// the_structural_census_as_a_table`.
 #[test]
 #[ignore]
 fn the_structural_census_as_a_table() {
-    println!("| file | section | lines | stderr | kind | what it is |");
-    println!("|---|---|---|---|---|---|");
+    println!("| file | section | lines | stderr | kind | command | what it is |");
+    println!("|---|---|---|---|---|---|---|");
     for (rel, secs) in files() {
         let lines = source(rel);
         let short = rel.rsplit('/').next().unwrap_or(rel);
@@ -782,12 +872,16 @@ fn the_structural_census_as_a_table() {
                 .trim_end_matches('(')
                 .to_string();
             println!(
-                "| `{}` | `{}` | {} | {} | {} | {} |",
+                "| `{}` | `{}` | {} | {} | {} | {} | {} |",
                 short,
                 name,
                 b - a + 1,
                 messages(&lines, a, b),
                 secs[i].kind.label(),
+                match secs[i].kind {
+                    Kind::Cmd(c) => c,
+                    _ => "—",
+                },
                 secs[i].what
             );
         }
