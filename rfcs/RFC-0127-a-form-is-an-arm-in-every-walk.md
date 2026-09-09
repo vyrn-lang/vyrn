@@ -209,14 +209,14 @@ one's.
 
 ### 3.2 The 9 declarations
 
-288 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
+274 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
 `ast.rs` by the test, so a tenth declaration form fails the census until it has
 a row.
 
 | declaration | parser | loader | checker | project | shared | editor | cli | all seven |
 |---|---|---|---|---|---|---|---|---|
 | `imports` | 1 | 19 | 0 | 0 | 0 | 5 | 1 | 26 |
-| `type_decls` | 16 | 16 | 4 | 1 | 0 | 14 | 0 | 51 |
+| `type_decls` | 2 | 16 | 4 | 1 | 0 | 14 | 0 | 37 |
 | `functions` | 2 | 18 | 22 | 1 | 1 | 12 | 15 | 71 |
 | `protocols` | 1 | 11 | 7 | 0 | 0 | 8 | 0 | 27 |
 | `contracts` | 0 | 11 | 4 | 0 | 0 | 0 | 0 | 15 |
@@ -224,6 +224,12 @@ a row.
 | `globals` | 1 | 12 | 15 | 1 | 2 | 2 | 0 | 33 |
 | `tests` | 0 | 6 | 2 | 1 | 1 | 1 | 5 | 16 |
 | `benches` | 0 | 6 | 2 | 1 | 1 | 1 | 6 | 17 |
+
+**`type_decls` used to cost the parser 16 and now costs it 2.** Fourteen of
+those sixteen were the language's prelude, pushed one declaration at a time; it
+is a Vyrn source file the compiler embeds since RFC-0125 §3 M6, and the parser
+extends from it once. The row is the cheapest measurement of that move: nothing
+about the surface changed, and 14 mentions went.
 
 `imports` is the only row with a zero in the checker, and that is RFC-0010
 working: the loader consumes an import and the checker never sees one.

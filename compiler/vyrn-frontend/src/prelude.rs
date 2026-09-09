@@ -129,8 +129,47 @@
 //! parser INJECTS into every program (`ModuleInterface`, `ContractInfo` — see
 //! `parser`'s reflection declarations). They have rows below.
 
-use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type};
+use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type, TypeDecl};
 use crate::project::ELEM;
+use std::sync::OnceLock;
+
+/// The language's prelude, as Vyrn source (RFC-0125 §2.4, §3 M6).
+///
+/// Embedded rather than resolved against a std root, for the reason this
+/// module's rows are seeded rather than imported: a bare file with no
+/// `vyrn.json` and no std root still parses, and these declarations are in it.
+const PRELUDE_SRC: &str = include_str!("prelude.vyrn");
+
+/// The declarations the compiler puts into every program — `Value`, `Template`,
+/// the error model, the storage outcome, `Schema`, the five `moduleInterface`
+/// records, the two `contractOf` records and `Request`/`Response`.
+///
+/// They are a builtin's contract in the sense this module's doc opens with, one
+/// declaration further along: a builtin that answers a `Schema` needs `Schema`
+/// to exist, and no program declares it. What is new here is only WHERE the
+/// declaration is written. It was 535 lines of `parser.rs` building AST values
+/// in Rust until RFC-0125 §3 M6; it is now [`PRELUDE_SRC`], read by the one
+/// parser, so a field name is spelled where a reader would look for it.
+///
+/// Every declaration carries line 0, which is how `loader::is_injected` and the
+/// editor's symbol index recognise one. Parsed once and cloned per program: the
+/// parse is a few microseconds and `parse_accum` runs per module.
+pub fn type_decls() -> &'static [TypeDecl] {
+    static DECLS: OnceLock<Vec<TypeDecl>> = OnceLock::new();
+    DECLS.get_or_init(|| {
+        let tokens = crate::lexer::lex(PRELUDE_SRC).expect("the prelude lexes");
+        let (mut program, errors) = crate::parser::parse_bare(tokens);
+        assert!(
+            errors.is_empty(),
+            "the prelude does not parse: {}",
+            errors[0].render()
+        );
+        for t in &mut program.type_decls {
+            t.line = 0;
+        }
+        program.type_decls
+    })
+}
 
 /// One seeded signature.
 ///
@@ -934,6 +973,53 @@ pub fn lends(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The prelude parses, declares these fifteen types in this order, and
+    /// declares nothing else.
+    ///
+    /// The order is load-bearing: the linker keeps the ROOT module's copies and
+    /// drops every other module's, and a reordered prelude would move every
+    /// index a linked program's declarations carry. The "nothing else" half is
+    /// what stops a `fn` or an `import` from entering every program by being
+    /// written in this file.
+    #[test]
+    fn the_prelude_declares_fifteen_types_and_nothing_else() {
+        let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Value",
+                "Template",
+                "Issue",
+                "Validation",
+                "LoadResult",
+                "Schema",
+                "Origin",
+                "ParamInfo",
+                "FnInfo",
+                "TypeInfo",
+                "ModuleInterface",
+                "MemberInfo",
+                "ContractInfo",
+                "Request",
+                "Response",
+            ]
+        );
+        assert!(
+            type_decls().iter().all(|t| t.line == 0 && !t.exported),
+            "every prelude declaration is line 0 and unexported"
+        );
+        let tokens = crate::lexer::lex(PRELUDE_SRC).expect("the prelude lexes");
+        let (p, _) = crate::parser::parse_bare(tokens);
+        assert!(
+            p.functions.is_empty()
+                && p.imports.is_empty()
+                && p.impls.is_empty()
+                && p.protocols.is_empty()
+                && p.contracts.is_empty(),
+            "the prelude declares something that is not a type"
+        );
+    }
 
     /// A row is matched by CALL NAME. That only means "the builtin" while no
     /// user function can carry the name, and `checker::RESERVED` is what stops

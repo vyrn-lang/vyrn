@@ -24,9 +24,10 @@
 //! file. The test computes the spans; the table below records the anchor, the
 //! kind and a reader.
 //!
-//! An anchor is usually an item. Three are not: `parse_accum` is 591 lines of
-//! three different jobs, and a section is what a reader would delete, not what
-//! `rustfmt` indents.
+//! An anchor is usually an item. One is not: `parse_accum` ends with a job of
+//! its own — the `impl` flattening — and a section is what a reader would
+//! delete, not what `rustfmt` indents. The function held a second such anchor
+//! until RFC-0125 §3 M6 moved the 535-line prelude out of it.
 //!
 //! # The kinds, and why these
 //!
@@ -165,24 +166,15 @@ fn parser_sections() -> Vec<Section> {
              it cannot see",
         ),
         sec(
-            "pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {",
+            "pub(crate) fn parse_bare(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {",
             Shared,
-            "the two entry points: the first error, and every error one pass \
-             recovered (RFC-0006)",
-        ),
-        sec(
-            "    // The built-in `Value` enum (RFC-0007): the closed set of types a tagged",
-            Twice,
-            "**the language's prelude, written as Rust**: eleven type \
-             declarations pushed into every program at line 0 — `Value`, \
-             `Template`, `Issue`, `Validation`, the three storage outcomes, \
-             `Schema`, the five `moduleInterface` records, the two \
-             `contractOf` records, and `Request`/`Response`. Their field and \
-             variant names are stated a second time wherever a pass builds one \
-             of these values: `schema_reflect.rs` writes `Schema`'s and \
-             `ParamInfo`'s fields out by hand, `types.rs` writes the schema \
-             field list, and `direct.rs` names `IntVal`/`StrVal` to box a tag \
-             argument. 535 lines, and none of it is a grammar",
+            "the three entry points: the grammar alone, the first error, and \
+             every error one pass recovered (RFC-0006). `parse_accum` also \
+             puts the language's PRELUDE into the program — fifteen type \
+             declarations at line 0 — and since RFC-0125 §3 M6 it does that by \
+             extending from `prelude::type_decls`, which parses `prelude.vyrn` \
+             through the bare entry point. It was 535 lines of Rust building \
+             those declarations as AST values, and none of it was a grammar",
         ),
         sec(
             "    let mut flat = Vec::new();",
@@ -836,9 +828,9 @@ fn the_parser_census_is_what_the_rfc_records() {
     let want = vec![
         ("parser.rs", "the grammar's own arm", 3512, 52),
         ("parser.rs", "a desugar the parser states", 928, 7),
-        ("parser.rs", "a table stated a second time", 786, 1),
+        ("parser.rs", "a table stated a second time", 251, 1),
         ("parser.rs", "recovery and the diagnostic sentences", 175, 2),
-        ("parser.rs", "shared machinery", 196, 1),
+        ("parser.rs", "shared machinery", 212, 1),
         ("parser.rs", "tests", 1920, 0),
         ("lexer.rs", "the grammar's own arm", 583, 11),
         ("lexer.rs", "a desugar the parser states", 0, 0),
