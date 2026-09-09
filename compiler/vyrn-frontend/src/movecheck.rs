@@ -1072,130 +1072,6 @@ pub fn root_of(path: &str) -> &str {
     }
 }
 
-/// A name that has been moved out of.
-///
-/// It carried the line and the hole flag until the `drop`-with-a-hole refusal
-/// left for the kernel (RFC-0125 §3 M3, row 22), and nothing reads either now.
-/// The table below is a set of consumed paths, and nothing reads THAT: it is
-/// the next deletion, and it takes the `consumed` parameter with it.
-#[derive(Clone)]
-struct Consumption;
-
-/// Consumed places: PATH -> what took it (RFC-0093), bucketed by ROOT.
-///
-/// It was keyed by root name until the take arrived. A take makes a hole in one
-/// path rather than emptying the whole binding, so `consume er.node` records
-/// `er.node` and leaves `er.next` readable. A whole-binding move still records
-/// the bare name, which is the same key it always recorded.
-///
-/// The root is back, one level up. A flat `HashMap<String, Consumption>` bought
-/// nothing: [`overlaps`] is a string-prefix relation, so every use paid the hash
-/// AND then scanned the whole map anyway — 250 / 500 / 1,000 / 2,000 drops
-/// interleaved with reads of a live binding measured 10 / 15 / 31 / 99 ms, which
-/// is quadratic. [`overlaps`] is false whenever the roots differ ([`under`] is
-/// `starts_with` at a `.` boundary, and `root_of` cuts at the first `.` or `[`),
-/// so one bucket holds every path a given use can collide with, and a lookup
-/// replaces the scan.
-#[derive(Clone, Default)]
-struct Consumed(HashMap<String, HashMap<String, Consumption>>);
-
-impl Consumed {
-    fn insert(&mut self, path: String, c: Consumption) {
-        self.0
-            .entry(root_of(&path).to_string())
-            .or_default()
-            .insert(path, c);
-    }
-
-    /// Record `c` for `path` only if the path has no consumption yet — the merge
-    /// after a branch, where the FIRST arm to consume a path names the line.
-    fn or_insert(&mut self, path: String, c: Consumption) {
-        self.0
-            .entry(root_of(&path).to_string())
-            .or_default()
-            .entry(path)
-            .or_insert(c);
-    }
-
-    fn remove(&mut self, path: &str) {
-        let root = root_of(path);
-        if let Some(b) = self.0.get_mut(root) {
-            b.remove(path);
-            if b.is_empty() {
-                self.0.remove(root);
-            }
-        }
-    }
-
-    /// A write to `path` revives it and every path inside it — one bucket, since
-    /// nothing outside `path`'s root can be inside `path`.
-    fn revive(&mut self, path: &str) {
-        let root = root_of(path);
-        if let Some(b) = self.0.get_mut(root) {
-            b.retain(|k, _| k != path && !under(k, path));
-            if b.is_empty() {
-                self.0.remove(root);
-            }
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = (&String, &Consumption)> {
-        self.0.values().flat_map(|b| b.iter())
-    }
-}
-
-impl IntoIterator for Consumed {
-    type Item = (String, Consumption);
-    type IntoIter = std::vec::IntoIter<(String, Consumption)>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0
-            .into_values()
-            .flatten()
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a Consumed {
-    type Item = (&'a String, &'a Consumption);
-    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
-    fn into_iter(self) -> Self::IntoIter {
-        Box::new(self.iter())
-    }
-}
-
-/// Whether `long` names storage inside `short`: `er.node` is under `er`.
-///
-/// FIELDS ONLY, and a name carrying a `[` relates to nothing but itself. Two
-/// reasons, and `tests/places.rs` found both.
-///
-/// RFC-0082's place desugar names its temporaries after the paths they took, so
-/// `o.i.xs[k] = v` moves through bindings literally called `o.i[]` and
-/// `o.i[].xs[]`. Read as paths, the second is inside the first, and every write
-/// back then reads as a use of something moved. They are not paths; they are one
-/// binding each, and identity is the whole relation they want.
-///
-/// The element case needs nothing more either: a take never reaches an element —
-/// `consume xs[i]` is refused and `swapRemove` is the answer — so no key this
-/// relation has to widen can carry a `[`.
-fn under(long: &str, short: &str) -> bool {
-    !long.contains('[')
-        && !short.contains('[')
-        && long.len() > short.len()
-        && long.starts_with(short)
-        && long.as_bytes()[short.len()] == b'.'
-}
-
-/// A write to `path` revives it and every path inside it.
-///
-/// `movecheck`'s own module comment has said *"reassignment revives a variable"*
-/// since Phase 4b; RFC-0093 makes the same sentence true one dot down. Only
-/// downward: writing `er.node` fills that field, it does not put back an `er`
-/// that was moved away whole.
-fn revive(consumed: &mut Consumed, path: &str) {
-    consumed.revive(path);
-}
-
 impl MoveCheck<'_> {
     fn function(&self, f: &Function) {
         *self.cur_fn.borrow_mut() = f.name.clone();
@@ -1212,7 +1088,7 @@ impl MoveCheck<'_> {
             .enumerate()
             .map(|(i, p)| (p.name.clone(), i))
             .collect();
-        let mut consumed = Consumed::default();
+
         let mut scope: Vec<HashSet<String>> =
             vec![f_params.iter().map(|p| p.name.clone()).collect()];
         // Module state is the outermost frame, the parameters the next one — the
@@ -1242,7 +1118,7 @@ impl MoveCheck<'_> {
         *self.ret.borrow_mut() = ret.clone();
         self.lambda_base.borrow_mut().clear();
         self.carrying_locals.borrow_mut().clear();
-        self.block(body, &mut consumed, &mut scope);
+        self.block(body, &mut scope);
     }
 
     /// Push a frame on ALL THREE stacks. They are read as one environment — a
@@ -1285,13 +1161,7 @@ impl MoveCheck<'_> {
     /// `xs = xs.push(v)`, `s.keys = s.keys.push(k)` — the receiver comes back
     /// through the result and the store revives the place, so the take the
     /// row would record is not recorded (RFC-0125 M2, `sinks`).
-    fn walk_writeback(
-        &self,
-        target: &str,
-        value: &Expr,
-        consumed: &mut Consumed,
-        scope: &mut Vec<HashSet<String>>,
-    ) {
+    fn walk_writeback(&self, target: &str, value: &Expr, scope: &mut Vec<HashSet<String>>) {
         let writeback = matches!(
             value,
             Expr::Call { name: callee, args, .. }
@@ -1301,7 +1171,7 @@ impl MoveCheck<'_> {
         if writeback {
             *self.writeback.borrow_mut() = Some(target.to_string());
         }
-        self.expr(value, consumed, scope);
+        self.expr(value, scope);
         *self.writeback.borrow_mut() = None;
     }
 
@@ -1434,8 +1304,7 @@ impl MoveCheck<'_> {
         into: &dyn Fn() -> String,
         line: usize,
         outlives: bool,
-        consumed: &mut Consumed,
-    ) -> bool {
+    ) {
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
@@ -1445,11 +1314,11 @@ impl MoveCheck<'_> {
                 self.note_projection("elem-store", &path, into(), ty, line);
             }
             if outlives && self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
-                return false;
+                return;
             }
         }
         let Some((root, path)) = place_path(value) else {
-            return false;
+            return;
         };
         // RFC-0092 M0's instrument, kept as M1's regression guard: it records
         // what the branch below now refuses, so a site that reappears is counted.
@@ -1460,24 +1329,10 @@ impl MoveCheck<'_> {
             let ty = self.type_of(value);
             self.note_projection("store", &path, into(), ty, line);
         }
-        // A scalar copies. An unnamed type is left alone — see the doc above.
-        if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
-            return false;
-        }
-        // A borrow does not move: the caller still owns it. Putting one
-        // somewhere that outlives the call is the kernel's refusal at the
-        // field and constructor doors, so nothing is recorded here.
-        if self.borrow_of(&root).is_some() {
-            return false;
-        }
-        // A projection does not move either: reading a field out of a record
-        // does not take the record.
-        if path != root {
-            return false;
-        }
-        let _ = into;
-        consumed.insert(root, Consumption);
-        true
+        // Everything the four screens below this used to guard — a scalar
+        // copies, a borrow does not move, a projection does not move — decided
+        // a `Consumed` entry, and it went with the table (RFC-0125 §3 M3, the
+        // table slice). What is left of this walk is the instrument.
     }
 
     /// The borrow status a `let` of `value` gives its binding.
@@ -1921,7 +1776,7 @@ impl MoveCheck<'_> {
     /// `return`/`break`/`continue` (RFC-0060). A statement after a diverging one
     /// is unreachable, so it is not checked (use-after-move there is not an
     /// error), and its consumptions never flow to the block's exit.
-    fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {
+    fn block(&self, b: &Block, scope: &mut Vec<HashSet<String>>) -> bool {
         scope.push(HashSet::new());
         self.enter();
         let mut diverged = false;
@@ -1931,7 +1786,7 @@ impl MoveCheck<'_> {
                 // (the `return` precedent — code after it is unreachable-clean).
                 break;
             }
-            diverged = self.stmt(s, consumed, scope);
+            diverged = self.stmt(s, scope);
         }
         self.exit();
         scope.pop();
@@ -1944,7 +1799,7 @@ impl MoveCheck<'_> {
 
     /// Returns whether this statement **diverges** (leaves via
     /// `return`/`break`/`continue` on every path) — see [`MoveCheck::block`].
-    fn stmt(&self, s: &Stmt, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {
+    fn stmt(&self, s: &Stmt, scope: &mut Vec<HashSet<String>>) -> bool {
         match s {
             Stmt::Let {
                 name,
@@ -1953,7 +1808,7 @@ impl MoveCheck<'_> {
                 line,
                 ..
             } => {
-                self.expr(value, consumed, scope);
+                self.expr(value, scope);
                 // The binding's type: what it was declared, else what the
                 // initializer yields — read against the PRE-binding environment,
                 // so `let x = x + b` resolves the old `x`.
@@ -2004,7 +1859,6 @@ impl MoveCheck<'_> {
                     },
                     *line,
                     hoisted,
-                    consumed,
                 );
                 // Round fifty-six provenance: a binding initialized with a
                 // carrying value carries it (read pre-bind, so `let x = x + b`
@@ -2018,7 +1872,6 @@ impl MoveCheck<'_> {
                     let read = Self::read_of(value).map(|p| (p, *line));
                     self.reads.borrow_mut().bind(name, read);
                 }
-                revive(consumed, name); // a fresh binding is alive again
                 scope.last_mut().unwrap().insert(name.clone());
                 false
             }
@@ -2026,7 +1879,7 @@ impl MoveCheck<'_> {
                 // The write-back form of a rebuilding row: `xs = xs.push(v)`.
                 // The receiver comes back through the result and the store
                 // revives the binding, so its take is not recorded.
-                self.walk_writeback(name, value, consumed, scope);
+                self.walk_writeback(name, value, scope);
                 // Module state (RFC-0013) is a place with a whole-module lifetime,
                 // so 4b treats a store into it differently from a local's.
                 let global = self.globals.contains(name) && !Self::in_scope(scope, name);
@@ -2043,7 +1896,7 @@ impl MoveCheck<'_> {
                         format!("`{name}`")
                     }
                 };
-                self.store(value, &into, *line, global, consumed);
+                self.store(value, &into, *line, global);
                 // An assignment rebinds, exactly as a `let` does, so it must
                 // carry the same answer: `t = d.title` makes `t` a projection of
                 // `d`. Without this, `let t = d.title` was refused at the next
@@ -2077,7 +1930,6 @@ impl MoveCheck<'_> {
                         self.carrying_locals.borrow_mut().insert(name.clone());
                     }
                 }
-                revive(consumed, name); // reassignment revives it
                 false
             }
             Stmt::SetField {
@@ -2087,18 +1939,16 @@ impl MoveCheck<'_> {
                 line,
             } => {
                 self.site("field", *line, value, None);
-                self.walk_writeback(&format!("{name}.{field}"), value, consumed, scope);
+                self.walk_writeback(&format!("{name}.{field}"), value, scope);
                 self.store(
                     value,
                     &|| format!("the field `{name}.{field}`"),
                     *line,
                     true,
-                    consumed,
                 );
                 // RFC-0093: a write fills the hole a take left. The same
                 // sentence `Stmt::Assign` has carried since Phase 4b, one dot
                 // down — and the reason no drop flag is needed to say it.
-                revive(consumed, &format!("{name}.{field}"));
                 self.note_carrying_store(name, value);
                 false
             }
@@ -2132,15 +1982,15 @@ impl MoveCheck<'_> {
                             if std::env::var_os("VYRN_PROJ_DUMP").is_some() {
                                 eprintln!("proj-store walked: {name} line {line}");
                             }
-                            self.block(blk, consumed, scope);
+                            self.block(blk, scope);
                             return false;
                         }
                     }
                 }
-                self.expr(index, consumed, scope);
+                self.expr(index, scope);
                 self.site("element", *line, value, None);
-                self.expr(value, consumed, scope);
-                self.store(value, &|| format!("`{name}`"), *line, true, consumed);
+                self.expr(value, scope);
+                self.store(value, &|| format!("`{name}`"), *line, true);
                 // A map takes its KEY. Both backends write the key pointer into
                 // `keys[len]` and copy nothing, so `hs[k] = v` moves `k` — and
                 // no rule said so until RFC-0092 M5 needed it to. `httpHeaders`
@@ -2165,14 +2015,14 @@ impl MoveCheck<'_> {
                 // (`std/http`) is `for k in base.keys() { hs[k] = .. }`, and the
                 // snapshot is a temporary the loop owns (M5), so `k` binds an
                 // OWNED element and the store still records the move.
-                self.store(index, &|| format!("`{name}`"), *line, true, consumed);
+                self.store(index, &|| format!("`{name}`"), *line, true);
                 self.note_carrying_store(name, value);
                 false
             }
             Stmt::Return { value, line } => {
                 if let Some(e) = value {
                     self.site("return", *line, e, None);
-                    self.expr(e, consumed, scope);
+                    self.expr(e, scope);
                     // Round fifty-six: the escape screen's record, at the one
                     // site a result actually leaves — BEFORE `check_return`'s
                     // own refusals, so a shape the checker also refuses still
@@ -2204,36 +2054,12 @@ impl MoveCheck<'_> {
                 else_block,
                 ..
             } => {
-                self.expr(cond, consumed, scope);
-                let mut then_c = consumed.clone();
-                let then_div = self.block(then_block, &mut then_c, scope);
-                let mut else_c = consumed.clone();
+                self.expr(cond, scope);
+                let then_div = self.block(then_block, scope);
                 let else_div = match else_block {
-                    Some(eb) => self.block(eb, &mut else_c, scope),
+                    Some(eb) => self.block(eb, scope),
                     None => false,
                 };
-                // RFC-0114 Rule N: a binding consumed on exactly one branch,
-                // both branches continuing to the join. The union below will say
-                // "consumed", so nothing after the `if` may read it (that is A1)
-                // and block exit will not release it — the edge that did NOT
-                // consume is the one place the value can still be given back.
-                // Whole bindings only, taken clean (no hole), untouched before
-                // the `if` and untouched on the other branch — a projection
-                // take, or any prior activity in the binding's bucket, refuses.
-                // may-consume, but a branch that DIVERGES (break/continue/return)
-                // carries its consumptions out the exit path, not to the code
-                // after the `if` — so a value moved only on a break-path is not
-                // considered moved on the fall-through (RFC-0060).
-                if !then_div {
-                    for (k, v) in then_c {
-                        consumed.or_insert(k, v);
-                    }
-                }
-                if !else_div {
-                    for (k, v) in else_c {
-                        consumed.or_insert(k, v);
-                    }
-                }
                 then_div && else_div
             }
             // `if let PAT = e { .. } else { .. }` (RFC-0060): the scrutinee is
@@ -2247,8 +2073,7 @@ impl MoveCheck<'_> {
                 else_block,
                 ..
             } => {
-                self.expr(scrutinee, consumed, scope);
-                let mut then_c = consumed.clone();
+                self.expr(scrutinee, scope);
                 scope.push(HashSet::new());
                 self.enter();
                 let (tys, borrow) = self.payload_binding(scrutinee, pattern);
@@ -2297,40 +2122,21 @@ impl MoveCheck<'_> {
                     .map(str::to_string)
                     .collect();
                 self.arm_binders.borrow_mut().push(binders);
-                let then_div = self.block(then_block, &mut then_c, scope);
+                let then_div = self.block(then_block, scope);
                 self.arm_binders.borrow_mut().pop();
                 self.exit();
                 scope.pop();
-                let mut else_c = consumed.clone();
                 let else_div = match else_block {
-                    Some(eb) => self.block(eb, &mut else_c, scope),
+                    Some(eb) => self.block(eb, scope),
                     None => false,
                 };
-                if !then_div {
-                    for (k, v) in then_c {
-                        consumed.or_insert(k, v);
-                    }
-                }
-                if !else_div {
-                    for (k, v) in else_c {
-                        consumed.or_insert(k, v);
-                    }
-                }
                 then_div && else_div
             }
             Stmt::While { cond, body, .. } => {
-                // The condition re-runs on every iteration, so consumption in it
-                // is loop-consumption exactly like the body's (`while take(x)`
-                // would use `x` again next time around) — track both in the
-                // in-loop map and run the same next-iteration check.
-                let mut body_c = consumed.clone();
-                self.expr(cond, &mut body_c, scope);
+                self.expr(cond, scope);
                 let outer_continue = self.continue_seen.replace(false);
-                let _ = self.block(body, &mut body_c, scope);
+                let _ = self.block(body, scope);
                 self.continue_seen.set(outer_continue);
-                for (k, v) in body_c {
-                    consumed.or_insert(k, v);
-                }
                 false
             }
             // A `for` loop consumes like a `while`: the iterable is read once,
@@ -2342,7 +2148,7 @@ impl MoveCheck<'_> {
                 line,
                 consuming,
             } => {
-                self.expr(iter, consumed, scope);
+                self.expr(iter, scope);
                 self.site("iterate", *line, iter, None);
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
                 // RFC-0089 rule 2: the loop variable is a borrow only while the
@@ -2388,7 +2194,6 @@ impl MoveCheck<'_> {
                 // survives is a body that kept nothing, so the release at the
                 // exit gives back the visited and the unvisited elements alike,
                 // each exactly once.
-                let mut body_c = consumed.clone();
                 self.enter();
                 let is_borrow = borrow.is_some();
                 self.bind(var, elem, borrow);
@@ -2397,26 +2202,9 @@ impl MoveCheck<'_> {
                     self.reads.borrow_mut().bind(var, read);
                 }
                 let outer_continue = self.continue_seen.replace(false);
-                let _ = self.block(body, &mut body_c, scope);
+                let _ = self.block(body, scope);
                 self.exit();
-                // The loop variable is fresh on every iteration, so a move of it
-                // is not a move of anything the enclosing scope can still name.
-                body_c.remove(var);
                 self.continue_seen.set(outer_continue);
-                for (k, v) in body_c {
-                    consumed.or_insert(k, v);
-                }
-                // The container is dead after a consuming loop: using it again is
-                // the rule 1 error `expr` already reports.
-                if *consuming {
-                    // RFC-0093: the loop takes the PATH, so `for t in consume
-                    // b.tags` empties that field and leaves the rest of `b`
-                    // readable — the same hole the prefix makes, recorded the
-                    // same way and handed to the same walk (M2).
-                    if let Some((_, path)) = place_path(iter) {
-                        consumed.insert(path.clone(), Consumption);
-                    }
-                }
                 false
             }
             // A `panic(..)` statement diverges (RFC-0079), which here means
@@ -2429,52 +2217,18 @@ impl MoveCheck<'_> {
                 // statement-position call whose OWNED heap result nothing
                 // binds. The core states it as a `St::Drop` at the
                 // `Stmt::Expr`, and the emitter reads the core alone.
-                self.expr(e, consumed, scope);
+                self.expr(e, scope);
                 matches!(e, Expr::Call { name, .. } if crate::ast::is_panic(name))
             }
             // A `region` is an ordinary nested block for move checking; it
             // diverges iff its body does (a `break` inside it exits the loop).
-            // Its map is a CLONE, like every other nested block's. Sharing it
-            // by `&mut` let a shadowing `let` inside the region run `revive`
-            // on the ENCLOSING map and erase the outer binding's consumption
-            // record — a use-after-move after the region then compiled.
-            Stmt::Region { body, .. } => {
-                let mut inner = consumed.clone();
-                let div = self.block(body, &mut inner, scope);
-                // Consumption of an OUTER binding inside the region survives
-                // it — that is the use-after-move the propagation exists for.
-                // A binding the region DECLARES dies with the region, and its
-                // record must die too: propagated by name, `drop s` on a
-                // region-local `s` marked an unrelated later `s` — a match
-                // arm's payload binding, in the corpus — as already consumed.
-                let mut local = std::collections::HashSet::new();
-                declared_in(body, &mut local);
-                for (k, v) in inner {
-                    let root = k.split('.').next().unwrap_or(&k).to_string();
-                    if !local.contains(&root) {
-                        consumed.or_insert(k, v);
-                    }
-                }
-                div
-            }
-            // `drop name;` consumes the binding: using it afterward is a
-            // use-after-drop, caught by the same machinery as `consume`.
-            Stmt::Drop { name, line: _ } => {
-                // All THREE of this statement's refusals have left (RFC-0125
-                // §3 M3, rows 20, 21 and 22): a `drop` of what a take already
-                // took, a `drop` of a borrow, and a `drop` of a binding a take
-                // left a hole in. The kernel states all three, in these words
-                // and at this line, and the accumulation driver puts them
-                // beside whatever else the file earns — which is what the
-                // first two rows waited on, because the one program of the
-                // corpus that breaks either of them,
-                // `examples/mustuse_abandoned.vyrn`, breaks a must-use
-                // obligation as well. What is left here is the record: a
-                // `drop` consumes the binding, so a use after it is a
-                // use-after-drop for the walk's own table.
-                consumed.insert(name.clone(), Consumption);
-                false
-            }
+            Stmt::Region { body, .. } => self.block(body, scope),
+            // `drop name` has nothing left for this pass. All THREE of its
+            // refusals are the kernel's (RFC-0125 §3 M3, rows 20, 21 and 22) —
+            // a `drop` of what a take already took, a `drop` of a borrow, and a
+            // `drop` of a binding a take left a hole in — and the record it
+            // wrote for the walk's own table went with the table.
+            Stmt::Drop { .. } => false,
         }
     }
 
@@ -2508,21 +2262,21 @@ impl MoveCheck<'_> {
         }
     }
 
-    fn expr(&self, e: &Expr, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) {
+    fn expr(&self, e: &Expr, scope: &mut Vec<HashSet<String>>) {
         match e {
             Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
             Expr::Var { name, line } => {
                 self.capture_site(name, *line);
             }
-            Expr::Unary { expr, .. } => self.expr(expr, consumed, scope),
+            Expr::Unary { expr, .. } => self.expr(expr, scope),
             Expr::Binary { lhs, rhs, .. } => {
-                self.expr(lhs, consumed, scope);
+                self.expr(lhs, scope);
                 // An operand of a String `+`, of a String comparison and of
                 // `=~` is a call argument — `@concat`'s — and the core states
                 // its release row from the lowered operator (RFC-0125 §3 M3,
                 // the last table's slice). This pass recorded the same three
                 // shapes until then.
-                self.expr(rhs, consumed, scope)
+                self.expr(rhs, scope)
             }
             // A place chain asks ONE consumption question, of the whole path.
             // Walking into the root instead would ask it of `er` and refuse
@@ -2542,32 +2296,15 @@ impl MoveCheck<'_> {
                     // alone, so this walk records nothing for it
                     // (RFC-0125 §3 M3, the emitter-reads-the-core-alone
                     // slice).
-                    self.expr(expr, consumed, scope)
+                    self.expr(expr, scope)
                 }
             },
-            // RFC-0093 — the take. The record below is what makes a later read
-            // of this place, or of anything overlapping it, a rule-1 error.
-            Expr::Consume { place, line: _ } => {
-                self.expr(place, consumed, scope);
-                // A `consume` of what names no place is the desugar's refusal
-                // now (rows 08 and 09), so this walk records nothing for it.
-                let Some((_, path)) = place_path(place) else {
-                    return;
-                };
-                // A whole binding writes the same `Gone::Moved` the consuming
-                // loop writes, so `own.rs` suppresses its drop through the two
-                // lines it already has.
-                //
-                // A PARTIAL take leaves a hole, and the release walk is the TYPE
-                // — which does not know that one field left. RFC-0093 M2 hands
-                // the hole set to [`crate::own`], which hands it to the walk: the
-                // binding is reclaimed MINUS these places. Every take of the same
-                // root joins the set, because a record is drained a field at a
-                // time.
-                consumed.insert(path.clone(), Consumption);
-            }
+            // RFC-0093 — the take. It is the kernel's rule and the kernel's
+            // hole set now, so the walk carries the operand and records
+            // nothing.
+            Expr::Consume { place, .. } => self.expr(place, scope),
             Expr::Try { expr, .. } => {
-                let r = self.expr(expr, consumed, scope);
+                let r = self.expr(expr, scope);
                 // `?` is a `return` in everything but the spelling — the
                 // escape screen records here too (round fifty-six): the err
                 // payload it hands the caller is a projection of the operand.
@@ -2583,31 +2320,22 @@ impl MoveCheck<'_> {
             Expr::StructLit { name, fields, line } => {
                 for (f, v) in fields {
                     self.site("literal", *line, v, None);
-                    self.expr(v, consumed, scope);
-                    self.store(
-                        v,
-                        &|| format!("the field `{name}.{f}`"),
-                        *line,
-                        true,
-                        consumed,
-                    );
+                    self.expr(v, scope);
+                    self.store(v, &|| format!("the field `{name}.{f}`"), *line, true);
                 }
             }
             Expr::TryConstruct { name, args, line } => {
                 for a in args {
                     self.site("literal", *line, a, None);
-                    self.expr(a, consumed, scope);
-                    self.store(a, &|| format!("`{name}`"), *line, true, consumed);
+                    self.expr(a, scope);
+                    self.store(a, &|| format!("`{name}`"), *line, true);
                 }
             }
             Expr::Match {
                 scrutinee, arms, ..
             } => {
-                self.expr(scrutinee, consumed, scope);
-                let base = consumed.clone();
-                let mut arm_cs: Vec<Consumed> = Vec::new();
+                self.expr(scrutinee, scope);
                 for arm in arms {
-                    let mut c = base.clone();
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
@@ -2623,68 +2351,29 @@ impl MoveCheck<'_> {
                         .borrow_mut()
                         .push(binders.iter().map(|b| b.to_string()).collect());
                     match &arm.body {
-                        ArmBody::Expr(body) => self.expr(body, &mut c, scope),
+                        ArmBody::Expr(body) => self.expr(body, scope),
                         // The statements walk as statements, inside the same
                         // binder scope and branch stamp an expression arm gets.
                         ArmBody::Block(b) => {
-                            self.block(b, &mut c, scope);
+                            self.block(b, scope);
                         }
                     }
                     self.arm_binders.borrow_mut().pop();
                     self.exit();
                     scope.pop();
-                    arm_cs.push(c);
-                }
-                // RFC-0114 Rule N at a MATCH join: a binding cleanly whole-taken
-                // in some arms and untouched in the rest is released on each
-                // untouched arm's edge — the `if` rule with `edge` = the arm's
-                // source index. Guards, all failing toward the leak: the name is
-                // nobody's binder (a binder shadows it), the scrutinee does not
-                // mention it (an arm's payload projects into the scrutinee), and
-                // an untouched arm either carries no heap out or never mentions
-                // the binding — its value must not alias what the edge frees. An
-                // arm yielding the binding whole is `Gone::Aliased`, which the
-                // fold's veto refuses.
-                let mut merged: Option<Consumed> = None;
-                for c in arm_cs {
-                    match &mut merged {
-                        None => merged = Some(c),
-                        Some(m) => {
-                            for (k, v) in c {
-                                m.or_insert(k, v);
-                            }
-                        }
-                    }
-                }
-                if let Some(m) = merged {
-                    *consumed = m;
                 }
             }
-            // `if` as an expression (RFC-0030): its two branches are match arms —
-            // the condition consumes eagerly, then each branch runs from the same
-            // base and a value consumed on either path is may-consumed afterward.
+            // `if` as an expression (RFC-0030): its two branches are match arms.
             Expr::IfExpr {
                 cond,
                 then_branch,
                 else_branch,
                 ..
             } => {
-                self.expr(cond, consumed, scope);
-                let base = consumed.clone();
-                let mut then_c = base.clone();
-                self.expr(then_branch, &mut then_c, scope);
-                let mut else_c = base.clone();
+                self.expr(cond, scope);
+                self.expr(then_branch, scope);
                 if let Some(eb) = else_branch {
-                    self.expr(eb, &mut else_c, scope);
-                }
-                // RFC-0114 Rule N at an `if`-expression join — the statement
-                // rule with the match's value guard: the releasing branch's
-                // value must not alias the binding (no heap, no mention, or a
-                // Binary/Unary body, whose result is a scalar or fresh). No
-                // binders and no scrutinee here, so those guards do not apply;
-                // the condition is a Bool read completed before the branch.
-                for (k, v) in then_c.into_iter().chain(else_c) {
-                    consumed.or_insert(k, v);
+                    self.expr(eb, scope);
                 }
             }
             Expr::Call { name, args, line } => {
@@ -2724,16 +2413,14 @@ impl MoveCheck<'_> {
                         }
                     }
                     self.site("arg", *line, arg, None);
-                    self.expr(arg, consumed, scope);
+                    self.expr(arg, scope);
                     if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
                         // A NULLARY constructor is a value with no owner, not a
                         // name (RFC-0126 §8.8): `take(None)` twice hands the
                         // callee two values, and reading the second as a use of
                         // the first refused a program every engine runs.
                         if let Expr::Var { name: v, .. } = arg {
-                            if !self.names_a_constructor(v) {
-                                consumed.or_insert(v.clone(), Consumption);
-                            }
+                            if !self.names_a_constructor(v) {}
                         }
                     } else if self.decl.constructs(name) {
                         // A variant constructor is a literal that reads like a
@@ -2779,7 +2466,6 @@ impl MoveCheck<'_> {
                                 {
                                     continue;
                                 }
-                                consumed.or_insert(root.clone(), Consumption);
                             }
                         }
                     } else if self.sinks(name, i)
@@ -2804,7 +2490,6 @@ impl MoveCheck<'_> {
                             &|| format!("`{}(..)`", crate::parser::method_surface(name)),
                             *line,
                             true,
-                            consumed,
                         );
                     }
                 }
@@ -2812,23 +2497,17 @@ impl MoveCheck<'_> {
             Expr::ArrayLit { elems, line } => {
                 for e in elems {
                     self.site("literal", *line, e, None);
-                    self.expr(e, consumed, scope);
-                    self.store(
-                        e,
-                        &|| "the array literal".to_string(),
-                        *line,
-                        true,
-                        consumed,
-                    );
+                    self.expr(e, scope);
+                    self.store(e, &|| "the array literal".to_string(), *line, true);
                 }
             }
             Expr::MapLit { entries, line } => {
                 for (k, v) in entries {
-                    self.expr(k, consumed, scope);
+                    self.expr(k, scope);
                     self.site("literal", *line, v, None);
-                    self.expr(v, consumed, scope);
-                    self.store(k, &|| "the map literal".to_string(), *line, true, consumed);
-                    self.store(v, &|| "the map literal".to_string(), *line, true, consumed);
+                    self.expr(v, scope);
+                    self.store(k, &|| "the map literal".to_string(), *line, true);
+                    self.store(v, &|| "the map literal".to_string(), *line, true);
                 }
             }
             // A lambda body (RFC-0023): its untyped params are fresh locals; walk
@@ -2865,52 +2544,22 @@ impl MoveCheck<'_> {
                 // the next call reads it freed. The kernel states it, from
                 // the capture the core marks (`core::BorrowKind::Capture`) and
                 // in these same words (RFC-0125 §3 M3, row 28).
-                let r = match body {
-                    LambdaBody::Expr(inner) => self.expr(inner, consumed, scope),
+                match body {
+                    LambdaBody::Expr(inner) => self.expr(inner, scope),
                     LambdaBody::Block(b) => {
-                        // A CLONE, like every other nested block's. Sharing
-                        // the enclosing map by `&mut` let a shadowing `let`
-                        // inside the block run `revive` on it and erase the
-                        // outer binding's consumption record — the exact bug
-                        // `Stmt::Region`'s clone fixed.
-                        let mut inner = consumed.clone();
-                        self.block(b, &mut inner, scope);
-                        // Consumption of an OUTER binding inside the lambda
-                        // survives it; anything the lambda's own frame
-                        // declares — its parameters and its lets — dies with
-                        // the frame.
-                        let mut local = std::collections::HashSet::new();
-                        local.extend(params.iter().cloned());
-                        declared_in(b, &mut local);
-                        for (k, v) in inner {
-                            let root = k.split('.').next().unwrap_or(&k).to_string();
-                            if !local.contains(&root) {
-                                consumed.or_insert(k, v);
-                            }
-                        }
+                        self.block(b, scope);
                     }
-                };
+                }
                 self.lambda_base.borrow_mut().pop();
                 self.exit();
                 scope.pop();
-                r
             }
             // `spawn f(args)` moves arguments exactly like a direct call: a
             // `consume` parameter takes ownership across the task boundary.
-            Expr::Spawn { name, args, line } => {
-                let caps = self.caps.get(name);
-                for (i, arg) in args.iter().enumerate() {
+            Expr::Spawn { args, line, .. } => {
+                for arg in args {
                     self.site("arg", *line, arg, None);
-                    self.expr(arg, consumed, scope);
-                    if caps.and_then(|c| c.get(i)) == Some(&Capability::Consume) {
-                        // A nullary constructor is not a name — see the
-                        // ordinary call above (RFC-0126 §8.8).
-                        if let Expr::Var { name: v, .. } = arg {
-                            if !self.names_a_constructor(v) {
-                                consumed.or_insert(v.clone(), Consumption);
-                            }
-                        }
-                    }
+                    self.expr(arg, scope);
                 }
             }
         }
@@ -3300,52 +2949,6 @@ fn root_var(e: &Expr) -> (&str, usize) {
 }
 
 /// The payload names a `match` pattern binds.
-/// Every name a block's statements DECLARE, at any depth — the bindings that
-/// cannot outlive it. Match-arm binders live in expressions and are scoped by
-/// `arm_binders`; statement-level declarations are what a region's consumption
-/// propagation must filter on.
-fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>) {
-    for s in &block.stmts {
-        match s {
-            crate::ast::Stmt::Let { name, .. } => {
-                out.insert(name.clone());
-            }
-            crate::ast::Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                declared_in(then_block, out);
-                if let Some(e) = else_block {
-                    declared_in(e, out);
-                }
-            }
-            crate::ast::Stmt::IfLet {
-                pattern,
-                then_block,
-                else_block,
-                ..
-            } => {
-                for b in pattern_bindings(pattern) {
-                    out.insert(b.to_string());
-                }
-                declared_in(then_block, out);
-                if let Some(e) = else_block {
-                    declared_in(e, out);
-                }
-            }
-            crate::ast::Stmt::While { body, .. } | crate::ast::Stmt::Region { body, .. } => {
-                declared_in(body, out);
-            }
-            crate::ast::Stmt::ForIn { var, body, .. } => {
-                out.insert(var.clone());
-                declared_in(body, out);
-            }
-            _ => {}
-        }
-    }
-}
-
 pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {
     match p {
         Pattern::Success(b) | Pattern::Failure(b) => vec![b],

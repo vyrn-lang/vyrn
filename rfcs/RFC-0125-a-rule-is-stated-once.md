@@ -15798,6 +15798,63 @@ The form census (RFC-0127 §3), the surface census, `emitter_census`,
 `checker_census` and `cli_census` do not move — this slice deletes no arm of
 any walk.
 
+#### The consumed table is written and never read (2026-09-09, `track-dx`)
+
+`Consumed` is a `HashMap<String, HashMap<String, Consumption>>` with an
+`insert`, an `or_insert`, a `remove`, a `revive`, two `IntoIterator`s and a
+bucket-by-root layout a measurement earned — 250 / 500 / 1,000 / 2,000 drops at
+10 / 15 / 31 / 99 ms is quadratic, and the root cut it. Every one of those
+readers reads the table back into itself: an `if` clones it twice and unions the
+two clones, a `match` folds the arms, a region and a lambda block filter their
+own declarations out of the union. Nothing asks it a question. The last reader
+was the use-after-consume refusal, and that left with row 06.
+
+`Consumption` is already an empty struct — it carried the line and the hole flag
+until row 22 — so the table is a set of strings the pass computes and drops. The
+walk carried it in a `&mut` parameter through `block`, `stmt`, `expr`,
+`walk_writeback` and `store`, which is why deleting it is 92 mentions.
+
+**The licence, the same instrument as the plumbing slice's.**
+
+| gate | result |
+|---|---|
+| `vyrn check`, whole stderr and exit code, 323 programs | byte-identical, **0 lost / 0 gained** |
+| refused | 77 before, 77 after |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, the manifest does not move |
+| `cargo test -p vyrn-cli`, no filter | 82 suites green |
+
+**Two findings, both of them dead by the same reader.** `MoveCheck::store`
+returns a `bool` — "this store is a move" — and every one of its eleven call
+sites has discarded it since the refusal left. The value fed `consumed.insert`,
+through a caller that no longer exists. With it go the three screens at the end
+of the function that only decided it: a scalar copies, a borrow does not move, a
+projection does not move. What `store` does now is RFC-0092's instrument, and it
+says so. And `declared_in` — every name a block's statements declare, at any
+depth — had two callers, the region's filter and the lambda block's, both of
+them filters over the union. It goes whole.
+
+**What the walk keeps.** The scope stacks, the borrow table, the type
+environment, the site and projection instruments, the escape screen, and the
+four call-graph sets `Want::Lets` fills. `Stmt::Drop` keeps an arm and it does
+nothing but say the statement does not diverge; `Stmt::Region` is one line;
+`Expr::Consume` carries its operand and records nothing; `Expr::Spawn` no longer
+reads the capability row, because the only thing it did with it was mark the
+argument consumed.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 3,760 to **3,363**.
+
+**The censuses.** The structural census: `Rows` **492 to 479** (`store`'s three
+screens), `Shared` **2,862 to 2,480**, `Tests` 404 unmoved. Two anchors move
+because the signatures they name lost a parameter and `cargo fmt` put them on
+one line — `block`, `stmt`, `expr` and `walk_writeback` — and `declared_in`'s
+section becomes `pattern_bindings`'s. RFC-0127 §3's form census moves for the
+first time on this track: `Stmt::Let` 3 to 2, `Stmt::If`, `Stmt::IfLet`,
+`Stmt::While` and `Stmt::ForIn` 4 to 3, `Stmt::Region` 3 to 2 and `Expr::Var` 15
+to 14 in the `movecheck` column, and the total 1,205 to **1,198 mentions in
+eight files for 38 forms**. Each of the seven is one arm's clone-and-union, and
+no form loses its arm. The surface census, `emitter_census`, `frontend_census`,
+`checker_census` and `cli_census` do not move.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive

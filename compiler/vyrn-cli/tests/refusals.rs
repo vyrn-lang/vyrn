@@ -2688,7 +2688,7 @@ fn sections() -> Vec<Section> {
             "the three scope stacks, read as one environment",
         ),
         sec(
-            "    fn walk_writeback(",
+            "fn walk_writeback(&self, target: &str, value: &Expr, scope: &mut Vec<HashSet<String>>) {",
             Shared,
             "the store whose value hands the place back, which records no take",
         ),
@@ -2745,12 +2745,12 @@ fn sections() -> Vec<Section> {
             "RFC-0089 rule 1's instrument",
         ),
         sec(
-            "    fn block(&self, b: &Block, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {",
+            "fn block(&self, b: &Block, scope: &mut Vec<HashSet<String>>) -> bool {",
             Shared,
             "a block, and whether it diverges",
         ),
         sec(
-            "fn stmt(&self, s: &Stmt, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) -> bool {",
+            "fn stmt(&self, s: &Stmt, scope: &mut Vec<HashSet<String>>) -> bool {",
             Shared,
             "the walk over statements: it calls the refusal helpers and writes \
              the plan's rows in the same arm",
@@ -2761,7 +2761,7 @@ fn sections() -> Vec<Section> {
             "a lambda's captures, recorded for the enclosing block",
         ),
         sec(
-            "fn expr(&self, e: &Expr, consumed: &mut Consumed, scope: &mut Vec<HashSet<String>>) {",
+            "fn expr(&self, e: &Expr, scope: &mut Vec<HashSet<String>>) {",
             Shared,
             "the walk over expressions: the same traversal does both jobs",
         ),
@@ -2794,9 +2794,9 @@ fn sections() -> Vec<Section> {
             "the place spellings every rule above compares",
         ),
         sec(
-            "fn declared_in(block: &crate::ast::Block, out: &mut std::collections::HashSet<String>) {",
+            "pub fn pattern_bindings(p: &Pattern) -> Vec<&str> {",
             Shared,
-            "the names a block declares, and a pattern's binders",
+            "a pattern's binders",
         ),
         sec("mod tests {", Tests, "the pass's own unit tests"),
     ]
@@ -2910,9 +2910,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 0),
         ("a rule only the checker gives", 0),
-        ("placement rows for the engines", 494),
+        ("placement rows for the engines", 479),
         ("a fix menu", 0),
-        ("shared machinery", 2862),
+        ("shared machinery", 2480),
         ("tests", 404),
     ];
     assert_eq!(got, want, "the structural census has moved");
