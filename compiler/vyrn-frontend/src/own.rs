@@ -1102,14 +1102,6 @@ pub struct Ownership {
     /// the one order that used to be asserted separately by `Gen::drop_stack`,
     /// `Fn_::releases` and the interpreter's per-block `Vec`.
     pub releases: HashMap<String, Vec<Release>>,
-    /// Round nineteen's closure over the call graph, handed on so the CORE
-    /// can screen the store it is lowering (RFC-0125 §3 M3, the fresh-store
-    /// slice).
-    ///
-    /// Not a table: it says nothing a body states. It names the functions
-    /// whose result can HOLD a borrowed parameter's storage, which is an
-    /// answer only a pass that has read every body can give.
-    pub escapers: std::collections::HashSet<String>,
     /// Round forty-six's meet, by signature key — see
     /// [`crate::movecheck::Facts::fnval_clear`]. The fourth answer only a
     /// pass that has read every body can give, and the core asks it at a call
@@ -1293,7 +1285,6 @@ fn analyze_now(program: &Program) -> Ownership {
         // Every row in this table is the placer's now: the analysis injects
         // none, and the fold that did is deleted (RFC-0125 §3 M3).
         releases: HashMap::new(),
-        escapers: facts.escapers.clone(),
         fnval_clear: facts.fnval_clear.clone(),
         arg_caps: crate::declared::arg_caps(program),
     };

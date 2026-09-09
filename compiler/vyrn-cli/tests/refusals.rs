@@ -2723,11 +2723,6 @@ fn sections() -> Vec<Section> {
             "what a pattern's binders name, and whether an iterable is a place",
         ),
         sec(
-            "    fn carries_param_storage(&self, e: &Expr) -> bool {",
-            Rows,
-            "the escape screen: storage flow rather than mention",
-        ),
-        sec(
             "    fn returned_borrow(&self, e: &Expr) -> Option<(Borrow, String, String)> {",
             Rows,
             "the first borrow a returned expression yields. Rule 3 left with \
@@ -2910,9 +2905,9 @@ fn the_structural_census_is_what_the_rfc_records() {
     let want = vec![
         ("a rule the kernel now gives", 0),
         ("a rule only the checker gives", 0),
-        ("placement rows for the engines", 479),
+        ("placement rows for the engines", 361),
         ("a fix menu", 0),
-        ("shared machinery", 2480),
+        ("shared machinery", 2420),
         ("tests", 404),
     ];
     assert_eq!(got, want, "the structural census has moved");

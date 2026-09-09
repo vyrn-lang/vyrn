@@ -15855,6 +15855,91 @@ eight files for 38 forms**. Each of the seven is one arm's clone-and-union, and
 no form loses its arm. The surface census, `emitter_census`, `frontend_census`,
 `checker_census` and `cli_census` do not move.
 
+#### The escape closure fires 589 times and is wrong every time (2026-09-09, `track-dx`)
+
+`track-dt` left `Ownership::escapers` at the top of the list and named what a
+deleting slice owes: the explanation of a set that fires 589 times over the 280
+corpus roots and changes no emitted byte and no runtime block. Here it is,
+measured at three depths.
+
+**What the screen does.** `core::Builder::store_is_fresh` decides whether
+`xs = f(xs)` hands the old buffer back. It reads the shape off the statement —
+every mention of `xs` in the value must be a READ argument — and then asks the
+closure whether any callee named there can HOLD a borrowed parameter's storage.
+A hit makes the store `Old::Transferred`: nothing is released.
+
+**Depth one: where it fires.** A dump at the screen counts **589 firings** over
+the corpus, and every one of them is at `placed=false owes=true` — the placer
+places no store row there, so the store's `releases` flag is `false` either way.
+The flip changes one WORD, `Old::Transferred` in place of `Old::Pending`.
+
+**Depth two: which callees.** Two, over the whole corpus, and no others:
+`std/strings.vyrn`'s `substring` and `std/vyx.vyrn`'s `vyxRelocateComp`. Both
+are false positives, and both are readable in ten seconds. `substring` returns
+`slice(s, start, end)`'s `Ok` payload, and `slice` allocates. `vyxRelocateComp`
+returns a `VyxComp` literal whose every field is `comp.<f>.copy()` except two
+freshly built arrays and one rebuilt tree. Neither result holds a byte of what
+it was handed. The closure marks them because `carries_param_storage` is
+conservative in the leak direction: a user call forwards until proven otherwise,
+and `return` of a value derived from a `read` parameter is the proof it wants.
+
+**Depth three: what the answer costs.** `Old::Transferred` at a name the kernel
+sees as `Own::Held` is a release that never happens. Standing the closure aside
+and re-running the placer, `site/app/docs.vyrn` gains **15 placed store rows**
+(1,371 to 1,386) and the corpus gains **258** stores that were `Transferred` at a
+`Held` name. They are releases the program owes, and the screen was the only
+thing suppressing them.
+
+**So it is not subsumed and it is not load-bearing: it is wrong.** The question
+it asks — "can this callee's result hold my storage" — is answered by the
+DECLARATION since RFC-0120: a result not spelled `read` or `modify` is owned,
+and returning a borrow of a parameter is the kernel's refusal (row 17). The
+closure is a call-graph guess at a declaration, it guesses wrong on both of the
+two functions it ever fires on, and the guess is a leak. It goes, with
+`movecheck::Facts::escapers`, `MoveCheck::param_escapers`, `carrying_locals`,
+`carries_param_storage`, `note_carrying_store` and the five record sites that
+fed them. `call_may_forward` stays: the core asks it at the same call, and its
+one method wrapper goes with the walk that used it.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check`, whole stderr and exit code, 323 programs | byte-identical, **0 lost / 0 gained** |
+| `kernel` `--ignored`, with the closure emptied | 24,762 accepted, 0 refused, 0 unlowered |
+| `coretables` `--ignored`, with the closure emptied | every count unmoved, 2,744 stores that release and 54,502 stood down |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, `rfcs/census/wasm-sha256.tsv` untouched |
+| the residue ratchet `--ignored` | engine 172 clean / 3 leaking, route 172 clean / 3 leaking, 0 failed |
+| `route` `--ignored` | 175 checked, 34 skipped, 0 failed |
+| `memory` `--test-threads=1` | 9 |
+| the site export, and `vyrn test` over `export.vyrn` and each `site/app/*.vyrn` | 82 routes and 14 assets; 189 blocks, 0 failed |
+
+The extra releases are in the site's own build, which is why the residue
+ratchet — 175 programs under `examples/` — cannot see them and the site's own
+gates can.
+
+**The lines.** `compiler/vyrn-frontend/src/movecheck.rs` 3,363 to **3,185**;
+`compiler/vyrn-frontend/src/own.rs` 1,827 to **1,818**;
+`compiler/vyrn-lower/src/core.rs` 6,207 to 6,210 — three lines of prose about
+where the rule is stated instead. `Ownership` is seven fields.
+
+**The censuses.** The structural census: `Rows` **479 to 361** — the escape
+screen was the largest single `Kind::Rows` section — and `Shared` **2,480 to
+2,420**. RFC-0127 §3's form census moves in fourteen rows, one arm each out of
+`carries_param_storage`'s hand-tiled expression walk: `Expr::Int` 6 to 5,
+`Expr::Float`, `Expr::Bool` and `Expr::Str` 5 to 4, `Expr::Var` 14 to 13,
+`Expr::Unary`, `Expr::Binary`, `Expr::StructLit`, `Expr::ArrayLit` and
+`Expr::MapLit` 4 to 3, `Expr::Call` 11 to 10, `Expr::Match` 7 to 6,
+`Expr::IfExpr` 5 to 4 and `Expr::Consume` 6 to 5; the total 1,198 to **1,184**.
+`emitter_census`, `surface`, `checker_census`, `frontend_census` and
+`cli_census` do not move.
+
+**What is left of the call graph.** `fnval_clear` alone — round forty-six's
+meet, which the core asks by signature at a call through a fn value.
+`track-dt` measured what it is worth by emptying it: `examples/rpc.vyrn` leaks
+6 blocks and `examples/rpcsplit.vyrn` 5, on the engine and on the route alike.
+`Facts` is one field now, and the walk that fills it is `Want::Lets`.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
