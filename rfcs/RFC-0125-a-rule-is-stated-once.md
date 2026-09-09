@@ -10045,6 +10045,47 @@ projection's rows at the call site, or the emitter reading the projection's own
 its arm waits on the core building a body for a `for` over a literal, and on the
 statement screen reading a `region`.
 
+#### The exits slice's gates (2026-09-09)
+
+In §1.4's order, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. The corpus suites ran in
+debug and the release-only ones as marked.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check`, and `vyrn-lsp`'s own manifest | clean, clean |
+| `cargo build --release -p vyrn-cli` | ok |
+| `cargo test -p vyrn-cli`, no filter | 644 passed, 44 ignored, 0 failed |
+| `kernel` `--ignored` | 1, 79 s |
+| `coretables` `--ignored` | 1, 76 s |
+| `typed` `--ignored` | 1, 123 s |
+| `effects` `--ignored` | 2, 154 s |
+| `fixtures` `--ignored` | 1, 69 s |
+| `testsweep` `--ignored` | 1, 159 s |
+| `coredrive` `--ignored`, release | 1, 47 s — 91,872 of 251,821 statements from the core's rows, 986 of 21,722 bodies whole, 167 of 170 programs byte-identical |
+| `emitter_census`, plain and `--ignored` | 3 and 1 — both tables re-pinned |
+| `forms` and `surface`, plain and `--ignored` | 8 and 2, 3 and 1 — unmoved |
+| `checker_census`, `refusals`, `lowered`, `lowered_dump` | 2, 21, 3, 6 plain and 1, 3, 1 ignored — only `lowered`'s `peek` floor moves |
+| `vyrn-frontend` | 1,112 passed, 5 ignored |
+| the workspace less `vyrn-cli` | 1,159 passed, 12 ignored |
+| `vyrn-lsp`'s own manifest | 100 passed, 5 ignored |
+| `vyrn-genwasm`'s own tests | 3 |
+| `genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 13, and its corpus test `--ignored` |
+| `memory` `--test-threads=1` | 9 |
+| `route` `--ignored`, release | 2, 362 s |
+| the residue ratchet `--ignored`, release | 1, 351 s — the baseline held |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 28 s, 176 examples, and `rfcs/census/wasm-sha256.tsv` is untouched |
+| `vyrn check` over `examples/`, head against `7293d083` | 683 lines of stdout and stderr identical, every exit code identical |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 blocks, none short of its file's declared count |
+
+**One environment note, and it is not a finding.** `site/export.vyrn` writes
+through `writeFile`, which does not make a directory, so the export needs `out`
+and its subdirectories to exist before it runs. It reports every miss as `FAIL
+<path>: cannot write` and exits 1. The workflow's checkout has them from an
+earlier step; a fresh worktree does not.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The
