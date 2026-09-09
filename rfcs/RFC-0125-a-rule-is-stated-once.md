@@ -22542,6 +22542,266 @@ the branch point stand after: two dead members of `movecheck::MoveCheck`, one
 dead `checker::expr_contains_spawn` that the last slice's macro left behind,
 and one unreachable pattern in `vyrn-lower`'s kernel.
 
+#### The prelude, the lexical grammar, and the fourth copy of a descent (2026-09-09)
+
+The parser census ranked what is left in `parser.rs` and `lexer.rs`. Its first
+three ranked items are taken here: the language's prelude out of the parser
+(535 lines), one lexical grammar instead of two (321), and the node hook that
+closes `mark_member_type_params` (49). Three commits, one licence each, and
+**nothing in the corpus moved a byte** in any of them.
+
+##### The prelude: which home, and what each costs
+
+The census row said the prelude is "written as Rust": fifteen type declarations
+built as AST values and pushed into every program at line 0. The brief asked
+which home is right, and there are two candidates.
+
+**Rows beside `prelude.rs`'s.** RFC-0094 M1 says a builtin's contract is its
+signature and this module seeds it, and it says why with no embedded source: "No
+grammar, no embedded source file, no parse step; and because nothing is
+imported, a bare file still runs." Moving the declarations here is a FILE MOVE:
+the same AST literals, about 500 lines, in a different module. It states each
+declaration once — but each was already stated once. What is stated a second
+time is the FIELD NAMES, three passes down, and a file move does not touch
+those. **Price: about 0 lines, 0 statements.**
+
+**A Vyrn source module the compiler carries.** §2.4 already says the runtime is
+Vyrn and M4's step 0 ships `std/runtime.vyrn` that way. These are Vyrn
+declarations, so the language can hold them: 201 lines of `.vyrn` with every
+comment kept, read by the one parser, against 535 lines of Rust. **Price: −535
+in `parser.rs`, +86 in `prelude.rs`, +201 of Vyrn — about 250 lines down, and
+the declaration is where a reader would look for it.**
+
+The second one landed. One thing about it needed deciding and is recorded so a
+later reader does not undo it: **it is embedded (`include_str!`), not resolved
+against a std root, and it is not an `RT_MODULES` entry.** Two reasons, and both
+are RFC-0094 M1's own. A runtime module's declarations are renamed to a reserved
+prefix so no program can name them, and a program NAMES `Request` and `Schema`
+as it writes them. And a bare file with no `vyrn.json` and no std root still
+parses today, which is the property the seeded rows were built to keep.
+
+So `prelude::type_decls` lexes the embedded source, parses it through a new
+`parser::parse_bare` — the tree the grammar alone produces, which is what the
+prelude has to be parsed by, since the prelude is what `parse_accum` adds —
+stamps line 0 on each declaration and memoizes the result. `parse_accum` extends
+from it. The whole of the Rust is 40 lines.
+
+**The three restatements stay, and each names why.** `schema_reflect.rs` and
+`types.rs` write `Schema`'s nine field names to BUILD a `Schema` literal, and
+`direct.rs` names `IntVal`/`StrVal`/`BoolVal` to pick the variant that boxes a
+tag argument. None of those is a second statement of the DECLARATION: a
+constructor must supply a value per field, and which variant boxes an `Int64` is
+a lowering decision the declaration does not carry. They are the "what a copy
+costs when it cannot be deleted" shape, and this slice does not pay it down.
+
+The licence is that a declaration moved home and moved no byte. Before deleting
+the Rust, a one-off test built the old vector beside the parsed one and compared
+them field for field: **fifteen declarations, `Debug`-identical, in the same
+order**. What is pinned permanently is smaller and is the one that can rot —
+`prelude::tests::the_prelude_declares_fifteen_types_and_nothing_else` — because
+the order is load-bearing (the linker keeps the ROOT module's copies) and
+because a `fn` or an `import` written in that file would otherwise enter every
+program.
+
+##### One lexical grammar, and a claim that was not true
+
+`lex_with_trivia` and `lex` scanned the same grammar twice. The trivia scan's
+own comment said the rule: *the two lexers must agree on what is a legal token —
+fmt may not format a file `lex` refuses.* **They did not agree.** The trivia
+scan does not decode, so it accepted four things `lex` refuses:
+
+| what | `lex` | the trivia scan |
+|---|---|---|
+| an unknown escape (`"\q"`) | refused | accepted |
+| `\u{0}` | refused (a `String` is NUL-terminated) | accepted |
+| an empty `\{ }` hole | refused | accepted |
+| an integer past `u64` | refused | accepted |
+
+`keyword_or_ident`'s doc comment says it is the "Shared spelling table so `lex`
+and `lex_with_trivia` agree exactly". **`lex` did not call it.** It carried its
+own 24-arm copy of the keyword table, and its own copies of both punctuation
+tables beside the `punctuation!` macro the last slice wrote to state them once.
+
+There is one scan now. `scan` finds every item and DECODES every literal where
+it finds it, recording the raw text and the position beside the token; the two
+readers take what they need. `lex` drops the comments, unwraps a doc line into
+the token that carries its markdown, and closes the stream with `Eof` — 26
+lines. `lex_with_trivia` is `Ok(scan(src)?.items)`.
+
+Two small shapes made that possible. `Triv` carries a `col`, which the formatter
+never reads and `lex` needs for every diagnostic below it. And `TrivKind::Doc`
+carries the doc payload, because the raw text a formatter prints is TRIMMED of
+trailing blanks and the markdown a declaration carries is not — one item, two
+readings, rather than one reading and a lie.
+
+`vyrn fmt` now refuses the four rows above. That is the invariant the comment
+claimed and could not keep.
+
+##### The fourth copy of the type descent
+
+`parser::mark_member_type_params` was the fourth hand-written copy of
+`loader::type_head_descent!`'s fourteen arms, and the census said why it had not
+folded: the macro handed its hook a type's NAME, and this reader REPLACES a
+`Type::Named` node with a `Type::Param`, which a `&mut String` cannot do.
+
+The hook is on the NODE now. `type_heads` and `type_heads_mut` are the head-name
+reading the other three readers want — `Named` and `App` are the two
+constructors that carry one — three lines each over the one descent. The arm
+lists matched arm for arm before the fold, so this one could not move a byte and
+did not.
+
+##### The licence
+
+Every clause, for all three slices together against the branch point.
+
+| the measurement | before | after |
+|---|---|---|
+| `vyrn check` stderr over the corpus, byte-identical | 419 of 419 | 419 of 419 |
+| a refusal LOST or GAINED | — | 0 / 0 |
+| files the corpus refuses | 79 | 79 |
+| `symbols_api::the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics | byte-identical |
+| `lowered_dump::the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered | byte-identical |
+| `VYRN_WASM_MANIFEST=check` | green | green — no byte moved |
+| `vyrn fmt --check` over `std/`+`examples/`+`site/` | 357 of 357 clean | 357 of 357 clean |
+| RFC-0017's re-lex equality invariant (`tests/fmt.rs`) | green | green |
+| `vyrn doc --verify` | 41 files up to date | 41 files up to date |
+| the LSP suite | 100 | 100 |
+| the residue ratchet | green | green |
+
+The whole-stderr diff is the licence that fits all three: the prelude's
+declarations are named in refusals about types, the lexer's sentences ARE
+refusals, and a descent that missed an arm would lose a rename. The symbols pin
+is the second, because the prelude's declarations carry line 0 and the editor
+filters them by it, and `vyrn check` does not go through `analyze`'s path.
+
+One note on the corpus `fmt --check`. Five fixtures under
+`compiler/vyrn-cli/tests/boundaries/` are not canonically formatted, and they
+were not before either: a `match` written as a call argument indents its arms
+one level short. It reproduces on three lines with no string literal in them, so
+it is the formatter's own and not this slice's. It is not in the corpus the
+licence measures and it is ranked below.
+
+##### The numbers
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/parser.rs` | 7,517 | 6,968 | −549 |
+| `compiler/vyrn-frontend/src/lexer.rs` | 1,475 | 1,192 | −283 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 1,086 | 1,172 | +86 |
+| `compiler/vyrn-frontend/src/loader.rs` | 4,862 | 4,887 | +25 |
+| `compiler/vyrn-frontend/src/prelude.vyrn` | — | 201 | +201 |
+| **the five** | **14,940** | **14,420** | **−520** |
+
+`fmt.rs` and `vyrn-play/src/lib.rs` moved one pattern each and no line.
+
+The functions touched, since other tracks are in these files at the same time.
+In `parser.rs`: `parse_accum`, the new `parse_bare`, and
+`mark_member_type_params`. In `lexer.rs`: `Triv`, `TrivKind`, the new `Scan` and
+`scan`, `lex_with_trivia` and `lex`. In `loader.rs`: `type_head_descent!` and
+the two `type_heads*` wrappers, and nothing else. In `prelude.rs`: two new
+items at the top of the code and one new test. Nothing in `direct.rs`, nothing
+in `checker.rs`, nothing in `own.rs`, `movecheck.rs`, `core.rs` or `kernel.rs`.
+
+##### The censuses that moved
+
+| census | row | before | after |
+|---|---|---|---|
+| parser (`parser.rs`) | a table stated a second time | 786 | 221 |
+| parser (`parser.rs`) | shared machinery | 196 | 212 |
+| parser (`lexer.rs`) | the grammar's own arm | 583 | 578 |
+| parser (`lexer.rs`) | a table stated a second time, and its diagnostics | 506, 7 | 185, 0 |
+| parser (`lexer.rs`) | shared machinery | 147 | 190 |
+| frontend (`loader.rs`) | shared machinery | 518 | 543 |
+| form (RFC-0127 §3.2) | `.type_decls` in the parser, and the table's total | 16, 288 | 2, 274 |
+| form (RFC-0127 §3.4) | every keyword's lexer column, and the table's total | 3, 172 | 2, 148 |
+
+The checker census, the surface census, the refusal census and the emitter
+census are unmoved: nothing in this slice touched a checker rule, a surface
+form, an ownership refusal or an emitter.
+
+**RFC-0127 §3.4's sentence changed and the reason is worth keeping.** It said
+"every keyword costs the lexer exactly 3", and the ranked list priced folding
+that to 2 at two anchors outside this crate — `tests/forms.rs` and
+`editor/vscode/test/grammar.test.mjs` both parse `keyword_or_ident`'s arms as
+text. **The fold cost neither.** The third statement was not
+`keyword_or_ident`; it was `lex`'s own copy beside it, and deleting the second
+scan took it. The anchor did not move. That is what a ranked list is for and it
+is also what a ranked list gets wrong: the item was priced against the wrong
+copy.
+
+##### Gates (2026-09-09)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean — red at the branch point, fixed here |
+| `cargo build --release` | ok, the same four warnings as the branch point |
+| `cargo test -p vyrn-cli`, no filter | 593 passed, 0 failed |
+| `kernel` `--ignored` | 1, 103 s |
+| `coretables` `--ignored` | 1, 91 s |
+| `typed` `--ignored` | 1, 110 s |
+| `effects` `--ignored` | 2, 119 s |
+| `fixtures` `--ignored` | 1, 66 s |
+| `testsweep` `--ignored` | 1, 126 s |
+| `vyrn-frontend` | 1,173 |
+| the workspace less `vyrn-cli`, `--skip _natively` | 1,220 |
+| `vyrn-lsp`'s own tests | 100 |
+| `vyrn-genwasm`, release, fresh `VYRN_GEN_CACHE_DIR` | 3 |
+| `genwasm` `--ignored` | 1, 37 s |
+| `memory` `--test-threads=1` | 8 |
+| `route` `--ignored` | 2, 353 s |
+| the residue ratchet | 1, 423 s — green, so the clean and leaking counts are unmoved on both engines |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 42 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files, 0 failed |
+| `parser_census`, `frontend_census`, `checker_census`, `emitter_census` | 2 passed and 1 ignored each |
+| `forms` | 8 passed, 2 ignored |
+| `refusals`, `surface` | 19, 3 |
+| `the_pinned_columns_over_the_corpus` | 419 programs, 3,249 diagnostics, byte-identical |
+| `the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, byte-identical |
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical |
+| `vyrn fmt --check` over 357 sources | clean |
+
+No red in the first pass. One gate was red at the branch point and is not this
+line's: `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` has failed since
+`450933c4` on one call in `contract_ctx` that fits on a line now that it takes
+four arguments. `vyrn-lsp` is outside the workspace, so `cargo fmt --all` never
+saw it. It is fixed in a commit of its own, because CI checks it.
+
+##### What is left, ranked
+
+The parser census's own list, with three taken and the rest re-priced.
+
+1. **`code_quote`'s four parse modes — up to 220 lines, for 15 quotes.** The
+   ranking's third item, unchanged: the skeleton is validated by trying to parse
+   it four ways, and it is the highest line-per-use row in `parser.rs`. The
+   licence is the corpus diff plus `tests/codequotes.rs`, and the question under
+   it is a design one — whether a code quote must be validated at the
+   generator's compile time at all.
+2. **`place_receiver` and `storage_desugar` — 233 lines of desugar.** Two of the
+   four remaining `Desugar` rows in `parser.rs` that another pass restates:
+   `movecheck.rs` asks `place_receiver`'s question of the same tree, and
+   `storage_desugar` is RFC-0044's `save`/`load` at the call site. Neither
+   folds without deciding where the rewrite belongs, which is §2.7's question
+   and not a fold.
+3. **The keyword spellings, two statements to one — about 24 lines.** Now that
+   `lex`'s copy is gone, what is left is `keyword_or_ident` and
+   `token_name_and_text`'s keyword rows, which are that map read backwards. The
+   cost the last ranking named is still the cost: both statements are anchors
+   two readers outside this crate parse as text.
+4. **`METHOD_BUILTINS`'s second copy — 0 lines.** Not on the list, for the
+   reason the last record gave: the copy carries a completion detail per row and
+   `symbols.rs`'s own test compares the two.
+5. **A formatter defect, not a size item.** A `match` written as a call argument
+   indents its arms one level short, which is why five `boundaries/` fixtures
+   fail `vyrn fmt --check`. Three lines reproduce it. It is the formatter's own
+   rule and belongs with RFC-0017, not here.
+
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

@@ -159,7 +159,7 @@ const CONTEXTUAL: &[&str] = &[
 /// the landing page.
 fn class_of(item: &Triv) -> &'static str {
     match &item.kind {
-        TrivKind::Comment | TrivKind::Doc => "c",
+        TrivKind::Comment | TrivKind::Doc(_) => "c",
         TrivKind::Tok(tok) => match tok {
             Tok::Str(_) | Tok::TemplateStr { .. } => "s",
             Tok::Int(_) | Tok::Byte(_) | Tok::Float(_) => "n",

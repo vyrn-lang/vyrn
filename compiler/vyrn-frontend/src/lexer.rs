@@ -164,14 +164,14 @@ pub fn token_name_and_text(tok: &Tok) -> (String, String) {
     }
 }
 
-/// A lexical *item* for the formatter (RFC-0017): a token or a comment, carrying
-/// its **raw source text** (verbatim) and the source lines it spans. This is the
-/// additive, comment-preserving view of the token stream that [`lex_with_trivia`]
-/// produces; the normal [`lex`] and its callers are untouched.
+/// One lexical *item* (RFC-0017): a token or a comment, carrying its **raw
+/// source text** (verbatim), the source lines it spans, and where it starts.
 ///
-/// The formatter prints raw `text` for every item and only ever changes the
-/// whitespace *between* items — so a literal (string, char, number) can never be
-/// re-escaped or mangled, which is what makes the safety invariant cheap.
+/// Every reader of the source takes these. [`lex`] drops the comments and keeps
+/// the payloads; the formatter keeps the comments and prints the raw `text`,
+/// only ever changing the whitespace *between* items — so a literal (string,
+/// byte, number) can never be re-escaped or mangled, which is what makes the
+/// safety invariant cheap.
 #[derive(Debug, Clone)]
 pub struct Triv {
     pub kind: TrivKind,
@@ -180,6 +180,9 @@ pub struct Triv {
     pub text: String,
     /// 1-based line the item starts on.
     pub start_line: usize,
+    /// 1-based column the item starts at. [`lex`] puts it on the token; the
+    /// formatter never reads it, because it re-indents everything it prints.
+    pub col: usize,
     /// 1-based line the item ends on (equal to `start_line` except for multi-line
     /// string literals, whose internal newlines are part of the token).
     pub end_line: usize,
@@ -192,14 +195,26 @@ pub struct Triv {
 /// What a [`Triv`] item is.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrivKind {
-    /// A real token. The payload is the token *kind* (used for spacing
-    /// decisions); its inner value is a dummy for literals — the raw `text` is
-    /// what gets printed, never a re-synthesized spelling.
+    /// A real token, payload and all — the string decoded, the template split,
+    /// the integer parsed. The formatter uses only the token's KIND (for its
+    /// spacing decisions) and prints the raw `text`, never a re-synthesized
+    /// spelling.
     Tok(Tok),
     /// A `//` line comment (including `////+` plain comments).
     Comment,
-    /// A `///` documentation line.
-    Doc,
+    /// A `///` documentation line. The payload is the markdown [`lex`] attaches
+    /// to the next declaration — the line minus `///`, minus a trailing CR and
+    /// one leading space. The item's `text` is the raw line the formatter
+    /// prints.
+    Doc(String),
+}
+
+/// One scan of a source file: every item in order, and where the input ended,
+/// which is where [`lex`] anchors its `Eof`.
+pub struct Scan {
+    pub items: Vec<Triv>,
+    pub end_line: usize,
+    pub end_col: usize,
 }
 
 /// Map an identifier's text to its keyword token, or [`Tok::Ident`]. Shared
@@ -335,25 +350,36 @@ punctuation! {
     }
 }
 
-/// Comment-preserving tokenizer (RFC-0017). Yields the same tokens as [`lex`]
-/// **plus** `//` comments and blank-line structure (via each item's raw text and
-/// line span), so the formatter can reconstruct the source faithfully.
+/// Scan `src` once: every lexical item in order, and where the input ended.
 ///
-/// Token *kinds* are accurate (keywords vs identifiers, each operator), but
-/// literal payloads are dummy — the raw `text` slice is authoritative and is all
-/// the printer ever emits. Boundaries mirror [`lex`] exactly (strings, char
-/// literals, `\{..}` interpolation holes, `///` docs vs `//`/`////+` comments),
-/// so re-lexing the printer's output with [`lex`] round-trips modulo semicolons.
-pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
+/// **The lexical grammar, stated once** (RFC-0125 §3 M6). There were two scans
+/// of it until then — this one for the formatter, keeping raw text, and a second
+/// inside [`lex`] that decoded as it went. Their own comment said what that
+/// cost: *the two lexers must agree on what is a legal token*, and they did not.
+/// The trivia scan accepted an unknown escape, a `\u{0}`, an empty `\{ }` hole
+/// and an integer past the range, so `vyrn fmt` formatted files `vyrn check`
+/// refuses. One scan decides all of it, and the two readers below take what they
+/// need: [`lex`] drops the comments and keeps the payloads, the formatter keeps
+/// the comments and prints the raw text.
+///
+/// A literal's payload is DECODED here (escapes resolved, a template split into
+/// its parts and holes, an integer parsed) and the item's raw `text` is kept
+/// beside it, so neither reader has to re-scan.
+pub fn scan(src: &str) -> Result<Scan, Diagnostic> {
     let chars: Vec<char> = src.chars().collect();
     let mut i = 0usize;
     let mut line = 1usize;
+    // Index of the first character of the current line; column is derived as
+    // `i - line_start + 1`, which stays correct regardless of how `i` advances.
+    let mut line_start = 0usize;
     let mut out: Vec<Triv> = Vec::new();
     // No token precedes the first one; the file start counts as "space before".
     let mut space_before = true;
 
-    // Trim a comment/doc slice: strip a trailing CR and any trailing blanks
-    // (verbatim content otherwise, so no-trailing-whitespace holds).
+    // Trim a comment/doc slice for the FORMATTER: strip a trailing CR and any
+    // trailing blanks, so printing the raw text keeps "no trailing whitespace".
+    // A doc's PAYLOAD is taken from the untrimmed line instead — that is the
+    // text a declaration has always carried.
     let trim_comment = |s: &[char]| -> String {
         let mut t: String = s.iter().collect();
         while t.ends_with('\r') || t.ends_with(' ') || t.ends_with('\t') {
@@ -364,9 +390,14 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
 
     while i < chars.len() {
         let c = chars[i];
+        // 1-based column of the current position.
+        let col = i - line_start + 1;
+
+        // whitespace
         if c == '\n' {
             line += 1;
             i += 1;
+            line_start = i;
             space_before = true;
             continue;
         }
@@ -379,7 +410,9 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
         let start = i;
         let start_line = line;
 
-        // `//` comment or `///` doc (`////+` is a plain comment, like `lex`).
+        // line comment `// ..` (dropped by `lex`) or doc comment `/// ..`
+        // (captured as markdown, attached to the next declaration). `////+` is a
+        // plain comment.
         if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
             let is_doc = i + 2 < chars.len()
                 && chars[i + 2] == '/'
@@ -387,14 +420,20 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             while i < chars.len() && chars[i] != '\n' {
                 i += 1;
             }
+            let kind = if is_doc {
+                let text: String = chars[start + 3..i].iter().collect();
+                // CRLF files leave a trailing `\r` (the scan stops at `\n`
+                // only) — strip it so it never leaks into rendered markdown.
+                let text = text.strip_suffix('\r').unwrap_or(&text);
+                TrivKind::Doc(text.strip_prefix(' ').unwrap_or(text).to_string())
+            } else {
+                TrivKind::Comment
+            };
             out.push(Triv {
-                kind: if is_doc {
-                    TrivKind::Doc
-                } else {
-                    TrivKind::Comment
-                },
+                kind,
                 text: trim_comment(&chars[start..i]),
                 start_line,
+                col,
                 end_line: start_line,
                 space_before,
             });
@@ -402,92 +441,139 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             continue;
         }
 
-        // string / interpolated string — one item spanning any internal newlines.
-        // A `"""…"""` triple-quoted string (RFC-0054) is one item too; inside it a
-        // lone `"`/`""` is literal, only `"""` closes. The raw text is captured
-        // verbatim (fmt never re-escapes a literal), so we only need the bounds.
+        // string literal: "..." with \n \t \\ \" escapes, and `\{ expr }`
+        // interpolation holes (RFC-0007). A hole leaves `{`/`}` as ordinary
+        // characters, so only `\{` opens interpolation.
         if c == '"' {
+            let start_col = col; // column of the opening quote
+                                 // A `"""…"""` triple-quoted string (RFC-0054): inside it a single `"`
+                                 // and `""` are ordinary characters, so emitted Vyrn code carrying
+                                 // string literals needs no `\"` escaping. `\{` interpolation and every
+                                 // other escape work exactly as in a plain string; only the terminator
+                                 // differs (`"""` instead of `"`).
             let triple = i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"';
-            i += if triple { 3 } else { 1 };
+            i += if triple { 3 } else { 1 }; // opening quote(s)
+                                             // A Vyrn `String` is NUL-terminated in the native representation, so a
+                                             // String holding a NUL is not an awkward value — it is an
+                                             // unrepresentable one, truncated the moment it crosses to C. RFC-0014
+                                             // already refuses to MAKE one at runtime (`stringFromBytes` returns
+                                             // `bytes contain a NUL byte`), but the lexer used to hand one out for
+                                             // free: RFC-0078 M4b(3) found a raw NUL byte in a string literal
+                                             // accepted, which is why `bytes`/`stringFromBytes` was not a round
+                                             // trip. Rejecting it here closes the class at its only two entrances —
+                                             // a raw NUL byte in the source, and `\u{0}` (there is no `\0` escape).
+            let nul = |line: usize| {
+                Diagnostic::error(
+                    line,
+                    start_col,
+                    "lex",
+                    "string literal contains a NUL byte; a Vyrn String is NUL-terminated and \
+                     cannot hold one"
+                        .to_string(),
+                )
+            };
+            let mut parts: Vec<String> = Vec::new();
+            let mut exprs: Vec<String> = Vec::new();
+            let mut cur = String::new();
             loop {
                 if i >= chars.len() {
                     return Err(Diagnostic::error(
                         line,
-                        0,
+                        start_col,
                         "lex",
-                        "unterminated string literal".into(),
+                        "unterminated string literal".to_string(),
                     ));
                 }
                 let ch = chars[i];
-                // The two lexers must agree on what is a legal token — fmt may not
-                // format a file `lex` refuses. This scan does not decode escapes, so
-                // it sees only the raw byte; `\u{0}` is caught in `lex`, and a file
-                // carrying one never reaches a formatter that would keep it.
                 if ch == '\0' {
-                    return Err(Diagnostic::error(
-                        line,
-                        0,
-                        "lex",
-                        "string literal contains a NUL byte; a Vyrn String is NUL-terminated \
-                         and cannot hold one"
-                            .into(),
-                    ));
+                    return Err(nul(line));
                 }
                 if ch == '"' {
                     if triple {
+                        // Only a run of three closes a triple-quoted string; a lone
+                        // `"` or `""` is literal text.
                         if i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
-                            i += 3;
+                            i += 3; // closing `"""`
                             break;
                         }
+                        cur.push('"');
                         i += 1;
                         continue;
                     }
-                    i += 1;
+                    i += 1; // closing quote
                     break;
                 }
+                // Normalize a source CRLF to a single LF inside a string/template
+                // literal (RFC-0054): a multi-line string — and especially a
+                // `vyrn"""…"""` code skeleton — must carry byte-identical bytes
+                // whether the file is checked out with LF or CRLF endings, so the
+                // emitted code (and three-way parity) never depends on the OS. The
+                // raw text keeps the CR, so the formatter still prints the file's
+                // own endings back.
+                if ch == '\r' && i + 1 < chars.len() && chars[i + 1] == '\n' {
+                    i += 1; // drop the CR; the LF is handled next iteration
+                    continue;
+                }
+                // Multi-line strings (RFC-0007): a raw newline is part of the
+                // string. Track the line so later diagnostics stay accurate.
                 if ch == '\n' {
                     line += 1;
                     i += 1;
+                    line_start = i;
+                    cur.push('\n');
                     continue;
                 }
                 if ch == '\\' {
                     if i + 1 >= chars.len() {
                         return Err(Diagnostic::error(
                             line,
-                            0,
+                            start_col,
                             "lex",
-                            "unterminated escape in string".into(),
+                            "unterminated escape in string".to_string(),
                         ));
                     }
+                    // `\{` opens an interpolation hole; scan its raw source up to
+                    // the matching `}` (tracking nested braces and strings).
                     if chars[i + 1] == '{' {
-                        // interpolation hole: scan raw to matching `}` (mirroring
-                        // `lex` — nested strings, char literals, comments, braces).
-                        i += 2;
+                        parts.push(std::mem::take(&mut cur));
+                        i += 2; // skip `\{`
+                        let hole = i;
                         let mut depth = 1usize;
                         while i < chars.len() && depth > 0 {
                             match chars[i] {
                                 '\n' => {
+                                    // A hole may span lines too; keep counting.
                                     line += 1;
                                     i += 1;
+                                    line_start = i;
                                 }
                                 '"' => {
+                                    // Skip a nested string, respecting its escapes —
+                                    // and its raw newlines (RFC-0007 allows them),
+                                    // which must keep `line` and `line_start` current
+                                    // exactly as the newline arm above does.
                                     i += 1;
                                     while i < chars.len() && chars[i] != '"' {
                                         if chars[i] == '\n' {
                                             line += 1;
+                                            i += 1;
+                                            line_start = i;
+                                        } else {
+                                            i += if chars[i] == '\\' { 2 } else { 1 };
                                         }
-                                        i += if chars[i] == '\\' { 2 } else { 1 };
                                     }
                                     if i >= chars.len() {
                                         return Err(Diagnostic::error(
                                             line,
-                                            0,
+                                            start_col,
                                             "lex",
-                                            "unterminated string in interpolation".into(),
+                                            "unterminated string in interpolation".to_string(),
                                         ));
                                     }
-                                    i += 1;
+                                    i += 1; // closing nested quote
                                 }
+                                // Skip a nested char literal — a `}` inside one
+                                // (`'}'`, `'\u{1F600}'`) must not close the hole.
                                 '\'' => {
                                     i += 1;
                                     while i < chars.len() && chars[i] != '\'' && chars[i] != '\n' {
@@ -496,14 +582,17 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                                     if i >= chars.len() || chars[i] == '\n' {
                                         return Err(Diagnostic::error(
                                             line,
-                                            0,
+                                            start_col,
                                             "lex",
                                             "unterminated character literal in interpolation"
-                                                .into(),
+                                                .to_string(),
                                         ));
                                     }
-                                    i += 1;
+                                    i += 1; // closing nested quote
                                 }
+                                // Skip a `//` comment — a `}` inside it is text,
+                                // not the end of the hole. The `\n` stays for the
+                                // newline arm to count.
                                 '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
                                     while i < chars.len() && chars[i] != '\n' {
                                         i += 1;
@@ -526,26 +615,74 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                         if depth != 0 {
                             return Err(Diagnostic::error(
                                 line,
-                                0,
+                                start_col,
                                 "lex",
-                                "unterminated `\\{` interpolation".into(),
+                                "unterminated `\\{` interpolation".to_string(),
                             ));
                         }
-                        i += 1; // closing `}`
+                        let hole_src: String = chars[hole..i].iter().collect();
+                        if hole_src.trim().is_empty() {
+                            return Err(Diagnostic::error(
+                                line,
+                                start_col,
+                                "lex",
+                                "empty `\\{ }` interpolation".to_string(),
+                            ));
+                        }
+                        exprs.push(hole_src);
+                        i += 1; // skip closing `}`
                         continue;
                     }
-                    // Any other escape: skip the backslash and its next char. `\u{..}`
-                    // leaves `{HEX}` as ordinary string chars (harmless here — only
-                    // `\{` opens a hole), matching `lex`.
+                    // `\u{XXXX}` — a Unicode scalar by hex code point.
+                    if chars[i + 1] == 'u' {
+                        let (ch, next) = parse_unicode_escape(&chars, i, line, start_col)?;
+                        // `\u{0}` is the same unrepresentable value spelled the long
+                        // way round. M4b(3) checked there is no `\0` escape and
+                        // concluded the raw byte was the only door; it is not.
+                        if ch == '\0' {
+                            return Err(nul(line));
+                        }
+                        cur.push(ch);
+                        i = next;
+                        continue;
+                    }
+                    // Ordinary escape.
+                    let esc = match chars[i + 1] {
+                        'n' => '\n',
+                        't' => '\t',
+                        'r' => '\r',
+                        '\\' => '\\',
+                        '"' => '"',
+                        other => {
+                            return Err(Diagnostic::error(
+                                line,
+                                start_col,
+                                "lex",
+                                format!("unknown escape `\\{other}`"),
+                            ))
+                        }
+                    };
+                    cur.push(esc);
                     i += 2;
                     continue;
                 }
+                cur.push(ch);
                 i += 1;
             }
+            // The token is anchored at the OPENING quote: a diagnostic on a
+            // multi-line string must point where it starts, not where it ends
+            // (and `(end_line, start_col)` would be internally inconsistent).
+            let tok = if exprs.is_empty() {
+                Tok::Str(cur)
+            } else {
+                parts.push(cur); // the trailing fragment after the last hole
+                Tok::TemplateStr { parts, exprs }
+            };
             out.push(Triv {
-                kind: TrivKind::Tok(Tok::Str(String::new())),
+                kind: TrivKind::Tok(tok),
                 text: chars[start..i].iter().collect(),
                 start_line,
+                col: start_col,
                 end_line: line,
                 space_before,
             });
@@ -553,17 +690,18 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             continue;
         }
 
-        // byte literal `'a'` / `'\n'` / `'\x1b'` (RFC-0057) — a single token. Its
-        // boundaries come from the same [`lex_byte_literal`] helper `lex` uses, so
-        // the raw slice fmt prints round-trips (the safety invariant).
+        // byte literal (RFC-0057): `'a'` / `'\n'` / `'\x1b'` is one ASCII byte as
+        // a `UInt8`-defaulting integer literal — Vyrn has no `Char`/`Rune` type
+        // and single-quoted strings do not exist. See [`lex_byte_literal`].
         if c == '\'' {
-            let (_, next) = lex_byte_literal(&chars, i, start_line, 0)?;
+            let (val, next) = lex_byte_literal(&chars, i, line, col)?;
             let text: String = chars[start..next].iter().collect();
-            i = next;
+            i = next; // past the closing quote
             out.push(Triv {
-                kind: TrivKind::Tok(Tok::Byte(0)),
+                kind: TrivKind::Tok(Tok::Byte(val)),
                 text,
                 start_line,
+                col,
                 end_line: line,
                 space_before,
             });
@@ -571,23 +709,48 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             continue;
         }
 
-        // number (int or `1.5` float — same rule as `lex`).
+        // integer literal
         if c.is_ascii_digit() {
             while i < chars.len() && chars[i].is_ascii_digit() {
                 i += 1;
             }
-            let mut kind = Tok::Int(0);
-            if i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
-                i += 1;
+            // A `.` followed by a digit makes this a float literal (`1.5`); a `.`
+            // followed by anything else is field/method access (`x.foo`, `1.max`).
+            let is_float = i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit();
+            if is_float {
+                i += 1; // consume the `.`
                 while i < chars.len() && chars[i].is_ascii_digit() {
                     i += 1;
                 }
-                kind = Tok::Float(0.0);
             }
+            let text: String = chars[start..i].iter().collect();
+            let tok = if is_float {
+                let value: f64 = text.parse().map_err(|_| {
+                    Diagnostic::error(line, col, "lex", format!("invalid float literal: {text}"))
+                })?;
+                Tok::Float(value)
+            } else {
+                // Integer literals are stored as `i64` bits. A value above `i64::MAX`
+                // (only reachable for `UInt64`) is accepted by reinterpreting its
+                // `u64` bit pattern, so e.g. `10000000000000000000` round-trips.
+                let value: i64 = match text.parse::<i64>() {
+                    Ok(v) => v,
+                    Err(_) => text.parse::<u64>().map(|u| u as i64).map_err(|_| {
+                        Diagnostic::error(
+                            line,
+                            col,
+                            "lex",
+                            format!("integer literal out of range: {text}"),
+                        )
+                    })?,
+                };
+                Tok::Int(value)
+            };
             out.push(Triv {
-                kind: TrivKind::Tok(kind),
-                text: chars[start..i].iter().collect(),
+                kind: TrivKind::Tok(tok),
+                text,
                 start_line,
+                col,
                 end_line: line,
                 space_before,
             });
@@ -595,7 +758,7 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             continue;
         }
 
-        // identifier or keyword.
+        // identifier or keyword
         if c.is_alphabetic() || c == '_' {
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                 i += 1;
@@ -606,6 +769,7 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
                 kind: TrivKind::Tok(tok),
                 text,
                 start_line,
+                col,
                 end_line: line,
                 space_before,
             });
@@ -613,47 +777,49 @@ pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
             continue;
         }
 
-        // multi-char then single-char operators.
-        if let Some(tok) = i
+        // multi-char operators, then single-char
+        let two = i
             .checked_add(1)
             .filter(|&j| j < chars.len())
-            .and_then(|j| two_char_op(c, chars[j]))
-        {
-            i += 2;
-            out.push(Triv {
-                kind: TrivKind::Tok(tok),
-                text: chars[start..i].iter().collect(),
-                start_line,
-                end_line: line,
-                space_before,
-            });
-            space_before = false;
-            continue;
-        }
-        match single_char_op(c) {
-            Some(tok) => {
-                i += 1;
-                out.push(Triv {
-                    kind: TrivKind::Tok(tok),
-                    text: chars[start..i].iter().collect(),
-                    start_line,
-                    end_line: line,
-                    space_before,
-                });
-                space_before = false;
-            }
-            None => {
-                return Err(Diagnostic::error(
-                    line,
-                    0,
-                    "lex",
-                    format!("unexpected character {c:?}"),
-                ));
-            }
-        }
+            .and_then(|j| two_char_op(c, chars[j]));
+        let (tok, width) = match two {
+            Some(tok) => (tok, 2usize),
+            None => match single_char_op(c) {
+                Some(tok) => (tok, 1usize),
+                None => {
+                    return Err(Diagnostic::error(
+                        line,
+                        col,
+                        "lex",
+                        format!("unexpected character {c:?}"),
+                    ))
+                }
+            },
+        };
+        i += width;
+        out.push(Triv {
+            kind: TrivKind::Tok(tok),
+            text: chars[start..i].iter().collect(),
+            start_line,
+            col,
+            end_line: line,
+            space_before,
+        });
+        space_before = false;
     }
 
-    Ok(out)
+    Ok(Scan {
+        items: out,
+        end_line: line,
+        end_col: i - line_start + 1,
+    })
+}
+
+/// Comment-preserving tokenizer (RFC-0017): every item [`scan`] found, comments
+/// included, each carrying its raw source text and the lines it spans, so the
+/// formatter can reconstruct the source faithfully.
+pub fn lex_with_trivia(src: &str) -> Result<Vec<Triv>, Diagnostic> {
+    Ok(scan(src)?.items)
 }
 
 /// Parse a `\u{HEX}` Unicode-scalar escape starting at the backslash (`chars[at]`
@@ -759,477 +925,28 @@ fn lex_byte_literal(
 
 /// Tokenize `src`. Returns an error [`Diagnostic`] on the first illegal
 /// character.
+///
+/// [`scan`] does the reading; this drops the comments, unwraps a doc line into
+/// the token that carries its markdown, and closes the stream with `Eof`.
 pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
-    let chars: Vec<char> = src.chars().collect();
-    let mut i = 0;
-    let mut line = 1;
-    // Index of the first character of the current line; column is derived as
-    // `i - line_start + 1`, which stays correct regardless of how `i` advances.
-    let mut line_start = 0;
-    let mut out = Vec::new();
-
-    while i < chars.len() {
-        let c = chars[i];
-        // 1-based column of the current position.
-        let col = i - line_start + 1;
-
-        // whitespace
-        if c == '\n' {
-            line += 1;
-            i += 1;
-            line_start = i;
-            continue;
-        }
-        if c.is_whitespace() {
-            i += 1;
-            continue;
-        }
-
-        // line comment `// ..` (skipped) or doc comment `/// ..` (captured as
-        // markdown, attached to the next declaration). `////+` is a plain comment.
-        if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
-            let is_doc = i + 2 < chars.len()
-                && chars[i + 2] == '/'
-                && !(i + 3 < chars.len() && chars[i + 3] == '/');
-            let start = i;
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            if is_doc {
-                let text: String = chars[start + 3..i].iter().collect();
-                // CRLF files leave a trailing `\r` (the scan stops at `\n`
-                // only) — strip it so it never leaks into rendered markdown.
-                let text = text.strip_suffix('\r').unwrap_or(&text);
-                let text = text.strip_prefix(' ').unwrap_or(text).to_string();
-                out.push(Token {
-                    tok: Tok::Doc(text),
-                    line,
-                    col,
-                });
-            }
-            continue;
-        }
-
-        // string literal: "..." with \n \t \\ \" escapes, and `\{ expr }`
-        // interpolation holes (RFC-0007). A hole leaves `{`/`}` as ordinary
-        // characters, so only `\{` opens interpolation.
-        if c == '"' {
-            let start_col = col; // column of the opening quote
-            let start_line = line; // a multi-line string is anchored at its start
-                                   // A `"""…"""` triple-quoted string (RFC-0054): inside it a single `"`
-                                   // and `""` are ordinary characters, so emitted Vyrn code carrying
-                                   // string literals needs no `\"` escaping. `\{` interpolation and every
-                                   // other escape work exactly as in a plain string; only the terminator
-                                   // differs (`"""` instead of `"`).
-            let triple = i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"';
-            i += if triple { 3 } else { 1 }; // opening quote(s)
-                                             // A Vyrn `String` is NUL-terminated in the native representation, so a
-                                             // String holding a NUL is not an awkward value — it is an
-                                             // unrepresentable one, truncated the moment it crosses to C. RFC-0014
-                                             // already refuses to MAKE one at runtime (`stringFromBytes` returns
-                                             // `bytes contain a NUL byte`), but the lexer used to hand one out for
-                                             // free: RFC-0078 M4b(3) found a raw NUL byte in a string literal
-                                             // accepted, which is why `bytes`/`stringFromBytes` was not a round
-                                             // trip. Rejecting it here closes the class at its only two entrances —
-                                             // a raw NUL byte in the source, and `\u{0}` (there is no `\0` escape).
-            let nul = |line: usize| {
-                Diagnostic::error(
-                    line,
-                    start_col,
-                    "lex",
-                    "string literal contains a NUL byte; a Vyrn String is NUL-terminated and \
-                     cannot hold one"
-                        .to_string(),
-                )
-            };
-            let mut parts: Vec<String> = Vec::new();
-            let mut exprs: Vec<String> = Vec::new();
-            let mut cur = String::new();
-            loop {
-                if i >= chars.len() {
-                    return Err(Diagnostic::error(
-                        line,
-                        start_col,
-                        "lex",
-                        "unterminated string literal".to_string(),
-                    ));
-                }
-                let ch = chars[i];
-                if ch == '\0' {
-                    return Err(nul(line));
-                }
-                if ch == '"' {
-                    if triple {
-                        // Only a run of three closes a triple-quoted string; a lone
-                        // `"` or `""` is literal text.
-                        if i + 2 < chars.len() && chars[i + 1] == '"' && chars[i + 2] == '"' {
-                            i += 3; // closing `"""`
-                            break;
-                        }
-                        cur.push('"');
-                        i += 1;
-                        continue;
-                    }
-                    i += 1; // closing quote
-                    break;
-                }
-                // Normalize a source CRLF to a single LF inside a string/template
-                // literal (RFC-0054): a multi-line string — and especially a
-                // `vyrn"""…"""` code skeleton — must carry byte-identical bytes
-                // whether the file is checked out with LF or CRLF endings, so the
-                // emitted code (and three-way parity) never depends on the OS.
-                if ch == '\r' && i + 1 < chars.len() && chars[i + 1] == '\n' {
-                    i += 1; // drop the CR; the LF is handled next iteration
-                    continue;
-                }
-                // Multi-line strings (RFC-0007): a raw newline is part of the
-                // string. Track the line so later diagnostics stay accurate.
-                if ch == '\n' {
-                    line += 1;
-                    i += 1;
-                    line_start = i;
-                    cur.push('\n');
-                    continue;
-                }
-                if ch == '\\' {
-                    if i + 1 >= chars.len() {
-                        return Err(Diagnostic::error(
-                            line,
-                            start_col,
-                            "lex",
-                            "unterminated escape in string".to_string(),
-                        ));
-                    }
-                    // `\{` opens an interpolation hole; scan its raw source up to
-                    // the matching `}` (tracking nested braces and strings).
-                    if chars[i + 1] == '{' {
-                        parts.push(std::mem::take(&mut cur));
-                        i += 2; // skip `\{`
-                        let start = i;
-                        let mut depth = 1usize;
-                        while i < chars.len() && depth > 0 {
-                            match chars[i] {
-                                '\n' => {
-                                    // A hole may span lines too; keep counting.
-                                    line += 1;
-                                    i += 1;
-                                    line_start = i;
-                                }
-                                '"' => {
-                                    // Skip a nested string, respecting its escapes —
-                                    // and its raw newlines (RFC-0007 allows them),
-                                    // which must keep `line` and `line_start` current
-                                    // exactly as the newline arm above does.
-                                    i += 1;
-                                    while i < chars.len() && chars[i] != '"' {
-                                        if chars[i] == '\n' {
-                                            line += 1;
-                                            i += 1;
-                                            line_start = i;
-                                        } else {
-                                            i += if chars[i] == '\\' { 2 } else { 1 };
-                                        }
-                                    }
-                                    if i >= chars.len() {
-                                        return Err(Diagnostic::error(
-                                            line,
-                                            start_col,
-                                            "lex",
-                                            "unterminated string in interpolation".to_string(),
-                                        ));
-                                    }
-                                    i += 1; // closing nested quote
-                                }
-                                // Skip a nested char literal — a `}` inside one
-                                // (`'}'`, `'\u{1F600}'`) must not close the hole.
-                                '\'' => {
-                                    i += 1;
-                                    while i < chars.len() && chars[i] != '\'' && chars[i] != '\n' {
-                                        i += if chars[i] == '\\' { 2 } else { 1 };
-                                    }
-                                    if i >= chars.len() || chars[i] == '\n' {
-                                        return Err(Diagnostic::error(
-                                            line,
-                                            start_col,
-                                            "lex",
-                                            "unterminated character literal in interpolation"
-                                                .to_string(),
-                                        ));
-                                    }
-                                    i += 1; // closing nested quote
-                                }
-                                // Skip a `//` comment — a `}` inside it is text,
-                                // not the end of the hole. The `\n` stays for the
-                                // newline arm to count.
-                                '/' if i + 1 < chars.len() && chars[i + 1] == '/' => {
-                                    while i < chars.len() && chars[i] != '\n' {
-                                        i += 1;
-                                    }
-                                }
-                                '{' => {
-                                    depth += 1;
-                                    i += 1;
-                                }
-                                '}' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        break;
-                                    }
-                                    i += 1;
-                                }
-                                _ => i += 1,
-                            }
-                        }
-                        if depth != 0 {
-                            return Err(Diagnostic::error(
-                                line,
-                                start_col,
-                                "lex",
-                                "unterminated `\\{` interpolation".to_string(),
-                            ));
-                        }
-                        let src: String = chars[start..i].iter().collect();
-                        if src.trim().is_empty() {
-                            return Err(Diagnostic::error(
-                                line,
-                                start_col,
-                                "lex",
-                                "empty `\\{ }` interpolation".to_string(),
-                            ));
-                        }
-                        exprs.push(src);
-                        i += 1; // skip closing `}`
-                        continue;
-                    }
-                    // `\u{XXXX}` — a Unicode scalar by hex code point.
-                    if chars[i + 1] == 'u' {
-                        let (ch, next) = parse_unicode_escape(&chars, i, line, start_col)?;
-                        // `\u{0}` is the same unrepresentable value spelled the long
-                        // way round. M4b(3) checked there is no `\0` escape and
-                        // concluded the raw byte was the only door; it is not.
-                        if ch == '\0' {
-                            return Err(nul(line));
-                        }
-                        cur.push(ch);
-                        i = next;
-                        continue;
-                    }
-                    // Ordinary escape.
-                    let esc = match chars[i + 1] {
-                        'n' => '\n',
-                        't' => '\t',
-                        'r' => '\r',
-                        '\\' => '\\',
-                        '"' => '"',
-                        other => {
-                            return Err(Diagnostic::error(
-                                line,
-                                start_col,
-                                "lex",
-                                format!("unknown escape `\\{other}`"),
-                            ))
-                        }
-                    };
-                    cur.push(esc);
-                    i += 2;
-                    continue;
-                }
-                cur.push(ch);
-                i += 1;
-            }
-            // The token is anchored at the OPENING quote: a diagnostic on a
-            // multi-line string must point where it starts, not where it ends
-            // (and `(end_line, start_col)` would be internally inconsistent).
-            if exprs.is_empty() {
-                out.push(Token {
-                    tok: Tok::Str(cur),
-                    line: start_line,
-                    col: start_col,
-                });
-            } else {
-                parts.push(cur); // the trailing fragment after the last hole
-                out.push(Token {
-                    tok: Tok::TemplateStr { parts, exprs },
-                    line: start_line,
-                    col: start_col,
-                });
-            }
-            continue;
-        }
-
-        // byte literal (RFC-0057): `'a'` / `'\n'` / `'\x1b'` is one ASCII byte as
-        // a `UInt8`-defaulting integer literal — Vyrn has no `Char`/`Rune` type
-        // and single-quoted strings do not exist. See [`lex_byte_literal`].
-        if c == '\'' {
-            let start_col = col;
-            let (val, next) = lex_byte_literal(&chars, i, line, start_col)?;
-            out.push(Token {
-                tok: Tok::Byte(val),
-                line,
-                col: start_col,
-            });
-            i = next; // past the closing quote
-            continue;
-        }
-
-        // integer literal
-        if c.is_ascii_digit() {
-            let start = i;
-            while i < chars.len() && chars[i].is_ascii_digit() {
-                i += 1;
-            }
-            // A `.` followed by a digit makes this a float literal (`1.5`); a `.`
-            // followed by anything else is field/method access (`x.foo`, `1.max`).
-            let is_float = i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit();
-            if is_float {
-                i += 1; // consume the `.`
-                while i < chars.len() && chars[i].is_ascii_digit() {
-                    i += 1;
-                }
-                let text: String = chars[start..i].iter().collect();
-                let value: f64 = text.parse().map_err(|_| {
-                    Diagnostic::error(line, col, "lex", format!("invalid float literal: {text}"))
-                })?;
-                out.push(Token {
-                    tok: Tok::Float(value),
-                    line,
-                    col,
-                });
-                continue;
-            }
-            let text: String = chars[start..i].iter().collect();
-            // Integer literals are stored as `i64` bits. A value above `i64::MAX`
-            // (only reachable for `UInt64`) is accepted by reinterpreting its
-            // `u64` bit pattern, so e.g. `10000000000000000000` round-trips.
-            let value: i64 = match text.parse::<i64>() {
-                Ok(v) => v,
-                Err(_) => text.parse::<u64>().map(|u| u as i64).map_err(|_| {
-                    Diagnostic::error(
-                        line,
-                        col,
-                        "lex",
-                        format!("integer literal out of range: {text}"),
-                    )
-                })?,
-            };
-            out.push(Token {
-                tok: Tok::Int(value),
-                line,
-                col,
-            });
-            continue;
-        }
-
-        // identifier or keyword
-        if c.is_alphabetic() || c == '_' {
-            let start = i;
-            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                i += 1;
-            }
-            let text: String = chars[start..i].iter().collect();
-            let tok = match text.as_str() {
-                "fn" => Tok::Fn,
-                "let" => Tok::Let,
-                "mut" => Tok::Mut,
-                "if" => Tok::If,
-                "else" => Tok::Else,
-                "while" => Tok::While,
-                "for" => Tok::For,
-                "in" => Tok::In,
-                "drop" => Tok::Drop,
-                "protocol" => Tok::Protocol,
-                "import" => Tok::Import,
-                "export" => Tok::Export,
-                "impl" => Tok::Impl,
-                "self" => Tok::Vself,
-                "return" => Tok::Return,
-                "true" => Tok::True,
-                "false" => Tok::False,
-                "type" => Tok::Type,
-                "where" => Tok::Where,
-                "match" => Tok::Match,
-                "region" => Tok::Region,
-                "spawn" => Tok::Spawn,
-                "break" => Tok::Break,
-                "continue" => Tok::Continue,
-                _ => Tok::Ident(text),
-            };
-            out.push(Token { tok, line, col });
-            continue;
-        }
-
-        // multi-char operators, then single-char
-        let two: Option<Tok> = if i + 1 < chars.len() {
-            match (c, chars[i + 1]) {
-                ('-', '>') => Some(Tok::Arrow),
-                ('=', '>') => Some(Tok::FatArrow),
-                ('=', '~') => Some(Tok::TildeMatch),
-                ('=', '=') => Some(Tok::EqEq),
-                ('!', '=') => Some(Tok::NotEq),
-                ('<', '=') => Some(Tok::LtEq),
-                ('>', '=') => Some(Tok::GtEq),
-                ('&', '&') => Some(Tok::AndAnd),
-                ('|', '|') => Some(Tok::OrOr),
-                ('?', '?') => Some(Tok::QuestionQuestion),
-                ('<', '<') => Some(Tok::Shl),
-                ('>', '>') => Some(Tok::Shr),
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if let Some(tok) = two {
-            out.push(Token { tok, line, col });
-            i += 2;
-            continue;
-        }
-
-        let single = match c {
-            '(' => Tok::LParen,
-            ')' => Tok::RParen,
-            '{' => Tok::LBrace,
-            '}' => Tok::RBrace,
-            '[' => Tok::LBracket,
-            ']' => Tok::RBracket,
-            ',' => Tok::Comma,
-            ';' => Tok::Semi,
-            ':' => Tok::Colon,
-            '.' => Tok::Dot,
-            '+' => Tok::Plus,
-            '-' => Tok::Minus,
-            '*' => Tok::Star,
-            '/' => Tok::Slash,
-            '%' => Tok::Percent,
-            '=' => Tok::Eq,
-            '<' => Tok::Lt,
-            '>' => Tok::Gt,
-            '!' => Tok::Bang,
-            '?' => Tok::Question,
-            '|' => Tok::Pipe,
-            '&' => Tok::Amp,
-            '^' => Tok::Caret,
-            '~' => Tok::Tilde,
-            other => {
-                return Err(Diagnostic::error(
-                    line,
-                    col,
-                    "lex",
-                    format!("unexpected character {other:?}"),
-                ))
-            }
+    let scanned = scan(src)?;
+    let mut out = Vec::with_capacity(scanned.items.len() + 1);
+    for it in scanned.items {
+        let tok = match it.kind {
+            TrivKind::Comment => continue,
+            TrivKind::Doc(text) => Tok::Doc(text),
+            TrivKind::Tok(t) => t,
         };
         out.push(Token {
-            tok: single,
-            line,
-            col,
+            tok,
+            line: it.start_line,
+            col: it.col,
         });
-        i += 1;
     }
-
     out.push(Token {
         tok: Tok::Eof,
-        line,
-        col: i - line_start + 1,
+        line: scanned.end_line,
+        col: scanned.end_col,
     });
     Ok(out)
 }

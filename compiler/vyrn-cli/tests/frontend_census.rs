@@ -235,9 +235,12 @@ fn loader_sections() -> Vec<Section> {
             "macro_rules! type_head_descent {",
             Shared,
             "the ONE descent over a `Type`, written by a macro so that the \
-             collector's shared borrow and the two rewriters' unique ones are \
-             spellings of one arm list (RFC-0125 §3 M6). It was three \
-             fourteen-arm matches until then",
+             collector's shared borrow and the three rewriters' unique ones \
+             are spellings of one arm list (RFC-0125 §3 M6). It was four \
+             fourteen-arm matches until then, the fourth in `parser.rs`; the \
+             hook is on the NODE so that one of them can replace what it \
+             visits, and `type_heads`/`type_heads_mut` are the head-name \
+             reading the other three want",
         ),
         sec(
             "crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);",
@@ -828,7 +831,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             15,
             0,
         ),
-        ("loader.rs", "shared machinery", 518, 0),
+        ("loader.rs", "shared machinery", 543, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2897, 0),
         ("symbols.rs", "a rule stated a second time", 272, 0),

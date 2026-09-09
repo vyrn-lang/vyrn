@@ -215,14 +215,14 @@ one's.
 
 ### 3.2 The 9 declarations
 
-279 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
+265 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
 `ast.rs` by the test, so a tenth declaration form fails the census until it has
 a row.
 
 | declaration | parser | loader | checker | project | shared | editor | cli | all seven |
 |---|---|---|---|---|---|---|---|---|
 | `imports` | 1 | 19 | 0 | 0 | 0 | 5 | 1 | 26 |
-| `type_decls` | 16 | 16 | 4 | 1 | 0 | 14 | 0 | 51 |
+| `type_decls` | 2 | 16 | 4 | 1 | 0 | 14 | 0 | 37 |
 | `functions` | 2 | 18 | 16 | 1 | 1 | 12 | 15 | 65 |
 | `protocols` | 1 | 11 | 7 | 0 | 0 | 8 | 0 | 27 |
 | `contracts` | 0 | 11 | 4 | 0 | 0 | 0 | 0 | 15 |
@@ -230,6 +230,12 @@ a row.
 | `globals` | 1 | 12 | 14 | 1 | 2 | 2 | 0 | 32 |
 | `tests` | 0 | 6 | 2 | 1 | 1 | 1 | 5 | 16 |
 | `benches` | 0 | 6 | 2 | 1 | 1 | 1 | 6 | 17 |
+
+**`type_decls` used to cost the parser 16 and now costs it 2.** Fourteen of
+those sixteen were the language's prelude, pushed one declaration at a time; it
+is a Vyrn source file the compiler embeds since RFC-0125 §3 M6, and the parser
+extends from it once. The row is the cheapest measurement of that move: nothing
+about the surface changed, and 14 mentions went.
 
 `imports` is the only row with a zero in the checker, and that is RFC-0010
 working: the loader consumes an import and the checker never sees one.
@@ -270,42 +276,45 @@ can say so as a fact rather than as a claim.
 
 ### 3.4 The 24 keywords and the 15 contextual words
 
-172 mentions in three files for the keywords. The spellings and the tokens are
+148 mentions in three files for the keywords. The spellings and the tokens are
 read out of the lexer's `keyword_or_ident`, which is the same anchor
 `editor/vscode/test/grammar.test.mjs` reads; this census is that map's third
 reader.
 
 | keyword | token | lexer | parser | fmt | all three |
 |---|---|---|---|---|
-| `fn` | `Tok::Fn` | 3 | 20 | 2 | 25 |
-| `let` | `Tok::Let` | 3 | 14 | 0 | 17 |
-| `mut` | `Tok::Mut` | 3 | 5 | 0 | 8 |
-| `if` | `Tok::If` | 3 | 4 | 0 | 7 |
-| `else` | `Tok::Else` | 3 | 2 | 0 | 5 |
-| `while` | `Tok::While` | 3 | 2 | 0 | 5 |
-| `for` | `Tok::For` | 3 | 3 | 0 | 6 |
-| `in` | `Tok::In` | 3 | 1 | 0 | 4 |
-| `drop` | `Tok::Drop` | 3 | 2 | 0 | 5 |
-| `protocol` | `Tok::Protocol` | 3 | 4 | 0 | 7 |
-| `import` | `Tok::Import` | 3 | 3 | 0 | 6 |
-| `export` | `Tok::Export` | 3 | 2 | 0 | 5 |
-| `impl` | `Tok::Impl` | 3 | 3 | 1 | 7 |
-| `self` | `Tok::Vself` | 3 | 8 | 1 | 12 |
-| `return` | `Tok::Return` | 3 | 2 | 0 | 5 |
-| `true` | `Tok::True` | 3 | 1 | 1 | 5 |
-| `false` | `Tok::False` | 3 | 1 | 1 | 5 |
-| `type` | `Tok::Type` | 3 | 7 | 0 | 10 |
-| `where` | `Tok::Where` | 3 | 2 | 0 | 5 |
-| `match` | `Tok::Match` | 3 | 1 | 0 | 4 |
-| `region` | `Tok::Region` | 3 | 2 | 0 | 5 |
-| `spawn` | `Tok::Spawn` | 3 | 1 | 0 | 4 |
-| `break` | `Tok::Break` | 3 | 2 | 0 | 5 |
-| `continue` | `Tok::Continue` | 3 | 2 | 0 | 5 |
+| `fn` | `Tok::Fn` | 2 | 20 | 2 | 24 |
+| `let` | `Tok::Let` | 2 | 14 | 0 | 16 |
+| `mut` | `Tok::Mut` | 2 | 5 | 0 | 7 |
+| `if` | `Tok::If` | 2 | 4 | 0 | 6 |
+| `else` | `Tok::Else` | 2 | 2 | 0 | 4 |
+| `while` | `Tok::While` | 2 | 2 | 0 | 4 |
+| `for` | `Tok::For` | 2 | 3 | 0 | 5 |
+| `in` | `Tok::In` | 2 | 1 | 0 | 3 |
+| `drop` | `Tok::Drop` | 2 | 2 | 0 | 4 |
+| `protocol` | `Tok::Protocol` | 2 | 4 | 0 | 6 |
+| `import` | `Tok::Import` | 2 | 3 | 0 | 5 |
+| `export` | `Tok::Export` | 2 | 2 | 0 | 4 |
+| `impl` | `Tok::Impl` | 2 | 3 | 1 | 6 |
+| `self` | `Tok::Vself` | 2 | 8 | 1 | 11 |
+| `return` | `Tok::Return` | 2 | 2 | 0 | 4 |
+| `true` | `Tok::True` | 2 | 1 | 1 | 4 |
+| `false` | `Tok::False` | 2 | 1 | 1 | 4 |
+| `type` | `Tok::Type` | 2 | 7 | 0 | 9 |
+| `where` | `Tok::Where` | 2 | 2 | 0 | 4 |
+| `match` | `Tok::Match` | 2 | 1 | 0 | 3 |
+| `region` | `Tok::Region` | 2 | 2 | 0 | 4 |
+| `spawn` | `Tok::Spawn` | 2 | 1 | 0 | 3 |
+| `break` | `Tok::Break` | 2 | 2 | 0 | 4 |
+| `continue` | `Tok::Continue` | 2 | 2 | 0 | 4 |
 
-**Every keyword costs the lexer exactly 3**, without exception: the `Tok`
-variant, the `keyword_or_ident` arm and the `token_name_and_text` row that
-`lex()` reads (RFC-0054). Three copies of one fact, and the count says they have
-not drifted. **A keyword is nearly free. The FORM behind it is what costs**, and
+**Every keyword costs the lexer exactly 2**, without exception: the
+`keyword_or_ident` arm and the `token_name_and_text` row that `lex()` reads
+(RFC-0054). It was 3 until RFC-0125 §3 M6 folded the two lexical scans into one:
+the third was `lex`'s own copy of the spelling table, beside the
+`keyword_or_ident` the other scan called and the doc comment that already
+claimed both scans shared. Two copies of one fact now, and the count says they
+have not drifted. **A keyword is nearly free. The FORM behind it is what costs**, and
 §3.1 is where the language's weight is.
 
 47 mentions in four files for the contextual words — the words the lexer hands

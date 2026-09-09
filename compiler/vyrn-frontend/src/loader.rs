@@ -3171,27 +3171,33 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     }
 }
 
-/// Every named or applied type HEAD inside a type, handed to a visitor, \
-/// innermost after outermost — the ONE descent this file makes over a `Type`.
+/// Every part of a type, handed to a visitor, outermost first — the ONE descent
+/// the compiler makes over a `Type`.
 ///
-/// Three readers ask the same question and used to write the same fourteen arms
+/// Four readers ask the same question and used to write the same fourteen arms
 /// out to ask it (RFC-0125 §3 M6): [`type_names`] collects the heads,
-/// [`rewrite_type`] renames each one through a map, and
+/// [`rewrite_type`] renames each one through a map,
 /// [`NsResolver::rewrite_type`] resolves a `ns.User` spelling to the declaration
-/// it names. The three matched arm for arm, which is what a rule stated three
-/// times looks like when nobody has drifted yet.
+/// it names, and `parser::mark_member_type_params` turns a contract member's
+/// implicit type parameter into a [`Type::Param`] (RFC-0071). All four matched
+/// arm for arm, which is what a rule stated four times looks like when nobody
+/// has drifted yet.
+///
+/// The hook is handed the NODE, not the head name, because the fourth reader
+/// REPLACES a node and a `&mut String` cannot do that. [`type_heads`] and
+/// [`type_heads_mut`] are the head-name reading the other three want, and they
+/// are three lines each over this.
 ///
 /// It is a macro because the readers need two mutabilities — one collects
-/// through a shared borrow, two assign through a unique one — and no other
+/// through a shared borrow, three assign through a unique one — and no other
 /// mechanism in Rust states a descent once across both. The arm list below is
 /// the rule; the two definitions after it are spellings of it.
 macro_rules! type_head_descent {
     ($name:ident $(, $mut_:tt)?) => {
-        fn $name(ty: &$($mut_)? Type, f: &mut impl FnMut(&$($mut_)? String)) {
+        pub(crate) fn $name(ty: &$($mut_)? Type, f: &mut impl FnMut(&$($mut_)? Type)) {
+            f(ty);
             match ty {
-                Type::Named(n) => f(n),
-                Type::App(n, args) => {
-                    f(n);
+                Type::App(_, args) => {
                     for a in args {
                         $name(a, f);
                     }
@@ -3239,8 +3245,27 @@ macro_rules! type_head_descent {
     };
 }
 
-type_head_descent!(type_heads);
-type_head_descent!(type_heads_mut, mut);
+type_head_descent!(type_nodes);
+type_head_descent!(type_nodes_mut, mut);
+
+/// The same descent, with the hook on a type's HEAD NAME rather than on the
+/// node — what three of the four readers want. `Named` and `App` are the two
+/// constructors that carry one; every other arm is above.
+fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
+    type_nodes(ty, &mut |t| {
+        if let Type::Named(n) | Type::App(n, _) = t {
+            f(n)
+        }
+    });
+}
+
+fn type_heads_mut(ty: &mut Type, f: &mut impl FnMut(&mut String)) {
+    type_nodes_mut(ty, &mut |t| {
+        if let Type::Named(n) | Type::App(n, _) = t {
+            f(n)
+        }
+    });
+}
 
 // The scope-aware descent over a body is `ast::body_scope_descent!`, where the
 // AST is declared. This file was where it was stated once (RFC-0125 §3 M6);
