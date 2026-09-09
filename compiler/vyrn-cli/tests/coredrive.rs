@@ -123,11 +123,10 @@ const PIN: [(&str, usize, usize); 3] = [
 /// move every corpus census and the wasm manifest.
 ///
 /// The first two are the readers the exits slice attributed `Stmt::Continue`'s
-/// arm to. The last two are the validation slice's: a `where` type reaches the
-/// core as the type of the annotated `let`'s VALUE, so the clause in
-/// `Fn_::core_walkable` that refuses one never saw it and the whole body was
-/// emitted from rows that state no check.
-const SHAPES: [(&str, &str); 4] = [
+/// arm to, and neither is one. The other five are shapes the driver got wrong
+/// and nothing asked: `examples/` writes none of them, and the file that does
+/// compiles with no core at all.
+const SHAPES: [(&str, &str); 7] = [
     (
         "a `for` over an array literal",
         "fn vyrnTestMain() -> Int64 { let mut s = 0 \
@@ -152,6 +151,18 @@ const SHAPES: [(&str, &str); 4] = [
         "type Age = Int64 where value >= 18 \
          fn vyrnTestMain() -> Int64 { let mut a: Age = 20 a = a - 15 return a }",
     ),
+    (
+        "a `let` of an `if` expression",
+        "fn vyrnTestMain() -> Int64 { let x = if 2 > 1 { 10 } else { 20 } return x }",
+    ),
+    (
+        "a match on two string literals",
+        "fn vyrnTestMain() -> Int64 { if \"abc\" =~ \"[a-z]+\" { return 1 } return 0 }",
+    ),
+    (
+        "an order on two string literals",
+        "fn vyrnTestMain() -> Int64 { if \"abc\" < \"abd\" { return 1 } return 0 }",
+    ),
 ];
 
 /// What `semantics.rs`'s `run` wraps a shape in, so what is emitted here is the
@@ -161,11 +172,14 @@ const WRAP: &str = "fn main() -> Int64 { print(vyrnTestMain().toString()) return
 
 /// Per shape: how many `break` and how many `continue` occurrences the AST arm
 /// emitted. An arm goes when this table and [`PIN`] both read zero.
-const SHAPE_PIN: [(&str, usize, usize); 4] = [
+const SHAPE_PIN: [(&str, usize, usize); 7] = [
     ("a `for` over an array literal", 0, 0),
     ("a `continue` under a `region`", 0, 0),
     ("a `let` annotated with a `where` type", 0, 0),
     ("a store into a binding of a `where` type", 0, 0),
+    ("a `let` of an `if` expression", 0, 0),
+    ("a match on two string literals", 0, 0),
+    ("an order on two string literals", 0, 0),
 ];
 
 /// The types `Fn_::core_walkable` admits a name of, spelled here so the count
@@ -470,13 +484,13 @@ fn run() {
     // AST walk emits exactly what it did. So a body it takes has to reach the
     // corpus at all, or this test measures nothing.
     assert!(from_core > 0, "the core walk emitted no body");
-    // The licence. Three programs emit a different module, all for ONE shape,
+    // The licence. Two programs emit a different module, both for ONE shape,
     // and RFC-0125 §3 M3's record explains it: `return if c { a } else { b }`
     // reaches the AST walk as a join it writes with a typed `if` and one
     // branch out, and the core rewrites it into a `return` per arm
     // (`Builder::return_through`) so the linear judgment sees each exit. The
     // driver emits what the row says, which is one `br` per arm where the join
-    // had one after the `if`. A FOURTH differing program is a shape nobody has
+    // had one after the `if`. A THIRD differing program is a shape nobody has
     // read, and this is where a reader is told to read it.
     let named: Vec<&str> = differ
         .iter()
@@ -484,7 +498,7 @@ fn run() {
         .collect();
     assert_eq!(
         named,
-        ["ifexpr.vyrn", "knucleotide.vyrn", "strpredbytes.vyrn"],
+        ["ifexpr.vyrn", "knucleotide.vyrn"],
         "the two walks differ somewhere the record does not explain"
     );
 }

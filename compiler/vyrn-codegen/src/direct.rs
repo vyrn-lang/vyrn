@@ -17113,8 +17113,17 @@ impl<'p> Fn_<'_, 'p> {
                 // never takes, so the two would emit different locals.
                 (held || body.names[*n as usize].binding.is_some()) && self.core_rhs_readable(rhs)
             }
+            // A store's destination has to have a place before the store runs,
+            // and this walk gives one to a temporary only where it BINDS it.
+            // The temporary an `if` expression joins through is stored into by
+            // each branch and bound by the `let` after them (RFC-0030), so it
+            // has none: `let x = if c { 10 } else { 20 }` reached the store
+            // with nowhere to put the value. A name the reader wrote is the
+            // AST arm's local and is always placed.
             St::Store { place, value, .. } => {
-                matches!(place, vyrn_lower::core::Place::Name(_)) && core_val_readable(value)
+                matches!(place, vyrn_lower::core::Place::Name(n)
+                    if !body.names[*n as usize].source.starts_with('@'))
+                    && core_val_readable(value)
             }
             St::If {
                 cond, then, els, ..
@@ -17196,7 +17205,13 @@ fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
 }
 
 fn core_val_readable(v: &Val) -> bool {
-    !matches!(v, Val::Lit(Lit::Opaque))
+    // A NAME is screened by its recorded type ([`core_scalar`], in
+    // `Fn_::core_run` and `Fn_::core_walkable`). A literal has no name and
+    // carries its type in its own variant, so the same screen has to be spelled
+    // here or it is not asked: a `Lit::Str` is a String, which this walk emits
+    // no operation on. `"a" < "b"` reached `Op::Lt` with two of them and not one
+    // name for the other screen to refuse.
+    !matches!(v, Val::Lit(Lit::Opaque | Lit::Str(_)))
 }
 
 /// Every `let` a statement's rows bind, itself and everything under it.
