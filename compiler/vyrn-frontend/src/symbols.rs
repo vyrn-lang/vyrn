@@ -822,6 +822,20 @@ fn pin_diagnostics(
                 d.end_col = end_col;
                 break;
             }
+            // A PATH is not a token: `b.xs[0]`, `d.title`, `x.id`, `t.xs[..]`.
+            // The kernel words its refusals about places, and a place is what
+            // a reader wrote — so the pin is its ROOT, which is a token on the
+            // line (RFC-0125 §3 M3, the column slice). Without this the five
+            // path-subject refusals of the census stayed whole-line, which is
+            // the standing gap every rule that moved to the kernel was in.
+            let root = &target[..target.find(['.', '[']).unwrap_or(target.len())];
+            if root != target && !root.is_empty() {
+                if let Some(t) = tok_info.iter().find(|t| t.line == d.line && t.text == root) {
+                    d.col = t.col;
+                    d.end_col = t.end_col;
+                    break;
+                }
+            }
         }
         // No backtick target found on the line → stays `col == 0` (whole-line
         // fallback in the LSP), unchanged.

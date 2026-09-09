@@ -15940,6 +15940,68 @@ meet, which the core asks by signature at a call through a fn value.
 6 blocks and `examples/rpcsplit.vyrn` 5, on the engine and on the route alike.
 `Facts` is one field now, and the walk that fills it is `Want::Lets`.
 
+#### The editor's column, measured before it was built (2026-09-09, `track-dx`)
+
+`track-dt` recorded a standing gap and named the answer: "`vyrn-lsp` installs
+the lowering so a kernel refusal does reach a reader, but the kernel refuses at
+a LINE and the pinner works from a column. Every rule that left since row 06 is
+in that position; the answer is one slice about `Refusal`, not one test."
+
+**The gap is one fifth of what it says, and the measurement is the whole
+slice.** `vyrn_lower::install()` and then `vyrn_frontend::symbols::analyze` —
+the call the editor makes — over the 43 programs of `tests/refusals` and
+`tests/unlicensed`: **38 of them were already pinned to a token**, because
+`symbols::pin_diagnostics` works from the message and the line, not from the
+node, and the kernel's sentences backtick-quote their subject exactly as the
+checker's do. `r06`'s `x` was at line 9, columns 18 to 19, before this slice
+touched anything.
+
+**The five that were not are the five whose subject is a PATH.** `b.xs[0]`,
+`h.meta[0]`, `d.title`, `t.xs[..]`, `x.id`. A path is not a token, so the
+identifier path of the pinner missed it, the keyword map missed it, and the
+diagnostic stayed whole-line. So the rule the slice adds is one sentence — **a
+place pins to its root**, which is a token on the line — and it is stated where
+every other column is stated, in the pinner. A field on `Refusal` would have
+been a second statement of the same column, and a worse one: the kernel would
+have to carry a column through `NameInfo`, `Site` and every `St` that carries a
+line, to arrive at the identifier the pinner already finds.
+
+**What moved, read row by row.** The refusal corpora: five programs gain a
+column (`r02` 6:0 to 6:14, `r05` 8:0 to 8:5, `r08` 6:0 to 6:26, `r16` 5:0 to
+5:12, `u06` 9:0 to 9:13) and one moves from a keyword to its subject (`u25b`
+12:9-16, the `consume` keyword, to 12:17-19, the `er` the sentence is about).
+Not one line moves, and no program loses a column. The wider corpus, through
+`symbols_api::the_pinned_columns_over_the_corpus` — every `.vyrn` under
+`examples/`, `site/`, `std/` and `compiler/vyrn-cli/tests` — **31 rows move and
+every one of them is `unknown type` on a namespaced name**: `api.RpcIssue`,
+`stream.Cursor`, `shapes.Color`, from column 0 to the namespace identifier.
+Nothing else in 3,688 lines of that print differs.
+
+**And the pin, where the kernel is reachable.**
+`compiler/vyrn-cli/tests/columns.rs` is new: `vyrn-frontend` cannot reach a
+kernel refusal, which is why `diagnostics_api.rs` and `symbols_api.rs` lost
+their ownership pins with the last rule, and this crate links both halves. It
+asserts the two halves of the one sentence over both refusal corpora — the
+refusal keeps its LINE, and its column is a span over a real token of that
+line — and prints the table under `--ignored`.
+
+**What is left, with its blocker named.** `vyrn check` prints `file:line:0:`
+for every one of these, because the command reports what the loader and the
+checker say and does not run the pinner. Giving the command the editor's column
+is a one-line change and a 77-program change to the whole-stderr licence every
+census in this milestone reads, so it is its own slice with its own re-recorded
+corpus — not a rider on this one.
+
+**The licence.** `vyrn check`, whole stderr and exit code, 323 programs:
+byte-identical, 0 lost / 0 gained. The pinner runs on the editor's path only,
+which is exactly why the corpus print above is its licence and the command's
+stderr cannot be.
+
+**The lines.** `compiler/vyrn-frontend/src/symbols.rs` 4,782 to **4,796**; a new
+`compiler/vyrn-cli/tests/columns.rs` of 117. The frontend census:
+`symbols.rs`'s "the file's own job" 2,898 to **2,912**. No other census moves —
+this slice deletes nothing and adds no arm to any walk.
+
 ### M6 — the other two judgments
 
 Validation by construction replaces the boundary checks. The trap primitive
