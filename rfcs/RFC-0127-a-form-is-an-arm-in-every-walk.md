@@ -90,7 +90,7 @@ and neither of those files ever matches a statement.
 | `parser` | `vyrn-frontend/src/parser.rs` | what the surface spells, and what it rewrites |
 | `checker` | `vyrn-frontend/src/checker.rs` | what a program means |
 | `movecheck` | `vyrn-frontend/src/movecheck.rs` | where a value is moved |
-| `own` | `vyrn-frontend/src/own.rs` | where a value is released |
+| `own` | `vyrn-frontend/src/own.rs`, `declared.rs` | where a value is released, and the `Owned` table that reading asks (RFC-0125 §3 M6) |
 | `lower` | `vyrn-lower/src/lib.rs`, `core.rs`, `typed.rs` | the lowered form, RFC-0125's core, and the must-use judgment, which reads the tree a reader wrote (RFC-0125 §3 M3) |
 | `native` | `vyrn-codegen/src/lib.rs` | the textual-IR emitter |
 | `wasm` | `vyrn-codegen/src/direct.rs` | the direct wasm emitter |

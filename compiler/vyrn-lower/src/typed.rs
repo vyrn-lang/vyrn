@@ -393,7 +393,7 @@ fn last(callee: &str) -> &str {
 /// name, a block and the paths out of it — but three of them matched
 /// `Type::Stream` directly, so the one compile-time reclamation proof in the
 /// language served exactly one type. The matches are a lookup in
-/// [`vyrn_frontend::own::Owned`], the same table `impl Owned for T` adds a row
+/// [`vyrn_frontend::declared::Owned`], the same table `impl Owned for T` adds a row
 /// to, so a user's file handle, transaction or reply obligation joins the
 /// mechanism with no compiler change.
 ///

@@ -45,7 +45,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// The nine files a FORM is stated in, in the RFC's order. A column may be more
+/// The ten files a FORM is stated in, in the RFC's order. A column may be more
 /// than one file when one pass is written in two (`vyrn-lower`).
 ///
 /// The `shared` column was `native` until RFC-0125 §3 M4's fourth slice: it read
@@ -56,7 +56,16 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
     ("parser", &["vyrn-frontend/src/parser.rs"]),
     ("checker", &["vyrn-frontend/src/checker.rs"]),
     ("movecheck", &["vyrn-frontend/src/movecheck.rs"]),
-    ("own", &["vyrn-frontend/src/own.rs"]),
+    (
+        "own",
+        &[
+            "vyrn-frontend/src/own.rs",
+            // The `Owned` type table and the free type predicates moved here
+            // with what they are — a reading of the declarations, which is
+            // what this file states (RFC-0125 §3 M6, the type-table slice).
+            "vyrn-frontend/src/declared.rs",
+        ],
+    ),
     (
         "lower",
         &[
@@ -74,7 +83,7 @@ const FORM_COLUMNS: &[(&str, &[&str])] = &[
 ];
 
 /// The seven files a DECLARATION is stated in. Not the same set: a declaration
-/// is linked by the loader and selected by the CLI, and three of the nine above
+/// is linked by the loader and selected by the CLI, and three of the ten above
 /// never see one.
 const DECL_COLUMNS: &[(&str, &[&str])] = &[
     ("parser", &["vyrn-frontend/src/parser.rs"]),

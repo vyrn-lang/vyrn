@@ -372,7 +372,7 @@ pub fn copy_impl_by_key(impls: &[ImplBlock], key: &str) -> Option<String> {
 /// The `impl Owned for T` method a value with this type key releases through
 /// (RFC-0086 M1), or `None` where nothing declared one.
 ///
-/// [`crate::own::Owned`] keys the same rows by the same key and is where the
+/// [`crate::declared::Owned`] keys the same rows by the same key and is where the
 /// automatic path reads them. This one exists for the interpreter, which
 /// dispatches an explicit `drop x` on a runtime value whose key is the name
 /// stamped on it — the same route [`copy_impl_by_key`] takes, for the same
