@@ -875,6 +875,50 @@ fn member_completion_offers_record_fields() {
     );
 }
 
+/// A binder inside an interpolation hole never becomes a local, and every local
+/// that IS indexed is spelled where it says it is.
+///
+/// A hole is re-lexed as its own source, so its tokens count lines and columns
+/// from the hole. `Parser::binder_pos` answers `(0, 0)` there and a binder with
+/// no column is not indexed: a row at a hole-relative position would point the
+/// editor at whatever token happens to sit there.
+#[test]
+fn a_binder_inside_an_interpolation_is_not_a_local() {
+    let src = "fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return f(f(x))
+}
+fn main() -> Int64 {
+    let s = \"x=\\{twice(q -> { let t = q + 1
+        return t }, 3)}\"
+    print(s)
+    return 0
+}
+";
+    let a = analyze(src);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean program: {:?}",
+        a.diagnostics
+    );
+    let names: Vec<&str> = a.locals.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["f", "x", "s"],
+        "the hole's `q` and `t` are not locals"
+    );
+    // Every row that IS indexed names the token it points at. Without the rule
+    // above, the hole's `let t` lands at line 1, column 18 — inside `twice`'s
+    // signature, which is where the hole's own column 18 happens to fall.
+    let lines: Vec<&str> = src.lines().collect();
+    for b in &a.locals {
+        let at = &lines[b.line - 1][b.col - 1..];
+        assert!(
+            at.starts_with(b.name.as_str()),
+            "{b:?} is not spelled at its position: {at}"
+        );
+    }
+}
+
 /// Every `.vyrn` of the corpus, sorted, with the repository root it is under.
 ///
 /// The two corpus pins below read the same files: what `analyze` decides about
