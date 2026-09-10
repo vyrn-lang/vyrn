@@ -73,7 +73,7 @@ Direct, precise, calm. Short sentences. Say what is wrong and why. Do not perfor
 
 ## Who does what
 
-- Teammates do the tracks. Launch each worker as a named agent on Opus, one worktree per track, at most three at a time.
+- Teammates do the tracks. Launch each worker as a named agent on Opus, one worktree per track, at most five at a time.
 - Fable decides. Use Fable for a design decision, for a record that other agents disagree on, and for a task another model tried and failed. Do not use Fable for a track.
 - The lead merges. The lead runs the gate chain on the merged branch, pushes when it is green, and watches CI once.
 
@@ -86,7 +86,7 @@ Every brief carries this file's rules. An agent does not inherit memory.
 3. Change one thing. One commit per slice.
 4. Prove it. Run the licence for the slice (below). Read every byte and every line that moves.
 5. Record it. Add a dated record under the milestone, in the style of the records before it, with the commands you ran and the numbers you got. Re-pin every census the change moved, in the same commit.
-6. Gate it. Run the full gate list in the foreground, one command at a time, and report the table.
+6. Gate it. Run the short list in the foreground, one command at a time, and report the table. The full list is CI's: the lead pushes the track branch as a draft pull request against the core branch, and CI runs every job on it.
 
 Report the numbers, the commits, the files before and after, and what is left with its blocker named exactly.
 
@@ -142,9 +142,11 @@ Do not optimize on a guess. A micro-optimization that the numbers do not license
 - `vyrn-lsp` and `vyrn-genwasm` are outside the workspace. Test them and format them explicitly.
 - Do not push and do not merge into another branch. The lead does both.
 
-## The gate list, in order
+## The gate list
 
-`cargo fmt --all --check`; `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check`; `cargo build --release -p vyrn-cli`; `cargo test -p vyrn-cli`; the ignored corpus suites `kernel`, `coretables`, `typed`, `effects`, `fixtures`, `testsweep`, `projections`; `cargo test -p vyrn-frontend`; `cargo test --workspace --exclude vyrn-cli`; the `vyrn-lsp` and `vyrn-genwasm` suites; `memory` single-threaded; `route --ignored` in release; `residue --ignored` in release; `VYRN_WASM_MANIFEST=check` on `wasmhash`; `genwasm --ignored` on a fresh cache; `vyrn doc --verify`; the site export; `vyrn test` per site file.
+The short list, which every track runs in the foreground before it reports: `cargo fmt --all --check`; `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check`; `cargo build --release -p vyrn-cli` with no new warning; every census the change touched; `cargo test -p vyrn-cli` without a filter; the licence of the slice (the corpus diff, the manifest check, the lowering pin, the kernel corpus, or the residue ratchet, whichever the slice's licence names). Each command runs under a timeout with its output in a file.
+
+The full list is CI's. Every job in `.github/workflows/ci.yml` and `site.yml` runs on a pull request: the formatting gates, the workspace tests on four platforms, the judgments over the corpus, the native route with the residue ratchet, the wasm manifest, the fixtures, the LSP and generation crates, the docs drift gate, the site export and its tests. The lead pushes a track branch as a draft pull request against the core branch, merges it locally with a merge commit when CI is green, and closes the pull request. A track does not run the full list on the machine; the machine cannot run four of them at once.
 
 Report every gate with its result. A red gate is reported as red, with the output.
 
