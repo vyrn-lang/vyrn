@@ -777,13 +777,9 @@ fn run(program: &Program, want: Want) -> Run {
                 .collect(),
         )),
         ret: RefCell::new(Type::Unit),
-        reads: RefCell::new(Scopes::new(HashMap::new())),
-        arm_binders: RefCell::new(Vec::new()),
-        continue_seen: std::cell::Cell::new(false),
         cur_fn: RefCell::new(String::new()),
         writeback: RefCell::new(None),
         lets: want == Want::Lets,
-        param_ix: RefCell::new(HashMap::new()),
         lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
         lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
@@ -906,29 +902,8 @@ struct MoveCheck<'a> {
     /// see [`MoveCheck::enter`]. A borrow is second-class: observable, passable,
     /// but never stored, captured or returned.
     borrows: RefCell<Scopes<Option<Borrow>>>,
-    /// What each borrow READS — the place's path and the binding's line — in
-    /// lockstep with `borrows`. The fix for a borrow a rebuilding call takes
-    /// is a `.copy()` where the borrow is bound. A write to that place ends
-    /// the borrow, and the kernel is the pass that says so now (RFC-0125 §3
-    /// M3, row 05).
-    reads: RefCell<Scopes<Option<(String, usize)>>>,
     /// The return type of the function being checked, for rule 3.
     ret: RefCell<Type>,
-    /// The pattern binders of each open `match`/`if let` arm, innermost last.
-    /// A binder over an owned scrutinee binds a [`Borrow::Projection`], but the
-    /// fact it names is not "this frame still owns the aggregate" — the
-    /// scrutinee handed the payload up and the arm's value carries it out. A
-    /// `let t = d.title` binds the same row with the dangerous meaning, so
-    /// [`MoveCheck::check_handover`] tells them apart by this mark.
-    arm_binders: RefCell<Vec<HashSet<String>>>,
-    /// Set when the walk under a loop body reached a `continue`. `continue`
-    /// starts the NEXT iteration rather than leaving the loop, so it must not
-    /// count as the divergence [`MoveCheck::check_loop_reuse`] may skip on —
-    /// a body every path of which LEAVES (`break`/`return`/`panic`) runs at
-    /// most once; one that continues does not. Each loop saves and resets it
-    /// around its body walk, so an inner loop's `continue` stays the inner
-    /// loop's.
-    continue_seen: std::cell::Cell<bool>,
     /// The declaring `Stmt::Let` of every name in scope, in lockstep with `vars`
     /// — 0 for a parameter, a loop variable, a pattern binder or a lambda
     /// parameter. **Every** binder is recorded, so an inner `let s` shadowing an
@@ -947,8 +922,6 @@ struct MoveCheck<'a> {
     /// call-graph sets went (RFC-0125 §3 M3, the wrapped lend), which made a
     /// sink stand in for a mode.
     lets: bool,
-    /// The index of each parameter of the function under check.
-    param_ix: RefCell<HashMap<String, usize>>,
     /// Round forty-six: the arity of every lambda the walk met. A lambda has
     /// no capability rows and no retention rows, so a signature any lambda
     /// could inhabit (matched by arity — the declared reading does not type
@@ -1013,12 +986,6 @@ impl MoveCheck<'_> {
     /// node addresses are the reclamation key (Phase 4c).
     fn body(&self, params: &[Param], ret: &Type, body: &Block) {
         let f_params = params;
-        *self.param_ix.borrow_mut() = f_params
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.name.clone(), i))
-            .collect();
-
         let mut scope: Vec<HashSet<String>> =
             vec![f_params.iter().map(|p| p.name.clone()).collect()];
         // Module state is the outermost frame, the parameters the next one — the
@@ -1049,34 +1016,22 @@ impl MoveCheck<'_> {
         self.block(body, &mut scope);
     }
 
-    /// Push a frame on ALL THREE stacks. They are read as one environment — a
-    /// name's type, whether it is a borrow, and where it was declared — so they
-    /// are never entered apart.
+    /// Push a frame on BOTH stacks. They are read as one environment — a name's
+    /// type and whether it is a borrow — so they are never entered apart.
     fn enter(&self) {
         self.vars.borrow_mut().enter();
         self.borrows.borrow_mut().enter();
-        self.reads.borrow_mut().enter();
     }
 
     fn exit(&self) {
         self.vars.borrow_mut().exit();
         self.borrows.borrow_mut().exit();
-        self.reads.borrow_mut().exit();
     }
 
     /// Bind `name` with its type and its borrow status.
     fn bind(&self, name: &str, ty: Option<Type>, borrow: Option<Borrow>) {
         self.vars.borrow_mut().bind(name, ty);
         self.borrows.borrow_mut().bind(name, borrow);
-        self.reads.borrow_mut().bind(name, None);
-    }
-
-    /// The place a borrow of `value` reads, when the value spells one: `h.meta`,
-    /// `xs[i]`, or a whole borrowed name.
-    fn read_of(value: &Expr) -> Option<String> {
-        place_path(value)
-            .or_else(|| element_path(value))
-            .map(|(_, path)| path)
     }
 
     /// Every name `e` reads, so a `return` or a `spawn` can give up all of them.
@@ -1612,12 +1567,7 @@ impl MoveCheck<'_> {
                     *line,
                     hoisted.is_some(),
                 );
-                let is_borrow = borrow.is_some();
                 self.bind(name, bty, borrow);
-                if is_borrow {
-                    let read = Self::read_of(value).map(|p| (p, *line));
-                    self.reads.borrow_mut().bind(name, read);
-                }
                 scope.last_mut().unwrap().insert(name.clone());
                 false
             }
@@ -1651,11 +1601,7 @@ impl MoveCheck<'_> {
                     // record still holds and releases again — `out = v` inside
                     // `if let Some(v) = o` is the same store one keyword over.
                     // One question, asked at both spellings.
-                    let read = b
-                        .as_ref()
-                        .and_then(|_| Self::read_of(value).map(|p| (p, *line)));
                     self.borrows.borrow_mut().rebind(name, b);
-                    self.reads.borrow_mut().rebind(name, read);
                 }
                 false
             }
@@ -1752,14 +1698,7 @@ impl MoveCheck<'_> {
             // `break`/`continue` (RFC-0060) consume nothing but terminate the
             // path — code after them in the same block is unreachable.
             Stmt::Break { .. } => true,
-            // A `continue` also diverges here, but it jumps to the NEXT
-            // iteration: the loop body re-runs. Marking it is what stops the
-            // loop arms from counting it as the "runs at most once"
-            // divergence that skips the next-iteration reuse check.
-            Stmt::Continue { .. } => {
-                self.continue_seen.set(true);
-                true
-            }
+            Stmt::Continue { .. } => true,
             Stmt::If {
                 cond,
                 then_block,
@@ -1829,11 +1768,7 @@ impl MoveCheck<'_> {
                     // (`own.rs`'s shadowing lesson).
                     self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                 }
-                let binders: HashSet<String> =
-                    pattern.bindings().into_iter().map(str::to_string).collect();
-                self.arm_binders.borrow_mut().push(binders);
                 let then_div = self.block(then_block, scope);
-                self.arm_binders.borrow_mut().pop();
                 self.exit();
                 scope.pop();
                 let else_div = match else_block {
@@ -1844,9 +1779,7 @@ impl MoveCheck<'_> {
             }
             Stmt::While { cond, body, .. } => {
                 self.expr(cond, scope);
-                let outer_continue = self.continue_seen.replace(false);
                 let _ = self.block(body, scope);
-                self.continue_seen.set(outer_continue);
                 false
             }
             // A `for` loop consumes like a `while`: the iterable is read once,
@@ -1855,8 +1788,8 @@ impl MoveCheck<'_> {
                 var,
                 iter,
                 body,
-                line,
                 consuming,
+                ..
             } => {
                 self.expr(iter, scope);
                 let elem = self.type_of(iter).and_then(|t| self.decl.elem_of(&t));
@@ -1904,16 +1837,9 @@ impl MoveCheck<'_> {
                 // exit gives back the visited and the unvisited elements alike,
                 // each exactly once.
                 self.enter();
-                let is_borrow = borrow.is_some();
                 self.bind(var, elem, borrow);
-                if is_borrow {
-                    let read = place_path(iter).map(|(_, p)| (format!("{p}[..]"), *line));
-                    self.reads.borrow_mut().bind(var, read);
-                }
-                let outer_continue = self.continue_seen.replace(false);
                 let _ = self.block(body, scope);
                 self.exit();
-                self.continue_seen.set(outer_continue);
                 false
             }
             // A `panic(..)` statement diverges (RFC-0079), which here means
@@ -2002,19 +1928,10 @@ impl MoveCheck<'_> {
                     scope.push(HashSet::new());
                     self.enter();
                     let (tys, borrow) = self.payload_binding(scrutinee, &arm.pattern);
-                    let binders: Vec<String> = arm
-                        .pattern
-                        .bindings()
-                        .into_iter()
-                        .map(str::to_string)
-                        .collect();
-                    for (i, b) in binders.iter().enumerate() {
-                        scope.last_mut().unwrap().insert(b.clone());
+                    for (i, b) in arm.pattern.bindings().into_iter().enumerate() {
+                        scope.last_mut().unwrap().insert(b.to_string());
                         self.bind(b, tys.get(i).cloned().flatten(), borrow.clone());
                     }
-                    self.arm_binders
-                        .borrow_mut()
-                        .push(binders.iter().map(|b| b.to_string()).collect());
                     match &arm.body {
                         ArmBody::Expr(body) => self.expr(body, scope),
                         // The statements walk as statements, inside the same
@@ -2023,7 +1940,6 @@ impl MoveCheck<'_> {
                             self.block(b, scope);
                         }
                     }
-                    self.arm_binders.borrow_mut().pop();
                     self.exit();
                     scope.pop();
                 }

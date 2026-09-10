@@ -787,7 +787,7 @@ fn movecheck_sections() -> Vec<Section> {
         sec(
             "    fn enter(&self) {",
             Shared,
-            "the three scope stacks, read as one environment",
+            "the two scope stacks, read as one environment",
         ),
         sec(
             "fn walk_writeback(&self, target: &str, value: &Expr, scope: &mut Vec<HashSet<String>>) {",
@@ -1079,7 +1079,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1511, 0),
+        ("movecheck.rs", "shared machinery", 1427, 0),
         ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
