@@ -1432,22 +1432,12 @@ fn load_modules(
                 hit
             } else {
                 let _p = crate::prof::phase("parse");
-                let tokens = lexer::lex(&text).map_err(|mut d| {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    vec![d]
-                })?;
+                let tokens = lexer::lex(&text).map_err(|d| vec![in_module(d, key, root_key)])?;
                 let (parsed, errors) = parser::parse_accum(tokens);
                 if !errors.is_empty() {
                     return Err(errors
                         .into_iter()
-                        .map(|mut d| {
-                            if !is_root {
-                                d.file = Some(key.to_string());
-                            }
-                            d
-                        })
+                        .map(|d| in_module(d, key, root_key))
                         .collect());
                 }
                 PARSE_CACHE.with(|c| {
@@ -1539,13 +1529,8 @@ fn load_modules(
                 idx += 1;
                 continue;
             };
-            let load_err = |msg: String| -> Vec<Diagnostic> {
-                let mut d = Diagnostic::error(line, 0, "load", msg);
-                if !is_root {
-                    d.file = Some(key.to_string());
-                }
-                vec![d]
-            };
+            let load_err =
+                |msg: String| -> Vec<Diagnostic> { vec![load_error(key, root_key, line, msg)] };
             if is_namespace {
                 return Err(load_err(format!(
                     "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
@@ -1567,23 +1552,15 @@ fn load_modules(
         let mut import_targets: Vec<Option<String>> = vec![None; program.imports.len()];
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Path(path) = &imp.source {
-                let target = resolve_spec(path, key, opts).map_err(|e| {
-                    let mut d = Diagnostic::error(imp.line, 0, "load", e);
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    vec![d]
-                })?;
+                let target = resolve_spec(path, key, opts)
+                    .map_err(|e| vec![load_error(key, root_key, imp.line, e)])?;
                 // RFC-0072 M1: an import may not WIDEN audience. Checked here,
                 // before the target is visited, so the first illegal edge is the
                 // one reported rather than whatever its subtree fails at.
-                if let Some(mut d) = audience_objection(key, &target, imp.line, opts)
+                if let Some(d) = audience_objection(key, &target, imp.line, opts)
                     .or_else(|| runtime_fence(key, &target, imp.line, opts))
                 {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    return Err(vec![d]);
+                    return Err(vec![in_module(d, key, root_key)]);
                 }
                 visit(
                     &target, None, opts, resolver, modules, states, identities, origins, warnings,
@@ -1600,8 +1577,7 @@ fn load_modules(
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
                 let (gen_key, gen_source) = run_generator(
-                    key, is_root, name, args, *line, opts, resolver, modules, states, identities,
-                    root_key,
+                    key, name, args, *line, opts, resolver, modules, states, identities, root_key,
                 )?;
                 // RFC-0072 M1: a generator import is an IMPORT, and the same rule
                 // decides it. The generated module's audience is its input file's
@@ -1609,11 +1585,8 @@ fn load_modules(
                 // not (M5), so this edge is the one a `.vyx` widens by living under
                 // `server/` and being mounted from the client root — the SSR half of
                 // a universal page inherits its caller and cannot widen against it.
-                if let Some(mut d) = audience_objection(key, &gen_key, *line, opts) {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    return Err(vec![d]);
+                if let Some(d) = audience_objection(key, &gen_key, *line, opts) {
+                    return Err(vec![in_module(d, key, root_key)]);
                 }
                 if let Some(src) = gen_source {
                     visit(
@@ -1842,7 +1815,6 @@ thread_local! {
 #[allow(clippy::too_many_arguments)]
 fn run_generator(
     importer: &str,
-    importer_is_root: bool,
     name: &str,
     args: &[Expr],
     line: usize,
@@ -1851,15 +1823,9 @@ fn run_generator(
     modules: &[Module],
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
-    _root_key: &str,
+    root_key: &str,
 ) -> Result<(String, Option<String>), Vec<Diagnostic>> {
-    let err = |msg: String| -> Vec<Diagnostic> {
-        let mut d = Diagnostic::error(line, 0, "load", msg);
-        if !importer_is_root {
-            d.file = Some(importer.to_string());
-        }
-        vec![d]
-    };
+    let err = |msg: String| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, msg)] };
 
     // 1. Arguments must be compile-time constants (RFC-0021).
     let empty = HashMap::new();
@@ -2662,31 +2628,23 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             let Some(ns) = &imp.namespace else { continue };
             let mut ok = true;
             if !seen_ns.insert(ns.clone()) {
-                errors.push(with_file(
-                    Diagnostic::error(
-                        imp.line,
-                        0,
-                        "load",
-                        format!("namespace `{ns}` is bound twice in this module"),
-                    ),
-                    m,
+                errors.push(load_error(
+                    &m.key,
                     root_key,
+                    imp.line,
+                    format!("namespace `{ns}` is bound twice in this module"),
                 ));
                 ok = false;
             }
             if mine.contains(ns) || import_locals.contains(ns) {
-                errors.push(with_file(
-                    Diagnostic::error(
-                        imp.line,
-                        0,
-                        "load",
-                        format!(
-                            "namespace `{ns}` collides with a top-level declaration or import \
-                             of the same name in this module"
-                        ),
-                    ),
-                    m,
+                errors.push(load_error(
+                    &m.key,
                     root_key,
+                    imp.line,
+                    format!(
+                        "namespace `{ns}` collides with a top-level declaration or import \
+                             of the same name in this module"
+                    ),
                 ));
                 ok = false;
             }
@@ -2832,31 +2790,23 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     // local, has no such owner and still errors here.
                     let one_name_two_modules = prev.0 != here.0 && prev.1 == here.1;
                     if !one_name_two_modules {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!("`{local}` is imported twice into this module"),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!("`{local}` is imported twice into this module"),
                         ));
                     }
                 }
                 if n.alias.is_some() && mine.contains(&local) {
-                    errors.push(with_file(
-                        Diagnostic::error(
-                            imp.line,
-                            0,
-                            "load",
-                            format!(
-                                "import alias `{local}` clashes with a top-level declaration of \
-                                 the same name in this module"
-                            ),
-                        ),
-                        m,
+                    errors.push(load_error(
+                        &m.key,
                         root_key,
+                        imp.line,
+                        format!(
+                            "import alias `{local}` clashes with a top-level declaration of \
+                                 the same name in this module"
+                        ),
                     ));
                 }
             }
@@ -2903,19 +2853,15 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                         // call as a forbidden direct use.
                         && !(ambiguous_only.contains(orig) && method_surface.contains(orig))
                     {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!(
-                                    "`{orig}` is not in scope — it was imported as `{}`; use \
-                                     that name (or import `{orig}` too)",
-                                    n.local()
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!(
+                                "`{orig}` is not in scope — it was imported as `{}`; use \
+                                     that name (or import `{orig}` too)",
+                                n.local()
+                            ),
                         ));
                     }
                 }
@@ -3302,11 +3248,8 @@ struct NsResolver<'a> {
 
 impl NsResolver<'_> {
     fn err(&mut self, line: usize, msg: String) {
-        let mut d = Diagnostic::error(line, 0, "load", msg);
-        if self.module_key != self.root_key {
-            d.file = Some(self.module_key.clone());
-        }
-        self.errors.push(d);
+        self.errors
+            .push(load_error(&self.module_key, &self.root_key, line, msg));
     }
 
     /// The program-wide symbol a namespace member resolves to (honoring any
@@ -3722,18 +3665,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 match owner.get(name) {
                     Some((def_module, exported)) if def_module == target => {
                         if !exported {
-                            errors.push(with_file(
-                                Diagnostic::error(
-                                    imp.line,
-                                    0,
-                                    "load",
-                                    format!(
-                                        "`{name}` exists in `{target}` but is not exported — \
-                                         add `export` to its declaration"
-                                    ),
-                                ),
-                                m,
+                            errors.push(load_error(
+                                &m.key,
                                 root_key,
+                                imp.line,
+                                format!(
+                                    "`{name}` exists in `{target}` but is not exported — \
+                                         add `export` to its declaration"
+                                ),
                             ));
                         }
                         // Importing an enum also brings its variants, and a
@@ -3742,18 +3681,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         visible.insert(name.clone());
                     }
                     Some((def_module, _)) if !clashed.contains(name.as_str()) => {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!(
-                                    "`{name}` is not defined in `{target}` (it lives in \
-                                     `{def_module}`)"
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!(
+                                "`{name}` is not defined in `{target}` (it lives in \
+                                     `{def_module}`)"
+                            ),
                         ));
                     }
                     // A clashed name: `clash_diagnostics` already reported the
@@ -3764,15 +3699,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         visible.insert(name.clone());
                     }
                     None => {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!("`{target}` does not define `{name}`"),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!("`{target}` does not define `{name}`"),
                         ));
                     }
                 }
@@ -3867,18 +3798,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         if gen_importer.as_deref() == Some(def_module.as_str()) {
                             return;
                         }
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                line,
-                                0,
-                                "load",
-                                format!(
-                                    "{what} `{name}` is defined in `{def_module}` but not \
-                                     imported here — add it to an `import {{ .. }} from` list"
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            line,
+                            format!(
+                                "{what} `{name}` is defined in `{def_module}` but not \
+                                     imported here — add it to an `import {{ .. }} from` list"
+                            ),
                         ));
                     }
                 }
@@ -3902,18 +3829,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             modules.sort_unstable();
             modules.dedup();
             let list = modules.join("`, `");
-            errors.push(with_file(
-                Diagnostic::error(
-                    line,
-                    0,
-                    "load",
-                    format!(
-                        "{what} `{name}` is defined in `{list}` but not imported here — add \
-                         it to an `import {{ .. }} from` list"
-                    ),
-                ),
-                m,
+            errors.push(load_error(
+                &m.key,
                 root_key,
+                line,
+                format!(
+                    "{what} `{name}` is defined in `{list}` but not imported here — add \
+                         it to an `import {{ .. }} from` list"
+                ),
             ));
         };
 
@@ -4047,12 +3970,23 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     Ok(program)
 }
 
-/// Attach the module's file to a diagnostic unless it is the root.
-fn with_file(mut d: Diagnostic, m: &Module, root_key: &str) -> Diagnostic {
-    if m.key != root_key {
-        d.file = Some(m.key.clone());
+/// Attach `key` to a diagnostic as its file, unless `key` is the root — a root
+/// diagnostic renders without one, exactly as a single-file program's does.
+///
+/// The ONE place a load's diagnostic learns where it points. `load_modules`,
+/// [`run_generator`] and [`NsResolver`] each restated these two lines against
+/// their own key, and `link` and [`resolve_aliases`] reached a third spelling
+/// through a `&Module`.
+fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {
+    if key != root_key {
+        d.file = Some(key.to_string());
     }
     d
+}
+
+/// A load error at `line` of `key`, worded by [`in_module`].
+fn load_error(key: &str, root_key: &str, line: usize, msg: String) -> Diagnostic {
+    in_module(Diagnostic::error(line, 0, "load", msg), key, root_key)
 }
 
 /// The import of `target` a diagnostic should point at, with the module that
@@ -4193,7 +4127,7 @@ fn clash_diagnostics(
                 if rest.len() == 1 { "s" } else { "" }
             )
         });
-        out.push(with_file(d, m, root_key));
+        out.push(in_module(d, &m.key, root_key));
     }
     out
 }

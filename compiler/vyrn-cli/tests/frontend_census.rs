@@ -281,11 +281,15 @@ fn loader_sections() -> Vec<Section> {
              twice or referenced without an import",
         ),
         sec(
-            "fn with_file(mut d: Diagnostic, m: &Module, root_key: &str) -> Diagnostic {",
+            "fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {",
             Shared,
             "where a load's diagnostic points: the module's file, the import \
              line a reader has to edit, and the namespace binding a suggestion \
-             would spell",
+             would spell. Since RFC-0125 §3 M6's wording slice there is ONE \
+             statement of the first — `load_modules`, `run_generator` and the \
+             namespace pass each restated it against their own key, and eleven \
+             sites in `link` and `resolve_aliases` spelled a whole \
+             `Diagnostic::error` out to reach a third",
         ),
         sec(
             "fn clash_diagnostics(",
@@ -1048,7 +1052,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4113, 23),
+        ("loader.rs", "the file's own job", 4036, 9),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1057,7 +1061,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("loader.rs", "shared machinery", 630, 0),
+        ("loader.rs", "shared machinery", 641, 1),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2947, 0),
         ("symbols.rs", "a rule stated a second time", 267, 0),
