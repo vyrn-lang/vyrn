@@ -1486,35 +1486,8 @@ fn load_modules(
         // Attribute decls to this module (root stays `None` so single-file
         // diagnostics render exactly as before).
         if !is_root {
-            for f in &mut program.functions {
-                f.module = Some(key.to_string());
-            }
-            for t in &mut program.type_decls {
-                t.module = Some(key.to_string());
-            }
-            for p in &mut program.protocols {
-                p.module = Some(key.to_string());
-            }
-            // Contracts (RFC-0071) carry their module too: `ContractInfo.module`
-            // is what lets a diagnostic say which library declared the contract
-            // (`contract `Page`, std/ui`).
-            for c in &mut program.contracts {
-                c.module = Some(key.to_string());
-            }
-            // Module state (RFC-0029) carries its owning module too, for
-            // diagnostics and the same-module initializer-call rule.
-            for g in &mut program.globals {
-                g.module = Some(key.to_string());
-            }
-            // Tag tests with their module too (RFC-0015): they still type-check,
-            // but `vyrn test <root>` runs only the root's (`None`-module) tests.
-            for t in &mut program.tests {
-                t.module = Some(key.to_string());
-            }
-            // Tag benches with their module too (RFC-0055): they still type-check,
-            // but `vyrn bench <root>` runs only the root's (`None`-module) benches.
-            for b in &mut program.benches {
-                b.module = Some(key.to_string());
+            for slot in decl_modules_mut(&mut program) {
+                *slot = Some(key.to_string());
             }
         }
 
@@ -2521,6 +2494,93 @@ fn is_injected(t: &TypeDecl) -> bool {
     t.line == 0
 }
 
+/// Which of a module's five declaration lists a row came from, for the one rule
+/// that needs it: a shared `extern fn` name is skipped only as a FUNCTION.
+#[derive(Clone, Copy, PartialEq)]
+enum DeclKind {
+    Type,
+    Fn,
+    Protocol,
+    Contract,
+    Global,
+}
+
+/// One top-level declaration of a module, as every reader in this file asks
+/// about it.
+struct Decl<'a> {
+    name: &'a str,
+    kind: DeclKind,
+    /// A global is never `export`ed: module state is module-private (RFC-0029),
+    /// so it is not namespace-reachable and cross-module access goes through an
+    /// accessor function.
+    exported: bool,
+    /// A parser-injected builtin type ([`is_injected`]), present in every file.
+    injected: bool,
+    /// An `extern fn` (RFC-0012): a host-ABI contract under its source
+    /// spelling, so no rule here may rename it.
+    is_extern: bool,
+}
+
+/// Every top-level declaration a module states, types first and globals last.
+///
+/// Six readers here asked this and wrote the five lists out to ask it: the decl
+/// set, the export set, the privacy candidates, an injected module's reserved
+/// spellings, [`link`]'s registration and [`load_modules`]'s attribution. A new
+/// declaration form had to reach all six, and each carried its own copy of
+/// which of them a rule skips.
+fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
+    fn d(name: &str, kind: DeclKind, exported: bool) -> Decl<'_> {
+        Decl {
+            name,
+            kind,
+            exported,
+            injected: false,
+            is_extern: false,
+        }
+    }
+    p.type_decls
+        .iter()
+        .map(|t| Decl {
+            injected: is_injected(t),
+            ..d(&t.name, DeclKind::Type, t.exported)
+        })
+        .chain(p.functions.iter().map(|f| Decl {
+            is_extern: f.is_extern,
+            ..d(&f.name, DeclKind::Fn, f.exported)
+        }))
+        .chain(
+            p.protocols
+                .iter()
+                .map(|pr| d(&pr.name, DeclKind::Protocol, pr.exported)),
+        )
+        .chain(
+            p.contracts
+                .iter()
+                .map(|c| d(&c.name, DeclKind::Contract, c.exported)),
+        )
+        .chain(
+            p.globals
+                .iter()
+                .map(|g| d(&g.name, DeclKind::Global, false)),
+        )
+}
+
+/// The owning-module slot of everything a module holds, the two runnable forms
+/// included. Each form needs one: a contract's names the library a diagnostic
+/// blames (RFC-0071), a global's carries the same-module initializer-call rule
+/// (RFC-0029), and a test's or bench's is what makes `vyrn test <root>` run the
+/// root's alone (RFC-0015, RFC-0055). Separate from [`decls`] only because the
+/// borrow is unique.
+fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>> {
+    (p.type_decls.iter_mut().map(|t| &mut t.module))
+        .chain(p.functions.iter_mut().map(|f| &mut f.module))
+        .chain(p.protocols.iter_mut().map(|pr| &mut pr.module))
+        .chain(p.contracts.iter_mut().map(|c| &mut c.module))
+        .chain(p.globals.iter_mut().map(|g| &mut g.module))
+        .chain(p.tests.iter_mut().map(|t| &mut t.module))
+        .chain(p.benches.iter_mut().map(|b| &mut b.module))
+}
+
 /// Resolve import aliasing (RFC-0022) into the flat namespace *before* the
 /// register/visibility/merge machinery, which is deliberately alias-unaware.
 ///
@@ -2546,25 +2606,10 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // 762 KB project, for a set usually read zero times. Filled on first use.
     let mut all_names: HashSet<String> = HashSet::new();
     for m in modules.iter() {
-        let set = module_decls.entry(m.key.clone()).or_default();
-        let mut add = |n: &str| {
-            set.insert(n.to_string());
-        };
-        for t in &m.program.type_decls {
-            add(&t.name);
-        }
-        for f in &m.program.functions {
-            add(&f.name);
-        }
-        for p in &m.program.protocols {
-            add(&p.name);
-        }
-        for c in &m.program.contracts {
-            add(&c.name);
-        }
-        for g in &m.program.globals {
-            add(&g.name);
-        }
+        module_decls
+            .entry(m.key.clone())
+            .or_default()
+            .extend(decls(&m.program).map(|d| d.name.to_string()));
     }
 
     // Exported top-level decl names per module — the surface a namespace import
@@ -2589,29 +2634,11 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 }
             }
         }
-        let set = module_exports.entry(m.key.clone()).or_default();
-        let mut ex = |n: &str, exported: bool| {
-            if exported {
-                set.insert(n.to_string());
-            }
-        };
-        for t in &m.program.type_decls {
-            if t.line != 0 {
-                ex(&t.name, t.exported);
-            }
-        }
-        for f in &m.program.functions {
-            ex(&f.name, f.exported);
-        }
-        for p in &m.program.protocols {
-            ex(&p.name, p.exported);
-        }
-        for c in &m.program.contracts {
-            ex(&c.name, c.exported);
-        }
-        // Globals are never `export`ed (module state is module-private,
-        // RFC-0029 — `export let` does not exist), so they are not
-        // namespace-reachable; cross-module access goes through accessor fns.
+        module_exports.entry(m.key.clone()).or_default().extend(
+            decls(&m.program)
+                .filter(|d| d.exported && !d.injected)
+                .map(|d| d.name.to_string()),
+        );
         for n in module_decls.get(&m.key).into_iter().flatten() {
             *name_module_count.entry(n.clone()).or_insert(0) += 1;
         }
@@ -2728,12 +2755,15 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             .find(|m| &m.key == key)
             .expect("injected module");
         let by_enum = injected_variants.entry(key.clone()).or_default();
-        let mut names: Vec<String> = Vec::new();
+        // Parser-injected builtins are in every module and keep their spelling.
+        let mut names: Vec<String> = decls(&m.program)
+            .filter(|d| !d.injected)
+            .map(|d| d.name.to_string())
+            .collect();
         for t in &m.program.type_decls {
             if t.line == 0 {
-                continue; // parser-injected builtins are in every module
+                continue;
             }
-            names.push(t.name.clone());
             if let Some(vs) = crate::types::declared_variants(&t.base) {
                 let vars = by_enum.entry(format!("{prefix}{}", t.name)).or_default();
                 for v in vs {
@@ -2741,18 +2771,6 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     names.push(v.name.clone());
                 }
             }
-        }
-        for f in &m.program.functions {
-            names.push(f.name.clone());
-        }
-        for p in &m.program.protocols {
-            names.push(p.name.clone());
-        }
-        for c in &m.program.contracts {
-            names.push(c.name.clone());
-        }
-        for g in &m.program.globals {
-            names.push(g.name.clone());
         }
         // No `all_names` bookkeeping: `mint` only ever produces `x__fromN`, which
         // has no `$` in it, so a reserved spelling is unreachable from there —
@@ -2963,39 +2981,20 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             .flat_map(|imp| imp.names.iter())
             .map(|n| n.local().to_string())
             .collect();
-        // Non-exported top-level decl names (skip parser-injected line-0 types,
-        // which are the same in every module and must never be renamed). Globals
-        // are never exported (RFC-0029), so they are always candidates.
-        let mut privates: Vec<String> = Vec::new();
-        for t in &m.program.type_decls {
-            if t.line != 0 && !exported.contains(&t.name) {
-                privates.push(t.name.clone());
-            }
-        }
-        for f in &m.program.functions {
-            // An `extern fn` is a host-ABI contract, not a namespace member:
-            // the backends emit the import under the SOURCE spelling and the
-            // JS host supplies it by that exact name (`extern:
-            // { vyrnRpcCall: .. }`). Renaming it severs the contract, so an
-            // extern is never a privacy-rename candidate even when several
-            // modules restate the same one (std/rpc's client stubs do).
-            if !f.is_extern && !exported.contains(&f.name) {
-                privates.push(f.name.clone());
-            }
-        }
-        for p in &m.program.protocols {
-            if !exported.contains(&p.name) {
-                privates.push(p.name.clone());
-            }
-        }
-        for c in &m.program.contracts {
-            if !exported.contains(&c.name) {
-                privates.push(c.name.clone());
-            }
-        }
-        for g in &m.program.globals {
-            privates.push(g.name.clone());
-        }
+        // Non-exported top-level decl names. A parser-injected type is the same
+        // in every module and must never be renamed; an `extern fn` names a
+        // host-ABI contract the backends emit under its SOURCE spelling, so
+        // renaming it severs the contract even when several modules restate the
+        // same one (std/rpc's client stubs do). A global is never exported
+        // (RFC-0029), so it is always a candidate.
+        let mut privates: Vec<String> = decls(&m.program)
+            .filter(|d| {
+                !d.injected
+                    && !d.is_extern
+                    && (d.kind == DeclKind::Global || !exported.contains(d.name))
+            })
+            .map(|d| d.name.to_string())
+            .collect();
         privates.sort();
         privates.dedup();
         for name in privates {
@@ -3653,12 +3652,23 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             owner.insert(name.to_string(), (module.to_string(), exported));
         };
 
+    // Every declaration form joins ONE top-level namespace: a contract name is
+    // what `contractOf(Name)` resolves (RFC-0071) and a module-state binding may
+    // not share a name with any other declaration (RFC-0013), so both obey the
+    // ordinary export/import visibility. Impl-flattened methods carry mangled
+    // names (`P__Key__m`) that cannot collide with a user identifier; they are
+    // registered anyway so duplicate impls across modules collide loudly here.
     for m in &modules {
+        for d in decls(&m.program) {
+            if d.injected || (d.kind == DeclKind::Fn && shared_externs.contains(d.name)) {
+                continue;
+            }
+            register(d.name, &m.key, d.exported, &mut clashes);
+        }
         for t in &m.program.type_decls {
             if is_injected(t) {
                 continue;
             }
-            register(&t.name, &m.key, t.exported, &mut clashes);
             if let Some(vs) = crate::types::declared_variants(&t.base) {
                 for v in vs {
                     variant_enum
@@ -3668,34 +3678,13 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 }
             }
         }
-        for f in &m.program.functions {
-            // Impl-flattened methods carry mangled names (`P__Key__m`) that
-            // cannot collide with user identifiers; register them anyway so
-            // duplicate impls across modules collide loudly here.
-            if shared_externs.contains(&f.name) {
-                continue;
-            }
-            register(&f.name, &m.key, f.exported, &mut clashes);
-        }
         for p in &m.program.protocols {
-            register(&p.name, &m.key, p.exported, &mut clashes);
             for sig in &p.methods {
                 method_protocol
                     .entry(sig.name.clone())
                     .or_default()
                     .push((p.name.clone(), m.key.clone()));
             }
-        }
-        // Contracts (RFC-0071) join the same top-level namespace as protocols:
-        // a contract name is what `contractOf(Name)` resolves, so it must be
-        // program-wide unique and obey the ordinary export/import visibility.
-        for c in &m.program.contracts {
-            register(&c.name, &m.key, c.exported, &mut clashes);
-        }
-        // Module-state bindings (RFC-0013) join the top-level namespace: a
-        // global may not share a name with any other top-level declaration.
-        for g in &m.program.globals {
-            register(&g.name, &m.key, false, &mut clashes);
         }
     }
     errors.extend(clash_diagnostics(&clashes, &modules, root_key));

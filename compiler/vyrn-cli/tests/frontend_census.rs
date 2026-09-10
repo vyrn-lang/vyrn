@@ -226,6 +226,16 @@ fn loader_sections() -> Vec<Section> {
             "which type declarations the parser injects into every file",
         ),
         sec(
+            "enum DeclKind {",
+            Shared,
+            "the ONE table of what a module declares, and the one of where each \
+             declaration records its owning module. Six readers wrote the five \
+             lists out to ask it before RFC-0125 §3 M6's table slice — the decl \
+             set, the export set, the privacy candidates, an injected module's \
+             reserved spellings, `link`'s registration and `load_modules`'s \
+             attribution — each with its own copy of which lists a rule skips",
+        ),
+        sec(
             "fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_key: &str) {",
             Job,
             "RFC-0022's import aliasing resolved into the flat namespace before \
@@ -1038,7 +1048,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4211, 23),
+        ("loader.rs", "the file's own job", 4113, 23),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1047,7 +1057,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("loader.rs", "shared machinery", 543, 0),
+        ("loader.rs", "shared machinery", 630, 0),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2947, 0),
         ("symbols.rs", "a rule stated a second time", 267, 0),
