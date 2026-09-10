@@ -62,14 +62,7 @@ const HOSTS: &[(&str, Core)] = &[
     ("compiler/vyrn-cli/tests/coretables.rs", Installed),
     ("compiler/vyrn-cli/tests/effects.rs", Installed),
     ("compiler/vyrn-cli/tests/kernel.rs", Installed),
-    (
-        "compiler/vyrn-cli/tests/lowered.rs",
-        None_(
-            "the gate compares a backend's derived types against the lowering's \
-             and installs only the generation engine, so the lowering it \
-             compares against was never in this process",
-        ),
-    ),
+    ("compiler/vyrn-cli/tests/lowered.rs", Installed),
     ("compiler/vyrn-cli/tests/typed.rs", Installed),
     (
         "compiler/vyrn-frontend/tests/common/mod.rs",
