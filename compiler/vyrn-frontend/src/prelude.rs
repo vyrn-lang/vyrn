@@ -613,25 +613,35 @@ fn rows() -> Vec<Function> {
             Str,
             &[],
         ),
-        // `@str` renders one value. Its parameter is a union — a number, a
-        // `Bool`, a `String`, or a type with `impl Show` — and this language
-        // cannot spell one, so the parameter is INERT and is spelled `Unit` for
-        // the reason `at`'s is. No rule reads it: RFC-0094 M1 deliberately left
-        // arity and parameter types in the checker's hand-written arms, which
-        // refuse a bad receiver with better words than a signature check could.
-        // What the row carries is the RETURN.
-        row("@str", &[], &[("x", Read, Unit)], Str, &[]),
-        // `print` takes the SAME union `@str` takes, and it had no row at all —
-        // the largest hole in every pass that asks what a builtin does with its
-        // argument. `rfcs/census-call-arguments.md` §3 counts it: 499 of the
-        // corpus's 532 unclassifiable call-argument sites are this one name, and
-        // a pass with no row cannot tell "the callee may keep it" from "nobody
-        // wrote it down". The parameter is inert and spelled `Unit` for the
-        // reason `@str`'s is; the checker's own arm still refuses a bad
-        // argument. What the row carries is the CAPABILITY: `print` reads what
-        // it is given and keeps nothing, so a temporary handed to it is the
-        // caller's to release.
-        row("print", &[], &[("x", Read, Unit)], Unit, &[]),
+        // `@str` renders one value, and `print` writes the same union out.
+        // The union used to be spelled `Unit` on both rows, because "a number,
+        // a `Bool`, a `String`, or a type with `impl Show`" was a type this
+        // language could not write down; each row said the parameter was inert
+        // and each name kept a hand-written arm to refuse a bad argument.
+        //
+        // A BOUND spells it (RFC-0125 §3 M6, the `Show` slice). `Show` is
+        // satisfied by a type the language renders itself and by a type that
+        // declares how it renders, which is exactly the union and is stated
+        // once, in [`crate::checker::Checker::type_satisfies`]. So the
+        // parameter is `T`, the bound is the union, and the two arms are gone.
+        //
+        // `print` had no row at all before RFC-0096 — the largest hole in every
+        // pass that asks what a builtin does with its argument.
+        // `rfcs/census-call-arguments.md` §3 counts it: 499 of the corpus's 532
+        // unclassifiable call-argument sites are this one name. The capability
+        // is what the row bought then and still buys: `print` reads what it is
+        // given and keeps nothing, so a temporary handed to it is the caller's
+        // to release.
+        bounded(
+            row("@str", &["T"], &[("x", Read, t())], Str, &[]),
+            "T",
+            crate::types::SHOW,
+        ),
+        bounded(
+            row("print", &["T"], &[("x", Read, t())], Unit, &[]),
+            "T",
+            crate::types::SHOW,
+        ),
         // `m.keys()` copies the keys into a new buffer (RFC-0028), so the
         // result is the caller's and the map keeps its own. Generic over the
         // KEY too (RFC-0117): `Array<K>` is what makes an Int64-keyed map's

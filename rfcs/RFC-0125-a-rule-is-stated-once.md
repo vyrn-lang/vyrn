@@ -25352,6 +25352,129 @@ table are re-pinned in this commit. RFC-0126's `Type::Logger` row moved a
 mention from the checker to the prelude and its total is unchanged; `Type::Str`,
 `Type::Unit` and `Type::Err` each lost the mentions the arm carried.
 
+#### The union `print` and `toString` take is a bound (2026-09-10, `track-ej`)
+
+The third of the three the open question §"What is left in `Checker::call`"
+left for the language. The user answered it on 2026-09-10: the union becomes
+`Show`, and the arms that wrote it out go.
+
+**What the blocks were.** Two arms of `Checker::call`, `print` and `@str`, each
+testing `types::renders` and then calling `renders_by_declaration`, each with
+its own arity refusal and its own sentence for a type that renders neither way.
+21 lines and 4 refusals of the arm section, and the union — *a number, a `Bool`,
+a `String`, or a type with `impl Show`* — written out twice and compared with
+nothing.
+
+**What it is now.** One bound. `Show` is satisfied by a type the language
+renders itself and by a type that declares how it renders, which is the union,
+and `Checker::type_satisfies` is where that sentence lives. `print`'s row is
+`<T: Show>(x: read T) -> Unit` and `@str`'s is `<T: Show>(x: read T) -> String`.
+Both were `(x: read Unit)` with a note on the row saying the parameter was inert
+because the language could not spell what it takes; both spell it now, and
+`prelude::checkable` hands them to the fall-through like any other row.
+
+**The bound's refusal is the arms' sentence.** `HEAPLESS` set the precedent: a
+bound the reader cannot reason about generically gets its own words. `Show`'s
+are `print`'s, with the hint that told a reader what to write —
+``` `print` needs a number, Bool, or String, found Q — say how it renders with
+`impl Show for Q` ```. `toString` said *renders* where `print` said *needs*, and
+one sentence now serves both, which is what a single statement of a rule means.
+
+**A call site's shown name reads the method table rather than stripping the
+`@`.** The fall-through printed `name.trim_start_matches('@')`, which is
+`toString`'s internal `@str` shown as `str` — a name no source can write, which
+is the mistake PR #120 named. `parser::method_surface` is where the surface
+spelling of an internal name is already written down, so it is read here. Every
+other internal name is unchanged by it, and the trim still covers `@list` and
+`@panicAt`, which are not method sugar.
+
+**Two defects the bound found, and both are older than it.**
+
+**One. A bare unsolved type parameter was offered as an expectation.** In the
+generic call path the argument was typed with `Some(&substitute(pty, &subst))`,
+and for a parameter the solve had not reached that is `T`. A `match` unifies its
+arms against what it is expected to be, so `print(match o { Some(v) => v, None
+=> 0 })` came back as *`match` arms have differing types: T vs Int64*. It is
+reproducible on the branch point with any generic — `fn id<T>(x: T) -> T` and
+`id(match o { .. })` refuses identically — and 26 corpus programs write the
+shape, so making `print` generic is what surfaced it. An unsolved bare parameter
+is not an expectation and is passed as `None`; every other shape still names its
+constructor and is passed through.
+
+**Two. `Show`'s return type was checked at three call sites and at no impl.**
+`renders_by_declaration` typed the `show` call and refused a non-String result,
+so an `impl Show for T` that nobody rendered was checked nowhere. With two of
+the three call sites gone the rule had one statement left to lose, so it moved
+to the impl, where the mistake is. The sentence is unchanged and it now fires at
+the impl's own line: `examples/show.vyrn`'s shape reports at line 2 column 22
+rather than at the `print` on line 3.
+
+**The one part of the decision the corpus refused, and the evidence.** The
+decision also said to seed an `impl Show` per scalar so that a user's `impl Show
+for Int64` overlaps it and `protocol_overlap` refuses it. That is not taken, and
+the reason is that its premise is false in this tree: a scalar `Show` impl is
+NOT dead. `examples/show.vyrn` line 81 is `print(n.show())` over `impl Show for
+Int64`, and its own comment states the rule the example exists to pin — *a
+scalar renders by the language's lowering, whatever a program declares* — with
+the divergence spelled out on line 53. `examples/protocol.vyrn` and
+`site/guide/protocols.vyrn` both declare `protocol Show` themselves and
+implement it for `Int64`, `Bool` and `String`; the guide teaches protocol
+dispatch with them. Refusing the impl would delete a working feature —
+`x.show()` on a scalar — to remove a divergence the corpus documents on purpose,
+and it would rewrite the protocols page's teaching material. Seeding the impls
+was also not expressible: `types::type_key` answers `None` for `Float64` and
+every sized int, and `ok_target` admits only `Int64`, `Bool` and `String` among
+scalars, so "an impl per scalar" needs the impl key space widened first, which
+is a change to dispatch and not to `print`.
+
+The bound does not need it. A scalar satisfies `Show` through `types::renders`,
+with no impl and no seeding, and every emitter checks `renders` FIRST
+(`Fn_::show_dispatch`), so a user impl on a scalar keeps meaning exactly what it
+means today. **0 refusals gained** is the result, and the wasm manifest is
+unmoved.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,069 | 15,102 | +33 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 1,195 | 1,205 | +10 |
+| `Checker::call`'s arms | 2,854 lines, 154 refusals | 2,833, 150 | −21, −4 |
+| statements of the union | 2 | 1 | −1 |
+| statements of "a `show` hands back a String" | 3 | 1 | −2 |
+| rows with an inert `Unit` parameter | 6 | 4 | −2 |
+
+The slice costs 43 lines and buys three fewer statements of two rules, plus the
+two defects above. `checker.rs` grows because both defects are fixed in it and
+because `declares_an_impl` is a named function where it was an inline chain.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 465 programs, byte-identical against the branch point, 125 refused before and after — 0 lost, 0 gained |
+| the six refusals the corpus never reaches | witnessed under both binaries, table below |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 33 s — no emitted byte moves |
+| `cargo test -p vyrn-frontend` | 0 failed |
+| `cargo test -p vyrn-cli` | 646 passed, 0 failed |
+
+| the program | before | after |
+|---|---|---|
+| `print(q)`, `q: Q` with no impl | ``` print needs a number, Bool, or String, found Q — say how it renders with `impl Show for Q` ``` | ``` `print` needs a number, Bool, or String, found Q — say how it renders with `impl Show for Q` ``` |
+| `q.toString()`, same `Q` | ``` `toString` renders a number, Bool, or String, found { a: Int64 } — … ``` | ``` `toString` needs a number, Bool, or String, found Q — … ``` |
+| `"hole \{q}"`, same `Q` | as `toString` | as `toString` |
+| `print(1, 2)` | `print expects 1 argument, got 2` | ``` `print` expects 1 argument(s), got 2 ``` |
+| `(1).toString(2)` | ``` `toString` takes no arguments ``` | ``` `toString` expects 1 argument(s), got 2 ``` |
+| `impl Show for Q { fn show(self) -> Int64 }` with `print(q)` | ``` `Show`'s `show` must hand back a String to render through, found Int64 ``` at the call | the same sentence, at the impl |
+
+The `toString` refusal names `Q` where it named `{ a: Int64 }`, because the
+bound reads the type the solve produced and the arm read the resolved base. That
+is the name a reader wrote.
+
+`checker_census.rs` and RFC-0126's cost table are re-pinned in this commit;
+`Type::Param` gains two mentions and `Type::Unit`, `Type::Str` and `Type::Err`
+lose the arms'.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the

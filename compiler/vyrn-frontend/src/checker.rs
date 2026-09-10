@@ -1096,6 +1096,33 @@ fn check_accum_inner(
         // branch in every arithmetic path in the interpreter. That case needs the
         // resolution to travel from the checker instead, which needs call-site
         // identity — designed in RFC-0084 and deliberately not built.
+
+        // A `Show` impl hands the renderers a String, and this is where that is
+        // said. It was checked at three CALL sites — `print`, `@str` and
+        // `value` each called [`Checker::renders_by_declaration`], which typed
+        // the `show` call and refused a non-String result — so the rule was
+        // stated three times and an impl nobody called was checked nowhere.
+        // Two of the three call sites are gone (their union is a bound now),
+        // and this is the one statement left.
+        //
+        // `Show` is known by NAME rather than declared (`vyrn run` on a bare
+        // file has no resolver, so `print` may not depend on a module lookup),
+        // so the signature comparison every declared protocol gets does not
+        // reach it. A program that declares `protocol Show` itself gets both.
+        if imp.protocol == crate::types::SHOW {
+            for m in &imp.methods {
+                if m.name == crate::types::SHOW_SHOW && m.ret != Type::Str {
+                    out.push(cerr_at!(
+                        m.line,
+                        m.name_span(),
+                        "`{}`'s `{}` must hand back a String to render through, found {}",
+                        crate::types::SHOW,
+                        crate::types::SHOW_SHOW,
+                        m.ret
+                    ));
+                }
+            }
+        }
         let ok_target = match &imp.ty {
             Type::Int | Type::Bool | Type::Str => true,
             // The two built-in sums, whichever way they are spelled
@@ -3686,6 +3713,24 @@ impl<'a> Checker<'a> {
             // collection an operation forgets or overwrites without releasing
             // it. Unlexable, so only a seeded row can carry it.
             crate::prelude::HEAPLESS => !crate::declared::owns_heap(&base, self.types),
+            // The union `print` and `@str` take, stated once (RFC-0125 §3 M6,
+            // the `Show` slice). It was written out in two arms of
+            // [`Self::call`], each testing [`crate::types::renders`] and then
+            // asking the declaration; the two are one bound now, and the arms
+            // are gone. The rule is additive, which is what the union always
+            // was: a scalar renders by the language's own lowering, and a type
+            // the language cannot render asks its `impl Show`.
+            //
+            // A scalar therefore satisfies the bound with no impl, and it must:
+            // the emitter checks `renders` FIRST, so an `impl Show for Int64`
+            // is never reached and is refused where it is written.
+            crate::types::SHOW => match &base {
+                // Inside `fn f<T: Show>(x: T)` the impl is selected per
+                // specialization, exactly as `x.show()` is (RFC-0002 §5), so
+                // the bound on the enclosing function is the whole answer.
+                Type::Param(p) => self.param_has_bound(p, bound),
+                _ => crate::types::renders(&base) || self.declares_an_impl(ty, &base, bound),
+            },
             "Num" | "Ord" => matches!(
                 base,
                 Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
@@ -3713,14 +3758,25 @@ impl<'a> Checker<'a> {
                 .any(|entries| entries.iter().any(|(p, _)| p == bound))
                 || self.impls.iter().any(|(p, _)| p == bound) =>
             {
-                [crate::types::type_key(ty), crate::types::type_key(&base)]
-                    .into_iter()
-                    .flatten()
-                    .any(|k| self.impls.contains(&(bound.to_string(), k)))
+                self.declares_an_impl(ty, &base, bound)
             }
             // Unknown bound names: unsatisfiable.
             _ => false,
         }
+    }
+
+    /// Whether `ty` declares an `impl <bound> for` itself.
+    ///
+    /// The type's OWN key first, the resolved base's second. An impl is keyed
+    /// on the name it was written for, and resolving first would erase that
+    /// name — `Box` resolves to a bare `Type::Record`, which has no key at all
+    /// (RFC-0084 M1). The base is still consulted so a plain alias (`type
+    /// Meters = Int64`) keeps satisfying the impl on what it aliases.
+    fn declares_an_impl(&self, ty: &Type, base: &Type, bound: &str) -> bool {
+        [crate::types::type_key(ty), crate::types::type_key(base)]
+            .into_iter()
+            .flatten()
+            .any(|k| self.impls.contains(&(bound.to_string(), k)))
     }
 
     /// Enforce the `extern` ABI type domain (RFC-0012): every parameter type
@@ -6721,9 +6777,9 @@ impl<'a> Checker<'a> {
     /// is selected per specialization, exactly as `x.show()` is inside the same
     /// generic (RFC-0002 §5), so this only agrees that one exists.
     ///
-    /// The protocol is an ordinary declaration — the compiler knows only the
-    /// name — so a program is free to declare `fn show(self) -> Int64`, and the
-    /// three renderers must not then be handed one.
+    /// That a `show` hands back a String is stated at the IMPL, beside the
+    /// other rule about a `Show` impl, so an impl nobody calls is checked too.
+    /// This types the call, which is what `value` still needs.
     fn renders_by_declaration(
         &self,
         t: &Type,
@@ -6738,16 +6794,8 @@ impl<'a> Checker<'a> {
         let Some(m) = self.show_dispatch(t) else {
             return Ok(false);
         };
-        let r = self.call(&m, args, line, scope, Some(&Type::Str), fn_ret)?;
-        match self.base(&r) {
-            Type::Str | Type::Err => Ok(true),
-            other => Err(cerr!(
-                line,
-                "`{}`'s `show` must hand back a String to render through, found \
-                 {other}",
-                crate::types::SHOW
-            )),
-        }
+        self.call(&m, args, line, scope, Some(&Type::Str), fn_ret)?;
+        Ok(true)
     }
 
     fn call(
@@ -6938,30 +6986,6 @@ impl<'a> Checker<'a> {
                 let _ = self.expr(&args[1], scope, Some(&Type::Str), fn_ret);
             }
             return Ok(Type::Never);
-        }
-
-        // built-in: print(Int|Bool) -> Unit
-        if name == "print" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "print expects 1 argument, got {}", args.len()));
-            }
-            let written = self.expr(&args[0], scope, None, fn_ret)?;
-            let t = self.base(&written);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if !crate::types::renders(&t) {
-                // RFC-0094 M3: the type answers where the language cannot.
-                if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
-                    return Ok(Type::Unit);
-                }
-                return Err(cerr!(
-                    line,
-                    "print needs a number, Bool, or String, found {t}{}",
-                    self.show_hint(&written)
-                ));
-            }
-            return Ok(Type::Unit);
         }
 
         // (RFC-0125 §3 M6 deleted the sixteen arms whose whole behaviour was the
@@ -7201,35 +7225,6 @@ impl<'a> Checker<'a> {
                 bits: 8,
                 signed: false,
             })));
-        }
-
-        // `@str` — the internal spelling of `x.toString()` and of interpolation
-        // holes: render a scalar to a fresh String. `parse` (below) is the
-        // fallible inverse.
-        if name == "@str" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`toString` takes no arguments"));
-            }
-            // `str` renders a scalar to a fresh String — Int, sized IntN, Float,
-            // Bool, or String (String is copied). Interpolation lowers to this.
-            let written = self.expr(&args[0], scope, None, fn_ret)?;
-            let t = self.base(&written);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if !crate::types::renders(&t) {
-                // RFC-0094 M3. `"\{x}"` desugars to this call, so one dispatch
-                // serves interpolation and `x.toString()` both.
-                if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
-                    return Ok(Type::Str);
-                }
-                return Err(cerr!(
-                    line,
-                    "`toString` renders a number, Bool, or String, found {t}{}",
-                    self.show_hint(&written)
-                ));
-            }
-            return Ok(Type::Str);
         }
 
         // Growable arrays. `[]` builds one, `xs.push(v)` (`@push`) appends and
@@ -8223,11 +8218,14 @@ impl<'a> Checker<'a> {
         // The name a reader can WRITE. An `@` spelling is the sugar's internal
         // one and no source can lex it, so a refusal that printed it would name
         // something the reader cannot type — PR #120's lesson, which
-        // [`Self::show_hint`] states for a loader-prefixed type. Stripping the
-        // `@` gives the method's surface spelling for every internal name that
-        // reaches here (`@charCount` is `charCount`), and it is a no-op for a
-        // user declaration, which is every other call on this path.
-        let shown = name.trim_start_matches('@');
+        // [`Self::show_hint`] states for a loader-prefixed type.
+        // [`crate::parser::METHOD_BUILTINS`] is where the surface spelling of
+        // an internal name is written down, and reading it here is what makes
+        // `@str` print as `toString` rather than as `str`. Stripping the `@`
+        // covers the internal names that are not method sugar (`@list`,
+        // `@panicAt`), and both are a no-op for a user declaration, which is
+        // every other call on this path.
+        let shown = crate::parser::method_surface(name).trim_start_matches('@');
         self.check_declared_call(
             &DeclaredCall {
                 key: name,
@@ -8315,7 +8313,18 @@ impl<'a> Checker<'a> {
                 // against `r: Result<T, String>`), and the unify then binds
                 // whatever parameter the literal left open.
                 let want = crate::types::substitute(pty, &subst);
-                let aty = self.expr(arg, scope, Some(&want), fn_ret)?;
+                // A bare type parameter the solve has not reached yet is not an
+                // expectation, and offering it as one is wrong: a `match`
+                // unifies its arms against what it is expected to be, so
+                // `print(match o { Some(v) => v, None => 0 })` came back as
+                // "arms have differing types: T vs Int64". Every other shape
+                // still names its constructor (`Array<T>` says "an array") and
+                // is passed through.
+                let want_hint = match want {
+                    Type::Param(_) => None,
+                    ref w => Some(w),
+                };
+                let aty = self.expr(arg, scope, want_hint, fn_ret)?;
                 self.unify(pty, &aty, &mut subst, line)?;
                 // The concrete path proves each constant argument against its
                 // (predicated) parameter type at the boundary; the generic path
@@ -8411,6 +8420,14 @@ impl<'a> Checker<'a> {
                     let Some(concrete) = subst.get(tp) else {
                         continue;
                     };
+                    // A bound has nothing to say about a type that already
+                    // failed: every arm this reading replaced answered `Ok`
+                    // for `Type::Err` and stopped, so that a second sentence
+                    // is not printed at a call whose argument is already
+                    // refused.
+                    if matches!(self.base(concrete), Type::Err) {
+                        continue;
+                    }
                     for b in bs {
                         if !self.type_satisfies(concrete, b) {
                             // The compiler's own bound is refused in its own
@@ -8427,6 +8444,19 @@ impl<'a> Checker<'a> {
                                     "`{shown}` forgets or overwrites elements without releasing \
                                      them, and `{concrete}` owns heap — move the elements one at \
                                      a time instead"
+                                ));
+                            }
+                            // `Show` is the union `print` and `@str` take,
+                            // and the two arms it replaces named it as a union
+                            // rather than as a protocol a type failed. The
+                            // sentence is theirs, with the hint that told a
+                            // reader what to write.
+                            if b == crate::types::SHOW {
+                                return Err(cerr!(
+                                    line,
+                                    "`{shown}` needs a number, Bool, or String, \
+                                     found {concrete}{}",
+                                    self.show_hint(concrete)
                                 ));
                             }
                             return Err(cerr!(line, "`{shown}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
@@ -11036,7 +11066,13 @@ mod tests {
              fn main() -> Int64 { return label(1).byteLength }",
         )
         .unwrap_err();
-        assert!(e.contains("`toString` renders"), "{e}");
+        // One sentence for both renderers since the union became a bound
+        // (RFC-0125 §3 M6): `print` always said "needs", `toString` said
+        // "renders", and the two arms that carried them are one row's bound.
+        assert!(
+            e.contains("`toString` needs a number, Bool, or String"),
+            "{e}"
+        );
     }
 
     /// A type with no `impl Show` is refused as before, and the refusal names
