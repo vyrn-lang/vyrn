@@ -6,7 +6,7 @@
 //! enforced by the compiler, rather than through `&`/move mechanics. It runs as
 //! a separate pass after type checking, so the type checker stays unaware of it.
 //!
-//! `Read`/`Modify`/`Share` impose no restriction in v0.1 (they are surface-only);
+//! `Read`/`Modify` impose no restriction in v0.1 (they are surface-only);
 //! only `Consume` moves. Analysis is flow-sensitive: `if` merges branches with
 //! "may-consume" (a value consumed on either path is consumed afterward), a
 //! reassignment revives a variable, and consuming a pre-loop variable inside a

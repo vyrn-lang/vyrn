@@ -372,9 +372,7 @@ fn parser_sections() -> Vec<Section> {
         sec(
             "fn parse_capability(&mut self) -> Capability {",
             Twice,
-            "a parameter's capability, `share` included. The same table, third \
-             statement — and the only one of the three that carries the fourth \
-             word",
+            "a parameter's capability. The same table, third statement",
         ),
         sec(
             "fn enum_type(&mut self) -> Result<Type, Diagnostic> {",
@@ -848,7 +846,7 @@ fn the_parser_census_is_what_the_rfc_records() {
     let want = vec![
         ("parser.rs", "the grammar's own arm", 3522, 52),
         ("parser.rs", "a desugar the parser states", 1043, 7),
-        ("parser.rs", "a table stated a second time", 234, 1),
+        ("parser.rs", "a table stated a second time", 233, 1),
         ("parser.rs", "recovery and the diagnostic sentences", 174, 2),
         ("parser.rs", "shared machinery", 244, 1),
         ("parser.rs", "tests", 1960, 0),

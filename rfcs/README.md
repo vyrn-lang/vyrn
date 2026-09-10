@@ -17,7 +17,7 @@ the evidence that changed the answer is the part worth keeping.
 - [RFC-0003 Validated Types](RFC-0003-validated-types.md) — the signature
   feature: a type carries the rule that makes a value valid.
 - [RFC-0004 Capabilities & Memory](RFC-0004-capabilities-and-memory.md) —
-  `read` / `modify` / `consume` / `share`. Read §4 and §5 as history: the memory
+  `read` / `modify` / `consume`. Read §4 and §5 as history: the memory
   model they record was replaced. The current one is
   [RFC-0089](RFC-0089-mutable-value-semantics.md) through
   [RFC-0096](RFC-0096-a-self-referring-type-declares-its-release.md), and
@@ -182,7 +182,7 @@ claim is true — is written down in the test's own header.
 | [0124](RFC-0124-work-that-happens-once.md) | work that happens once | Implemented; generation-side at-most-once evaluation for provably effect-free nullary functions (referential transparency with its hypothesis screened, not assumed) — site export 16.7 s → 13.8 s; runtime once-only recorded as module state's answered question |
 | [0125](RFC-0125-a-rule-is-stated-once.md) | a rule is stated once | Draft; a named, place-based core, a kernel of three judgments, one emitter and a runtime in Vyrn — M1 (places) is the measured gate, and the probe that motivates it is in §1.4 |
 | [0126](RFC-0126-a-type-constructor-is-a-case-in-every-pass.md) | a type constructor is a case in every pass | Census closed, and its first collapse taken through M5: `ast::Type` is 33 constructors and 2,288 mentions in the seven files that decide, `Option<T>` IS `| None | Some(T)`, and RFC-0125 §2.8's array and Map candidates were already refused with numbers by RFC-0082 |
-| [0127](RFC-0127-a-form-is-an-arm-in-every-walk.md) | a form is an arm in every walk | Census closed; the rest of the surface priced — 38 statement, expression and pattern forms (1,777 mentions in nine files), 9 declarations, 24 keywords and 15 contextual words — with five ranked collapses, one taken (`test` and `bench` share a carrier) and the number that stopped each of the others |
+| [0127](RFC-0127-a-form-is-an-arm-in-every-walk.md) | a form is an arm in every walk | Census closed; the rest of the surface priced — 38 statement, expression and pattern forms (1,777 mentions in nine files), 9 declarations, 24 keywords and 14 contextual words — with five ranked collapses, one taken (`test` and `bench` share a carrier) and the number that stopped each of the others |
 
 ## The other documents here
 

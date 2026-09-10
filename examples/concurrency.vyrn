@@ -8,12 +8,12 @@
 // them one after another) and native code agree, and a parallel scheduler could be
 // dropped in without changing a single answer.
 //
-// `share` is the capability for concurrent read access: the same immutable value
-// can be handed to several tasks at once, precisely because none can mutate it.
+// A task reads immutable data: the same value can be handed to several tasks at
+// once, precisely because none can mutate it.
 
 type Config = { base: Int64, scale: Int64 }
 
-fn transform(cfg: share Config, x: Int64) -> Int64 {
+fn transform(cfg: read Config, x: Int64) -> Int64 {
     return cfg.base + x * cfg.scale
 }
 

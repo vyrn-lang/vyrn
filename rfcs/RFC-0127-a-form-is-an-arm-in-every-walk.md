@@ -271,7 +271,7 @@ rows.
 So of the nine passes the brief named, two cost nothing per form, and the census
 can say so as a fact rather than as a claim.
 
-### 3.4 The 24 keywords and the 15 contextual words
+### 3.4 The 24 keywords and the 14 contextual words
 
 124 mentions in three files for the keywords. The spellings and the tokens are
 read out of the lexer's `keywords!` table, which is the same anchor
@@ -315,7 +315,7 @@ The third was `lex`'s own copy of the spelling table, which went when RFC-0125
 there are not two. **A keyword is nearly free. The FORM behind it is what
 costs**, and §3.1 is where the language's weight is.
 
-47 mentions in four files for the contextual words — the words the lexer hands
+46 mentions in four files for the contextual words — the words the lexer hands
 back as identifiers and the parser reads by position.
 
 | word | lexer | parser | checker | fmt | all four |
@@ -323,7 +323,6 @@ back as identifiers and the parser reads by position.
 | `read` | 0 | 5 | 0 | 0 | 5 |
 | `modify` | 0 | 5 | 3 | 0 | 8 |
 | `consume` | 0 | 5 | 0 | 0 | 5 |
-| `share` | 0 | 1 | 0 | 0 | 1 |
 | `gen` | 0 | 3 | 0 | 0 | 3 |
 | `test` | 0 | 3 | 1 | 0 | 4 |
 | `bench` | 0 | 3 | 1 | 0 | 4 |

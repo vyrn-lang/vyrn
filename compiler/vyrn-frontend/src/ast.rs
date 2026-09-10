@@ -740,7 +740,7 @@ impl Function {
 /// A capability declares what a function does with a parameter (RFC-0004):
 /// the programmer's *intent*, from which the compiler enforces usage rules.
 /// v0.1 gives `Consume` real semantics (move / use-after-consume checking);
-/// `Read`/`Modify`/`Share` are accepted but currently behave like `Read`.
+/// `Read`/`Modify` are accepted but currently behave like `Read`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     /// Observe the value; it remains usable by the caller. (Default.)
@@ -749,8 +749,6 @@ pub enum Capability {
     Modify,
     /// Take ownership; the caller may not use the value afterward.
     Consume,
-    /// Share concurrent read access (surface-only in v0.1; treated as `Read`).
-    Share,
 }
 
 /// A name a binding form introduces, and where the reader spelled it.

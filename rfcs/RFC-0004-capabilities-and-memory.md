@@ -5,6 +5,9 @@
   Read §5.4 first; §4, §5.1, §5.2 and §5.3 are kept as the record of a decision
   that was made on evidence and reversed on evidence. Remaining: surface
   refinements + *parallel execution* of the shipped concurrency model.
+- **Retired:** `share` left the language on 2026-09-11. It parsed to a fourth
+  capability that every pass treated as `read`, and no program in `std/`, in
+  `examples/` or on the site wrote it. Read every `share` below as history.
 - **Depends on:** RFC-0001
 - **Related:** RFC-0002 (views), RFC-0006 (how conflicts are reported)
 

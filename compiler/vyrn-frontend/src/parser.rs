@@ -2310,7 +2310,6 @@ impl Parser {
                 "read" => Some(Capability::Read),
                 "modify" => Some(Capability::Modify),
                 "consume" => Some(Capability::Consume),
-                "share" => Some(Capability::Share),
                 _ => None,
             };
             if let Some(c) = cap {

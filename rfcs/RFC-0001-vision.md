@@ -42,7 +42,7 @@ the question is: *does this make the programmer's intent more obvious without
 weakening the guarantees?*
 
 ### 1. Intent over mechanism
-The programmer reasons about **read / modify / consume / share**, not ownership,
+The programmer reasons about **read / modify / consume**, not ownership,
 lifetimes, or borrow state. The compiler translates intent into safe, efficient
 code. → RFC-0004.
 

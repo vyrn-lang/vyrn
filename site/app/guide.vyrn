@@ -311,7 +311,7 @@ export fn chapters() -> Array<Chapter> {
                     "The compiler proves what it can while the program compiles. So `Age(30)` costs nothing at run time, and `Age(5)` is a compile error rather than a failed check. Input from outside the program is not a constant, so it takes the total form. `Age?(n)` answers <code>Option&lt;Age&gt;</code>, and no path produces an unchecked `Age`.",
                 ], "types"),
                 compared("intent", "What a function does with its argument", [
-                    "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: `read`, `modify`, `consume`, `share`.",
+                    "Rust says this with borrows and lifetimes, TypeScript cannot say it at all, and Go says it with a pointer and a comment. Vyrn writes the intent on the parameter as a word: `read`, `modify`, `consume`.",
                     "There is no lifetime grammar to learn, because the word is the whole declaration — the compiler decides where the value is released from what the words say. <a href=\"/guide/ownership.html\">Ownership, consume, regions</a> is the chapter that teaches it.",
                 ], "memory"),
                 compared("failure", "When something fails", [
@@ -386,8 +386,8 @@ export fn chapters() -> Array<Chapter> {
             title: "Ownership, consume, regions",
             lede: "You write what a function does with a value. The compiler enforces it and frees the memory. There is no collector, no lifetime syntax, and no borrow annotation.",
             sections: [
-                section("capabilities", "The four words", [
-                    "A parameter carries a capability. <code>read</code> observes the value and the caller keeps it. <code>modify</code> changes it in place. <code>consume</code> takes ownership, and the caller may not name the value again. <code>share</code> is the fourth, for a value more than one holder reads.",
+                section("capabilities", "The three words", [
+                    "A parameter carries a capability. <code>read</code> observes the value and the caller keeps it. <code>modify</code> changes it in place. <code>consume</code> takes ownership, and the caller may not name the value again.",
                     "The words are erased before the program runs. They cost nothing, and they are the only ownership syntax there is.",
                     "Use a consumed value again and the compiler names the line that took it: <code>`t` is used here but was already consumed by `redeem(..)` on line 7</code>.",
                 ], ["capabilities"]),

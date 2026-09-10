@@ -2375,7 +2375,6 @@ fn function_detail(f: &Function) -> String {
                 Capability::Read => "",
                 Capability::Modify => "modify ",
                 Capability::Consume => "consume ",
-                Capability::Share => "share ",
             };
             let ty = type_to_string(&p.ty);
             if i == 0 && p.name == "self" {
@@ -2474,7 +2473,6 @@ fn method_sig_detail(m: &MethodSig) -> String {
         Capability::Read => t,
         Capability::Modify => format!("modify {t}"),
         Capability::Consume => format!("consume {t}"),
-        Capability::Share => format!("share {t}"),
     };
     let mut ps = vec![cap(m.recv, "self".to_string())];
     ps.extend(m.params.iter().enumerate().map(|(i, t)| {

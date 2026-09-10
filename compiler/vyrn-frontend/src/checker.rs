@@ -738,7 +738,6 @@ fn render_method_sig(
         Capability::Read => t,
         Capability::Modify => format!("modify {t}"),
         Capability::Consume => format!("consume {t}"),
-        Capability::Share => format!("share {t}"),
     };
     let mut ps = vec![word(recv, "self".to_string())];
     ps.extend(params.iter().enumerate().map(|(i, t)| {

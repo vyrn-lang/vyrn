@@ -224,7 +224,7 @@ fn reader_path(e: &Expr) -> Option<String> {
 /// what it is handed (`consume`).
 fn param_borrow(cap: Capability, name: &str) -> Option<BorrowKind> {
     let cap = match cap {
-        Capability::Read | Capability::Share => "read",
+        Capability::Read => "read",
         Capability::Modify => "modify",
         Capability::Consume => return None,
     };

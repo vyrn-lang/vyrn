@@ -117,8 +117,8 @@ const CONTEXTUAL_COLUMNS: &[(&str, &[&str])] = &[
 /// named in RFC-0127 §3.4 and are here because the parser or the checker reads
 /// them.
 const CONTEXTUAL_WORDS: &[&str] = &[
-    "read", "modify", "consume", "share", "gen", "test", "bench", "panic", "from", "as", "extern",
-    "lazy", "place", "logging", "contract",
+    "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as", "extern", "lazy",
+    "place", "logging", "contract",
 ];
 
 /// The verdict vocabulary of RFC-0127 §4, which is RFC-0126 §4's. Three words,
@@ -917,7 +917,7 @@ fn count_tokens(tokens: &[vyrn_frontend::lexer::Token], into: &mut Uses) {
             // Each word in the position the parser reads it in, and no other:
             // a binding named `read` is a name, not the capability.
             let contextual = match w.as_str() {
-                "read" | "modify" | "consume" | "share" => {
+                "read" | "modify" | "consume" => {
                     matches!(after, Some(Tok::Ident(_) | Tok::Vself | Tok::Fn))
                 }
                 "gen" | "extern" => matches!(after, Some(Tok::Fn)),

@@ -163,13 +163,6 @@ match seat(t) {
 }
 ",
         },
-        Piece {
-            id: "capShare",
-            src: "fn watch(t: share Ticket) -> Int64 {
-    return t.id  // shared, and the compiler enforces what that permits
-}
-",
-        },
     ]
 }
 
@@ -178,11 +171,11 @@ match seat(t) {
 // ---------------------------------------------------------------------------
 
 /// The words the grammar reads as keywords in position and the lexer hands back
-/// as identifiers. `read`, `modify`, `consume` and `share` are the reason this
-/// list exists: they are the language's whole ownership surface, and a site that
+/// as identifiers. `read`, `modify` and `consume` are the reason this list
+/// exists: they are the language's whole ownership surface, and a site that
 /// argues for them cannot render them as ordinary names.
 fn contextual() -> Array<String> {
-    return ["read", "modify", "consume", "share", "gen", "test", "bench", "panic", "from", "as"]
+    return ["read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as"]
 }
 
 fn isContextual(word: String) -> Bool {

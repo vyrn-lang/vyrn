@@ -145,11 +145,11 @@ fn publish_json(json: String) -> usize {
 /// as identifiers.
 ///
 /// The same list as `site/app/hl.vyrn`, which colours the snippets the rest of
-/// the site shows, and for the same reason: `read`, `modify`, `consume` and
-/// `share` are the language's whole ownership surface, and a page that invites
-/// you to type them cannot render them as ordinary names.
+/// the site shows, and for the same reason: `read`, `modify` and `consume` are
+/// the language's whole ownership surface, and a page that invites you to type
+/// them cannot render them as ordinary names.
 const CONTEXTUAL: &[&str] = &[
-    "read", "modify", "consume", "share", "gen", "test", "bench", "panic", "from", "as",
+    "read", "modify", "consume", "gen", "test", "bench", "panic", "from", "as",
 ];
 
 /// The CSS class for one lexed item, or `""` for text that carries no colour.
