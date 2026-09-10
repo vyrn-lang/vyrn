@@ -2064,7 +2064,7 @@ fn mk() -> Pack {
 
 fn go() -> Int64 {
     let arg = mk()
-    return match fromJson(R, arg.j) {
+    return match fromJson<R>(arg.j) {
         Valid(v) => v.id,
         Invalid(i) => 0,
     }

@@ -4219,7 +4219,7 @@ fn vyxEmitClientRender(hasLoad: Bool, paramNames: Array<String>, dataType: Strin
     if hasLoad == false {
         let mut out = "export fn clientRender(propsJson: String, paramsJson: String) -> String {\n"
         if hasParams {
-            out = out + "    return match fromJson(Params, paramsJson) {\n"
+            out = out + "    return match fromJson<Params>(paramsJson) {\n"
             out = out + "        Valid(uiPrm) => toJson(page(uiPrm)),\n"
             out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
         } else {
@@ -4237,13 +4237,13 @@ fn vyxEmitClientRender(hasLoad: Bool, paramNames: Array<String>, dataType: Strin
     }
     out = out + "export fn clientRender(propsJson: String, paramsJson: String) -> String {\n"
     if hasParams {
-        out = out + "    return match fromJson(" + dataName + ", propsJson) {\n"
-        out = out + "        Valid(uiD) => match fromJson(Params, paramsJson) {\n"
+        out = out + "    return match fromJson<" + dataName + ">(propsJson) {\n"
+        out = out + "        Valid(uiD) => match fromJson<Params>(paramsJson) {\n"
         out = out + "            Valid(uiPrm) => toJson(page(uiPrm, uiD)),\n"
         out = out + "            Invalid(uiI) => " + fb + ",\n        },\n"
         out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
     } else {
-        out = out + "    return match fromJson(" + dataName + ", propsJson) {\n"
+        out = out + "    return match fromJson<" + dataName + ">(propsJson) {\n"
         out = out + "        Valid(uiD) => toJson(page(uiD)),\n"
         out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
     }
@@ -4270,7 +4270,7 @@ fn vyxEmitClientRenderLoading(paramNames: Array<String>) -> String {
     let fb = "\"__vyrn_fallback__\""
     if paramNames.length > 0 {
         let mut out = "export fn clientRenderLoading(paramsJson: String) -> String {\n"
-        out = out + "    return match fromJson(Params, paramsJson) {\n"
+        out = out + "    return match fromJson<Params>(paramsJson) {\n"
         out = out + "        Valid(uiPrm) => toJson(pageLoading(uiPrm)),\n"
         out = out + "        Invalid(uiI) => " + fb + ",\n    }\n}\n"
         return out

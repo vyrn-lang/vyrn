@@ -212,8 +212,8 @@ The `want` argument of `field`, emitted as the JSON text a procedure's input
 record is decoded from.
 
 **The same decode path the RPC surface uses.** `std/rpc`'s generated handler
-runs a POSTed body through `fromJson(<ReqType>, body)`; the arm this feeds
-runs `fromJson(<ReqType>, ..)` over the text this returns. An argument and a
+runs a POSTed body through `fromJson<ReqType>(body)`; the arm this feeds
+runs `fromJson<ReqType>(..)` over the text this returns. An argument and a
 request body reach the same record by one route and are validated by one rule,
 so a `Title` too long is refused identically over both wires — there is no
 second decoder here to be lenient where the first is strict.

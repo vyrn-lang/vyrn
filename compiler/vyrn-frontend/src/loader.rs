@@ -397,7 +397,13 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
 /// which is where the list of those bodies lives.
 fn stamp_panic_sites(program: &mut Program, file: &str) {
     let mut stamp = |e: &mut Expr| {
-        if let Expr::Call { name, args, line } = e {
+        if let Expr::Call {
+            name,
+            args,
+            line,
+            type_args: _,
+        } = e
+        {
             if name == "panic" && args.len() == 1 {
                 *name = PANIC_AT.to_string();
                 args.push(Expr::Str(format!("{file}:{line}")));
@@ -3342,8 +3348,21 @@ impl BodyVisitMut for NsResolver<'_> {
             // `ns.fn(args)` and `ns.Enum.Variant(payload)` both arrive as method
             // sugar — the receiver is the first argument. Either way the
             // receiver goes and the walk carries on into what is left.
-            Expr::Call { name, args, line } => {
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                line,
+            } => {
                 let l = *line;
+                // A type ARGUMENT is a type, and a namespaced one resolves the
+                // way every other type spelling does (RFC-0125 §3 M6):
+                // `fromJson<shapes.Point>(s)` names the declaration `shapes`
+                // brings in. Before the type argument existed the target was an
+                // `Expr::Var` and the `Field` arm below rewrote it.
+                for t in type_args.iter_mut() {
+                    self.rewrite_type(t);
+                }
                 // `ns.member(rest)` — first arg is the bare namespace.
                 if let Some(Expr::Var { name: head, .. }) = args.first() {
                     if self.is_ns(head, locals) {
@@ -4133,7 +4152,13 @@ impl BodyVisit<'_> for RefNames {
             // is recorded under its dotted spelling, never as a bare `f` that
             // would read as this module's flat name. A flat call with a like-
             // shaped argument keeps the bare spelling.
-            Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+            Expr::Call {
+                name,
+                args,
+                line,
+                type_args: _,
+            }
+            | Expr::Spawn { name, args, line } => {
                 let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
                     sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
@@ -4326,7 +4351,18 @@ impl BodyVisitMut for Renamer<'_> {
 
     fn expr(&mut self, e: &mut Expr, locals: &HashSet<String>) -> bool {
         match e {
-            Expr::Call { name, args, .. } => {
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                ..
+            } => {
+                // A renamed declaration is renamed inside a type argument too
+                // (RFC-0125 §3 M6): `fromJson<Pt>(s)` names a type this module
+                // may have had renamed for privacy.
+                for t in type_args.iter_mut() {
+                    rewrite_type(t, self.map);
+                }
                 let ns_receiver =
                     matches!(args.first(), Some(Expr::Var { name: h, .. }) if self.ns.contains(h));
                 let ctor = self.variants.contains(name.as_str());

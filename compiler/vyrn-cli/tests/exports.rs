@@ -245,7 +245,7 @@ fn emit_gen_connect_client_shows_stubs_dispatchers_and_unify() {
     );
     // The unifier: 200 decode, 400 -> the Connect error's details, transport Issue.
     assert!(
-        src.contains("if status == 200 { return fromJson(UserResult, body) }"),
+        src.contains("if status == 200 { return fromJson<UserResult>(body) }"),
         "{src}"
     );
     assert!(src.contains("Valid(err) => Invalid(err.details)"), "{src}");

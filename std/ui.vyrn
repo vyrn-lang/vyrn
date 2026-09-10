@@ -1928,7 +1928,7 @@ gen fn uiEmitDynMatch(p: UiPageInfo, k: Int64, idx: String, renderName: String) 
         out = out + "    }"
         return out
     }
-    let mut out = "match fromJson(UiRouteInt, segs[" + segIdx.toString() + "]) {\n"
+    let mut out = "match fromJson<UiRouteInt>(segs[" + segIdx.toString() + "]) {\n"
     out = out + "        Valid(" + vv + ") => " + uiEmitDynMatch(p, k + 1, idx, renderName) + ",\n"
     out = out + "        Invalid(issues) => None,\n"
     out = out + "    }"
@@ -2876,7 +2876,7 @@ gen fn uiBuildClientModule(pages: Array<UiPageInfo>, errors: Array<UiChrome>, th
     out = out + "    let uiPrms = emit(uiClientField(uiJ, \"params\"))\n"
     if hasErr {
         out = out + "    if uiPage == \"@error\" {\n"
-        out = out + "        return match fromJson(PageError, uiProps) {\n            Valid(uiPe) => toJson(uiErrPg0.errorPage(uiPe)),\n            Invalid(uiI) => \"__vyrn_fallback__\",\n        }\n    }\n"
+        out = out + "        return match fromJson<PageError>(uiProps) {\n            Valid(uiPe) => toJson(uiErrPg0.errorPage(uiPe)),\n            Invalid(uiI) => \"__vyrn_fallback__\",\n        }\n    }\n"
     }
     i = 0
     while i < pages.length {

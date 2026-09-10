@@ -1059,11 +1059,11 @@ mod tests {
 
     #[test]
     fn namespace_type_name_argument() {
-        // `fromJson(ns.User, s)` / `jsonSchema(ns.User)` — type-name arguments.
+        // `fromJson<ns.User>(s)` / `jsonSchema<ns.User>()` — type-name arguments.
         let api = "export type User = { id: Int64, name: String }";
         let root = "import * as api from \"./api\" \
                     fn main() -> Int64 { \
-                        return match fromJson(api.User, \"{\\\"id\\\":5,\\\"name\\\":\\\"a\\\"}\") { \
+                        return match fromJson<api.User>(\"{\\\"id\\\":5,\\\"name\\\":\\\"a\\\"}\") { \
                             Valid(u) => u.id, Invalid(iss) => 0 } }";
         assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 5);
     }

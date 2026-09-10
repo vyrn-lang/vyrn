@@ -7949,7 +7949,7 @@ where it is, which is what catches a deletion that deleted prose.
 | the mapping §2.3 names | 6,791 | 595 | a `prim` row to its instruction, a `load`/`store` to a typed load or store at a computed address, a `drop` to a call, a `trap` to a call with a table index, a control-flow form to wasm's blocks. Nothing replaces this — it is what an emitter is |
 | a decision §2.3 says it must not make | 2,212 | 356 | it places something, checks a bound it was not told to check, decides what a validated type is, optimizes, or performs a rewrite that should be stated once before it. The deletion candidates |
 | the runtime it emits by hand | 625 | 7 | §2.7's "the runtime hand-emitted by `direct.rs`" |
-| one block per builtin name | 4,807 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
+| one block per builtin name | 4,808 | 978 | the `builtins` factor of §1.1 as this emitter pays it — the shape `Checker::call` had before M6 emptied it |
 | the wasm format | 334 | 0 | the import tables, the ABI rules, the custom sections, the memory arguments. `wasm.rs` holds the rest |
 | shared machinery | 2,580 | 77 | the driver, the monomorphisation queue, the contexts, the frames, the name lookup |
 | tests | 326 | 0 | the file's own unit tests |
@@ -17863,7 +17863,7 @@ whether it allocated. `pure` is the bottom.
 |---|---|---|---|---|---|---|
 | `alloc` | `runtime$malloc`, `mem$grow`; and an owned name born of a primitive, a literal or a builtin | `memory.grow` | yes | yes | yes | yes |
 | `read-input` | `readLine` | `fd_read` on 0 | yes | yes | EOF | no |
-| `write-output` | `print`, `writeStdout`, `trace`, `debug`, `info`, `warn`, `error` | `fd_write` on 1, 2 | yes | yes | yes | no (finding 4) |
+| `write-output` | `print`, `writeStdout`, `@trace`, `@debug`, `@info`, `@warn`, `@error` | `fd_write` on 1, 2 | yes | yes | yes | no (finding 4) |
 | `fs-read` | `readFile`, `readFileBytes` | `path_open`, `fd_read`, `fd_close`, `fd_prestat_get` | yes | yes | `NOENT` | `readFile` yes, `readFileBytes` no (finding 5) |
 | `fs-write` | `writeFile`, `writeFileBytes`, `renameFile`, `fsyncFile` | `path_open`, `fd_write`, `path_rename`, `fd_sync` | yes | yes | `NOENT` | no |
 | `fs-list` | `listDir`, `listDirKinds` | `fd_readdir` | no (`NATIVE_UNSUPPORTED`) | yes | `BADF` | yes, mediated |
@@ -26006,6 +26006,363 @@ Findings: `rel_for` asked `own` on two spellings — the container arms on the s
 Findings: `array_releases_elems` and `deep_row` were two names over one body, and two of their three call sites pass a different spelling of the type. The names are one; the spellings are not, and that is the same defect one layer down.
 Findings: the census counted a section by its anchor, so a decision's emission counted as the decision. The anchors sit where the decision is now: `coerce` and `rel_for` are the mapping, `call_depth_enter`, `addr_local`, `free_snap` and `emit_validation` are new mapping rows, and `store_bufs` and `store_boxes` are the decision `addr_local` was filed for. The decision class falls from 2,212 lines to 1,230. **No line left the file for that; 50 did, and they are the four above.**
 Left: `direct.rs` is 1,040 over the 16,500 this track was given, and that target was the six sections' line count subtracted from the file. The count was the anchor's. What is left in these six is 144 lines with three blockers, and none of the three is in this file: a `check` row and a `Coerce` row in the core, a store row that names its buffers, and a loop-invariant header the core makes a named place.
+#### The five log levels lose their words and keep their rows (2026-09-10, `track-ej`)
+
+The first of the three the open question §"What is left in `Checker::call`"
+left for the language to answer. The user answered it on 2026-09-10 and took
+the record's THIRD answer: the five levels are not reserved, the sugar produces
+a spelling nobody can write, and the row is keyed by that.
+
+**What the block was.** 28 lines and 3 refusals in `Checker::call`, one arm for
+`trace`/`debug`/`info`/`warn`/`error` together, checking an arity, a receiver
+type and a message type — the three things a row states. What blocked the row
+was that a row is matched by NAME and
+`every_seeded_name_is_reserved_or_unspellable` is what makes that sound. The
+five words were in `RESERVED` to satisfy it, and the cost was five common
+English words no program could use for a function of its own.
+
+**What it is now.** `parser::METHOD_BUILTINS` pairs each level with `@` plus its
+own name, exactly as it pairs `push` with `@push`, so `log.info(m)` carries
+`@info` from the parser's method sugar. `prelude::rows` seeds one `row(..)` over
+`ast::LOG_LEVELS` — `(l: read Logger, m: read String) -> Unit`, five names, one
+statement — and the fall-through types every log call against it. The five
+surface words left `RESERVED` and are ordinary identifiers again;
+`parser::unshadow_method_builtins` hands each back to any module that declares
+or imports it, which is the half of the table that already existed for
+`remove`.
+
+**The second hand-written exception went with the block.**
+`prelude::capability` held one for the levels beside `@charCount`'s: it said the
+message is `read`, because five names with no row have no capability to read,
+and without that answer an interpolated message temporary leaked one rendered
+String per record (exit-residue round thirty-nine). The row says it now.
+
+**Four sites are keyed by the internal spelling, and one predicate replaced two
+tables.** `effects::ATOMS` names `@trace`..`@error`; `direct.rs`'s arm spells
+the five out as literals, because `primitives.rs` greps that file to decide
+whether the backend covers a census name and a predicate is invisible to a text
+scan; `vyrn-lower/src/core.rs` lost its `is_log_level` clause, because a name
+with a row takes the branch above it; and `ast::is_log_level` is gone, replaced
+by `ast::log_internal`, which is `log_level_ordinal` of the name with its `@`
+stripped. `effects::gen_refusal` now prints `parser::method_surface(name)`, so
+its "calls `info`" clause names the word a reader can write rather than the
+internal one — PR #120's lesson, and it would have leaked `@info` into a
+generation fence diagnostic.
+
+**Nothing in the corpus declared one of the five.** The count was taken before
+the change and it is zero, which it had to be: `RESERVED` refused the
+declaration. What the slice buys is every program written after it.
+
+**The refusals, before and after.** Three witnessed, because the corpus reaches
+none of them.
+
+| the program | before | after |
+|---|---|---|
+| `log.info("a", "b")` | ``` `info` takes a Logger and a String, got 3 argument(s) ``` | ``` `info` expects 2 argument(s), got 3 ``` |
+| `x.info("hi")`, `x: Int64` | ``` `info` must be called on a Logger (e.g. `log.info(..)`), found Int64 ``` | ``` `info` argument 1 expects Logger, found Int64 ``` |
+| `log.info(3)` | ``` `info` message must be a String, found Int64 ``` | ``` `info` argument 2 expects String, found Int64 ``` |
+
+Each is the row stating what the arm stated, in the generic wording every other
+row-typed builtin now uses, and each names `info` rather than `@info` because
+the fall-through shows a call site's name with its `@` stripped.
+
+**One refusal is deliberately gone**, and it is the feature: ``` `info` is a
+reserved name ``` at a declaration. `fn info(x: Int64) -> Int64` compiles, and a
+module that declares it means its own `info` in method form too.
+
+**The numbers.**
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,090 | 15,069 | −21 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 1,172 | 1,195 | +23 |
+| `compiler/vyrn-frontend/src/parser.rs` | 7,011 | 7,024 | +13 |
+| `compiler/vyrn-frontend/src/ast.rs` | 2,019 | 2,025 | +6 |
+| `compiler/vyrn-frontend/src/effects.rs` | 342 | 356 | +14 |
+| `compiler/vyrn-codegen/src/direct.rs` | 17,592 | 17,593 | +1 |
+| `Checker::call`'s arms | 2,883 lines, 157 refusals | 2,854, 154 | −29, −3 |
+| `checker::RESERVED` | 95 names | 90 | −5 |
+| hand-written exceptions in `prelude::capability` | 2 | 1 | −1 |
+
+The slice costs 36 lines and buys five words back, one fewer statement of the
+log contract, and one fewer hand-written capability exception. The rows and the
+table entries are longer than the arm they replace; what they are not is a
+second statement of a rule.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 465 programs, byte-identical against the branch point, 125 refused before and after — 0 lost, 0 gained |
+| the three refusals the corpus never reaches | witnessed under both binaries, table above |
+| `cargo test -p vyrn-frontend` | 718 + 194 + 110 + the rest, 0 failed |
+| `cargo test -p vyrn-cli` | 646 passed, 0 failed |
+| the `vyrn-lsp` suite | 100 passed |
+| `every_seeded_name_is_reserved_or_unspellable` | green — `@trace`..`@error` are unspellable |
+
+`checker_census.rs`, `emitter_census.rs`, `parser_census.rs` and RFC-0126's cost
+table are re-pinned in this commit. RFC-0126's `Type::Logger` row moved a
+mention from the checker to the prelude and its total is unchanged; `Type::Str`,
+`Type::Unit` and `Type::Err` each lost the mentions the arm carried.
+
+#### A call site can write its type arguments (2026-09-10, `track-ej`)
+
+The second of the three the open question §"What is left in `Checker::call`"
+left for the language, and the only one that needed a feature rather than a
+row. The user answered it on 2026-09-10 and took the WIDE answer:
+`fromJson<T>(s)`, `schemaOf<T>()`, `jsonSchema<T>()`.
+
+**What the block was.** 77 lines and 11 refusals for three names that each took
+a TYPE where a value goes. `schemaOf(Shape)` put a declaration name in argument
+position, so the arm had to do the arity itself, decide by hand whether the
+expression was an `Expr::Var` naming a declared type, and answer the result;
+`prelude::rows` spelled all three parameters `Unit` and said on each row that
+the type was inert, because no parameter type this language writes is honest
+about a type name. `fromJson` had no row at all — the audit table in
+`prelude.rs` held it back with "`T` is the first ARGUMENT — a type name, not a
+value. No signature says 'the type my caller wrote'."
+
+**The language could not spell an explicit type argument, so that is what was
+built.** `fn f<T: Show>` has always had a binder; a CALL had no way to write
+one. `Expr::Call` carries a `type_args: Vec<Type>`, empty for every call that
+writes none, and `parser::call_type_args` fills it.
+
+**The parse is speculative, and the rule is the narrowest one that admits the
+form.** `<` after a callee is ambiguous with less-than. A comma-separated type
+list, closed by `>`, with `(` IMMEDIATELY after the `>`, is a type argument
+list; anything else rewinds the cursor and leaves the `<` to the binary
+operator. The cursor is the whole of the parser's state at an expression
+boundary, so the rewind is one assignment, and no diagnostic is raised on the
+failed attempt — the type parser's error belongs to whoever re-reads the tokens
+as an expression. The one shape that reads differently now is `a < b > (c)`,
+which compares a `Bool` against a value and has no meaning in this language. The
+whole corpus was `vyrn check`ed with the parser change alone, before any row
+moved: **465 of 465 byte-identical**.
+
+**The checker seeds the solve.** The written types go into `subst` in
+declaration order and the arguments infer what is left, so a partial list is
+legal, a list longer than the binder is refused, and a call that writes none
+reads exactly as it did. Two general refusals came with it — a type argument on
+a callee that declares no type parameters, and one too many — and every written
+type gets the answer every other type spelling gets, which is what stops
+`schemaOf<Nope>()` from passing `vyrn check` and failing in the emitter. Any
+generic may be written this way; the three builtins are simply the only
+signatures in the language whose type parameter appears in no parameter.
+
+**The rows are ordinary now, but for one bound.** `jsonSchema<T>() -> String`,
+`schemaOf<T>() -> Schema`, `fromJson<T>(s: read String) -> Validation<T>`. The
+one rule of the arm a signature cannot carry is that `fromJson`'s target must be
+decodable, so it is a BOUND — [`prelude::DECODABLE`], read the way `HEAPLESS`
+is, refused in the arm's own words because the sentence names the OFFENDING part
+of the type rather than the whole of it.
+
+**One arm survives, six lines, and it is not a rule the row states.** The three
+are REWRITTEN at their call site, not called: two fold to a compile-time literal
+and `fromJson` expands to the decoder generated for its target. So both emitters
+need the target AT THE NODE, and the node carries it only where the caller wrote
+it — an expected type would answer the checker and leave the emitters with
+nothing. One sentence covers the three, and it names the new spelling rather
+than letting the row answer "expects 1 argument(s), got 2", which tells a reader
+nothing about what to write.
+
+**Two things the AST field rippled into, and both were real.**
+
+**One. A type argument is a type, so the loader must rewrite it.** Both body
+walkers — the namespace resolver and the privacy renamer — rewrote types in
+signatures and in `let` annotations and had never seen one inside an expression.
+`fromJson<shapes.Point>(s)` and `fromJson<api.CreateReq>(s)` came back as *not a
+codable type*, because the spelling had not been resolved to the declaration.
+Three corpus programs caught it: `examples/namespace.vyrn` and the `bin` and
+`shelf` clients.
+
+**Two. `fromJson` answers a type now, so the audit table lost a row.** It was
+held back from the declared reading because no signature could name what it
+gives back. `Validation<T>` names it, and `prelude::returns` hands it over like
+`@push`'s `Array<T>`.
+
+**The migration.** 87 call sites in 29 files: `examples/` (18 files),
+`std/` (8), `site/` (2), `compiler/vyrn-cli/tests/boundaries/` (1), plus 29 in
+the compiler's own test sources and 7 in `compiler/vyrn-cli/tests/`. Eight of
+`std/`'s are inside GENERATORS that build Vyrn source as text —
+`std/rpc`, `std/connect`, `std/graphql`, `std/http` and `std/openapi` all emit
+`fromJson<T>(body)` now. `std/storage`'s `load(TypeName, path)` keeps its
+surface, because it is `std/storage`'s and not the language's; its desugar in
+`parser.rs` converts the name to the type argument once.
+
+**The numbers.**
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,105 | 15,113 | +8 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 1,205 | 1,246 | +41 |
+| `compiler/vyrn-frontend/src/parser.rs` | 7,024 | 7,110 | +86 |
+| `compiler/vyrn-frontend/src/ast.rs` | 2,025 | 2,039 | +14 |
+| `compiler/vyrn-frontend/src/loader.rs` | 4,891 | 4,915 | +24 |
+| `compiler/vyrn-codegen/src/direct.rs` | 17,593 | 17,606 | +13 |
+| `Checker::call`'s arms | 2,833 lines, 150 refusals | 2,778, 140 | −55, −10 |
+| rows with an inert `Unit` parameter | 4 | 1 | −3 |
+| names the audit holds back from the declared reading | 4 | 3 | −1 |
+
+The slice ADDS 186 lines, and it should: it is a language feature. What it
+deletes is the last statement of "this parameter is a type name" — three rows
+that spelled `Unit` and 55 lines of `Checker::call` that read `args[0]` as a
+declaration.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus, parser change alone | 465 programs, byte-identical, 125 refused |
+| `vyrn check` stderr over the corpus, whole slice and migration | 465 programs, byte-identical, 125 refused — 0 lost, 0 gained |
+| the seven refusals the corpus never reaches | pinned in `tests/refusals.rs`, table below |
+| `cargo test -p vyrn-frontend` | 0 failed |
+| `cargo test -p vyrn-cli` | 0 failed |
+
+| the program | before | after |
+|---|---|---|
+| `fromJson(Pt, "{}")` | typed | ``` `fromJson` names its target as a type argument — write `fromJson<Pt>(s)` ``` |
+| `schemaOf(Pt)` | typed | ``` `schemaOf` names its target as a type argument — write `schemaOf<Pt>()` ``` |
+| `jsonSchema(Pt)` | typed | ``` `jsonSchema` names its target as a type argument — write `jsonSchema<Pt>()` ``` |
+| `fromJson<Bad>("{}")` | ``` `fromJson` cannot decode into `Bad` (not a codable type) ``` | the same sentence, from the bound |
+| `schemaOf<Nope>()` | — | `` unknown type `Nope` `` |
+| `f<Int64>(1)` on a concrete `f` | — | ``` `f` declares no type parameters, so it takes no type arguments ``` |
+| `id<Int64, Bool>(1)` | — | ``` `id` takes 1 type argument(s), got 2 ``` |
+
+The refusals GAINED are the last four, and every one is the old spelling of
+this decision or a mistake about the new one, which is what the licence allows.
+The refusals LOST are the arm's six wordings for "that is not a type name" and
+its three arity sentences: three are re-stated by the arm above with the new
+spelling named, three become `unknown type`, and three become the row's own
+arity sentence.
+
+`checker_census.rs`, `parser_census.rs`, `emitter_census.rs`, `cli_census.rs`,
+`frontend_census.rs`, RFC-0126's cost table and RFC-0127's form table are all
+re-pinned in this commit. `Expr::Var` loses five mentions in the checker (the
+three arms that read a type name out of argument position) and `Expr::Call`
+gains one in the parser.
+
+#### The union `print` and `toString` take is a bound (2026-09-10, `track-ej`)
+
+The third of the three the open question §"What is left in `Checker::call`"
+left for the language. The user answered it on 2026-09-10: the union becomes
+`Show`, and the arms that wrote it out go.
+
+**What the blocks were.** Two arms of `Checker::call`, `print` and `@str`, each
+testing `types::renders` and then calling `renders_by_declaration`, each with
+its own arity refusal and its own sentence for a type that renders neither way.
+21 lines and 4 refusals of the arm section, and the union — *a number, a `Bool`,
+a `String`, or a type with `impl Show`* — written out twice and compared with
+nothing.
+
+**What it is now.** One bound. `Show` is satisfied by a type the language
+renders itself and by a type that declares how it renders, which is the union,
+and `Checker::type_satisfies` is where that sentence lives. `print`'s row is
+`<T: Show>(x: read T) -> Unit` and `@str`'s is `<T: Show>(x: read T) -> String`.
+Both were `(x: read Unit)` with a note on the row saying the parameter was inert
+because the language could not spell what it takes; both spell it now, and
+`prelude::checkable` hands them to the fall-through like any other row.
+
+**The bound's refusal is the arms' sentence.** `HEAPLESS` set the precedent: a
+bound the reader cannot reason about generically gets its own words. `Show`'s
+are `print`'s, with the hint that told a reader what to write —
+``` `print` needs a number, Bool, or String, found Q — say how it renders with
+`impl Show for Q` ```. `toString` said *renders* where `print` said *needs*, and
+one sentence now serves both, which is what a single statement of a rule means.
+
+**A call site's shown name reads the method table rather than stripping the
+`@`.** The fall-through printed `name.trim_start_matches('@')`, which is
+`toString`'s internal `@str` shown as `str` — a name no source can write, which
+is the mistake PR #120 named. `parser::method_surface` is where the surface
+spelling of an internal name is already written down, so it is read here. Every
+other internal name is unchanged by it, and the trim still covers `@list` and
+`@panicAt`, which are not method sugar.
+
+**Two defects the bound found, and both are older than it.**
+
+**One. A bare unsolved type parameter was offered as an expectation.** In the
+generic call path the argument was typed with `Some(&substitute(pty, &subst))`,
+and for a parameter the solve had not reached that is `T`. A `match` unifies its
+arms against what it is expected to be, so `print(match o { Some(v) => v, None
+=> 0 })` came back as *`match` arms have differing types: T vs Int64*. It is
+reproducible on the branch point with any generic — `fn id<T>(x: T) -> T` and
+`id(match o { .. })` refuses identically — and 26 corpus programs write the
+shape, so making `print` generic is what surfaced it. An unsolved bare parameter
+is not an expectation and is passed as `None`; every other shape still names its
+constructor and is passed through.
+
+**Two. `Show`'s return type was checked at three call sites and at no impl.**
+`renders_by_declaration` typed the `show` call and refused a non-String result,
+so an `impl Show for T` that nobody rendered was checked nowhere. With two of
+the three call sites gone the rule had one statement left to lose, so it moved
+to the impl, where the mistake is. The sentence is unchanged and it now fires at
+the impl's own line: `examples/show.vyrn`'s shape reports at line 2 column 22
+rather than at the `print` on line 3.
+
+**The one part of the decision the corpus refused, and the evidence.** The
+decision also said to seed an `impl Show` per scalar so that a user's `impl Show
+for Int64` overlaps it and `protocol_overlap` refuses it. That is not taken, and
+the reason is that its premise is false in this tree: a scalar `Show` impl is
+NOT dead. `examples/show.vyrn` line 81 is `print(n.show())` over `impl Show for
+Int64`, and its own comment states the rule the example exists to pin — *a
+scalar renders by the language's lowering, whatever a program declares* — with
+the divergence spelled out on line 53. `examples/protocol.vyrn` and
+`site/guide/protocols.vyrn` both declare `protocol Show` themselves and
+implement it for `Int64`, `Bool` and `String`; the guide teaches protocol
+dispatch with them. Refusing the impl would delete a working feature —
+`x.show()` on a scalar — to remove a divergence the corpus documents on purpose,
+and it would rewrite the protocols page's teaching material. Seeding the impls
+was also not expressible: `types::type_key` answers `None` for `Float64` and
+every sized int, and `ok_target` admits only `Int64`, `Bool` and `String` among
+scalars, so "an impl per scalar" needs the impl key space widened first, which
+is a change to dispatch and not to `print`.
+
+The bound does not need it. A scalar satisfies `Show` through `types::renders`,
+with no impl and no seeding, and every emitter checks `renders` FIRST
+(`Fn_::show_dispatch`), so a user impl on a scalar keeps meaning exactly what it
+means today. **0 refusals gained** is the result, and the wasm manifest is
+unmoved.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-frontend/src/checker.rs` | 15,069 | 15,102 | +33 |
+| `compiler/vyrn-frontend/src/prelude.rs` | 1,195 | 1,205 | +10 |
+| `Checker::call`'s arms | 2,854 lines, 154 refusals | 2,833, 150 | −21, −4 |
+| statements of the union | 2 | 1 | −1 |
+| statements of "a `show` hands back a String" | 3 | 1 | −2 |
+| rows with an inert `Unit` parameter | 6 | 4 | −2 |
+
+The slice costs 43 lines and buys three fewer statements of two rules, plus the
+two defects above. `checker.rs` grows because both defects are fixed in it and
+because `declares_an_impl` is a named function where it was an inline chain.
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 465 programs, byte-identical against the branch point, 125 refused before and after — 0 lost, 0 gained |
+| the six refusals the corpus never reaches | witnessed under both binaries, table below |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green, 33 s — no emitted byte moves |
+| `cargo test -p vyrn-frontend` | 0 failed |
+| `cargo test -p vyrn-cli` | 646 passed, 0 failed |
+
+| the program | before | after |
+|---|---|---|
+| `print(q)`, `q: Q` with no impl | ``` print needs a number, Bool, or String, found Q — say how it renders with `impl Show for Q` ``` | ``` `print` needs a number, Bool, or String, found Q — say how it renders with `impl Show for Q` ``` |
+| `q.toString()`, same `Q` | ``` `toString` renders a number, Bool, or String, found { a: Int64 } — … ``` | ``` `toString` needs a number, Bool, or String, found Q — … ``` |
+| `"hole \{q}"`, same `Q` | as `toString` | as `toString` |
+| `print(1, 2)` | `print expects 1 argument, got 2` | ``` `print` expects 1 argument(s), got 2 ``` |
+| `(1).toString(2)` | ``` `toString` takes no arguments ``` | ``` `toString` expects 1 argument(s), got 2 ``` |
+| `impl Show for Q { fn show(self) -> Int64 }` with `print(q)` | ``` `Show`'s `show` must hand back a String to render through, found Int64 ``` at the call | the same sentence, at the impl |
+
+The `toString` refusal names `Q` where it named `{ a: Int64 }`, because the
+bound reads the type the solve produced and the arm read the resolved base. That
+is the name a reader wrote.
+
+`checker_census.rs` and RFC-0126's cost table are re-pinned in this commit;
+`Type::Param` gains two mentions and `Type::Unit`, `Type::Str` and `Type::Err`
+lose the arms'.
 
 ### What each milestone is worth on its own
 

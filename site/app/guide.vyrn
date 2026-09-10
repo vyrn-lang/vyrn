@@ -478,7 +478,7 @@ export fn chapters() -> Array<Chapter> {
                     "This page is built the same way. A generator reads <code>std/</code> and writes the <a href=\"/docs.html\">reference pages</a>.",
                 ], ["genuse"]),
                 section("reflection", "Reading a type at compile time", [
-                    "<code>schemaOf(T)</code> reads a validated type's own declaration. It answers with the name, the base type, the documentation line and every bound the <code>where</code> clause implies. <code>jsonSchema(T)</code> writes the JSON Schema document from the same facts.",
+                    "<code>schemaOf<T>()</code> reads a validated type's own declaration. It answers with the name, the base type, the documentation line and every bound the <code>where</code> clause implies. <code>jsonSchema<T>()</code> writes the JSON Schema document from the same facts.",
                     "This is not runtime reflection. Vyrn erases types before the program runs; the compiler computes the answer from the declaration.",
                 ], ["schema"]),
             ],

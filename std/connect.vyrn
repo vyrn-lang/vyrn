@@ -205,7 +205,7 @@ fn connectDispatchFn(f: FnInfo) -> String {
     let mut out = "fn " + handler + "(body: String) -> Response {\n"
     if f.params.length == 1 {
         let reqType = f.params[0].spelling
-        out = out + "    return match fromJson(" + reqType + ", body) {\n"
+        out = out + "    return match fromJson<" + reqType + ">(body) {\n"
         if retUnit {
             let runName = "connectRun" + cap
             out = out + "        Valid(input) => " + runName + "(input),\n"
@@ -306,10 +306,10 @@ fn connectUnifyFn(f: FnInfo, service: String) -> String {
         out = out + "    if status == 200 { return Valid(true) }\n"
     } else {
         out = out + "fn " + unify + "(status: Int64, body: String) -> Validation<" + f.ret + "> {\n"
-        out = out + "    if status == 200 { return fromJson(" + f.ret + ", body) }\n"
+        out = out + "    if status == 200 { return fromJson<" + f.ret + ">(body) }\n"
     }
     out = out + "    if status == 400 {\n"
-    out = out + "        return match fromJson(ConnectError, body) {\n"
+    out = out + "        return match fromJson<ConnectError>(body) {\n"
     out = out + "            Valid(err) => Invalid(err.details),\n"
     out = out + "            Invalid(issues) => Invalid(issues),\n"
     out = out + "        }\n"

@@ -157,14 +157,14 @@ test "StoreFile round-trips through the JSON codec (load/save fidelity)" {
 
 /// Decode a StoreFile, or an empty store (counter: 0) on failure.
 fn decodeOrEmpty(j: String) -> StoreFile {
-    return match fromJson(StoreFile, j) {
+    return match fromJson<StoreFile>(j) {
         Valid(b) => b,
         Invalid(issues) => StoreFile { pastes: [], counter: 0 },
     }
 }
 
 test "a corrupt/invalid store JSON is rejected by fromJson (no trap)" {
-    match fromJson(StoreFile, "{ not json at all ]") {
+    match fromJson<StoreFile>("{ not json at all ]") {
         Valid(s) => assert(false),
         Invalid(issues) => assert(issues.length >= 1),
     }

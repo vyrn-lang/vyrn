@@ -591,6 +591,7 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
     let pattern = pred.and_then(predicate_pattern);
     let opt = |n: Option<i64>| match n {
         Some(v) => Expr::Call {
+            type_args: Vec::new(),
             name: "Some".to_string(),
             args: vec![Expr::Int(v)],
             line: 0,
@@ -602,6 +603,7 @@ pub fn schema_struct_lit(decl: &TypeDecl) -> Expr {
     };
     let opt_str = |s: Option<String>| match s {
         Some(v) => Expr::Call {
+            type_args: Vec::new(),
             name: "Some".to_string(),
             args: vec![Expr::Str(v)],
             line: 0,

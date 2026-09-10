@@ -166,7 +166,7 @@ fn humanizeDuration(ms: Int64) -> String {
 
 /// Decode one line, wrapping the `Validation` in a bool-tagged record.
 fn decodeLine(raw: String) -> Decoded {
-    match fromJson(LogLine, raw) {
+    match fromJson<LogLine>(raw) {
         Valid(l) => {
             return Decoded { ok: true, line: l, err: "" }
         }

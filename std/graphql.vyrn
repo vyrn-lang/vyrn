@@ -1730,8 +1730,8 @@ export type GqlArg = { json: String, err: String }
 /// record is decoded from.
 ///
 /// **The same decode path the RPC surface uses.** `std/rpc`'s generated handler
-/// runs a POSTed body through `fromJson(<ReqType>, body)`; the arm this feeds
-/// runs `fromJson(<ReqType>, ..)` over the text this returns. An argument and a
+/// runs a POSTed body through `fromJson<ReqType>(body)`; the arm this feeds
+/// runs `fromJson<ReqType>(..)` over the text this returns. An argument and a
 /// request body reach the same record by one route and are validated by one rule,
 /// so a `Title` too long is refused identically over both wires — there is no
 /// second decoder here to be lenient where the first is strict.
@@ -2078,7 +2078,7 @@ fn gqlResolverArm(f: FnInfo) -> String {
         let reqType = f.params[0].spelling
         let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
         out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
-        out = out + "        return match fromJson(" + reqType + ", arg.json) {\n"
+        out = out + "        return match fromJson<" + reqType + ">(arg.json) {\n"
         out = out + "            Valid(input) => gqlRun_" + f.name + "(input),\n"
         out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
         out = out + "        }\n"
@@ -2092,7 +2092,7 @@ fn gqlResolverArm(f: FnInfo) -> String {
     let reqType = f.params[0].spelling
     let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
     out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
-    out = out + "        return match fromJson(" + reqType + ", arg.json) {\n"
+    out = out + "        return match fromJson<" + reqType + ">(arg.json) {\n"
     out = out + "            Valid(input) => Ok(gqlValueOf(toJson(" + f.name + "(input)))),\n"
     out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
     out = out + "        }\n"

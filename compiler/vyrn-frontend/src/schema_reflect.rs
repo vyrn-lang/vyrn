@@ -546,6 +546,7 @@ fn none() -> Expr {
 fn opt_str(s: Option<&str>) -> Expr {
     match s {
         Some(v) => Expr::Call {
+            type_args: Vec::new(),
             name: "Some".to_string(),
             args: vec![Expr::Str(v.to_string())],
             line: 0,

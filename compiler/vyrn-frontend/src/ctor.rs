@@ -151,11 +151,13 @@ fn constructor_fn(decl: &TypeDecl) -> Function {
         line: 0,
     };
     let holds = Expr::Call {
+        type_args: Vec::new(),
         name: pred_name(&decl.name),
         args: pred_args(decl, value),
         line: 0,
     };
     let fail = Stmt::Expr(Expr::Call {
+        type_args: Vec::new(),
         name: "panic".to_string(),
         args: vec![Expr::Str(crate::trap::validation_of(decl))],
         line: 0,

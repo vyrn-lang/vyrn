@@ -98,7 +98,7 @@ export extern fn submitCreate(arg: String) {
     // A record literal takes what it is given, and nothing takes module state
     // (RFC-0013, RFC-0125 §3 M3).
     let raw = RawCreate { title: draftTitle.copy(), body: draftBody.copy(), lang: draftLang.copy() }
-    match fromJson(api.CreateReq, toJson(raw)) {
+    match fromJson<api.CreateReq>(toJson(raw)) {
         Valid(req) => api.pastesCreate(req, onPastesCreate),
         Invalid(iss) => setIssues(api.rpcIssuesFrom(iss)),
     }
@@ -150,7 +150,7 @@ fn main() -> Int64 {
 
 test "submitCreate surfaces accumulated Issues for an invalid draft (no trap)" {
     let raw = RawCreate { title: "t", body: "", lang: "klingon" }
-    match fromJson(api.CreateReq, toJson(raw)) {
+    match fromJson<api.CreateReq>(toJson(raw)) {
         Valid(req) => assert(false),
         Invalid(iss) => assert(iss.length >= 1),
     }
@@ -158,7 +158,7 @@ test "submitCreate surfaces accumulated Issues for an invalid draft (no trap)" {
 
 test "a valid draft decodes to a CreateReq" {
     let raw = RawCreate { title: "hi", body: "some body", lang: "vyrn" }
-    match fromJson(api.CreateReq, toJson(raw)) {
+    match fromJson<api.CreateReq>(toJson(raw)) {
         Valid(req) => assertEq(req.lang, "vyrn"),
         Invalid(iss) => assert(false),
     }
@@ -174,7 +174,7 @@ test "createForm renders the heading and save button (a .vyx view snapshot)" {
 test "createForm attaches the localized body issue under its field, not the leaked type name" {
     // A real prevalidation of an empty body, mapped to the one RpcIssue shape.
     let raw = RawCreate { title: "t", body: "", lang: "text" }
-    let iss = match fromJson(api.CreateReq, toJson(raw)) {
+    let iss = match fromJson<api.CreateReq>(toJson(raw)) {
         Valid(req) => api.rpcIssuesFrom([]),
         Invalid(is) => api.rpcIssuesFrom(is),
     }

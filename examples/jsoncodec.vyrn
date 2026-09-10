@@ -3,7 +3,7 @@
 /// structured, accumulated `Issue`s (RFC-0009) instead of trapping.
 ///
 ///   toJson(x) -> String                      canonical, deterministic
-///   fromJson(TypeName, s) -> Validation<T>    never traps; every problem at once
+///   fromJson<TypeName>(s) -> Validation<T>    never traps; every problem at once
 ///
 /// Encoding is canonical: record fields in declaration order, no whitespace,
 /// numbers rendered exactly as Vyrn's `toString`, `None` fields omitted, a bare
@@ -47,7 +47,7 @@ fn main() -> Int64 {
 
     // Decode a good payload — unknown fields ignored, `nick` absent -> None.
     let good = "{\"name\":\"Cid\",\"age\":29,\"role\":\"Guest\",\"team\":\"blue\"}"
-    let okCount = match fromJson(User, good) {
+    let okCount = match fromJson<User>(good) {
         Valid(u) => showUser(u),
         Invalid(issues) => report(issues),
     }
@@ -56,13 +56,13 @@ fn main() -> Int64 {
     // empty username fails its `where`, age 200 is out of range, role is not a
     // known variant, and `nick` is simply absent (that is fine).
     let bad = "{\"name\":\"\",\"age\":200,\"role\":\"Wizard\"}"
-    let badCount = match fromJson(User, bad) {
+    let badCount = match fromJson<User>(bad) {
         Valid(u) => 0,
         Invalid(issues) => report(issues),
     }
 
     // Decode malformed JSON — a single `json.parse` Issue at the root.
-    let broken = match fromJson(User, "{ not json") {
+    let broken = match fromJson<User>("{ not json") {
         Valid(u) => 0,
         Invalid(issues) => report(issues),
     }

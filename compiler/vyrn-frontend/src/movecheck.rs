@@ -1936,7 +1936,12 @@ impl MoveCheck<'_> {
                     self.expr(eb, scope);
                 }
             }
-            Expr::Call { name, args, line } => {
+            Expr::Call {
+                name,
+                args,
+                line,
+                type_args: _,
+            } => {
                 let caps = self.caps.get(name);
                 // Round eighteen's soundness screen, re-anchored in round
                 // fifty-six: the question is whether the enclosing function's

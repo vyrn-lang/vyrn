@@ -282,7 +282,7 @@ fn the_base_path_comes_from_the_stem_and_the_codec_is_the_rpc_one() {
     // `Id` is `Int64`-based, so the captured segment is passed as a NUMBER.
     assert!(src.contains("httpInput(ps, req.body, [\"id\"])"), "{src}");
     // Decode and encode are the RPC surface's, verbatim — one codec, one 422.
-    assert!(src.contains("fromJson(IdReq, httpInput"), "{src}");
+    assert!(src.contains("fromJson<IdReq>(httpInput"), "{src}");
     assert!(
         src.contains("Invalid(issues) => Some(Response { status: 422, contentType: \"application/json\", body: toJson(HttpIssues { issues: issues })"),
         "{src}"

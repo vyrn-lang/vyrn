@@ -257,7 +257,7 @@ fn arithmetic_and_return() {
 
 // ---- payload enums / Result round-trip (RFC-0024) -------------------
 
-/// `fromJson(T, toJson(x)) == Valid(x)` over the new domain: a payload enum
+/// `fromJson<T>(toJson(x)) == Valid(x)` over the new domain: a payload enum
 /// (single/tuple/nullary) and a `Result`, both nested through a record, an
 /// array, and an `Option`. Returns 0 only when every arm round-trips.
 #[test]
@@ -271,7 +271,7 @@ fn payload_codec_round_trip_law() {
                    } \
                    fn same(a: Box) -> Int64 { \
                        let enc = toJson(a) \
-                       return match fromJson(Box, enc) { \
+                       return match fromJson<Box>(enc) { \
                            Valid(b) => cmp(enc, b), \
                            Invalid(is) => 2, \
                        } \
@@ -999,11 +999,11 @@ fn tagged_template_values_are_matchable_and_typed() {
 
 #[test]
 fn schema_of_extracts_where_bounds() {
-    // `schemaOf(Port)` reads the `where` predicate at compile time.
+    // `schemaOf<Port>()` reads the `where` predicate at compile time.
     let src = "type Port = Int64 where value >= 1 && value <= 65535; \
                    fn optOr(o: Option<Int64>, d: Int64) -> Int64 { \
                        return match o { Some(n) => n, None => d }; } \
-                   fn main() -> Int64 { let s = schemaOf(Port); \
+                   fn main() -> Int64 { let s = schemaOf<Port>(); \
                        return optOr(s.min, 0) + optOr(s.max, 0); }"; // 1 + 65535
     assert_eq!(run(src).unwrap(), 65536);
 }
@@ -1020,9 +1020,9 @@ fn schema_of_enriched_fields() {
                        return match o { Some(n) => n, None => d }\n\
                    }\n\
                    fn main() -> Int64 {\n\
-                       let u = schemaOf(Username)\n\
-                       let e = schemaOf(Even)\n\
-                       let b = schemaOf(Byte)\n\
+                       let u = schemaOf<Username>()\n\
+                       let e = schemaOf<Even>()\n\
+                       let b = schemaOf<Byte>()\n\
                        let mut n = 0\n\
                        if u.name == \"Username\" { n = n + 1 }\n\
                        if u.base == \"String\" { n = n + 1 }\n\
@@ -1042,14 +1042,17 @@ fn schema_of_enriched_fields() {
 fn schema_of_unbounded_type_has_no_bounds() {
     let src = "type Id = Int64; \
                    fn none(o: Option<Int64>) -> Int64 { return match o { Some(n) => 1, None => 0 }; } \
-                   fn main() -> Int64 { let s = schemaOf(Id); return none(s.min) + none(s.max); }";
+                   fn main() -> Int64 { let s = schemaOf<Id>(); return none(s.min) + none(s.max); }";
     assert_eq!(run(src).unwrap(), 0); // both None
 }
 
+/// The target is a TYPE ARGUMENT since RFC-0125 §3 M6, so a name that is not a
+/// type is refused by the answer every type spelling gets rather than by an arm
+/// of `Checker::call`.
 #[test]
 fn schema_of_rejects_a_non_type() {
-    let src = "fn main() -> Int64 { let x = 5; let s = schemaOf(x); return 0; }";
-    assert!(run(src).unwrap_err().contains("not a type"));
+    let src = "fn main() -> Int64 { let x = 5; let s = schemaOf<x>(); return 0; }";
+    assert!(run(src).unwrap_err().contains("unknown type `x`"));
 }
 
 #[test]
@@ -2116,7 +2119,7 @@ fn roundtrip_valid_record() {
                    fn main() -> Int64 { \
                        let u = User { name: \"Ada\", age: 36, nick: Some(\"A\") } \
                        let s = toJson(u) \
-                       return match fromJson(User, s) { \
+                       return match fromJson<User>(s) { \
                            Valid(u2) => u2.age + u2.name.byteLength, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
@@ -2129,7 +2132,7 @@ fn exact_large_integer_roundtrips() {
     // Beyond f64's 53-bit exact range — must survive as an exact i64.
     let src = "type W = { n: Int64 } \
                    fn main() -> Int64 { \
-                       return match fromJson(W, \"{\\\"n\\\":9007199254740993}\") { \
+                       return match fromJson<W>(\"{\\\"n\\\":9007199254740993}\") { \
                            Valid(w) => w.n - 9007199254740992, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
@@ -2140,7 +2143,7 @@ fn exact_large_integer_roundtrips() {
 fn decode_unknown_fields_ignored_and_null_option_is_none() {
     let src = "type U = { name: String, nick: Option<String> } \
                    fn main() -> Int64 { \
-                       return match fromJson(U, \"{\\\"name\\\":\\\"x\\\",\\\"nick\\\":null,\\\"extra\\\":7}\") { \
+                       return match fromJson<U>(\"{\\\"name\\\":\\\"x\\\",\\\"nick\\\":null,\\\"extra\\\":7}\") { \
                            Valid(u) => match u.nick { Some(s) => 2, None => 1, }, \
                            Invalid(iss) => 0 - iss.length, \
                        }; }";
@@ -2151,7 +2154,7 @@ fn decode_unknown_fields_ignored_and_null_option_is_none() {
 fn decode_missing_field_issue_bytes() {
     let src = "type U = { name: String, age: Int64 } \
                    fn main() -> Int64 { \
-                       return match fromJson(U, \"{\\\"name\\\":\\\"x\\\"}\") { \
+                       return match fromJson<U>(\"{\\\"name\\\":\\\"x\\\"}\") { \
                            Valid(u) => 0, \
                            Invalid(iss) => eq(iss[0].key, \"json.missing\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"missing required field `age`\"), \
@@ -2163,7 +2166,7 @@ fn decode_missing_field_issue_bytes() {
 fn decode_type_mismatch_issue_bytes() {
     let src = "type U = { age: Int64 } \
                    fn main() -> Int64 { \
-                       return match fromJson(U, \"{\\\"age\\\":\\\"nope\\\"}\") { \
+                       return match fromJson<U>(\"{\\\"age\\\":\\\"nope\\\"}\") { \
                            Valid(u) => 0, \
                            Invalid(iss) => eq(iss[0].key, \"json.type\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"expected integer, found string\"), \
@@ -2178,7 +2181,7 @@ fn decode_validation_issue_accumulates_all() {
                    type Name = String where value.byteLength >= 1 \
                    type U = { name: Name, age: Age } \
                    fn main() -> Int64 { \
-                       return match fromJson(U, \"{\\\"name\\\":\\\"\\\",\\\"age\\\":999}\") { \
+                       return match fromJson<U>(\"{\\\"name\\\":\\\"\\\",\\\"age\\\":999}\") { \
                            Valid(u) => 0, \
                            Invalid(iss) => iss.length, \
                        }; }";
@@ -2190,7 +2193,7 @@ fn decode_validation_issue_bytes() {
     let src = "type Age = Int64 where value >= 0 && value <= 130 \
                    type U = { age: Age } \
                    fn main() -> Int64 { \
-                       return match fromJson(U, \"{\\\"age\\\":999}\") { \
+                       return match fromJson<U>(\"{\\\"age\\\":999}\") { \
                            Valid(u) => 0, \
                            Invalid(iss) => eq(iss[0].key, \"validate\") + eq(iss[0].path, \"age\") \
                                + eq(iss[0].message, \"validation failed for `Age`\"), \
@@ -2202,7 +2205,7 @@ fn decode_validation_issue_bytes() {
 fn decode_parse_error_is_single_issue() {
     let src = "type U = { a: Int64 } \
                    fn main() -> Int64 { \
-                       return match fromJson(U, \"{ bad\") { \
+                       return match fromJson<U>(\"{ bad\") { \
                            Valid(u) => 0, \
                            Invalid(iss) => iss.length + eq(iss[0].key, \"json.parse\") + eq(iss[0].path, \"\"), \
                        }; }";
@@ -2218,7 +2221,7 @@ fn decode_enum_payloadless_roundtrip() {
                        let p = P { c: Green } \
                        let s = toJson(p) \
                        if s == \"{\\\"c\\\":\\\"Green\\\"}\" { \
-                           return match fromJson(P, s) { Valid(q) => 1, Invalid(iss) => 0, }; \
+                           return match fromJson<P>(s) { Valid(q) => 1, Invalid(iss) => 0, }; \
                        } \
                        return 5; }";
     assert_eq!(run_json(src).unwrap(), 1);

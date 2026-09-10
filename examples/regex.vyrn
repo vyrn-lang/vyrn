@@ -52,8 +52,8 @@ fn main() -> Int64 {
     print(w) // banana
 
     // Refinements reflect into JSON Schema.
-    print(jsonSchema(Username)) // ... "minLength":3,"maxLength":16
-    print(jsonSchema(Email)) // ... "pattern":"^...$"
-    print(jsonSchema(EveryOther)) // ... "minLength":2,"allOf":[{...},{...}]
+    print(jsonSchema<Username>()) // ... "minLength":3,"maxLength":16
+    print(jsonSchema<Email>()) // ... "pattern":"^...$"
+    print(jsonSchema<EveryOther>()) // ... "minLength":2,"allOf":[{...},{...}]
     return 0
 }

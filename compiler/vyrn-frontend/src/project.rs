@@ -837,6 +837,7 @@ fn iterate_loop_build(
         mutable: false,
         ty: None,
         value: Expr::Call {
+            type_args: Vec::new(),
             name: size_fn.to_string(),
             args: vec![recv.clone()],
             line,
@@ -1570,6 +1571,7 @@ mod tests {
             nth,
             "x",
             &Expr::Call {
+                type_args: Vec::new(),
                 name: "makeRing".into(),
                 args: Vec::new(),
                 line: 9,

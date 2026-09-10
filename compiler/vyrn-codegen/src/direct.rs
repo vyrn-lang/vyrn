@@ -3413,7 +3413,7 @@ impl<'p> Fn_<'_, 'p> {
                     name: "@rel".to_string(),
                     line,
                 }];
-                let r = self.call(m, b, f, &recv, line);
+                let r = self.call(m, b, f, &recv, &[], line);
                 self.scope.truncate(mark);
                 r?;
                 // RFC-0096: the payload boxes are the enum's own storage and the
@@ -6155,9 +6155,14 @@ impl<'p> Fn_<'_, 'p> {
                 self.try_construct(m, b, name, args, *line)?
             }
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
-            Expr::Call { name, args, line } => {
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                line,
+            } => {
                 self.call_dest = hint;
-                self.call(m, b, name, args, *line)?
+                self.call(m, b, name, args, type_args, *line)?
             }
             Expr::Spawn { name, args, line } => self.spawn(m, b, name, args, *line)?,
             // No catch-all. The arms above cover `Expr` exhaustively, and the
@@ -7245,7 +7250,7 @@ impl<'p> Fn_<'_, 'p> {
         let code = Type::Named("Code".to_string());
         if let Some(e) = self.gen_entry(name, args) {
             let fwd: &[Expr] = if name == "contractOf" { &[] } else { args };
-            return self.call(m, b, &e, fwd, line).map(Some);
+            return self.call(m, b, &e, fwd, &[], line).map(Some);
         }
         match (name, args.len()) {
             // `raw(s)` IS `@codeText(s)` in the interpreter — one verbatim piece,
@@ -7431,6 +7436,12 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         name: &str,
         args: &[Expr],
+        // The type arguments the caller WROTE (RFC-0125 §3 M6). Empty for
+        // every call this emitter reaches by rewriting one, and for every call
+        // whose type arguments the arguments themselves answer — which is all
+        // of them but the three reflection builtins, whose target is the whole
+        // of what they compile to.
+        type_args: &[Type],
         line: usize,
     ) -> Result<Type, String> {
         // RFC-0114 §25: the instrument's hooks are calls only in an audited
@@ -7440,7 +7451,7 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(Type::Unit);
         }
         let mark = self.arg_frees.len();
-        let r = self.call_inner(m, b, name, args, line);
+        let r = self.call_inner(m, b, name, args, type_args, line);
         // RFC-0125 M3, third slice: a lending call's result points into an
         // argument (`a[i]`, a projection). A temporary its arguments teed —
         // the receiver `weekdayLetters()[1]` reads its element out of — must
@@ -7477,6 +7488,7 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         name: &str,
         args: &[Expr],
+        type_args: &[Type],
         line: usize,
     ) -> Result<Type, String> {
         // RFC-0125 M1: the consumer's storage for THIS call's result, taken
@@ -7496,7 +7508,7 @@ impl<'p> Fn_<'_, 'p> {
         // to be hand-emitted become a library this backend already compiles.
         if let Some(rt) = vyrn_frontend::loader::routed_builtin(name) {
             if self.cx.sigs.contains_key(rt) {
-                return self.call(m, b, rt, args, line);
+                return self.call(m, b, rt, args, &[], line);
             }
             // Otherwise fall through to `unsupported("the call \`{name}\`")` below,
             // which is this backend's own wording for something it cannot reach.
@@ -7513,13 +7525,13 @@ impl<'p> Fn_<'_, 'p> {
                 .and_then(|t| self.show_dispatch(&t))
             {
                 if name == "@str" {
-                    return self.call(m, b, &f, args, line);
+                    return self.call(m, b, &f, args, &[], line);
                 }
                 // The textual backend's twin (round thirty-five): a printed
                 // render is freed at the print, because the synthesized call
                 // node has no plan row.
                 if name == "print" {
-                    self.call(m, b, &f, args, line)?;
+                    self.call(m, b, &f, args, &[], line)?;
                     let sv = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(sv));
                     b.ins(&Instruction::Call(self.cx.rt.print_str));
@@ -7529,11 +7541,12 @@ impl<'p> Fn_<'_, 'p> {
                     return Ok(Type::Unit);
                 }
                 let rendered = [Expr::Call {
+                    type_args: Vec::new(),
                     name: f,
                     args: args.to_vec(),
                     line,
                 }];
-                return self.call(m, b, name, &rendered, line);
+                return self.call(m, b, name, &rendered, &[], line);
             }
         }
         // RFC-0076 M7: the builtins that exist only while a generator runs — the
@@ -7865,16 +7878,17 @@ impl<'p> Fn_<'_, 'p> {
             // emits no `write_all` at all, which is why a disabled log site costs
             // nothing on any engine. Making it a runtime comparison would turn a
             // deleted call into a branch — RFC-0078's census names that mistake.
-            // (The five spellings are RESERVED by the checker, so no user function
-            // can reach this arm — the same reason the textual backend needs no
-            // guard either.)
-            // Literal for the same reason as the interpreter's arm:
+            // (The five spellings are the parser's own, so no user function can
+            // reach this arm: `log.info(m)` carries `@info` and a module that
+            // declares `info` gets the surface word back before this.)
+            // Literal rather than [`vyrn_frontend::ast::log_internal`]:
             // `primitives.rs` greps THIS FILE for each census name to decide
-            // whether the direct backend covers it.
-            "trace" | "debug" | "info" | "warn" | "error" if args.len() == 2 => {
+            // whether the direct backend covers it, and a predicate is
+            // invisible to a text scan.
+            "@trace" | "@debug" | "@info" | "@warn" | "@error" if args.len() == 2 => {
                 self.expr_as(m, b, &args[0], &Type::Logger)?;
                 self.expr_as(m, b, &args[1], &Type::Str)?;
-                if log_level_ordinal(name).unwrap_or(0) < self.cx.log_level {
+                if log_internal(name).unwrap_or(0) < self.cx.log_level {
                     // Below the threshold: the two values are the only thing this
                     // site leaves behind, and `Unit` means nobody consumes them.
                     b.ins(&Instruction::Drop);
@@ -7968,8 +7982,8 @@ impl<'p> Fn_<'_, 'p> {
             // so neither backend has a runtime lowering to get wrong and the bytes
             // cannot disagree. `jsonSchema` is one string; `schemaOf` is a `Schema`
             // record literal that then lowers like any other.
-            "jsonSchema" | "schemaOf" if args.len() == 1 => {
-                let e = self.reflected(name, &args[0], line)?;
+            "jsonSchema" | "schemaOf" if type_args.len() == 1 => {
+                let e = self.reflected(name, &type_args[0], line)?;
                 return self.expr(m, b, &e);
             }
             // `toJson(x)` is the same shape one size up (RFC-0078 M2b): the
@@ -7997,11 +8011,8 @@ impl<'p> Fn_<'_, 'p> {
             // `std/jsonread` and the walk is generated per target, so this backend
             // gets `fromJson` without a DOM, a number parser or a message
             // assembler — the two rows RFC-0077 had left unlowered.
-            "fromJson" if args.len() == 2 => {
-                let Expr::Var { name: tn, .. } = &args[0] else {
-                    return unsupported("`fromJson` without a type name", line);
-                };
-                let target = vyrn_frontend::ast::Type::Named(tn.clone());
+            "fromJson" if type_args.len() == 1 && args.len() == 1 => {
+                let target = type_args[0].clone();
                 if !self
                     .cx
                     .sigs
@@ -8009,12 +8020,12 @@ impl<'p> Fn_<'_, 'p> {
                 {
                     return unsupported("`fromJson` without the JSON runtime linked", line);
                 }
-                let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
+                let e = vyrn_frontend::jsondec::decode_expr(&target, args[0].clone(), line);
                 // RFC-0114 §26: the rewrite embeds a clone of the payload
                 // argument — `toJson`'s twin, treated identically.
                 let mark = self.cx.plan.alias_scope();
                 let mut pairs = Vec::new();
-                vyrn_frontend::ast::alias_embedded(&e, &args[1], &mut pairs);
+                vyrn_frontend::ast::alias_embedded(&e, &args[0], &mut pairs);
                 self.cx.plan.alias_clones_scoped(&pairs);
                 let r = self.expr(m, b, &e);
                 self.cx.plan.alias_unwind(mark);
@@ -8747,7 +8758,7 @@ impl<'p> Fn_<'_, 'p> {
                     .ok()
                     .and_then(|t| ftypes::copy_impl(&self.cx.impls, &t))
                 {
-                    return self.call(m, b, &f, args, line);
+                    return self.call(m, b, &f, args, &[], line);
                 }
                 let ty = self.expr(m, b, &args[0])?;
                 self.copy_stack(m, b, &ty, line)?;
@@ -8888,7 +8899,7 @@ impl<'p> Fn_<'_, 'p> {
             let key = ftypes::type_key(&rty)
                 .ok_or_else(|| gap(&format!("`{name}` dispatched on `{rty}`"), line))?;
             let mangled = ftypes::impl_method_name(&proto, &key, name);
-            return self.call(m, b, &mangled, args, line);
+            return self.call(m, b, &mangled, args, &[], line);
         }
         // A function with `fn`-typed parameters (RFC-0023): resolve each
         // function-value argument to a direct-call target, specialize the callee
@@ -9231,7 +9242,7 @@ impl<'p> Fn_<'_, 'p> {
         // Interned AT the use site, the way M2m interns a DFA table: `Module::data`
         // shares identical contents, so five sites at one level get one string
         // without anything having gone looking for them.
-        let prefix = format!("[{}] ", level.to_uppercase());
+        let prefix = format!("[{}] ", level.trim_start_matches('@').to_uppercase());
         let (at, plen) = (self.cx.rt.intern(m, &prefix), prefix.len() as i32);
         let colon = self.cx.rt.intern(m, ": ");
         let nl = self.cx.rt.intern(m, "\n");
@@ -9286,15 +9297,16 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// The expression `jsonSchema(T)` / `schemaOf(T)` stands for.
+    /// The expression `jsonSchema<T>()` / `schemaOf<T>()` stands for.
     ///
-    /// Both are compile-time reflection over a *declaration*, so the argument is a
-    /// type name rather than a value — which is also why this is a rewrite rather
-    /// than a call: there is nothing to evaluate at runtime.
-    fn reflected(&self, which: &str, arg: &Expr, line: usize) -> Result<Expr, String> {
-        let Expr::Var { name: tn, .. } = arg else {
+    /// Both are compile-time reflection over a *declaration*, so the target is a
+    /// type ARGUMENT rather than a value — which is also why this is a rewrite
+    /// rather than a call: there is nothing to evaluate at runtime. The target
+    /// was an `Expr::Var` in argument position until RFC-0125 §3 M6.
+    fn reflected(&self, which: &str, target: &Type, line: usize) -> Result<Expr, String> {
+        let (Type::Named(tn) | Type::App(tn, _)) = target else {
             return unsupported(
-                &format!("`{which}` of something other than a type name"),
+                &format!("`{which}` of `{target}`, which names no declaration"),
                 line,
             );
         };
@@ -10441,7 +10453,7 @@ impl<'p> Fn_<'_, 'p> {
         // Everything a call needs — argument coercion, generic instantiation, the
         // hidden destination for an aggregate return — is `call`'s, so a spawned
         // call and a plain one cannot diverge in how they pass arguments.
-        let ret = self.call(m, b, name, args, line)?;
+        let ret = self.call(m, b, name, args, &[], line)?;
         let boxed = b.local(ValType::I32);
         match self.cx.repr(&ret, line)? {
             Repr::Scalar(v) => {
@@ -13416,6 +13428,7 @@ impl<'p> Fn_<'_, 'p> {
             b,
             &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "isSuccess"),
             &recv,
+            &[],
             line,
         )?;
         b.ins(&Instruction::I32Eqz);
@@ -13442,6 +13455,7 @@ impl<'p> Fn_<'_, 'p> {
             b,
             &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "success"),
             &recv,
+            &[],
             line,
         );
         self.scope.truncate(mark);

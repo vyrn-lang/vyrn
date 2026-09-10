@@ -1152,8 +1152,10 @@ fn mounted_routes_wasm(
         .into_iter()
         .map(|args| {
             Stmt::Expr(Expr::Call {
+                type_args: Vec::new(),
                 name: "print".to_string(),
                 args: vec![Expr::Call {
+                    type_args: Vec::new(),
                     name: "mountedRows".to_string(),
                     args,
                     line: 0,
@@ -3914,12 +3916,14 @@ import {{ benchOne }} from \"std/bench\"
         };
         if json {
             measure_calls.push(Expr::Call {
+                type_args: Vec::new(),
                 name: "benchMeasure".to_string(),
                 args: vec![Expr::Str(b.name.clone()), body_ref],
                 line: 0,
             });
         } else {
             harness_stmts.push(Stmt::Expr(Expr::Call {
+                type_args: Vec::new(),
                 name: "benchOne".to_string(),
                 args: vec![Expr::Str(b.name.clone()), Expr::Int(width), body_ref],
                 line: 0,
@@ -3932,8 +3936,10 @@ import {{ benchOne }} from \"std/bench\"
         // The array literal coerces to `Array<BenchResult>` from `benchJson`'s
         // parameter type; declaration order is preserved.
         harness_stmts.push(Stmt::Expr(Expr::Call {
+            type_args: Vec::new(),
             name: "print".to_string(),
             args: vec![Expr::Call {
+                type_args: Vec::new(),
                 name: "benchJson".to_string(),
                 args: vec![
                     Expr::ArrayLit {
@@ -3950,11 +3956,13 @@ import {{ benchOne }} from \"std/bench\"
     } else {
         // Footer: a blank line, then the count (mirrors `vyrn test`'s summary shape).
         harness_stmts.push(Stmt::Expr(Expr::Call {
+            type_args: Vec::new(),
             name: "print".to_string(),
             args: vec![Expr::Str(String::new())],
             line: 0,
         }));
         harness_stmts.push(Stmt::Expr(Expr::Call {
+            type_args: Vec::new(),
             name: "print".to_string(),
             args: vec![Expr::Str(format!("{} benches", selected.len()))],
             line: 0,
