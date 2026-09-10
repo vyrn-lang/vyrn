@@ -47,7 +47,7 @@ fn randomSeed() -> Int64
 ```
 
 An unpredictable Int64 seed from the host CSPRNG. HOST EFFECT (forbidden in
-generators/comptime; cannot cross a `spawn` boundary). Isolated here so 99%
+generators/comptime). Isolated here so 99%
 of randomness — the pure `Rng` below — stays deterministic and host-free.
 
 ## seededRng
