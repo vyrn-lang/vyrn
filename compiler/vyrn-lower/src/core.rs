@@ -212,11 +212,11 @@ pub enum NotOwned {
 }
 
 /// The path a reader wrote for a place read, spelled as the checker quotes it
-/// (`movecheck::place_path`, `movecheck::element_path`): `p.name`, `xs[i]`,
+/// (`ast::place_path`, `project::element_path`): `p.name`, `xs[i]`,
 /// `d.title`. `None` where the expression names no place.
 fn reader_path(e: &Expr) -> Option<String> {
-    vyrn_frontend::movecheck::place_path(e)
-        .or_else(|| vyrn_frontend::movecheck::element_path(e))
+    vyrn_frontend::ast::place_path(e)
+        .or_else(|| vyrn_frontend::project::element_path(e))
         .map(|(_, p)| p)
 }
 
@@ -271,7 +271,7 @@ impl BorrowKind {
         // to one (`let t = r.s`) is a second name for it. The two are
         // comparable at the root alone, which is `movecheck::Borrow::what`'s
         // own test (RFC-0125 §3 M3).
-        let at = vyrn_frontend::movecheck::root_of(at);
+        let at = vyrn_frontend::ast::root_of(at);
         match self {
             BorrowKind::Param { cap, of } if at == of => format!("a `{cap}` parameter"),
             BorrowKind::Param { cap, of } => {
@@ -303,7 +303,7 @@ impl BorrowKind {
             // handed on — a stored FIELD of one is a partial move — so a path
             // under the variable is left with the copy alone
             // (`movecheck::Borrow::fixes`).
-            BorrowKind::LoopVar { of } if vyrn_frontend::movecheck::root_of(path) == path => vec![
+            BorrowKind::LoopVar { of } if vyrn_frontend::ast::root_of(path) == path => vec![
                 format!("`for {path} in consume {of}` if the loop should take the elements"),
                 format!("`{path}.copy()` if both sides need a value"),
             ],
@@ -1212,10 +1212,10 @@ fn is_place_read(e: &Expr) -> bool {
 /// both are stated from the SYNTAX, so no heapless counterexample to either
 /// exists (RFC-0125 §3 M3, rows 08 and 09).
 fn take_names_a_place(e: &Expr, line: usize, by_loop: bool) -> Result<(), Gap> {
-    if vyrn_frontend::movecheck::place_path(e).is_some() {
+    if vyrn_frontend::ast::place_path(e).is_some() {
         return Ok(());
     }
-    if let Some((root, path)) = vyrn_frontend::movecheck::element_path(e) {
+    if let Some((root, path)) = vyrn_frontend::project::element_path(e) {
         // A container element is the one place that CAN hold a hole at run
         // time, and `swapRemove` already spells it (RFC-0011).
         return refuse(
@@ -2510,7 +2510,7 @@ impl<'a> Builder<'a> {
                 // this one (RFC-0125 §3 M3, the emitter-reads-the-core
                 // slice). Module state takes the same rule: it is a name to
                 // both of them.
-                let mentions = vyrn_frontend::movecheck::mentions_place(value, name);
+                let mentions = vyrn_frontend::ast::mentions_place(value, name);
                 let fresh_str = self.fresh_str(&ty, value);
                 // The hand-back is the CORE's answer and not the kernel's: it
                 // is read off the statement, not off the path. Everything
@@ -2590,8 +2590,8 @@ impl<'a> Builder<'a> {
                 // store to a name takes, one dot down, with the same
                 // exception for a String concatenation, which builds a fresh
                 // buffer whatever it reads (RFC-0125 §3 M3, the store slice).
-                let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
-                    && !self.fresh_str(&fty, value);
+                let handed_back =
+                    vyrn_frontend::ast::mentions_place(value, name) && !self.fresh_str(&fty, value);
                 let key = self.store_key(sid);
                 let releases = !handed_back && placed_store(key);
                 out.push(St::Store {
@@ -2641,8 +2641,8 @@ impl<'a> Builder<'a> {
                 // xs[j]` and `xs[xs.length - 1] = v` both read the buffer the
                 // store writes into, and neither displaces anything the
                 // container did not keep.
-                let handed_back = vyrn_frontend::movecheck::mentions_place(value, name)
-                    || vyrn_frontend::movecheck::mentions_place(index, name);
+                let handed_back = vyrn_frontend::ast::mentions_place(value, name)
+                    || vyrn_frontend::ast::mentions_place(index, name);
                 let releases = !handed_back && placed_store(key);
                 out.push(St::Store {
                     place,
@@ -2898,7 +2898,7 @@ impl<'a> Builder<'a> {
                 // read out of a place; the checker says what the reader wrote
                 // (RFC-0125 §3 M3, row 19).
                 if !*consuming && self.body.names[x as usize].borrow {
-                    let of = vyrn_frontend::movecheck::place_path(iter)
+                    let of = vyrn_frontend::ast::place_path(iter)
                         .map(|(r, _)| r)
                         .unwrap_or_default();
                     self.body.names[x as usize].loop_var = Some(of);
@@ -3283,7 +3283,8 @@ impl<'a> Builder<'a> {
     /// place, and that is a different question — what the arms may hold, not
     /// what the frame owns.
     fn made_scrutinee(&self, e: &'a Expr) -> bool {
-        use vyrn_frontend::movecheck::{element_path, place_path};
+        use vyrn_frontend::ast::place_path;
+        use vyrn_frontend::project::element_path;
         if place_path(e).is_none() && element_path(e).is_none() {
             return true;
         }
@@ -3613,7 +3614,7 @@ impl<'a> Builder<'a> {
     /// `root`'s own storage back.
     fn read_only_mentions(&self, e: &Expr, root: &str, out: &mut Vec<String>) -> bool {
         use vyrn_frontend::movecheck as mc;
-        if !mc::mentions_place(e, root) {
+        if !vyrn_frontend::ast::mentions_place(e, root) {
             return true;
         }
         // A mention whose TYPE owns no heap hands nothing back however it is
@@ -3625,7 +3626,7 @@ impl<'a> Builder<'a> {
             Expr::Call { name, args, .. } => args.iter().all(|a| {
                 let is_root_read = match a {
                     Expr::Var { name: v, .. } => v == root,
-                    _ => mc::place_path(a).is_some_and(|(r, _)| r == root),
+                    _ => vyrn_frontend::ast::place_path(a).is_some_and(|(r, _)| r == root),
                 };
                 if !is_root_read {
                     return self.read_only_mentions(a, root, out);
@@ -4164,7 +4165,7 @@ impl<'a> Builder<'a> {
             if params.contains(name) || caps.contains(&Val::Name(*n)) {
                 continue;
             }
-            if vyrn_frontend::movecheck::mentions_place(e, name) || calls.contains(&name.as_str()) {
+            if vyrn_frontend::ast::mentions_place(e, name) || calls.contains(&name.as_str()) {
                 caps.push(Val::Name(*n));
             }
         }
@@ -4254,7 +4255,7 @@ impl<'a> Builder<'a> {
     /// the borrow flag carries the heap gate the checker asks for: a record
     /// of `Int64`s has no buffer to hand away.
     fn consume_names_a_borrow(&self, e: &'a Expr, line: usize) -> Result<(), Gap> {
-        let Some((root, path)) = vyrn_frontend::movecheck::place_path(e) else {
+        let Some((root, path)) = vyrn_frontend::ast::place_path(e) else {
             return Ok(());
         };
         let Some(n) = self.lookup(&root) else {

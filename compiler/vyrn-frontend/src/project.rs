@@ -1280,6 +1280,110 @@ pub fn all(p: &Program) -> impl Iterator<Item = (&ImplBlock, &Function)> {
         .flat_map(|i| i.places.iter().map(move |f| (i, f)))
 }
 
+// ---------------------------------------------------------------------------
+// Which call names read a place, and the path one spells.
+//
+// A user projection's name is an element read wherever it appears, exactly as
+// `@at` is. That is a fact about the PROJECTIONS a program declares, so it is
+// stated here; `movecheck.rs` held it while the move check was its only reader
+// (RFC-0125 §3 M3, the algebra slice), and the core, the direct backend and the
+// checker all ask it now.
+// ---------------------------------------------------------------------------
+thread_local! {
+    /// The user projection NAMES of the program under check (RFC-0120).
+    ///
+    /// This pass keys every element-read rule on the spelling `@at`, because
+    /// `@at` is reserved and therefore IS an element read wherever it appears.
+    /// A named projection is the same read under a user-chosen name, and the
+    /// name alone cannot say so — so [`run`] records the program's projection
+    /// names here and [`named_projection`] answers for the free functions
+    /// ([`element_path`]) that have no `&self` to carry a set through. A name
+    /// answers true whether or not the receiver at a given site is the
+    /// projection's own type; that over-approximation only widens a borrow
+    /// verdict, never narrows one, which is the conservative direction.
+    static PLACE_NAMES: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Whether `name` is a user projection's name — see [`PLACE_NAMES`].
+pub(crate) fn named_projection(name: &str) -> bool {
+    PLACE_NAMES.with(|s| s.borrow().contains(name))
+}
+
+/// `@at`, or a user projection's own name: an element read either way.
+pub(crate) fn projection_call(name: &str) -> bool {
+    name == AT || named_projection(name)
+}
+
+/// The place `e` reads, as `(root name, whole path)`.
+///
+/// `s` is `("s", "s")` and `r.a.b` is `("r", "r.a.b")` — the root is what a move
+/// takes, the path is what the diagnostic quotes. Anything else (a call, a
+/// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `@at(xs, i)`,
+/// which is a call, so [`crate::ast::place_path`] answers `None` for it.
+///
+/// M0 found that the RFC was wrong to say an element read is covered "by the
+/// same three lines as a field read". It is true of `borrow_from`, which reads
+/// `@at(..)` itself, and false of `movecheck`'s `store` and `returned_borrow`,
+/// both of which bailed at `place_path` before
+/// deciding anything. **M1 took the decision M0 left open and widened both**, so
+/// `out.push(xs[i])` and `return items[i]` are refused like the field they are.
+/// The instrument still counts them apart, under `elem-store` and `elem-return`.
+pub fn element_path(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Call { name, args, .. } if projection_call(name) => {
+            let a = args.first()?;
+            let (root, path) = crate::ast::place_path(a).or_else(|| element_path(a))?;
+            // A named projection quotes as the call the reader wrote; `@at`
+            // keeps the index spelling `xs[i]` it has always had.
+            if name == AT {
+                Some((root, format!("{path}[{}]", index_text(args.get(1)))))
+            } else {
+                Some((root, format!("{path}.{name}(..)")))
+            }
+        }
+        // A field OF an element: `fs[0].key`. `ast::place_path` walks a `Field` down
+        // to a `Var` and answers `None` as soon as it meets the `@at(..)` call, so
+        // without this arm the escape hatch is one dot wide — `let f = fs[0]`
+        // then `return f.key` is refused and `return fs[0].key` is not.
+        Expr::Field { expr, field, .. } => {
+            let (root, path) = element_path(expr)?;
+            Some((root, format!("{path}.{field}")))
+        }
+        _ => None,
+    }
+}
+
+/// An index as the reader wrote it, for the quoted path in a diagnostic.
+///
+/// A whole name and a whole integer are spelled back, so `xs[i]` and `fs[0]`
+/// print as themselves and the `.copy()` on the menu is text `vyrn fix` can find
+/// in the line. Anything else prints `..`: the message still says which read is
+/// the problem, and `vyrn fix` then refuses rather than guessing where to put the
+/// call — which is the behaviour it already has for a path it cannot locate.
+fn index_text(e: Option<&Expr>) -> String {
+    match e {
+        Some(Expr::Var { name, .. }) => name.clone(),
+        Some(Expr::Int(n)) => n.to_string(),
+        _ => "..".to_string(),
+    }
+}
+
+/// Record which call names read a place in `program` (RFC-0120), for
+/// [`element_path`] and for `movecheck::views`.
+///
+/// Rebuilt per analysis so a long-lived process — the language server — always
+/// answers for the program in hand.
+pub fn note_place_names(program: &Program) {
+    PLACE_NAMES.with(|s| {
+        *s.borrow_mut() = program
+            .impls
+            .iter()
+            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
+            .collect();
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

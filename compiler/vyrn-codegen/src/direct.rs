@@ -4032,7 +4032,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The snapshot is taken BEFORE the store and freed AFTER it, which is the
     /// same order as "compute the new value, then release the old" and survives an
     /// aggregate that is built destination-first. It is only ever reached where the
-    /// new value does not name the place ([`vyrn_frontend::movecheck::mentions`]),
+    /// new value does not name the place ([`vyrn_frontend::ast::mentions`]),
     /// so nothing the store computes can read the snapshot.
     fn snap_at(
         &mut self,
@@ -5067,8 +5067,8 @@ impl<'p> Fn_<'_, 'p> {
                     // states at its own map arm: a map owns its values outright,
                     // so who owns the MAP does not change who owns the value this
                     // store displaces. The arena and aliasing are what is asked.
-                    let drop_old = !vyrn_frontend::movecheck::mentions_place(value, name)
-                        && !vyrn_frontend::movecheck::mentions_place(index, name);
+                    let drop_old = !vyrn_frontend::ast::mentions_place(value, name)
+                        && !vyrn_frontend::ast::mentions_place(index, name);
                     // The entry's release is `map_set`'s own two questions.
                     return self
                         .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
@@ -13811,7 +13811,7 @@ impl<'p> Fn_<'_, 'p> {
     /// as one row now (`St::Switch`'s `owns`), which is why this backend has
     /// no `Expr` left to look at (RFC-0125 §3 M3, the box slice).
     fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
-        use vyrn_frontend::movecheck::place_path;
+        use vyrn_frontend::ast::place_path;
         let consumed = self.cx.owns_scrutinee(key);
         let own_receiver = self.is_release
             && match scrutinee {
@@ -15365,7 +15365,7 @@ fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt))
 /// a callee can reach module state, and a `modify` argument is the binding
 /// itself. A lambda literal counts as a call: it captures now.
 fn observes(e: &Expr, name: &str) -> bool {
-    let mut hit = vyrn_frontend::movecheck::mentions_place(e, name);
+    let mut hit = vyrn_frontend::ast::mentions_place(e, name);
     each_expr(
         e,
         &mut |x| {
@@ -15439,7 +15439,7 @@ fn header_invariant(cond: &Expr, body: &Block, name: &str) -> bool {
                 is_var(a, name) || matches!(a, Expr::Consume { place, .. } if is_var(place, name))
             }),
             Expr::Consume { place, .. } => !is_var(place, name),
-            Expr::Lambda { .. } => !vyrn_frontend::movecheck::mentions_place(e, name),
+            Expr::Lambda { .. } => !vyrn_frontend::ast::mentions_place(e, name),
             Expr::Match { arms, .. } => !arms.iter().any(|a| binds(&a.pattern, name)),
             _ => true,
         };
