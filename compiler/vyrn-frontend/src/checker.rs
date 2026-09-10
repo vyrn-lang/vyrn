@@ -1510,30 +1510,13 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         // handle reads the same bytes, but a write through one can land in
         // the copy, so `atSet`'s place stays a chain the store machinery can
         // prove writes through.
-        let mut roots: std::collections::HashSet<String> =
-            f.params.iter().map(|p| p.name.clone()).collect();
-        if f.params.first().map(|p| p.capability) != Some(crate::ast::Capability::Modify) {
-            for s in &f.body.stmts[..f.body.stmts.len() - 1] {
-                if let Stmt::Let { name, value, .. } = s {
-                    if let_borrows_from(value, &roots) {
-                        roots.insert(name.clone());
-                    }
-                }
-            }
-        }
-        match crate::project::place_root(y) {
-            Some(root) if roots.contains(&root) => {}
-            Some(root) => push(cerr_at!(
-                f.line,
-                f.name_span(),
-                "projection `{}` returns a place rooted at `{root}`, which the \
-                 access site does not own — a projection may only return a place \
-                 inside `self`, a parameter, or a prologue `let` that borrows \
-                 from one",
-                f.name
-            )),
-            None => {}
-        }
+        let modifies =
+            f.params.first().map(|p| p.capability) == Some(crate::ast::Capability::Modify);
+        let prologue = match modifies {
+            true => &f.body.stmts[..0],
+            false => &f.body.stmts[..f.body.stmts.len() - 1],
+        };
+        rooted_where_the_site_owns(f, y, prologue.iter(), &mut push);
         // The body itself, with `self` typed to the implementing type.
         let r = checker.function(f);
         if let Err(s) = r {
@@ -1635,12 +1618,37 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
     // Roots trace through borrowing `let`s of BOTH segments: the prologue's,
     // and the hit prologue's — the payload binding after the miss is decided
     // is `tryField`'s whole reason to have one.
+    let prologue = f.body.stmts[..n - 1]
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .map(|(_, s)| s);
+    rooted_where_the_site_owns(f, y, prologue, push);
+    if let Err(s) = checker.function(f) {
+        push(s);
+    }
+    for s in checker.errors.borrow_mut().drain(..) {
+        push(s);
+    }
+}
+
+/// Rule 3 for both projection shapes: what a projection yields is rooted where
+/// the access site owns — `self`, a parameter, or a prologue `let` that borrows
+/// from one.
+///
+/// `prologue` is the statements a root traces through, and it is the whole of
+/// what the two shapes differ in: the plain kind traces its own prologue and
+/// nothing when the receiver is `modify`, and the optional kind traces both
+/// segments' but not the decision itself.
+fn rooted_where_the_site_owns<'s>(
+    f: &Function,
+    y: &Expr,
+    prologue: impl Iterator<Item = &'s Stmt>,
+    push: &mut impl FnMut(Diagnostic),
+) {
     let mut roots: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
-    for (i, s) in f.body.stmts[..n - 1].iter().enumerate() {
-        if i == at {
-            continue;
-        }
+    for s in prologue {
         if let Stmt::Let { name, value, .. } = s {
             if let_borrows_from(value, &roots) {
                 roots.insert(name.clone());
@@ -1659,12 +1667,6 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
             f.name
         )),
         None => {}
-    }
-    if let Err(s) = checker.function(f) {
-        push(s);
-    }
-    for s in checker.errors.borrow_mut().drain(..) {
-        push(s);
     }
 }
 
@@ -8511,6 +8513,52 @@ impl<'a> Checker<'a> {
             Type::Fn(ps, r) => (ps.clone(), (**r).clone()),
             _ => return Ok(()),
         };
+        // Contravariance, and the return unified: the value's own parameter
+        // type must accept whatever the callee will pass. Checking the reverse
+        // direction too let the callee pass a NARROWER record than the value
+        // reads — a missing field at dispatch. A type parameter that occurs
+        // ONLY inside this `fn` parameter's own parameter list is solved from
+        // the value's declared types, exactly as a bare name solves it
+        // (RFC-0071 M2b). All three arms below that hand over a function value
+        // ask it; `owner` is how each names the value.
+        let params_accept = |owner: &str,
+                             vptys: &[Type],
+                             vret: &Type,
+                             subst: &mut HashMap<String, Type>|
+         -> Result<(), Diagnostic> {
+            for (a, b) in vptys.iter().zip(&ptys) {
+                let b = &self.solve_fn_param(b, a, subst, line);
+                if !self.assignable(b, a) {
+                    return Err(cerr!(
+                        line,
+                        "{owner} expects a {a} argument, but `{callee}` \
+                         will pass it {b}"
+                    ));
+                }
+            }
+            self.unify(&ret, vret, subst, line)
+        };
+        // The two arms that hand over a value of `fn` TYPE share their arity
+        // sentence as well; the named-function arm below has its own, because a
+        // declaration is not a value and the sentence says so.
+        let value_matches = |subject: &str,
+                             owner: &str,
+                             vptys: &[Type],
+                             vret: &Type,
+                             subst: &mut HashMap<String, Type>|
+         -> Result<(), Diagnostic> {
+            if vptys.len() != ptys.len() {
+                return Err(cerr!(
+                    line,
+                    "{subject} is a {}-argument function value, but \
+                     `{callee}` argument {} expects {}",
+                    vptys.len(),
+                    i + 1,
+                    ptys.len()
+                ));
+            }
+            params_accept(owner, vptys, vret, subst)
+        };
         match arg {
             Expr::Lambda {
                 params,
@@ -8624,32 +8672,8 @@ impl<'a> Checker<'a> {
                 if let Some(Type::Fn(vptys, vret)) =
                     self.lookup(scope, vn).map(|b| self.base(&b.ty))
                 {
-                    if vptys.len() != ptys.len() {
-                        return Err(cerr!(
-                            line,
-                            "`{vn}` is a {}-argument function value, but \
-                             `{callee}` argument {} expects {}",
-                            vptys.len(),
-                            i + 1,
-                            ptys.len()
-                        ));
-                    }
-                    // Contravariant, like the named-function arm below: the
-                    // value's own parameter type must accept whatever the
-                    // callee will pass. Checking the reverse direction too let
-                    // the callee pass a NARROWER record than the value reads
-                    // — a missing field at dispatch.
-                    for (a, b) in vptys.iter().zip(&ptys) {
-                        let b = &self.solve_fn_param(b, a, subst, line);
-                        if !self.assignable(b, a) {
-                            return Err(cerr!(
-                                line,
-                                "`{vn}` expects a {a} argument, but `{callee}` \
-                                 will pass it {b}"
-                            ));
-                        }
-                    }
-                    self.unify(&ret, &vret, subst, line)?;
+                    let vn = format!("`{vn}`");
+                    value_matches(&vn, &vn, &vptys, &vret, subst)?;
                     return Ok(());
                 }
                 let sig = self.sigs.get(vn).ok_or_else(|| {
@@ -8679,17 +8703,7 @@ impl<'a> Checker<'a> {
                         ptys.len()
                     ));
                 }
-                for (a, b) in sig.0.iter().zip(&ptys) {
-                    let b = &self.solve_fn_param(b, a, subst, line);
-                    if !self.assignable(b, a) {
-                        return Err(cerr!(
-                            line,
-                            "`{vn}` expects a {a} argument, but `{callee}` will \
-                             pass it {b}"
-                        ));
-                    }
-                }
-                self.unify(&ret, &sig.1, subst, line)?;
+                params_accept(&format!("`{vn}`"), &sig.0, &sig.1, subst)?;
                 self.record_arg_fn(
                     &crate::types::substitute(expected_fn, subst),
                     Some(vn),
@@ -8724,34 +8738,7 @@ impl<'a> Checker<'a> {
                         i + 1
                     ));
                 };
-                if vptys.len() != ptys.len() {
-                    return Err(cerr!(
-                        line,
-                        "this is a {}-argument function value, but \
-                         `{callee}` argument {} expects {}",
-                        vptys.len(),
-                        i + 1,
-                        ptys.len()
-                    ));
-                }
-                // Contravariant (see the Var arm above): the value's declared
-                // parameter type must accept what the callee will pass.
-                for (a, b) in vptys.iter().zip(&ptys) {
-                    // A type parameter that occurs ONLY inside this `fn`
-                    // parameter's own parameter list is solved from the value's
-                    // declared types, exactly as a bare name solves it
-                    // (RFC-0071 M2b).
-                    let b = &self.solve_fn_param(b, a, subst, line);
-                    if !self.assignable(b, a) {
-                        return Err(cerr!(
-                            line,
-                            "this function value expects a {a} argument, \
-                             but `{callee}` will pass it {b}"
-                        ));
-                    }
-                }
-                self.unify(&ret, &vret, subst, line)?;
-                Ok(())
+                value_matches("this", "this function value", &vptys, &vret, subst)
             }
         }
     }

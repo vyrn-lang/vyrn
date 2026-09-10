@@ -733,8 +733,8 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3398, 140),
-        ("a rule the checker states", 1469, 55),
+        ("the typing judgment", 3383, 137),
+        ("a rule the checker states", 1471, 54),
         ("the checker's part in a rewrite stated elsewhere", 454, 14),
         ("one arm per form, type constructor or builtin", 2883, 157),
         ("shared machinery", 2184, 29),
