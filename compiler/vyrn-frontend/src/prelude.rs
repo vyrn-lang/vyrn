@@ -197,6 +197,8 @@ fn row(
                 name: n.to_string(),
                 capability: *c,
                 ty: t.clone(),
+                line: 0,
+                col: 0,
             })
             .collect(),
         ret,

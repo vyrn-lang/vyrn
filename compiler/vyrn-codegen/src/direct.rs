@@ -1643,6 +1643,8 @@ impl<'a> Cx<'a> {
                 name: p.name.clone(),
                 capability: p.capability,
                 ty: ftypes::substitute(&p.ty, &subst),
+                line: p.line,
+                col: p.col,
             });
         }
         sf.ret = ftypes::substitute(&f.ret, &subst);
@@ -9600,6 +9602,8 @@ impl<'p> Fn_<'_, 'p> {
                     name: p.name.clone(),
                     capability: p.capability,
                     ty: ftypes::substitute(&p.ty, &subst),
+                    line: p.line,
+                    col: p.col,
                 });
                 call_args.push(args[i].clone());
                 let mut v = Vec::new();
@@ -9617,6 +9621,8 @@ impl<'p> Fn_<'_, 'p> {
                     name: n.clone(),
                     capability: Capability::Read,
                     ty: t.clone(),
+                    line: 0,
+                    col: 0,
                 });
                 srcs.push(n);
             }
@@ -9836,7 +9842,7 @@ impl<'p> Fn_<'_, 'p> {
     /// type the arm does not produce.
     fn lambda_ret(
         &mut self,
-        params: &[String],
+        params: &[Binder],
         body: &LambdaBody,
         ptys: &[Type],
         expected_ret: &Type,
@@ -9847,7 +9853,7 @@ impl<'p> Fn_<'_, 'p> {
                 let mark = self.scope.len();
                 for (pn, pt) in params.iter().zip(ptys) {
                     self.scope
-                        .push((pn.clone(), Place::Local(u32::MAX), pt.clone()));
+                        .push((pn.name.clone(), Place::Local(u32::MAX), pt.clone()));
                 }
                 let got = self.peek(e, line);
                 self.scope.truncate(mark);
@@ -9904,7 +9910,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         at: &Expr,
-        params: &[String],
+        params: &[Binder],
         body: &LambdaBody,
         ptys: &[Type],
         expected_ret: &Type,
@@ -9917,9 +9923,11 @@ impl<'p> Fn_<'_, 'p> {
         // because a capture list is part of the lifted function's signature and two
         // backends disagreeing about its length would emit calls with the wrong
         // number of arguments.
-        let cap_names = crate::lambda_captures(body, params.iter().cloned().collect(), &|n| {
-            self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n)
-        });
+        let cap_names = crate::lambda_captures(
+            body,
+            params.iter().map(|p| p.name.clone()).collect(),
+            &|n| self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n),
+        );
         let mut cap_tys = Vec::new();
         for cn in &cap_names {
             // A `fn`-typed PARAMETER captured by the lambda has no slot: inside a
@@ -9968,11 +9976,15 @@ impl<'p> Fn_<'_, 'p> {
                 name: n.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
+                line: 0,
+                col: 0,
             })
             .chain(params.iter().zip(ptys).map(|(n, t)| Param {
-                name: n.clone(),
+                name: n.name.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
+                line: n.line,
+                col: n.col,
             }))
             .collect();
         sf.ret = ret.clone();
@@ -11101,7 +11113,7 @@ impl<'p> Fn_<'_, 'p> {
         b.slot(ooff);
         b.ins(&Instruction::LocalSet(oaddr));
         let sum = crate::sum_variants_of(&opt, &self.cx.types).unwrap_or_default();
-        let some = Pattern::Variant("Some".into(), vec![String::new()]);
+        let some = Pattern::Variant("Some".into(), vec![Binder::synthetic("")]);
         self.tag_test(b, oaddr, &sum, &some, line)?;
         b.ins(&Instruction::If(BlockType::Empty));
         let got = self.bind_payload(
@@ -12994,7 +13006,7 @@ impl<'p> Fn_<'_, 'p> {
         // rather than a variant — variant 1 succeeds, variant 0 fails — which is
         // the one thing the parser could not do; a sum wider than two has no
         // success side as a pattern.
-        let (at, binds): (usize, &[String]) = match pat {
+        let (at, binds): (usize, &[Binder]) = match pat {
             // The refutable-`let` desugar's default arm (RFC-0121): any
             // variant, nothing bound.
             Pattern::Other => return Ok(Vec::new()),
@@ -13017,7 +13029,7 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(v
                 .payload
                 .first()
-                .map(|t| vec![(binds[0].clone(), t.clone())])
+                .map(|t| vec![(binds[0].name.clone(), t.clone())])
                 .unwrap_or_default());
         }
         if v.payload.len() != binds.len() {
@@ -13025,7 +13037,7 @@ impl<'p> Fn_<'_, 'p> {
         }
         Ok(binds
             .iter()
-            .cloned()
+            .map(|b| b.name.clone())
             .zip(v.payload.iter().cloned())
             .collect())
     }
@@ -13332,7 +13344,7 @@ impl<'p> Fn_<'_, 'p> {
         // into `Pattern`". A `Variant` rebuilt here from `vs[1].name` said it a
         // second time. The binder is unread either way: `tag_test` takes the tag
         // from the pattern and `bind_payload` the type from the sum.
-        let ok_pat = Pattern::Success(String::new());
+        let ok_pat = Pattern::Success(Binder::synthetic(""));
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("`?` on a non-aggregate sum", line);
         };
@@ -13646,11 +13658,12 @@ impl<'p> Fn_<'_, 'p> {
         if let Pattern::Variant(_, binds) = pattern {
             let bind = &binds[0];
             let synth = Stmt::Let {
-                name: bind.clone(),
+                name: bind.name.clone(),
                 mutable: false,
                 ty: None,
                 value: p.place.clone(),
                 line,
+                col: bind.col,
             };
             self.stmt(m, b, &synth)?;
         }
@@ -15388,11 +15401,7 @@ fn is_var(e: &Expr, name: &str) -> bool {
 /// Does `p` bind `name`? A binder inside the loop would shadow the hoisted
 /// binding, so the hoist is refused.
 fn binds(p: &Pattern, name: &str) -> bool {
-    match p {
-        Pattern::Success(n) | Pattern::Failure(n) => n == name,
-        Pattern::Variant(_, ns) => ns.iter().any(|n| n == name),
-        Pattern::Other => false,
-    }
+    p.bindings().contains(&name)
 }
 
 /// The names a `while` indexes: every `@at(name, _)` in its condition or body.

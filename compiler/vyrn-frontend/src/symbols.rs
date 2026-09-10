@@ -17,8 +17,8 @@
 //! from the cached [`Analysis`].
 
 use crate::ast::{
-    self, Block, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl,
-    Stmt, Type, TypeDecl,
+    self, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Stmt, Type,
+    TypeDecl,
 };
 use crate::checker;
 use crate::diagnostics::Diagnostic;
@@ -79,38 +79,13 @@ pub struct TokenInfo {
     pub end_col: usize,
 }
 
-/// A local binding — a parameter, a `let`, or a `for`-in variable — scoped to a
-/// single function body. Indexed for hover/go-to-definition on variables (the
-/// most common thing to hover). Reuses the lexer's token column for the name
-/// position, exactly like [`Symbol`]; no AST span threading.
-#[derive(Debug, Clone)]
-pub struct LocalBinding {
-    pub name: String,
-    pub kind: LocalKind,
-    /// Declared type, if any. `None` for unannotated `let`s and `for`-in vars
-    /// (the element type is inferred by the checker and not retained here).
-    pub ty: Option<Type>,
-    /// 1-based definition line. For a param this is the function's line; for a
-    /// `let`/`for` it is the statement's line.
-    pub line: usize,
-    /// 1-based name column (0 = unknown).
-    pub col: usize,
-    /// 1-based name end column (0 = unknown).
-    pub end_col: usize,
-    /// The enclosing function's declaration line (scopes the binding).
-    pub fn_line: usize,
-}
-
-/// The flavor of a [`LocalBinding`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalKind {
-    /// A function parameter (`fn area(s: Shape)` → `s`).
-    Param,
-    /// `let [mut] name [: Type] = value;` (annotated or not).
-    Let { mutable: bool },
-    /// `for name in iter { .. }` — the loop variable.
-    ForVar,
-}
+/// A local binding, and its flavour — the checker's rows, read here.
+///
+/// This file walked every body a second time to make them, for the POSITIONS
+/// the checker did not record. It records them now (RFC-0125 §3 M6): a binder
+/// carries its column in the AST, and the pass that types a binding is the pass
+/// that indexes it.
+pub use crate::checker::{LocalBinding, LocalKind};
 
 /// Everything the LSP needs for one document, built in a single pass.
 #[derive(Debug, Clone)]
@@ -432,10 +407,10 @@ fn analyze_inner(
     // which is why it is here and not inside the block that asks first: `Memo`
     // clears the slot when it drops.
     let _own = checked.as_ref().map(crate::own::Memo::open);
-    // `check_accum_with_let_types` returns the diagnostics AND a table of the
-    // inferred/declared type of each clean `let` and `for`-var — used below to
-    // give unannotated lets a real type on hover (`let x: Int`).
-    let let_types = match &checked {
+    // The check returns the diagnostics AND every binding it made in the root
+    // module — the editor's local index, with the type the checker decided, so
+    // an unannotated `let x = 5` hovers as `let x: Int64`.
+    let locals = match &checked {
         Some(prog) => {
             // The LSP re-checks on every keystroke, and all but the edited
             // module are byte-identical to last time — reuse their diagnostics
@@ -451,10 +426,10 @@ fn analyze_inner(
             // a companion: a reused body is one this pass does not walk, so it
             // records nothing for it. A host with no placer has no reader for a
             // record and keeps the memo.
-            let (check_diags, let_types) = if crate::own::placer_installed() {
+            let (check_diags, binders) = if crate::own::placer_installed() {
                 checker::check_accum_recording(prog)
             } else if hashes.is_empty() {
-                checker::check_accum_with_let_types(prog)
+                checker::check_accum_with_binders(prog)
             } else {
                 checker::check_accum_reusing(prog, &hashes)
             };
@@ -483,9 +458,11 @@ fn analyze_inner(
                     diags.push(adopt_foreign(d));
                 }
             }
-            let_types
+            binders
         }
-        None => Default::default(),
+        // A parse error stops the check, and the statements the parser
+        // recovered still bind names the reader hovers — untyped.
+        None => checker::local_index(&program, &Default::default()),
     };
     pin_diagnostics(&mut diags, &kw_cols, &tok_info);
 
@@ -513,7 +490,6 @@ fn analyze_inner(
     // completion and `ns.member` hover / go-to-definition). Needs the linker to
     // resolve each namespace import to its source module.
     let namespaces = index_namespaces(&graph, &program, linker, &origin_index);
-    let locals = index_locals(&program, &tok_info, &let_types);
 
     // Protocol/impl member tables for `.foo` completion (RFC-0002 §5). Impls
     // and protocols come from the linked program when available (imported
@@ -2280,277 +2256,6 @@ pub(crate) fn short_path(file: &str) -> String {
         return file.to_string();
     }
     format!("…/{}", parts[parts.len() - 3..].join("/"))
-}
-
-// ---------------------------------------------------------------------------
-// local-binding indexing (params / lets / for-vars)
-// ---------------------------------------------------------------------------
-
-/// Index every function's local bindings: its parameters, every `let` in its
-/// body (annotated or not — unannotated ones still get go-to-definition), and
-/// every `for`-in loop variable. Methods (`impl` blocks) are functions too;
-/// protocol methods have no body and are skipped.
-fn index_locals(
-    program: &ast::Program,
-    tok_info: &[TokenInfo],
-    let_types: &std::collections::HashMap<(usize, String), Type>,
-) -> Vec<LocalBinding> {
-    let mut out = Vec::new();
-    for f in &program.functions {
-        index_function_locals(f, tok_info, let_types, &mut out);
-    }
-    for imp in &program.impls {
-        for m in &imp.methods {
-            index_function_locals(m, tok_info, let_types, &mut out);
-        }
-    }
-    out
-}
-
-/// One function's params + body bindings.
-fn index_function_locals(
-    f: &Function,
-    tok_info: &[TokenInfo],
-    let_types: &std::collections::HashMap<(usize, String), Type>,
-    out: &mut Vec<LocalBinding>,
-) {
-    // Params: name on the function's line (v0 signatures are single-line; if a
-    // param name isn't found there, fall back to an unknown column — the binding
-    // still resolves by name).
-    for p in &f.params {
-        let (col, end_col) = name_col_on_line(tok_info, &p.name, f.line);
-        out.push(LocalBinding {
-            name: p.name.clone(),
-            kind: LocalKind::Param,
-            ty: Some(p.ty.clone()),
-            line: f.line,
-            col,
-            end_col,
-            fn_line: f.line,
-        });
-    }
-    collect_lets(&f.body, f.line, tok_info, let_types, out);
-}
-
-// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
-// declared (RFC-0125 §3 M6). This file wrote the same thirty-five arms out to
-// collect the bindings; what is this reader's own is the row it records.
-crate::body_scope_descent!(LetVisit, let_block, let_stmt, let_expr);
-
-/// The collector's line at each site. `let` and `for`-in bind by statement,
-/// `if let` and a `match` arm by pattern, a lambda by parameter; every one is
-/// indexed at its own line, so a binding in a nested block hovers where it is
-/// written. The checker's `let_types` table fills in the inferred type for an
-/// unannotated `let` (and the element type for a `for`-var); an annotated `let`
-/// keeps its AST annotation, which is the same value. A binding after a
-/// same-function error is not in the table, so it falls back to the annotation
-/// (None for unannotated — no type shown).
-struct Lets<'a> {
-    fn_line: usize,
-    tok_info: &'a [TokenInfo],
-    let_types: &'a std::collections::HashMap<(usize, String), Type>,
-    out: &'a mut Vec<LocalBinding>,
-    /// The value of a synthetic desugar `let`, which is not descended: an
-    /// unspellable binding has no source token, and neither has anything the
-    /// desugar put under it.
-    skip: Option<usize>,
-}
-
-impl LetVisit<'_> for Lets<'_> {
-    // Nothing here asks what is in scope; the binder's own line and column are
-    // the whole answer.
-    const SCOPED: bool = false;
-
-    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
-        match s {
-            Stmt::Let {
-                name,
-                mutable,
-                ty,
-                value,
-                line,
-            } => {
-                // Synthetic desugar temporaries (e.g. `ps[]`, from `a[i].f = v`)
-                // are unspellable — they contain characters no real identifier
-                // can — and have no source token; never surface them as
-                // hover/outline/completion locals.
-                if name.starts_with('@') || name.contains('[') {
-                    self.skip = Some(value as *const Expr as usize);
-                    return;
-                }
-                let (col, end_col) = name_col_on_line(self.tok_info, name, *line);
-                // Prefer the checker's retained type (covers unannotated lets);
-                // fall back to the AST annotation.
-                let inferred = self
-                    .let_types
-                    .get(&(*line, name.clone()))
-                    .cloned()
-                    .or_else(|| ty.clone());
-                self.out.push(LocalBinding {
-                    name: name.clone(),
-                    kind: LocalKind::Let { mutable: *mutable },
-                    ty: inferred,
-                    line: *line,
-                    col,
-                    end_col,
-                    fn_line: self.fn_line,
-                });
-            }
-            Stmt::ForIn { var, line, .. } => {
-                let (col, end_col) = name_col_on_line(self.tok_info, var, *line);
-                // The element type is inferred by the checker and retained in
-                // `let_types`; fall back to None if it isn't there.
-                let elem_ty = self.let_types.get(&(*line, var.clone())).cloned();
-                self.out.push(LocalBinding {
-                    name: var.clone(),
-                    kind: LocalKind::ForVar,
-                    ty: elem_ty,
-                    line: *line,
-                    col,
-                    end_col,
-                    fn_line: self.fn_line,
-                });
-            }
-            // `if let` binders are real locals scoped to the then-block
-            // (RFC-0060): surface each for hover / go-to-def / completion /
-            // highlight, typed from the checker's retained payload types.
-            Stmt::IfLet { pattern, line, .. } => {
-                for b in pattern.bindings() {
-                    let (col, end_col) = name_col_on_line(self.tok_info, b, *line);
-                    let ty = self.let_types.get(&(*line, b.to_string())).cloned();
-                    self.out.push(LocalBinding {
-                        name: b.to_string(),
-                        kind: LocalKind::Let { mutable: false },
-                        ty,
-                        line: *line,
-                        col,
-                        end_col,
-                        fn_line: self.fn_line,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
-        if self.skip == Some(e as *const Expr as usize) {
-            self.skip = None;
-            return false;
-        }
-        if let Expr::Lambda { params, .. } = e {
-            for p in params {
-                // Untyped in the literal — the type flows from the expected
-                // `fn(..)` parameter position — so this is a `let`-shaped
-                // local, never a Param (whose hover unwraps a type).
-                if let Some((line, col, end_col)) =
-                    binder_pos(self.tok_info, p, &[], e.line(), self.out)
-                {
-                    self.out.push(LocalBinding {
-                        name: p.clone(),
-                        kind: LocalKind::Let { mutable: false },
-                        ty: None,
-                        line,
-                        col,
-                        end_col,
-                        fn_line: self.fn_line,
-                    });
-                }
-            }
-        }
-        true
-    }
-
-    fn arm_pattern(
-        &mut self,
-        p: &ast::Pattern,
-        line: usize,
-        _: &std::collections::HashSet<String>,
-    ) {
-        // Arm binders surface like `if let`'s, minus the type: the checker
-        // retains no match-arm payload types. WHICH names a pattern binds is
-        // `ast::Pattern::bindings`; what is this reader's own is where each is
-        // SPELLED. The anchor is the pattern's shape ([`binder_pos`]): the
-        // variant head, and any earlier payload, immediately precedes a binder
-        // in the token stream, which keeps a same-named USE in an earlier arm's
-        // body from being taken for it. A desugar's `@`-prefixed binder is
-        // unspellable, so `binder_pos` finds nothing and it never surfaces.
-        let head = match p {
-            ast::Pattern::Variant(head, _) => Some(head.as_str()),
-            _ => None,
-        };
-        let binds = p.bindings();
-        for (k, b) in binds.iter().enumerate() {
-            let prefix: Vec<&str> = head.into_iter().chain(binds[..k].iter().copied()).collect();
-            if let Some((l, col, end_col)) = binder_pos(self.tok_info, b, &prefix, line, self.out) {
-                self.out.push(LocalBinding {
-                    name: b.to_string(),
-                    kind: LocalKind::Let { mutable: false },
-                    ty: None,
-                    line: l,
-                    col,
-                    end_col,
-                    fn_line: self.fn_line,
-                });
-            }
-        }
-    }
-}
-
-fn collect_lets(
-    block: &Block,
-    fn_line: usize,
-    tok_info: &[TokenInfo],
-    let_types: &std::collections::HashMap<(usize, String), Type>,
-    out: &mut Vec<LocalBinding>,
-) {
-    let mut v = Lets {
-        fn_line,
-        tok_info,
-        let_types,
-        out,
-        skip: None,
-    };
-    let mut locals = std::collections::HashSet::new();
-    let_block(block, &mut locals, &mut v);
-}
-
-/// The source position of a pattern binder (a `match` arm's payload name or a
-/// lambda parameter): the first spelling of the name at or after the match's /
-/// lambda's own line that is not already an indexed binding's recorded spot,
-/// where `prefix` — the idents that must immediately precede the spelling in
-/// the token stream — is what tells a BINDING site from an ordinary use. An
-/// arm binder is always spelled right after its variant head (`Some(m)`), so
-/// a same-named use in an earlier arm's body (`None => len(m)`, `Err(e) =>
-/// log(e)`) cannot be mistaken for it; a lambda's parameters carry no such
-/// trail and keep the empty prefix. The pattern still precedes the arm body,
-/// and an outer `let m = match o { Some(m) => .. }` on one line owns the
-/// earlier column via `out`. `None` when the name is never spelled in source
-/// (a desugar's `@`-prefixed binder), which must not become a phantom local.
-fn binder_pos(
-    tok_info: &[TokenInfo],
-    name: &str,
-    prefix: &[&str],
-    from_line: usize,
-    out: &[LocalBinding],
-) -> Option<(usize, usize, usize)> {
-    tok_info
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.text == name && t.line >= from_line)
-        .filter(|(i, _)| {
-            prefix.is_empty()
-                || *i >= prefix.len()
-                    && tok_info[i - prefix.len()..*i]
-                        .iter()
-                        .zip(prefix.iter())
-                        .all(|(t, p)| t.text == *p)
-        })
-        .find(|(_, t)| {
-            !out.iter()
-                .any(|b| b.name == name && b.line == t.line && b.col == t.col)
-        })
-        .map(|(_, t)| (t.line, t.col, t.end_col))
 }
 
 /// Build a [`Resolution`] for a local binding.

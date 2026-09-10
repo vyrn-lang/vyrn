@@ -2902,7 +2902,7 @@ fn the_structural_census_is_what_the_rfc_records() {
         ("a rule only the checker gives", 0),
         ("placement rows for the engines", 361),
         ("a fix menu", 0),
-        ("shared machinery", 2397),
+        ("shared machinery", 2398),
         ("tests", 207),
     ];
     assert_eq!(got, want, "the structural census has moved");

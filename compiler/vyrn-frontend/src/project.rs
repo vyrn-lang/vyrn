@@ -560,6 +560,7 @@ fn substituted(
                 ty: None,
                 value: a.clone(),
                 line,
+                col: 0,
             });
             map.insert(p.name.clone(), Expr::Var { name: tmp, line });
         }
@@ -828,6 +829,7 @@ fn iterate_loop_build(
             ty: None,
             value: iter.clone(),
             line,
+            col: 0,
         });
         var_of(RECV)
     };
@@ -841,6 +843,7 @@ fn iterate_loop_build(
             line,
         },
         line,
+        col: 0,
     });
     out.push(Stmt::Let {
         name: IDX.to_string(),
@@ -848,6 +851,7 @@ fn iterate_loop_build(
         ty: None,
         value: Expr::Int(-1),
         line,
+        col: 0,
     });
 
     let mut inner = vec![Stmt::Assign {
@@ -863,6 +867,7 @@ fn iterate_loop_build(
         ty: None,
         value: p.place,
         line,
+        col: 0,
     });
     inner.extend(body.stmts.iter().cloned());
     out.push(Stmt::While {
@@ -915,8 +920,8 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
                 // A pattern binder is a binding of the body too (RFC-0121):
                 // leaving it un-renamed while `subst_block` rewrites its uses
                 // is how an arm came to yield a name nothing bound.
-                for n in pattern_binder_names(pattern) {
-                    out.insert(n.clone(), format!("@b{tag}.{n}"));
+                for n in pattern.binders() {
+                    out.insert(n.name.clone(), format!("@b{tag}.{n}"));
                 }
                 collect_bindings(then_block, tag, out);
                 if let Some(e) = else_block {
@@ -943,32 +948,12 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
         collect_lambda(e, tag, out);
         if let Expr::Match { arms, .. } = e {
             for arm in arms {
-                for n in pattern_binder_names(&arm.pattern) {
-                    out.insert(n.clone(), format!("@b{tag}.{n}"));
+                for n in arm.pattern.binders() {
+                    out.insert(n.name.clone(), format!("@b{tag}.{n}"));
                 }
             }
         }
     });
-}
-
-/// The names a pattern binds, by reference — the rename walk's view.
-fn pattern_binder_names(p: &crate::ast::Pattern) -> Vec<&String> {
-    use crate::ast::Pattern;
-    match p {
-        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-        Pattern::Variant(_, binds) => binds.iter().collect(),
-        Pattern::Other => Vec::new(),
-    }
-}
-
-/// The same names, mutably — what [`rename_bindings`] rewrites.
-fn pattern_binder_names_mut(p: &mut crate::ast::Pattern) -> Vec<&mut String> {
-    use crate::ast::Pattern;
-    match p {
-        Pattern::Success(b) | Pattern::Failure(b) => vec![b],
-        Pattern::Variant(_, binds) => binds.iter_mut().collect(),
-        Pattern::Other => Vec::new(),
-    }
 }
 
 fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
@@ -976,7 +961,7 @@ fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
         return;
     };
     for p in params.iter() {
-        out.insert(p.clone(), format!("@b{tag}.{p}"));
+        out.insert(p.name.clone(), format!("@b{tag}.{p}"));
     }
     match body {
         LambdaBody::Expr(inner) => collect_lambda(inner, tag, out),
@@ -1025,8 +1010,8 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
                 | Stmt::SetField { name, .. }
                 | Stmt::Drop { name, .. } => self.put(name),
                 Stmt::IfLet { pattern, .. } => {
-                    for n in pattern_binder_names_mut(pattern) {
-                        self.put(n);
+                    for n in pattern.binders_mut() {
+                        self.put(&mut n.name);
                     }
                 }
                 Stmt::ForIn { var, .. } => self.put(var),
@@ -1037,7 +1022,7 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
         fn expr(&mut self, e: &mut Expr, _: &std::collections::HashSet<String>) -> bool {
             if let Expr::Lambda { params, .. } = e {
                 for p in params.iter_mut() {
-                    self.put(p);
+                    self.put(&mut p.name);
                 }
             }
             true
@@ -1049,8 +1034,8 @@ fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
             _: usize,
             _: &std::collections::HashSet<String>,
         ) {
-            for n in pattern_binder_names_mut(p) {
-                self.put(n);
+            for n in p.binders_mut() {
+                self.put(&mut n.name);
             }
         }
     }

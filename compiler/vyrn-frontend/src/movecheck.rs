@@ -1959,6 +1959,7 @@ impl MoveCheck<'_> {
                 body,
                 line,
                 consuming,
+                col: _,
             } => {
                 self.expr(iter, scope);
                 self.site("iterate", *line, iter, None);
@@ -2333,8 +2334,8 @@ impl MoveCheck<'_> {
                 scope.push(HashSet::new());
                 self.enter();
                 for p in params {
-                    scope.last_mut().unwrap().insert(p.clone());
-                    self.bind(p, None, None);
+                    scope.last_mut().unwrap().insert(p.name.clone());
+                    self.bind(&p.name, None, None);
                 }
                 // Everything read below this frame is a capture (RFC-0089's
                 // no-retain rule is about exactly these).

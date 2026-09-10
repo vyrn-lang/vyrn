@@ -297,6 +297,14 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Whether this parser reads an interpolation hole rather than the file.
+    ///
+    /// A hole is re-lexed as its own source, so its tokens count lines and
+    /// columns from the hole rather than from the file — which is why
+    /// [`Parser::parse_hole`] anchors every diagnostic at the template. A
+    /// binder inherits the same limit, so one parsed here carries no position
+    /// and never becomes a local ([`crate::ast::Binder`]).
+    in_hole: bool,
     /// When true, a bare `Ident {` is NOT a struct literal (so `if x { .. }`
     /// parses `x` as the condition and `{` as the block). Reset inside `( .. )`.
     no_struct: bool,
@@ -441,6 +449,7 @@ pub fn place_receiver(
                     line,
                 },
                 line,
+                col: 0,
             });
             post.insert(
                 0,
@@ -470,6 +479,7 @@ pub fn place_receiver(
                 ty: None,
                 value: args[1].clone(),
                 line,
+                col: 0,
             });
             let index = Expr::Var { name: idx, line };
             let load = Expr::Call {
@@ -489,6 +499,7 @@ pub fn place_receiver(
                 ty: None,
                 value: load,
                 line,
+                col: 0,
             });
             post.insert(
                 0,
@@ -550,6 +561,7 @@ pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize)
         ty: None,
         value: e,
         line,
+        col: 0,
     });
     Expr::Var { name, line }
 }
@@ -689,6 +701,7 @@ impl Parser {
         Parser {
             tokens,
             pos: 0,
+            in_hole: false,
             no_struct: false,
             type_params: Vec::new(),
             type_aliases: Default::default(),
@@ -708,6 +721,7 @@ impl Parser {
         Parser {
             type_params: self.type_params.clone(),
             type_aliases: self.type_aliases.clone(),
+            in_hole: true,
             ..Parser::over(tokens)
         }
     }
@@ -835,6 +849,25 @@ impl Parser {
             return Ok("self".to_string());
         }
         self.expect_ident()
+    }
+
+    /// Where the token under the cursor is spelled in the FILE, or `(0, 0)`
+    /// when no file token spells it. A hole's tokens count from the hole, so a
+    /// binder parsed there carries no position ([`Parser::in_hole`]). Every
+    /// binder's line and column is taken here, so the rule is stated once.
+    fn binder_pos(&self) -> (usize, usize) {
+        if self.in_hole {
+            (0, 0)
+        } else {
+            (self.line(), self.col())
+        }
+    }
+
+    /// The binder under the cursor: its name and where it is spelled.
+    fn expect_binder(&mut self) -> Result<Binder, Diagnostic> {
+        let (line, col) = self.binder_pos();
+        let name = self.expect_ident()?;
+        Ok(Binder { name, line, col })
     }
 
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {
@@ -1846,14 +1879,18 @@ impl Parser {
         let name = self.expect_ident()?;
         self.eat(&Tok::LParen)?;
         let capability = self.parse_self_capability();
+        let (self_line, self_col) = self.binder_pos();
         self.eat(&Tok::Vself)?;
         let mut params = vec![Param {
             name: "self".to_string(),
             capability,
             ty: self_ty.clone(),
+            line: self_line,
+            col: self_col,
         }];
         while *self.peek() == Tok::Comma {
             self.advance();
+            let (line, col) = self.binder_pos();
             let pname = self.expect_ident()?;
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
@@ -1862,6 +1899,8 @@ impl Parser {
                 name: pname,
                 capability,
                 ty,
+                line,
+                col,
             });
         }
         self.eat(&Tok::RParen)?;
@@ -2453,6 +2492,7 @@ impl Parser {
 
         let mut params = Vec::new();
         while *self.peek() != Tok::RParen {
+            let (line, col) = self.binder_pos();
             let pname = self.expect_ident()?;
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
@@ -2461,6 +2501,8 @@ impl Parser {
                 name: pname,
                 capability,
                 ty,
+                line,
+                col,
             });
             if *self.peek() == Tok::Comma {
                 self.advance();
@@ -2575,6 +2617,7 @@ impl Parser {
         self.eat(&Tok::LParen)?;
         let mut params = Vec::new();
         while *self.peek() != Tok::RParen {
+            let (line, col) = self.binder_pos();
             let pname = self.expect_ident()?;
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
@@ -2583,6 +2626,8 @@ impl Parser {
                 name: pname,
                 capability,
                 ty,
+                line,
+                col,
             });
             if *self.peek() == Tok::Comma {
                 self.advance();
@@ -3271,9 +3316,9 @@ impl Parser {
             ));
         }
         self.eat(&Tok::LParen)?;
-        let mut binds: Vec<String> = Vec::new();
+        let mut binds: Vec<Binder> = Vec::new();
         while *self.peek() != Tok::RParen {
-            binds.push(self.expect_ident()?);
+            binds.push(self.expect_binder()?);
             if *self.peek() == Tok::Comma {
                 self.advance();
             } else {
@@ -3310,14 +3355,14 @@ impl Parser {
         let msg = format!("let `{variant}(..)` did not match");
         let mut stmts = Vec::new();
         for (j, b) in binds.iter().enumerate() {
-            let arm_binds: Vec<String> = binds
+            let arm_binds: Vec<Binder> = binds
                 .iter()
                 .enumerate()
-                .map(|(k, name)| {
+                .map(|(k, b)| {
                     if k == j {
-                        name.clone()
+                        b.clone()
                     } else {
-                        format!("@rl{k}")
+                        Binder::synthetic(format!("@rl{k}"))
                     }
                 })
                 .collect();
@@ -3328,7 +3373,7 @@ impl Parser {
                     MatchArm {
                         pattern: Pattern::Variant(variant.clone(), arm_binds),
                         body: ArmBody::Expr(Expr::Var {
-                            name: b.clone(),
+                            name: b.name.clone(),
                             line,
                         }),
                     },
@@ -3344,11 +3389,12 @@ impl Parser {
                 line,
             };
             stmts.push(Stmt::Let {
-                name: b.clone(),
+                name: b.name.clone(),
                 mutable: false,
                 ty: None,
                 value: m,
                 line,
+                col: b.col,
             });
         }
         Ok(self.spliced(stmts))
@@ -3375,6 +3421,7 @@ impl Parser {
                 {
                     return self.refutable_let(line, mutable);
                 }
+                let col = self.binder_pos().1;
                 let name = self.expect_ident()?;
                 let ty = if *self.peek() == Tok::Colon {
                     self.advance();
@@ -3396,6 +3443,7 @@ impl Parser {
                         ty,
                         value,
                         line,
+                        col,
                     });
                     pre.extend(post);
                     return Ok(self.spliced(pre));
@@ -3406,6 +3454,7 @@ impl Parser {
                     ty,
                     value,
                     line,
+                    col,
                 })
             }
             Tok::Return => {
@@ -3466,6 +3515,7 @@ impl Parser {
             }
             Tok::For => {
                 self.advance();
+                let col = self.binder_pos().1;
                 let var = self.expect_ident()?;
                 self.eat(&Tok::In)?;
                 // Parse the iterable in the no-struct context (like a `while`
@@ -3487,6 +3537,7 @@ impl Parser {
                     body,
                     line,
                     consuming,
+                    col,
                 })
             }
             Tok::Region => {
@@ -3849,14 +3900,14 @@ impl Parser {
             scrutinee: Box::new(lhs),
             arms: vec![
                 MatchArm {
-                    pattern: Pattern::Success("@v".to_string()),
+                    pattern: Pattern::Success(Binder::synthetic("@v")),
                     body: ArmBody::Expr(Expr::Var {
                         name: "@v".to_string(),
                         line,
                     }),
                 },
                 MatchArm {
-                    pattern: Pattern::Failure("@e".to_string()),
+                    pattern: Pattern::Failure(Binder::synthetic("@e")),
                     body: ArmBody::Expr(rhs),
                 },
             ],
@@ -4146,7 +4197,7 @@ impl Parser {
         if *self.peek() == Tok::LParen {
             self.advance();
             while *self.peek() != Tok::RParen {
-                params.push(self.expect_ident()?);
+                params.push(self.expect_binder()?);
                 if *self.peek() == Tok::Comma {
                     self.advance();
                 } else {
@@ -4156,7 +4207,7 @@ impl Parser {
             self.eat(&Tok::RParen)?;
         } else {
             // The unparenthesised single parameter, which is the common one.
-            params.push(self.expect_ident()?);
+            params.push(self.expect_binder()?);
         }
         self.eat(&Tok::Arrow)?;
         let body = if *self.peek() == Tok::LBrace {
@@ -4820,13 +4871,16 @@ impl Parser {
                     scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
+                            pattern: Pattern::Variant(
+                                "Valid".to_string(),
+                                vec![Binder::synthetic("@v")],
+                            ),
                             body: ArmBody::Expr(call("Loaded", vec![var("@v")])),
                         },
                         MatchArm {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
-                                vec!["@i".to_string()],
+                                vec![Binder::synthetic("@i")],
                             ),
                             body: ArmBody::Expr(call("Corrupt", vec![var("@i")])),
                         },
@@ -4838,11 +4892,11 @@ impl Parser {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Ok".into(), vec!["@t".to_string()]),
+                            pattern: Pattern::Variant("Ok".into(), vec![Binder::synthetic("@t")]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Variant("Err".into(), vec!["@e".to_string()]),
+                            pattern: Pattern::Variant("Err".into(), vec![Binder::synthetic("@e")]),
                             body: ArmBody::Expr(var("Missing")),
                         },
                     ],
@@ -4856,13 +4910,16 @@ impl Parser {
                     scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
+                            pattern: Pattern::Variant(
+                                "Valid".to_string(),
+                                vec![Binder::synthetic("@v")],
+                            ),
                             body: ArmBody::Expr(var("@v")),
                         },
                         MatchArm {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
-                                vec!["@i".to_string()],
+                                vec![Binder::synthetic("@i")],
                             ),
                             body: ArmBody::Expr(default.clone()),
                         },
@@ -4874,11 +4931,11 @@ impl Parser {
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Ok".into(), vec!["@t".to_string()]),
+                            pattern: Pattern::Variant("Ok".into(), vec![Binder::synthetic("@t")]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Variant("Err".into(), vec!["@e".to_string()]),
+                            pattern: Pattern::Variant("Err".into(), vec![Binder::synthetic("@e")]),
                             body: ArmBody::Expr(default),
                         },
                     ],
@@ -5024,7 +5081,7 @@ impl Parser {
             if *self.peek() == Tok::LParen {
                 self.advance();
                 while *self.peek() != Tok::RParen {
-                    binds.push(self.expect_ident()?);
+                    binds.push(self.expect_binder()?);
                     if *self.peek() == Tok::Comma {
                         self.advance();
                     } else {
@@ -5043,7 +5100,7 @@ impl Parser {
         if *self.peek() == Tok::LParen {
             self.advance();
             while *self.peek() != Tok::RParen {
-                binds.push(self.expect_ident()?);
+                binds.push(self.expect_binder()?);
                 if *self.peek() == Tok::Comma {
                     self.advance();
                 } else {
@@ -5273,7 +5330,9 @@ mod tests {
             panic!("expected a match initializer, got {value:?}");
         };
         assert_eq!(arms.len(), 2);
-        assert!(matches!(&arms[0].pattern, Pattern::Variant(v, b) if v == "Circle" && b == &["r"]));
+        assert!(
+            matches!(&arms[0].pattern, Pattern::Variant(v, b) if v == "Circle" && b.len() == 1 && b[0].name == "r")
+        );
         assert!(matches!(&arms[1].pattern, Pattern::Other));
         // The trap is an ordinary `panic`, so the wording has ONE source and
         // the loader stamps the site — parity by construction.
@@ -6554,6 +6613,11 @@ mod tests {
 
     // ---- function values (RFC-0023) -------------------------------------
 
+    /// The names a lambda's parameters carry, without their columns.
+    fn names(ps: &[Binder]) -> Vec<&str> {
+        ps.iter().map(|b| b.name.as_str()).collect()
+    }
+
     fn only_arg(p: &Program) -> Expr {
         // The single call argument of `f(<arg>)` in `main`'s first statement.
         match &p.functions.last().unwrap().body.stmts[0] {
@@ -6588,7 +6652,7 @@ mod tests {
         );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
-                assert_eq!(params, vec!["x".to_string()]);
+                assert_eq!(names(&params), vec!["x"]);
                 assert!(matches!(body, LambdaBody::Expr(_)));
             }
             other => panic!("expected lambda, got {other:?}"),
@@ -6603,7 +6667,7 @@ mod tests {
         );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
-                assert_eq!(params, vec!["x".to_string(), "y".to_string()]);
+                assert_eq!(names(&params), vec!["x", "y"]);
                 assert!(matches!(body, LambdaBody::Block(_)));
             }
             other => panic!("expected lambda, got {other:?}"),

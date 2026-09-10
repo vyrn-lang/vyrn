@@ -410,6 +410,8 @@ impl Walk<'_> {
                     name,
                     capability: Capability::Read,
                     ty,
+                    line: 0,
+                    col: 0,
                 })
                 .collect(),
             ret: Type::Bool,

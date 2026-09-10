@@ -134,6 +134,8 @@ fn predicate_fn(decl: &TypeDecl) -> Function {
                 name,
                 capability: Capability::Read,
                 ty,
+                line: 0,
+                col: 0,
             })
             .collect(),
         Type::Bool,
@@ -166,6 +168,8 @@ fn constructor_fn(decl: &TypeDecl) -> Function {
             name: "value".to_string(),
             capability: Capability::Read,
             ty: decl.base.clone(),
+            line: 0,
+            col: 0,
         }],
         Type::Unit,
         vec![Stmt::If {
