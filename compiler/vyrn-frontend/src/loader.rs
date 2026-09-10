@@ -2604,13 +2604,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     let mut ns_bindings: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for m in modules.iter() {
         let mine = module_decls.get(&m.key).cloned().unwrap_or_default();
-        let import_locals: HashSet<String> = m
-            .program
-            .imports
-            .iter()
-            .flat_map(|imp| imp.names.iter())
-            .map(|n| n.local().to_string())
-            .collect();
+        let import_locals = import_locals(&m.program);
         let mut seen_ns: HashSet<String> = HashSet::new();
         let binds = ns_bindings.entry(m.key.clone()).or_default();
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
@@ -2643,27 +2637,34 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
-    // (target module, original) -> fresh symbol, for co-naming renames.
+    // (target module, original) -> fresh symbol, for every rename apart.
     let mut foreign_renames: HashMap<(String, String), String> = HashMap::new();
-    // Fill `all_names` on the first mint — see the note at its declaration.
-    let ensure_all_names = |all: &mut HashSet<String>, decls: &HashMap<String, HashSet<String>>| {
-        if all.is_empty() {
-            for names in decls.values() {
-                all.extend(names.iter().cloned());
+    // Rename `name`, as `target` declares it, apart from every other name in the
+    // program — once, whichever rule asked. Three do: co-naming (RFC-0022), a
+    // namespaced module's export (RFC-0027) and name privacy (RFC-0046 §3), and
+    // each wrote the fill, the mint and the insert out to ask. `all_names` fills
+    // on the first of them; see the note at its declaration.
+    let mut rename_apart =
+        |renames: &mut HashMap<(String, String), String>, target: &str, name: &str| {
+            let key = (target.to_string(), name.to_string());
+            if renames.contains_key(&key) {
+                return;
             }
-        }
-    };
-    let mint = |original: &str, all: &mut HashSet<String>| -> String {
-        let mut n = 0usize;
-        loop {
-            let cand = format!("{original}__from{n}");
-            if !all.contains(&cand) {
-                all.insert(cand.clone());
-                return cand;
+            if all_names.is_empty() {
+                for names in module_decls.values() {
+                    all_names.extend(names.iter().cloned());
+                }
             }
-            n += 1;
-        }
-    };
+            let mut n = 0usize;
+            let fresh = loop {
+                let cand = format!("{name}__from{n}");
+                if all_names.insert(cand.clone()) {
+                    break cand;
+                }
+                n += 1;
+            };
+            renames.insert(key, fresh);
+        };
 
     // RFC-0078 M2b: an INJECTED module's every declaration is renamed to its
     // reserved spelling, unconditionally rather than on collision. Two things fall
@@ -2804,12 +2805,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             for n in &imp.names {
                 if n.alias.is_some() && mine.contains(&n.original) {
-                    let key = (target.clone(), n.original.clone());
-                    if !foreign_renames.contains_key(&key) {
-                        ensure_all_names(&mut all_names, &module_decls);
-                        let s = mint(&n.original, &mut all_names);
-                        foreign_renames.insert(key, s);
-                    }
+                    rename_apart(&mut foreign_renames, target, &n.original);
                 }
             }
         }
@@ -2883,10 +2879,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         names.sort();
         for name in names {
             if name_module_count.get(name).copied().unwrap_or(0) >= 2 {
-                ensure_all_names(&mut all_names, &module_decls);
-                foreign_renames
-                    .entry((target.clone(), name.clone()))
-                    .or_insert_with(|| mint(name, &mut all_names));
+                rename_apart(&mut foreign_renames, target, name);
             }
         }
     }
@@ -2909,13 +2902,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         // (import vs. declaration) the user must resolve — auto-renaming would
         // silently hide it. Renaming stays limited to names invisible outside
         // their module AND not shadowing an in-scope import here.
-        let imported: HashSet<String> = m
-            .program
-            .imports
-            .iter()
-            .flat_map(|imp| imp.names.iter())
-            .map(|n| n.local().to_string())
-            .collect();
+        let imported = import_locals(&m.program);
         // Non-exported top-level decl names. A parser-injected type is the same
         // in every module and must never be renamed; an `extern fn` names a
         // host-ABI contract the backends emit under its SOURCE spelling, so
@@ -2949,10 +2936,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 continue;
             }
             if name_module_count.get(&name).copied().unwrap_or(0) >= 2 {
-                ensure_all_names(&mut all_names, &module_decls);
-                foreign_renames
-                    .entry((m.key.clone(), name.clone()))
-                    .or_insert_with(|| mint(&name, &mut all_names));
+                rename_apart(&mut foreign_renames, &m.key, &name);
             }
         }
     }
@@ -2962,10 +2946,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     for m in modules.iter() {
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             for n in &imp.names {
-                let resolved = foreign_renames
-                    .get(&(target.clone(), n.original.clone()))
-                    .cloned()
-                    .unwrap_or_else(|| n.original.clone());
+                let resolved = resolved_name(&foreign_renames, target, &n.original);
                 if n.alias.is_some() {
                     // The alias resolves to the decl (renamed or original).
                     rewrites
@@ -2991,10 +2972,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             if !imp.names.is_empty() {
                 if let Some(by_enum) = injected_variants.get(target) {
                     for n in &imp.names {
-                        let resolved = foreign_renames
-                            .get(&(target.clone(), n.original.clone()))
-                            .cloned()
-                            .unwrap_or_else(|| n.original.clone());
+                        let resolved = resolved_name(&foreign_renames, target, &n.original);
                         if let Some(vars) = by_enum.get(&resolved) {
                             rewrites
                                 .entry(m.key.clone())
@@ -3021,12 +2999,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         let Some(map) = renames_by_module.get(tm.key.as_str()) else {
             continue;
         };
-        let ns_names: HashSet<String> = ns_bindings
-            .get(&tm.key)
-            .into_iter()
-            .flatten()
-            .map(|(n, _)| n.clone())
-            .collect();
+        let ns_names = ns_names_of(&ns_bindings, &tm.key);
         rename_decls_in_module(&mut tm.program, map, &ns_names);
     }
 
@@ -3062,12 +3035,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // bare import of the resolved decl name so register/visibility stay unaware.
     for m in modules.iter_mut() {
         if let Some(map) = rewrites.get(&m.key) {
-            let ns_names: HashSet<String> = ns_bindings
-                .get(&m.key)
-                .into_iter()
-                .flatten()
-                .map(|(n, _)| n.clone())
-                .collect();
+            let ns_names = ns_names_of(&ns_bindings, &m.key);
             // This module's own variants guard the rewrite (see
             // [`Renamer::variants`]): an alias local or injected spelling that
             // collides with one must not fold the constructor sites.
@@ -3076,10 +3044,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
         for (imp, target) in m.program.imports.iter_mut().zip(&m.import_targets) {
             for n in &mut imp.names {
-                let resolved = foreign_renames
-                    .get(&(target.clone(), n.original.clone()))
-                    .cloned()
-                    .unwrap_or_else(|| n.original.clone());
+                let resolved = resolved_name(&foreign_renames, target, &n.original);
                 n.original = resolved;
                 n.alias = None;
             }
@@ -3259,12 +3224,7 @@ impl NsResolver<'_> {
             );
             return None;
         }
-        Some(
-            self.foreign_renames
-                .get(&(target, member.to_string()))
-                .cloned()
-                .unwrap_or_else(|| member.to_string()),
-        )
+        Some(resolved_name(self.foreign_renames, &target, member))
     }
 
     fn resolve_program(&mut self, p: &mut Program) {
@@ -4242,6 +4202,43 @@ fn type_names(ty: &Type) -> Vec<String> {
 // unlinked root AST that the LSP indexes is untouched, so hover still sees `Y`.
 
 /// A name→name substitution for references (`map.get(n)` or `n` unchanged).
+/// The program-wide symbol `original` names in module `target` once every
+/// rename apart has been decided — `original` itself when no rule renamed it.
+/// Pass 2, pass 4 and [`NsResolver::resolve_member`] each spelled the lookup
+/// and its fallback out.
+fn resolved_name(
+    renames: &HashMap<(String, String), String>,
+    target: &str,
+    original: &str,
+) -> String {
+    renames
+        .get(&(target.to_string(), original.to_string()))
+        .cloned()
+        .unwrap_or_else(|| original.to_string())
+}
+
+/// Every name a module's imports bring into scope — an alias where one is
+/// written, the declaration's own name otherwise. The namespace-collision check
+/// and the name-privacy rule both ask.
+fn import_locals(p: &Program) -> HashSet<String> {
+    p.imports
+        .iter()
+        .flat_map(|imp| imp.names.iter())
+        .map(|n| n.local().to_string())
+        .collect()
+}
+
+/// The namespace names module `key` binds (RFC-0027), which pass 3 and pass 4
+/// each guard their rewrite with.
+fn ns_names_of(binds: &HashMap<String, Vec<(String, String)>>, key: &str) -> HashSet<String> {
+    binds
+        .get(key)
+        .into_iter()
+        .flatten()
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
 fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {
     map.get(n).cloned().unwrap_or_else(|| n.to_string())
 }
