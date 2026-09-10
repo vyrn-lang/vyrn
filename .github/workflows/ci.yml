@@ -887,12 +887,13 @@ jobs:
       - name: Populate ~/.vyrn/tools from vyrn.lock
         if: steps.wasm-tools.outputs.cache-hit != 'true'
         run: compiler/target/debug/vyrn update --locked
+      # `github.event.before` is the main head this push replaced; on a merge
+      # commit that is the line before the merge. The baseline is measured
+      # HERE, on the same runner in the same run, so the fleet's spread (one
+      # label, several CPU generations, a 39x range on one row) cancels
+      # instead of failing the gate.
       - name: Check out the commit before this push, for a same-host baseline
-        # actions/checkout@v4. `github.event.before` is the main head this push
-        # replaced; on a merge commit that is the line before the merge. The
-        # baseline is measured HERE, on the same runner in the same run, so the
-        # fleet's spread (one label, several CPU generations, a 39x range on one
-        # row) cancels instead of failing the gate.
+        # actions/checkout@v4
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.event.before }}
