@@ -48,7 +48,10 @@ pub fn real_path(path: &str) -> Option<String> {
 /// stripping only the drive prefix left the literal letters `UNC/` in front of
 /// a string that matches no module key spelling anywhere else. Those spell back
 /// to the `//server/share/..` form every other part of the toolchain uses.
-fn dos_to_slash(s: &str) -> String {
+///
+/// Public because the driver spells a path ten times and needs the rule rather
+/// than a tenth reading of it (RFC-0125 §3 M5).
+pub fn dos_to_slash(s: &str) -> String {
     let stripped = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         format!("//{rest}")
     } else {

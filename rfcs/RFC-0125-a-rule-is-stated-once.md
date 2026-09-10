@@ -24175,6 +24175,417 @@ before and after this track, which is the licence that mattered here: the
 `hoisted` flag this track re-stated is what feeds that instrument and it moved
 no row.
 
+#### The driver, counted per command (2026-09-10, `track-ef`)
+
+`compiler/vyrn-cli/src/main.rs` is the third-largest file in the compiler and
+`tests/cli_census.rs` already tiles it by kind. One heading holds two thirds of
+it: "a command's own path", 5,224 lines of the crate's 8,010 non-test lines.
+A heading that size names nothing to cut. So [`Kind::Cmd`] carries the command a
+section belongs to, and the same lines tile a second time — one entry per
+command. The two tilings are asserted against each other: the per-command entries
+sum to 5,224, the kind total.
+
+**A section two commands share is one entry.** `serve` and `dev` both reach
+`SERVE_SHIM`, `serve_rewrite` and `serve_pool_wasm`; `test` and `bench` both
+reach `Body` and `bodies_wasm`; `build` and `bench` both read `NativeTarget`.
+Splitting those by a guess would be a worse number than naming both. `(global)`
+is the flags read before the subcommand. `(dispatch)` is `real_main`.
+
+**Four commands have no entry of their own, and that is the first finding.**
+`check`, `run`, `emit-wat` and `emit-lowered` are match arms inside `real_main`,
+not functions. The census cannot tile below an item, so their 78 lines are
+inside `(dispatch)`'s 269. Every other command is a function.
+
+**What each command costs.**
+
+| command | lines | stderr |
+|---|---|---|
+| `bench` | 671 | 17 |
+| `why` | 575 | 19 |
+| `doc` | 391 | 14 |
+| `serve, dev` | 386 | 3 |
+| `routes` | 370 | 5 |
+| `dev` | 315 | 22 |
+| `fmt` | 295 | 15 |
+| `build` | 277 | 17 |
+| `deps` | 271 | 7 |
+| `(dispatch)` | 269 | 12 |
+| `fix` | 247 | 1 |
+| `update` | 226 | 7 |
+| `serve` | 179 | 12 |
+| `test, bench` | 164 | 2 |
+| `build, bench` | 163 | 0 |
+| `emit-gen` | 81 | 5 |
+| `run` | 79 | 3 |
+| `add` | 73 | 6 |
+| `vendor` | 65 | 6 |
+| `test` | 51 | 2 |
+| `new` | 41 | 4 |
+| `(global)` | 35 | 0 |
+
+**The distribution is flat, and that decides the method.** No command is a
+runaway: the largest is 12.8 per cent of the tile, and the top five are 46 per
+cent of it. There is no one command to delete lines out of. What repeats is
+across commands, not inside one, so the ranking below is by RULE — how many lines
+a rule costs and how many times the file states it — not by command.
+
+**The ranking, by lines per rule.**
+
+| rank | the rule | statements | lines it costs | where one home is |
+|---|---|---|---|---|
+| 1 | the serving loop: bind, gate on module state, spawn the pool or start one resident instance, accept, answer | 2 (`serve_cmd`, `dev_cmd`) | 152 | neither; both write it out |
+| 2 | how the CLI prints a diagnostic | 6 | 34 | `load_program`, and 2 of the 6 drop the note |
+| 3 | a synthesized `main`, and a synthesized function beside it | 3 | 62 | `bodies_wasm`'s local closure |
+| 4 | how this toolchain spells a path: verbatim prefix off, backslashes to slashes | 10 in the CLI | 12 | `manifest::real_path`, which the CLI's copies do not match |
+| 5 | the import-chain walk, bounded at 24 chains and depth 12 | 2 (`chains_from`, `import_chains`) | 74 | neither; one walks forward, one backward |
+| 6 | the signature a served root must have | 3 (`serve_cmd`, `dev_cmd`, `checker.rs`) | 21 | the checker states it over its own table |
+
+**Rank 4 is a defect, not only a repetition.** `manifest::real_path` strips
+`\?\UNC\` to `//server/share` and the CLI's ten copies strip only `\?\`,
+leaving the literal `UNC/` in front. Nine of the ten are wrong on a network path.
+
+**Kind (3) is still empty.** `cargo check -p vyrn-cli --all-targets` reports no
+`dead_code` under `src/`. What the deleted routes left is prose: nine comments in
+`main.rs` name `interp::serve`, `interp::serve_pool`, a tree-walking interpreter
+and a parity invariant, and none of those exists. The slices below delete the
+ones they touch.
+
+**The count.** `compiler/vyrn-cli/tests/cli_census.rs`, 795 to 886 lines
+(+91): one `Kind::Cmd` payload per Command section, the per-command aggregation,
+its pin and its table. It adds lines because it is the count, and the count is
+what the slices spend.
+
+#### One serving loop, and the two commands that wrote it twice (2026-09-10, `track-ef`)
+
+Rank 1 of the census above. `serve_cmd` and `dev_cmd` each wrote out the whole
+of how a Vyrn program is served: gate on module state, open a channel, spawn N
+workers over one Cranelift compile, accept and hand each connection over — or,
+without `--workers`, compile once, start one resident instance, drain its
+standard error, greet, accept, answer. 152 lines, said twice, arm for arm.
+
+**What actually differs between them is two arguments.** `vyrn dev` puts a
+static tree in front of the doors and `vyrn serve` does not; each prints its own
+greeting. `serve_loop` takes both — `assets: Option<&DevAssets>` and a `banner`
+closure handed the worker count — and everything else is one body. The greeting
+moved into the closure whole, so the bytes on standard error are the same bytes
+in the same order: the pooled path prints it inside the accept closure, after
+`serve_pool_wasm` has drained the setup instance, exactly where each command
+printed it before.
+
+**The third statement stays where it is, and the record says why.** The
+signature a served root must have — `fn handle(req: Request) -> Response`,
+exactly — was written out in both commands and is written a third time in
+`checker.rs`, where it exempts a served module from needing `main`. The two in
+the CLI are now `has_served_handle`. The checker's is not, and merging it would
+be a bug: the checker asks its own `sigs` table, which holds one entry per name
+and is built after "function defined twice" and "reserved name" have already
+refused, and it does not filter `is_extern`. A walk over `program.functions`
+would answer about a program the checker never sees, and an `extern handle` that
+is exempt today would stop being exempt. That is a gained refusal, which the
+licence does not permit without a witness. It is recorded as the one statement
+this slice left standing.
+
+**Three comments named a module that does not exist.** `serve_wasm_call` said
+its shape was `interp::serve`'s, `serve_pool_wasm` said its signature was
+`interp::serve_pool`'s, and `WORKER_STACK_BYTES` sized itself against "the
+interpreter's pool". The interpreter went at M5. Each now names `serve_loop`,
+which is the thing that is actually there.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,154 | 7,110 | −44 |
+| `serve` alone | 179 | 97 | −82 |
+| `dev` alone | 315 | 238 | −77 |
+| `serve, dev` shared | 386 | 501 | +115 |
+| the three together | 880 | 836 | −44 |
+| the command tile | 5,224 | 5,180 | −44 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `fixtures::every_example_prints_what_was_recorded` `--ignored` | byte-identical |
+| `cargo test -p vyrn-cli --test serve --test http --test pages` | 17 + 31 + 27 passed, 0 failed |
+| `cargo test -p vyrn-cli`, no filter | 646 passed, 0 failed |
+
+`tests/cli_census.rs` gains a section for the shared loop and is re-pinned in
+this commit. `RFC-0127 §3.2`'s declaration census is re-pinned too: the CLI's
+`.functions` mentions go 15 to 14 and the row total 65 to 64, because one of the
+two walks over `program.functions` is gone.
+
+#### One diagnostic printer, and the two commands that were dropping the note (2026-09-10, `track-ef`)
+
+Rank 2 of the census. Seven sites in `main.rs` wrote out how this driver prints
+a diagnostic — the file, the line, the column, the message, and the note under
+it. Five printed the note. Two did not: `vyrn routes` and `vyrn doc` each wrote
+their own four-line loop with the `if let Some(note)` missing.
+
+**That is not a repetition, it is a silent loss.** A `Diagnostic::note` is the
+half of a load error that says what to do about it. Two commands threw it away
+whenever a load failed under them, and nothing said so, because each loop looked
+correct on its own. This is what "one home per fact" is FOR: the copies agreed
+about the shape and disagreed about the content, and only a reader holding all
+seven at once could see it.
+
+`print_diagnostics(diags, root_key, marker)` is the one home. `marker` is the
+empty string for an error and `"warning: "` for a warning, which is the only
+thing `print_warnings` was ever adding; `print_warnings` keeps the
+`--deny-warnings` rule and prints through it.
+
+**The gained output is a gain, not a moved refusal.** No refusal is lost or
+gained: nothing changed about which programs are refused or with what message.
+What changed is that two commands now print a note they were already given. It
+is not visible on the corpus at all, because the corpus exercises `vyrn check`,
+whose printer already had it.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,110 | 7,096 | −14 |
+| the command tile | 5,180 | 5,156 | −24 |
+| shared machinery | 1,485 | 1,495 | +10 |
+| `eprintln!` sites, whole crate | 198 | 188 | −10 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `cargo test -p vyrn-cli`, no filter | green in the track gate table below |
+
+`tests/cli_census.rs` is re-pinned in this commit.
+
+#### How this toolchain spells a path, stated once (2026-09-10, `track-ef`)
+
+Rank 4 of the census, and the only rank that is a defect rather than a
+repetition. `main.rs` spelled a path thirteen times: strip Windows's verbatim
+prefix, turn backslashes into slashes. Two of the thirteen were named functions
+(`normalize_slashes`, `show_path`) and eleven were written inline at the top of
+a command. `vyrn_frontend::manifest::dos_to_slash` states it a fourteenth time,
+which `real_path` returns through, and it is the only one that is right.
+
+**All thirteen are wrong on a network path.** `canonicalize` yields
+`\?\C:\..` for a drive and `\?\UNC\server\share\..` for a UNC location.
+`dos_to_slash` spells the second back to `//server/share/..`; the CLI's copies
+strip only `\?\` and leave the literal letters `UNC/` in front of a string that
+matches no module key anywhere else in the toolchain. A project on a share had
+`vyrn why`, `vyrn fix`, `vyrn fmt`, `vyrn doc`, `vyrn routes`, `vyrn emit-gen`
+and every load site keyed on a spelling the loader does not use.
+
+`dos_to_slash` is public now, and the CLI's two adapters are one line each: the
+`&str` one keeps the name `normalize_slashes`, the `&Path` one keeps `show_path`.
+Neither states the rule; both call it. The eleven inline copies call one of them.
+
+**One copy was stranger than the rest.** `project_sources` replaced backslashes
+FIRST and then stripped `//?/` — the prefix as it looks after the replacement.
+Same rule, spelled backwards, and the same UNC hole. It is one call now.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,096 | 7,089 | −7 |
+| the command tile | 5,156 | 5,150 | −6 |
+| statements of the rule in the CLI | 13 | 0 | −13 |
+| statements of the rule in the compiler | 14 | 1 | −13 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `cargo test -p vyrn-cli`, no filter | green in the track gate table below |
+
+No corpus path is a UNC path, so the fix is invisible to every gate. It is
+witnessed by `manifest.rs`'s own unit test, which is where the rule now lives:
+`dos_to_slash(r"\?\UNC\server\share\proj")` is `//server/share/proj`.
+
+`tests/cli_census.rs` is re-pinned in this commit.
+
+#### A synthesized function, written once (2026-09-10, `track-ef`)
+
+Rank 3 of the census. `main.rs` builds an `ast::Function` at four sites and each
+wrote out all fifteen fields: `vyrn routes`'s printer over `mountedRows`, each
+body `vyrn bench` lifts out of a `bench` block, the harness `main` it puts in
+their place, and the doors `vyrn test` and `vyrn bench --check` knock on. Twelve
+of the fifteen fields are the same at every site, and they are the same because
+a function this driver synthesizes has no parameters, no type parameters, no
+doc, no module and no column.
+
+`synth_fn(name, body, ret, line, door)` is the one home. `door` is the only
+field that varies beyond the four an argument carries, and it varies for one
+reason the doc now states once instead of in a comment at one of the four sites:
+an export is what the host knocks on AND what makes the body a sweep root.
+
+**This one had no defect in it.** The four copies agreed field for field —
+`bodies_wasm` had already pulled its two into a local closure. What it cost was
+lines, and what it buys is that a sixteenth field on `ast::Function` is one edit
+rather than four.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,089 | 7,074 | −15 |
+| the command tile | 5,150 | 5,101 | −49 |
+| shared machinery | 1,495 | 1,529 | +34 |
+| `ast::Function` literals in the CLI | 4 | 1 | −3 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `benching`, `testing`, `route`, `derived` | 3 + 12 + 16 + 8 passed, 0 failed |
+| `cargo test -p vyrn-cli`, no filter | green in the track gate table below |
+
+`tests/cli_census.rs` gains a section for `synth_fn` and is re-pinned in this
+commit.
+
+#### The bound was stated twice; the walk was not worth merging (2026-09-10, `track-ef`)
+
+Rank 5 of the census, and the one that came back with a negative answer.
+`chains_from` and `import_chains` are the two import-graph walks behind
+`vyrn why`: forward from an artifact's entry to the module that brings a
+capability in, and backward from a file to the roots that reach it. 74 lines,
+and the census ranked them as one rule stated twice.
+
+**Only part of it was.** Each declared `MAX_CHAINS` and `MAX_DEPTH` for itself,
+and the two had drifted: `chains_from` guarded on `seen.len() > MAX_DEPTH` and
+`import_chains` on `>=`, so one enumerated chains of thirteen modules and the
+other stopped at twelve. That is a rule stated twice, and it is now two
+file-level constants with one doc, read by both. The forward walk is the one
+that moved: it stops at twelve now, like the other.
+
+**The walks themselves were merged and the merge was measured and reverted.**
+One `simple_paths(start, next, keep)` over `&dyn Fn` neighbours and a `&dyn Fn`
+stop predicate does express both — the forward one is `keep = node == target`,
+the backward one is `keep = no importers left` — and it compiles and passes.
+It is **13 lines longer** than the two walks it replaces. The two differ in
+three ways at once: direction, where they stop, and the order they answer in
+(the backward one reverses each chain and drops the one-element answer), and in
+Rust each of those costs more to abstract over than to write down. `main.rs`
+went 7,074 to 7,087 and the change was thrown away.
+
+This is what "delete more than you add, or say why not" is for. The rule that
+was stated twice was the bound, and the bound is four lines. The walk was never
+one rule stated twice; it was two walks that happened to share a shape.
+
+**The numbers.**
+
+| | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,074 | 7,072 | −2 |
+| statements of the bound | 2 | 1 | −1 |
+| `main.rs` with the walks merged, not taken | 7,074 | 7,087 | +13 |
+
+**The licence.**
+
+| gate | result |
+|---|---|
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after |
+| `floor` (`why --capability`, forward walk) | 16 passed, 0 failed |
+| `audience` (`why <file>`, backward walk) | 13 passed, 0 failed |
+
+The forward walk's depth bound is the one observable change in this track, and
+no corpus chain is thirteen modules deep, so nothing moved. It is recorded here
+rather than left implicit.
+
+`tests/cli_census.rs` gains a section for the bound and is re-pinned in this
+commit.
+
+#### Gates (2026-09-10, `track-ef`)
+
+The whole list, one at a time, in the foreground, with `TMP` and `TEMP` pointed
+at a shallow scratch directory outside the checkout. Over the six commits of
+this track together.
+
+| gate | result |
+|---|---|
+| `cargo fmt --all --check` | clean |
+| `cargo fmt --manifest-path vyrn-lsp/Cargo.toml --check` | clean |
+| `cargo build --release` | ok, 0 warnings |
+| `cargo test -p vyrn-cli`, no filter | 85 binaries, 646 passed, 0 failed |
+| `kernel` `--ignored`, release | 1, 28 s |
+| `coretables` `--ignored`, release | 1, 30 s |
+| `typed` `--ignored`, release | 1, 60 s |
+| `effects` `--ignored`, release | 2, 66 s |
+| `fixtures` `--ignored`, release | 1, 23 s — every command's stdout and stderr over the corpus, byte-identical |
+| `testsweep` `--ignored`, release | 1, 62 s |
+| `cargo test -p vyrn-frontend` | 11 binaries, 1,113 passed, 0 failed |
+| `cargo test --workspace --exclude vyrn-cli -- --skip _natively` | 18 binaries, 1,160 passed, 0 failed |
+| `cargo test --manifest-path vyrn-lsp/Cargo.toml` | 77 passed, 5 ignored |
+| `cargo test -p vyrn-genwasm --all-targets` | 3 passed |
+| `memory` `--test-threads=1` | 9 passed |
+| `route` `--ignored`, release | 2 — 175 checked, 34 skipped, 0 failed |
+| the residue ratchet `--ignored`, release | 1 — engine 172 clean and 3 leaking, route the same, 0 failed |
+| `VYRN_WASM_MANIFEST=check` on `wasmhash` | green — 176 examples hashed, no byte moved |
+| `genwasm` `--ignored`, release, fresh `VYRN_GEN_CACHE_DIR` | 1, 29 s |
+| `vyrn doc --std -o ../docs/api --verify` | 41 files up to date |
+| the site export | 82 routes, 14 assets |
+| `vyrn test` over `export.vyrn` and `site/app` | 189 over 28 files, 0 failed |
+| `parser_census`, `frontend_census`, `checker_census`, `emitter_census`, `cli_census` | green; `cli_census` re-pinned in each commit that moved it |
+| `forms` | 8 passed, 2 ignored; RFC-0127 §3.2 re-pinned in the serving-loop commit |
+| `refusals`, `surface`, `columns` | 21, 2, 3 |
+| `symbols_api::the_pinned_columns_over_the_corpus` | green |
+| `lowered_dump::the_pinned_lowering_over_the_corpus` | 419 programs, 341 lowered, 0 unstable |
+| `vyrn check` stderr over the corpus | 419 of 419 byte-identical, 79 refused before and after, at every commit |
+
+No red in the first pass, and no gate was weakened or skipped.
+
+**One environment note, not a gate result.** `vyrn run site/export.vyrn <out>`
+writes through the guest's preopen, which is the working directory. An absolute
+output path outside the checkout fails all 241 writes and says so on each one.
+Give it a path under the repository, as the file's own doc comment does.
+
+##### What the track moved
+
+| the file | before | after | moved |
+|---|---|---|---|
+| `compiler/vyrn-cli/src/main.rs` | 7,154 | 7,072 | −82 |
+| `compiler/vyrn-cli/tests/cli_census.rs` | 795 | 904 | +109 |
+| `compiler/vyrn-frontend/src/manifest.rs` | 766 | 769 | +3 |
+
+| the tile | before | after | moved |
+|---|---|---|---|
+| a command's own path | 5,224 | 5,101 | −123 |
+| a rule another pass also states | 168 | 165 | −3 |
+| shared machinery | 1,485 | 1,529 | +44 |
+| the crate, less tests | 8,010 | 7,928 | −82 |
+
+Five rules that were stated more than once are stated once: the serving loop,
+the diagnostic printer, the path spelling, the synthesized function and the
+chain bound. Two statements were weighed and left standing, each with its reason
+in its own record: the checker's third reading of what a served root is, and the
+two import walks, whose merge was measured at +13 lines.
+
+##### What is left, with its blocker named
+
+**`project_imports`, 165 lines, the whole of "a rule another pass also states".**
+It is the CLI's own walk over a project's import graph, and `loader.rs` builds
+the same edge set on every load. It cannot go until the loader can answer "what
+imports what" WITHOUT loading, which is the question `vyrn why` asks about a
+project that need not compile. The blocker is a loader API, not this file.
+
+**The checker's third statement of the served-root signature.** Named in the
+serving-loop record. The blocker is that the checker asks its own `sigs` table
+and a walk over `program.functions` would gain a refusal on an `extern handle`.
+It needs a witness program and a licence of its own.
+
+**`vyrn bench` is 651 lines, the largest command, and nothing here touched it.**
+The census found no second statement in it: `bench_native` drives clang, and the
+harness it builds is Vyrn, in `std/bench`. What it costs is its own four modes,
+which is surface, not duplication.
+
+**`check`, `run`, `emit-wat` and `emit-lowered` still have no section.** Their
+78 lines are match arms inside `real_main` and a census cannot tile below an
+item. Pulling each into a function would let the next census price them; nothing
+in this track needed that, so nothing did it.
+
 ### The surface collapse — RFC-0126 §8, one line per step
 
 §2.8 deferred the surface census and RFC-0126 answered it. Its §8 takes the one

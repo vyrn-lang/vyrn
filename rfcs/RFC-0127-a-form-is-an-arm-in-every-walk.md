@@ -209,7 +209,7 @@ one's.
 
 ### 3.2 The 9 declarations
 
-265 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
+264 mentions in seven files. The rows are `Program`'s `Vec` fields, read out of
 `ast.rs` by the test, so a tenth declaration form fails the census until it has
 a row.
 
@@ -217,7 +217,7 @@ a row.
 |---|---|---|---|---|---|---|---|---|
 | `imports` | 1 | 19 | 0 | 0 | 0 | 5 | 1 | 26 |
 | `type_decls` | 2 | 16 | 4 | 1 | 0 | 14 | 0 | 37 |
-| `functions` | 2 | 18 | 16 | 1 | 1 | 12 | 15 | 65 |
+| `functions` | 2 | 18 | 16 | 1 | 1 | 12 | 14 | 64 |
 | `protocols` | 1 | 11 | 7 | 0 | 0 | 8 | 0 | 27 |
 | `contracts` | 0 | 11 | 4 | 0 | 0 | 0 | 0 | 15 |
 | `impls` | 1 | 7 | 13 | 3 | 0 | 6 | 0 | 30 |
