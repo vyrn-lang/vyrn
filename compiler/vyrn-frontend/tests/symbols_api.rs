@@ -875,20 +875,11 @@ fn member_completion_offers_record_fields() {
     );
 }
 
-/// Every diagnostic position `analyze` gives over the corpus, printed.
+/// Every `.vyrn` of the corpus, sorted, with the repository root it is under.
 ///
-/// The pin for [`vyrn_frontend::analyze`]'s COLUMNS, which nothing else
-/// records. `vyrn check` does not go through this path — it reports what the
-/// loader and the checker say, at the column those give — so a change to the
-/// keyword-column map moves no byte of the corpus's `vyrn check` stderr and is
-/// invisible to the licence RFC-0125 §3 M6 uses everywhere else. This is the
-/// licence for that map: run it before and after and compare the whole output.
-///
-/// `cargo test -p vyrn-frontend --test symbols_api -- --ignored --nocapture
-/// the_pinned_columns_over_the_corpus`
-#[test]
-#[ignore]
-fn the_pinned_columns_over_the_corpus() {
+/// The two corpus pins below read the same files: what `analyze` decides about
+/// a program is one answer, and a pin over half of it is not a licence.
+fn corpus() -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
     for dir in ["examples", "site", "std", "compiler/vyrn-cli/tests"] {
@@ -908,9 +899,14 @@ fn the_pinned_columns_over_the_corpus() {
         }
     }
     files.sort();
-    // The corpus holds files a debug build cannot walk on the harness's own
-    // stack (`site/app/chart.vyrn` is 35 KB of one expression tree), so the
-    // whole scan runs on a thread with room.
+    (root, files)
+}
+
+/// The corpus walked on a thread with room: it holds files a debug build cannot
+/// walk on the harness's own stack (`site/app/chart.vyrn` is 35 KB of one
+/// expression tree).
+fn over_the_corpus(each: fn(&str, &str)) {
+    let (root, files) = corpus();
     std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
         .spawn(move || {
@@ -923,17 +919,67 @@ fn the_pinned_columns_over_the_corpus() {
                 let Ok(src) = std::fs::read_to_string(&p) else {
                     continue;
                 };
-                let a = analyze(&src);
-                println!("===== {rel} ({} diagnostics)", a.diagnostics.len());
-                for d in &a.diagnostics {
-                    println!(
-                        "{}:{}:{}:{} {} | {}",
-                        rel, d.line, d.col, d.end_col, d.stage, d.message
-                    );
-                }
+                each(&rel, &src);
             }
         })
         .expect("spawn")
         .join()
         .expect("the corpus scan");
+}
+
+/// Every local binding `analyze` gives over the corpus, printed: the name, the
+/// kind, the position, the enclosing function and the type on hover.
+///
+/// The pin for the editor's LOCALS. Nothing else records them — a local is not
+/// a declaration, so no `vyrn check` byte moves when one is lost — and the walk
+/// that produced them is the section RFC-0125 §3 M6 deletes. This is the
+/// licence for that deletion: run it before and after and compare every byte.
+///
+/// `cargo test -p vyrn-frontend --test symbols_api -- --ignored --nocapture
+/// the_pinned_binders_over_the_corpus`
+#[test]
+#[ignore]
+fn the_pinned_binders_over_the_corpus() {
+    over_the_corpus(|rel, src| {
+        let a = analyze(src);
+        println!("===== {rel} ({} locals)", a.locals.len());
+        for b in &a.locals {
+            println!(
+                "{rel}:{}:{}:{} {} {:?} fn@{} | {}",
+                b.line,
+                b.col,
+                b.end_col,
+                b.name,
+                b.kind,
+                b.fn_line,
+                b.ty.as_ref().map(ToString::to_string).unwrap_or_default()
+            );
+        }
+    });
+}
+
+/// Every diagnostic position `analyze` gives over the corpus, printed.
+///
+/// The pin for [`vyrn_frontend::analyze`]'s COLUMNS, which nothing else
+/// records. `vyrn check` does not go through this path — it reports what the
+/// loader and the checker say, at the column those give — so a change to the
+/// keyword-column map moves no byte of the corpus's `vyrn check` stderr and is
+/// invisible to the licence RFC-0125 §3 M6 uses everywhere else. This is the
+/// licence for that map: run it before and after and compare the whole output.
+///
+/// `cargo test -p vyrn-frontend --test symbols_api -- --ignored --nocapture
+/// the_pinned_columns_over_the_corpus`
+#[test]
+#[ignore]
+fn the_pinned_columns_over_the_corpus() {
+    over_the_corpus(|rel, src| {
+        let a = analyze(src);
+        println!("===== {rel} ({} diagnostics)", a.diagnostics.len());
+        for d in &a.diagnostics {
+            println!(
+                "{}:{}:{}:{} {} | {}",
+                rel, d.line, d.col, d.end_col, d.stage, d.message
+            );
+        }
+    });
 }
