@@ -11665,18 +11665,21 @@ impl<'p> Fn_<'_, 'p> {
 
     /// The receiver of an array operation `std/runtime` rebuilds
     /// (PLAN-0125-runtime §6 step 6): the element type, the header layout, the
-    /// element stride, the receiver's address parked in a local, and a fresh
-    /// slot the runtime writes the result triple into. `xs.push(v)` is
-    /// `xs = @push(xs, v)`, so the result is a NEW triple and the write-back is
-    /// an ordinary assignment; `reserve`, `clear`, `append` and `copyFrom`
-    /// (RFC-0115) rebuild the same way.
+    /// element stride, and the receiver's address parked in a local. That
+    /// address is the runtime's `dst` as well as its `src`. Every array
+    /// function reads all of `src` before it stores, which step 6 states, so
+    /// the new triple lands in the receiver and `xs = @push(xs, v)` copies a
+    /// header onto itself. A destination slot of its own cost the store-heavy
+    /// rows half their time: the temp forced a store and two reloads the
+    /// runtime call already fenced, and wasm2c spells the write-back
+    /// `memmove`. `examples/benching.vyrn`'s "push 1000" went 6.52 to 3.47 us.
     fn arr_recv(
         &mut self,
         b: &mut Frame,
         aty: &Type,
         verb: &str,
         line: usize,
-    ) -> Result<(Type, Layout, i32, u32, u32), String> {
+    ) -> Result<(Type, Layout, i32, u32), String> {
         let Type::Array(elem) = self.cx.resolve(aty) else {
             return unsupported(&format!("`{verb}` on `{aty}`"), line);
         };
@@ -11684,8 +11687,7 @@ impl<'p> Fn_<'_, 'p> {
         let stride = self.stride(&elem, line)? as i32;
         let src = b.local(ValType::I32);
         b.ins(&Instruction::LocalSet(src));
-        let off = b.alloc(l.size, l.align);
-        Ok((*elem, l, stride, src, off))
+        Ok((*elem, l, stride, src))
     }
 
     /// `xs.clear()` (RFC-0115 addendum): `std/runtime`'s `arrClear`.
@@ -11697,11 +11699,11 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        let (_, _, _, src, off) = self.arr_recv(b, &aty, "clear", line)?;
-        b.slot(off);
+        let (_, _, _, src) = self.arr_recv(b, &aty, "clear", line)?;
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::Call(self.cx.rt.arr_clear));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         Ok(aty)
     }
 
@@ -11716,16 +11718,16 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        let (elem, _, stride, src, off) = self.arr_recv(b, &aty, "reserve", line)?;
+        let (elem, _, stride, src) = self.arr_recv(b, &aty, "reserve", line)?;
         let n = b.local(ValType::I64);
         self.expr_as(m, b, &args[1], &Type::Int)?;
         b.ins(&Instruction::LocalSet(n));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Const(stride));
         b.ins(&Instruction::LocalGet(n));
         b.ins(&Instruction::Call(self.cx.rt.arr_reserve));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         Ok(Type::Array(Box::new(elem)))
     }
 
@@ -11761,11 +11763,11 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        let (elem, _, stride, src, off) = self.arr_recv(b, &aty, verb, line)?;
+        let (elem, _, stride, src) = self.arr_recv(b, &aty, verb, line)?;
         let xs = b.local(ValType::I32);
         self.expr_as(m, b, &args[1], &aty)?;
         b.ins(&Instruction::LocalSet(xs));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Const(stride));
         b.ins(&Instruction::LocalGet(xs));
@@ -11774,7 +11776,7 @@ impl<'p> Fn_<'_, 'p> {
         } else {
             self.cx.rt.arr_copy_from
         }));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         Ok(Type::Array(Box::new(elem)))
     }
 
@@ -11801,19 +11803,19 @@ impl<'p> Fn_<'_, 'p> {
             let ty = self.cx.resolve(&aty);
             return self.sa_push(m, b, &ty, &inner, n, &args[1], line);
         }
-        let (elem, l, stride, src, off) = self.arr_recv(b, &aty, "push", line)?;
+        let (elem, l, stride, src) = self.arr_recv(b, &aty, "push", line)?;
         let stale = b.local(ValType::I32);
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Const(stride));
         b.ins(&Instruction::Call(self.cx.rt.arr_push));
         b.ins(&Instruction::LocalSet(stale));
         // The element goes at the old length, which the new triple holds plus one.
         let (data, last) = (b.local(ValType::I32), b.local(ValType::I64));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalSet(data));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I64Load(at(l.fields[1])));
         b.ins(&Instruction::I64Const(1));
         b.ins(&Instruction::I64Sub);
@@ -11844,7 +11846,7 @@ impl<'p> Fn_<'_, 'p> {
         // Now nothing can read the old buffer through the caller's header.
         b.ins(&Instruction::LocalGet(stale));
         b.ins(&Instruction::Call(self.cx.rt.free));
-        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         Ok(Type::Array(Box::new(elem)))
     }
 
