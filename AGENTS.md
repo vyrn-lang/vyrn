@@ -145,7 +145,7 @@ Do not optimize on a guess. A micro-optimization that the numbers do not license
 - Never `git stash`. The stash list is shared by every worktree. Set work aside with a patch file.
 - Never run two cargo commands at the same time in one worktree. Run every gate in the foreground with a timeout and wait for it.
 - Never pipe a test suite's output. Redirect it to a file and read the file. A suite's leaked child holds the pipe open, and the run looks hung for as long as you wait.
-- Never write a polling or wait loop, in a script or by hand. Run the command under a timeout and read its exit code. A process that must be waited for is re-checked later, not watched.
+- Never write a polling or wait loop, in a script or by hand, and never an `until … sleep` loop through the Monitor tool either. Run the command under a timeout in the foreground and read its exit code; or run it in the background and do nothing until the harness notifies you. A loop outlives the agent that wrote it, and six loops on one file were found on this machine.
 - A background process is a process tree. Stop it by its tree, then list what is still alive under your worktree before you start the next command.
 - Kill only a process whose command line names your own worktree. Eight tracks and other sessions share this machine; a cargo process you cannot match to your own command is someone else's.
 - A suite that stops growing its log is not hung until you have checked the process's start time and CPU. Read the log's last line, look for a leaked child, and wait for the timeout; do not kill on a guess.
