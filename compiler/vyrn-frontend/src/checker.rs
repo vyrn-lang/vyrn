@@ -9224,9 +9224,9 @@ impl<'a> Checker<'a> {
         scope: &Scope,
         line: usize,
     ) -> Result<(), Diagnostic> {
-        if let Some((root, path)) = crate::movecheck::place_path(arg) {
+        if let Some((root, path)) = crate::ast::place_path(arg) {
             for (j, b) in args.iter().enumerate() {
-                if j != i && crate::movecheck::mentions(b, &root) {
+                if j != i && crate::ast::mentions(b, &root) {
                     let mut d = cerr!(
                         line,
                         "`{path}` is passed to `{fname}` as `modify` and read again in the \

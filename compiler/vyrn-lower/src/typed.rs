@@ -414,9 +414,9 @@ pub mod obligation {
     use std::collections::HashMap;
 
     use vyrn_frontend::ast::*;
+    use vyrn_frontend::ast::{paths, stmt_mentions, sub_blocks};
     use vyrn_frontend::declared::Declared;
     use vyrn_frontend::diagnostics::Diagnostic;
-    use vyrn_frontend::movecheck::{paths, stmt_mentions, sub_blocks};
     use vyrn_frontend::own::Linear;
 
     /// One live must-use binding, as a diagnostic about it needs it: the type

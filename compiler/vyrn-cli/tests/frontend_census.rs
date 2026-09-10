@@ -670,6 +670,13 @@ fn project_sections() -> Vec<Section> {
             "the three predicates a place question needs: is this a place, what \
              is its root, does this body hold a `?`",
         ),
+        sec(
+            "pub(crate) fn named_projection(name: &str) -> bool {",
+            Job,
+            "which call names read a place in the program under analysis, and \
+             the path one of them spells. READERS: `movecheck::views`, and \
+             `vyrn_lower::core` at every place question",
+        ),
         sec("mod tests {", Tests, "the file's own unit tests"),
     ]
 }
@@ -706,9 +713,24 @@ fn movecheck_sections() -> Vec<Section> {
              through a fn value, where no capability row answers",
         ),
         sec(
-            "enum Want {",
+            "fn declarations(program: &Program) -> Declared {",
             Shared,
-            "what a run is for, and one run's outputs",
+            "the declaration reading every walk over a body starts from, and              the one body descent both of them read",
+        ),
+        sec(
+            "struct Lets<'a> {",
+            Job,
+            "what a compile reads off a body besides the rules: the lambdas              that stand the fn-value meet down, and the projection stores it              descends through. READERS: `facts` above, and `lets_outputs`              below",
+        ),
+        sec(
+            "pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) -> String {",
+            Job,
+            "the key a fn-value signature meets under. READERS: the meet              above, and `vyrn_lower::core` at a call through a fn value",
+        ),
+        sec(
+            "pub fn lets_outputs(program: &Program) -> Vec<String> {",
+            Job,
+            "the three rows one `Want::Lets` walk produces. READER:              `compiler/vyrn-cli/tests/letswalk.rs`, which prints them over the              corpus so the walk can be rewritten against them",
         ),
         sec(
             "pub fn hands_back(name: &str) -> bool {",
@@ -756,10 +778,10 @@ fn movecheck_sections() -> Vec<Section> {
              backtick — the suppression key `refusals` merges the two lists on",
         ),
         sec(
-            "fn run(program: &Program, want: Want) -> Run {",
+            "fn run(program: &Program) -> Vec<ProjectionSite> {",
             Shared,
-            "the one walk: the capability tables, every body, the drains, and \
-             round forty-six's meet over the fn-value signatures",
+            "RFC-0092 M0's walk: the capability tables, every body and the \
+             drains",
         ),
         sec(
             "struct MoveCheck<'a> {",
@@ -773,12 +795,6 @@ fn movecheck_sections() -> Vec<Section> {
              projection. The SENTENCES left with row 24: \
              `core::BorrowKind::what` and `::fixes` word a borrow now, and \
              nothing outside the kernel does",
-        ),
-        sec(
-            "pub fn root_of(path: &str) -> &str {",
-            Job,
-            "the base name of a place path. READERS: `vyrn_lower::core` at a \
-             loop variable's borrow, and `subject` above",
         ),
         sec(
             "impl MoveCheck<'_> {",
@@ -845,38 +861,11 @@ fn movecheck_sections() -> Vec<Section> {
             "the walk over expressions: the same traversal does both jobs",
         ),
         sec(
-            "pub fn mentions_place(e: &Expr, base: &str) -> bool {",
-            Job,
-            "whether a stored value mentions the place it is stored into. \
-             READERS: `vyrn_lower::core` at five stores and \
-             `vyrn_codegen::direct` at four",
-        ),
-        sec(
-            "pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {",
-            Job,
-            "what an expression names, and on which of its paths. READERS: \
-             `vyrn_lower::typed`'s must-use judgment asks all three of \
-             `sub_blocks`, `stmt_mentions` and `paths`; `checker.rs` asks \
-             `mentions` for the second `modify` argument",
-        ),
-        sec(
-            "fn store_path(e: &Expr) -> Option<String> {",
-            Shared,
-            "the place an expression names, as the store arms spell it",
-        ),
-        sec(
             "fn sinks(decl: &Declared, name: &str, i: usize) -> bool {",
             Shared,
             "whether a builtin's parameter takes its argument for good — read \
              off `prelude::signature` and `prelude::rebuilds`, where the rule \
              is stated once for this pass and the core alike",
-        ),
-        sec(
-            "pub fn element_path(e: &Expr) -> Option<(String, String)> {",
-            Job,
-            "the place spellings every rule above compares. READERS: \
-             `vyrn_lower::core`, `vyrn_codegen::direct` and `checker.rs` all \
-             ask `place_path`; the core asks `element_path` beside it",
         ),
         sec("mod tests {", Tests, "the pass's own unit tests"),
     ]
@@ -1060,7 +1049,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 829, 0),
-        ("project.rs", "the file's own job", 1008, 0),
+        ("project.rs", "the file's own job", 1088, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1069,9 +1058,9 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("project.rs", "shared machinery", 273, 0),
+        ("project.rs", "shared machinery", 298, 0),
         ("project.rs", "tests", 309, 0),
-        ("movecheck.rs", "the file's own job", 1084, 0),
+        ("movecheck.rs", "the file's own job", 885, 0),
         ("movecheck.rs", "a rule stated a second time", 0, 0),
         ("movecheck.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1080,7 +1069,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1357, 0),
+        ("movecheck.rs", "shared machinery", 1192, 0),
         ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");

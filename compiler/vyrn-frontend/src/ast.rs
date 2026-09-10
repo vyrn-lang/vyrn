@@ -135,7 +135,7 @@ pub enum LogSink {
 /// The operand temps the desugar hoists ahead of the move carry a further
 /// suffix (`[]idx`, `#idx`, `#val`, `[]arg1`) so they do not match, and `#` is
 /// what keeps a hoisted operand from reading as DERIVED from the container
-/// under [`movecheck::mentions_place`](crate::movecheck::mentions_place).
+/// under [`ast::mentions_place`](crate::ast::mentions_place).
 ///
 /// **`parser::place_receiver` is the one statement of the naming and this is
 /// the one statement of the reading.** Every pass below asks here —
@@ -2016,4 +2016,307 @@ pub fn alias_embedded(tree: &Expr, orig: &Expr, out: &mut Vec<(usize, usize)>) {
         &std::collections::HashSet::new(),
         &mut Alias { orig, out },
     );
+}
+
+// ---------------------------------------------------------------------------
+// How this language spells a PLACE, and what an expression mentions.
+//
+// A path, its root, the two probes a store asks and the two a `?` asks: none of
+// them is a rule, and every one is a question about the SHAPE of the AST. They
+// were `movecheck.rs`'s because the move check asked them first (RFC-0125 §3
+// M3, the algebra slice); the readers are the core, the direct backend, the
+// checker and the must-use judgment, and each of those asks the AST.
+// ---------------------------------------------------------------------------
+
+/// The base name of a place path: `r.a[0]` is `r`.
+///
+/// A message names a PATH and a borrow names the PARAMETER it came from, so the
+/// two are comparable only at the root.
+pub fn root_of(path: &str) -> &str {
+    match path.find(['.', '[']) {
+        Some(i) => &path[..i],
+        None => path,
+    }
+}
+
+/// RFC-0075 — the linearity of `Stream<T>`: acquired once, disposed exactly once.
+///
+/// This is the milestone's whole claim, so it is worth stating what it is not.
+/// `own.rs` already reclaims an owned heap value at block exit and on every
+/// divergent exit (RFC-0060), which is "owned and dropped". A stream is stronger:
+/// disposal must be *written*, because M2's producer has a teardown that no
+/// generic memory drop can run, and the tRPC incidents this RFC quotes were live
+/// producers rather than unreachable bytes. So the obligation is checked here and
+/// the release is emitted by the construct that discharges it — a stream binding
+/// is never in a `drop_stack` frame of its own.
+///
+/// The analysis is deliberately name-based and typeless, like the rest of this
+/// file: movecheck runs only on programs the checker already accepted, so
+/// `close(x)` implies `x` is a stream and there is no read operation on a stream
+/// at all — every mention of a stream binding is a move. That last fact is what
+/// makes a one-pass syntactic walk exact instead of approximate.
+///
+/// Known limit, shared with the `Consumed` map above: bindings are keyed by NAME,
+/// so an inner `let s = 1` shadowing an outer stream `s` reads as a disposal of
+/// the outer one. Erring toward accepting matches the existing pass; a scope-id
+/// key would have to be introduced for both at once.
+///
+/// Whether `e` reads the place `base`, or anything derived from it.
+///
+/// The store half of RFC-0089 rule 4 asks this: a store releases what the place
+/// held, and the old value is usually an operand of the new one — `acc = acc +
+/// x` reads the old buffer and `a = @push(a, i)` grows it. A value that names the
+/// place therefore releases nothing. The self-append spine reclaims that shape
+/// by not allocating at all; every other shape is a recorded leak, which is the
+/// side of the trade a language that promises memory safety takes.
+///
+/// **Derived, not just equal.** A place desugar (RFC-0082) names its temporary
+/// after the path it took: `t.xs[k] = v` becomes a move-out into `t.xs[]`, the
+/// element store, and the write-back `t.xs = t.xs[]` — which hands the SAME
+/// buffer back. Comparing the base name alone reads that write-back as a store of
+/// an unrelated value and frees what it is about to store. `placeorder.vyrn`
+/// caught it in one parity run, and it is the shape RFC-0087 §4 warned about in
+/// its own words.
+///
+/// A lambda with a block body answers `true` without being read. The question is
+/// "may this store free the old value", where `true` costs a leak and `false` can
+/// cost a use-after-free.
+///
+/// The descent is [`body_scope_descent`]'s; what is
+/// this probe's own is the derived-name test and the two forms it answers
+/// `true` for without descending.
+pub fn mentions_place(e: &Expr, base: &str) -> bool {
+    /// The probe's line at each site: a name derived from the base is a
+    /// mention, and two forms answer `true` without being read.
+    struct Mentions<'a> {
+        base: &'a str,
+        found: bool,
+    }
+
+    impl Mentions<'_> {
+        fn derived(&self, n: &str) -> bool {
+            let base = self.base;
+            n == base
+                || (n.len() > base.len()
+                    && n.starts_with(base)
+                    && matches!(n.as_bytes()[base.len()], b'.' | b'['))
+        }
+    }
+
+    impl AstVisit<'_> for Mentions<'_> {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            match e {
+                Expr::Var { name, .. } if self.derived(name) => self.found = true,
+                // A block-bodied lambda and a block match arm (RFC-0118) both
+                // answer `true` without being read, for the reason the doc
+                // gives: `true` costs a leak and `false` can cost a
+                // use-after-free.
+                Expr::Lambda {
+                    body: LambdaBody::Block(_),
+                    ..
+                } => self.found = true,
+                Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
+                    self.found = true
+                }
+                _ => {}
+            }
+            !self.found
+        }
+    }
+
+    let mut v = Mentions { base, found: false };
+    ast_expr(e, &std::collections::HashSet::new(), &mut v);
+    v.found
+}
+
+/// The nested blocks of a statement, for the declaration walk.
+pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
+    match s {
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        }
+        | Stmt::IfLet {
+            then_block,
+            else_block,
+            ..
+        } => {
+            let mut v = vec![then_block];
+            v.extend(else_block.as_ref());
+            v
+        }
+        Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
+            vec![body]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a whole statement (including everything nested in it) mentions the
+/// binding — the double-disposal probe.
+pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
+    let here = match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::SetField { value, .. }
+        | Stmt::Expr(value) => mentions(value, name),
+        Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
+        Stmt::If { cond: e, .. }
+        | Stmt::While { cond: e, .. }
+        | Stmt::IfLet { scrutinee: e, .. } => mentions(e, name),
+        Stmt::ForIn { iter, .. } => mentions(iter, name),
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| mentions(e, name)),
+        Stmt::Drop { name: n, .. } => n == name,
+        _ => false,
+    };
+    here || sub_blocks(s)
+        .iter()
+        .any(|b| b.stmts.iter().any(|s| stmt_mentions(s, name)))
+}
+
+/// Whether `e` names the binding anywhere. Every mention of a stream is a
+/// move — a `Stream` has no field, no length, and no indexing — so this needs
+/// no notion of position, which is what keeps it a dozen lines.
+pub fn mentions(e: &Expr, name: &str) -> bool {
+    paths(e, name).0
+}
+
+/// How the paths through `e` treat the binding: `.0` where SOME path names
+/// it, `.1` where EVERY path does.
+///
+/// The two answers differ at exactly two shapes — a `match` and an `if` used
+/// as an expression — because those are the only expressions with a path
+/// that skips a sub-expression. Everything else evaluates all of its parts,
+/// so a mention in one part is a mention on every path through the whole.
+///
+/// This is RFC-0095 M3. the must-use walk read a statement's expressions with
+/// [`mentions`] alone, which answers "some path", and then treated the answer
+/// as a disposal on every path — so `match p { Some(n) => t.join(), None => 0 }`
+/// discharged a task the `None` path abandons. The `if` STATEMENT never had
+/// the hole: `scan` walks its two blocks and merges them. The merge is
+/// unchanged; what changed is that a branching EXPRESSION now reaches it.
+pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
+    // Two sub-expressions that both run: a mention in either is a mention,
+    // and a disposal on every path through either is one through the pair.
+    let seq = |a: (bool, bool), b: (bool, bool)| (a.0 || b.0, a.1 || b.1);
+    let all = |m: bool| (m, m);
+    match e {
+        Expr::Var { name: n, .. } => all(n == name),
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
+            (false, false)
+        }
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+            paths(expr, name)
+        }
+        Expr::Consume { place, .. } => paths(place, name),
+        Expr::Binary { lhs, rhs, .. } => seq(paths(lhs, name), paths(rhs, name)),
+        Expr::Call { args, .. }
+        | Expr::Spawn { args, .. }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => args
+            .iter()
+            .fold((false, false), |acc, a| seq(acc, paths(a, name))),
+        Expr::MapLit { entries, .. } => entries.iter().fold((false, false), |acc, (k, v)| {
+            seq(seq(acc, paths(k, name)), paths(v, name))
+        }),
+        Expr::StructLit { fields, .. } => fields
+            .iter()
+            .fold((false, false), |acc, (_, v)| seq(acc, paths(v, name))),
+        // The scrutinee runs whatever arm is taken, so it is sequenced with
+        // the arms rather than merged into them. An arm list that is empty
+        // has no path of its own to say anything about.
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            let s = paths(scrutinee, name);
+            if arms.is_empty() {
+                return s;
+            }
+            // A block arm (RFC-0118) exists only in statement position,
+            // which is never an operand this hoisting question is asked
+            // about; if one is ever met, (true, false) is conservative in
+            // both directions.
+            let any = arms
+                .iter()
+                .any(|a| a.body.as_expr().is_none_or(|e| paths(e, name).0));
+            let every = arms
+                .iter()
+                .all(|a| a.body.as_expr().is_some_and(|e| paths(e, name).1));
+            seq(s, (any, every))
+        }
+        // A missing `else` is a path that names nothing. The checker refuses
+        // an if-expression without one, so this is the incomplete tree and
+        // not a shape a program can write.
+        Expr::IfExpr {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let t = paths(then_branch, name);
+            let e = match else_branch {
+                Some(b) => paths(b, name),
+                None => (false, false),
+            };
+            seq(paths(cond, name), (t.0 || e.0, t.1 && e.1))
+        }
+        // A lambda body may never run, and reading it as a disposal on every
+        // path is the answer this walk has always given. Narrowing it would
+        // widen what compiles, which is not this milestone.
+        Expr::Lambda { body, .. } => all(match body {
+            LambdaBody::Expr(e) => mentions(e, name),
+            LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
+        }),
+    }
+}
+
+/// Whether parameter `i` of the builtin `name` takes its argument for good,
+/// under **rule 1**.
+///
+/// It was `RESERVED_SINKS`, three rows in a hand list (RFC-0087 §2b). RFC-0094
+/// M1 reads `consume` off the seeded signature instead ([`crate::prelude`]), so
+/// the fact is written once where every rule sees it. Everything else a builtin
+/// does with a heap argument is a read: `print` formats it, `@concat` copies out
+/// of it, `at` looks inside it.
+///
+/// **A linear parameter is not rule 1's.** `close`, `boxStream` and
+/// `serveStream` each declare `consume Stream<T>`, and a `Stream<T>` already
+/// carries a disposal obligation the [`linear`] walk proves: every mention of a
+/// stream binding is a disposal there, so a second one is refused before rule 1
+/// is asked. Two rules over one value would refuse the same program twice with
+/// the worse words — rule 1's menu offers `.copy()`, which a stream has no
+/// answer for. The obligation on the TYPE wins, and the census's claim that
+/// these three carry a rule "nowhere at all" is corrected rather than acted on.
+/// The place an expression names, spelled as the store arms spell it:
+/// `xs`, `s.keys`, `a.b.c`. `None` for anything that is not a place.
+pub fn store_path(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Var { name, .. } => Some(name.clone()),
+        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", store_path(expr)?)),
+        _ => None,
+    }
+}
+
+/// The place `e` reads, as `(root name, whole path)`.
+///
+/// `s` is `("s", "s")` and `r.a.b` is `("r", "r.a.b")` — the root is what a move
+/// takes, the path is what the diagnostic quotes. Anything else (a call, a
+/// literal, an operator) is not a place and answers `None`: it has no earlier
+/// owner, so nothing about it can be a move.
+pub fn place_path(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Var { name, .. } => Some((name.clone(), name.clone())),
+        Expr::Field { expr, field, .. } => {
+            let (root, path) = place_path(expr)?;
+            Some((root, format!("{path}.{field}")))
+        }
+        // RFC-0093: a take is not a place. `consume d.title` names no storage
+        // the frame can still reach, so it is an OWNER at every store, every
+        // return and every pattern position — with no second rule, which is the
+        // whole reason the prefix costs so little.
+        _ => None,
+    }
 }

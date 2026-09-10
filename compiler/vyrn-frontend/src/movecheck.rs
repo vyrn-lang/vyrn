@@ -84,7 +84,7 @@ pub struct ProjectionSite {
 /// every cross-module result reads as `?` — the error Phase 4b's per-file
 /// measurement made, by 81 sites.
 pub fn projection_sites(program: &Program) -> Vec<ProjectionSite> {
-    run(program, Want::Projections).projections
+    run(program)
 }
 
 /// One call-argument position whose argument expression BUILT the value it
@@ -166,11 +166,171 @@ pub struct Facts {
     pub fnval_clear: HashSet<String>,
 }
 
-/// The closure over the call graph, out of one walk.
+/// The closure over the call graph, over the one body descent.
 pub fn facts(program: &Program) -> Facts {
-    let r = run(program, Want::Lets);
-    Facts {
-        fnval_clear: r.fnval_clear,
+    let decl = declarations(program);
+    let lets = Lets::over(program, &decl);
+    let caps = crate::declared::arg_caps(program);
+    let mut sig_groups: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    for f in &program.functions {
+        let ps: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
+        let key = fn_sig_key(&ps, &f.ret, decl.decls());
+        sig_groups
+            .entry(key)
+            .or_insert_with(|| (ps.len(), Vec::new()))
+            .1
+            .push(f.name.clone());
+    }
+    let mut fnval_clear: HashSet<String> = HashSet::new();
+    for (key, (arity, members)) in &sig_groups {
+        if lets.arities.contains(arity) || lets.sigs.contains(key) {
+            continue;
+        }
+        let all_clear = !members.is_empty()
+            && members.iter().all(|m| {
+                // The meet is per POSITION in the plan's reading, and the
+                // position it was asked about is the one the temporary sits
+                // in. A signature every one of whose members reads EVERY
+                // position is clear at every position, which is the answer a
+                // key can carry. It used to ask two call-graph sets beside
+                // the capability; both were empty for every program the
+                // kernel accepts (RFC-0125 §3 M3, the wrapped lend).
+                caps.get(m)
+                    .is_some_and(|cs| cs.iter().all(|c| *c == Capability::Read))
+            });
+        if std::env::var("VYRN_MEET_DUMP").is_ok() {
+            eprintln!("meet: key={key} members={members:?} clear={all_clear}");
+        }
+        if all_clear {
+            fnval_clear.insert(key.clone());
+        }
+    }
+    Facts { fnval_clear }
+}
+
+/// The declaration reading every walk over a body starts from.
+///
+/// [`crate::checker::recorded`] is asked for its record and for its EFFECT: the
+/// checker expands a `place atSet` store as it records, and [`Lets`] reads that
+/// expansion back out of `project`'s memo rather than building a second one.
+///
+/// It also records the program's projection names, which are the program's and
+/// not a walk's: `views` and `project::element_path` read them, and the core
+/// asks both at a call it is lowering, where no walk of this file has run.
+fn declarations(program: &Program) -> Declared {
+    crate::project::note_place_names(program);
+    let rec_span = crate::prof::phase("movecheck: checker::record");
+    let rec = crate::checker::recorded(program);
+    drop(rec_span);
+    Declared::new(program).recording(rec)
+}
+
+crate::body_scope_descent!(LetsVisit, lets_block, lets_stmt, lets_expr);
+
+/// What a compile reads off a body besides the rules: the lambdas that stand
+/// the fn-value meet down, and the projection stores it descends through.
+///
+/// A lambda carries no capability rows, so a signature one could inhabit is not
+/// a signature the meet may clear. Which lambdas those are is a question about
+/// ARITY, unless an argument position declares a fn type — then it is a
+/// question about that signature alone (round fifty-five).
+///
+/// An `a[i] = v` store the checker expanded through a `place atSet` projection
+/// is read as the expansion, the same leaked nodes the lowering walks. So a
+/// lambda inside the projection's body counts, and one inside the index or the
+/// value it stands in for does not.
+struct Lets<'a> {
+    decl: &'a Declared,
+    /// Lambda nodes an argument position already gave a signature.
+    typed: HashSet<usize>,
+    /// Index and value nodes a projection store's expansion stands in for.
+    skipped: HashSet<usize>,
+    arities: HashSet<usize>,
+    sigs: HashSet<String>,
+    stores: Vec<String>,
+}
+
+impl<'a> LetsVisit<'a> for Lets<'_> {
+    /// Nothing here asks what is in scope.
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &'a Stmt, _: &HashSet<String>) {
+        let Stmt::IndexSet {
+            name,
+            index,
+            value,
+            line,
+        } = s
+        else {
+            return;
+        };
+        let Some(blk) = crate::project::stored(name, index, value) else {
+            return;
+        };
+        if std::env::var_os("VYRN_PROJ_DUMP").is_some() {
+            eprintln!("proj-store walked: {name} line {line}");
+        }
+        self.skipped.insert(index as *const Expr as usize);
+        self.skipped.insert(value as *const Expr as usize);
+        self.stores.push(format!("store {name}:{line}"));
+        lets_block(blk, &mut HashSet::new(), self);
+    }
+
+    fn expr(&mut self, e: &'a Expr, _: &HashSet<String>) -> bool {
+        if self.skipped.contains(&(e as *const Expr as usize)) {
+            return false;
+        }
+        match e {
+            // Recorded before the walk reaches the lambda, so the arity poison
+            // stands down for it and the meet refuses only its own signature.
+            Expr::Call { name, args, .. } => {
+                for (i, a) in args.iter().enumerate() {
+                    if !matches!(a, Expr::Lambda { .. }) {
+                        continue;
+                    }
+                    let Some(pt) = self.decl.param_ty(name, i) else {
+                        continue;
+                    };
+                    if let Type::Fn(ps, r) = crate::types::resolve(pt, self.decl.decls()) {
+                        self.typed.insert(a as *const Expr as usize);
+                        self.sigs.insert(fn_sig_key(&ps, &r, self.decl.decls()));
+                    }
+                }
+            }
+            Expr::Lambda { params, .. } => {
+                if !self.typed.contains(&(e as *const Expr as usize)) {
+                    self.arities.insert(params.len());
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+impl<'a> Lets<'a> {
+    /// Every function, test and bench body, and no module-state initializer —
+    /// the set the walk this replaced covered.
+    fn over(program: &'a Program, decl: &'a Declared) -> Lets<'a> {
+        let mut v = Lets {
+            decl,
+            typed: HashSet::new(),
+            skipped: HashSet::new(),
+            arities: HashSet::new(),
+            sigs: HashSet::new(),
+            stores: Vec::new(),
+        };
+        let mut locals = HashSet::new();
+        let bodies = program
+            .functions
+            .iter()
+            .map(|f| &f.body)
+            .chain(program.tests.iter().map(|t| &t.body))
+            .chain(program.benches.iter().map(|b| &b.body));
+        for b in bodies {
+            lets_block(b, &mut locals, &mut v);
+        }
+        v
     }
 }
 
@@ -182,19 +342,22 @@ pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) ->
     format!("{rps:?}->{:?}", crate::types::resolve(ret, decls))
 }
 
-/// What a run of the pass is for. The check is the hot path — a keystroke pays
-/// for it — so neither record is built unless somebody asked.
-#[derive(PartialEq, Clone, Copy)]
-enum Want {
-    Lets,
-    /// RFC-0092 M0: record every projection the rule would refuse, refuse none.
-    Projections,
-}
-
-/// One run's outputs.
-struct Run {
-    projections: Vec<ProjectionSite>,
-    fnval_clear: HashSet<String>,
+/// Everything [`Lets`] reads off a program, one sorted line per row.
+///
+/// Three kinds of row and no fourth: the arity of a lambda whose signature the
+/// declaration does not name, the signature key of one it does, and the
+/// projection store whose expansion stands in for the index and the value.
+/// READER: `compiler/vyrn-cli/tests/letswalk.rs`, which prints them over the
+/// corpus (RFC-0125 Section 3 M3).
+pub fn lets_outputs(program: &Program) -> Vec<String> {
+    let decl = declarations(program);
+    let lets = Lets::over(program, &decl);
+    let mut out: Vec<String> = lets.arities.iter().map(|n| format!("arity {n}")).collect();
+    out.extend(lets.sigs.iter().map(|k| format!("sig {k}")));
+    out.extend(lets.stores);
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Whether the producer of an argument HANDS ITS ARGUMENT BACK — `blackBox`,
@@ -332,33 +495,7 @@ pub fn arg_verdict(s: &ArgTemp, constructs: bool, cap: Option<Capability>) -> Ar
 /// for `led.wrapped(2)` and the kernel refused the release, and `protoplace`
 /// and `assoctype` freed the label a projection handed out.
 fn views(name: &str) -> bool {
-    crate::prelude::lends(name) || named_projection(name)
-}
-
-thread_local! {
-    /// The user projection NAMES of the program under check (RFC-0120).
-    ///
-    /// This pass keys every element-read rule on the spelling `@at`, because
-    /// `@at` is reserved and therefore IS an element read wherever it appears.
-    /// A named projection is the same read under a user-chosen name, and the
-    /// name alone cannot say so — so [`run`] records the program's projection
-    /// names here and [`named_projection`] answers for the free functions
-    /// ([`element_path`]) that have no `&self` to carry a set through. A name
-    /// answers true whether or not the receiver at a given site is the
-    /// projection's own type; that over-approximation only widens a borrow
-    /// verdict, never narrows one, which is the conservative direction.
-    static PLACE_NAMES: std::cell::RefCell<HashSet<String>> =
-        std::cell::RefCell::new(HashSet::new());
-}
-
-/// Whether `name` is a user projection's name — see [`PLACE_NAMES`].
-fn named_projection(name: &str) -> bool {
-    PLACE_NAMES.with(|s| s.borrow().contains(name))
-}
-
-/// `@at`, or a user projection's own name: an element read either way.
-fn projection_call(name: &str) -> bool {
-    name == crate::project::AT || named_projection(name)
+    crate::prelude::lends(name) || crate::project::named_projection(name)
 }
 
 /// **The order a file's refusals come out in is the source's** (RFC-0125 §3
@@ -725,23 +862,13 @@ fn declaration_fingerprint(program: &Program) -> u64 {
 fn subject(message: &str) -> Option<&str> {
     let rest = message.split_once('`')?.1;
     let path = rest.split_once('`')?.0;
-    let root = root_of(path);
+    let root = crate::ast::root_of(path);
     (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
 }
 
-/// The one walk, shared by [`owning_sites`], [`facts`] and [`projection_sites`].
-/// `want` turns each record on; with neither the pass still builds and carries
-/// its type environment, and asks `owns_heap` nowhere.
-fn run(program: &Program, want: Want) -> Run {
-    // The projection-name set for [`named_projection`], rebuilt per run so a
-    // long-lived process (the LSP) always answers for the program in hand.
-    PLACE_NAMES.with(|s| {
-        *s.borrow_mut() = program
-            .impls
-            .iter()
-            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
-            .collect();
-    });
+/// RFC-0092 M0's walk: record every projection the rule would refuse, refuse
+/// none. Its one reader is [`projection_sites`].
+fn run(program: &Program) -> Vec<ProjectionSite> {
     // A method call is written `s.insert(v)` and reaches this pass as
     // `insert(s, v)` — the SURFACE name, because the impl is selected by the
     // receiver's type and this pass does not select impls. The protocol is what
@@ -751,18 +878,9 @@ fn run(program: &Program, want: Want) -> Run {
     // function became a method. Stated once, in [`crate::declared::arg_caps`].
     let caps = crate::declared::arg_caps(program);
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
-    // RFC-0125 §3 M3, the type slice: the type of a node is the checker's
-    // answer, read off its record. `recorded` serves the analysis's own check
-    // where one was made and checks once where none was, and the record it
-    // makes here is held for the rest of the analysis — so the check the
-    // lowering used to pay for is the one this asks for.
-    let rec_span = crate::prof::phase("movecheck: checker::record");
-    let rec = crate::checker::recorded(program);
-    drop(rec_span);
-    let decl = Declared::new(program).recording(rec);
+    let decl = declarations(program);
     let mc = MoveCheck {
         caps: &caps,
-        impls: &program.impls,
         globals: &globals,
         decl: &decl,
         // Module state is the outermost frame and is built once, not per body.
@@ -779,22 +897,16 @@ fn run(program: &Program, want: Want) -> Run {
         ret: RefCell::new(Type::Unit),
         cur_fn: RefCell::new(String::new()),
         writeback: RefCell::new(None),
-        lets: want == Want::Lets,
-        lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
-        typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
-        lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
-        projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
+        projections: RefCell::new(Vec::new()),
     };
     let mut projections = Vec::new();
     // A projection site is stamped with the module of the body it was found in,
     // the same way an error is — the sink itself has no idea which file it is
     // reading, and a linked program is most of somebody else's.
     let drain = |into: &mut Vec<ProjectionSite>, mc: &MoveCheck, module: &Option<String>| {
-        if let Some(sink) = &mc.projections {
-            for mut p in sink.borrow_mut().drain(..) {
-                p.module.clone_from(module);
-                into.push(p);
-            }
+        for mut p in mc.projections.borrow_mut().drain(..) {
+            p.module.clone_from(module);
+            into.push(p);
         }
     };
     for f in &program.functions {
@@ -826,64 +938,11 @@ fn run(program: &Program, want: Want) -> Run {
     // consumed after) and "disposed exactly once" is a must-analysis — and it
     // is now the typed judgment's (`vyrn_lower::typed::obligation`), reached
     // from [`refusals`] through `own::must_use_refusals`.
-    // Round forty-six's meet, over the target set of every fn-value signature
-    // the program declares.
-    //
-    // The core asks this by signature at the call it lowers, because a call
-    // through a fn value names no function and no capability row answers for
-    // its positions (RFC-0125 §3 M3, the last table's slice — the plan asked
-    // it per argument row until then).
-    let lambda_arities = mc
-        .lambda_arities
-        .map(RefCell::into_inner)
-        .unwrap_or_default();
-    let lambda_sigs = mc.lambda_sigs.map(RefCell::into_inner).unwrap_or_default();
-    let mut sig_groups: HashMap<String, (usize, Vec<String>)> = HashMap::new();
-    for f in &program.functions {
-        let ps: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
-        let key = fn_sig_key(&ps, &f.ret, decl.decls());
-        sig_groups
-            .entry(key)
-            .or_insert_with(|| (ps.len(), Vec::new()))
-            .1
-            .push(f.name.clone());
-    }
-    let mut fnval_clear: HashSet<String> = HashSet::new();
-    for (key, (arity, members)) in &sig_groups {
-        if lambda_arities.contains(arity) || lambda_sigs.contains(key) {
-            continue;
-        }
-        let all_clear = !members.is_empty()
-            && members.iter().all(|m| {
-                // The meet is per POSITION in the plan's reading, and the
-                // position it was asked about is the one the temporary sits
-                // in. A signature every one of whose members reads EVERY
-                // position is clear at every position, which is the answer a
-                // key can carry. It used to ask two call-graph sets beside
-                // the capability; both were empty for every program the
-                // kernel accepts (RFC-0125 §3 M3, the wrapped lend).
-                caps.get(m)
-                    .is_some_and(|cs| cs.iter().all(|c| *c == Capability::Read))
-            });
-        if std::env::var("VYRN_MEET_DUMP").is_ok() {
-            eprintln!("meet: key={key} members={members:?} clear={all_clear}");
-        }
-        if all_clear {
-            fnval_clear.insert(key.clone());
-        }
-    }
-    Run {
-        projections,
-        fnval_clear,
-    }
+    projections
 }
 
 struct MoveCheck<'a> {
     caps: &'a HashMap<String, Vec<Capability>>,
-    /// The program's impl blocks — what selects a `place atSet` projection,
-    /// so the facts walk can read a projection store as the desugared group
-    /// the lowering emits (round fifty-seven).
-    impls: &'a [crate::ast::ImplBlock],
     /// Module-state binding names (RFC-0013). A global may never be passed to a
     /// `consume` parameter — nothing may take ownership of module state.
     globals: &'a HashSet<String>,
@@ -916,27 +975,9 @@ struct MoveCheck<'a> {
     /// receiver (`sinks`), and the statement form takes and revives it in one
     /// line — so the take is not recorded there, and the receiver is read.
     writeback: RefCell<Option<String>>,
-    /// Whether this is the [`Want::Lets`] walk — the one `own::analyze` runs,
-    /// which walks a projection's desugared statement group and records what
-    /// a lambda captures. It was read off `lending.is_some()` until the two
-    /// call-graph sets went (RFC-0125 §3 M3, the wrapped lend), which made a
-    /// sink stand in for a mode.
-    lets: bool,
-    /// Round forty-six: the arity of every lambda the walk met. A lambda has
-    /// no capability rows and no retention rows, so a signature any lambda
-    /// could inhabit (matched by arity — the declared reading does not type
-    /// lambdas) stands down from the fn-value meet below.
-    lambda_arities: Option<RefCell<std::collections::HashSet<usize>>>,
-    /// Round fifty-five: lambdas whose type IS known — they sit in an
-    /// argument position whose declared parameter is a fn type. They poison
-    /// only their own signature, not their whole arity.
-    typed_lambdas: Option<RefCell<std::collections::HashSet<usize>>>,
-    /// The signature keys those typed lambdas inhabit.
-    lambda_sigs: Option<RefCell<std::collections::HashSet<String>>>,
-    /// Where RFC-0092 M0's projection sites go, or `None` everywhere else. The
-    /// measurement is a mode, not a second walk: the two places that would refuse
-    /// are the two places that record.
-    projections: Option<RefCell<Vec<ProjectionSite>>>,
+    /// Where RFC-0092 M0's projection sites go. The two places that would
+    /// refuse are the two places that record.
+    projections: RefCell<Vec<ProjectionSite>>,
 }
 
 /// A binding that names a value somebody else owns (RFC-0089 rule 2).
@@ -955,17 +996,6 @@ enum Borrow {
     /// A local bound to a field or element read: `let t = r.s`. A place owns its
     /// contents (rule 4), so reading one out does not take it.
     Projection,
-}
-
-/// The base name of a place path: `r.a[0]` is `r`.
-///
-/// A message names a PATH and a borrow names the PARAMETER it came from, so the
-/// two are comparable only at the root.
-pub fn root_of(path: &str) -> &str {
-    match path.find(['.', '[']) {
-        Some(i) => &path[..i],
-        None => path,
-    }
 }
 
 impl MoveCheck<'_> {
@@ -1089,7 +1119,7 @@ impl MoveCheck<'_> {
             // record answers for one, and where there is no record `elem_of`
             // answers only for builtin containers, so the named form falls
             // through to `None` exactly as `@at` on a user container does.
-            Expr::Call { name, args, .. } if projection_call(name) => {
+            Expr::Call { name, args, .. } if crate::project::projection_call(name) => {
                 let c = self.type_of(args.first()?)?;
                 self.decl.elem_of(&c)
             }
@@ -1167,17 +1197,12 @@ impl MoveCheck<'_> {
         // Everything the four screens here used to guard — a scalar copies, a
         // borrow does not move, a projection does not move — decided a
         // `Consumed` entry, and it went with the table (RFC-0125 §3 M3, the
-        // table slice). What is left is RFC-0092's instrument, and an
-        // instrument is a MODE: the check walk and the facts walk record
-        // nothing, so they ask nothing. The screen is here rather than at the
-        // ten call sites because every one of them would need it.
-        if self.projections.is_none() {
-            return;
-        }
+        // table slice). What is left is RFC-0092's instrument.
+        //
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
-        if let Some((_, path)) = element_path(value) {
+        if let Some((_, path)) = crate::project::element_path(value) {
             if outlives {
                 let ty = self.type_of(value);
                 self.note_projection("elem-store", &path, into(), ty, line);
@@ -1186,7 +1211,7 @@ impl MoveCheck<'_> {
                 return;
             }
         }
-        let Some((root, path)) = place_path(value) else {
+        let Some((root, path)) = crate::ast::place_path(value) else {
             return;
         };
         // Recorded BEFORE the `owns_heap` guard, so a scalar field is counted
@@ -1221,7 +1246,9 @@ impl MoveCheck<'_> {
                 Some(_) => false,
             });
             if all_borrow {
-                if let Some((root, _)) = place_path(scrutinee).or_else(|| element_path(scrutinee)) {
+                if let Some((root, _)) = crate::ast::place_path(scrutinee)
+                    .or_else(|| crate::project::element_path(scrutinee))
+                {
                     return Some(self.borrow_of(&root).unwrap_or(Borrow::Projection));
                 }
             }
@@ -1238,7 +1265,7 @@ impl MoveCheck<'_> {
         if !self.type_of(value).is_some_and(|t| self.decl.owns_heap(&t)) {
             return None;
         }
-        match place_path(value) {
+        match crate::ast::place_path(value) {
             // `let t = r.s` / `let t = xs[i]` — a projection of somebody's place.
             // **Whose place, when the answer is known.** `let n = nodes[i]` on a
             // `read` parameter used to bind a bare projection, which says "this
@@ -1258,7 +1285,7 @@ impl MoveCheck<'_> {
             // is written by the RFC-0082 place desugar and never by a person.
             // Without it that binding was an OWNER, and storing it gave two
             // elements one buffer.
-            None => element_path(value)
+            None => crate::project::element_path(value)
                 .map(|(root, _)| self.borrow_of(&root).unwrap_or(Borrow::Projection)),
         }
     }
@@ -1315,8 +1342,8 @@ impl MoveCheck<'_> {
         // [`MoveCheck::borrow_from`]'s reason: `match b.opt { Some(v) => f(v) }`
         // on a `read` parameter names a payload the caller still owns, and a bare
         // projection would have said this frame owned it.
-        let borrow = place_path(scrutinee)
-            .or_else(|| element_path(scrutinee))
+        let borrow = crate::ast::place_path(scrutinee)
+            .or_else(|| crate::project::element_path(scrutinee))
             .map(|(root, _)| self.borrow_of(&root).unwrap_or(Borrow::Projection));
         (tys, borrow)
     }
@@ -1329,7 +1356,7 @@ impl MoveCheck<'_> {
     fn iterable_is_a_place(&self, e: &Expr) -> bool {
         match e {
             Expr::Var { .. } | Expr::Field { .. } => true,
-            Expr::Call { name, args, .. } if projection_call(name) => {
+            Expr::Call { name, args, .. } if crate::project::projection_call(name) => {
                 args.first().is_some_and(|a| self.iterable_is_a_place(a))
             }
             _ => false,
@@ -1400,10 +1427,10 @@ impl MoveCheck<'_> {
                 .returned_borrow(then_branch)
                 .or_else(|| else_branch.as_ref().and_then(|b| self.returned_borrow(b))),
             _ => {
-                let Some((root, path)) = place_path(e) else {
+                let Some((root, path)) = crate::ast::place_path(e) else {
                     // An element read is a projection too, and `place_path`
                     // answers `None` for the `@at(..)` call it lowers to.
-                    let (root, path) = element_path(e)?;
+                    let (root, path) = crate::project::element_path(e)?;
                     return Some((Borrow::Projection, root, path));
                 };
                 match self.borrow_of(&root) {
@@ -1426,10 +1453,7 @@ impl MoveCheck<'_> {
     /// A root that is already a borrow was refused before this RFC (rule 3, Phase
     /// 4b), so it is not part of this bill.
     fn note_returned_projection(&self, e: &Expr, line: usize) {
-        if self.projections.is_none() {
-            return;
-        }
-        if let Some((root, _)) = place_path(e) {
+        if let Some((root, _)) = crate::ast::place_path(e) {
             if self.borrow_of(&root).is_some() {
                 return;
             }
@@ -1459,10 +1483,7 @@ impl MoveCheck<'_> {
         ty: Option<Type>,
         line: usize,
     ) {
-        let Some(sink) = &self.projections else {
-            return;
-        };
-        sink.borrow_mut().push(ProjectionSite {
+        self.projections.borrow_mut().push(ProjectionSite {
             kind,
             module: None,
             func: self.cur_fn.borrow().clone(),
@@ -1613,30 +1634,9 @@ impl MoveCheck<'_> {
                 value,
                 line,
             } => {
-                // Round fifty-seven: a store a `place atSet` PROJECTION
-                // governs runs as the desugared statement group the checker
-                // recorded (`project::stored`, the same leaked nodes the
-                // lowering walks). The facts walk reads that group here, so
-                // the element write-back inside it gets a plan row and the
-                // displaced value a free — `strs[s] = tail` through
-                // `std/slots` leaked every overwritten element (genref, and
-                // the user-container half of §26's stand-aside). The CHECK
-                // walk keeps the plain reading: its diagnostics name the
-                // spelling the user wrote.
-                if self.lets && crate::project::memo_open() {
-                    let aty = self.vars.borrow().get(name).cloned().flatten();
-                    if let Some(aty) = aty {
-                        if let Ok(Some(blk)) =
-                            crate::project::store_index(self.impls, name, index, value, &aty)
-                        {
-                            if std::env::var_os("VYRN_PROJ_DUMP").is_some() {
-                                eprintln!("proj-store walked: {name} line {line}");
-                            }
-                            self.block(blk, scope);
-                            return false;
-                        }
-                    }
-                }
+                // A store a `place atSet` PROJECTION governs is read as the
+                // expansion by [`Lets`], not here: this walk records what the
+                // reader WROTE, because its rows quote the reader's spelling.
                 self.expr(index, scope);
                 self.expr(value, scope);
                 self.store(value, &|| format!("`{name}`"), *line, true);
@@ -1864,7 +1864,7 @@ impl MoveCheck<'_> {
             // Walking into the root instead would ask it of `er` and refuse
             // `er.next` after `consume er.node`, which is the case RFC-0093
             // exists to allow.
-            Expr::Field { expr, .. } => match place_path(e) {
+            Expr::Field { expr, .. } => match crate::ast::place_path(e) {
                 Some(_) => {}
                 None => {
                     // RFC-0114 R1′ was recorded here: a receiver with no
@@ -1954,24 +1954,6 @@ impl MoveCheck<'_> {
                 // Left-to-right: check each argument, then apply its consumption,
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
-                    // Round fifty-five: a lambda in an argument position
-                    // whose declared parameter is a fn type has a KNOWN
-                    // signature — recorded before the walk meets the lambda,
-                    // so the arity poison stands down for it and the meet
-                    // refuses only its own signature.
-                    if matches!(arg, Expr::Lambda { .. }) {
-                        if let (Some(tl), Some(ls)) = (&self.typed_lambdas, &self.lambda_sigs) {
-                            if let Some(pt) = self.decl.param_ty(name, i) {
-                                if let Type::Fn(ps, r) =
-                                    crate::types::resolve(pt, self.decl.decls())
-                                {
-                                    tl.borrow_mut().insert(arg as *const Expr as usize);
-                                    ls.borrow_mut()
-                                        .insert(fn_sig_key(&ps, &r, self.decl.decls()));
-                                }
-                            }
-                        }
-                    }
                     self.expr(arg, scope);
                     // A builtin whose parameter declares `consume` takes its
                     // argument, and rule 1 governs the take exactly as it
@@ -1993,7 +1975,8 @@ impl MoveCheck<'_> {
                         && !self.decl.constructs(name)
                         && self.sinks(name, i)
                         && !(i == 0
-                            && store_path(arg).as_deref() == self.writeback.borrow().as_deref())
+                            && crate::ast::store_path(arg).as_deref()
+                                == self.writeback.borrow().as_deref())
                     {
                         self.store(
                             arg,
@@ -2024,15 +2007,6 @@ impl MoveCheck<'_> {
             // so a reference to one that was already consumed surfaces the standard
             // use-after-consume error here too.
             Expr::Lambda { params, body, .. } => {
-                if let Some(la) = &self.lambda_arities {
-                    let typed = self
-                        .typed_lambdas
-                        .as_ref()
-                        .is_some_and(|t| t.borrow().contains(&(e as *const Expr as usize)));
-                    if !typed {
-                        la.borrow_mut().insert(params.len());
-                    }
-                }
                 scope.push(HashSet::new());
                 self.enter();
                 for p in params {
@@ -2067,98 +2041,6 @@ impl MoveCheck<'_> {
     }
 }
 
-/// RFC-0075 — the linearity of `Stream<T>`: acquired once, disposed exactly once.
-///
-/// This is the milestone's whole claim, so it is worth stating what it is not.
-/// `own.rs` already reclaims an owned heap value at block exit and on every
-/// divergent exit (RFC-0060), which is "owned and dropped". A stream is stronger:
-/// disposal must be *written*, because M2's producer has a teardown that no
-/// generic memory drop can run, and the tRPC incidents this RFC quotes were live
-/// producers rather than unreachable bytes. So the obligation is checked here and
-/// the release is emitted by the construct that discharges it — a stream binding
-/// is never in a `drop_stack` frame of its own.
-///
-/// The analysis is deliberately name-based and typeless, like the rest of this
-/// file: movecheck runs only on programs the checker already accepted, so
-/// `close(x)` implies `x` is a stream and there is no read operation on a stream
-/// at all — every mention of a stream binding is a move. That last fact is what
-/// makes a one-pass syntactic walk exact instead of approximate.
-///
-/// Known limit, shared with the `Consumed` map above: bindings are keyed by NAME,
-/// so an inner `let s = 1` shadowing an outer stream `s` reads as a disposal of
-/// the outer one. Erring toward accepting matches the existing pass; a scope-id
-/// key would have to be introduced for both at once.
-///
-/// Whether `e` reads the place `base`, or anything derived from it.
-///
-/// The store half of RFC-0089 rule 4 asks this: a store releases what the place
-/// held, and the old value is usually an operand of the new one — `acc = acc +
-/// x` reads the old buffer and `a = @push(a, i)` grows it. A value that names the
-/// place therefore releases nothing. The self-append spine reclaims that shape
-/// by not allocating at all; every other shape is a recorded leak, which is the
-/// side of the trade a language that promises memory safety takes.
-///
-/// **Derived, not just equal.** A place desugar (RFC-0082) names its temporary
-/// after the path it took: `t.xs[k] = v` becomes a move-out into `t.xs[]`, the
-/// element store, and the write-back `t.xs = t.xs[]` — which hands the SAME
-/// buffer back. Comparing the base name alone reads that write-back as a store of
-/// an unrelated value and frees what it is about to store. `placeorder.vyrn`
-/// caught it in one parity run, and it is the shape RFC-0087 §4 warned about in
-/// its own words.
-///
-/// A lambda with a block body answers `true` without being read. The question is
-/// "may this store free the old value", where `true` costs a leak and `false` can
-/// cost a use-after-free.
-///
-/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; what is
-/// this probe's own is the derived-name test and the two forms it answers
-/// `true` for without descending.
-pub fn mentions_place(e: &Expr, base: &str) -> bool {
-    /// The probe's line at each site: a name derived from the base is a
-    /// mention, and two forms answer `true` without being read.
-    struct Mentions<'a> {
-        base: &'a str,
-        found: bool,
-    }
-
-    impl Mentions<'_> {
-        fn derived(&self, n: &str) -> bool {
-            let base = self.base;
-            n == base
-                || (n.len() > base.len()
-                    && n.starts_with(base)
-                    && matches!(n.as_bytes()[base.len()], b'.' | b'['))
-        }
-    }
-
-    impl BodyVisit<'_> for Mentions<'_> {
-        const SCOPED: bool = false;
-
-        fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
-            match e {
-                Expr::Var { name, .. } if self.derived(name) => self.found = true,
-                // A block-bodied lambda and a block match arm (RFC-0118) both
-                // answer `true` without being read, for the reason the doc
-                // gives: `true` costs a leak and `false` can cost a
-                // use-after-free.
-                Expr::Lambda {
-                    body: LambdaBody::Block(_),
-                    ..
-                } => self.found = true,
-                Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
-                    self.found = true
-                }
-                _ => {}
-            }
-            !self.found
-        }
-    }
-
-    let mut v = Mentions { base, found: false };
-    body_expr(e, &HashSet::new(), &mut v);
-    v.found
-}
-
 // ---------------------------------------------------------------------------
 // The AST predicates the must-use judgment reads, and the checker's
 // exclusivity rule with it (RFC-0125 §3 M3, the obligation slice and row 23).
@@ -2168,175 +2050,6 @@ pub fn mentions_place(e: &Expr, base: &str) -> bool {
 // about the tree. The rule moved to `vyrn_lower::typed::obligation`, and these
 // stayed because a pass below the lowering asks them too.
 // ---------------------------------------------------------------------------
-
-/// The nested blocks of a statement, for the declaration walk.
-pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
-    match s {
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        }
-        | Stmt::IfLet {
-            then_block,
-            else_block,
-            ..
-        } => {
-            let mut v = vec![then_block];
-            v.extend(else_block.as_ref());
-            v
-        }
-        Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
-            vec![body]
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// Whether a whole statement (including everything nested in it) mentions the
-/// binding — the double-disposal probe.
-pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
-    let here = match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => mentions(value, name),
-        Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
-        Stmt::If { cond: e, .. }
-        | Stmt::While { cond: e, .. }
-        | Stmt::IfLet { scrutinee: e, .. } => mentions(e, name),
-        Stmt::ForIn { iter, .. } => mentions(iter, name),
-        Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| mentions(e, name)),
-        Stmt::Drop { name: n, .. } => n == name,
-        _ => false,
-    };
-    here || sub_blocks(s)
-        .iter()
-        .any(|b| b.stmts.iter().any(|s| stmt_mentions(s, name)))
-}
-
-/// Whether `e` names the binding anywhere. Every mention of a stream is a
-/// move — a `Stream` has no field, no length, and no indexing — so this needs
-/// no notion of position, which is what keeps it a dozen lines.
-pub fn mentions(e: &Expr, name: &str) -> bool {
-    paths(e, name).0
-}
-
-/// How the paths through `e` treat the binding: `.0` where SOME path names
-/// it, `.1` where EVERY path does.
-///
-/// The two answers differ at exactly two shapes — a `match` and an `if` used
-/// as an expression — because those are the only expressions with a path
-/// that skips a sub-expression. Everything else evaluates all of its parts,
-/// so a mention in one part is a mention on every path through the whole.
-///
-/// This is RFC-0095 M3. the must-use walk read a statement's expressions with
-/// [`mentions`] alone, which answers "some path", and then treated the answer
-/// as a disposal on every path — so `match p { Some(n) => t.join(), None => 0 }`
-/// discharged a task the `None` path abandons. The `if` STATEMENT never had
-/// the hole: `scan` walks its two blocks and merges them. The merge is
-/// unchanged; what changed is that a branching EXPRESSION now reaches it.
-pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
-    // Two sub-expressions that both run: a mention in either is a mention,
-    // and a disposal on every path through either is one through the pair.
-    let seq = |a: (bool, bool), b: (bool, bool)| (a.0 || b.0, a.1 || b.1);
-    let all = |m: bool| (m, m);
-    match e {
-        Expr::Var { name: n, .. } => all(n == name),
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
-            (false, false)
-        }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            paths(expr, name)
-        }
-        Expr::Consume { place, .. } => paths(place, name),
-        Expr::Binary { lhs, rhs, .. } => seq(paths(lhs, name), paths(rhs, name)),
-        Expr::Call { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => args
-            .iter()
-            .fold((false, false), |acc, a| seq(acc, paths(a, name))),
-        Expr::MapLit { entries, .. } => entries.iter().fold((false, false), |acc, (k, v)| {
-            seq(seq(acc, paths(k, name)), paths(v, name))
-        }),
-        Expr::StructLit { fields, .. } => fields
-            .iter()
-            .fold((false, false), |acc, (_, v)| seq(acc, paths(v, name))),
-        // The scrutinee runs whatever arm is taken, so it is sequenced with
-        // the arms rather than merged into them. An arm list that is empty
-        // has no path of its own to say anything about.
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            let s = paths(scrutinee, name);
-            if arms.is_empty() {
-                return s;
-            }
-            // A block arm (RFC-0118) exists only in statement position,
-            // which is never an operand this hoisting question is asked
-            // about; if one is ever met, (true, false) is conservative in
-            // both directions.
-            let any = arms
-                .iter()
-                .any(|a| a.body.as_expr().is_none_or(|e| paths(e, name).0));
-            let every = arms
-                .iter()
-                .all(|a| a.body.as_expr().is_some_and(|e| paths(e, name).1));
-            seq(s, (any, every))
-        }
-        // A missing `else` is a path that names nothing. The checker refuses
-        // an if-expression without one, so this is the incomplete tree and
-        // not a shape a program can write.
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let t = paths(then_branch, name);
-            let e = match else_branch {
-                Some(b) => paths(b, name),
-                None => (false, false),
-            };
-            seq(paths(cond, name), (t.0 || e.0, t.1 && e.1))
-        }
-        // A lambda body may never run, and reading it as a disposal on every
-        // path is the answer this walk has always given. Narrowing it would
-        // widen what compiles, which is not this milestone.
-        Expr::Lambda { body, .. } => all(match body {
-            LambdaBody::Expr(e) => mentions(e, name),
-            LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
-        }),
-    }
-}
-
-/// Whether parameter `i` of the builtin `name` takes its argument for good,
-/// under **rule 1**.
-///
-/// It was `RESERVED_SINKS`, three rows in a hand list (RFC-0087 §2b). RFC-0094
-/// M1 reads `consume` off the seeded signature instead ([`crate::prelude`]), so
-/// the fact is written once where every rule sees it. Everything else a builtin
-/// does with a heap argument is a read: `print` formats it, `@concat` copies out
-/// of it, `at` looks inside it.
-///
-/// **A linear parameter is not rule 1's.** `close`, `boxStream` and
-/// `serveStream` each declare `consume Stream<T>`, and a `Stream<T>` already
-/// carries a disposal obligation the [`linear`] walk proves: every mention of a
-/// stream binding is a disposal there, so a second one is refused before rule 1
-/// is asked. Two rules over one value would refuse the same program twice with
-/// the worse words — rule 1's menu offers `.copy()`, which a stream has no
-/// answer for. The obligation on the TYPE wins, and the census's claim that
-/// these three carry a rule "nowhere at all" is corrected rather than acted on.
-/// The place an expression names, spelled as the store arms spell it:
-/// `xs`, `s.keys`, `a.b.c`. `None` for anything that is not a place.
-fn store_path(e: &Expr) -> Option<String> {
-    match e {
-        Expr::Var { name, .. } => Some(name.clone()),
-        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", store_path(expr)?)),
-        _ => None,
-    }
-}
 
 fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
     let Some(f) = crate::prelude::signature(name) else {
@@ -2360,83 +2073,6 @@ fn sinks(decl: &Declared, name: &str, i: usize) -> bool {
     // its buffer out, and the caller received freed memory
     // (`rfcs/probes-0125/push-in-expression-position.vyrn`).
     i == 0 && crate::prelude::rebuilds(name)
-}
-
-// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
-// declared (RFC-0125 §3 M6). This file's collectors read it; the judgment
-// itself — `MoveCheck::stmt` and `MoveCheck::expr` — states a fact per arm and
-// keeps its own.
-crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
-
-/// The place `e` reads, as `(root name, whole path)`.
-///
-/// `s` is `("s", "s")` and `r.a.b` is `("r", "r.a.b")` — the root is what a move
-/// takes, the path is what the diagnostic quotes. Anything else (a call, a
-/// literal, an operator) is not a place and answers `None`: it has no earlier
-/// owner, so nothing about it can be a move.
-/// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `@at(xs, i)`,
-/// which is a call, so [`place_path`] answers `None` for it.
-///
-/// M0 found that the RFC was wrong to say an element read is covered "by the
-/// same three lines as a field read". It is true of `borrow_from`, which reads
-/// `@at(..)` itself, and false of [`MoveCheck::store`] and of
-/// [`MoveCheck::returned_borrow`], both of which bailed at `place_path` before
-/// deciding anything. **M1 took the decision M0 left open and widened both**, so
-/// `out.push(xs[i])` and `return items[i]` are refused like the field they are.
-/// The instrument still counts them apart, under `elem-store` and `elem-return`.
-pub fn element_path(e: &Expr) -> Option<(String, String)> {
-    match e {
-        Expr::Call { name, args, .. } if projection_call(name) => {
-            let a = args.first()?;
-            let (root, path) = place_path(a).or_else(|| element_path(a))?;
-            // A named projection quotes as the call the reader wrote; `@at`
-            // keeps the index spelling `xs[i]` it has always had.
-            if name == crate::project::AT {
-                Some((root, format!("{path}[{}]", index_text(args.get(1)))))
-            } else {
-                Some((root, format!("{path}.{name}(..)")))
-            }
-        }
-        // A field OF an element: `fs[0].key`. [`place_path`] walks a `Field` down
-        // to a `Var` and answers `None` as soon as it meets the `@at(..)` call, so
-        // without this arm the escape hatch is one dot wide — `let f = fs[0]`
-        // then `return f.key` is refused and `return fs[0].key` is not.
-        Expr::Field { expr, field, .. } => {
-            let (root, path) = element_path(expr)?;
-            Some((root, format!("{path}.{field}")))
-        }
-        _ => None,
-    }
-}
-
-/// An index as the reader wrote it, for the quoted path in a diagnostic.
-///
-/// A whole name and a whole integer are spelled back, so `xs[i]` and `fs[0]`
-/// print as themselves and the `.copy()` on the menu is text `vyrn fix` can find
-/// in the line. Anything else prints `..`: the message still says which read is
-/// the problem, and `vyrn fix` then refuses rather than guessing where to put the
-/// call — which is the behaviour it already has for a path it cannot locate.
-fn index_text(e: Option<&Expr>) -> String {
-    match e {
-        Some(Expr::Var { name, .. }) => name.clone(),
-        Some(Expr::Int(n)) => n.to_string(),
-        _ => "..".to_string(),
-    }
-}
-
-pub fn place_path(e: &Expr) -> Option<(String, String)> {
-    match e {
-        Expr::Var { name, .. } => Some((name.clone(), name.clone())),
-        Expr::Field { expr, field, .. } => {
-            let (root, path) = place_path(expr)?;
-            Some((root, format!("{path}.{field}")))
-        }
-        // RFC-0093: a take is not a place. `consume d.title` names no storage
-        // the frame can still reach, so it is an OWNER at every store, every
-        // return and every pattern position — with no second rule, which is the
-        // whole reason the prefix costs so little.
-        _ => None,
-    }
 }
 
 #[cfg(test)]
