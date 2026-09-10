@@ -135,6 +135,8 @@ Do not optimize on a guess. A micro-optimization that the numbers do not license
 - Work in a worktree of your own. Never touch another worktree. Never delete a worktree or its `tools` junction.
 - Never `git stash`. The stash list is shared by every worktree. Set work aside with a patch file.
 - Never run two cargo commands at the same time in one worktree. Run every gate in the foreground with a timeout and wait for it.
+- Never write a polling or wait loop, in a script or by hand. Run the command under a timeout and read its exit code. A process that must be waited for is re-checked later, not watched.
+- A background process is a process tree. Stop it by its tree, then list what is still alive under your worktree before you start the next command.
 - Set `TMP` and `TEMP` to a shallow directory of your own before any cargo test. The suites scratch under fixed names.
 - `vyrn-lsp` and `vyrn-genwasm` are outside the workspace. Test them and format them explicitly.
 - Do not push and do not merge into another branch. The lead does both.
