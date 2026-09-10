@@ -25437,6 +25437,37 @@ No red at the end. Three commits of the six leave
 `the_form_census_is_what_the_rfc_records` red on purpose, and the sixth is its
 re-pin — see the record above.
 
+#### The walk is what it produces (2026-09-10, `track-el`)
+
+Decision: `Want::Lets` becomes a visitor over `ast::body_scope_descent!` and the
+path algebra moves to the AST — `track-el`'s, on `track-ei`'s reading that
+neither output is a rule.
+Went: the walk's `Lets` mode 163, with `Want`, `Run`, four sinks and the
+`Option` on the projection sink; the path algebra 353, to `ast.rs` and (with the
+projection names it reads) `project.rs`; `BodyVisit`, a second expansion of a
+descent `ast.rs` declares.  Stayed: RFC-0092's instrument and its walk 1,298,
+because the guard is independent of the kernel's rule; the driver 128, the memo
+221, the argument rows 200, the generator screen 19, each read outside.
+Lines: `movecheck.rs` 2,489 to 2,125, `ast.rs` 2,019 to 2,316, `project.rs`
+1,590 to 1,698, the three 6,098 to 6,139 — the 41 added are the producer and its
+pin.  Refusals: 0 lost / 0 gained over 323 roots at 77 refused.  Manifest:
+untouched, so the residue ratchet is not asked.
+Licence: byte-identical against the branch point, after each of the three
+commits — `vyrn check` whole stderr and every exit code over 323 roots,
+`vyrn why --memory` over 209, `the_pinned_lets_outputs_over_the_corpus` (new,
+320 programs and 96 rows), `the_pinned_lowering_over_the_corpus` (419 programs,
+341 lowered, 0 unstable); `projections --ignored` 0 / 0 / 0 / 0 with scalars 42,
+83, 3, 33; `kernel --ignored` 177 programs, 27,637 accepted, 0 refused.
+Findings: the third output was already the checker's — all 52 of the walk's
+`project::store_index` calls over the corpus were memo hits, so `Lets` reads
+`project::stored` and needs no receiver type.  `PLACE_NAMES` was filled by `run`
+and read at every call the core lowers, so taking `facts` off the walk emptied
+it; `declarations` records it now.  No speed is claimed: interleaved, 121.9 s
+against 200.5 s, then 172.6 against 153.1.
+Left: the instrument and its walk, 1,298 lines, blocked by a judgment and not a
+missing reader — `run` has one caller, `projection_sites`, which has one, and
+that test is `#[ignore]`d.
+
 ### What each milestone is worth on its own
 
 M1 fixes the wasm column. M2 makes leaks a compile error. M3 halves the
