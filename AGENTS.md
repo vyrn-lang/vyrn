@@ -73,7 +73,7 @@ Direct, precise, calm. Short sentences. Say what is wrong and why. Do not perfor
 
 ## Who does what
 
-- Teammates do the tracks. Launch each worker as a named agent on Opus, one worktree per track, at most five at a time.
+- Teammates do the tracks. Launch each worker as a named agent on Opus, one worktree per track, at most eight at a time. A track is a file with a line target and the census sections it takes, not one rule.
 - Fable decides. Use Fable for a design decision, for a record that other agents disagree on, and for a task another model tried and failed. Do not use Fable for a track.
 - The lead merges. The lead runs the gate chain on the merged branch, pushes when it is green, and watches CI once.
 
@@ -82,10 +82,19 @@ Every brief carries this file's rules. An agent does not inherit memory.
 ## How a track runs
 
 1. Read the record. The newest records in `rfcs/RFC-0125-a-rule-is-stated-once.md` say what is left and what blocks it.
-2. Count first. Write or extend a census in `compiler/vyrn-cli/tests/` that tiles the file by kind and pins the numbers. A change starts from a count, not from an impression.
+2. Count first. If the file has a census table in `compiler/vyrn-cli/tests/`, read it; that is the count. Write one only for a file that has none. A change starts from a count, not from an impression.
 3. Change one thing. One commit per slice.
 4. Prove it. Run the licence for the slice (below). Read every byte and every line that moves.
-5. Record it. Add a dated record under the milestone, in the style of the records before it, with the commands you ran and the numbers you got. Re-pin every census the change moved, in the same commit.
+5. Record it. Add one dated record per track under the milestone, using the template below, at most thirty lines. Re-pin every census the change moved, in the same commit.
+   ```
+   #### <what is stated once now> (<date>, `track-xx`)
+   Decision: <one sentence, and whose>.
+   Went: <section> <lines>, <section> <lines>.  Stayed: <section> <lines>, because <blocker>.
+   Lines: <file> <before> to <after>.  Refusals: <lost> lost / <gained> gained.  Manifest: <untouched | N rows, why>.
+   Licence: <the commands and their numbers, one line each>.
+   Findings: <one line each>.
+   Left: <item>, blocked by <exactly what>.
+   ```
 6. Gate it. Run the short list in the foreground, one command at a time, and report the table. The full list is CI's: the lead pushes the track branch as a draft pull request against the core branch, and CI runs every job on it.
 
 Report the numbers, the commits, the files before and after, and what is left with its blocker named exactly.
