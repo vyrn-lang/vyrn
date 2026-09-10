@@ -6,10 +6,10 @@
 //! was written the interpreter went (M5), the text-IR native route, `emit-ir`,
 //! `--route` and the parity harness went (M3/M4), the runtime became Vyrn (M4)
 //! and one emitter was left standing. Nobody had counted the driver since.
-//! `own.rs` was censused by a reader against every part, `movecheck.rs` by the
-//! kind table in `tests/refusals.rs`, `checker.rs` by `tests/checker_census.rs`
-//! and `direct.rs` by `tests/emitter_census.rs`; this is the same measurement
-//! for the CLI.
+//! `own.rs` was censused by a reader against every part, `movecheck.rs` by
+//! `tests/frontend_census.rs`, `checker.rs` by `tests/checker_census.rs` and
+//! `direct.rs` by `tests/emitter_census.rs`; this is the same measurement for
+//! the CLI.
 //!
 //! # The method, which is `checker_census.rs`'s
 //!

@@ -8,9 +8,9 @@
 //! is deleted. All nine steps of `PLAN-0125-runtime.md` §6 landed, track-cg
 //! deleted the text-IR emitter and the C shim, and the file still stands at
 //! sixteen and a half thousand lines. Nobody had counted it. `own.rs` was
-//! censused by a reader against every part, `movecheck.rs` by the kind table in
-//! `tests/refusals.rs` and `checker.rs` by `tests/checker_census.rs`; this is
-//! the same measurement for the emitter.
+//! censused by a reader against every part, `movecheck.rs` by
+//! `tests/frontend_census.rs` and `checker.rs` by `tests/checker_census.rs`;
+//! this is the same measurement for the emitter.
 //!
 //! # The method, which is `checker_census.rs`'s
 //!

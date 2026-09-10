@@ -4,10 +4,10 @@
 //! workspace. §2.7 estimates 139,000 lines down to 40,000–45,000, and that
 //! estimate cannot be met while this file stands at its present size. Nobody
 //! had counted what is in it. `own.rs` was censused by a reader against every
-//! part, and `movecheck.rs` by the kind table in `tests/refusals.rs`; this is
-//! the same measurement for the checker.
+//! part, and `movecheck.rs` by `tests/frontend_census.rs`; this is the same
+//! measurement for the checker.
 //!
-//! # The method, which is `refusals.rs`'s
+//! # The method, which is `frontend_census.rs`'s
 //!
 //! A section is one item — a `fn`, a `struct`, an `enum`, an `impl`, a `mod`,
 //! a `const` — together with every item after it up to the next section's
@@ -19,8 +19,8 @@
 //!
 //! # The extra column, and why
 //!
-//! `movecheck.rs`'s census has a kind per section and nothing else, because
-//! every one of its rules is a section. The checker's are not: 99 of its 402
+//! `movecheck.rs`'s census has a kind and a reader per section and nothing
+//! else, because every one of its rules is a section. The checker's are not: 99 of its 402
 //! refusal sites are inside `Checker::call`, which is a table with one arm per
 //! builtin, and a kind alone would file all 99 under the surface and lose
 //! them. (It was 190 of 487 when this census was written; RFC-0125 §3 M6
