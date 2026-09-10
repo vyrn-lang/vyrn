@@ -834,7 +834,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4808, 978),
         ("the wasm format", 334, 0),
-        ("shared machinery", 2582, 77),
+        ("shared machinery", 2588, 77),
         ("tests", 326, 0),
     ];
     assert_eq!(got, want, "the emitter census has moved");
@@ -913,7 +913,7 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
         ("the core's rows", 5, 2075, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
         ("the source, and the core has no row", 10, 1892, 84, 0),
-        ("both, for two questions", 15, 7517, 102, 138),
+        ("both, for two questions", 15, 7523, 103, 139),
     ];
     assert_eq!(got, want, "what the emitter reads has moved");
     assert_eq!(

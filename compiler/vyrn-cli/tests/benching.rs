@@ -763,3 +763,48 @@ fn check_rejects_json_and_compare_flags() {
     assert_eq!(out.status.code(), Some(2));
     assert!(norm(&out.stderr).contains("--check cannot be combined with --json or --compare"));
 }
+
+/// Every bench program under `examples/` compiles and runs on the timing face.
+/// The `--check` face lowers a body through `bodies_wasm`; the timing face lifts
+/// each body into a function the native harness calls, and the two reach the
+/// emitter with different trees. `langbench.vyrn` compiled under one and not
+/// the other, and the regression gate on `main` was the first thing to say so.
+#[test]
+#[ignore = "needs clang; run explicitly: cargo test -p vyrn-cli --test benching -- --ignored"]
+fn every_bench_program_times_on_the_native_route() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "vyrn")
+                && std::fs::read_to_string(&p).unwrap().contains("bench \"")
+            {
+                out.push(p);
+            }
+        }
+    }
+    let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let mut corpus = Vec::new();
+    walk(&examples, &mut corpus);
+    corpus.sort();
+    assert!(
+        !corpus.is_empty(),
+        "no bench program under {}",
+        examples.display()
+    );
+    let mut failed = Vec::new();
+    for f in &corpus {
+        let out = vyrn().arg("bench").arg(f).arg("--json").output().unwrap();
+        if !out.status.success() {
+            failed.push(format!("{}:\n{}", f.display(), norm(&out.stderr)));
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "{} of {} bench programs failed on the timing face:\n{}",
+        failed.len(),
+        corpus.len(),
+        failed.join("\n")
+    );
+}
