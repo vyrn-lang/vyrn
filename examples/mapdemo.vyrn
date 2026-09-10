@@ -87,27 +87,27 @@ fn main() -> Int64 {
     inv["pear"] = 5
     let wire = toJson(inv)
     print(wire) // {"apple":3,"pear":5}
-    let back = match fromJson(IntMap, wire) {
+    let back = match fromJson<IntMap>(wire) {
         Valid(m) => total(m),
         Invalid(issues) => report(issues),
     }
     print("decoded total=\{back}") // 8
 
     // Duplicate keys in JSON input: first wins (mirrors the record decoder).
-    let dup = match fromJson(IntMap, "{\"a\":1,\"b\":2,\"a\":9}") {
+    let dup = match fromJson<IntMap>("{\"a\":1,\"b\":2,\"a\":9}") {
         Valid(m) => look(m, "a"), // 1, not 9
         Invalid(issues) => 0 - report(issues),
     }
     print("dup-key a=\{dup}")
 
     // A bad value surfaces a `json.type` Issue at `field.<key>`.
-    let bad = match fromJson(IntMap, "{\"ok\":1,\"oops\":\"x\"}") {
+    let bad = match fromJson<IntMap>("{\"ok\":1,\"oops\":\"x\"}") {
         Valid(m) => 0,
         Invalid(issues) => report(issues), // json.type | oops | expected integer, found string
     }
 
     // --- Schema: additionalProperties carries V's schema ---------------
-    print(jsonSchema(IntMap))
+    print(jsonSchema<IntMap>())
 
     // --- A Map inside an enum payload, encoded ------------------------
     let mut mm: Map<String, Int64> = [:]

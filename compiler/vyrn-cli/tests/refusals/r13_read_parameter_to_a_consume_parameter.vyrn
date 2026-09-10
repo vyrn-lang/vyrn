@@ -1,0 +1,12 @@
+// RFC-0089 rule 2: a `read` parameter has nothing to give a `consume` one.
+fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }
+
+fn caller(ys: Array<Int64>) -> Int64 {
+    return take(ys)
+}
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    print(caller(a) + a.length)
+    return 0
+}

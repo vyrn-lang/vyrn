@@ -34,6 +34,7 @@
 //! | the receiver is written through | `Capability::Modify` on parameter 0 | `checker::mut_array_receiver` |
 //! | what the result IS | the return type | `declared::Declared::new` |
 //! | the access site's lowering | the whole row | `crate::project::inline` |
+//! | the call's arity, argument types and result | the whole row | `checker::Checker::call` |
 //!
 //! A row is keyed by the name the **call site carries**, because that is what
 //! every pass matches on: `@push`, `@pop` and `@swapRemove` are the internal
@@ -43,13 +44,43 @@
 //!
 //! ## What is deliberately NOT here
 //!
-//! - **Effects.** `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` are 29 rows and no
+//! - **Effects.** `SPAWN_FORBIDDEN` and the lattice's `gen` column are 29 rows and no
 //!   signature in this language carries an effect. That is a language feature,
 //!   not a milestone.
-//! - **Arity and parameter types.** The checker's per-builtin arms already
-//!   refuse on both, with hand-written wording that reads better than anything
-//!   a generic signature check would print. The declared types below are the
-//!   census's, and they are read only where the table above says so.
+//! Arity and parameter types are NO LONGER excluded, and this section used to
+//! say they were: the checker's per-builtin blocks refused on both, "with
+//! hand-written wording that reads better than anything a generic signature
+//! check would print". RFC-0125 §3 M6 counted what the wording cost — sixteen
+//! names, 328 lines of `Checker::call` and 27 of its 190 refusals, every one a
+//! second statement of a row below — and deleted the blocks. [`checkable`] is
+//! the reading, and the blocks that remain are the ones a row cannot carry.
+//! Four more names then got the row they never had (`logger`, `lineAt`,
+//! `colAt`, `@charCount`), which took 84 lines and 7 refusals more and retired
+//! `@charCount`'s hand-written exception in [`capability`]. Six `consume` rows
+//! followed (`fromArray`, `fromStep`, `close`, `boxStream`, `serveStream`,
+//! `@join`, 123 lines and 15 refusals): their blocks did not check the
+//! `consume` their rows carry, so the deletion ADDS `region_consume_guard` to
+//! those calls, which a corpus pass priced at nothing. `@reserve` and `@tally`
+//! followed (60 lines and 8 refusals): the census held them back over a claim
+//! about an alias that no program can make true. Then the element-type four
+//! (`@clear`, `@append`, `@copyFrom`, `@tallyBytes`, 145 lines and 17
+//! refusals). Three of those four needed one thing a parameter type cannot
+//! say — the element must own no heap — and a BOUND says it: [`HEAPLESS`], one
+//! column, one sentence, three names. The fourth needed nothing: its receiver
+//! is `Map<String, Int64>`, which the row already spelled out.
+//!
+//! ## Where a row states a rule about the type ARGUMENT
+//!
+//! A bound is the third column a row can carry, after the parameter types and
+//! the capabilities. [`HEAPLESS`] is the only one seeded today, and the rule
+//! for adding another is the rule for [`checkable`]: a bound belongs on a row
+//! when it is a property of the type argument that every pass could read, and
+//! not when it is a property of one call site.
+//!
+//! The deletion also found the drift a second statement always risks:
+//! `floatBits` said `UInt64` in its block and `Int64` on its row, and
+//! `floatFromBits` said the mirror pair. Nothing read the wrong half because
+//! both are scalars, which is the only reason it survived M1.
 //!
 //! ## Where a declared type is INERT, and how a reader tells
 //!
@@ -73,13 +104,15 @@
 //! binding. The audit is now the whole of [`crate::checker::RESERVED`], and
 //! every name that ALLOCATES a result this language can spell has a row below.
 //!
-//! Five names allocate and are still held back. Each is held for a reason
-//! about the TYPE, never about the fact:
+//! Four names allocate and are still held back. Each is held for a reason
+//! about the TYPE, never about the fact. `fromJson` was the fifth: its target
+//! was the first ARGUMENT, so no signature could say "the type my caller
+//! wrote". RFC-0125 §3 M6 made it a type PARAMETER, and the row says
+//! `Validation<T>` like any other generic:
 //!
 //! | name | it answers | why no row |
 //! |---|---|---|
-//! | `fromJson` | `Validation<T>` | `T` is the first ARGUMENT — a type name, not a value. No signature says "the type my caller wrote". |
-//! | `value` | `Value` | It boxes the caller's buffer rather than copying it (`box_payload` of the lowered argument), so it LENDS, and a row would double free. |
+//! | `value` | `Value` | It boxes the caller's buffer rather than copying it (`box_payload` of the lowered argument), so it LENDS, and a row would double free. The LENDING is stated in [`lends`] since RFC-0125 §3 M3's type slice; the absence of a row no longer states it. |
 //! | `@list` | `Array<E>` | `E` is the argument's element type, which one row cannot name any more than `at` can. |
 //! | `pullAt` | `Option<T>` | The element type comes from the expected type; the checker refuses the call without an annotation, so the binding is already named. |
 //! | `at`, `atSet`, `bytes` | the receiver's | They LEND, which is the older rule above. |
@@ -98,8 +131,47 @@
 //! parser INJECTS into every program (`ModuleInterface`, `ContractInfo` — see
 //! `parser`'s reflection declarations). They have rows below.
 
-use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type};
+use crate::ast::{Block, Capability, Expr, Function, Param, Stmt, Type, TypeDecl};
 use crate::project::ELEM;
+use std::sync::OnceLock;
+
+/// The language's prelude, as Vyrn source (RFC-0125 §2.4, §3 M6).
+///
+/// Embedded rather than resolved against a std root, for the reason this
+/// module's rows are seeded rather than imported: a bare file with no
+/// `vyrn.json` and no std root still parses, and these declarations are in it.
+const PRELUDE_SRC: &str = include_str!("prelude.vyrn");
+
+/// The declarations the compiler puts into every program — `Value`, `Template`,
+/// the error model, the storage outcome, `Schema`, the five `moduleInterface`
+/// records, the two `contractOf` records and `Request`/`Response`.
+///
+/// They are a builtin's contract in the sense this module's doc opens with, one
+/// declaration further along: a builtin that answers a `Schema` needs `Schema`
+/// to exist, and no program declares it. What is new here is only WHERE the
+/// declaration is written. It was 535 lines of `parser.rs` building AST values
+/// in Rust until RFC-0125 §3 M6; it is now [`PRELUDE_SRC`], read by the one
+/// parser, so a field name is spelled where a reader would look for it.
+///
+/// Every declaration carries line 0, which is how `loader::is_injected` and the
+/// editor's symbol index recognise one. Parsed once and cloned per program: the
+/// parse is a few microseconds and `parse_accum` runs per module.
+pub fn type_decls() -> &'static [TypeDecl] {
+    static DECLS: OnceLock<Vec<TypeDecl>> = OnceLock::new();
+    DECLS.get_or_init(|| {
+        let tokens = crate::lexer::lex(PRELUDE_SRC).expect("the prelude lexes");
+        let (mut program, errors) = crate::parser::parse_bare(tokens);
+        assert!(
+            errors.is_empty(),
+            "the prelude does not parse: {}",
+            errors[0].render()
+        );
+        for t in &mut program.type_decls {
+            t.line = 0;
+        }
+        program.type_decls
+    })
+}
 
 /// One seeded signature.
 ///
@@ -127,6 +199,8 @@ fn row(
                 name: n.to_string(),
                 capability: *c,
                 ty: t.clone(),
+                line: 0,
+                col: 0,
             })
             .collect(),
         ret,
@@ -135,6 +209,7 @@ fn row(
                 true => Vec::new(),
                 false => vec![Stmt::Return {
                     value: Some(Expr::Call {
+                        type_args: Vec::new(),
                         name: ELEM.to_string(),
                         args: place
                             .iter()
@@ -161,6 +236,41 @@ fn row(
     }
 }
 
+/// The bound that says **this type parameter owns no heap**.
+///
+/// Three rows below — `@clear`, `@append` and `@copyFrom` — forget or overwrite
+/// their elements without releasing them, so an element that owns heap would
+/// leak. That is a fact about the type ARGUMENT rather than about the
+/// signature, and it is the one thing about those three the rest of the row
+/// cannot say. A bound is where a signature says it: the same column
+/// `fn f<T: Show>` writes, read by [`crate::checker::Checker::type_satisfies`]
+/// like any other.
+///
+/// The spelling is unlexable on purpose, for the reason `@push` and `@slot` are
+/// (see the module comment): no source can write it, so no program can declare
+/// a protocol of that name and no program can name the bound itself. The
+/// refusal is worded for it rather than by the generic "does not satisfy"
+/// sentence, because a reader cannot write what the generic one would print.
+pub const HEAPLESS: &str = "@Heapless";
+
+/// The bound that says **this type can be decoded into from JSON**.
+///
+/// `fromJson<T>(s)`'s target is `crate::codec::decodable`'s answer, which is a
+/// fact about the type ARGUMENT rather than about the signature, and it is the
+/// one thing the row cannot otherwise say. Unlexable for [`HEAPLESS`]'s reason:
+/// no source can write it, so no program can declare a protocol of that name.
+/// The refusal is worded for it — it names the OFFENDING part of the type, not
+/// the whole of it, which is what the deleted arm printed and what a reader
+/// needs.
+pub const DECODABLE: &str = "@Decodable";
+
+/// A row with a bound on one of its type parameters.
+fn bounded(mut f: Function, tp: &str, bound: &str) -> Function {
+    f.type_bounds
+        .insert(tp.to_string(), vec![bound.to_string()]);
+    f
+}
+
 /// The seeded signatures, in the census's order (`rfcs/census-builtins.md`, the
 /// prelude-extern bucket plus the three stream primitives whose ownership fact
 /// M1 writes down for the first time).
@@ -169,13 +279,17 @@ fn rows() -> Vec<Function> {
     use Type::{Bool, Float, Int, Str, Unit};
     let t = || Type::Param("T".to_string());
     let arr = |e: Type| Type::Array(Box::new(e));
-    let opt = |e: Type| Type::Option(Box::new(e));
+    let opt = |e: Type| Type::option(e);
     let stm = |e: Type| Type::Stream(Box::new(e));
     let u8s = || {
         arr(Type::IntN {
             bits: 8,
             signed: false,
         })
+    };
+    let u64_ = || Type::IntN {
+        bits: 64,
+        signed: false,
     };
     let step = || Type::Fn(vec![Int, Int, Bool], Box::new(opt(t())));
     vec![
@@ -239,12 +353,76 @@ fn rows() -> Vec<Function> {
             "stringFromBytes",
             &[],
             &[("b", Read, u8s())],
-            Type::Result(Box::new(Str), Box::new(Str)),
+            Type::result(Str, Str),
             &[],
         ),
-        row("floatBits", &[], &[("x", Read, Float)], Int, &[]),
-        row("floatFromBits", &[], &[("b", Read, Int)], Float, &[]),
+        // The bit pattern is a `UInt64`, not an `Int64`. RFC-0094 M1 wrote
+        // `Int64` on both rows and the checker's arm said `UInt64`, and the two
+        // spellings sat side by side until RFC-0125 §3 M6 read them together —
+        // the same drift `stringFromBytes` had, one type narrower. Nothing read
+        // the wrong half (both are scalars, so `owns_heap` answers alike for
+        // either), which is exactly why it stood: a fact stated twice is only
+        // checked where somebody happens to compare the two statements.
+        row("floatBits", &[], &[("x", Read, Float)], u64_(), &[]),
+        row("floatFromBits", &[], &[("b", Read, u64_())], Float, &[]),
         row("parse", &[], &[("s", Read, Str)], opt(Int), &[]),
+        // ---- the four rows RFC-0125 §3 M6 added (the seed extension) --------
+        // Each of these names had a hand-written block in `Checker::call` and
+        // no row at all, so its arity, its argument types and its result were
+        // stated once — in the checker — and every other pass had nothing to
+        // read. A row states them where the rest are stated, and the block goes.
+        //
+        // `logger(name)` opens a sink (RFC-0008). `Logger` is a builtin type
+        // that owns no heap, so the row buys the checker's reading and nothing
+        // else asks.
+        row("logger", &[], &[("name", Read, Str)], Type::Logger, &[]),
+        // `lineAt(bytes, off)` / `colAt(bytes, off)` — the 1-based line and
+        // column of a byte offset in a UTF-8 buffer (RFC-0033 origin directives
+        // are 1-based, and this is what feeds them).
+        //
+        // The buffer must be a BYTE buffer, not any array, and the type on this
+        // row is the whole of that rule. The engines disagreed on anything
+        // else: the interpreter reads `v as u8` per ELEMENT, so `[1, 10]:
+        // Array<Int64>` looks like the bytes `01 0a`, while native hands the
+        // `{ ptr, i64, i64 }` data pointer to `__vyrn_line_at` as `unsigned
+        // char*`, where element 1 starts at byte 8. RFC-0077's M2n note found
+        // `lineAt([1, 10], 2)` answering 2 interpreted and 1 native and refused
+        // to pick a winner, because a line number over an `Array<Int64>` is
+        // nonsense in both readings. `ArrayN`/`SmallArray` were never lowerable
+        // here either — the native emitter `extractvalue`s the growable
+        // `Array` layout alone. `bytes(s)` produces exactly `Array<UInt8>`, and
+        // that is what every real caller passes (`std/vyx`'s scanner,
+        // `std/text`'s oracles); a validated newtype over `UInt8` is the same
+        // byte at the same stride, and an `Array` is covariant in its element
+        // with a `Named` decaying to its base, so the row accepts it.
+        //
+        // They are builtins rather than a library loop because the obvious loop
+        // is quadratic: counting newlines from byte 0 on every call is
+        // O(offset), and a scanner asks once per node. `std/vyx` spent 122 ms
+        // of a 291 ms page compile in exactly that shape. The interpreter
+        // memoizes a line-start table per buffer, which a Vyrn library cannot
+        // do — generators may not touch module state (comptime purity), so the
+        // cache has to live below them. Any generator gets it, not just std.
+        row(
+            "lineAt",
+            &[],
+            &[("b", Read, u8s()), ("off", Read, Int)],
+            Int,
+            &[],
+        ),
+        row(
+            "colAt",
+            &[],
+            &[("b", Read, u8s()), ("off", Read, Int)],
+            Int,
+            &[],
+        ),
+        // `s.charCount()` (RFC-0058): the number of Unicode scalar values in a
+        // String. O(n) — it counts the non-continuation bytes (`b & 0xC0 !=
+        // 0x80`) of validated UTF-8. The row also retires a hand-written
+        // exception in [`capability`]: `@charCount` reads its receiver, and
+        // that answer used to be written there because the name had no row.
+        row("@charCount", &[], &[("s", Read, Str)], Int, &[]),
         // ---- control (RFC-0079, RFC-0015, RFC-0055) -------------------------
         // `panic` diverges; the language has no `Never`, so the return is spelled
         // `Unit` and no rule reads it.
@@ -287,6 +465,14 @@ fn rows() -> Vec<Function> {
         // reallocated) buffer, and the statement form writes it back.
         // `append` reads its source: the elements are copied, and the checker
         // holds the element type to ones a byte copy is correct for.
+        //
+        // `@reserve` types its whole call here since RFC-0125 §3 M6. The block
+        // it replaced answered the receiver's OWN type rather than `Array<T>`,
+        // and the census held the deletion back for that: `type Buf =
+        // Array<Int64>` was said to stop being a `Buf`. It does not. An `Array`
+        // is covariant in its element and a `Named` decays to its base, so the
+        // rebuilt value goes back into the binding through the coercion every
+        // other assignment takes.
         row(
             "@reserve",
             &["T"],
@@ -294,24 +480,54 @@ fn rows() -> Vec<Function> {
             arr(t()),
             &[],
         ),
-        row(
-            "@append",
-            &["T"],
-            &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
-            arr(t()),
-            &[],
+        // `xs.clear()` (RFC-0115 addendum, RFC-0125 §1): the length goes to
+        // zero and the buffer stays, so the next fill reuses it.
+        //
+        // These three are the [`HEAPLESS`] rows. `clear` forgets its elements,
+        // `copyFrom` overwrites them and `append` copies its source's in by
+        // bytes; none of the three releases anything, so an element type that
+        // owns heap leaks. Each stated that rule in a hand-written block of
+        // `Checker::call` until RFC-0125 §3 M6, and each stated its arity, its
+        // parameter types and its result a second time to get there. The bound
+        // is the column the row was missing, and it is the whole of what the
+        // three blocks knew that these rows did not.
+        bounded(
+            row("@clear", &["T"], &[("self", Read, arr(t()))], arr(t()), &[]),
+            "T",
+            HEAPLESS,
         ),
-        row(
-            "@copyFrom",
-            &["T"],
-            &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
-            arr(t()),
-            &[],
+        bounded(
+            row(
+                "@append",
+                &["T"],
+                &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
+                arr(t()),
+                &[],
+            ),
+            "T",
+            HEAPLESS,
+        ),
+        bounded(
+            row(
+                "@copyFrom",
+                &["T"],
+                &[("self", Read, arr(t())), ("xs", Read, arr(t()))],
+                arr(t()),
+                &[],
+            ),
+            "T",
+            HEAPLESS,
         ),
         // ---- the stream primitives (RFC-0075, RFC-0090 M3) ------------------
         // The two PR #118 rows. A stream's close frees what its producer was
         // handed — the array's buffer, or the step's capture block — so the frame
         // that handed it over may not release it a second time.
+        //
+        // `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
+        // `fromStep(slot, gen, step)` hands over a producer instead; `close(s)`
+        // is the explicit release for either. All three are builtins because
+        // none can be written in Vyrn — there is no other way to make or unmake
+        // a `Stream`.
         row(
             "fromArray",
             &["T"],
@@ -319,6 +535,25 @@ fn rows() -> Vec<Function> {
             stm(t()),
             &[],
         ),
+        // `fromStep` (RFC-0075 M2b, re-hosted by RFC-0090 M3) is the pull
+        // producer: the stream carries the two words of a cursor its CALLER
+        // minted, and every `next` hands them back to `step`, which reads the
+        // cursor, writes the next one, and answers `Some(v)` or `None`.
+        //
+        // The cursor used to be a `Ref<Int64>` — a Path B cell, allocated at
+        // the call. It is two plain `Int64`s now, and the slab they index lives
+        // in `std/stream` over `std/slots`. What did not change is the property
+        // the `Ref` was pinned at `Int64` for: the dispatcher a stream calls is
+        // keyed by the step's SIGNATURE, so that signature must be a function
+        // of the element type alone. That is why this row spells the step's
+        // `fn` type exactly, and the checker holds a call to it.
+        //
+        // The third parameter is how a release reaches the slab. A close is
+        // type-erased in the runtime and the slab is not, so `close` asks the
+        // step to release itself: `closing` is true exactly once per stream,
+        // and the step answers `None` after giving its slot back. That is also
+        // what makes a wrapper's walk ordinary Vyrn — it closes its own source,
+        // and `movecheck` checks that release like any other.
         row(
             "fromStep",
             &["T"],
@@ -337,6 +572,22 @@ fn rows() -> Vec<Function> {
         // these rows change is that the fact is now WRITTEN.
         row("close", &["T"], &[("s", Consume, stm(t()))], Unit, &[]),
         row("boxStream", &["T"], &[("s", Consume, stm(t()))], Int, &[]),
+        // `serveStream(s)` (RFC-0074 M3a) hands a producer to the HOST: the
+        // request that opened it returns an ordinary `Response` carrying only
+        // the header block, and the host then pulls one element at a time,
+        // writes it, and `close`s the stream the first time a write fails. That
+        // is the whole disconnect mechanism — the socket rather than a host
+        // event — and it is why this is a builtin rather than a library
+        // function: a stream must escape the call that made it, which is the
+        // one thing M1's linearity otherwise forbids, and `close` on the far
+        // side is what discharges it.
+        //
+        // `Stream<String>` and not `Stream<Event>`, which is what this row's
+        // parameter type says: the element is one already encoded frame, so
+        // every byte of SSE's syntax stays in `std/http` where the vocabulary
+        // belongs, and the host learns nothing about the protocol beyond "write
+        // this, flush, ask again". `ws` (M3b) is the same handoff with a
+        // different encoder.
         row("serveStream", &[], &[("s", Consume, stm(Str))], Unit, &[]),
         // The box's inverse. Its argument is an `Int64` address, so it consumes
         // nothing a binding could double-release; what it DOES carry is the
@@ -378,25 +629,35 @@ fn rows() -> Vec<Function> {
             Str,
             &[],
         ),
-        // `@str` renders one value. Its parameter is a union — a number, a
-        // `Bool`, a `String`, or a type with `impl Show` — and this language
-        // cannot spell one, so the parameter is INERT and is spelled `Unit` for
-        // the reason `at`'s is. No rule reads it: RFC-0094 M1 deliberately left
-        // arity and parameter types in the checker's hand-written arms, which
-        // refuse a bad receiver with better words than a signature check could.
-        // What the row carries is the RETURN.
-        row("@str", &[], &[("x", Read, Unit)], Str, &[]),
-        // `print` takes the SAME union `@str` takes, and it had no row at all —
-        // the largest hole in every pass that asks what a builtin does with its
-        // argument. `rfcs/census-call-arguments.md` §3 counts it: 499 of the
-        // corpus's 532 unclassifiable call-argument sites are this one name, and
-        // a pass with no row cannot tell "the callee may keep it" from "nobody
-        // wrote it down". The parameter is inert and spelled `Unit` for the
-        // reason `@str`'s is; the checker's own arm still refuses a bad
-        // argument. What the row carries is the CAPABILITY: `print` reads what
-        // it is given and keeps nothing, so a temporary handed to it is the
-        // caller's to release.
-        row("print", &[], &[("x", Read, Unit)], Unit, &[]),
+        // `@str` renders one value, and `print` writes the same union out.
+        // The union used to be spelled `Unit` on both rows, because "a number,
+        // a `Bool`, a `String`, or a type with `impl Show`" was a type this
+        // language could not write down; each row said the parameter was inert
+        // and each name kept a hand-written arm to refuse a bad argument.
+        //
+        // A BOUND spells it (RFC-0125 §3 M6, the `Show` slice). `Show` is
+        // satisfied by a type the language renders itself and by a type that
+        // declares how it renders, which is exactly the union and is stated
+        // once, in [`crate::checker::Checker::type_satisfies`]. So the
+        // parameter is `T`, the bound is the union, and the two arms are gone.
+        //
+        // `print` had no row at all before RFC-0096 — the largest hole in every
+        // pass that asks what a builtin does with its argument.
+        // `rfcs/census-call-arguments.md` §3 counts it: 499 of the corpus's 532
+        // unclassifiable call-argument sites are this one name. The capability
+        // is what the row bought then and still buys: `print` reads what it is
+        // given and keeps nothing, so a temporary handed to it is the caller's
+        // to release.
+        bounded(
+            row("@str", &["T"], &[("x", Read, t())], Str, &[]),
+            "T",
+            crate::types::SHOW,
+        ),
+        bounded(
+            row("print", &["T"], &[("x", Read, t())], Unit, &[]),
+            "T",
+            crate::types::SHOW,
+        ),
         // `m.keys()` copies the keys into a new buffer (RFC-0028), so the
         // result is the caller's and the map keeps its own. Generic over the
         // KEY too (RFC-0117): `Array<K>` is what makes an Int64-keyed map's
@@ -418,7 +679,9 @@ fn rows() -> Vec<Function> {
             &[],
         ),
         // `m.tally(k, n)` (RFC-0116): insert-or-add on a count map, one probe.
-        // The key is READ — a hit keeps the key the map already has, a miss
+        // This row types the whole call since RFC-0125 §3 M6, for the reason on
+        // `@reserve` above. The key is READ — a hit keeps the key the map
+        // already has, a miss
         // copies this one in — and the value type is pinned to `Int64`, which
         // is what makes the add spellable in a signature. The key type is any
         // legal one (RFC-0117).
@@ -474,21 +737,44 @@ fn rows() -> Vec<Function> {
         // `@str`'s is, so the parameter is spelled `Unit` and is inert for the
         // same reason.
         row("toJson", &[], &[("x", Read, Unit)], Str, &[]),
-        // `jsonSchema(T)` and `schemaOf(T)` take a TYPE NAME, not a value, so the
-        // parameter is inert here too — the checker's arm is what refuses
-        // anything but a declared name. Both fold to a compile-time literal, and
-        // a literal is data-segment storage whose release is a no-op:
-        // `__vyrn_str_free` returns on `cap == 0` (RFC-0089 M1a) and a `Schema`
-        // is a record of such strings. The rows are here because the READING
-        // must be able to name the type either way — a reading that answers for
-        // some sites and not others is the fork RFC-0094 removed.
-        row("jsonSchema", &[], &[("t", Read, Unit)], Str, &[]),
+        // `jsonSchema<T>()` and `schemaOf<T>()` name their target as a TYPE
+        // ARGUMENT (RFC-0125 §3 M6). They spelled it as a value parameter until
+        // then — `schemaOf(Shape)`, with `Shape` in argument position — so the
+        // parameter type was inert, spelled `Unit`, and a 77-line arm of
+        // `Checker::call` did the whole of the arity, the "is that a type", and
+        // the result for all three. A type parameter says it, and the ordinary
+        // call path types the call.
+        //
+        // Both fold to a compile-time literal, and a literal is data-segment
+        // storage whose release is a no-op: `__vyrn_str_free` returns on `cap
+        // == 0` (RFC-0089 M1a) and a `Schema` is a record of such strings. The
+        // rows are here because the READING must be able to name the type
+        // either way — a reading that answers for some sites and not others is
+        // the fork RFC-0094 removed.
+        row("jsonSchema", &["T"], &[], Str, &[]),
         row(
             "schemaOf",
+            &["T"],
             &[],
-            &[("t", Read, Unit)],
             Type::Named("Schema".to_string()),
             &[],
+        ),
+        // `fromJson<T>(s)` decodes a String into a `Validation<T>` (RFC-0018).
+        // The row is ordinary in every column but one: the target must be a
+        // type this language can decode INTO, which is a property of the type
+        // argument and not of the signature, so it is a BOUND — [`DECODABLE`],
+        // read the way [`HEAPLESS`] is. That is the one rule of the deleted arm
+        // a row could not carry.
+        bounded(
+            row(
+                "fromJson",
+                &["T"],
+                &[("s", Read, Str)],
+                Type::App("Validation".to_string(), vec![t()]),
+                &[],
+            ),
+            "T",
+            DECODABLE,
         ),
         // ---- the input I/O results (RFC-0014, RFC-0044) ---------------------
         // Every one allocates on the host side and hands the buffer over. The
@@ -500,21 +786,21 @@ fn rows() -> Vec<Function> {
             "readFile",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(Str), Box::new(Str)),
+            Type::result(Str, Str),
             &[],
         ),
         row(
             "readFileBytes",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(u8s()), Box::new(Str)),
+            Type::result(u8s(), Str),
             &[],
         ),
         row(
             "writeFileBytes",
             &[],
             &[("p", Read, Str), ("b", Read, u8s())],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row("writeStdout", &[], &[("b", Read, u8s())], Type::Unit, &[]),
@@ -522,21 +808,21 @@ fn rows() -> Vec<Function> {
             "writeFile",
             &[],
             &[("p", Read, Str), ("s", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row(
             "renameFile",
             &[],
             &[("from", Read, Str), ("to", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         row(
             "fsyncFile",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(Bool), Box::new(Str)),
+            Type::result(Bool, Str),
             &[],
         ),
         // ---- the generation-time results (RFC-0021, RFC-0071) ---------------
@@ -551,14 +837,14 @@ fn rows() -> Vec<Function> {
         // belong to is empty by construction, and the row is about facts.
         //
         // `listDir` also has a runtime: `vyrn run` lists the real filesystem
-        // (`COMPTIME_FORBIDDEN` deliberately omits it, and so does the
+        // (the lattice's `gen` column allows it, and so does the
         // interpreter's generation-only refusal). Only the two compiling
         // backends have no lowering for it.
         row(
             "listDir",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            Type::result(arr(Str), Str),
             &[],
         ),
         // `listDirKinds` (RFC-0119): the same listing, each directory entry's
@@ -568,7 +854,7 @@ fn rows() -> Vec<Function> {
             "listDirKinds",
             &[],
             &[("p", Read, Str)],
-            Type::Result(Box::new(arr(Str)), Box::new(Str)),
+            Type::result(arr(Str), Str),
             &[],
         ),
         row(
@@ -589,6 +875,30 @@ fn rows() -> Vec<Function> {
             &[],
         ),
     ]
+    .into_iter()
+    // ---- the five log levels (RFC-0008) ---------------------------------
+    // One `row(..)`, five names. `log.info(m)` carries `@info` from the
+    // parser's method sugar, so the LEVEL is in the name and the row is the
+    // same signature five times over — written once here rather than five
+    // times, for the reason every other table in this file is written once.
+    //
+    // The internal spelling is what makes the rows sound. A row is matched by
+    // NAME, so a seeded `info` would attach this contract to a user's `fn
+    // info(..)` by spelling alone; `@info` is unlexable, and
+    // `every_seeded_name_is_reserved_or_unspellable` is the check. The five
+    // surface words are ordinary identifiers again, and
+    // [`crate::parser::unshadow_method_builtins`] gives each back to any
+    // module that declares or imports it.
+    .chain(crate::ast::LOG_LEVELS.iter().map(|lvl| {
+        row(
+            &format!("@{lvl}"),
+            &[],
+            &[("l", Read, Type::Logger), ("m", Read, Str)],
+            Unit,
+            &[],
+        )
+    }))
+    .collect()
 }
 
 /// Every seeded row, built once.
@@ -613,6 +923,29 @@ pub fn signature(name: &str) -> Option<&'static Function> {
     all().iter().find(|f| f.name == name)
 }
 
+/// The row a CALL SITE may be checked against — arity, parameter types and
+/// result — or `None` where the row spells a type it does not mean.
+///
+/// The module comment names the two kinds of inert row, and this is that same
+/// list read as a predicate rather than as prose. A **lending** row cannot name
+/// its result (`at`, `atSet`: the type is the receiver's element). A row with a
+/// `Unit` PARAMETER cannot name its argument — `@str`, `print`, `toJson`,
+/// `jsonSchema`, `schemaOf` and `contractOf` each take a union or a type name,
+/// and no builtin genuinely takes a `Unit` value, so the spelling is the
+/// marker. Everything else on a row is the contract, and
+/// [`crate::checker::Checker::call`] types the call against it exactly as it
+/// types a call against a user declaration (RFC-0125 §3 M6).
+///
+/// This is the reading RFC-0094 M1 held back. Its module comment said arity and
+/// parameter types stayed in the checker's hand-written arms "with wording that
+/// reads better than anything a generic signature check would print", and that
+/// was true of the wording and false of the cost: sixteen names paid 328 lines
+/// and 26 refusals for a sentence the row already carried.
+pub fn checkable(name: &str) -> Option<&'static Function> {
+    let f = signature(name)?;
+    (!lends(name) && !f.params.iter().any(|p| p.ty == Type::Unit)).then_some(f)
+}
+
 /// What each seeded builtin gives back, for the declared-types reading
 /// ([`crate::declared`]) — the name a call site carries, and the row's `ret`.
 ///
@@ -630,22 +963,18 @@ pub fn returns() -> impl Iterator<Item = (&'static str, &'static Type)> {
 
 /// The capability parameter `i` of `name` declares.
 pub fn capability(name: &str, i: usize) -> Option<Capability> {
-    // `s.charCount()` lowers through the `@charCount` seam to `std/text`'s
-    // reader — an internal spelling no import can name, so it has no seeded
-    // row and no user declaration to read a capability from. The receiver is
-    // read; without this answer a call-result receiver's temporary had no
-    // verdict and leaked (exit-residue round twenty-three).
-    if name == "@charCount" && i == 0 {
-        return Some(Capability::Read);
-    }
-    // A log method (RFC-0008) writes its message to the sink and keeps
-    // nothing — the same seam as `@charCount`: the four level names have no
-    // seeded row and no user declaration, so an interpolated message
-    // temporary (`log.error("\{i.path}: \{i.message}")`) had no verdict and
-    // leaked one rendered String per record (exit-residue round thirty-nine).
-    if crate::ast::is_log_level(name) && i == 1 {
-        return Some(Capability::Read);
-    }
+    // (`@charCount`'s exception stood here until RFC-0125 §3 M6's seed
+    // extension. It said the receiver is `read`, because the name had no row
+    // to read a capability from, and without that answer a call-result
+    // receiver's temporary had no verdict and leaked — exit-residue round
+    // twenty-three. `@charCount` has a row now and the row says it.)
+    // (A log method's exception stood here beside `@charCount`'s until the
+    // levels got their rows. It said the message is `read`, because the five
+    // level names had no row to read a capability from, and without that
+    // answer an interpolated message temporary — `log.error("\{i.path}:
+    // \{i.message}")` — had no verdict and leaked one rendered String per
+    // record, exit-residue round thirty-nine. `@info` has a row and the row
+    // says it.)
     // The codec forms (RFC-0009) parse or render what they are given and
     // keep nothing — the same seam again: no seeded row, no user
     // declaration, so `fromJson(T, httpInput(..))` and `toJson(f(..))` gave
@@ -661,13 +990,46 @@ pub fn capability(name: &str, i: usize) -> Option<Capability> {
         .map(|p| p.capability)
 }
 
+/// Whether the seeded builtin `name` REBUILDS its receiver: its first
+/// parameter has the type it hands back, and that type is a container. Such
+/// a row gives the receiver's buffer back through its result — `push`,
+/// `reserve`, `append`, `copyFrom`, a map's `tally` — so the call TAKES the
+/// receiver (RFC-0125 M2, the first defect the kernel found).
+///
+/// Stated here because two passes ask the same question: `movecheck::sinks`
+/// asks it under rule 1, and `core::call` asks it when it lowers the call
+/// and marks the write-back exception. A rule is stated once (RFC-0125 §3
+/// M3, the checker's deletion path).
+pub fn rebuilds(name: &str) -> bool {
+    let Some(f) = signature(name) else {
+        return false;
+    };
+    f.params.first().is_some_and(|p| p.ty == f.ret)
+        && matches!(f.ret, Type::Array(_) | Type::SmallArray(..) | Type::Map(..))
+}
+
 /// Whether the result of `name` points **into** one of its arguments.
 ///
 /// Read off the body, which is where a projection says so: a row that yields
 /// [`ELEM`] of a parameter names storage its caller does not own. `at`/`atSet`
 /// say it for an element of a container and `bytes` says it for a String's
 /// buffer, and they are the only rows that say it.
+///
+/// **`value` has no row and lends anyway** — the audit table in the module
+/// comment says so: it BOXES the caller's buffer instead of copying it, so a
+/// release row on its result is a double free. Its parameter is a union of
+/// three types no signature spells, which is why there is no row to read the
+/// fact off. Until RFC-0125 §3 M3's type slice the absence of the row WAS the
+/// statement: no return type meant the declared reading could not name
+/// `value(x)`, so nothing released it. The checker types the call, so the
+/// absence states nothing any more and the fact is written here, beside the
+/// rows that state it the ordinary way. `protocol Show` over a record, matched
+/// on `value(p)`, is the program: the kernel refused the release the plan had
+/// just minted (`vyrn-frontend/semantics` literal #344, found by `testsweep`).
 pub fn lends(name: &str) -> bool {
+    if name == "value" {
+        return true;
+    }
     let Some(f) = signature(name) else {
         return false;
     };
@@ -683,6 +1045,53 @@ pub fn lends(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The prelude parses, declares these fifteen types in this order, and
+    /// declares nothing else.
+    ///
+    /// The order is load-bearing: the linker keeps the ROOT module's copies and
+    /// drops every other module's, and a reordered prelude would move every
+    /// index a linked program's declarations carry. The "nothing else" half is
+    /// what stops a `fn` or an `import` from entering every program by being
+    /// written in this file.
+    #[test]
+    fn the_prelude_declares_fifteen_types_and_nothing_else() {
+        let names: Vec<&str> = type_decls().iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Value",
+                "Template",
+                "Issue",
+                "Validation",
+                "LoadResult",
+                "Schema",
+                "Origin",
+                "ParamInfo",
+                "FnInfo",
+                "TypeInfo",
+                "ModuleInterface",
+                "MemberInfo",
+                "ContractInfo",
+                "Request",
+                "Response",
+            ]
+        );
+        assert!(
+            type_decls().iter().all(|t| t.line == 0 && !t.exported),
+            "every prelude declaration is line 0 and unexported"
+        );
+        let tokens = crate::lexer::lex(PRELUDE_SRC).expect("the prelude lexes");
+        let (p, _) = crate::parser::parse_bare(tokens);
+        assert!(
+            p.functions.is_empty()
+                && p.imports.is_empty()
+                && p.impls.is_empty()
+                && p.protocols.is_empty()
+                && p.contracts.is_empty(),
+            "the prelude declares something that is not a type"
+        );
+    }
 
     /// A row is matched by CALL NAME. That only means "the builtin" while no
     /// user function can carry the name, and `checker::RESERVED` is what stops
@@ -799,9 +1208,13 @@ mod tests {
         ] {
             assert_eq!(of(name), ty, "`{name}` answers the wrong type");
         }
-        // The five held back. A row appearing here later is a decision, and it
+        // `fromJson` stood in the list below until RFC-0125 §3 M6 gave it a
+        // type parameter: its target was the first ARGUMENT, so no signature
+        // could name what it answers. It names it now.
+        assert_eq!(of("fromJson"), "Validation<T>");
+        // The rest held back. A row appearing here later is a decision, and it
         // has to be made at the table in the module comment.
-        for held in ["fromJson", "value", "@list", "pullAt"] {
+        for held in ["value", "@list", "pullAt"] {
             assert!(
                 !rets.iter().any(|(k, _)| *k == held),
                 "`{held}` is held back by the audit and may not answer for a call"

@@ -32,9 +32,7 @@
 //! whose `place at` yields `self.data[i]` inlines to the same `@slot` through
 //! one more level of the same machinery.
 
-use crate::ast::{
-    ArmBody, BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type,
-};
+use crate::ast::{BinOp, Block, Expr, Function, ImplBlock, LambdaBody, Program, Stmt, Type};
 use std::collections::HashMap;
 
 /// The element-place primitive: `@slot(container, index)`. Unspellable (no
@@ -185,7 +183,12 @@ pub fn site(
         return Ok(None);
     };
     memo(
-        (recv_expr as *const Expr as usize, key, method.to_string()),
+        (
+            recv_expr as *const Expr as usize,
+            line,
+            key,
+            method.to_string(),
+        ),
         recv_expr,
         args,
         || inline(f, recv_expr, args, line),
@@ -222,6 +225,7 @@ pub fn optional_site(
         let m = m.borrow();
         let e = m.as_ref()?.get(&(
             recv_expr as *const Expr as usize,
+            line,
             key.clone(),
             method.to_string(),
         ))?;
@@ -235,7 +239,12 @@ pub fn optional_site(
     OPT_MEMO.with(|m| {
         if let Some(m) = m.borrow_mut().as_mut() {
             m.insert(
-                (recv_expr as *const Expr as usize, key, method.to_string()),
+                (
+                    recv_expr as *const Expr as usize,
+                    line,
+                    key,
+                    method.to_string(),
+                ),
                 OptExpansion {
                     recv: recv_expr.clone(),
                     args: args.to_vec(),
@@ -258,6 +267,16 @@ struct OptExpansion {
 // Desugar once
 // ---------------------------------------------------------------------------
 
+/// What identifies an access site: the receiver node's address, the LINE it
+/// stands on, the receiver's type key and the member name.
+///
+/// The line is in the key because the memo now spans the LOAD (RFC-0125 §3 M3,
+/// the one analysis), and a load builds and drops whole generator programs — so
+/// a dead node's address is handed out to a live node, and two sites with an
+/// equal receiver and equal arguments can differ only in where they stand. The
+/// expansion carries that line in the nodes it mints.
+type Key = (usize, usize, String, String);
+
 /// One expansion, and the site inputs it was built from.
 ///
 /// The inputs are kept so a hit can be VERIFIED. The key holds a node address,
@@ -276,10 +295,10 @@ thread_local! {
     static LOOPS: std::cell::RefCell<
         Option<HashMap<(usize, String, String), (Expr, Block, &'static Block)>>,
     > = const { std::cell::RefCell::new(None) };
-    static MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), Expansion>>> =
+    static MEMO: std::cell::RefCell<Option<HashMap<Key, Expansion>>> =
         const { std::cell::RefCell::new(None) };
     /// The optional kind's half of [`MEMO`] (RFC-0122), same key, same rules.
-    static OPT_MEMO: std::cell::RefCell<Option<HashMap<(usize, String, String), OptExpansion>>> =
+    static OPT_MEMO: std::cell::RefCell<Option<HashMap<Key, OptExpansion>>> =
         const { std::cell::RefCell::new(None) };
     /// The store half, keyed by the INDEX node rather than by the receiver:
     /// `a[i] = v` has no receiver node — [`store_index`] synthesizes one, and a
@@ -325,11 +344,11 @@ impl Drop for Memo {
     }
 }
 
-/// Whether a compile-scope [`Memo`] is open. The facts walk expands a
-/// projection store only then (round fifty-seven): inside a compile the
-/// lowering walks the same leaked nodes and reads the same plan rows; the LSP
-/// analyzes per keystroke with no memo, and expanding there would leak one
-/// tree per keystroke per store site for rows nothing will ever emit.
+/// Whether a compile-scope [`Memo`] is open. A projection store is expanded
+/// only then (round fifty-seven): inside a compile the lowering walks the same
+/// leaked nodes and reads the same plan rows; the LSP analyzes per keystroke
+/// with no memo, and expanding there would leak one tree per keystroke per
+/// store site for rows nothing will ever emit.
 pub fn memo_open() -> bool {
     STORES.with(|m| m.borrow().is_some())
 }
@@ -337,7 +356,7 @@ pub fn memo_open() -> bool {
 /// The shared expansion for `key`, or `build`'s, leaked so its addresses outlive
 /// every consumer.
 fn memo(
-    key: (usize, String, String),
+    key: Key,
     recv: &Expr,
     args: &[Expr],
     build: impl FnOnce() -> Result<Projection, String>,
@@ -372,7 +391,7 @@ fn memo(
 /// `None` is [`site`]'s `None`: the seeded row, whose store the caller's own
 /// element path writes. `Some` is a user container, whose store becomes the
 /// projection's prologue and the move-out/mutate/move-back group
-/// [`store_stmts`] builds.
+/// [`crate::parser::store_stmts`] builds.
 ///
 /// One function because it was two, byte for byte, in `lib.rs` and
 /// `direct.rs` — the shape RFC-0101 §1.1 counts, down to the refusal's wording.
@@ -402,7 +421,7 @@ pub fn store_index(
     else {
         return Ok(None);
     };
-    let Some(store) = store_stmts(&p.place, value, line) else {
+    let Some(store) = crate::parser::store_stmts(&p.place, value, line) else {
         return Err(format!(
             "line {line}: `{name}[..] = v` goes through an `atSet` projection whose              result has no address — a call result or a temporary. A projection              returns a place: a binding, a field of one, or an element of one"
         ));
@@ -422,11 +441,12 @@ pub fn store_index(
 }
 
 /// The shared expansion of a store site, for a reader that has the statement
-/// but not the receiver's TYPE — which is the lowering.
+/// but not the receiver's TYPE — the lowering, and `movecheck`'s body descent.
 ///
-/// [`store_index`] needs `aty` to find the `place atSet` at all; the lowering
-/// stands at a `Stmt::IndexSet` whose receiver is a NAME and has no scope of
-/// binding types to resolve it in. So the anchor is the index node — a node of
+/// [`store_index`] needs `aty` to find the `place atSet` at all, and neither
+/// reader has one: each stands at a `Stmt::IndexSet` whose receiver is a NAME,
+/// with no scope of binding types to resolve it in. The checker has the type
+/// and expands as it records, so the anchor is the index node — a node of
 /// the program, alive for the whole compile — and the verification is the whole
 /// site: the same receiver name, the same index, the same value. Address reuse
 /// answering from a dead key is the failure [`memo`] guards against, and this
@@ -541,6 +561,7 @@ fn substituted(
                 ty: None,
                 value: a.clone(),
                 line,
+                col: 0,
             });
             map.insert(p.name.clone(), Expr::Var { name: tmp, line });
         }
@@ -566,7 +587,7 @@ pub struct OptionalProjection {
 /// result is an `Option<T>`, where the plain kind names the place's type
 /// bare. The checker enforces the body shape this classification implies.
 pub fn is_optional(f: &Function) -> bool {
-    matches!(f.ret, crate::ast::Type::Option(_))
+    crate::types::option_payload(&f.ret).is_some()
 }
 
 /// [`inline`] for an optional projection: split the body into its four
@@ -638,99 +659,24 @@ pub fn is_miss_return(s: &Stmt) -> bool {
         )
 }
 
-/// What a store through a projected place becomes (RFC-0091 M3).
+/// The node the STORE of a [`store_index`] expansion stands on — RFC-0125 §3
+/// M3, the store slice.
 ///
-/// 7a refused this by name: `a[i] = v` accepted a projection only where the
-/// yielded place was the binding's own element, because writing anywhere else
-/// "needs an address-of no backend has". **That reading was wrong, and the
-/// mechanism was already in the repo.** RFC-0082 M1 met the same problem for
-/// `r.a[i] = v` — a container that is not a slot — and answered it without an
-/// address-of: move the container out into a temp, mutate the temp, move it
-/// back. [`crate::parser::place_receiver`] is that desugar, it is pure AST, and
-/// it already handles the three shapes a place can take.
+/// The expansion is a prologue, the move-outs, the store, and the write-backs
+/// `place_receiver` adds after it. The prologue and the move-outs are `let`
+/// bindings; the store is the first statement that writes a place, and the
+/// write-backs after it target the view temporaries the prologue bound, which
+/// are borrows and release nothing.
 ///
-/// So a store through a user container is the same three statements the
-/// language emits for `r.a[i] = v`, wrapped around the store the projection
-/// resolved to. No engine gains an addressing mode.
-///
-/// The move-out is O(1) for a growable container — a header copy, sharing the
-/// buffer — and a whole-value copy for one held inline, which is what
-/// `a[i].f = v` has always cost.
-///
-/// `None` means the projection yields something no store can reach: a call
-/// result, a literal, a temporary. The caller keeps its own refusal.
-pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
-    match place {
-        // The whole receiver: `yield self` and nothing else.
-        Expr::Var { name, .. } => Some(vec![Stmt::Assign {
-            name: name.clone(),
-            value: value.clone(),
-            line,
-        }]),
-        // A field of a place: `return self.count`.
-        Expr::Field { expr, field, .. } => {
-            let (recv, mut out, moves, post) = crate::parser::place_receiver(expr, line)?;
-            let value = if moves.is_empty() {
-                value.clone()
-            } else {
-                crate::parser::hoist_operand(
-                    value.clone(),
-                    format!("{recv}.{field}=val"),
-                    &mut out,
-                    line,
-                )
-            };
-            out.extend(moves);
-            out.push(Stmt::SetField {
-                name: recv,
-                field: field.clone(),
-                value,
-                line,
-            });
-            out.extend(post);
-            Some(out)
-        }
-        // An element of a place: `return self.data[j]`, and the seeded row's
-        // `yield @slot(self, i)`.
-        Expr::Call { name, args, .. } if (name == AT || name == ELEM) && args.len() == 2 => {
-            let (recv, mut out, moves, post) = crate::parser::place_receiver(&args[0], line)?;
-            // With a move-out in play the index and the value run before it, in
-            // source order: nothing may read the place while it is out.
-            let (index, value) = if moves.is_empty() {
-                (args[1].clone(), value.clone())
-            } else {
-                // `#`, not `[]`: the round-fifty rename, mirrored — a name
-                // spelled `{recv}[]idx` reads as DERIVED from the `{recv}[]`
-                // container temp under `mentions_place`, which vetoed the
-                // inner store's displaced-element row and left every
-                // overwritten user-container element with no owner
-                // (exit-residue round fifty-seven, std/slots).
-                let i = crate::parser::hoist_operand(
-                    args[1].clone(),
-                    format!("{recv}#idx"),
-                    &mut out,
-                    line,
-                );
-                let v = crate::parser::hoist_operand(
-                    value.clone(),
-                    format!("{recv}#val"),
-                    &mut out,
-                    line,
-                );
-                (i, v)
-            };
-            out.extend(moves);
-            out.push(Stmt::IndexSet {
-                name: recv,
-                index,
-                value,
-                line,
-            });
-            out.extend(post);
-            Some(out)
-        }
-        _ => None,
-    }
+/// An emitter walking the expansion asks the core about THIS node, and the
+/// core judged the source statement, so the emitter points one at the other.
+pub fn store_node(blk: &Block) -> Option<&Stmt> {
+    blk.stmts.iter().find(|s| {
+        matches!(
+            s,
+            Stmt::Assign { .. } | Stmt::SetField { .. } | Stmt::IndexSet { .. }
+        )
+    })
 }
 
 /// What `for x in xs` becomes when `xs` is a user container (RFC-0091 M3).
@@ -884,6 +830,7 @@ fn iterate_loop_build(
             ty: None,
             value: iter.clone(),
             line,
+            col: 0,
         });
         var_of(RECV)
     };
@@ -892,11 +839,13 @@ fn iterate_loop_build(
         mutable: false,
         ty: None,
         value: Expr::Call {
+            type_args: Vec::new(),
             name: size_fn.to_string(),
             args: vec![recv.clone()],
             line,
         },
         line,
+        col: 0,
     });
     out.push(Stmt::Let {
         name: IDX.to_string(),
@@ -904,6 +853,7 @@ fn iterate_loop_build(
         ty: None,
         value: Expr::Int(-1),
         line,
+        col: 0,
     });
 
     let mut inner = vec![Stmt::Assign {
@@ -919,6 +869,7 @@ fn iterate_loop_build(
         ty: None,
         value: p.place,
         line,
+        col: 0,
     });
     inner.extend(body.stmts.iter().cloned());
     out.push(Stmt::While {
@@ -971,8 +922,8 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
                 // A pattern binder is a binding of the body too (RFC-0121):
                 // leaving it un-renamed while `subst_block` rewrites its uses
                 // is how an arm came to yield a name nothing bound.
-                for n in pattern_binder_names(pattern) {
-                    out.insert(n.clone(), format!("@b{tag}.{n}"));
+                for n in pattern.binders() {
+                    out.insert(n.name.clone(), format!("@b{tag}.{n}"));
                 }
                 collect_bindings(then_block, tag, out);
                 if let Some(e) = else_block {
@@ -999,40 +950,12 @@ fn collect_bindings(b: &mut Block, tag: usize, out: &mut HashMap<String, String>
         collect_lambda(e, tag, out);
         if let Expr::Match { arms, .. } = e {
             for arm in arms {
-                for n in pattern_binder_names(&arm.pattern) {
-                    out.insert(n.clone(), format!("@b{tag}.{n}"));
+                for n in arm.pattern.binders() {
+                    out.insert(n.name.clone(), format!("@b{tag}.{n}"));
                 }
             }
         }
     });
-}
-
-/// The names a pattern binds, by reference — the rename walk's view.
-fn pattern_binder_names(p: &crate::ast::Pattern) -> Vec<&String> {
-    use crate::ast::Pattern;
-    match p {
-        Pattern::Some(b)
-        | Pattern::Ok(b)
-        | Pattern::Err(b)
-        | Pattern::Success(b)
-        | Pattern::Failure(b) => vec![b],
-        Pattern::Variant(_, binds) => binds.iter().collect(),
-        Pattern::None | Pattern::Other => Vec::new(),
-    }
-}
-
-/// The same names, mutably — what [`rename_bindings`] rewrites.
-fn pattern_binder_names_mut(p: &mut crate::ast::Pattern) -> Vec<&mut String> {
-    use crate::ast::Pattern;
-    match p {
-        Pattern::Some(b)
-        | Pattern::Ok(b)
-        | Pattern::Err(b)
-        | Pattern::Success(b)
-        | Pattern::Failure(b) => vec![b],
-        Pattern::Variant(_, binds) => binds.iter_mut().collect(),
-        Pattern::None | Pattern::Other => Vec::new(),
-    }
 }
 
 fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
@@ -1040,7 +963,7 @@ fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
         return;
     };
     for p in params.iter() {
-        out.insert(p.clone(), format!("@b{tag}.{p}"));
+        out.insert(p.name.clone(), format!("@b{tag}.{p}"));
     }
     match body {
         LambdaBody::Expr(inner) => collect_lambda(inner, tag, out),
@@ -1051,80 +974,75 @@ fn collect_lambda(e: &mut Expr, tag: usize, out: &mut HashMap<String, String>) {
 /// Rewrite the *declaration* side of each binding through `map` — a lambda's
 /// parameters are declarations too (see [`collect_bindings`]); their USES go
 /// through the same map in [`subst_block`], whose walk reaches the same bodies.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6. It used to
+/// be two walks — a statement recursion that never entered an expression, and
+/// [`walk_block`] for the lambda parameters and the arm binders — and the
+/// statement one never reached a lambda's BLOCK body, whose `let`s
+/// [`collect_bindings`] puts in the map and [`subst_block`] rewrites the uses
+/// of. One walk reaches every declaration site the map can name.
 fn rename_bindings(b: &mut Block, map: &HashMap<String, String>) {
-    for s in &mut b.stmts {
-        match s {
-            Stmt::Let { name, .. } => {
-                if let Some(n) = map.get(name) {
-                    *name = n.clone();
-                }
+    crate::body_scope_descent!(RenameVisit, ren_block, ren_stmt, ren_expr, mut);
+
+    /// The one line this reader writes: a declared name, through the map. A
+    /// name the map does not hold is somebody else's — module state — and is
+    /// left alone.
+    struct Rename<'a>(&'a HashMap<String, String>);
+
+    impl Rename<'_> {
+        fn put(&self, n: &mut String) {
+            if let Some(r) = self.0.get(n.as_str()) {
+                *n = r.clone();
             }
-            // A statement that NAMES a binding follows the binding's rename
-            // (RFC-0121 — the first projection bodies that mutate a local).
-            // A name not in the map is somebody else's (module state) and is
-            // left alone.
-            Stmt::Assign { name, .. }
-            | Stmt::IndexSet { name, .. }
-            | Stmt::SetField { name, .. }
-            | Stmt::Drop { name, .. } => {
-                if let Some(n) = map.get(name) {
-                    *name = n.clone();
-                }
-            }
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                rename_bindings(then_block, map);
-                if let Some(e) = else_block {
-                    rename_bindings(e, map);
-                }
-            }
-            Stmt::IfLet {
-                pattern,
-                then_block,
-                else_block,
-                ..
-            } => {
-                for n in pattern_binder_names_mut(pattern) {
-                    if let Some(r) = map.get(n.as_str()) {
-                        *n = r.clone();
-                    }
-                }
-                rename_bindings(then_block, map);
-                if let Some(e) = else_block {
-                    rename_bindings(e, map);
-                }
-            }
-            Stmt::While { body, .. } | Stmt::Region { body, .. } => rename_bindings(body, map),
-            Stmt::ForIn { var, body, .. } => {
-                if let Some(n) = map.get(var) {
-                    *var = n.clone();
-                }
-                rename_bindings(body, map);
-            }
-            _ => {}
         }
     }
-    walk_block(b, &mut |e: &mut Expr| {
-        if let Expr::Match { arms, .. } = e {
-            for arm in arms.iter_mut() {
-                for n in pattern_binder_names_mut(&mut arm.pattern) {
-                    if let Some(r) = map.get(n.as_str()) {
-                        *n = r.clone();
+
+    impl RenameVisit for Rename<'_> {
+        // The map is the whole scope: `collect_bindings` tagged every name in
+        // this body before the rename began.
+        const SCOPED: bool = false;
+
+        fn stmt(&mut self, s: &mut Stmt, _: &std::collections::HashSet<String>) {
+            match s {
+                // A statement that NAMES a binding follows the binding's rename
+                // (RFC-0121 — the first projection bodies that mutate a local).
+                Stmt::Let { name, .. }
+                | Stmt::Assign { name, .. }
+                | Stmt::IndexSet { name, .. }
+                | Stmt::SetField { name, .. }
+                | Stmt::Drop { name, .. } => self.put(name),
+                Stmt::IfLet { pattern, .. } => {
+                    for n in pattern.binders_mut() {
+                        self.put(&mut n.name);
                     }
                 }
+                Stmt::ForIn { var, .. } => self.put(var),
+                _ => {}
             }
         }
-        if let Expr::Lambda { params, .. } = e {
-            for p in params.iter_mut() {
-                if let Some(n) = map.get(p) {
-                    *p = n.clone();
+
+        fn expr(&mut self, e: &mut Expr, _: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Lambda { params, .. } = e {
+                for p in params.iter_mut() {
+                    self.put(&mut p.name);
                 }
             }
+            true
         }
-    });
+
+        fn arm_pattern(
+            &mut self,
+            p: &mut crate::ast::Pattern,
+            _: usize,
+            _: &std::collections::HashSet<String>,
+        ) {
+            for n in p.binders_mut() {
+                self.put(&mut n.name);
+            }
+        }
+    }
+
+    ren_block(b, &mut std::collections::HashSet::new(), &mut Rename(map));
 }
 
 /// How many times `name` is read in `b`.
@@ -1217,131 +1135,30 @@ fn subst_block(b: &mut Block, map: &HashMap<String, Expr>) {
 }
 
 /// Apply `f` to every expression node in `b`, innermost-last: `f` sees a node
-/// after its children, so a substituted expression is never re-walked.
+/// after its children, so a substituted expression is never re-walked. That is
+/// `body_scope_descent`'s `after_expr` hook, and the walk itself is
+/// `ast::body_scope_descent!` since RFC-0125 §3 M6 — this file wrote out the
+/// same thirty-five arms until then.
 ///
 /// `pub(crate)` since census U5: the loader stamps every `panic` with its source
-/// site and needs the same complete walk this one already is.
-pub(crate) fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
-    for s in &mut b.stmts {
-        walk_stmt(s, f);
-    }
-}
+/// site and needs the same complete walk this one already is. `pub` since
+/// RFC-0125 M5: `vyrn test` rewrites a body's test-only builtins
+/// before the direct backend sees them, and needs the same walk again.
+pub fn walk_block(b: &mut Block, f: &mut impl FnMut(&mut Expr)) {
+    crate::body_scope_descent!(ExprVisit, expr_block, expr_stmt, expr_expr, mut);
 
-fn walk_stmt(s: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
-    match s {
-        Stmt::Let { value, .. } | Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
-            walk_expr(value, f)
-        }
-        Stmt::IndexSet { index, value, .. } => {
-            walk_expr(index, f);
-            walk_expr(value, f);
-        }
-        Stmt::Return { value: Some(e), .. } => walk_expr(e, f),
-        Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            walk_expr(cond, f);
-            walk_block(then_block, f);
-            if let Some(e) = else_block {
-                walk_block(e, f);
-            }
-        }
-        Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            walk_expr(scrutinee, f);
-            walk_block(then_block, f);
-            if let Some(e) = else_block {
-                walk_block(e, f);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            walk_expr(cond, f);
-            walk_block(body, f);
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            walk_expr(iter, f);
-            walk_block(body, f);
-        }
-        Stmt::Drop { .. } => {}
-        Stmt::Expr(e) => walk_expr(e, f),
-        Stmt::Region { body, .. } => walk_block(body, f),
-    }
-}
+    /// The one line this walk's readers write: an expression, after its
+    /// children. None of them looks at a name in scope.
+    struct Innermost<'f, F: FnMut(&mut Expr)>(&'f mut F);
 
-fn walk_expr(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
-    match e {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            walk_expr(expr, f)
+    impl<F: FnMut(&mut Expr)> ExprVisit for Innermost<'_, F> {
+        const SCOPED: bool = false;
+        fn after_expr(&mut self, e: &mut Expr, _: &std::collections::HashSet<String>) {
+            (self.0)(e)
         }
-        Expr::Consume { place, .. } => walk_expr(place, f),
-        Expr::Binary { lhs, rhs, .. } => {
-            walk_expr(lhs, f);
-            walk_expr(rhs, f);
-        }
-        Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
-            for a in args {
-                walk_expr(a, f);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            walk_expr(scrutinee, f);
-            for a in arms {
-                match &mut a.body {
-                    ArmBody::Expr(e) => walk_expr(e, f),
-                    ArmBody::Block(b) => walk_block(b, f),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            walk_expr(cond, f);
-            walk_expr(then_branch, f);
-            if let Some(e) = else_branch {
-                walk_expr(e, f);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                walk_expr(v, f);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                walk_expr(v, f);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                walk_expr(k, f);
-                walk_expr(v, f);
-            }
-        }
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e) => walk_expr(e, f),
-            LambdaBody::Block(b) => walk_block(b, f),
-        },
     }
-    f(e);
+
+    expr_block(b, &mut std::collections::HashSet::new(), &mut Innermost(f));
 }
 
 /// Apply `f` to every expression a whole program can hold, innermost-last.
@@ -1380,7 +1197,7 @@ pub(crate) fn walk_program(program: &mut Program, f: &mut impl FnMut(&mut Expr))
 
 /// [`walk_program`] over a bare expression — a global's initializer or a
 /// refinement predicate, neither of which is a block.
-pub(crate) fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
+pub fn walk_bare(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
     let mut b = Block {
         stmts: vec![Stmt::Expr(std::mem::replace(e, Expr::Int(0)))],
     };
@@ -1447,6 +1264,110 @@ pub fn all(p: &Program) -> impl Iterator<Item = (&ImplBlock, &Function)> {
     p.impls
         .iter()
         .flat_map(|i| i.places.iter().map(move |f| (i, f)))
+}
+
+// ---------------------------------------------------------------------------
+// Which call names read a place, and the path one spells.
+//
+// A user projection's name is an element read wherever it appears, exactly as
+// `@at` is. That is a fact about the PROJECTIONS a program declares, so it is
+// stated here; `movecheck.rs` held it while the move check was its only reader
+// (RFC-0125 §3 M3, the algebra slice), and the core, the direct backend and the
+// checker all ask it now.
+// ---------------------------------------------------------------------------
+thread_local! {
+    /// The user projection NAMES of the program under check (RFC-0120).
+    ///
+    /// This pass keys every element-read rule on the spelling `@at`, because
+    /// `@at` is reserved and therefore IS an element read wherever it appears.
+    /// A named projection is the same read under a user-chosen name, and the
+    /// name alone cannot say so — so [`run`] records the program's projection
+    /// names here and [`named_projection`] answers for the free functions
+    /// ([`element_path`]) that have no `&self` to carry a set through. A name
+    /// answers true whether or not the receiver at a given site is the
+    /// projection's own type; that over-approximation only widens a borrow
+    /// verdict, never narrows one, which is the conservative direction.
+    static PLACE_NAMES: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// Whether `name` is a user projection's name — see [`PLACE_NAMES`].
+pub(crate) fn named_projection(name: &str) -> bool {
+    PLACE_NAMES.with(|s| s.borrow().contains(name))
+}
+
+/// `@at`, or a user projection's own name: an element read either way.
+pub(crate) fn projection_call(name: &str) -> bool {
+    name == AT || named_projection(name)
+}
+
+/// The place `e` reads, as `(root name, whole path)`.
+///
+/// `s` is `("s", "s")` and `r.a.b` is `("r", "r.a.b")` — the root is what a move
+/// takes, the path is what the diagnostic quotes. Anything else (a call, a
+/// The place an ELEMENT read looks into: `xs[i]` reaches this pass as `@at(xs, i)`,
+/// which is a call, so [`crate::ast::place_path`] answers `None` for it.
+///
+/// M0 found that the RFC was wrong to say an element read is covered "by the
+/// same three lines as a field read". It is true of `borrow_from`, which reads
+/// `@at(..)` itself, and false of `movecheck`'s `store` and `returned_borrow`,
+/// both of which bailed at `place_path` before
+/// deciding anything. **M1 took the decision M0 left open and widened both**, so
+/// `out.push(xs[i])` and `return items[i]` are refused like the field they are.
+/// The instrument still counts them apart, under `elem-store` and `elem-return`.
+pub fn element_path(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Call { name, args, .. } if projection_call(name) => {
+            let a = args.first()?;
+            let (root, path) = crate::ast::place_path(a).or_else(|| element_path(a))?;
+            // A named projection quotes as the call the reader wrote; `@at`
+            // keeps the index spelling `xs[i]` it has always had.
+            if name == AT {
+                Some((root, format!("{path}[{}]", index_text(args.get(1)))))
+            } else {
+                Some((root, format!("{path}.{name}(..)")))
+            }
+        }
+        // A field OF an element: `fs[0].key`. `ast::place_path` walks a `Field` down
+        // to a `Var` and answers `None` as soon as it meets the `@at(..)` call, so
+        // without this arm the escape hatch is one dot wide — `let f = fs[0]`
+        // then `return f.key` is refused and `return fs[0].key` is not.
+        Expr::Field { expr, field, .. } => {
+            let (root, path) = element_path(expr)?;
+            Some((root, format!("{path}.{field}")))
+        }
+        _ => None,
+    }
+}
+
+/// An index as the reader wrote it, for the quoted path in a diagnostic.
+///
+/// A whole name and a whole integer are spelled back, so `xs[i]` and `fs[0]`
+/// print as themselves and the `.copy()` on the menu is text `vyrn fix` can find
+/// in the line. Anything else prints `..`: the message still says which read is
+/// the problem, and `vyrn fix` then refuses rather than guessing where to put the
+/// call — which is the behaviour it already has for a path it cannot locate.
+fn index_text(e: Option<&Expr>) -> String {
+    match e {
+        Some(Expr::Var { name, .. }) => name.clone(),
+        Some(Expr::Int(n)) => n.to_string(),
+        _ => "..".to_string(),
+    }
+}
+
+/// Record which call names read a place in `program` (RFC-0120), for
+/// [`element_path`] and for `movecheck::views`.
+///
+/// Rebuilt per analysis so a long-lived process — the language server — always
+/// answers for the program in hand.
+pub fn note_place_names(program: &Program) {
+    PLACE_NAMES.with(|s| {
+        *s.borrow_mut() = program
+            .impls
+            .iter()
+            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
+            .collect();
+    });
 }
 
 #[cfg(test)]
@@ -1635,6 +1556,7 @@ mod tests {
             nth,
             "x",
             &Expr::Call {
+                type_args: Vec::new(),
                 name: "makeRing".into(),
                 args: Vec::new(),
                 line: 9,
@@ -1732,8 +1654,11 @@ mod tests {
             "the caller's argument binds a temporary, not a capture"
         );
         let mut seen_lambda = false;
-        for s in &mut pr.prologue {
-            walk_stmt(s, &mut |e: &mut Expr| match e {
+        let mut prologue = Block {
+            stmts: std::mem::take(&mut pr.prologue),
+        };
+        {
+            walk_block(&mut prologue, &mut |e: &mut Expr| match e {
                 Expr::Lambda { params, body, .. } => {
                     seen_lambda = true;
                     assert_eq!(params.len(), 1);
@@ -1751,6 +1676,7 @@ mod tests {
                 _ => {}
             });
         }
+        pr.prologue = prologue.stmts;
         assert!(seen_lambda, "the lambda should have been walked");
     }
 }

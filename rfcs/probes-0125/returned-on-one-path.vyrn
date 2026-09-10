@@ -1,0 +1,23 @@
+// RFC-0125 M2 probe: a String built by a call, returned on one path and
+// left on the floor on the other. The kernel says the other path leaks.
+let turns = 200000
+
+fn pick(b: Bool, i: Int64) -> String {
+    let stray = "prefix-" + i.toString() + "-suffix-with-some-length-to-see"
+    if b {
+        return stray
+    }
+    return "other"
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        let s = pick(false, i)
+        total = total + s.byteLength
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

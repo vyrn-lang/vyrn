@@ -1,16 +1,26 @@
 //! RFC-0101 M1: the lowered form, checked against the copies it will replace.
 //!
-//! Three engines derive the static type of every expression, and the parity
-//! suite proves only that the programs they emit behave the same. It cannot see
-//! a type. So "the two copies agree" has been an assumption for as long as there
-//! have been two copies, and this file is the first thing that turns it into a
-//! gate — before M3 deletes either one.
+//! Three engines derived the static type of every expression, and the parity
+//! suite proved only that the programs they emit behave the same. It could not
+//! see a type. So "the copies agree" was an assumption for as long as there were
+//! copies, and this file is the thing that turned it into a gate — before M3
+//! deleted them.
 //!
 //! RFC-0101 M1 asked for one assertion, at every expression both compiled
-//! backends type:
+//! backends typed:
 //!
 //!   `peek`'s answer  ==  the native backend's threaded `(String, Type)` answer
 //!                    ==  the type `vyrn-lower` recorded from the checker.
+//!
+//! **One engine is left, and the gate grew rather than shrank.** RFC-0125 §3 M4's
+//! fourth slice deleted the text-IR route, so the `Site::Native` column and the
+//! middle line above went with it. The corpus did the opposite: the native
+//! backend REFUSED 35 of the 208 examples, and a refusal was a `continue` here,
+//! so those programs were never compared at all. 138 examples became 173, and
+//! 1,026,227 backend answers are compared where 570,960 were. The one difference
+//! that surfaced is recorded on [`InstRule`]: RFC-0114 §25's leak-check teardown
+//! was the text-IR route's, and `vyrn-lower` was still queueing the releases it
+//! would have emitted.
 //!
 //! **Measured, that is false, and finding it false is what M1 was for.** Over
 //! 138 corpus programs and 570,960 typed expression answers, 22,283 differ from
@@ -38,8 +48,8 @@
 //! half removes rather than reconciles.
 //!
 //! It runs in-process rather than through `vyrn`, because the thing being
-//! compared never reaches a process boundary: both backends' answers come out of
-//! `vyrn_codegen::observe`, a sink that records what each emitter was about to
+//! compared never reaches a process boundary: the backend's answers come out of
+//! `vyrn_codegen::observe`, a sink that records what the emitter was about to
 //! return anyway.
 //!
 //! **M2c halved the residue this gate reports.** 9,505 of the answers above were
@@ -91,12 +101,14 @@
 //! when a block RUNS.
 //!
 //! **M2 added a second comparison over the same run: the instance LISTS.** Each
-//! backend runs its own monomorphization worklist and nothing outside a backend
+//! backend ran its own monomorphization worklist and nothing outside a backend
 //! could see either, so "the lowering builds what the backends build" was a
 //! claim with no gate. It is one now — set equality on `(callee, type
 //! arguments)`, resolved through every alias so one instance has one spelling —
 //! and the differences it leaves are named on [`InstRule`], the way [`Rule`]
 //! names the type differences. What M2 measured there is in RFC-0101 §3 M2.
+
+use vyrn_frontend::loader::DiskResolver;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -105,16 +117,6 @@ use vyrn_codegen::observe::{self, Site};
 use vyrn_frontend::ast::{Expr, Program, Type, TypeDecl};
 use vyrn_frontend::types::{decl_map, mentions_param, resolve};
 use vyrn_lower::Node;
-
-/// A filesystem resolver, which is all an example needs: the corpus imports
-/// `std/` and its own siblings, and nothing here fetches.
-struct Fs;
-
-impl vyrn_frontend::loader::ModuleResolver for Fs {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-}
 
 /// Not `canonicalize`: on Windows that returns a `\\?\` verbatim path, and a
 /// verbatim std root resolves to a spec the loader cannot read — which it treats
@@ -135,7 +137,7 @@ fn load(path: &std::path::Path) -> Result<Program, String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    vyrn_frontend::load(&src, &root, &opts, &Fs).map_err(|d| {
+    vyrn_frontend::load(&src, &root, &opts, &DiskResolver).map_err(|d| {
         d.first()
             .map(|d| d.render())
             .unwrap_or_else(|| "load failed".into())
@@ -342,7 +344,12 @@ struct Tally {
     /// of a release receiver, of a dispatched call the emitter builds at an emit
     /// site, and of the operands built beside them), so it has a FLOOR as well
     /// as a ceiling: 299 while the lambda and predicate clones were live, 109
-    /// once both were measured, 110 once both were deleted.
+    /// once both were measured, 110 once both were deleted, and 72 once `peek`
+    /// stopped deriving a type at all (RFC-0125 §3 M5, the ninth slice). The
+    /// last move is the class SHRINKING to what §2.3 describes rather than the
+    /// class changing: `peek` reads the checker's record for every node the
+    /// program holds now, so the only questions left are about AST the backend
+    /// built itself, which is the definition §2.3 gives.
     peek_off: usize,
     /// Instantiations one backend emitted that the lowering's worklist does not
     /// have. This is M2's gate and it is zero.
@@ -372,10 +379,21 @@ struct Tally {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum InstRule {
     /// A `gen fn` (RFC-0021) runs in the compiler's interpreter at generation
-    /// time and is never called in a shipped binary, so neither backend emits a
+    /// time and is never called in a shipped binary, so the emitter emits no
     /// body for it. The lowering has one, because the program does.
     GenFn,
 }
+
+// `<teardown>` was a ROOT rather than a rule, and it is gone rather than
+// explained — RFC-0125 §3 M4's fourth slice. RFC-0114 §25's leak check dropped
+// every module-state binding after `main`, and `vyrn_lower` queued the generic
+// releases that teardown would reach so that "the lowering is the worklist"
+// covered it. The teardown was the text-IR route's alone; with the route gone
+// the root queued four bodies (`Owned__Slots__release<{ pos: Int64, src: Int64
+// }>`, `std/stream`'s module-state slab, in `membench`, `streamlazy`,
+// `streamops` and `streamunfold`) that no engine can emit. It surfaced here the
+// moment the corpus grew, which is the failure that file prefers, and the root
+// comes back with the teardown rather than before it.
 
 // `InstRule::ImplicitDispatch` was here and is RETIRED — RFC-0101 M5. It named
 // the flattened protocol-impl method the SOURCE never calls: the `release` a
@@ -384,155 +402,21 @@ enum InstRule {
 // it stayed 24, because `own::release_kind` threw the receiver type away and a
 // name alone does not say which instance a generic release reaches. The step
 // carries the type now (`DropKind::Release(name, receiver)`) and `vyrn_lower`
-// solves the instance from it, so the class is empty and the rule goes rather
+// solved the instance from it, so the class was empty and the rule went rather
 // than firing zero times — §3 M2's own precedent, applied to itself for the
 // second time.
-
-/// Why an engine's boundary ladder took a rung the plan does not place —
-/// RFC-0101 §1.5's shadow.
-///
-/// Same discipline as [`Rule`]: a difference that fits a rule is a fact this
-/// file records, and one that fits none fails the run. **Every rule here is
-/// about ORDER, or about a rung one ladder does not have** — which is what M6's
-/// second phase predicted from reading the two ladders against each other, and
-/// it is why the plan does not try to be both of them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum RungRule {
-    /// The textual ladder's resize rung is guarded by the TARGET being a sized
-    /// integer rather than by the pair differing, so `Int16 -> Int16` takes it
-    /// and emits nothing. A rung that does no work is not a decision about the
-    /// value; the plan places [`Rung::Identity`] there.
-    SizedTargetRung,
-    /// The direct ladder's numeric rung answers for EVERY integer pair, equal or
-    /// not — and it must, because it has to come before that ladder's shape
-    /// shortcut: `llt` prints `i8` for `Int8` and `UInt8` alike, so a shortcut
-    /// reached first would swallow the one pair whose bits genuinely move. This
-    /// is §1.5's order difference, and the reason is written at the rung.
-    NumericBeforeShape,
-    /// The direct ladder has no function-value rung at all: the structural
-    /// spelling and every named alias share the `{ i64, i64 }` shape, so its
-    /// shape shortcut answers first. The textual one re-tags explicitly.
-    FnByShape,
-    /// A type PARAMETER still spelled `T` on one side. The direct ladder
-    /// substitutes before its first rung (§1.5's first row) and the textual one
-    /// does not, so a pair like `String -> T` matches no guard there and falls
-    /// off the end.
-    ///
-    /// **It is a spelling, not a hole, and two programs say so.** A value can
-    /// only reach a `T` position if the checker solved `T` to its type: an
-    /// `Int64` flowing into a `T` the receiver fixed at a refined `Age` is
-    /// rejected — "type parameter `T` is both Age and Int64" — with a bare
-    /// generic and with an associated type alike. So `from` and `to` here are
-    /// one type under two spellings, the identity is right, and the validation
-    /// the textual ladder would appear to be skipping is one the checker has
-    /// already made unreachable. Both programs were written and both came back
-    /// green (RFC-0101 §3 M6's third phase).
-    ParamSpelling,
-}
-
-/// Which rule, if any, explains `took` where the plan places `planned`. `None`
-/// means the gate fails.
-///
-/// The pair is an argument because one rule is about the TYPES rather than the
-/// rungs: a `Refuse` the textual ladder walked past is a spelling when a type
-/// parameter is involved and a program that compiles on one target only when it
-/// is not.
-fn rung_rule(
-    site: Site,
-    from: &Type,
-    to: &Type,
-    planned: vyrn_codegen::Rung,
-    took: vyrn_codegen::Rung,
-) -> Option<RungRule> {
-    use vyrn_codegen::Rung as R;
-    match (site, planned, took) {
-        (Site::Native, R::Identity, R::Resize) => Some(RungRule::SizedTargetRung),
-        (Site::Wasm, R::Identity, R::Resize) => Some(RungRule::NumericBeforeShape),
-        (Site::Wasm, R::FnRetag, R::Identity) => Some(RungRule::FnByShape),
-        (Site::Native, R::Refuse, R::Identity) if mentions_param(from) || mentions_param(to) => {
-            Some(RungRule::ParamSpelling)
-        }
-        _ => None,
-    }
-}
-
-/// Why the interpreter's release sequence differs from the placement both
-/// compiled backends now read — RFC-0101 M4.
-///
-/// Two of the three rules retired with the compiled backends' derivations:
-/// `Terminated` was a block that had already returned, and `StreamCursor` was
-/// the one frame entry the placement has nothing for. Neither is reachable from
-/// this engine. What is left is the difference §1.4 recorded and §2.4 calls a
-/// DECLARED one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-enum RelRule {
-    /// The interpreter acts on 2 of `own`'s 7 kinds (§1.4): a `String` or an
-    /// array buffer is reclaimed by the host when the process ends, so it runs
-    /// no step for one. What it DOES run is the two that a program can observe —
-    /// a declared `release`, and the walk that reaches one.
-    HostReclaims,
-}
-
-/// Which rule, if any, explains the interpreter's release walk against the
-/// placement. `None` means the gate fails.
-///
-/// It is a SUBSEQUENCE test, which is the point: this engine may run fewer steps
-/// than the form places, for a reason it can name, and it may never run them in
-/// a different order. A reordering fits no rule and fails.
-fn rel_rule(
-    want: &[usize],
-    got: &[usize],
-    kind_of: &HashMap<usize, vyrn_frontend::own::DropKind>,
-) -> Option<RelRule> {
-    use vyrn_frontend::own::DropKind;
-    // Order first, and unconditionally: whatever the engine skips, what it does
-    // run is in the order the form placed it.
-    let mut w = want.iter();
-    if !got.iter().all(|g| w.any(|x| x == g)) {
-        return None;
-    }
-    let skipped: Vec<&DropKind> = want
-        .iter()
-        .filter(|b| !got.contains(b))
-        .filter_map(|b| kind_of.get(b))
-        .collect();
-    if skipped
-        .iter()
-        .all(|k| !matches!(k, DropKind::Release(..) | DropKind::Deep(_)))
-    {
-        return Some(RelRule::HostReclaims);
-    }
-    None
-}
-
-/// The placement, as a consumer reads it: every step the form put at one exit,
-/// keyed by the node that exit is AT.
-///
-/// This is the keying RFC-0101 M4's second phase chose, and the reason is this
-/// function: an engine standing at a `break` has the `Stmt::Break` in hand and
-/// nothing else, and a reader that had to re-derive `LoopCtx::drop_boundary` to
-/// find its steps would be the fourth copy of the thing being deleted.
-fn placement(
-    lowered: &vyrn_lower::Lowered,
-) -> (
-    HashMap<(vyrn_frontend::own::Exit, usize), Vec<usize>>,
-    HashMap<usize, vyrn_frontend::own::DropKind>,
-) {
-    let mut placed: HashMap<(vyrn_frontend::own::Exit, usize), Vec<usize>> = HashMap::new();
-    let mut kind_of: HashMap<usize, vyrn_frontend::own::DropKind> = HashMap::new();
-    for inst in &lowered.instances {
-        for rel in &inst.releases {
-            // A generic body has one AST and many instances, so the sequence at
-            // one exit is the same under every instantiation; it is held once.
-            let seq = placed.entry((rel.exit, rel.site)).or_default();
-            if !seq.contains(&rel.binding) {
-                seq.push(rel.binding);
-            }
-            kind_of.insert(rel.binding, rel.kind.clone());
-        }
-    }
-    (placed, kind_of)
-}
+//
+// The SOLVER that replaced it was deleted and is BACK (RFC-0125 §3 M3, the
+// hosts slice). `lower_with` reads the placed release rows to queue those
+// instances; the deletion measured that removing it moved no emitted byte and
+// concluded the worklist owed it nothing. The byte measurement was right and
+// the conclusion was not, and this file is why: it never called
+// `vyrn_lower::install`, so it had no placer, no placed release rows and no
+// instances to miss. Green here was not evidence. With the line in place the
+// backend monomorphizes 7 `Owned__Slots__release<T>` bodies of its own at
+// release sites the SOURCE never wrote, which is the note below, and RFC-0125
+// §2.3 puts that decision above the emitter. `vyrn-lower` already models the
+// teardown's generic declared release as an instantiation for the same reason.
 
 /// Which rule, if any, explains `a` against `b`. `None` means the gate fails.
 ///
@@ -575,14 +459,27 @@ fn deep(t: &Type, decls: &HashMap<String, TypeDecl>, depth: usize) -> Type {
     let t = resolve(t, decls);
     let d = |x: &Type| Box::new(deep(x, decls, depth + 1));
     match &t {
-        Type::Option(a) => Type::Option(d(a)),
         Type::Array(a) => Type::Array(d(a)),
         Type::Stream(a) => Type::Stream(d(a)),
         Type::Task(a) => Type::Task(d(a)),
         Type::ArrayN(a, n) => Type::ArrayN(d(a), *n),
         Type::SmallArray(a, n) => Type::SmallArray(d(a), *n),
-        Type::Result(a, b) => Type::Result(d(a), d(b)),
         Type::Map(a, b) => Type::Map(d(a), d(b)),
+        // Since RFC-0126 §8.11's M4b `resolve` answers `Enum` for the two
+        // built-in sums, so an alias whose payload is a name comes back with the
+        // name still in it unless the walk descends here.
+        Type::Enum(vs) => Type::Enum(
+            vs.iter()
+                .map(|v| vyrn_frontend::ast::EnumVariant {
+                    name: v.name.clone(),
+                    payload: v
+                        .payload
+                        .iter()
+                        .map(|p| deep(p, decls, depth + 1))
+                        .collect(),
+                })
+                .collect(),
+        ),
         Type::Fn(ps, r) => Type::Fn(ps.iter().map(|p| deep(p, decls, depth + 1)).collect(), d(r)),
         Type::App(n, args) => Type::App(
             n.clone(),
@@ -635,14 +532,22 @@ fn defaulted(a: &Type, b: &Type) -> bool {
             return true;
         }
         match (a, b) {
-            (Type::Option(x), Type::Option(y))
-            | (Type::Array(x), Type::Array(y))
+            (Type::Array(x), Type::Array(y))
             | (Type::Stream(x), Type::Stream(y))
             | (Type::Task(x), Type::Task(y)) => walk(x, y),
             (Type::ArrayN(x, _), Type::ArrayN(y, _))
             | (Type::SmallArray(x, _), Type::SmallArray(y, _)) => walk(x, y),
-            (Type::Result(x1, x2), Type::Result(y1, y2))
-            | (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),
+            (Type::Map(x1, x2), Type::Map(y1, y2)) => walk(x1, y1) && walk(x2, y2),
+            // The resolved form of every sum since RFC-0126 §8.11's M4b — an
+            // `Option` and a `Result` reach here as variant lists, and the
+            // defaulted half is a payload rather than a type argument.
+            (Type::Enum(v1), Type::Enum(v2)) if v1.len() == v2.len() => {
+                v1.iter().zip(v2).all(|(x, y)| {
+                    x.name == y.name
+                        && x.payload.len() == y.payload.len()
+                        && x.payload.iter().zip(&y.payload).all(|(p, q)| walk(p, q))
+                })
+            }
             (Type::App(n1, a1), Type::App(n2, a2)) if n1 == n2 && a1.len() == a2.len() => {
                 a1.iter().zip(a2).all(|(x, y)| walk(x, y))
             }
@@ -653,154 +558,6 @@ fn defaulted(a: &Type, b: &Type) -> bool {
         }
     }
     walk(a, b)
-}
-
-/// The third engine's half of M4's shadow, and it needs a different shape.
-///
-/// The interpreter's release walk is not a static one: it happens when the
-/// program RUNS, so reading it means running programs, and running the corpus
-/// in-process is a different test from this file's. Fixtures instead, each the
-/// smallest program that puts one exit kind to the walk: does it release the
-/// same bindings the lowering placed, in the same order, and is everything it
-/// skips a kind the host reclaims (§1.4 — the interpreter acts on 2 of `own`'s
-/// 7).
-///
-/// The last column of the table is the exit kind the fixture EXISTS for, and it
-/// is asserted to have actually been reached. A fixture whose shape stopped
-/// producing the walk it was written for would otherwise pass by comparing
-/// nothing, which is the failure mode a gate is for.
-#[test]
-fn the_interpreter_releases_what_the_lowering_placed_in_the_order_it_placed_it() {
-    use vyrn_frontend::own::Exit;
-    const OWNED: &str = "protocol Owned {\n    fn release(consume self)\n}\n\
-                         type Ring = {\n    label: String\n}\n\
-                         impl Owned for Ring {\n    fn release(consume self) {\n        \
-                         print(self.label)\n    }\n}\n\
-                         fn ring(l: String) -> Ring {\n    \
-                         return Ring { label: l.copy() }\n}\n\
-                         fn maybe() -> Option<Ring> {\n    return Some(ring(\"s\"))\n}\n\
-                         fn none() -> Option<Int64> {\n    return None\n}\n\n";
-    // The block exit's own fixtures keep every binding inside an `if`, and that
-    // is not decoration: a function body ends in `return`, which is an EARLY
-    // exit in all three engines, so `main`'s own block never runs a fall-through
-    // walk. (It is why the corpus gate names its `Terminated` exits.)
-    //
-    // A declared owner between two `String`s: the two buffers are host-reclaimed
-    // and the `Ring` is not, so the interpreter runs one of three placed steps.
-    let mixed = format!(
-        "{OWNED}fn main() -> Int64 {{\n    if true {{\n        let s = \"a\" + \"b\"\n        \
-         let r = ring(\"x\")\n        let t = \"c\" + \"d\"\n        \
-         print(s + t)\n    }}\n    return 0\n}}\n"
-    );
-    // Two owners, so the ORDER is what the fixture is about: newest first.
-    let two = format!(
-        "{OWNED}fn main() -> Int64 {{\n    if true {{\n        \
-         let a = ring(\"a\")\n        let b = ring(\"b\")\n        print(\"in\")\n    }}\n    \
-         return 0\n}}\n"
-    );
-    // A nested block, so "innermost frame first" is asserted too.
-    let nested = format!(
-        "{OWNED}fn main() -> Int64 {{\n    if true {{\n        \
-         let a = ring(\"a\")\n        if true {{\n            \
-         let b = ring(\"b\")\n            print(\"in\")\n        }}\n    }}\n    \
-         return 0\n}}\n"
-    );
-    // `return` out of two frames at once: the walk is one sequence across both,
-    // innermost first, and this engine produces it one frame at a time.
-    let ret = format!(
-        "{OWNED}fn f() -> Int64 {{\n    let outer = ring(\"o\")\n    if true {{\n        \
-         let inner = ring(\"i\")\n        return 1\n    }}\n    return 0\n}}\n\
-         fn main() -> Int64 {{\n    return f() - 1\n}}\n"
-    );
-    // `break` reaches the loop body's frames and stops there — the binding above
-    // the loop is not on the walk, which is the boundary index asserted.
-    let brk = format!(
-        "{OWNED}fn f() -> Int64 {{\n    let outer = ring(\"o\")\n    let mut i = 0\n    \
-         while i < 3 {{\n        let inLoop = ring(\"l\")\n        break\n    }}\n    \
-         return 0\n}}\n\
-         fn main() -> Int64 {{\n    return f()\n}}\n"
-    );
-    // `continue`, which runs the same frames once per turn.
-    let cont = format!(
-        "{OWNED}fn f() -> Int64 {{\n    let mut i = 0\n    while i < 2 {{\n        \
-         let inLoop = ring(\"l\")\n        i = i + 1\n        continue\n    }}\n    \
-         return 0\n}}\n\
-         fn main() -> Int64 {{\n    return f()\n}}\n"
-    );
-    // A propagating `?`, which is a function exit and pays what one pays. This
-    // is the walk RFC-0101 M4's step 0 found the interpreter was not running at
-    // all, and `examples/releaseacrosstry.vyrn` is its parity pin.
-    let tri = format!(
-        "{OWNED}fn f() -> Option<Int64> {{\n    let r = ring(\"t\")\n    \
-         let v = none()?\n    return Some(v)\n}}\n\
-         fn main() -> Int64 {{\n    let a = f()\n    return 0\n}}\n"
-    );
-    // The temporary a `match` owns, and the handover beside it: the first has a
-    // step because no arm took the scrutinee, the second has none because an arm
-    // did and the binding it flowed into is the one owner there is.
-    let scrut = format!(
-        "{OWNED}fn f() -> Int64 {{\n    let n = match maybe() {{\n        \
-         Some(r) => 1,\n        None => 0\n    }}\n    return n\n}}\n\
-         fn main() -> Int64 {{\n    return f() - 1\n}}\n"
-    );
-    let handover = format!(
-        "{OWNED}fn f() -> Int64 {{\n    if true {{\n        \
-         let kept = match maybe() {{\n            Some(r) => r,\n            \
-         None => ring(\"f\")\n        }}\n        print(\"held\")\n    }}\n    \
-         return 0\n}}\n\
-         fn main() -> Int64 {{\n    return f()\n}}\n"
-    );
-
-    for (what, src, reaches) in [
-        ("mixed", &mixed, Exit::Block),
-        ("two", &two, Exit::Block),
-        ("nested", &nested, Exit::Block),
-        ("return", &ret, Exit::Return),
-        ("break", &brk, Exit::Break),
-        ("continue", &cont, Exit::Continue),
-        ("try", &tri, Exit::Try),
-        ("scrutinee", &scrut, Exit::Scrutinee),
-        ("handover", &handover, Exit::Block),
-    ] {
-        let mut program = vyrn_frontend::check(src).expect("the fixture checks");
-        let diags = vyrn_frontend::check_and_synthesize(&mut program);
-        assert!(diags.is_empty(), "{what}: {diags:?}");
-
-        let lowered = vyrn_lower::lower(&program);
-        let (placed, kind_of) = placement(&lowered);
-        assert!(!placed.is_empty(), "{what}: the lowering placed nothing");
-
-        vyrn_frontend::own::trace::start();
-        let code = vyrn_frontend::interp::run(&program);
-        let exits = vyrn_frontend::own::trace::take();
-        assert_eq!(code, Ok(0), "{what}");
-        assert!(!exits.is_empty(), "{what}: the interpreter walked no exit");
-
-        let mut reached = false;
-        let mut checked = 0;
-        for e in &exits {
-            let want = placed.get(&(e.exit, e.at)).cloned().unwrap_or_default();
-            reached |= e.exit == reaches && !e.bindings.is_empty();
-            checked += 1;
-            if want == e.bindings {
-                continue;
-            }
-            assert_eq!(
-                rel_rule(&want, &e.bindings, &kind_of),
-                Some(RelRule::HostReclaims),
-                "{what}: the interpreter released {:?} at a {:?} exit, where the \
-                 lowering placed {want:?}, and no rule explains it",
-                e.bindings,
-                e.exit
-            );
-        }
-        assert!(checked > 0, "{what}: nothing was compared");
-        assert!(
-            reached,
-            "{what}: the fixture is written for {reaches:?} and no release ran at \
-             one — it would be asserting about a walk that never happened"
-        );
-    }
 }
 
 /// The corpus gate. Green means: wherever a compiled backend derived the type of
@@ -820,6 +577,15 @@ fn every_backend_type_equals_the_recorded_one() {
 }
 
 fn gate() {
+    // The corpus has generator examples in it, and generation is the driver's
+    // engine rather than the frontend's (RFC-0125 §3 M5). Without this every one
+    // of them fails to link and the gate silently measures a smaller corpus.
+    vyrn_genwasm::install();
+    // The lowering this gate compares a backend against has to be IN this
+    // process. Without it the placer never runs, `core::BODIES` stays empty and
+    // the backend answers every question here from the AST alone: the gate then
+    // measures one compiler against itself.
+    vyrn_lower::install();
     let mut t = Tally::default();
     // The residue, by the engine that answered and the kind of expression —
     // the axis RFC-0101 §3 M2c classified by hand and this milestone re-measured
@@ -853,7 +619,6 @@ fn gate() {
         (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
         usize,
     > = Default::default();
-    let mut rung_rules: std::collections::BTreeMap<RungRule, usize> = Default::default();
     #[allow(clippy::type_complexity)]
     let mut unruled: std::collections::BTreeMap<
         (Site, vyrn_codegen::Rung, vyrn_codegen::Rung),
@@ -981,21 +746,10 @@ fn gate() {
         }
 
         observe::start();
-        let native = vyrn_codegen::emit(&program);
-        let mut rows = observe::take();
-        let mut insts = observe::take_insts();
-        let mut crossings = observe::take_crossings();
-        if native.is_err() {
-            // A program the native backend refuses is not a program this gate
-            // can compare; the wasm column would be answering about a different
-            // walk. Parity already owns that failure.
-            continue;
-        }
-        observe::start();
         let wasm = vyrn_codegen::direct::compile(&program);
-        rows.extend(observe::take());
-        insts.extend(observe::take_insts());
-        crossings.extend(observe::take_crossings());
+        let rows = observe::take();
+        let insts = observe::take_insts();
+        let crossings = observe::take_crossings();
         if wasm.is_err() {
             continue;
         }
@@ -1010,20 +764,14 @@ fn gate() {
                 t.rungs_planned += 1;
                 continue;
             }
-            match rung_rule(c.site, &c.from, &c.to, planned, c.rung) {
-                Some(r) => *rung_rules.entry(r).or_insert(0) += 1,
-                None => {
-                    t.rungs_unruled += 1;
-                    if planned == vyrn_codegen::Rung::Refuse || c.rung == vyrn_codegen::Rung::Refuse
-                    {
-                        t.rungs_terminal += 1;
-                    }
-                    unruled
-                        .entry((c.site, planned, c.rung))
-                        .or_default()
-                        .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
-                }
+            t.rungs_unruled += 1;
+            if planned == vyrn_codegen::Rung::Refuse || c.rung == vyrn_codegen::Rung::Refuse {
+                t.rungs_terminal += 1;
             }
+            unruled
+                .entry((c.site, planned, c.rung))
+                .or_default()
+                .insert(format!("`{}` -> `{}` ({name})", c.from, c.to));
         }
 
         // Half zero, and RFC-0101 M2's own gate: the lowering's worklist against
@@ -1203,12 +951,8 @@ fn gate() {
 
     eprintln!("  RFC-0101 M4: {rel_lambda} release steps placed inside a lambda body");
     eprintln!(
-        "  RFC-0101 §1.5: {} boundary crossings took the planned rung, {} took another          by a named rule {:?}, {} by none ({} of them terminal)",
-        t.rungs_planned,
-        rung_rules.values().sum::<usize>(),
-        rung_rules,
-        t.rungs_unruled,
-        t.rungs_terminal
+        "  RFC-0101 §1.5: {} boundary crossings took the planned rung, {} took another          ({} of them terminal)",
+        t.rungs_planned, t.rungs_unruled, t.rungs_terminal
     );
     for ((site, planned, took), n) in &ladder {
         eprintln!("    ladder {site:?}: plan {planned:?}, took {took:?} x{n}");
@@ -1381,33 +1125,40 @@ fn gate() {
     // share of the residue is the class RFC-0101 §2.3 assigns to the backend on
     // purpose: the type of a release receiver or of a dispatched call the
     // emitter builds at an emit site, which is a fact about a wasm local rather
-    // than about a program. It was 299 while two clones were live and 109 once
-    // both were measured away; it is not waiting for a mechanism, and a
-    // milestone that drives it toward zero is moving a decision INTO the form
-    // that §2.3 puts in the backend. Both bounds fail loudly rather than one:
-    // a rise means a new engine-built tree, a fall means §2.3 moved.
+    // than about a program. It is not waiting for a mechanism, and a milestone
+    // that drives it to zero is moving a decision INTO the form that §2.3 puts
+    // in the backend. Both bounds fail loudly rather than one: a rise means a
+    // new engine-built tree, a fall means §2.3 moved.
+    //
+    // IT IS 68, AND THE SERIES BEFORE IT WAS A DIFFERENT COMPILER. 299, 109, 72
+    // and 46 were all read in a process that never called `vyrn_lower::install`
+    // — no placer, no rows, and the AST dispatch answering everything. The 46
+    // was attributed to the driver asking the core; the driver did not run here
+    // at all. The band is the width the old one had, around the number this
+    // gate reads now that it compiles the way `vyrn run` compiles.
     assert!(
-        (90..=150).contains(&t.peek_off),
-        "`peek` answered {} questions about AST no instantiation holds. RFC-0101 M6          measured this class at 109-110 and §2.3 owns every one of them; outside          90..150 the class has changed and the RFC's §2.3 leaves need re-reading",
+        (48..=96).contains(&t.peek_off),
+        "`peek` answered {} questions about AST no instantiation holds. RFC-0125 §3 M3          measured this class at 68 with the lowering installed and §2.3 owns every          one of them; outside 48..96 the class has changed and the RFC's §2.3          leaves need re-reading",
         t.peek_off
     );
 
     // RFC-0101 §1.5's shadow, and the TERMINAL rung first, because it is the one
-    // difference that is a program compiling on one target only: the textual
-    // ladder falls through to identity where the direct one refuses. A pair the
-    // plan refuses and an engine walked past is either a type parameter's
-    // spelling (`RungRule::ParamSpelling`, with the two programs that prove it)
-    // or a hole, and nothing else in this repository asks.
+    // difference that is a program compiling on one target only: a pair one
+    // ladder refuses and the other walks past. Both ladders ask the plan now
+    // (RFC-0125 §3 M6, the coercion ladder), so the count is zero by
+    // construction — and this is what says so out loud if an emitter grows a
+    // rung of its own again.
     assert_eq!(
         t.rungs_terminal, 0,
-        "{} boundary crossings are at the end of one ladder and not the other, with          no rule to explain them — see the UNRULED lines above",
+        "{} boundary crossings are at the end of one ladder and not the other —          see the UNRULED lines above",
         t.rungs_terminal
     );
-    // …and then the rest of the ladder. Every crossing takes the planned rung or
-    // one of the four named differences, all of which are ORDER (§1.5).
+    // …and then the rest of the ladder. Every crossing takes the planned rung.
+    // The four named differences RFC-0101 §1.5 recorded — an order, and a rung
+    // one ladder did not have — went with the guards that produced them.
     assert_eq!(
         t.rungs_unruled, 0,
-        "{} boundary crossings took a rung the plan does not place and no rule          explains — see the UNRULED lines above",
+        "{} boundary crossings took a rung the plan does not place — see the          UNRULED lines above",
         t.rungs_unruled
     );
     // The floor under both: a shadow that observes nothing asserts nothing.
@@ -1444,73 +1195,10 @@ fn gate() {
     );
 }
 
-/// RFC-0101 §1.5's shadow, broken on purpose — in both directions, which is
-/// what M4's placement gate established a gate has to do before it is worth
-/// anything.
-///
-/// The corpus run above is green, and a green run over four rules proves the
-/// rules FIRE; it does not prove they are narrow. These are the cases that must
-/// still fail, and each one is a real difference wearing a rule's shape.
-#[test]
-fn the_ladder_rules_refuse_what_they_are_not_about() {
-    use vyrn_codegen::Rung as R;
-    let t = Type::Named("T".into());
-    let p = Type::Param("T".into());
-    let s = Type::Str;
-
-    // THE TERMINAL RUNG, and the reason it is gated first: the textual ladder
-    // walking past a pair the plan refuses is a spelling ONLY where a type
-    // parameter is in it. The same walk-past between two concrete types is a
-    // value reinterpreted on one target and a compile error on the other, and
-    // it has no rule.
-    assert_eq!(
-        rung_rule(Site::Native, &s, &p, R::Refuse, R::Identity),
-        Some(RungRule::ParamSpelling)
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Refuse, R::Identity),
-        None,
-        "a refused pair with no type parameter in it is the hole, not a spelling"
-    );
-    // …and in the other direction: the DIRECT ladder refusing is its declared
-    // end, but the textual one reaching `Refuse` would mean it grew an end it
-    // does not have.
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Identity, R::Refuse),
-        None
-    );
-
-    // Every other rule is about ONE engine's ladder, so the same pair of rungs
-    // at the other engine is a real difference. Swapping the site must not be
-    // explained.
-    assert_eq!(
-        rung_rule(Site::Wasm, &s, &t, R::FnRetag, R::Identity),
-        Some(RungRule::FnByShape)
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::FnRetag, R::Identity),
-        None,
-        "the textual ladder HAS a function rung; skipping it is not the shape shortcut"
-    );
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Identity, R::Resize),
-        Some(RungRule::SizedTargetRung)
-    );
-    assert_eq!(
-        rung_rule(Site::Wasm, &s, &t, R::Identity, R::Resize),
-        Some(RungRule::NumericBeforeShape)
-    );
-    // A rung nothing explains, at either engine.
-    assert_eq!(rung_rule(Site::Wasm, &s, &t, R::Heapify, R::Identity), None);
-    assert_eq!(
-        rung_rule(Site::Native, &s, &t, R::Validate, R::Identity),
-        None,
-        "a validation skipped is the defect class this whole gate exists for"
-    );
-}
-
 /// The plan itself, at the pairs the corpus does not reach — the ends of the
-/// ladder, which is where the two engines disagree.
+/// ladder, which is where the two engines used to disagree. It is stated once
+/// and both emitters ask it now (RFC-0125 §3 M6), so what this pins is the
+/// ORDER, which is the half of the rule a green corpus cannot see.
 #[test]
 fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
     use vyrn_codegen::Rung as R;
@@ -1535,4 +1223,218 @@ fn the_plan_places_the_rungs_the_two_ladders_were_read_at() {
     // disagree about what that means.
     assert_eq!(plan(&Type::Str, &Type::Int), R::Refuse);
     assert_eq!(plan(&Type::Str, &Type::Param("T".into())), R::Refuse);
+}
+
+// ---------------------------------------------------------------------------
+// The coercion census — RFC-0125 §3 M6, the coercion ladder.
+//
+// §1 measures the ladder at "505 lines of one decision, and the two compiled
+// backends order its rungs differently". §2.7 puts it on the deletion list.
+// This is the list it is deleted from: one row per site that DECIDES something
+// about a coercion, the engine that carries it, and its code lines.
+//
+// The metric is CODE lines — non-blank and not a comment — over the site's whole
+// span, doc comment included. That is §1.1's own column, and it is what makes
+// §1's 505 comparable: the six ladder rows measured 533 the day this census was
+// written, and the difference is the observation hook RFC-0101 §1.5's shadow
+// added after §1 was measured.
+// ---------------------------------------------------------------------------
+
+/// One site that decides something about a coercion.
+struct CoercionSite {
+    /// The file, under `compiler/`.
+    file: &'static str,
+    /// The signature line, matched on whitespace-collapsed text. It must name
+    /// exactly one line of the file.
+    at: &'static str,
+    /// The engine that carries the decision, or `shared` for one statement all
+    /// of them ask.
+    engine: &'static str,
+    /// What it decides.
+    decides: &'static str,
+    /// Whether it is the RUNG ladder — the code §1's 505 counts. The other rows
+    /// are in the census so a later reader does not go looking for them.
+    ladder: bool,
+    /// Whether it STATES the rung rule, rather than emitting a rung another site
+    /// placed. This is the column the milestone moves: an emitter that asks is
+    /// not a statement (RFC-0125 §2.3).
+    states_rung: bool,
+    /// Its code lines, as the RFC records them.
+    code: usize,
+}
+
+fn coercion_census() -> Vec<CoercionSite> {
+    let site = |file, at, engine, decides, ladder, states_rung, code| CoercionSite {
+        file,
+        at,
+        engine,
+        decides,
+        ladder,
+        states_rung,
+        code,
+    };
+    vec![
+        site(
+            "vyrn-codegen/src/lib.rs",
+            "pub fn coerce_plan(from: &Type, to: &Type, types: &HashMap<String, TypeDecl>) -> Rung {",
+            "shared",
+            "which rung a pair takes",
+            true,
+            true,
+            54,
+        ),
+        site(
+            "vyrn-codegen/src/direct.rs",
+            "fn coerce(",
+            "wasm",
+            "the wasm for the rung the plan placed",
+            true,
+            false,
+            192,
+        ),
+        site(
+            "vyrn-frontend/src/checker.rs",
+            "fn prove_coercion(&self, expr: &Expr, to: &Type, line: usize) -> Result<(), Diagnostic> {",
+            "checker",
+            "whether a CONSTANT fails its target's predicate at compile time",
+            false,
+            false,
+            44,
+        ),
+    ]
+}
+
+/// The span a site holds — `(first, last)`, one-based and inclusive, doc comment
+/// included — and its code lines.
+fn coercion_span(s: &CoercionSite) -> (usize, usize, usize) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join(s.file);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", s.file));
+    let text = text.replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().collect();
+    let norm = |l: &str| l.split_whitespace().collect::<Vec<_>>().join(" ");
+    let want = norm(s.at);
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| norm(l) == want)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        hits.len(),
+        1,
+        "the anchor `{}` names {} lines of {}; a census row's anchor must name one",
+        s.at,
+        hits.len(),
+        s.file
+    );
+    let anchor = hits[0];
+    let mut first = anchor;
+    while first > 0 {
+        let t = lines[first - 1].trim_start();
+        if t.starts_with("//") || t.starts_with("#[") {
+            first -= 1;
+        } else {
+            break;
+        }
+    }
+    let (mut depth, mut open) = (0i32, false);
+    let mut last = None;
+    for (k, l) in lines.iter().enumerate().skip(anchor) {
+        for ch in l.chars() {
+            if ch == '{' {
+                depth += 1;
+                open = true;
+            } else if ch == '}' {
+                depth -= 1;
+                if open && depth == 0 {
+                    last = Some(k);
+                    break;
+                }
+            }
+        }
+        if last.is_some() {
+            break;
+        }
+    }
+    let last = last.unwrap_or_else(|| panic!("no closing brace for `{}` in {}", s.at, s.file));
+    let code = lines[first..=last]
+        .iter()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with("//")
+        })
+        .count();
+    (first + 1, last + 1, code)
+}
+
+/// The census's line counts, as RFC-0125 §3 M6 records them. The prose quotes
+/// these numbers, so they are asserted rather than described: a change to a
+/// ladder moves one, and the RFC's table moves with it.
+#[test]
+fn the_coercion_census_is_what_the_rfc_records() {
+    let census = coercion_census();
+    // The ladder's CARRIERS — the engines' own statements — and, separately, the
+    // one statement they can ask. §1's 505 is the first of the two.
+    let mut ladder = 0usize;
+    for s in &census {
+        let (_, _, code) = coercion_span(s);
+        assert_eq!(
+            code, s.code,
+            "`{}` in {} is {code} code lines and the census says {}",
+            s.at, s.file, s.code
+        );
+        if s.ladder && s.engine != "shared" {
+            ladder += code;
+        }
+    }
+    // 562 until RFC-0125 §3 M5's sixteenth slice, which deleted `interp.rs` and
+    // the four rows it carried — 252 of those lines; 310 until §3 M4's fourth
+    // slice deleted the text-IR route and the 118-line ladder it carried. What
+    // is left is ONE emitter, which STATES nothing: it writes the rung the plan
+    // placed.
+    assert_eq!(
+        ladder, 192,
+        "the rung ladder is {ladder} code lines and RFC-0125 §3 M4 records 192"
+    );
+    // The separate statements of the rung rule, which is what the milestone
+    // moves: an engine that ASKS another site's statement is not one. It was
+    // four — the two emitters, the interpreter, and a plan nobody asked; the
+    // sixth slice made it two, and RFC-0125 §3 M5's sixteenth made it ONE, by
+    // deleting the interpreter. The plan is what is left, and the one emitter
+    // asks it.
+    let statements: std::collections::BTreeSet<&str> = census
+        .iter()
+        .filter(|s| s.states_rung)
+        .map(|s| s.engine)
+        .collect();
+    assert_eq!(
+        statements.len(),
+        1,
+        "the rung rule is stated {} times and the census says 1: {statements:?}",
+        statements.len()
+    );
+}
+
+/// The table for RFC-0125 §3 M6, printed from the census above:
+/// `cargo test -p vyrn-cli --test lowered -- --ignored --nocapture
+/// the_coercion_census_as_a_table`.
+#[test]
+#[ignore]
+fn the_coercion_census_as_a_table() {
+    println!("| site | rung ladder | states the rung | engine | what it decides | code |");
+    println!("|---|---|---|---|---|---|");
+    for s in coercion_census() {
+        let (a, b, code) = coercion_span(&s);
+        let name = s.at.split_whitespace().collect::<Vec<_>>().join(" ");
+        println!(
+            "| `{}` {a}-{b} `{name}` | {} | {} | {} | {} | {code} |",
+            s.file,
+            if s.ladder { "yes" } else { "no" },
+            if s.states_rung { "yes" } else { "no" },
+            s.engine,
+            s.decides
+        );
+    }
 }

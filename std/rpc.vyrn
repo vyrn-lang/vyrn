@@ -145,7 +145,7 @@ fn isNamedType(spelling: String, iface: ModuleInterface) -> Bool {
 /// type that cannot be encoded, and before this it passed the rule and failed
 /// inside the generated module instead.
 ///
-/// **Not nameable.** `fromJson(<Type>, body)` and `jsonSchema(<Type>)` are
+/// **Not nameable.** `fromJson<Type>(body)` and `jsonSchema<Type>()` are
 /// emitted as SOURCE TEXT, so both ends must additionally be a type the module's
 /// own reflection can name. This is why a bare `Int64` or `Array<Paste>` is
 /// refused although both are codable: wrap them in a record, which is what keeps
@@ -304,7 +304,7 @@ fn serverHandlerFn(f: FnInfo) -> String {
     let mut out = "fn " + handler + "(body: String) -> Response {\n"
     if f.params.length == 1 {
         let reqType = f.params[0].spelling
-        out = out + "    return match fromJson(" + reqType + ", body) {\n"
+        out = out + "    return match fromJson<" + reqType + ">(body) {\n"
         if retUnit {
             let runName = "rpcRun" + cap
             out = out + "        Valid(input) => " + runName + "(input),\n"
@@ -348,13 +348,13 @@ fn serverSchemaFn(iface: ModuleInterface) -> String {
         let lead = if i > 0 { "," } else { "" }
         out = out + "    acc = acc + \"" + lead + "{\\\"name\\\":\\\"" + f.name + "\\\",\\\"request\\\":\"\n"
         if f.params.length == 1 && isNamedType(f.params[0].spelling, iface) {
-            out = out + "    acc = acc + jsonSchema(" + f.params[0].spelling + ")\n"
+            out = out + "    acc = acc + jsonSchema<" + f.params[0].spelling + ">()\n"
         } else {
             out = out + "    acc = acc + \"null\"\n"
         }
         out = out + "    acc = acc + \",\\\"response\\\":\"\n"
         if isNamedType(f.ret, iface) {
-            out = out + "    acc = acc + jsonSchema(" + f.ret + ")\n"
+            out = out + "    acc = acc + jsonSchema<" + f.ret + ">()\n"
         } else {
             out = out + "    acc = acc + \"null\"\n"
         }
@@ -438,14 +438,14 @@ fn clientUnifyFn(f: FnInfo) -> String {
     } else {
         out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<" + f.ret + "> {\n"
         out = out + "    if status == 200 {\n"
-        out = out + "        return match fromJson(" + f.ret + ", body) {\n"
+        out = out + "        return match fromJson<" + f.ret + ">(body) {\n"
         out = out + "            Valid(v) => Done(v),\n"
         out = out + "            Invalid(iss) => Failed(\"procedure `" + f.name + "` returned a malformed reply\"),\n"
         out = out + "        }\n"
         out = out + "    }\n"
     }
     out = out + "    if status == 422 {\n"
-    out = out + "        return match fromJson(RpcIssues, body) {\n"
+    out = out + "        return match fromJson<RpcIssues>(body) {\n"
     out = out + "            Valid(bag) => Rejected(consume bag.issues),\n"
     out = out + "            Invalid(iss) => Failed(\"procedure `" + f.name + "` sent an unparseable 422 body\"),\n"
     out = out + "        }\n"
@@ -742,8 +742,8 @@ gen fn rpcReadJson(path: String) -> Json {
 fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
     let p = rpcStrOf(rpcMember(doc, "prefix"))
     let t = rpcStrOf(rpcMember(doc, "path"))
-    let mut keys = cfg.pinKeys
-    let mut paths = cfg.pinPaths
+    let mut keys = cfg.pinKeys.copy()
+    let mut paths = cfg.pinPaths.copy()
     for f in rpcFieldsOf(rpcMember(doc, "pin")) {
         let v = rpcStrOf(f.value)
         if v != "" {
@@ -752,8 +752,8 @@ fn rpcApplyConfig(cfg: RpcConfig, doc: Json) -> RpcConfig {
         }
     }
     return RpcConfig {
-        prefix: if p == "" { cfg.prefix } else { p },
-        path: if t == "" { cfg.path } else { t },
+        prefix: if p == "" { cfg.prefix.copy() } else { p },
+        path: if t == "" { cfg.path.copy() } else { t },
         pinKeys: keys.copy(),
         pinPaths: paths.copy(),
     }
@@ -819,10 +819,10 @@ gen fn rpcRoutesOf(mods: Array<RpcModule>, cfg: RpcConfig) -> Array<RpcRoute> {
             // the move, so the comparison has to happen first.
             let pinned = path != rpcTemplatePath(cfg, m.rel, f.name)
             out.push(RpcRoute {
-                    path: path,
-                    key: m.rel + "/" + f.name,
-                    pinned: pinned,
-                })
+                path: path,
+                key: m.rel + "/" + f.name,
+                pinned: pinned,
+            })
         }
     }
     return out
@@ -1106,7 +1106,7 @@ fn rpcDirHandler(f: FnInfo, qual: String, ns: String) -> String {
     let mut out = "fn " + handler + "(body: String) -> Response {\n"
     if f.params.length == 1 {
         let reqType = f.params[0].spelling
-        out = out + "    return match fromJson(" + reqType + ", body) {\n"
+        out = out + "    return match fromJson<" + reqType + ">(body) {\n"
         if retUnit {
             let runName = "rpcRun" + capFirst(qual)
             out = out + "        Valid(input) => " + runName + "(input),\n"
@@ -1151,13 +1151,13 @@ gen fn rpcDirSchema(mods: Array<RpcModule>, cfg: RpcConfig) -> String {
             let path = rpcPathFor(cfg, m.rel, f.name)
             out = out + "    acc = acc + \"" + lead + "{\\\"path\\\":\\\"" + path + "\\\",\\\"name\\\":\\\"" + m.rel + "/" + f.name + "\\\",\\\"request\\\":\"\n"
             if f.params.length == 1 && isNamedType(f.params[0].spelling, iface) {
-                out = out + "    acc = acc + jsonSchema(" + f.params[0].spelling + ")\n"
+                out = out + "    acc = acc + jsonSchema<" + f.params[0].spelling + ">()\n"
             } else {
                 out = out + "    acc = acc + \"null\"\n"
             }
             out = out + "    acc = acc + \",\\\"response\\\":\"\n"
             if isNamedType(f.ret, iface) {
-                out = out + "    acc = acc + jsonSchema(" + f.ret + ")\n"
+                out = out + "    acc = acc + jsonSchema<" + f.ret + ">()\n"
             } else {
                 out = out + "    acc = acc + \"null\"\n"
             }
@@ -1258,14 +1258,14 @@ fn rpcDirUnifyFn(f: FnInfo, qual: String) -> String {
     } else {
         out = out + "fn " + unify + "(status: Int64, body: String) -> RpcReply<" + f.ret + "> {\n"
         out = out + "    if status == 200 {\n"
-        out = out + "        return match fromJson(" + f.ret + ", body) {\n"
+        out = out + "        return match fromJson<" + f.ret + ">(body) {\n"
         out = out + "            Valid(v) => Done(v),\n"
         out = out + "            Invalid(iss) => Failed(\"procedure `" + qual + "` returned a malformed reply\"),\n"
         out = out + "        }\n"
         out = out + "    }\n"
     }
     out = out + "    if status == 422 {\n"
-    out = out + "        return match fromJson(RpcIssues, body) {\n"
+    out = out + "        return match fromJson<RpcIssues>(body) {\n"
     out = out + "            Valid(bag) => Rejected(consume bag.issues),\n"
     out = out + "            Invalid(iss) => Failed(\"procedure `" + qual + "` sent an unparseable 422 body\"),\n"
     out = out + "        }\n"

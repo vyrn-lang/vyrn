@@ -1,0 +1,15 @@
+// Row 12 of the refusals census, through `spawn`.
+//
+// The rule is the same and only the spelling of the taker changes. The census
+// runs one program per row, so the `spawn` form was never measured: the
+// checker named `spawn take(..)` and the kernel named `take(..)`, which is a
+// sentence that would have moved the day the checker went (RFC-0125 §3 M3,
+// the containment slice).
+let mut names: Array<String> = ["a"]
+
+fn take(xs: consume Array<String>) -> Int64 { return xs.length }
+
+fn main() -> Int64 {
+    let t = spawn take(names)
+    return t.join()
+}

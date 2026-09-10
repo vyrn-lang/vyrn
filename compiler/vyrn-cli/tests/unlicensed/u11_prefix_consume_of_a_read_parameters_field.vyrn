@@ -1,0 +1,14 @@
+// Row 11 of the refusals census, at a spelling the kernel does not reach.
+//
+// The value owns heap here, so this is not the heap reason: the kernel does
+// not see a prefix `consume` of a `read` parameter's field as a take of a
+// borrow, and accepts a program that hands the caller's buffer away.
+type Bag = { a: String }
+
+fn go(d: read Bag) -> Int64 {
+    let mut o: Array<String> = []
+    o.push(consume d.a)
+    return o.length
+}
+
+fn main() -> Int64 { return 0 }

@@ -1,0 +1,10 @@
+titles: Dune;Solaris;
+never read -> loads = 0
+first body: body of book 1
+read one of two -> loads = 1
+once: body of book 3
+twice: body of book 3
+read twice -> loads = 2
+captured: body of book 7
+json: {"title":"Stalker","body":"body of book 4"}
+toJson -> loads = 1

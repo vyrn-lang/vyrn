@@ -72,10 +72,10 @@ export fn rawFile(gitRef: String, path: String) -> String {
     return ghRaw(gitRef, path)
 }
 
-/// How many backends a program compiles to: the tree-walking interpreter, the
-/// native binary, and the WebAssembly module.
+/// How many ways a program runs: the WebAssembly module, and the native binary
+/// `wasm2c` and `clang` build from the same bytes.
 export fn backendCount() -> Int64 {
-    return 3
+    return 2
 }
 
 // ---------------------------------------------------------------------------
@@ -266,9 +266,9 @@ test "the baked release is a tag, a date, and a rule about the suffix" {
         assert(releaseUrl().byteLength > "https://github.com/vyrn-lang/vyrn/releases/tag/".byteLength)
         assert(releaseDate().byteLength == 10)
         assertEq(releasePre(), match indexOf(releaseTag(), "-") {
-                Some(at) => true,
-                None => false,
-            })
+            Some(at) => true,
+            None => false,
+        })
     } else {
         // The other state, which the pages also render.
         assertEq(releaseTag(), "")

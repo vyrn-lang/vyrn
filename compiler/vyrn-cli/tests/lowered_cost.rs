@@ -17,6 +17,8 @@
 //! This is a measurement, so it asserts almost nothing: only that both forms
 //! were actually built. The numbers go in the RFC, and `--nocapture` prints them.
 
+use vyrn_frontend::loader::DiskResolver;
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -46,14 +48,6 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
-struct Fs;
-
-impl vyrn_frontend::loader::ModuleResolver for Fs {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-}
-
 fn repo_root() -> PathBuf {
     let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     d.pop();
@@ -68,7 +62,7 @@ fn load(path: &std::path::Path) -> Result<Program, String> {
         std_root: Some(repo_root().join("std").to_string_lossy().replace('\\', "/")),
         ..Default::default()
     };
-    vyrn_frontend::load(&src, &root, &opts, &Fs).map_err(|_| "load failed".to_string())
+    vyrn_frontend::load(&src, &root, &opts, &DiskResolver).map_err(|_| "load failed".to_string())
 }
 
 fn mib(bytes: usize) -> f64 {

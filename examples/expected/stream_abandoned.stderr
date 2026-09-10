@@ -1,0 +1,8 @@
+stream_abandoned.vyrn:45:0: `events` is a `Stream<Int64>` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(events)` — on every path
+stream_abandoned.vyrn:50:0: `conditional` is a `Stream<Int64>` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(conditional)` — on every path
+stream_abandoned.vyrn:56:0: `early` is a `Stream<Int64>` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(early)` — on every path
+stream_abandoned.vyrn:66:0: `armed` is a `Stream<Int64>` and is never disposed
+  note: a stream must be consumed with `for … in`, forwarded by returning it, or released with `close(armed)` — on every path

@@ -1,0 +1,8 @@
+themes: 2 entries
+  dark.txt
+  light.txt
+pages: 3 entries
+  index.vyrn
+  items/
+  users/
+missing: cannot list `no-such-dir`

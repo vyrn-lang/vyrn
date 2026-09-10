@@ -1,0 +1,13 @@
+// RFC-0090: all mutation is exclusive, so a `modify` borrow may not overlap a
+// read of the same place in the same call.
+fn bump(xs: modify Array<Int64>, n: Int64) -> Int64 {
+    xs.push(n)
+    return xs.length
+}
+
+fn main() -> Int64 {
+    let mut a: Array<Int64> = [1, 2]
+    let n = bump(a, a.length)
+    print(n)
+    return 0
+}

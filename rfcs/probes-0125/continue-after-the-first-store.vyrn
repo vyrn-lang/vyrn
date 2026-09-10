@@ -1,0 +1,43 @@
+// RFC-0125 M3 probe, the default slice: a `continue` that follows the store
+// which gives a `Static` name its first value.
+//
+// `out` is bound to a literal, so the loop's entry state calls it `Static`.
+// The store makes it `Held`, and the `continue` after it is a back edge. The
+// kernel used to judge that edge against the entry BEFORE the loop widened
+// it, so it refused a body every engine compiles and runs. It widens from
+// every back edge now, the `continue`s with the body's end, and judges each
+// against the entry the second turn really has.
+//
+// `site/app/apidoc.vyrn`, `site/app/bench.vyrn` and `site/export.vyrn` are the
+// three corpus programs that met this; each is one scanner that appends to an
+// accumulator and skips ahead.
+
+import { substring } from "std/strings"
+
+fn withoutBrackets(doc: String) -> String {
+    let n = doc.byteLength
+    let mut out = ""
+    let mut last = 0
+    let mut i = 0
+    while i < n {
+        if doc[i] == '[' {
+            out = out + substring(doc, last, i)
+            last = i + 1
+            i = i + 1
+            continue
+        }
+        i = i + 1
+    }
+    return out + substring(doc, last, n)
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < 1000 {
+        total = total + withoutBrackets("a[b]c[d]e").byteLength
+        i = i + 1
+    }
+    print(total.toString())
+    return 0
+}

@@ -1,0 +1,13 @@
+/// Row `array-index` — RFC-0011. An array read past the end.
+///
+/// The index arrives through a parameter, so no engine folds it.
+
+fn idx(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    let xs: Array<Int64> = [1, 2, 3]
+    print(xs[idx(7)])
+    return 0
+}

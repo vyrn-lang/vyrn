@@ -108,6 +108,13 @@ fn analyze_doc(uri: &Url, text: &str, overlays: &HashMap<String, String>) -> Ana
             },
         );
     }
+    // RFC-0125 §3 M3. `VYRN_BUILD_PROFILE=1` reports the phases of ONE
+    // analysis, which is what a keystroke costs. The CLI prints the same table
+    // at the end of a command; here it is per-analysis, because the question is
+    // what the second one costs and not what the session did.
+    if vyrn_frontend::prof::phases_on() {
+        eprint!("{}", vyrn_frontend::prof::phase_table());
+    }
     analysis
 }
 
@@ -193,7 +200,7 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
             {
                 return Ok(text.clone());
             }
-            return std::fs::read_to_string(resolved).map_err(|e| e.to_string());
+            return vyrn_frontend::loader::DiskResolver.read(resolved);
         }
         let dir = self
             .manifest_dir
@@ -223,47 +230,24 @@ impl vyrn_frontend::loader::ModuleResolver for EditorResolver {
         })
     }
 
-    /// Generation-time `listDir` (RFC-0021): read the local directory. The
-    /// generator's inputs are local files, so this is a plain read-only listing.
+    /// Generation-time `listDir` (RFC-0021), the kinded listing (RFC-0119) and
+    /// the shared generator cache: all three are the disk's, so all three are
+    /// `DiskResolver`'s. The editor differs from a build in ONE answer — `read`,
+    /// which prefers an open buffer and refuses an unpinned remote — and it used
+    /// to write the other four out again. The cache is the same
+    /// `~/.vyrn/cache/gen` the driver writes (honouring `VYRN_GEN_CACHE_DIR`),
+    /// so a keystroke reuses a build's generation instead of re-running it.
     fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let entries = std::fs::read_dir(resolved)
-            .map_err(|_| vyrn_frontend::trap::io_at("listerr", resolved))?;
-        let mut names: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        Ok(names)
+        vyrn_frontend::loader::DiskResolver.list(resolved)
     }
-
-    /// The kinded listing (RFC-0119): a directory entry's name carries a
-    /// trailing `/`.
     fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let entries = std::fs::read_dir(resolved)
-            .map_err(|_| vyrn_frontend::trap::io_at("listerr", resolved))?;
-        let mut names: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    format!("{name}/")
-                } else {
-                    name
-                }
-            })
-            .collect();
-        names.sort();
-        Ok(names)
+        vyrn_frontend::loader::DiskResolver.list_kinds(resolved)
     }
-
-    /// Participate in the shared generator cache (RFC-0021) so per-keystroke
-    /// re-analysis reuses a build's generation instead of re-running it. Same
-    /// `~/.vyrn/cache/gen` the CLI writes (honors `VYRN_GEN_CACHE_DIR`).
     fn gen_cache_get(&self, key: &str) -> Option<String> {
-        vyrn_frontend::manifest::gen_cache_get(key)
+        vyrn_frontend::loader::DiskResolver.gen_cache_get(key)
     }
     fn gen_cache_put(&self, key: &str, value: &str) {
-        vyrn_frontend::manifest::gen_cache_put(key, value)
+        vyrn_frontend::loader::DiskResolver.gen_cache_put(key, value)
     }
 }
 
@@ -289,18 +273,29 @@ fn dbg_log(msg: &str) {
 }
 
 fn main() {
-    // RFC-0076 M4. Choosing an engine, not adding analysis: the generator still
-    // runs the same Vyrn program and still returns the same source. This is the
-    // process the engine exists for — a compiled artifact is argument-independent
-    // and cached for the session, so the clang is paid once per generator instead
-    // of once per keystroke. Installed before any document can be opened, since
-    // generation happens deep inside the load, and it declines to the interpreter
-    // when there is no clang or no wasi sysroot, so an editor on a machine
-    // without a toolchain is slower and never broken. `VYRN_NO_WASM_GEN=1`
-    // forces the interpreter, spelled exactly as the CLI spells it.
-    #[cfg(feature = "wasm-gen")]
-    if std::env::var("VYRN_NO_WASM_GEN").is_err() {
-        vyrn_genwasm::install();
+    // RFC-0076 M4. This is the process the engine exists for — a compiled
+    // artifact is argument-independent and cached for the session, so a
+    // generator is compiled once instead of once per keystroke. Installed
+    // before any document can be opened, since generation happens deep inside
+    // the load.
+    //
+    // There is no way to turn it off, and no feature gating it away: it is the
+    // only generation engine there is since RFC-0125 §3 M5 deleted the
+    // tree-walker, so an LSP built without it could not open a file that uses a
+    // `gen fn`. The CLI says the same thing at the same place.
+    vyrn_genwasm::install();
+
+    // RFC-0125 §3 M3, the accumulation slice. The placer, the arm rows, the
+    // kernel's refusals and the effect judgment, into the slots `vyrn-frontend`
+    // holds for them — the same call `vyrn` makes at start-up. Without it the
+    // editor read a different compiler from the build: seven ownership rules
+    // have left `movecheck.rs` and are stated by the kernel alone, so a program
+    // `vyrn check` refuses analyzed clean here.
+    // `VYRN_NO_PLACER=1` stands it aside, spelled exactly as `vyrn` spells it:
+    // the editor before the kernel, which is the column a measurement of what
+    // the kernel costs a keystroke is read against.
+    if std::env::var("VYRN_NO_PLACER").is_err() {
+        vyrn_lower::install();
     }
 
     // `Connection::stdio` sets up the stdin/stdout channels. The server is
@@ -322,6 +317,26 @@ fn main() {
         .name("vyrn-lsp".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
+            // RFC-0125 §3 M3, the memo slice. This server reads the kernel's
+            // REFUSALS and lowers nothing — the analysis feeds `memory_notes`,
+            // which reads the walk's own notes, and the effect judgment, which
+            // walks the lowering — so a body whose text and declarations have
+            // not moved keeps the verdict it earned last keystroke instead of
+            // being built and judged again. `vyrn` does not arm it: it emits,
+            // and an emitter reads the core's facts, which a served body does
+            // not contribute.
+            //
+            // HERE and not beside `vyrn_lower::install`: the memo is a
+            // thread-local, like every other table a keystroke reuses (the
+            // parse cache, the checker's, the loader's module hashes), and
+            // this thread is the one that analyses.
+            //
+            // `VYRN_NO_MEMO=1` stands it aside, the way `VYRN_NO_PLACER=1`
+            // stands the kernel aside: the middle column of the measurement,
+            // the editor with the kernel and without the memory.
+            if std::env::var("VYRN_NO_MEMO").is_err() {
+                vyrn_frontend::movecheck::reuse_judgments();
+            }
             let mut server = Server {
                 docs: HashMap::new(),
                 analyses: HashMap::new(),
@@ -2545,7 +2560,13 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     let (opts, resolver, _, _) = load_context(uri, &overlays)?;
 
     let mut cache = server.contract_cache.borrow_mut();
-    let roots = contracts::role_roots(&app_dir);
+    // The roots, and the declared-else-discovered rule below, are the
+    // frontend's — `vyrn why --contract` asks the same two functions, and the
+    // editor and the command cannot disagree about which contract governs a
+    // file. This reader owns its own read of `vyrn.json`, which is the one half
+    // that differs between them.
+    let doc = vyrn_frontend::manifest::doc_in(&app_dir);
+    let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc.as_ref());
     let sig = contracts::roles_sig(&app_dir, &roots);
     let entry = cache
         .entry(app_dir.clone())
@@ -2558,7 +2579,8 @@ fn contract_ctx(server: &Server, uri: &Url) -> Option<ContractCtx> {
     if entry.sig != sig || !entry.derived {
         entry.sig = sig;
         entry.derived = true;
-        entry.roles = contracts::roles_of(&app_dir, &roots, &opts, &resolver);
+        entry.roles =
+            vyrn_frontend::contracts::roles_for_project(doc.as_ref(), &roots, &opts, &resolver);
         entry.views.clear();
     }
     let role = vyrn_frontend::contracts::role_for(&path, &entry.roles)?.clone();

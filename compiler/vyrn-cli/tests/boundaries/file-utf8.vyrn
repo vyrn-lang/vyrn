@@ -1,0 +1,15 @@
+/// Row `file-utf8` — RFC-0014. `readFile` validates the bytes it read; the
+/// same bytes through `readFileBytes` are a value, because an `Array<UInt8>`
+/// carries no such rule.
+
+fn main() -> Int64 {
+    print(match readFile("data/badutf8.bin") {
+        Ok(_) => "ok",
+        Err(e) => "err: \{e}",
+    })
+    print(match readFileBytes("data/badutf8.bin") {
+        Ok(b) => "bytes: \{b.length}",
+        Err(e) => "err: \{e}",
+    })
+    return 0
+}

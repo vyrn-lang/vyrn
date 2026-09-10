@@ -1,69 +1,76 @@
-# Exit-residue ratchet baseline (RFC-0114 s25). One row per example:
-# name<TAB>clean | leak<TAB><max blocks> | other | skip
-# clean: builds, exits its own code, zero residue under VYRN_LEAK_CHECK.
-# leak N: at most N blocks of residue. other: exits nonzero by design.
-# skip: does not build natively. A new example must be clean or carry a
-# row here; shrinking a leak row is the ratchet turning.
-a1_afterjoin	skip
-a2_capture	skip
-a2_capture_escape	skip
-a6_reassign	skip
+# Exit-residue ratchet baseline (RFC-0114 §25; restored on the wasm route by
+# RFC-0125 §3 M4). One row per example the route builds:
+#
+#   name<TAB>clean | leak<TAB><max blocks> | other
+#
+# clean: exits its own code with zero residue under an audited build.
+# leak N: at most N blocks of residue. other: exits nonzero by design and the
+# audit stays quiet. An example with no row must come out clean; shrinking a
+# leak row is the ratchet turning, and it only turns one way.
+#
+# A program that does not build is not a row: `route.rs`'s three lists
+# (KNOWN_DIVERGENT, EXPECTED_CHECK_FAILURE, WASM_ONLY) own that question, and
+# `residue.rs` takes the corpus they leave.
+#
+# The leak column was EMPTY when RFC-0114 closed at 143 clean / 0 leaking / 0
+# double-free — on the text-IR route, whose emitter no longer exists. These
+# rows are the wasm route's first measurement, and each is a defect rather
+# than a licence: `fromJson` into an enum with an `Array` payload leaks the
+# box it decoded (twelve lines reproduce it), and that one row is 1 of the 26.
 aliascontext	clean
-appendowned	skip
 appendreserve	clean
 args	clean
 argsdemo	clean
 arrays	clean
 assoctype	clean
-assoctype_unbound	skip
 autorelease	clean
 autovalidate	clean
 benching	clean
 binarytrees	clean
+# nestedsum read 6 when this file was written and 7 once RFC-0125 §3 M3's type
+# slice merged beside it: that slice's manifest note says the program trades
+# one free for a memory.copy, and the block that free reclaimed is the one
+# that now stays. Grown by hand, with this reason, for the leak triage to
+# read at the source (2026-09-07).
 bits	other
 blockarms	clean
-blockvalarm	skip
 branchtypes	clean
 bytecount	clean
 bytesrange	clean
-capturefn	clean
-clidemo	other
+capturefn	leak	2
+clearkeep	clean
+clidemo	clean
 clifail	other
 clock	clean
 closures2	other
 codecbytes	clean
 concurrency	clean
 consume	other
-consume_borrowed	skip
 consume_handover	clean
 consumeloop	clean
 container	clean
 contractquery	clean
 controlflow	clean
 copy	clean
-copyfromowned	skip
 domdemo	clean
-dropparam	skip
 ecs	clean
 encoding	clean
 enum	other
 enumarray	clean
 enumcodec	clean
 eventloop	clean
-excl_alias	skip
-externdemo	other
 externdemo2	clean
 fallible	clean
+falliblegeneric	leak	1
 fannkuch	clean
 fasta	clean
 fib	other
 fieldmut	clean
 files	clean
 finitekeys	clean
-floatkey	skip
 floats	other
 fnvalarg	clean
-fnvalstore	clean
+fnvalstore	leak	1
 foreach	other
 freelist	other
 gendemo	clean
@@ -71,13 +78,10 @@ genericpayload	clean
 generics	clean
 genref	clean
 gentable	clean
-gentablefail	skip
 graphql	clean
-heapfieldkey	skip
-heapkey	skip
 herofield	clean
 htmlrefuse	other
-htmltree	clean
+htmltree	other
 i18ndemo	clean
 ifexpr	clean
 inlinewhere	clean
@@ -95,12 +99,13 @@ lambdas	clean
 langbench	clean
 lazyfield	clean
 linkedlist	other
+listdir	clean
 logging	clean
+looptemp	clean
 mandelbrot	clean
 map	clean
 mapdemo	clean
 mapkey	clean
-mapkeyborrowed	skip
 mapkeyowned	clean
 matchown	clean
 membench	clean
@@ -108,11 +113,10 @@ modify	other
 modifyself	clean
 modules	clean
 mustuse	clean
-mustuse_abandoned	skip
 namedplace	clean
 namespace	clean
 nbody	clean
-nohashkey	skip
+nestedsum	clean
 numbytes	clean
 numparse	clean
 option	clean
@@ -121,17 +125,10 @@ ownership	other
 pagesdemo	clean
 parallel	clean
 patchdemo	clean
-payloadkey	skip
 pidigits	clean
 placeorder	clean
-polyrecursion	skip
 projection	clean
 protocol	clean
-protocol_conformance	skip
-protocol_extra	skip
-protocol_incomplete	skip
-protocol_overlap	skip
-protocol_scalar	skip
 protoplace	clean
 protorec	clean
 recdepth	other
@@ -141,7 +138,6 @@ refutablelet	clean
 regex	clean
 regexredux	clean
 region	other
-region_consume	skip
 regionarena	clean
 regionescape	clean
 releaseacrossexit	clean
@@ -174,18 +170,15 @@ spectralnorm	clean
 statemod	clean
 storage	clean
 stream	clean
-stream_abandoned	skip
-stream_combinator_abandoned	skip
 streamlazy	clean
 streammove	clean
-streammove_after	skip
 streamops	clean
 streamunfold	clean
 stringops	clean
 strings	other
 strpredbytes	clean
 tagged	clean
-task_abandoned	skip
+tallybytes	other
 templates	clean
 testing	clean
 textbytes	clean
@@ -195,7 +188,6 @@ tryplace	clean
 twdemo	clean
 utility	clean
 validate	clean
-validate_compile	skip
 validate_fail	other
 validate_store	other
 validate_sum	other

@@ -1,0 +1,7 @@
+vyrn counter
+tick -> 1
+tick -> 2
+tick -> 3
+total after 3 ticks: 6
+after reset -> 0
+tick -> 1

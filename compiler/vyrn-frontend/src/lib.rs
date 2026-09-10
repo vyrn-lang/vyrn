@@ -17,13 +17,16 @@ pub mod checker;
 pub mod codec;
 pub mod consteval;
 pub mod contracts;
+pub mod ctor;
 pub mod declared;
 pub mod diagnostics;
+pub mod effects;
 pub mod finite;
 pub mod floor;
 pub mod fmt;
+pub mod gen;
 pub mod hash;
-pub mod interp;
+pub mod isolation;
 pub mod jsondec;
 pub mod jsonenc;
 pub mod lexer;
@@ -33,11 +36,6 @@ pub mod movecheck;
 pub mod origin;
 pub mod own;
 pub mod parser;
-/// The playground's host boundary — output, input and the clock — on the one
-/// target that has no operating system to supply them (`wasm32-unknown-unknown`,
-/// which `compiler/vyrn-play` builds). Absent everywhere else.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub mod playhost;
 pub mod prelude;
 pub mod prof;
 pub mod project;
@@ -49,6 +47,7 @@ pub mod symbols;
 pub mod toolpin;
 pub mod trap;
 pub mod types;
+pub mod validate;
 pub mod vyx;
 
 // Re-export the symbol-query API at the crate root so the LSP can spell it as
@@ -81,10 +80,6 @@ pub use contracts::{
 // and `vyrn_frontend::fmt::` names the module.
 pub use fmt::fmt;
 
-// The names a `match` pattern binds (RFC-0023 uses this in codegen's lambda
-// capture analysis, so it is re-exported at the crate root).
-pub use movecheck::pattern_bindings;
-
 /// Parse, type-check, and move-check `source`, returning the checked
 /// [`ast::Program`].
 ///
@@ -99,7 +94,15 @@ pub fn check(source: &str) -> Result<ast::Program, String> {
             // since diagnostics() reported nothing, lex+parse+check+movecheck all
             // succeeded, so this is infallible in practice.
             let tokens = lexer::lex(source).expect("diagnostics reported no lex error");
-            let program = parser::parse(tokens).expect("diagnostics reported no parse error");
+            let mut program = parser::parse(tokens).expect("diagnostics reported no parse error");
+            // RFC-0125 §3 M6, the third judgment's fourth slice: a `where`
+            // type's predicate is a generated function now, so the
+            // single-source path has to carry it too — the interpreter calls
+            // it, exactly as it does on the linked path. Only this synthesis:
+            // the JSON walks need the checker's own record and `floor` holds a
+            // decision, and neither belongs to a re-parse.
+            let types = types::decl_map(&program);
+            program.functions.extend(ctor::constructors(&types));
             Ok(program)
         }
         Some(d) => Err(d.render()),
@@ -122,19 +125,11 @@ pub fn diagnostics(source: &str) -> Vec<diagnostics::Diagnostic> {
     symbols::analyze(source).diagnostics
 }
 
-/// Parse, check, then run `main` via the tree-walking interpreter.
-///
-/// Returns the integer value `main` returns (its exit code).
-pub fn run(source: &str) -> Result<i64, String> {
-    let program = check(source)?;
-    interp::run(&program)
-}
-
 /// Load a multi-module program (RFC-0010): parse `root_source`, resolve every
 /// `import` transitively through `resolver`, link into one [`ast::Program`],
 /// then type-check and move-check it. Single-file programs (no imports) take
-/// exactly the old path semantically — [`check`]/[`run`] remain the simple
-/// single-source entry points.
+/// exactly the old path semantically — [`check`] remains the simple
+/// single-source entry point.
 pub fn load(
     root_source: &str,
     root_path: &str,
@@ -168,7 +163,10 @@ pub fn load(
 /// are ordinary Vyrn: move-checked below with everything else, and lowered by every
 /// backend as source it cannot tell apart from the user's.
 pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diagnostic> {
+    let check_span = prof::phase("check");
     let (mut diags, json_types, json_dec_types) = checker::check_accum_with_json_types(program);
+    drop(check_span);
+    let synth_span = prof::phase("synthesize");
     if diags.is_empty() {
         let types = types::decl_map(program);
         match jsonenc::encoders(&json_types, &types) {
@@ -182,9 +180,55 @@ pub fn check_and_synthesize(program: &mut ast::Program) -> Vec<diagnostics::Diag
             }
             Err(e) => diags.push(diagnostics::Diagnostic::error(0, 0, "check", e)),
         }
+        // RFC-0125 §3 M6, the third judgment's fourth slice: one constructor
+        // per `where` type, so the census's `where-scalar` and `where-record`
+        // rows are stated in Vyrn once instead of once per engine. Here for the
+        // JSON walks' reason — the checker has just typed the program and no
+        // engine has built its function table.
+        let have: std::collections::HashSet<&str> =
+            program.functions.iter().map(|f| f.name.as_str()).collect();
+        let fresh: Vec<_> = ctor::constructors(&types)
+            .into_iter()
+            .filter(|f| !have.contains(f.name.as_str()))
+            .collect();
+        program.functions.extend(fresh);
+    }
+    // RFC-0125 §3 M3, the accumulation slice: the checker's ownership refusals
+    // and the kernel's, as one list, in the order the source states them. The
+    // gate is the lowering's own — the program type-checks, so the core can
+    // build a body for it — and `VYRN_NO_MOVECHECK=1` lives inside the driver
+    // with the two passes it chooses between.
+    drop(synth_span);
+    // RFC-0125 §3 M3, the type slice: ONE record of the program the synthesis
+    // has just finished, for the three readers below it. The synthesis is over,
+    // so no node moves under the record's keys, and the guard closes before the
+    // caller can extend the program again.
+    let _held = checker::Held::open(program);
+    if diags.is_empty() {
+        let _p = prof::phase("movecheck");
+        diags.extend(movecheck::refusals(program));
+    }
+    // RFC-0125 M6, fourth slice: the floor row a judgment answers. The load
+    // held the decision because the judgment reads the named core, which is
+    // built from the types the check has only just supplied. Last, so the
+    // refusal is the one this program earns and not a second answer on top of
+    // a type error. A no-op for every load that decided for itself.
+    if diags.is_empty() {
+        // RFC-0125 §3 M6, the isolation slice: RFC-0004 §Q4's spawn rule, which
+        // is the effect judgment's inclusion check and one signature test. Here
+        // for the floor's reason and not a second one — the judgment reads the
+        // named core, which the check has only just made buildable.
+        let _p = prof::phase("isolation");
+        diags.extend(isolation::refusals(program));
     }
     if diags.is_empty() {
-        diags.extend(movecheck::check_accum(program));
+        let _p = prof::phase("floor");
+        diags.extend(floor::decide(program));
+    } else {
+        // A program with errors gets its errors. Dropping the held decision
+        // here is what keeps it from answering for the next program a process
+        // checks without loading.
+        floor::forget();
     }
     diags
 }
@@ -198,8 +242,10 @@ pub fn load_warned(
     Result<ast::Program, Vec<diagnostics::Diagnostic>>,
     loader::Warnings,
 ) {
+    let load_span = prof::phase("load (total)");
     let (loaded, origins, warnings, _graph) =
         loader::load_with_origins(root_source, root_path, opts, resolver);
+    drop(load_span);
     // RFC-0053: load/lex/parse diagnostics are already remapped by the loader.
     let program = match loaded {
         Ok(p) => p,

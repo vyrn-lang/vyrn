@@ -1,0 +1,7 @@
+release ring1 (1)
+release ring2 (2)
+release ring3 (3)
+inside
+tally 40
+after
+release last (2)

@@ -28,7 +28,39 @@
 //! table, which is the derivation `peek` and `static_ty` are — written once
 //! below both backends instead of twice inside them.
 
+pub mod core;
+pub mod effects;
+pub mod kernel;
 mod render;
+pub mod typed;
+
+/// Install the placer (RFC-0125 M3) into `own::analyze`, so every consumer
+/// of the ownership plan — the interpreter, both backends, `vyrn why` — sees
+/// the release rows the kernel found missing. Idempotent; the CLI calls it
+/// at start-up the way it installs the generator engine.
+pub fn install() {
+    vyrn_frontend::own::install_placer(core::augment);
+    // RFC-0125 §3 M3, the deletion slice: the interpreter reads round forty's
+    // answer off the core through this slot, because `vyrn-frontend` sits
+    // below this crate and cannot call into it.
+    // RFC-0125 §3 M3, the accumulation slice: the kernel's own refusals into
+    // the one list a file's refusals come out in, so a rule that has left
+    // `movecheck.rs` is stated wherever that list is read — `vyrn check`, the
+    // editor, `vyrn fix`.
+    vyrn_frontend::own::install_refusals(core::refusal_diagnostics);
+    // RFC-0125 §3 M3, the obligation slice: the must-use judgment, which is a
+    // rule about a TYPE and not about ownership, so it is the typed judgment's
+    // and reaches the same list through the same kind of slot.
+    vyrn_frontend::own::install_must_use(typed::obligation::judge);
+    // RFC-0125 M6, fourth slice: the effect judgment into the floor's decision,
+    // so a capability row is answered by the judgment and not by a second scan.
+    vyrn_frontend::floor::install_judge(effects::reaches);
+    // RFC-0125 M6, the isolation slice: RFC-0004 §Q4's spawn rule, stated by
+    // the same judgment over the same core instead of by two fixpoints over the
+    // AST call graph.
+    vyrn_frontend::isolation::install_judge(effects::spawn_refusals);
+}
+pub use core::{refuses as kernel_refuses, take_refusals};
 pub use render::render;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -301,6 +333,47 @@ pub struct Lowered<'a> {
     /// set stays so the next engine that walks a lambda body can say which blocks
     /// those are without a second AST walk.
     pub lambda_bodies: std::collections::HashSet<usize>,
+    /// The `test` (RFC-0015) and `bench` (RFC-0055) bodies, in declaration
+    /// order, each body's rows under the synthetic `test@<i>` / `bench@<i>`
+    /// name the checker and `own` key it by.
+    ///
+    /// Outside every instantiation, like [`Lowered::globals`], and NOT
+    /// followed into the worklist, like [`Lowered::predicates`]: a test body
+    /// is no part of an artifact, so a generic it alone calls is an
+    /// instantiation no backend emits. The rows are here because a body the
+    /// judgment cannot see is a lambda with no frame, which is the half of
+    /// RFC-0125 §3 M6's finding 14 the third slice could not close.
+    pub bodies: Vec<OutsideBody<'a>>,
+    /// Every `impl` projection's body (RFC-0091 M2, RFC-0120), with its rows.
+    ///
+    /// A projection is never flattened into `Program::functions`, so no
+    /// instance covers it and no worklist reaches it — and the core still
+    /// lowers an access site as a CALL by the projection's own name. That is
+    /// why the effect judgment had twenty calls it could not attribute
+    /// (RFC-0125 §3 M6, finding 14). Outside every instantiation, like
+    /// [`Lowered::predicates`], and for the same reason: a projection is
+    /// inlined at its site, so following its calls would add instantiations
+    /// no backend's worklist has.
+    pub places: Vec<PlaceRows<'a>>,
+}
+
+/// One `impl` projection's body and its rows.
+#[derive(Debug, Clone)]
+pub struct PlaceRows<'a> {
+    pub func: &'a Function,
+    pub rows: Vec<Row<'a>>,
+}
+
+/// One body that is no function of the program: a `test` or a `bench`.
+#[derive(Debug, Clone)]
+pub struct OutsideBody<'a> {
+    /// `test@<i>` or `bench@<i>` — the name the checker checked it under and
+    /// the key `own`'s release plan uses.
+    pub name: String,
+    pub block: &'a vyrn_frontend::ast::Block,
+    pub module: Option<String>,
+    pub line: usize,
+    pub rows: Vec<Row<'a>>,
 }
 
 impl<'a> Lowered<'a> {
@@ -324,18 +397,54 @@ impl<'a> Lowered<'a> {
 /// JSON codecs are ordinary Vyrn functions and are lowered like any other, which
 /// is only true if they are in the program when the checker runs over it here.
 pub fn lower(program: &Program) -> Lowered<'_> {
-    let recorded = checker::record(program);
+    let _p = vyrn_frontend::prof::phase("lower");
     // The same analysis all three engines already share, asked once here so the
     // placement below is the only new thing in the form (RFC-0101 §1.4).
+    let own_span = vyrn_frontend::prof::phase("lower: own::analyze");
     let ownership = vyrn_frontend::own::analyze(program);
-    let mut lowered = build(program, &recorded, &ownership);
+    drop(own_span);
+    lower_with(program, &ownership)
+}
+
+/// The lowered form against an ownership analysis already made — what the
+/// placer (RFC-0125 M3) needs, since it runs INSIDE `own::analyze`.
+pub fn lower_with<'a>(
+    program: &'a Program,
+    ownership: &vyrn_frontend::own::Ownership,
+) -> Lowered<'a> {
+    let rec_span = vyrn_frontend::prof::phase("lower: checker::record");
+    // RFC-0125 §3 M3, the one check: what the checker decided about every node,
+    // from the analysis's own check where it made one. This used to check the
+    // whole linked program a second time, after the analysis had just checked
+    // it — one program, two checks, in one analysis.
+    let recorded = checker::recorded(program);
+    drop(rec_span);
+    // RFC-0125 §3 M5: the emitters read an expression's type off this same
+    // record, by node, instead of deriving one from its operands.
+    core::set_decided(program, &recorded);
+    let build_span = vyrn_frontend::prof::phase("lower: build");
+    let mut lowered = build(program, &recorded, ownership);
+    drop(build_span);
     lowered.instances.sort_by(|a, b| {
         (a.module(), &a.func.name, a.spelling()).cmp(&(b.module(), &b.func.name, b.spelling()))
     });
+    // The lint re-derives the types with a fresh check, and a COMPTIME program
+    // is not the program that check admitted: a generator is re-loaded as its
+    // own root and keeps helpers that use `lex`, `render` and `Token`, which an
+    // ordinary check refuses as "only available during generation" and records
+    // as `<type error>`. Whether the lint sees one at all depends on which
+    // functions the instantiation reaches — the same generator reaches 448
+    // through `vyrn check` and 458 through the editor, which is what made this
+    // assertion fire in one host and not the other. It stays armed for every
+    // program a tool holds (RFC-0125 §3 M3, the accumulation slice).
     debug_assert!(
-        lint(&lowered).is_empty(),
-        "the lowered form failed its own lint:\n  {}",
-        lint(&lowered).join("\n  ")
+        vyrn_frontend::movecheck::in_comptime() || lint(&lowered).is_empty(),
+        "the lowered form failed its own lint:
+  {}",
+        lint(&lowered).join(
+            "
+  "
+        )
     );
     lowered
 }
@@ -398,11 +507,17 @@ fn build<'a>(
 
     // The roots are every non-generic function: that is what both backends emit
     // before either worklist turns, and a generic body is reachable only from
-    // one of them.
+    // one of them. A `std/mem` primitive is a declaration whose lowering is one
+    // instruction at each call (PLAN-0125-runtime §2.1, §3.2); like an
+    // `extern`, it has no body of its own to build.
     let mut queue: VecDeque<(&Function, Vec<Type>)> = program
         .functions
         .iter()
-        .filter(|f| f.type_params.is_empty() && !f.is_extern)
+        .filter(|f| {
+            f.type_params.is_empty()
+                && !f.is_extern
+                && !f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX)
+        })
         .map(|f| (f, Vec::new()))
         .collect();
     let mut seen: Vec<(String, String)> = queue
@@ -437,6 +552,45 @@ fn build<'a>(
         }
     }
     let predicates = pw.rows;
+    // The fourth root, and the second with no worklist attached: a `test` or
+    // `bench` body — see [`Lowered::bodies`].
+    let mut outside: Vec<OutsideBody<'a>> = Vec::new();
+    for (i, t) in program.tests.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&t.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("test@{i}"),
+            block: &t.body,
+            module: t.module.clone(),
+            line: t.line,
+            rows: w.rows,
+        });
+    }
+    for (i, b) in program.benches.iter().enumerate() {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&b.body, 0, &mut chain, &mut w);
+        outside.push(OutsideBody {
+            name: format!("bench@{i}"),
+            block: &b.body,
+            module: b.module.clone(),
+            line: b.line,
+            rows: w.rows,
+        });
+    }
+    // The fifth root, and the third with no worklist attached: an `impl`
+    // projection's body — see [`Lowered::places`].
+    let mut places: Vec<PlaceRows<'a>> = Vec::new();
+    for (_, f) in vyrn_frontend::project::all(program) {
+        let mut w = Walk::new(recorded, &program.impls);
+        let mut chain: Chain = vec![HashMap::new()];
+        block(&f.body, 0, &mut chain, &mut w);
+        places.push(PlaceRows {
+            func: f,
+            rows: w.rows,
+        });
+    }
     follow(
         "<module state>",
         std::mem::take(&mut gw.calls),
@@ -448,39 +602,47 @@ fn build<'a>(
     );
     // RFC-0114 §25: the leak-check teardown drops every module-state binding
     // after `main`, and a GENERIC declared release it reaches is an
-    // instantiation like any placed one — modeled here so "the lowering is
-    // the worklist" covers the teardown's emission too. Solved from the
-    // DECLARED type, which is the type the backends' teardown drops by; an
-    // unannotated global of a declared-release type would surface at the
-    // gate as a missing instantiation — loud, the failure this file prefers.
-    let mut teardown_calls: Vec<(&str, HashMap<String, Type>)> = Vec::new();
-    for g in &program.globals {
-        let Some(gty) = &g.ty else { continue };
-        let Some(vyrn_frontend::own::DropKind::Release(f, _)) = ownership.proto.release_kind(gty)
-        else {
-            continue;
-        };
-        let Some(target) = by_name.get(f.as_str()) else {
-            continue;
-        };
-        if target.type_params.is_empty() {
-            continue;
+    // instantiation like any placed one — modeled here so "the lowering is the
+    // worklist" covers the teardown's emission too. Solved from the DECLARED
+    // type, which is the type the teardown drops by; an unannotated global of
+    // a declared-release type would surface at the gate as a missing
+    // instantiation — loud, the failure this file prefers.
+    //
+    // The root stands only in an AUDITED build, because that is the only build
+    // that emits the teardown. Unconditional, it queues bodies nothing could
+    // ever emit and `lowered.rs` reports each as a difference with no rule,
+    // which is what took the root out with the text-IR route.
+    if vyrn_frontend::loader::audit_build() {
+        let mut teardown_calls: Vec<(&str, HashMap<String, Type>)> = Vec::new();
+        for g in &program.globals {
+            let Some(gty) = &g.ty else { continue };
+            let Some(vyrn_frontend::own::DropKind::Release(f, _)) =
+                ownership.proto.release_kind(gty)
+            else {
+                continue;
+            };
+            let Some(target) = by_name.get(f.as_str()) else {
+                continue;
+            };
+            if target.type_params.is_empty() {
+                continue;
+            }
+            let mut solved: HashMap<String, Type> = HashMap::new();
+            if let Some(p) = target.params.first() {
+                vyrn_frontend::types::solve_param(&p.ty, gty, &mut solved);
+            }
+            teardown_calls.push((target.name.as_str(), solved));
         }
-        let mut solved: HashMap<String, Type> = HashMap::new();
-        if let Some(p) = target.params.first() {
-            vyrn_frontend::types::solve_param(&p.ty, gty, &mut solved);
-        }
-        teardown_calls.push((target.name.as_str(), solved));
+        follow(
+            "<teardown>",
+            teardown_calls,
+            &by_name,
+            &decls,
+            &mut seen,
+            &mut queue,
+            &mut unresolved,
+        );
     }
-    follow(
-        "<teardown>",
-        teardown_calls,
-        &by_name,
-        &decls,
-        &mut seen,
-        &mut queue,
-        &mut unresolved,
-    );
 
     while let Some((func, type_args)) = queue.pop_front() {
         let subst: BTreeMap<String, Type> = func
@@ -543,6 +705,8 @@ fn build<'a>(
         predicates,
         unresolved,
         lambda_bodies,
+        bodies: outside,
+        places,
     }
 }
 
@@ -551,21 +715,26 @@ fn build<'a>(
 /// A placed [`Release`] whose kind is [`DropKind::Release`] IS a call: the
 /// source never writes it, the release walk places it, and a flattened
 /// `impl<T> Owned for Slots<T>` is a generic function, so which body it reaches
-/// depends on the receiver. That is the whole of the `ImplicitDispatch` class
-/// M2 named and M4 measured at 24 — every one of them an
-/// `Owned__Slots__release<…>` a backend emitted and no worklist above a backend
-/// could see. The step carries the receiver type now, so the parameters are
-/// solved here from the same rule a written call is solved by
-/// ([`vyrn_frontend::types::solve_param`], one matcher, moved below the
-/// backends for this), and the instance comes from the step rather than from a
-/// guess about where a release happens.
+/// depends on the receiver. The step carries that receiver, so the parameters
+/// are solved here from the same rule a written call is solved by
+/// ([`vyrn_frontend::types::solve_param`], one matcher), and the instance comes
+/// from the step rather than from a guess about where a release happens.
+///
+/// **Why the emitter reaching the body is not enough.** `direct.rs`'s
+/// `Rel::Call` parks the receiver and calls the ordinary call path, which
+/// monomorphizes the release for a call site the SOURCE never wrote. That is a
+/// body only a backend knows about, and RFC-0125 §2.3 puts the decision above
+/// it: the lowering is the worklist. The teardown's generic declared release is
+/// already modeled as an instantiation for exactly this reason, four hundred
+/// lines up; a placed one is the same rule at the same kind of exit.
 ///
 /// **What it does not reach**, stated rather than left to be found: a generic
 /// declared release reached only from INSIDE a [`DropKind::Deep`] walk — an
 /// `Array<Slots<Int64>>` — is a call this cannot see, because the walk over a
 /// type's places is the encoder's and §2.3 keeps the encoder in the backend.
-/// The corpus has none; one would fail the gate as a missing instantiation
-/// rather than hide under a rule, which is the failure this file prefers.
+/// The corpus has none; one would fail `tests/lowered.rs` as a missing
+/// instantiation rather than hide under a rule, which is the failure that file
+/// prefers.
 fn dispatched<'f>(
     releases: &[Release],
     by_name: &HashMap<&str, &'f Function>,
@@ -592,6 +761,38 @@ fn dispatched<'f>(
     out
 }
 
+/// `?` on a `Fallible` operand writes TWO calls and the checker records ONE.
+///
+/// It types the `?` by typing `Fallible__Key__success(operand)`, so that is the
+/// substitution recorded against the node; `isSuccess` is the tag test the
+/// engines emit beside it and nothing types it. Both bodies are the same impl at
+/// the same instantiation, so the twin is named here rather than guessed at —
+/// [`dispatched`]'s rule for the other call the language writes and the source
+/// does not. A NON-generic impl is a root of the worklist already, which is why
+/// `examples/fallible.vyrn` never showed the gap (RFC-0126 §8.16).
+fn fallible_twins(
+    calls: Vec<(&str, HashMap<String, Type>)>,
+) -> Vec<(String, HashMap<String, Type>)> {
+    let mut out = Vec::with_capacity(calls.len());
+    for (callee, solved) in calls {
+        if let Some(key) = callee
+            .strip_prefix(&format!("{}__", vyrn_frontend::types::FALLIBLE))
+            .and_then(|rest| rest.strip_suffix("__success"))
+        {
+            out.push((
+                vyrn_frontend::types::impl_method_name(
+                    vyrn_frontend::types::FALLIBLE,
+                    key,
+                    "isSuccess",
+                ),
+                solved.clone(),
+            ));
+        }
+        out.push((callee.to_string(), solved));
+    }
+    out
+}
+
 /// Turn the generic calls one body made into instantiations on the worklist.
 ///
 /// One function rather than one per root, because a module-state initializer
@@ -608,7 +809,8 @@ fn follow<'a>(
     queue: &mut VecDeque<(&'a Function, Vec<Type>)>,
     unresolved: &mut Vec<Unresolved>,
 ) {
-    for (callee, solved) in calls {
+    for (callee, solved) in fallible_twins(calls) {
+        let callee: &str = &callee;
         let mut stop = |why, line, args: Vec<Type>| {
             unresolved.push(Unresolved {
                 caller: caller.to_string(),
@@ -619,6 +821,17 @@ fn follow<'a>(
             })
         };
         let Some(target) = by_name.get(callee) else {
+            // A seeded builtin's row is a signature, not a body (RFC-0094):
+            // there is nothing to instantiate, and every engine implements the
+            // name directly. It reaches this list at all because a GENERIC row
+            // — `@join`, `close`, `fromArray`, `fromStep`, `boxStream` — solves
+            // its type parameters the way a user call does, and the checker
+            // records that solution against the node. RFC-0125 §3 M6's
+            // `consume` slice is where the first generic row stopped having a
+            // hand-written block and started being typed here.
+            if vyrn_frontend::prelude::signature(callee).is_some() {
+                continue;
+            }
             stop(Why::NotAFunction, 0, Vec::new());
             continue;
         };
@@ -669,7 +882,7 @@ fn block<'a>(b: &'a Block, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) 
 }
 
 fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
-    let line = stmt_line(s) as u32;
+    let line = s.line() as u32;
     let here = w.rows.len();
     w.rows.push(Row {
         depth,
@@ -749,7 +962,7 @@ fn stmt<'a>(s: &'a Stmt, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) {
                             name,
                             &args[0],
                             &args[1..],
-                            stmt_line(s),
+                            s.line(),
                         ) {
                             for ps in &p.prologue {
                                 stmt(ps, d, chain, w);
@@ -823,7 +1036,14 @@ fn expr<'a>(e: &'a Expr, depth: u16, chain: &mut Chain, w: &mut Walk<'a, '_>) ->
                 .collect();
             // A record literal solves parameters too, and it is not a call:
             // only a call adds an instance to the worklist.
-            if matches!(e, Expr::Call { .. } | Expr::Spawn { .. }) {
+            //
+            // `?` IS a call: on a `Fallible` operand the checker types it by
+            // typing `Fallible__Key__success(operand)`, and that is the node the
+            // substitution is recorded against. A GENERIC impl therefore reaches
+            // the worklist nowhere else — a non-generic one is a root already,
+            // which is why `examples/fallible.vyrn` never showed the gap and
+            // `examples/falliblegeneric.vyrn` does (RFC-0126 §8.16).
+            if matches!(e, Expr::Call { .. } | Expr::Spawn { .. } | Expr::Try { .. }) {
                 w.calls.push((callee.as_str(), solved.clone()));
             }
             chain.push(solved);
@@ -1007,11 +1227,11 @@ fn has_of(e: &Expr, kids: &[usize], w: &Walk<'_, '_>) -> Option<Type> {
             }),
         ),
         // A sum constructor names one side, and the other is unconstrained.
-        Expr::Var { name, .. } if name == "None" => Type::Option(Box::new(UNCONSTRAINED)),
+        Expr::Var { name, .. } if name == "None" => Type::option(UNCONSTRAINED),
         Expr::Call { name, args, .. } if args.len() == 1 => match name.as_str() {
-            "Some" => Type::Option(Box::new(kid(0)?)),
-            "Ok" => Type::Result(Box::new(kid(0)?), Box::new(UNCONSTRAINED)),
-            "Err" => Type::Result(Box::new(UNCONSTRAINED), Box::new(kid(0)?)),
+            "Some" => Type::option(kid(0)?),
+            "Ok" => Type::result(kid(0)?, UNCONSTRAINED),
+            "Err" => Type::result(UNCONSTRAINED, kid(0)?),
             _ => return None,
         },
         _ => return None,
@@ -1067,25 +1287,6 @@ fn iterate<'a>(
     let ty = apply(w.recorded.node_types.get(&key)?, chain);
     let (size_fn, nth) = vyrn_frontend::types::iterate_impl(w.impls, &ty)?;
     vyrn_frontend::project::iterate_loop(&size_fn, nth, var, iter, body, iter.line()).ok()
-}
-
-fn stmt_line(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let { line, .. }
-        | Stmt::Assign { line, .. }
-        | Stmt::SetField { line, .. }
-        | Stmt::IndexSet { line, .. }
-        | Stmt::Return { line, .. }
-        | Stmt::Break { line }
-        | Stmt::Continue { line }
-        | Stmt::If { line, .. }
-        | Stmt::IfLet { line, .. }
-        | Stmt::While { line, .. }
-        | Stmt::ForIn { line, .. }
-        | Stmt::Drop { line, .. }
-        | Stmt::Region { line, .. } => *line,
-        Stmt::Expr(e) => e.line(),
-    }
 }
 
 // ---- the lint ------------------------------------------------------------

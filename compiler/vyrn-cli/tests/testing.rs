@@ -1,6 +1,8 @@
 //! `vyrn test` integration tests (RFC-0015): exact stdout, exit codes, the
-//! `--name` filter, the no-tests case, and IR stripping. Interpreter-only (no
-//! clang), so these run in the default suite.
+//! `--name` filter, the no-tests case, and IR stripping. No clang, so these run
+//! in the default suite; since RFC-0125 §3 M5's eleventh slice the default is
+//! the compiled route, and the two pins at the end of this file name both
+//! engines because a `test` block must answer the same on either.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -138,7 +140,7 @@ fn test_bodies_are_stripped_from_emitted_ir() {
          fn main() -> Int64 { print(1) return 0 }\n",
     )
     .unwrap();
-    let out = vyrn().arg("emit-ir").arg(&file).output().unwrap();
+    let out = vyrn().arg("emit-wat").arg(&file).output().unwrap();
     assert!(out.status.success(), "{}", norm(&out.stderr));
     let ir = norm(&out.stdout);
     assert!(
@@ -148,5 +150,102 @@ fn test_bodies_are_stripped_from_emitted_ir() {
     assert!(
         !ir.contains("UNIQUE_TEST_MARKER"),
         "test name leaked into IR"
+    );
+}
+
+/// RFC-0125 §3 M5, the eleventh slice: `assert` and `assertEq` in a match ARM.
+///
+/// Both are `Unit` where they emit, and `Fn_::peek` had no row for either — so
+/// `std/bench.vyrn` was refused ("a branch yielding `assertEq`") and
+/// `std/regex.vyrn` COMPILED and trapped, which is the worse of the two. Both
+/// engines, because the answer is the language's and not one backend's.
+#[test]
+fn a_match_arm_may_assert() {
+    let dir = scratch("arm-assert");
+    let file = dir.join("t.vyrn");
+    std::fs::write(
+        &file,
+        "fn mk(s: String) -> Result<Int64, String> {
+             return Err(\"boom \" + s)
+         }
+         test \"assert in an arm\" {
+             match mk(\"x\") {
+                 Ok(r) => panic(\"took the Ok arm\"),
+                 Err(w) => assert(w == \"boom x\"),
+             }
+         }
+         test \"assertEq in an arm\" {
+             match mk(\"y\") {
+                 Ok(r) => panic(\"took the Ok arm\"),
+                 Err(w) => assertEq(w, \"boom y\"),
+             }
+         }
+",
+    )
+    .unwrap();
+    let out = vyrn().arg("test").arg(&file).output().expect("vyrn test");
+    let said = norm(&out.stdout) + &norm(&out.stderr);
+    assert!(
+        out.status.success() && said.contains("2 passed, 0 failed"),
+        "{said}"
+    );
+}
+
+/// RFC-0125 §3 M5, the eleventh slice: an ordinary function that calls a `gen
+/// fn` has no runtime lowering either, and nothing calls it, so it is skipped
+/// rather than failing the build of every program that imports the module.
+/// `std/vyx-hints`'s `checkOf` is the shape this reduces.
+#[test]
+fn a_function_that_calls_a_generator_does_not_fail_the_build() {
+    let dir = scratch("gen-caller");
+    let file = dir.join("t.vyrn");
+    std::fs::write(
+        &file,
+        "gen fn quoted(s: String) -> String {
+             return s + \"!\"
+         }
+         fn onlyTestsCallThis() -> String {
+             return quoted(\"x\")
+         }
+         fn main() -> Int64 {
+             print(\"ok\")
+             return 0
+         }
+",
+    )
+    .unwrap();
+    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+    assert!(
+        out.status.success()
+            && norm(&out.stdout)
+                == "ok
+",
+        "{}{}",
+        norm(&out.stdout),
+        norm(&out.stderr)
+    );
+
+    // And a call to the skipped name refuses at the call, naming it.
+    let file = dir.join("u.vyrn");
+    std::fs::write(
+        &file,
+        "gen fn quoted(s: String) -> String {
+             return s + \"!\"
+         }
+         fn viaHelper() -> String {
+             return quoted(\"x\")
+         }
+         fn main() -> Int64 {
+             print(viaHelper())
+             return 0
+         }
+",
+    )
+    .unwrap();
+    let out = vyrn().arg("run").arg(&file).output().expect("vyrn run");
+    let said = norm(&out.stderr);
+    assert!(
+        !out.status.success() && said.contains("no lowering for the call `viaHelper`"),
+        "{said}"
     );
 }

@@ -81,12 +81,17 @@ EXAMPLES = ROOT / "examples"
 BUILD = HARNESS / "build"                      # gitignored
 RESULTS = BENCHDIR / "results"
 
+# `vyrn-native` IS RFC-0125 §2.5's route: the same wasm the `vyrn-wasm` leg
+# runs, through wasm2c and clang. It was a third leg named `vyrn-wasm2c` beside a
+# textual-IR `vyrn-native` for as long as the two routes both existed, which is
+# how the numbers that retired the textual one were taken. It needs wabt and
+# simde, which `vyrn build` finds through the pin or under `tools/`.
 CONTESTANTS = ["c", "rust", "js", "vyrn-native", "vyrn-wasm"]
 
 # The flags, stated rather than implied.
 #
-# `vyrn build`'s native pipeline passes clang `-O2 -ffp-contract=off
-# -Wno-override-module` and no `-march` on the default x86-64 target
+# `vyrn build`'s native route passes clang `-O2 -ffp-contract=off` and no
+# `-march` on the default x86-64 target
 # (`add_native_clang_flags` in compiler/vyrn-cli/src/main.rs). The C leg is
 # given the same two that affect code: same optimization level, same refusal to
 # fuse `a*b+c`, same baseline ISA. Without `-ffp-contract=off` the C numbers
@@ -340,8 +345,8 @@ def environment() -> dict:
             "c": "clang " + " ".join(CFLAGS),
             "rust": "rustc " + " ".join(RUSTFLAGS),
             "js": "node (no build step)",
-            "vyrn-native": "vyrn build (clang -O2 -ffp-contract=off -Wno-override-module)",
-            "vyrn-wasm": "vyrn build --target wasm (direct backend, no optimizer) + wasmtime run",
+            "vyrn-native": "vyrn build (the module through wasm2c, clang -O2 -ffp-contract=off with wasm-rt)",
+            "vyrn-wasm": "vyrn build --target wasm (the emitter's module, no optimizer) + wasmtime run",
         },
     }
 

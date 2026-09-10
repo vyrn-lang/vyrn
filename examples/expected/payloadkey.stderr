@@ -1,0 +1,1 @@
+payloadkey.vyrn:20:0: `Shape` has a variant with a payload, and a payload-bearing enum key waits for real demand — a fieldless enum or a record of scalars keys today (RFC-0117 M2)

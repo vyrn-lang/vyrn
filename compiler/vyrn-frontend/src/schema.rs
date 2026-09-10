@@ -797,7 +797,7 @@ fn convert(
                 let fty = if required.contains(&fname.as_str()) {
                     fty
                 } else {
-                    Type::Option(Box::new(fty))
+                    Type::option(fty)
                 };
                 rec_fields.push(Field {
                     name: fname.clone(),
@@ -1181,7 +1181,7 @@ mod tests {
             panic!("record")
         };
         assert_eq!(fields[0].ty, Type::Named("User.age".into()));
-        assert_eq!(fields[1].ty, Type::Option(Box::new(Type::Str)));
+        assert_eq!(fields[1].ty, Type::option(Type::Str));
         let age = decls.iter().find(|d| d.name == "User.age").unwrap();
         assert!(age.predicate.is_some());
         assert!(!age.exported, "synthetic helpers stay private");

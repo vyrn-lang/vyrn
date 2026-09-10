@@ -1,14 +1,15 @@
-# The three workflows, and what to do with them
+# The four workflows, and what to do with them
 
 This file is for someone who has just arrived. The workflow files themselves
 carry long comments explaining why each step exists; this one explains what the
-three are for, when they run, and how to do the jobs people actually need to do.
+four are for, when they run, and how to do the jobs people actually need to do.
 
-## The three
+## The four
 
 | workflow | what it proves | when it runs |
 | --- | --- | --- |
 | `ci.yml` | the compiler builds, the tests pass, and the three backends agree | every push, and on demand |
+| `docs.yml` | `rfcs/README.md` agrees with `rfcs/` | every pull request, docs-only ones included; `ci.yml` skips those |
 | `site.yml` | the site builds and every route answers | on a pull request, after CI passes on `main`, and when a release is published |
 | `release.yml` | a tagged commit becomes a published release with binaries | when a tag starting with `v` is pushed |
 
@@ -55,8 +56,8 @@ A step-by-step timing of all three workflows is in
 worth knowing before anyone tries to speed things up.
 
 **One minute per job is not reachable.** The floor is not the workflow. It is
-the Vyrn interpreter executing test corpora — the site's own test blocks in one
-case, forty parity programs in another. No change to a YAML file reaches it.
+Vyrn executing test corpora — the site's own test blocks in one case, forty
+route programs in another. No change to a YAML file reaches it.
 
 **What the site's test step is made of is now known.** Run
 `vyrn test --profile site/export.vyrn` and it answers in one command: `slice`
@@ -66,8 +67,8 @@ tune in the workflow and the write-up is
 `rfcs/census/slice-is-half-the-site-build.md`.
 
 **There are two bench gates and they check different things.**
-`Bench --check`, in the `checks` job, runs every bench body once under the
-interpreter. It never loads the bench harness at all, so nothing it does
+`Bench --check`, in the `checks` job, runs every bench body once, compiled. It
+never loads the bench harness at all, so nothing it does
 exercises the native timing path. The `benchmarks` job below does run that path.
 Knowing which is which matters: a defect lived in the harness merge for a long
 time and neither gate saw it, because the corpus is the project's own files and

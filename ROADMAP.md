@@ -134,7 +134,7 @@ body that always returns satisfies the enclosing function (it runs exactly
 once, unlike a loop). Allocation failure traps (`error: out of memory`)
 instead of dereferencing null — the C shim's `__vyrn_malloc`/`__vyrn_realloc`
 check once at the choke point, including the ILP32 guard against a 64-bit
-size silently truncating in the `(size_t)` cast on wasm32. `schemaOf(T)`
+size silently truncating in the `(size_t)` cast on wasm32. `schemaOf<T>()`
 was enriched: `Schema` now carries `name`, the full base spelling (sized
 ints included), the `///` `doc`, `multipleOf`, `minLength`/`maxLength`,
 and the regex `pattern` — enough to assemble real OpenAPI fragments in
@@ -153,7 +153,7 @@ checker, interpreter, both code generators, and the parity harness are unaware
 modules exist. I/O lives behind a `ModuleResolver` trait (filesystem in the
 CLI, in-memory maps in tests). **JSON Schema type imports** (M2):
 `import type { User } from "./api.schema.json"` synthesizes validated types
-from a schema document — the exact inverse of `jsonSchema(T)` (bounds/lengths/
+from a schema document — the exact inverse of `jsonSchema<T>()` (bounds/lengths/
 patterns become `where` clauses, `required` steers `Option<T>`, `$defs`,
 `#/$defs/..` and root `#` refs resolve, `enum`-of-strings becomes a
 payload-less Vyrn enum, constrained fields become synthetic `User.age`
@@ -164,7 +164,7 @@ for the root — not a lossy comment), sized ints carry their width bounds as
 part of the wire contract, and payload-less enums emit `enum` arrays. **The
 JSON codec** (RFC-0018) moves *values* across that same wire: `toJson(x) ->
 String` (canonical — declaration-order fields, `None` omitted, bare `Option`
-→ `null`, numbers through the same `toString` rendering) and `fromJson(T, s)
+→ `null`, numbers through the same `toString` rendering) and `fromJson<T>(s)
 -> Validation<T>`, which never traps — it ignores unknown fields, takes
 absent-or-`null` for an `Option`, parses integers **exactly** (never through
 `f64`), and runs every `where` clause, accumulating one `Issue` per failure

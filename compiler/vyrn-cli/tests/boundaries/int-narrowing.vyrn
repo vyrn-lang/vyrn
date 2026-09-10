@@ -1,0 +1,15 @@
+/// Row `int-narrowing` — RFC-0002. A wider integer entering a sized slot
+/// takes the low bits and re-reads the sign. It answers rather than refusing,
+/// which is the row §2.3 proposes to turn into a constructor.
+
+fn raw(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    let a: UInt8 = UInt8(raw(300))
+    let b: Int8 = Int8(raw(200))
+    let c: Int32 = Int32(raw(4294967296 + 7))
+    print("\{a} \{b} \{c}")
+    return 0
+}

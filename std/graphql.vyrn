@@ -478,10 +478,10 @@ fn gqlRecordMembers(rhs: String, iface: ModuleInterface) -> Array<GqlMember> {
             let ftypeRaw = gqlTrim(gqlSlice(bytes(f), colon + 1, bytes(f).length))
             let ftype = gqlStripWhere(ftypeRaw)
             out.push(GqlMember {
-                    name: fname,
-                    ref: gqlRef(ftype, false, iface),
-                    inputRef: gqlRef(ftype, true, iface),
-                })
+                name: fname,
+                ref: gqlRef(ftype, false, iface),
+                inputRef: gqlRef(ftype, true, iface),
+            })
         }
     }
     return out
@@ -1708,9 +1708,9 @@ fn gqlErrJson(errs: Array<GqlErr>) -> Json {
     let mut out: Array<Json> = []
     for e in errs {
         out.push(JObj([
-                    JsonField { key: "message", value: JStr(e.message.copy()) },
-                    JsonField { key: "path", value: JArr(copyJsonArray(e.path)) },
-                ]))
+            JsonField { key: "message", value: JStr(e.message.copy()) },
+            JsonField { key: "path", value: JArr(copyJsonArray(e.path)) },
+        ]))
     }
     return JArr(out)
 }
@@ -1730,8 +1730,8 @@ export type GqlArg = { json: String, err: String }
 /// record is decoded from.
 ///
 /// **The same decode path the RPC surface uses.** `std/rpc`'s generated handler
-/// runs a POSTed body through `fromJson(<ReqType>, body)`; the arm this feeds
-/// runs `fromJson(<ReqType>, ..)` over the text this returns. An argument and a
+/// runs a POSTed body through `fromJson<ReqType>(body)`; the arm this feeds
+/// runs `fromJson<ReqType>(..)` over the text this returns. An argument and a
 /// request body reach the same record by one route and are validated by one rule,
 /// so a `Title` too long is refused identically over both wires — there is no
 /// second decoder here to be lenient where the first is strict.
@@ -2078,7 +2078,7 @@ fn gqlResolverArm(f: FnInfo) -> String {
         let reqType = f.params[0].spelling
         let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
         out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
-        out = out + "        return match fromJson(" + reqType + ", arg.json) {\n"
+        out = out + "        return match fromJson<" + reqType + ">(arg.json) {\n"
         out = out + "            Valid(input) => gqlRun_" + f.name + "(input),\n"
         out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
         out = out + "        }\n"
@@ -2092,7 +2092,7 @@ fn gqlResolverArm(f: FnInfo) -> String {
     let reqType = f.params[0].spelling
     let mut out = "        let arg = gqlArgOf(\"" + f.name + "\", args, \"input\")\n"
     out = out + "        if arg.err != \"\" {\n            return Err(consume arg.err)\n        }\n"
-    out = out + "        return match fromJson(" + reqType + ", arg.json) {\n"
+    out = out + "        return match fromJson<" + reqType + ">(arg.json) {\n"
     out = out + "            Valid(input) => Ok(gqlValueOf(toJson(" + f.name + "(input)))),\n"
     out = out + "            Invalid(issues) => Err(gqlArgError(\"" + f.name + "\", issues)),\n"
     out = out + "        }\n"
@@ -2330,10 +2330,10 @@ fn gqlTestProject(query: String) -> String {
     let sels = gqlParseQuery(query).sels
     let r = gqlProject(gqlTestValue(), sels[0].subs, "BookList!", [], gqlTestSchema)
     return emit(JObj([
-                JsonField { key: "value", value: consume r.value },
-                JsonField { key: "errors", value: gqlErrJson(r.errs) },
-                JsonField { key: "climbing", value: JBool(r.failed) },
-            ]))
+        JsonField { key: "value", value: consume r.value },
+        JsonField { key: "errors", value: gqlErrJson(r.errs) },
+        JsonField { key: "climbing", value: JBool(r.failed) },
+    ]))
 }
 
 test "gqlParseQuery reads a nested selection set" {
@@ -2499,9 +2499,15 @@ test "gqlProject refuses an argument written where the schema declares none" {
 }
 
 test "gqlArgOf takes the declared argument and names any other" {
-    let args = gqlParseQuery("{ byId(input: {id: 1}) }").sels[0].args
+    // The query is named, so the argument list is a borrow of it. Read out of
+    // the unnamed temporary, the list is taken and the rest of the query is
+    // released whole around an element hole the release walk cannot skip
+    // (RFC-0125 §3 M3, the reach slice).
+    let doc = gqlParseQuery("{ byId(input: {id: 1}) }")
+    let args = doc.sels[0].args
     assertEq(gqlArgOf("byId", args, "input").json, "{\"id\":1}")
-    let wrong = gqlParseQuery("{ byId(id: 1) }").sels[0].args
+    let bad = gqlParseQuery("{ byId(id: 1) }")
+    let wrong = bad.sels[0].args
     assertEq(gqlArgOf("byId", wrong, "input").err, "Unknown argument `id` on field `byId`.")
     assertEq(
         gqlArgOf("byId", [], "input").err,

@@ -1,0 +1,11 @@
+GET / -> 200
+GET /items -> 200
+GET /items/5 -> 200
+GET /items/abc -> 404
+GET /users/7 -> 200
+GET /users/0 -> 422
+GET /nope -> 404
+/
+/items
+/items/5
+/users/7

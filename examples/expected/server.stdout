@@ -1,0 +1,4 @@
+server starting
+200 ok
+200 <h1>hello #2 via GET</h1>
+200 <h1>hello #3 via POST</h1>

@@ -162,9 +162,12 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
         "the profile changed the program's own output"
     );
     let table = String::from_utf8_lossy(&profiled.stderr).replace("\r\n", "\n");
-    assert!(table.contains("function"), "no table on stderr:\n{table}");
-    assert!(table.contains("work"), "`work` is missing:\n{table}");
-    assert!(table.contains("main"), "`main` is missing:\n{table}");
+    // The rows are the phases of the compile and the run, and the count is the
+    // guest's operations (RFC-0125 §3 M5, the fifth slice: the per-function
+    // table was the tree-walker's, and it was replaced rather than ported).
+    assert!(table.contains("phase"), "no table on stderr:\n{table}");
+    assert!(table.contains("compile"), "`compile` is missing:\n{table}");
+    assert!(table.contains("run"), "`run` is missing:\n{table}");
     assert!(
         String::from_utf8_lossy(&plain.stderr).trim().is_empty(),
         "an unprofiled run printed a table"
@@ -183,4 +186,97 @@ fn profile_writes_the_table_to_stderr_and_not_to_stdout() {
     );
     // `args()` saw it, so the program's own output changed by exactly one.
     assert_ne!(plain.stdout, passed.stdout);
+}
+
+/// `vyrn run --profile` reports phases and a count, not functions (RFC-0125 §3
+/// M5, the `run-profile` row).
+///
+/// The compiled route has no per-call funnel to charge a span at, so it reports
+/// what it can see: the four phases the host owns, and the operations the guest
+/// executed. The count is wasmtime's fuel, so it is the same number twice — the
+/// one column of a profile that does not move with the machine. Stdout is the
+/// program's, with the flag as without it.
+#[test]
+fn the_compiled_profile_reports_phases_and_a_repeatable_count() {
+    let dir = std::env::temp_dir().join("vyrn-cli-profile-wasm");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("p.vyrn");
+    std::fs::write(
+        &file,
+        "fn work(n: Int64) -> Int64 {
+             let mut h = 0
+             let mut i = 0
+             while i < n { h = h + i  i = i + 1 }
+             return h
+         }
+         fn main() -> Int64 {
+             print(work(1000))
+             return 0
+         }
+",
+    )
+    .unwrap();
+    let one = || {
+        Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .arg("run")
+            .arg("--profile")
+            .arg(&file)
+            .output()
+            .expect("vyrn run --profile")
+    };
+    let plain = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let first = one();
+    assert!(first.status.success());
+    assert_eq!(
+        plain.stdout, first.stdout,
+        "the profile changed the program's own output"
+    );
+    assert!(
+        String::from_utf8_lossy(&plain.stderr).trim().is_empty(),
+        "an unprofiled compiled run printed a table"
+    );
+    let table = String::from_utf8_lossy(&first.stderr).replace(
+        "
+", "
+",
+    );
+    for row in [
+        "phase",
+        "load",
+        "compile",
+        "translate",
+        "instantiate",
+        "run",
+    ] {
+        assert!(
+            table.contains(row),
+            "`{row}` is missing:
+{table}"
+        );
+    }
+    let count = |text: &str| -> String {
+        text.lines()
+            .find(|l| l.contains("operation(s) executed"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no count:
+{text}"
+                )
+            })
+            .to_string()
+    };
+    let second = one();
+    assert_eq!(
+        count(&table),
+        count(&String::from_utf8_lossy(&second.stderr).replace(
+            "
+", "
+"
+        )),
+        "fuel is a count, so two runs of one program must report the same one"
+    );
 }

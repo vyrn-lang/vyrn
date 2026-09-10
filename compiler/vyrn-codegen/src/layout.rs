@@ -94,9 +94,11 @@ pub const SHAPES: &[(&str, &str)] = &[
     ("Float64", "double"),
     ("Float32", "float"),
     ("String", "ptr"),
-    // The fixed aggregates. `Option`/`Result` and `Array` are the two that lead
-    // with a narrow member and then need i64 alignment — the interesting ones.
-    ("Option/Result", "{ i1, i64, i64 }"),
+    // The fixed aggregates. `Array` leads with a narrow member and then needs
+    // i64 alignment, which is the interesting one. `Option`/`Result` used to sit
+    // beside it as `{ i1, i64, i64 }`; RFC-0126 §8.4 gave every sum the enum's
+    // `i64` tag and a slot count that follows the payload's width, so the sum
+    // rows below are theirs too.
     ("Array", "{ ptr, i64, i64 }"),
     // A `Stream<T>` (RFC-0075 M2b): the array triple, then the producer's tag,
     // payload and cursor generation.
@@ -115,9 +117,12 @@ pub const SHAPES: &[(&str, &str)] = &[
     // A vector inside a record, which is the padding case the bare vector cannot
     // show: 16-alignment pushes the member to 16 and the struct to 32.
     ("RecordOfVector", "{ i8, <4 x float> }"),
-    // Enums: one i64 tag plus one i64 per payload slot of the widest variant.
+    // Sums: one i64 tag plus one i64 per payload SLOT of the widest variant
+    // (RFC-0126 §8.4) — `Option<Int64>` and a one-word enum are `Enum1`,
+    // `Option<fn(Int64)>` and a two-word enum are `Enum2`.
     ("Enum0", "{ i64 }"),
     ("Enum1", "{ i64, i64 }"),
+    ("Enum2", "{ i64, i64, i64 }"),
     ("Enum3", "{ i64, i64, i64, i64 }"),
     // Records, including the mixed-width and nested cases. Nesting is the shape
     // the spike measured 19 deep; three levels exercises the same rule.
@@ -370,8 +375,9 @@ mod tests {
             (m.size, m.align, &m.fields[..]),
             (32, 8, &[0, 4, 8, 16, 24][..])
         );
-        // Option/Result: the `i1` is a byte, then 7 bytes of hole.
-        let o = of_ll("{ i1, i64, i64 }").unwrap();
+        // A sum with two payload slots — `Option<fn(Int64)>`, or an enum whose
+        // widest variant is two words wide (RFC-0126 §8.4).
+        let o = of_ll("{ i64, i64, i64 }").unwrap();
         assert_eq!((o.size, o.align, &o.fields[..]), (24, 8, &[0, 8, 16][..]));
         // A defunctionalized `fn` value (RFC-0037): tag plus capture block.
         let r = of_ll("{ i64, i64 }").unwrap();

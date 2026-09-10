@@ -270,7 +270,12 @@ test "the pager walks the tree the sidebar prints" {
     let landing = pagerFor(docsTree("index"))
     assertEq(landing.prevHref, "")
     assertEq(landing.nextHref, "")
-    let firstModule = docsTree("x")[0].rows[0].label
+    // The tree is named, so the label is a borrow of it. Read out of the
+    // unnamed temporary, the label is taken and the rest of the tree is
+    // released whole around an element hole the release walk cannot skip
+    // (RFC-0125 §3 M3, the reach slice).
+    let tree = docsTree("x")
+    let firstModule = tree[0].rows[0].label
     // labels are "std/<name>"; the marked walk is exercised through `mid`.
     assert(firstModule.byteLength > 4)
     // A module in the middle has both, and both are rows of the tree.

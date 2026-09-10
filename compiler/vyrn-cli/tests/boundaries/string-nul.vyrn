@@ -1,0 +1,11 @@
+/// Row `string-nul` — RFC-0014 M2. A `String` is NUL-terminated, so a byte
+/// array holding a NUL is refused BEFORE the UTF-8 check.
+
+fn main() -> Int64 {
+    let b: Array<UInt8> = [104, 0, 105]
+    print(match stringFromBytes(b) {
+        Ok(s) => "ok: \{s}",
+        Err(e) => "err: \{e}",
+    })
+    return 0
+}

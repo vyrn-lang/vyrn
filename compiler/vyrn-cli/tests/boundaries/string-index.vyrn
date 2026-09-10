@@ -1,0 +1,11 @@
+/// Row `string-index` — RFC-0022. A byte read past the end of a String.
+
+fn idx(n: Int64) -> Int64 {
+    return n
+}
+
+fn main() -> Int64 {
+    let s = "abc"
+    print(Int64(s[idx(9)]))
+    return 0
+}

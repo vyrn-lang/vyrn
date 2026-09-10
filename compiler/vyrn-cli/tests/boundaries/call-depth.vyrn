@@ -1,0 +1,11 @@
+/// Row `call-depth` — RFC-0004 §4. The recursion budget, whose number the
+/// wording is built from so the limit and the sentence cannot drift.
+
+fn down(n: Int64) -> Int64 {
+    return down(n + 1)
+}
+
+fn main() -> Int64 {
+    print(down(0))
+    return 0
+}

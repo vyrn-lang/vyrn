@@ -1,0 +1,43 @@
+// RFC-0125 M3 probe: a heap field READ off a temporary nobody names, in a
+// read position (`gqlSplitDecl(src).rhs.startsWith("{")` in `std/graphql`;
+// a compare here, so the probe needs no import). The analysis puts the
+// receiver in R1's table, but both compiled backends run that row after a
+// scalar field read only: the borrowed field outlives the read, and no
+// table keys a free after the read's consumer. The whole temporary is never
+// released. The kernel's one remaining refusal at M3's second slice. Peak
+// working set at 200,000 and 400,000 turns: 25.9 MB and 58.7 MB natively,
+// 32.6 MB and 76 MB under wasmtime (36.7 / 68.8 MB and 43.7 / 72.6 MB with
+// M3's third-slice build and the placer off).
+//
+// Closed by M3's third slice: the placer writes an argument-temporary drop
+// keyed by the node that produced the receiver (`split(i)`), and both
+// compiled backends free it after the compare that consumed the read. After:
+// 4.4 MB at both turn counts natively; 14.9 / 14.8 MB under wasmtime, where a
+// flat probe reads 18.2 / 14.9 MB on the same host.
+let turns = 200000
+
+type Decl = { name: String, rhs: String }
+
+fn split(i: Int64) -> Decl {
+    return Decl {
+        name: "name-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+        rhs: "{ rhs-" + i.toString() + "-with-enough-length-to-live-on-the-heap",
+    }
+}
+
+fn isRecord(i: Int64) -> Bool {
+    return split(i).rhs == "{"
+}
+
+fn main() -> Int64 {
+    let mut i = 0
+    let mut total = 0
+    while i < turns {
+        if isRecord(i) {
+            total = total + 1
+        }
+        i = i + 1
+    }
+    print(total)
+    return 0
+}

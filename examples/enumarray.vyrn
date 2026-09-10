@@ -99,7 +99,7 @@ fn main() -> Int64 {
     // Codec round-trip: encode an array-payload enum, decode it back, and match.
     let enc = toJson(Words(["x", "y"]))
     print(enc)
-    match fromJson(Bag, "{\"Ints\":[8,9]}") {
+    match fromJson<Bag>("{\"Ints\":[8,9]}") {
         Valid(v) => describe(v),
         Invalid(_) => 0,
     }

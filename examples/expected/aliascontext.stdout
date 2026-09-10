@@ -1,0 +1,6 @@
+empty map alias: length=2 json={"apple":3,"pear":5}
+empty array alias: length=2 sum=9
+filled array alias: sum=6 length=3
+filled map alias: json={"usd":1,"eur":2}
+empty array alias: sum=7
+nobody / age 21

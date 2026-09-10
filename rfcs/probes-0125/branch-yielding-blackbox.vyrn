@@ -1,0 +1,14 @@
+// RFC-0125 M5 probe: a branch inside a `bench` body that yields `blackBox(v)`.
+// The direct backend lowers `blackBox(v)` as `v`, but its type peek held no row
+// for the name, so the arm had no type and the whole program was refused with
+// `no lowering for a branch yielding \`blackBox\``. The interpreter ran it.
+// `examples/langbench.vyrn` is the corpus program that hit it.
+//
+//     vyrn bench rfcs/probes-0125/branch-yielding-blackbox.vyrn --check
+//     vyrn bench --engine wasm rfcs/probes-0125/branch-yielding-blackbox.vyrn --check
+//
+// Both print `bench "..." ... ok`.
+bench "a branch that yields blackBox" {
+    let n = if true { blackBox(3) } else { 0 }
+    blackBox(n)
+}

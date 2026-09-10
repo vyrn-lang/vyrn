@@ -1,0 +1,32 @@
+// RFC-0125 M3 probe, the default slice: a store over a name that owns
+// nothing.
+//
+// `let mut b = Body { nodes: [] }` binds a literal built from literals, and
+// the kernel calls that `Static`: nothing to release. A STORE of the same
+// expression used to leave the name `Held`, so the next store over it was
+// refused as a leak of a value that never existed. The rule is the `let`'s
+// now, read off the value's own state.
+//
+// `std/vyx.vyrn`'s `vyxProcessNodes` is the corpus program that met this: it
+// resets `elseBody` to an empty body after flushing a `v-if` chain.
+
+type Body = { nodes: Array<Int64> }
+
+fn chains(n: Int64) -> Int64 {
+    let mut out: Array<Body> = []
+    let mut b = Body { nodes: [] }
+    let mut i = 0
+    while i < n {
+        if i % 3 == 0 {
+            out.push(b)
+            b = Body { nodes: [] }
+        }
+        i = i + 1
+    }
+    return out.length + b.nodes.length
+}
+
+fn main() -> Int64 {
+    print(chains(30).toString())
+    return 0
+}

@@ -1,6 +1,6 @@
 /// RFC-0115's refusal: `append` is a byte copy of the source's elements, and
 /// an element that owns heap — a String here — would give two arrays one
-/// buffer. The fix the checker names is a `push` loop with `.copy()`.
+/// buffer. The `@Heapless` bound on its row is the rule (RFC-0125 §3 M6).
 fn main() -> Int64 {
     let mut a: Array<String> = ["x"]
     let b: Array<String> = ["y"]

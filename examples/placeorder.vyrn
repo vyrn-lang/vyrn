@@ -112,12 +112,13 @@ test "a nested place still writes back through every level" {
     assertEq(grid.rows[1][1], 4)
 }
 
-test "a field write does not disturb an alias taken before it" {
-    // The move-out is a take, but the array is still shared with `before`, so
-    // the element store must copy — the take removes the desugar's OWN extra
-    // reference, never a user's.
+test "a field write does not disturb a copy taken before it" {
+    // `let before = t.xs` would read `t.xs` in place, and the element store
+    // writes through that place: RFC-0089 rule 2 refuses using `before`
+    // after the write (the compiled routes would print 99 for it, the
+    // interpreter 1). A copy is its own value.
     let mut t: T = T { xs: [1, 2, 3] }
-    let before = t.xs
+    let before = t.xs.copy()
     t.xs[0] = 99
     assertEq(t.xs[0], 99)
     assertEq(before[0], 1)

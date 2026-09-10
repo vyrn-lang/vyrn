@@ -1,0 +1,201 @@
+// The language's prelude — every declaration the compiler puts into every
+// program, stated once, in Vyrn (RFC-0125 §2.4, §3 M6).
+//
+// This file is not a module. Nothing imports it, nothing resolves it against a
+// std root, and no `vyrn.json` can name it: `prelude.rs` embeds the text at
+// build time and the parser pushes these declarations into every program it
+// parses. So a bare file still runs, with no import and no std root, which is
+// what the injection has always bought.
+//
+// The declarations are UNPREFIXED, which is why this is not an `RT_MODULES`
+// entry: a program names `Request` and `Schema` as it writes them, and a
+// runtime module's declarations are renamed to a reserved spelling nothing can
+// write. Every declaration here carries line 0, and that is how the loader
+// (`is_injected`) and the editor recognise one.
+//
+// A comment here is `//` and never `///`: a `///` is a declaration's doc, and
+// these declarations carry none — a doc would change what hover says.
+
+// The built-in `Value` enum (RFC-0007): the closed set of types a tagged
+// template can interpolate. Injected so every program can name `Array<Value>`
+// and match `IntVal`/`StrVal`/`BoolVal` — the tag surface — without a `use`.
+type Value = | IntVal(Int64) | StrVal(String) | BoolVal(Bool)
+
+// The built-in `Template` record (RFC-0007): the structured form of an
+// interpolated string — literal `parts` interleaved with boxed `values`.
+// `template"a\{x}b"` yields one of these; any code can read its fields.
+type Template = { parts: Array<String>, values: Array<Value> }
+
+// The error model (RFC-0009): a structured `Issue` (with an i18n `key`) and a
+// generic `Validation<T>` = `Valid(T) | Invalid([Issue])`. A validator
+// accumulates all failing checks into an issue array and returns `Invalid`,
+// so every problem is reported at once and each carries a translation key.
+type Issue = { key: String, path: String, message: String }
+
+type Validation<T> = | Valid(T) | Invalid(Array<Issue>)
+
+// Persistence outcome (RFC-0044): the three honest results of `load`ing a
+// typed value from a file — the file is absent (`Missing`), present but not
+// decodable (`Corrupt` with the accumulated `Issue`s), or decoded (`Loaded`).
+// A missing file is deliberately NOT the same as a corrupt one. Injected like
+// `Validation` so `load(TypeName, path)` (a call-site desugar) can name its
+// variants without an import.
+type LoadResult<T> = | Missing | Corrupt(Array<Issue>) | Loaded(T)
+
+// `Schema` (RFC-0003 reflection): the extractable shape of a validated type,
+// produced by `schemaOf(TypeName)` — its name, base spelling, `///` doc,
+// and everything its `where` predicate implies (numeric bounds, multipleOf,
+// string length bounds, regex pattern). Turn it into OpenAPI/JSON in
+// ordinary code.
+type Schema = {
+    name: String,
+    base: String,
+    doc: Option<String>,
+    min: Option<Int64>,
+    max: Option<Int64>,
+    multipleOf: Option<Int64>,
+    minLength: Option<Int64>,
+    maxLength: Option<Int64>,
+    pattern: Option<String>
+}
+
+// Module reflection (RFC-0021): `moduleInterface(path)` returns the shape of
+// a module's EXPORTED surface — `schemaOf` generalized from one type to a
+// whole module. Injected like `Schema`/`Issue` so a generator can name them
+// without an import, and filtered out of the LSP by their line-0 origin. The
+// records reference each other and `Schema` by name (resolution is
+// order-independent). A generator consumes these to emit stubs/docs/mocks.
+
+// Where a declaration was WRITTEN (RFC-0073 M1) — the file it came from and
+// the 1-based line/column of its name token, so a generated symbol can be
+// mapped back to the declaration it stands for. `name` is the declaration's
+// own name, which is routinely not the generated symbol's (`pastes.list`
+// stands for `list`), so an origin answers on its own. An unknown position
+// is `line == 0 && col == 0`, the same "not located" spelling the LSP's
+// symbol index uses.
+type Origin = { file: String, line: Int64, col: Int64, name: String }
+
+type ParamInfo = {
+    name: String,
+    spelling: String,
+    schema: Schema,
+    // The first type inside this parameter's type that cannot cross the
+    // wire, or `""` when the whole of it can (RFC-0071 M3). A parameter
+    // is a DECODE target, so this is `codec::decodable`'s answer — which
+    // is the compiler's own rule rather than a second one that could
+    // drift from it.
+    uncodable: String
+}
+
+type FnInfo = {
+    name: String,
+    params: Array<ParamInfo>,
+    ret: String,
+    retSchema: Schema,
+    // The same answer for the return type, `codec::encodable`'s way
+    // round — a return is ENCODED. `Unit` reports itself here (nothing
+    // is codable that is not a value); a caller that means "nothing is
+    // sent" tests `ret == ""` first, which is what `std/rpc` does.
+    retUncodable: String,
+    // `mut fn` — the author declared that this procedure changes state
+    // (RFC-0074 M4a). Never inferred: Vyrn does not track effects, so
+    // this is exactly what the declaration said and nothing more. One
+    // bit, three spellings — `std/graphql` reads it as Mutation vs
+    // Query, an HTTP projection as not-a-`GET`, gRPC ignores it.
+    mutates: Bool,
+    // Where the procedure was declared (RFC-0073 M1) — the half of
+    // `//@origin` that line-granular mapping cannot carry: a generated
+    // stub knows which declaration it stands for, and can say so.
+    origin: Origin
+}
+
+type TypeInfo = {
+    name: String,
+    source: String,
+    // The import specifier (relative to the reflected module's importer)
+    // for the module that DECLARES this type — so a generator that must
+    // share the type's identity (rpcServer/rpcInProcess) can import it
+    // from the right module when the closure reaches across imports
+    // (RFC-0031). Own types carry the generator's own contract argument.
+    module: String,
+    schema: Schema,
+    // Where the type was declared — the reflected module's file for its
+    // own types, the DECLARING module's for a closure type reached
+    // across an import (RFC-0073 M1).
+    origin: Origin
+}
+
+type ModuleInterface = { functions: Array<FnInfo>, types: Array<TypeInfo> }
+
+// Contract reflection (RFC-0071): `contractOf(Name)` returns the declared
+// shape of a module contract — `moduleInterface`'s counterpart on the
+// *expectation* side, so `std/contract:checkContract(iface, contractOf(P))`
+// compares two ordinary records in ordinary Vyrn code and the compiler stays
+// ignorant of any particular contract. Injected like `ModuleInterface` so a
+// generator can name them without an import.
+// `kind` is `"let"` or `"fn"`; `name` is `"*"` for the open rule; `spelling`
+// is the member's whole type (`Head`, or `fn(Int64) -> String`) so a
+// comparison against `FnInfo`/`TypeInfo` spellings is a string comparison.
+// `variadic` marks an open rule written `fn *(..) -> R`, which constrains the
+// return type only.
+type MemberInfo = {
+    name: String,
+    kind: String,
+    spelling: String,
+    params: Array<String>,
+    ret: String,
+    optional: Bool,
+    variadic: Bool,
+    doc: Option<String>
+}
+
+type ContractInfo = {
+    name: String,
+    module: String,
+    doc: Option<String>,
+    open: Bool,
+    members: Array<MemberInfo>
+}
+
+// The server surface (RFC-0016): the `Request` handed to `handle` and the
+// `Response` it returns. Ordinary records (no `where`), injected like
+// `Schema`/`Issue` so every program can name them without a `use` and
+// `vyrn serve` can construct/read them across the FFI-free interpreter
+// boundary. `path` carries the query string as sent; `body` is the raw
+// request body (`""` when absent). Users construct them freely — `main`
+// calling `handle` directly is the parity story.
+//
+// `headers` (RFC-0072 M4) carries the request's header block. RFC 9110 makes
+// field names case-insensitive, and a `Map<String, String>` lookup is exact,
+// so the NAMES ARE LOWERCASED WHERE THE REQUEST IS BUILT — the host lowercases
+// as it parses the wire, and a hand-written `Request` literal writes lowercase
+// keys. Normalizing at construction rather than at lookup keeps the map itself
+// canonical: iterating it yields one spelling per header, and no reader has to
+// remember a helper to be correct. Duplicate field lines join with `", "` per
+// RFC 9110 §5.3.
+type Request = {
+    method: String,
+    path: String,
+    headers: Map<String, String>,
+    body: String
+}
+
+type Response = {
+    status: Int64,
+    contentType: String,
+    body: String,
+    // The `Vary` response header (RFC-0072 M4). A response whose body
+    // depends on a request header must say which, or a shared cache will
+    // serve one audience's copy to the other — a page's HTML to a client
+    // asking for its JSON payload. `""` emits no header.
+    vary: String,
+    // Every OTHER response header, in insertion order (RFC-0074 M2).
+    // `Vary` kept its own field because RFC-0072 M4 already shipped it and
+    // one negotiation channel is better than two; the rest of HTTP's
+    // response vocabulary — `ETag`, `Cache-Control`, `Last-Modified`,
+    // `Location` — is open-ended, so it is a map rather than a field per
+    // header. Names are written as they go on the wire (response header
+    // names are never looked up by the program that just wrote them, so
+    // the `Request` lowercasing rule does not apply here).
+    headers: Map<String, String>
+}

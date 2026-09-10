@@ -44,6 +44,11 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
         "copies its source's elements by bytes",
     ),
     (
+        "clearowned.vyrn",
+        "RFC-0115 addendum: `clear` forgets its elements, so an element type          that owns heap is refused — forgetting one leaks it",
+        "forgets its elements without releasing them",
+    ),
+    (
         "floatkey.vyrn",
         "RFC-0117: float keys are refused by name — NaN != NaN breaks the          reflexivity a key needs",
         "does neither well",
@@ -87,7 +92,7 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
     (
         "a1_afterjoin.vyrn",
         "A1's reach: a read AFTER the join of a conditional move (Theorem 4's          first case). The branch-disjoint read is accepted; this is not",
-        "used again here",
+        "already consumed by",
     ),
     (
         "a2_capture.vyrn",
@@ -219,16 +224,33 @@ pub const EXPECTED_CHECK_FAILURE: &[(&str, &str, &str)] = &[
          knows nothing about tables",
         "data/dupe.tbl:4:1: column `id` is declared twice",
     ),
+    (
+        "loopalias.vyrn",
+        "a join arm that hands out a name bound outside an enclosing loop \
+         (RFC-0125 §3 M3, the safety strand) — the arm stands the outer name down \
+         and the `let` owns the result, so the back edge freed one buffer once per \
+         turn and the native binary exited 134 under `VYRN_LEAK_CHECK=1`",
+        "may not be handed out of an arm inside a loop",
+    ),
 ];
 
 /// Examples whose behavior is HOST-PROVIDED (RFC-0012 `extern`): only a browser
-/// page supplies the `vyrn` import namespace, so three-way output parity cannot
-/// apply — wasmtime provides WASI, not `vyrn`. Excluded from the parity loop;
-/// instead [`wasm_only_examples_trap_identically`] asserts the decided
-/// non-wasm semantics: interp and native both produce the canonical
-/// `error: extern `name` is not available on this target` trap, byte-identical
-/// to each other. The real browser behavior is exercised by `web/externdemo.html`.
-/// KNOWN_DIVERGENT stays empty — this list is about *hosts*, not divergence.
+/// page supplies the `vyrn` import namespace. The real browser behavior is
+/// exercised by `web/externdemo.html`. KNOWN_DIVERGENT stays empty — this list
+/// is about *hosts*, not divergence.
+///
+/// It names the harnesses that drive an OUTSIDE tool, and only those: the route
+/// loop compares wasm2c against the `wasmtime` CLI, and neither knows the
+/// namespace, so there is no column to compare.
+/// `route::the_extern_example_refuses_on_the_route_as_the_embedded_engine_does`
+/// asserts the decided non-page semantics instead: the route and the embedded
+/// engine both produce the canonical
+/// `error: extern `name` is not available on this target` trap, byte-identical.
+///
+/// `tests/fixtures.rs` does NOT skip this list. Its engine is the embedded host
+/// in `vyrn-cli`'s own `wasmrun`, which answers the `vyrn` namespace with that
+/// same sentence, so a reached `extern` fails identically on all three engines
+/// (RFC-0125 §3 M5, the fourth slice).
 ///
 /// The cost of that exclusion is on record: because nothing here ever *built* one
 /// of these to wasm either, the direct backend reached 87 of 87 with no lowering
@@ -239,6 +261,73 @@ pub const WASM_ONLY: &[(&str, &str)] = &[(
     "externdemo.vyrn",
     "calls `extern` fns; only the browser provides the `vyrn` namespace",
 )];
+
+/// Project entries under `examples/*/` that `vyrn check` must REFUSE, with the
+/// text the refusal must contain. `EXPECTED_CHECK_FAILURE` is the precedent and
+/// lists single files; a project's entry point is refused by its artifact's
+/// floor (RFC-0103), which a single file never has. `tests/floor.rs` asserts
+/// each; the corpus harnesses that walk project entries skip them.
+pub const EXPECTED_PROJECT_CHECK_FAILURE: &[(&str, &str, &str)] = &[
+    (
+        "leak/client/boot.vyrn",
+        "RFC-0103 M2's gate: the browser artifact reaches a file reader three          hops away, and the chain is the diagnostic",
+        "`readFile` needs `fs`; target `browser` has no filesystem",
+    ),
+    (
+        "listing/client/boot.vyrn",
+        "RFC-0125 M6 finding 6: a browser artifact that lists a directory degrades          to the canonical `Err` on a page, so the floor's `fs` row carries `listDir`",
+        "`listDir` needs `fs`; target `browser` has no filesystem",
+    ),
+];
+
+/// The one function in `src`'s module whose body contains `marker`, printed as
+/// WAT (`vyrn emit-wat`).
+///
+/// A structural count needs a function to count in, and `vyrn emit-ir` was where
+/// these tests found one until the textual route went (RFC-0125 §2.5). The
+/// module carries no name section, so a function is an index here and an index
+/// moves whenever the runtime does — hence by CONTENT. `wasmprinter` indents
+/// every function's opening `(func` by two spaces and closes it with a `)` at
+/// the same column, which is what makes the slice exact, and a marker that names
+/// two functions or none is a failure rather than a vacuous pass.
+pub fn wat_func_containing(dir: &Path, name: &str, src: &str, marker: &str) -> String {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-wat");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    let wat = norm(&out.stdout);
+    let bodies: Vec<&str> = wat
+        .split("\n  (func ")
+        .skip(1)
+        .map(|f| &f[..f.find("\n  )").expect("unterminated function")])
+        .filter(|f| f.contains(marker))
+        .collect();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "expected exactly one function containing `{marker}`, found {}",
+        bodies.len()
+    );
+    bodies[0].to_string()
+}
+
+/// The whole module as WAT, for a test whose claim is about the module and not
+/// about one function in it.
+pub fn wat_of(dir: &Path, name: &str, src: &str) -> String {
+    let file = dir.join(format!("{name}.vyrn"));
+    std::fs::write(&file, src).unwrap();
+    let out = vyrn()
+        .arg("emit-wat")
+        .arg(&file)
+        .output()
+        .expect("vyrn emit-wat");
+    assert!(out.status.success(), "{}", norm(&out.stderr));
+    norm(&out.stdout)
+}
 
 pub fn examples_dir() -> PathBuf {
     // vyrn-cli/ -> compiler/ -> repo root -> examples/
@@ -418,11 +507,14 @@ pub fn run_io(mut cmd: Command, dir: &Path, stdin_fixture: &Path) -> std::proces
     cmd.output().expect("run backend")
 }
 
+/// Build `path` through the NATIVE route (the text-IR backend and clang) and
+/// run the binary under [`run_io`]'s conventions.
+///
 /// Program arguments for an example (RFC-0061): the tokens in `examples/<name>.args`,
 /// ONE per line (so a token may contain spaces), trailing newline ignored. These
-/// are forwarded identically to all three backends — `vyrn run <file> <args>`,
-/// the native `<exe> <args>`, and `wasmtime run ... <module> <args>` — so an argv
-/// example is a byte-identical parity citizen. No fixture ⇒ empty argv.
+/// are forwarded identically to both routes — `vyrn run <file> <args>` and
+/// `wasmtime run ... <module> <args>` — so an argv example is a byte-identical
+/// citizen of every gate. No fixture ⇒ empty argv.
 pub fn read_args(args_fixture: &Path) -> Vec<String> {
     if !args_fixture.exists() {
         return Vec::new();

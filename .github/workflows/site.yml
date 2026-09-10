@@ -100,8 +100,8 @@ jobs:
         # 132 s of cargo, which is what this step removes on a warm run. The pole
         # is not a build. `The site's own tests` is 907 s of it, and 687 s of THAT
         # is `vyrn test site/export.vyrn`: 32 blocks, most of which render pages,
-        # against 175 routes. That number belongs to the interpreter and not to
-        # this file, and it is the next thing to attack here.
+        # against 175 routes. That number belongs to the compiler and not to this
+        # file, and it is the next thing to attack here.
         # Swatinem/rust-cache@v2
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
@@ -160,6 +160,22 @@ jobs:
         # per design record, and the registry one per package.
         run: mkdir -p out/docs/std out/guide out/web out/tooling out/backstage/rfcs out/explore
 
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (RFC-0102: a project that never pinned behaves as it
+        # always did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          compiler/target/release/vyrn update --locked wabt >/dev/null
+          compiler/target/release/vyrn update --locked simde >/dev/null
+          wasm2c=$(compiler/target/release/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/release/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
       - name: A minute with Vyrn, recorded
         # AFTER the CLI build, because it runs the binary that step just made,
         # and BEFORE the export, which refuses to publish without this file —
@@ -259,7 +275,12 @@ jobs:
         # directory: `.cargo/config.toml` there sets the linker's stack size,
         # and cargo reads that file from the working directory upward, so a
         # `--manifest-path` build from elsewhere silently gets wasm-ld's 1 MB
-        # default and overflows a tenth of the way to the interpreter's limit.
+        # default, which the compiler's own recursion overflows on a deeply
+        # nested program.
+        #
+        # RFC-0125 M5: this module COMPILES and no longer runs. It answers the
+        # program's own wasm module, which the page instantiates with
+        # `web/wasi-min.js`, so `vyrn-codegen` builds for this target too.
         #
         # `writeFile` takes a String, so the export cannot copy a wasm module;
         # this one lands straight in the output.
@@ -272,8 +293,10 @@ jobs:
           ls -l ../../out/play.wasm
 
       - name: The playground's own checks
-        # The span offsets, the diagnostics shape and the exit codes, on the
-        # host where a failure is readable.
+        # The span offsets, the diagnostics shape, and which of the two answers
+        # `play_compile` gives, on the host where a failure is readable. WHAT the
+        # emitted module then does is the compiled route's rule, and the parity
+        # suite in `vyrn-cli` is where that is stated.
         working-directory: compiler/vyrn-play
         run: cargo test --release
 

@@ -1,0 +1,8 @@
+// RFC-0115 addendum's refusal: `clear` forgets its elements without releasing
+// them, and an element that owns heap — a String here — would leak. The rule
+// is the `@Heapless` bound on its seeded row (RFC-0125 §3 M6).
+fn main() -> Int64 {
+    let mut a: Array<String> = ["x"]
+    a.clear()
+    return a.length
+}

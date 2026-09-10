@@ -1,0 +1,3 @@
+streammove_after.vyrn:11:0: `xs` was moved here into `fromArray(..)`
+line 16: ... and `xs` is used again here
+  fix: `xs.copy()` if both sides need a value

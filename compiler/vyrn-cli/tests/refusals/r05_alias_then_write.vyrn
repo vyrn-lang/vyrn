@@ -1,0 +1,11 @@
+// RFC-0090: all mutation is exclusive. A write through the root ends every
+// alias that reads out of it.
+type Tbl = { xs: Array<Int64> }
+
+fn main() -> Int64 {
+    let mut t = Tbl { xs: [1, 2] }
+    let before = t.xs
+    t.xs[0] = 99
+    print(before[0])
+    return 0
+}

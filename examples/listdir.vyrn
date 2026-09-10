@@ -1,0 +1,23 @@
+/// `listDir` and `listDirKinds` (RFC-0021, RFC-0119) at run time: the names
+/// in a directory, sorted by their bytes, and the canonical `Err` for a
+/// directory that is not there. The same three answers come out of the
+/// interpreter and of `vyrn run --engine wasm`, where the listing is WASI's
+/// `fd_readdir` (RFC-0125 §3 M5). Run from `examples/`.
+fn show(label: String, listed: Result<Array<String>, String>) {
+    match listed {
+        Ok(names) => {
+            print("\{label}: \{names.length} entries")
+            for name in names {
+                print("  \{name}")
+            }
+        }
+        Err(e) => print("\{label}: \{e}")
+    }
+}
+
+fn main() -> Int64 {
+    show("themes", listDir("data/themes"))
+    show("pages", listDirKinds("pages"))
+    show("missing", listDir("no-such-dir"))
+    return 0
+}

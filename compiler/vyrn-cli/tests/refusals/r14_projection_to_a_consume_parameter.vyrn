@@ -1,0 +1,12 @@
+// RFC-0092: a projection is a borrow of its root, and a `consume` parameter
+// takes what it is handed.
+type Doc = { title: String, id: Int64 }
+
+fn take(s: consume String) -> Int64 { return s.byteLength }
+
+fn main() -> Int64 {
+    let d = Doc { title: "t", id: 1 }
+    let n = take(d.title)
+    print(n + d.id)
+    return 0
+}

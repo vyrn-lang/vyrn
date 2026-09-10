@@ -1,0 +1,1 @@
+dropparam.vyrn:7:0: cannot `drop` `v`: its type `T` is a type parameter, so this body cannot know whether the rule below holds for the instance — a plain record would be released here where `drop` on it directly is refused. Release the value where its concrete type is known, or `consume` the heap field and `drop` that

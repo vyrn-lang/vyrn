@@ -1,8 +1,10 @@
 # Vyrn compiler (prototype)
 
 The Rust workspace that implements Vyrn. Every feature below is verified to
-produce identical results three ways: the tree-walking interpreter (the
-reference semantics), the clang-linked native binary, and the wasm module:
+produce identical results two ways: the clang-linked native binary and the wasm
+module. There was a third — a tree-walking interpreter, which was the reference
+semantics — and RFC-0125 §3 M5 deleted it: one rule stated twice instead of
+three times, and `vyrn run` compiles.
 
 - **Core**: `Int64`, `Bool`, immutable + dynamic `String`, `let`/`mut`, arithmetic,
   `if`/`else`, `while`, `for`-in over arrays, functions, `print`, and `str`/`parse`
@@ -57,22 +59,22 @@ rule (see `Cargo.toml`).
 
 ```bash
 cd compiler
-cargo test        # the workspace suite: lexer/parser/checker/interpreter/codegen/movecheck/ownership
+cargo test        # the workspace suite: lexer/parser/checker/codegen/movecheck/ownership
 cargo build       # builds the `vyrn` binary
 ```
 
 | Crate | Role |
 |-------|------|
-| `vyrn-frontend` | lexer → parser → AST → type checker → move checker → tree-walking **interpreter**; also the structured-`Diagnostic` API (`diagnostics(source)`) |
+| `vyrn-frontend` | lexer → parser → AST → type checker → move checker → the loader; also the structured-`Diagnostic` API (`diagnostics(source)`) |
 | `vyrn-codegen`  | emits **textual LLVM IR** (a string; no LLVM libs to produce it) **and the wasm module directly** (RFC-0077: `src/direct.rs`, `src/wasm.rs` — no LLVM, no clang, no sysroot) |
 | `vyrn-cli`      | the `vyrn` driver |
 | `vyrn-lsp`      | Language Server Protocol server (excluded — pulls `lsp-server`/`lsp-types`; see below) |
-| `vyrn-genwasm`  | RFC-0076: runs `gen fn` generators as compiled wasm (excluded — pulls `wasmtime`; optional in both `vyrn-cli` and `vyrn-lsp`, feature `wasm-gen`) |
+| `vyrn-genwasm`  | RFC-0076: runs `gen fn` generators as compiled wasm (excluded from the workspace — pulls `wasmtime` — and unconditional in both `vyrn-cli` and `vyrn-lsp`, because it is the only generation engine) |
 
 ## Running programs
 
 ```bash
-# interpret (process exits with main's return value)
+# compile and run (process exits with main's return value)
 cargo run -p vyrn-cli -- run    ../examples/fib.vyrn     # prints 55, exit code 55
 cargo run -p vyrn-cli -- run    ../examples/fib.vyrn     # exit code 55
 
@@ -83,10 +85,7 @@ cargo run -p vyrn-cli -- check  ../examples/fib.vyrn     # -> ok
 #   bad.vyrn:1:0: return type mismatch: expected Int64, found Bool
 #   bad.vyrn:2:0: arithmetic needs matching numeric operands, found Int64 and String
 
-# emit LLVM IR to stdout
-cargo run -p vyrn-cli -- emit-ir ../examples/fib.vyrn
-
-# emit the direct wasm backend's module as WAT to stdout (RFC-0077)
+# emit the emitter's module as WAT to stdout (RFC-0077)
 cargo run -p vyrn-cli -- emit-wat ../examples/fib.vyrn
 
 # print every module a generator import synthesizes (RFC-0021)
@@ -150,26 +149,24 @@ cargo run -p vyrn-cli -- build ../examples/validate_fail.vyrn -o vfail.exe
 
 ## Getting a native executable  ✅ verified working
 
-The text IR targets **LLVM 15+** (opaque pointers) and has been compiled and run
-natively with `clang` (tested against clang 22 on Windows). The `build`
-subcommand does emit-IR + link in one shot:
+There is ONE native route (RFC-0125 §2.5): the module `--target wasm` writes,
+through wabt's `wasm2c` to C, compiled with the WASI host of
+`vyrn-codegen/src/wasi_host.c` by `clang` at `-O2`.
 
 ```bash
-# one-shot: emits <out>.ll next to the binary, then links with clang
+# one-shot: writes <out>.wasm, <out>.w2c.c, <out>.w2c.h and <out>.host.c
+# next to the binary, so a failure is inspectable
 cargo run -p vyrn-cli -- build ../examples/fib.vyrn -o fib.exe
 ./fib.exe ; echo $?      # prints 55, exit code 55
 ```
 
 `vyrn build` finds clang via `$CLANG`, then PATH, then
-`C:\Program Files\LLVM\bin\clang.exe`. Or do it by hand:
-
-```bash
-cargo run -p vyrn-cli -- emit-ir ../examples/fib.vyrn > fib.ll
-clang fib.ll -o fib.exe
-```
+`C:\Program Files\LLVM\bin\clang.exe`; wasm2c and simde through `$VYRN_WASM2C`
+and `$VYRN_SIMDE`, then `vyrn.lock`'s pin, then a `tools/` walk from the source
+and from the compiler.
 
 > Note: native output uses the platform C runtime, so on Windows `print` lines end
-> with `\r\n`; the interpreter (`vyrn run`) uses `\n`. Same text, same exit codes
+> with `\r\n`; the wasm guest (`vyrn run`) writes `\n`. Same text, same exit codes
 > — a benign line-ending artifact, not a semantic difference.
 
 ## Editor support — diagnostics + symbol query + LSP (core API)
@@ -237,22 +234,25 @@ hover / F12 go-to-definition / completion. See `editor/vscode/README.md`.
 
 ## Semantics contract
 
-All three execution paths — the interpreter, the native binary (textual IR
-linked by `clang`), and the direct wasm module — must agree; the parity harness
-(`vyrn-cli/tests/parity.rs`) is the gate. The interpreter in
-`vyrn-frontend/src/interp.rs` is the executable reference; its unit tests
-(`fib`, `while`+`mut`, arithmetic) plus the `examples/` are the shared
-conformance cases. Verified match points include: `print` of a `Bool` prints
-`true`/`false`; a compile-time-proven validated construction has no runtime
-check; a failed runtime validation exits with code 1 (native prints
-`Vyrn: validation failed`, interpreter prints a detailed message).
+Both execution paths — the native binary (textual IR linked by `clang`) and the
+direct wasm module — must agree; the parity harness (`vyrn-cli/tests/parity.rs`)
+is the gate. There was a third path and it was the reference: the tree-walker,
+deleted by RFC-0125 §3 M5. What replaced it as the oracle is a RECORDING —
+`vyrn-cli/tests/fixtures.rs` compares every example with `examples/expected/`,
+which a human reviewed in a diff, and `vyrn-cli/tests/wasmhash.rs` says the
+module's bytes are the same on every platform. The tree-walker's own unit tests
+are `vyrn-frontend/tests/semantics.rs`, running on the compiled route; those
+plus the `examples/` are the shared conformance cases. Verified match points
+include: `print` of a `Bool` prints `true`/`false`; a compile-time-proven
+validated construction has no runtime check; a failed runtime validation exits
+with code 1.
 
 ## Gates: run the profile CI runs
 
 CI runs the test and parity jobs in DEBUG (`cargo test --quiet`, no `--release`);
 only the cross-engine-generation job uses `--release`. A local gate must match,
-because the profiles are not interchangeable: an unoptimized interpreter frame is
-about 20x an optimized one, so a runtime limit can fit in release and abort in
+because the profiles are not interchangeable: an unoptimized frame is several
+times an optimized one, so a runtime limit can fit in release and abort in
 debug. That is exactly how `CALL_DEPTH_LIMIT = 10,000` reached `main` green and
 turned CI red — every gate that session was `--release`.
 
@@ -273,11 +273,11 @@ generation job is optimized, and a debug run is minutes slower per example.
 ```
 compiler/
 ├── Cargo.toml              workspace (excludes vyrn-lsp, vyrn-genwasm)
-├── vyrn-frontend/          lexer, parser, ast, checker, movecheck, interp, types, diagnostics (+ tests)
-├── vyrn-codegen/           textual LLVM IR emitter + the direct wasm backend (+ unit tests)
-├── vyrn-cli/               vyrn: run | check | emit-ir | emit-wat | emit-gen | build
+├── vyrn-frontend/          lexer, parser, ast, checker, movecheck, loader, types, diagnostics (+ tests)
+├── vyrn-codegen/           the wasm emitter + the layout engine + toolchain discovery (+ unit tests)
+├── vyrn-cli/               vyrn: run | check | emit-wat | emit-gen | build
 ├── vyrn-lsp/               LSP server (excluded — pulls lsp-server/lsp-types)
-├── vyrn-genwasm/           wasm generation engine (excluded — pulls wasmtime; feature `wasm-gen`)
+├── vyrn-genwasm/           wasm generation engine (excluded — pulls wasmtime)
 
 editor/vscode/             VS Code extension: extension.js (LSP client) + TextMate grammar
 ```

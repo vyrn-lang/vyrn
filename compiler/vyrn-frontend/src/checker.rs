@@ -74,7 +74,7 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
 /// does not suppress errors in the others. Inside a single function body the
 /// check is still first-error (recovery there is the same class of work as
 /// parser recovery, and is deferred).
-/// Like [`check_accum_with_let_types`], but reuses the diagnostics of modules
+/// Like [`check_accum_with_binders`], but reuses the diagnostics of modules
 /// that have not changed since the last call.
 ///
 /// `module_hashes` is `module key -> content hash` from the load that produced
@@ -89,15 +89,18 @@ pub(crate) fn line_of(l: impl std::borrow::Borrow<usize>) -> usize {
 /// The ROOT module carries no key (`module: None`), so the file being edited is
 /// never reused — only the libraries behind it.
 ///
-/// Returns diagnostics and inferred `let` types. It deliberately does NOT return
-/// [`StoredFnEffects`]: those accumulate during body checks, and a reused body
-/// contributes none. Callers that need effects must use the full check.
+/// Returns diagnostics and the root module's bindings. It deliberately does NOT
+/// return [`StoredFnEffects`]: those accumulate during body checks, and a reused
+/// body contributes none. Callers that need effects must use the full check.
+///
+/// The bindings are complete for all that: a reused body is a library's, and the
+/// root — the file being edited — is never reused.
 pub fn check_accum_reusing(
     program: &Program,
     module_hashes: &std::collections::HashMap<String, String>,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _, _, _) = check_accum_inner(program, Some(module_hashes));
-    (out, let_types)
+) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+    let (out, binders, _, _, _) = check_accum_inner(program, Some(module_hashes));
+    (out, binders)
 }
 
 thread_local! {
@@ -115,6 +118,100 @@ thread_local! {
     /// disguised as memory hygiene.
     static CHECK_MEMO: std::cell::RefCell<(u64, HashMap<(String, String, String), Vec<Diagnostic>>)> =
         std::cell::RefCell::new((0, HashMap::new()));
+
+    /// Whether this thread is checking a GENERATOR HOST — the program RFC-0076's
+    /// engine compiles so it can run a `gen fn` as wasm (RFC-0125 §3 M5, the
+    /// ninth slice).
+    ///
+    /// That program is the generator's module with `is_gen` cleared, because a
+    /// `gen fn` has no runtime lowering. Clearing it also told this checker the
+    /// bodies were ordinary code, so `lex`, `moduleInterface`, `contractOf` and
+    /// the `Code` and `Token` types were refused as "only available during
+    /// generation" and every node under them recorded `<type error>`. The
+    /// emitter has its own lowering for all of them and emitted a correct
+    /// module anyway; what the errors cost was the RECORD — the join types the
+    /// emitters read (RFC-0125 M5, the eighth slice) among them — and, in a
+    /// debug build, `vyrn_lower`'s own lint, which failed the run.
+    ///
+    /// So the context is stated once, here, for the whole program: this is
+    /// generation, whatever an individual `is_gen` says. It only ever ENABLES a
+    /// generation-only name; nothing reads it to refuse.
+    static GEN_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark this thread as checking a generator host, or stop. Set by
+/// `vyrn_codegen::set_gen_host`, which the two gen-host emitters bracket their
+/// whole compile with — so the checker's answer and the emitter's lowering come
+/// from one flag rather than two.
+pub fn set_gen_host(on: bool) {
+    GEN_HOST.with(|g| g.set(on));
+}
+
+/// Whether this thread is checking a generator host. Part of [`recorded`]'s
+/// key, because it is part of what a check decides — and part of the key the
+/// lowering holds its own copy of the record under (`vyrn_lower::core::decide`).
+pub fn gen_host() -> bool {
+    GEN_HOST.with(|g| g.get())
+}
+
+thread_local! {
+    /// Whether this thread is checking a TEST HOST — the program `vyrn test`
+    /// and `vyrn bench` compile, whose functions are the `test` and `bench`
+    /// bodies lifted out and given names (RFC-0125 §3 M5, the one-reader
+    /// slice).
+    ///
+    /// The same shape as [`gen_host`] and for the same reason. A lifted body
+    /// is an ordinary `Function`, so this checker read `assert`, `assertEq`
+    /// and `blackBox` in it as ordinary code and refused them — "only
+    /// available inside a `test` block" — and every node UNDER the refused
+    /// call went unrecorded, the arguments included. The emitter has its own
+    /// lowering for all three and emitted a correct module anyway; what the
+    /// refusal cost was the record.
+    ///
+    /// So the context is stated once, for the whole program, by the caller
+    /// that did the lifting. It only ever ENABLES a test-only name.
+    static TEST_HOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Mark this thread as checking a test host, or stop. Set by the `vyrn test`
+/// and `vyrn bench` routes around the compile of the program they lift.
+pub fn set_test_host(on: bool) {
+    TEST_HOST.with(|t| t.set(on));
+}
+
+/// Whether this thread is checking a test host. Part of [`recorded`]'s key,
+/// with [`gen_host`], for that key's reason.
+pub fn test_host() -> bool {
+    TEST_HOST.with(|t| t.get())
+}
+
+/// Whether a body is checked as generation code: its own `gen fn` marker, or a
+/// whole-program generator host.
+fn in_gen_of(f: &Function) -> bool {
+    f.is_gen || GEN_HOST.with(|g| g.get())
+}
+
+/// The atom-stream primitives a generator host's synthesized decoders are
+/// written against (RFC-0076 M3b): one call that starts a reflected answer, and
+/// two that take the next atom off it. `vyrn-codegen` re-exports these names and
+/// lowers the calls in place; they are declared HERE so the checker and the
+/// emitter read one signature rather than two (RFC-0125 §3 M5, the ninth
+/// slice). They exist only under [`set_gen_host`], so no program can name them.
+pub const GEN_REFLECT: &str = "__vyrnGenReflect";
+pub const GEN_NEXT_INT: &str = "__vyrnGenNextInt";
+pub const GEN_NEXT_STR: &str = "__vyrnGenNextStr";
+
+/// What one of those three answers, at that arity.
+fn gen_host_primitive(name: &str, argc: usize) -> Option<Type> {
+    if !GEN_HOST.with(|g| g.get()) {
+        return None;
+    }
+    match (name, argc) {
+        (GEN_REFLECT, 2) => Some(Type::Unit),
+        (GEN_NEXT_INT, 0) => Some(Type::Int),
+        (GEN_NEXT_STR, 0) => Some(Type::Str),
+        _ => None,
+    }
 }
 
 /// A cheap hash over everything a function body may refer to by name: every
@@ -168,11 +265,147 @@ fn signature_fingerprint(
     h
 }
 
-pub fn check_accum_with_let_types(
+/// A local binding — a parameter, a `let`, a `for`-in variable, a pattern
+/// binder or a lambda parameter — scoped to one function body.
+///
+/// The editor indexes these for hover, go-to-definition, completion and
+/// highlight. It used to make them itself, in a second walk over every body
+/// beside this pass, because a binder carried no POSITION and the checker
+/// recorded no binding (RFC-0125 §3 M6). A binder carries its column now
+/// ([`crate::ast::Binder`]), the one descent every body walk shares reports
+/// each binding site, and this pass supplies the type it decided.
+#[derive(Debug, Clone)]
+pub struct LocalBinding {
+    pub name: String,
+    pub kind: LocalKind,
+    /// The binding's type: what the check decided, else what the source
+    /// declares. `None` for a binding that has neither — an unannotated `let`
+    /// in a body the check did not reach.
+    pub ty: Option<Type>,
+    /// 1-based line the NAME is spelled on.
+    pub line: usize,
+    /// 1-based name column.
+    pub col: usize,
+    /// 1-based name end column.
+    pub end_col: usize,
+    /// The enclosing function's declaration line (scopes the binding).
+    pub fn_line: usize,
+}
+
+/// The flavour of a [`LocalBinding`] — the descent's, so the list of binding
+/// forms has one home.
+pub use crate::ast::LocalKind;
+
+crate::body_scope_descent!(BinderIndex, index_block, index_stmt, index_expr);
+
+/// The editor's local index for one function body: every binder the descent
+/// reports, with the type this pass decided for it.
+///
+/// Nothing here asks what is in scope — a binder's own position is the whole
+/// answer — so the scope stack is off.
+struct LocalIndex<'a> {
+    types: &'a HashMap<(usize, usize), Type>,
+    fn_line: usize,
+    out: &'a mut Vec<LocalBinding>,
+}
+
+impl LocalIndex<'_> {
+    fn row(
+        &mut self,
+        name: &str,
+        kind: LocalKind,
+        line: usize,
+        col: usize,
+        declared: Option<&Type>,
+    ) {
+        // A desugar's binder is unspellable and carries no column. Inventing a
+        // position for one puts a phantom local in the editor, which is worse
+        // than a missing one.
+        if col == 0 {
+            return;
+        }
+        self.out.push(LocalBinding {
+            name: name.to_string(),
+            kind,
+            // The check is bounded: it stops accumulating, and a body it never
+            // reached decided nothing. A parameter and an annotated `let` are
+            // still typed there, because the source says so.
+            ty: self
+                .types
+                .get(&(line, col))
+                .cloned()
+                .or_else(|| declared.cloned()),
+            line,
+            col,
+            end_col: col + name.chars().count(),
+            fn_line: self.fn_line,
+        });
+    }
+}
+
+impl BinderIndex<'_> for LocalIndex<'_> {
+    const SCOPED: bool = false;
+
+    fn bind(
+        &mut self,
+        name: &str,
+        line: usize,
+        col: usize,
+        kind: LocalKind,
+        declared: Option<&Type>,
+    ) {
+        self.row(name, kind, line, col, declared);
+    }
+}
+
+/// Every binding the ROOT module makes, in source order.
+///
+/// `types` is what the check decided, keyed by a binder's position; a binder
+/// with no row there falls back to the type the source declares for it. That is
+/// how a program the check never reached — a parse error stops it — still has
+/// an index, and a typed one wherever the reader wrote a type down.
+///
+/// The functions are the ones the editor scopes a cursor to (`symbols::fn_lines`
+/// — the top-level functions and the impl methods). A projection body and a
+/// `test` block bind names too, and neither is on that list, so a local in one
+/// would never resolve to a cursor; they wait for it.
+pub(crate) fn local_index(
     program: &Program,
-) -> (Vec<Diagnostic>, HashMap<(usize, String), Type>) {
-    let (out, let_types, _, _, _) = check_accum_full(program);
-    (out, let_types)
+    types: &HashMap<(usize, usize), Type>,
+) -> Vec<LocalBinding> {
+    let mut out = Vec::new();
+    let methods = program.impls.iter().flat_map(|i| i.methods.iter());
+    for f in program.functions.iter().chain(methods) {
+        if f.module.is_some() {
+            continue;
+        }
+        let mut v = LocalIndex {
+            types,
+            fn_line: f.line,
+            out: &mut out,
+        };
+        for p in &f.params {
+            v.row(&p.name, LocalKind::Param, p.line, p.col, Some(&p.ty));
+        }
+        index_block(&f.body, &mut HashSet::new(), &mut v);
+    }
+    // Source order, and one row per spelled POSITION. Two things put two rows
+    // on one token. An impl method is walked twice, because `parse_accum`
+    // flattens every one it can name into `functions` and the chain above reads
+    // `impls` for the few it cannot. And the refutable `let` (RFC-0121) makes
+    // one `let` per binder over a `match`, so the arm binder that reaches `a`
+    // in `let Pair(a, b) = v` is the same token the `let` binds. The arm's row
+    // is pushed first — the descent walks a `let`'s value before its name — and
+    // a stable sort keeps it, which is the right one: a pattern binder is never
+    // `mut`.
+    out.sort_by_key(|b| (b.fn_line, b.line, b.col));
+    out.dedup_by_key(|b| (b.line, b.col));
+    out
+}
+
+pub fn check_accum_with_binders(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+    let (out, binders, _, _, _) = check_accum_full(program);
+    (out, binders)
 }
 
 /// The stored-function-value facts (RFC-0037) the `--workers` gate needs:
@@ -238,11 +471,13 @@ pub const RESERVED: &[&str] = &[
     "lineAt",
     "colAt",
     "moduleInterface",
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error",
+    // RFC-0125 §3 M6's levels slice removed five rows here: `trace`, `debug`,
+    // `info`, `warn` and `error`. Each was reserved so a seeded row could be
+    // keyed by the name a call site carries, and the cost was five common
+    // English words that no program could use for a function of its own. The
+    // sugar carries `@info` now, the row is seeded under that, and
+    // [`crate::parser::METHOD_BUILTINS`] hands the surface word back to any
+    // module that declares or imports it.
     "value",
     "list",
     "schemaOf",
@@ -298,40 +533,146 @@ pub const RESERVED: &[&str] = &[
     "atSet",
 ];
 
-/// The names RFC-0094 M2 took out of [`RESERVED`], and the `std/` module each
-/// one lives in now.
+/// Where a name a program may still write has gone.
 ///
-/// A reader who writes `contains(s, "x")` has written a call that was legal in
-/// every earlier version of the language. "call to unknown function" is true and
-/// useless; this table is what turns it into the import line the program needs.
-/// It is a MIGRATION table, in the shape the six `was removed` hints already
-/// have, and it is read at exactly one place — the unknown-name fallthrough of
-/// [`Checker::call`] — so a name that resolves never consults it.
+/// Three things put a name in front of a reader who cannot resolve it, and each
+/// needs a different sentence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gone {
+    /// RFC-0094 M2 took the name out of [`RESERVED`] and it is an ordinary
+    /// exported function of this `std/` module now. The sentence is the import
+    /// line the program needs.
+    Module(&'static str),
+    /// The free-function spelling was REMOVED, because the surface says the
+    /// same thing another way. The sentence is what to write instead.
+    Removed(&'static str),
+    /// A DESUGAR writes this name, so a reader is told about a call they never
+    /// wrote. The sentence names the spelling they DID write before it names
+    /// the import, and it is true for both readers — the one who wrote the
+    /// sugar and the one who wrote the primitive without importing it.
+    Desugared {
+        module: &'static str,
+        sugar: &'static str,
+    },
+}
+
+impl Gone {
+    /// The sentence a reader who wrote `name` gets.
+    pub fn hint(&self, name: &str) -> String {
+        match self {
+            Gone::Module(m) => {
+                format!("`{name}` is `{m}`'s — add `import {{ {name} }} from \"{m}\"`")
+            }
+            Gone::Removed(s) => (*s).to_string(),
+            Gone::Desugared { module, sugar } => format!(
+                "`{name}` is `{module}`'s, and `{sugar}` writes through it — add \
+                 `import {{ {name} }} from \"{module}\"`"
+            ),
+        }
+    }
+}
+
+/// The names a program may write that no longer resolve, and what to write
+/// instead.
 ///
-/// `every_moved_name_is_gone_from_reserved` is what keeps it honest in the one
-/// direction that can rot: a name here that came BACK into `RESERVED` would send
-/// a reader to an import that cannot be written.
-pub const MOVED_TO_STD: &[(&str, &str)] = &[
-    ("contains", "std/strpred"),
-    ("startsWith", "std/strpred"),
-    ("endsWith", "std/strpred"),
-    ("slice", "std/strpred"),
-    ("chars", "std/text"),
-    ("hexEncode", "std/codecs"),
-    ("hexDecode", "std/codecs"),
-    ("base64Encode", "std/codecs"),
-    ("base64Decode", "std/codecs"),
-    ("urlEncode", "std/codecs"),
-    ("urlDecode", "std/codecs"),
+/// A reader who writes `contains(s, "x")` or `str(x)` has written a call that
+/// was legal in an earlier version of the language. "call to unknown function"
+/// is true and useless; this table is what turns it into the line the program
+/// needs. It is the MIGRATION table, and it is read at exactly two places in
+/// [`Checker::call`] — the removed-spelling guard for a name `RESERVED` still
+/// holds, and the unknown-name fall-through for one it does not — so a name
+/// that resolves never consults it.
+///
+/// The ten [`Gone::Removed`] rows were ten hand-written blocks in
+/// `Checker::call` until RFC-0125 §3 M6, 57 lines stating ten sentences one
+/// `match` arm each. A sentence is a row, not a block.
+///
+/// `every_moved_name_is_gone_from_reserved` keeps the [`Gone::Module`] half
+/// honest in the one direction that can rot: a name there that came BACK into
+/// `RESERVED` would send a reader to an import that cannot be written. A
+/// [`Gone::Removed`] row is the opposite and MUST stay reserved — a program
+/// that could declare `fn push` would shadow the hint with its own function.
+pub const MOVED_TO_STD: &[(&str, Gone)] = &[
+    ("contains", Gone::Module("std/strpred")),
+    ("startsWith", Gone::Module("std/strpred")),
+    ("endsWith", Gone::Module("std/strpred")),
+    ("slice", Gone::Module("std/strpred")),
+    ("chars", Gone::Module("std/text")),
+    ("hexEncode", Gone::Module("std/codecs")),
+    ("hexDecode", Gone::Module("std/codecs")),
+    ("base64Encode", Gone::Module("std/codecs")),
+    ("base64Decode", Gone::Module("std/codecs")),
+    ("urlEncode", Gone::Module("std/codecs")),
+    ("urlDecode", Gone::Module("std/codecs")),
+    // `save(path, value)` is `writeAtomic(path, toJson(value))` after
+    // `parser::storage_desugar` (RFC-0044), so a module that never imported the
+    // primitive was told "call to unknown function `writeAtomic`" about a call
+    // it did not write.
+    (
+        "writeAtomic",
+        Gone::Desugared {
+            module: "std/storage",
+            sugar: "save(path, value)",
+        },
+    ),
+    // The removed free-function spellings. Each fires for the BARE
+    // user-written name only: the desugaring and the method forms carry the
+    // unspellable `@`-prefixed internal names (`@str`, `@concat`, `@list`,
+    // `@join`, `@push`, `@at`), which no source can lex.
+    (
+        "str",
+        Gone::Removed("`str(x)` was removed; render a value with `x.toString()`"),
+    ),
+    (
+        "concat",
+        Gone::Removed("`concat(a, b)` was removed; concatenate Strings with `a + b`"),
+    ),
+    (
+        "len",
+        Gone::Removed("`len(s)` was removed; a String's byte length is `s.byteLength`"),
+    ),
+    (
+        "list",
+        Gone::Removed(
+            "`list([..])` was removed; write the array literal `[..]` \
+             directly where an `Array<T>` is expected",
+        ),
+    ),
+    (
+        "join",
+        Gone::Removed("`join(t)` was removed; await a task's result with `t.join()`"),
+    ),
+    (
+        "toString",
+        Gone::Removed("`toString` is a method; write `x.toString()`"),
+    ),
+    // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]` are the
+    // whole surface; the verb forms were the second spelling of each, which is
+    // what this repo removed.
+    (
+        "push",
+        Gone::Removed("`push(xs, v)` was removed; push with `xs.push(v)`"),
+    ),
+    (
+        "at",
+        Gone::Removed("`at(xs, i)` was removed; index with `xs[i]`"),
+    ),
+    (
+        "alen",
+        Gone::Removed("`alen(xs)` was removed; a collection's length is `xs.length`"),
+    ),
+    (
+        "array",
+        Gone::Removed("`array()` was removed; write the array literal `[]`"),
+    ),
 ];
 
-/// The module a moved builtin lives in now, or `None` for a name that never was
-/// one.
-pub fn moved_to_std(name: &str) -> Option<&'static str> {
+/// Where a name went, or `None` for one that was never a builtin.
+pub fn moved_to_std(name: &str) -> Option<&'static Gone> {
     MOVED_TO_STD
         .iter()
         .find(|(n, _)| *n == name)
-        .map(|(_, m)| *m)
+        .map(|(_, g)| g)
 }
 
 use crate::types::INT32;
@@ -341,13 +682,13 @@ pub fn check_accum_with_json_types(program: &Program) -> (Vec<Diagnostic>, Vec<T
     (out, json, jdec)
 }
 
-/// The full checking pass: diagnostics, the inferred-`let`-type table, and the
+/// The full checking pass: diagnostics, the root module's bindings, and the
 /// RFC-0037 stored-function-value collection.
 fn check_accum_full(
     program: &Program,
 ) -> (
     Vec<Diagnostic>,
-    HashMap<(usize, String), Type>,
+    Vec<LocalBinding>,
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
@@ -414,7 +755,7 @@ fn check_accum_inner(
     reuse: Option<&std::collections::HashMap<String, String>>,
 ) -> (
     Vec<Diagnostic>,
-    HashMap<(usize, String), Type>,
+    Vec<LocalBinding>,
     StoredFnEffects,
     Vec<Type>,
     Vec<Type>,
@@ -442,7 +783,7 @@ fn check_accum_inner(
     // 1b. Collect enum variants into a global constructor table.
     let mut variants: HashMap<String, VariantInfo> = HashMap::new();
     for t in &program.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             for v in vs {
                 if RESERVED.contains(&v.name.as_str()) {
                     out.push(cerr!(t.line, "`{}` is a reserved name", v.name));
@@ -575,80 +916,13 @@ fn check_accum_inner(
         }
     }
 
-    // Which functions are "spawn-safe" — pure enough to run as a concurrent task:
-    // no I/O (`print`), no shared-mutable-state ops (`cell`/`set`/`release`), no
-    // `modify` params, and (transitively) only calls to other spawn-safe functions.
-    // A monotone fixpoint over the call graph (starts optimistic, shrinks).
-    let fn_names: std::collections::HashSet<String> =
-        program.functions.iter().map(|f| f.name.clone()).collect();
-    // Module-state bindings (RFC-0013). A function that reads OR writes any
-    // global is not spawn-safe (module state is shared by definition), and the
-    // fixpoint below spreads that transitively to every caller.
-    let global_names: std::collections::HashSet<String> =
-        program.globals.iter().map(|g| g.name.clone()).collect();
-    // A protocol-method call site (`n.burp()`) collects the *surface* name, but
-    // impl bodies live under mangled names (`Noise__Int__burp`). Expand each
-    // surface method name to every registered impl so those call-graph edges
-    // are visible to the fixpoint — otherwise an impure impl (one that prints)
-    // would be spawnable through a method call.
-    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
-    for imp in &program.impls {
-        if let Some(key) = crate::types::type_key(&imp.ty) {
-            for m in &imp.methods {
-                method_impls
-                    .entry(m.name.clone())
-                    .or_default()
-                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
-            }
-        }
-    }
-    let expand = |calls: std::collections::HashSet<String>| -> std::collections::HashSet<String> {
-        let mut out = std::collections::HashSet::with_capacity(calls.len());
-        for c in calls {
-            if let Some(impls) = method_impls.get(&c) {
-                out.extend(impls.iter().cloned());
-            }
-            out.insert(c);
-        }
-        out
-    };
-    let mut spawn_safe: std::collections::HashSet<String> = program
-        .functions
-        .iter()
-        .filter(|f| {
-            let calls = expand(fn_calls(&f.body));
-            let no_modify = f.params.iter().all(|p| p.capability != Capability::Modify);
-            // An `extern` (RFC-0012) is a host effect (I/O by definition), so it is
-            // never spawn-safe — and any function that calls one becomes unsafe
-            // transitively through the fixpoint below.
-            !f.is_extern
-                && no_modify
-                && !calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
-                && !contains_drop(&f.body)
-                && !touches_globals(f, &global_names)
-        })
-        .map(|f| f.name.clone())
-        .collect();
-    loop {
-        let mut changed = false;
-        let snapshot = spawn_safe.clone();
-        for f in &program.functions {
-            if snapshot.contains(&f.name) {
-                let callees = expand(fn_calls(&f.body));
-                let ok = callees
-                    .iter()
-                    .filter(|c| fn_names.contains(*c))
-                    .all(|c| snapshot.contains(c));
-                if !ok {
-                    spawn_safe.remove(&f.name);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    // RFC-0004 §Q4's spawn-isolation rule used to be a monotone fixpoint over
+    // the call graph here, and a second fixpoint after the check for calls
+    // through a stored function value. It is `vyrn_lower::effects` now, stated
+    // once over the named core and reached through `crate::isolation`
+    // (RFC-0125 §3 M6, the isolation slice). What stays at a `spawn` site is
+    // the shape of the call: the callee must exist, must not be a `gen fn`,
+    // and must take no function value.
 
     // Protocol registries (RFC-0002 §5): map each method name to its protocol +
     // signature, and record which (protocol, type-key) pairs are implemented.
@@ -771,10 +1045,41 @@ fn check_accum_inner(
             let opaque =
                 |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
-                // A projection requirement (RFC-0123 M2) is satisfied by a
-                // `places` member, matched on the same terms a method is —
-                // and the receiver capability carries the result's too, since
-                // the parser made them equal on both sides.
+                let want = || {
+                    render_method_sig(&sig.name, sig.recv, &sig.params, &sig.param_caps, &sig.ret)
+                };
+                // Does the member the impl provides have the signature the
+                // protocol declared, and how does it read? Both members that can
+                // satisfy a requirement are matched on these terms — a method,
+                // and a projection since RFC-0123 M2 — so the rule is read here
+                // and the two arms below say only which member they looked in.
+                //
+                // `self` is implicit in the declaration and the first parameter
+                // of the member the parser built, whose type is the impl's own
+                // head — so its TYPE is dropped rather than compared. Its
+                // CAPABILITY is compared: a bounded generic types `x.m(..)` from
+                // the protocol, so an impl free to take `modify self` where the
+                // protocol says `self` would mutate through a borrow with
+                // nothing at the call site to say so.
+                let provided = |f: &crate::ast::Function| {
+                    let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                    let got_caps: Vec<Capability> =
+                        f.params.iter().skip(1).map(|p| p.capability).collect();
+                    let recv = f
+                        .params
+                        .first()
+                        .map(|p| p.capability)
+                        .unwrap_or(Capability::Read);
+                    let agrees = got.len() == sig.params.len()
+                        && (sig.ret == f.ret || opaque(&sig.ret))
+                        && recv == sig.recv
+                        && got_caps == sig.param_caps
+                        && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                    (
+                        agrees,
+                        render_method_sig(&f.name, recv, &got, &got_caps, &f.ret),
+                    )
+                };
                 if sig.result_cap.is_some() {
                     let Some(f) = imp.places.iter().find(|m| m.name == sig.name) else {
                         out.push(cerr_at!(
@@ -785,30 +1090,12 @@ fn check_accum_inner(
                              all required",
                             imp.protocol,
                             imp.ty,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
+                            want(),
                             imp.protocol
                         ));
                         continue;
                     };
-                    let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
-                    let got_caps: Vec<Capability> =
-                        f.params.iter().skip(1).map(|p| p.capability).collect();
-                    let f_recv = f
-                        .params
-                        .first()
-                        .map(|p| p.capability)
-                        .unwrap_or(Capability::Read);
-                    let agrees = got.len() == sig.params.len()
-                        && (sig.ret == f.ret || opaque(&sig.ret))
-                        && f_recv == sig.recv
-                        && got_caps == sig.param_caps
-                        && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                    let (agrees, got) = provided(f);
                     if !agrees {
                         out.push(cerr_at!(
                             f.line,
@@ -817,14 +1104,8 @@ fn check_accum_inner(
                              `{}`, this provides `{}`",
                             f.name,
                             imp.protocol,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
-                            render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                            want(),
+                            got
                         ));
                     }
                     continue;
@@ -838,38 +1119,13 @@ fn check_accum_inner(
                              holding a `T: {}` may call it",
                         imp.protocol,
                         imp.ty,
-                        render_method_sig(
-                            &sig.name,
-                            sig.recv,
-                            &sig.params,
-                            &sig.param_caps,
-                            &sig.ret
-                        ),
+                        want(),
                         imp.protocol,
                         imp.protocol
                     ));
                     continue;
                 };
-                // `self` is implicit in the declaration and the first parameter
-                // of the method the parser built, whose type is the impl's own
-                // head — so its TYPE is dropped rather than compared. Its
-                // CAPABILITY is compared: a bounded generic types `x.m(..)` from
-                // the protocol, so an impl free to take `modify self` where the
-                // protocol says `self` would mutate through a borrow with
-                // nothing at the call site to say so.
-                let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
-                let got_caps: Vec<Capability> =
-                    f.params.iter().skip(1).map(|p| p.capability).collect();
-                let f_recv = f
-                    .params
-                    .first()
-                    .map(|p| p.capability)
-                    .unwrap_or(Capability::Read);
-                let agrees = got.len() == sig.params.len()
-                    && (sig.ret == f.ret || opaque(&sig.ret))
-                    && f_recv == sig.recv
-                    && got_caps == sig.param_caps
-                    && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                let (agrees, got) = provided(f);
                 if !agrees {
                     out.push(cerr_at!(
                         f.line,
@@ -878,14 +1134,8 @@ fn check_accum_inner(
                              provides `{}`",
                         render_impl_head(imp),
                         imp.protocol,
-                        render_method_sig(
-                            &sig.name,
-                            sig.recv,
-                            &sig.params,
-                            &sig.param_caps,
-                            &sig.ret
-                        ),
-                        render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                        want(),
+                        got
                     ));
                 }
             }
@@ -961,8 +1211,38 @@ fn check_accum_inner(
         // branch in every arithmetic path in the interpreter. That case needs the
         // resolution to travel from the checker instead, which needs call-site
         // identity — designed in RFC-0084 and deliberately not built.
+
+        // A `Show` impl hands the renderers a String, and this is where that is
+        // said. It was checked at three CALL sites — `print`, `@str` and
+        // `value` each called [`Checker::renders_by_declaration`], which typed
+        // the `show` call and refused a non-String result — so the rule was
+        // stated three times and an impl nobody called was checked nowhere.
+        // Two of the three call sites are gone (their union is a bound now),
+        // and this is the one statement left.
+        //
+        // `Show` is known by NAME rather than declared (`vyrn run` on a bare
+        // file has no resolver, so `print` may not depend on a module lookup),
+        // so the signature comparison every declared protocol gets does not
+        // reach it. A program that declares `protocol Show` itself gets both.
+        if imp.protocol == crate::types::SHOW {
+            for m in &imp.methods {
+                if m.name == crate::types::SHOW_SHOW && m.ret != Type::Str {
+                    out.push(cerr_at!(
+                        m.line,
+                        m.name_span(),
+                        "`{}`'s `{}` must hand back a String to render through, found {}",
+                        crate::types::SHOW,
+                        crate::types::SHOW_SHOW,
+                        m.ret
+                    ));
+                }
+            }
+        }
         let ok_target = match &imp.ty {
-            Type::Int | Type::Bool | Type::Str | Type::Option(_) | Type::Result(..) => true,
+            Type::Int | Type::Bool | Type::Str => true,
+            // The two built-in sums, whichever way they are spelled
+            // (RFC-0126 §8.15): `impl<T> Show for Option<T>` keys `Option`.
+            _ if crate::types::is_sum_alias(&imp.ty) => true,
             Type::Named(n) | Type::App(n, _) => matches!(
                 types.get(n).map(|d| &d.base),
                 Some(Type::Enum(_) | Type::Record(_))
@@ -1060,7 +1340,6 @@ fn check_accum_inner(
         sigs: &sigs,
         caps: &caps,
         caps_by_sig: &caps_by_sig,
-        spawn_safe: &spawn_safe,
         types: &types,
         contracts: &contracts,
         variants: &variants,
@@ -1072,9 +1351,9 @@ fn check_accum_inner(
         impl_blocks: &program.impls,
         cur_bounds: RefCell::new(HashMap::new()),
         region_floor: RefCell::new(Vec::new()),
-        stmt_match: std::cell::Cell::new(0),
         in_loop: RefCell::new(false),
-        let_types: RefCell::new(HashMap::new()),
+        binder_types: RefCell::new(HashMap::new()),
+        in_root: std::cell::Cell::new(false),
         errors: RefCell::new(Vec::new()),
         globals: RefCell::new(HashMap::new()),
         in_test: RefCell::new(false),
@@ -1087,8 +1366,8 @@ fn check_accum_inner(
         gen_fns: &gen_fns,
         cur_fn: RefCell::new(String::new()),
         stored_sources: RefCell::new(Vec::new()),
+        arg_sources: RefCell::new(Vec::new()),
         stored_calls: RefCell::new(Vec::new()),
-        spawn_sites: RefCell::new(Vec::new()),
         json_types: RefCell::new(Vec::new()),
         json_dec_types: RefCell::new(Vec::new()),
     };
@@ -1208,7 +1487,7 @@ fn check_accum_inner(
 
         // Signature validation (params/return) runs outside `function()`, so make
         // it gen-aware here too — a `Code` type in a `gen fn` signature is legal.
-        *checker.in_gen.borrow_mut() = f.is_gen;
+        *checker.in_gen.borrow_mut() = in_gen_of(f);
         *checker.here.borrow_mut() = f.module.clone();
         let r = (|| -> Result<(), Diagnostic> {
             for p in &f.params {
@@ -1292,20 +1571,22 @@ fn check_accum_inner(
         }
     }
 
-    // 6. Check test bodies (RFC-0015). Each is checked as a Unit-returning
-    //    function body under a synthetic unspellable name (`test@<index>`), so
-    //    every existing analysis (movecheck runs separately; ownership, spawn
-    //    purity, region) applies unchanged. Tests are NOT registered in `sigs`,
-    //    so user code can never call one. Duplicate names within a single file
-    //    are rejected here (a better message than a parse error).
+    // 6. Check test bodies (RFC-0015) and bench bodies (RFC-0055) — one walk,
+    //    twice. Each is checked as a Unit-returning function body under a
+    //    synthetic unspellable name (`test@<index>`, `bench@<index>`), so every
+    //    existing analysis (movecheck runs separately; ownership, spawn purity,
+    //    region) applies unchanged. Neither is registered in `sigs`, so user
+    //    code can never call one. Duplicate names within a single file are
+    //    rejected here (a better message than a parse error).
     check_places(&checker, program, &mut out);
-    check_tests(&checker, program, &mut out);
-
-    // 6b. Check bench bodies (RFC-0055). Identical treatment to tests: each is a
-    //     Unit-returning function body under a synthetic `bench@<index>` name, with
-    //     `in_bench` set so `blackBox` is legal. Benches are never registered in
-    //     `sigs`, so user code cannot call one; duplicate names per file are caught.
-    check_benches(&checker, program, &mut out);
+    check_named_blocks(&checker, &program.tests, "test", &checker.in_test, &mut out);
+    check_named_blocks(
+        &checker,
+        &program.benches,
+        "bench",
+        &checker.in_bench,
+        &mut out,
+    );
 
     // 7. Comptime-purity (RFC-0021): every `gen fn` and its transitive callees
     //    must be pure enough to run in the compiler's interpreter at generation
@@ -1313,43 +1594,17 @@ fn check_accum_inner(
     //    type errors surface first.
     check_comptime_purity(program, &mut out);
 
-    // 8. RFC-0037: re-verify every accepted `spawn` site against the
-    //    stored-closure-EXTENDED spawn-safety fixpoint. The pre-check fixpoint
-    //    cannot see calls through stored function values (their callee set is
-    //    the signature's collected sources), so a function whose only impurity
-    //    flows through a stored value passed the inline check; catch it here.
     let effects = StoredFnEffects {
         sources: checker.stored_sources.borrow().clone(),
+        arg_sources: checker.arg_sources.borrow().clone(),
         calls: checker.stored_calls.borrow().clone(),
     };
-    if !effects.calls.is_empty() {
-        let ext = extend_spawn_safe(program, &spawn_safe, &effects);
-        for (caller, callee, line) in checker.spawn_sites.borrow().iter() {
-            if !ext.contains(callee.as_str()) {
-                let mut d = cerr!(
-                    line,
-                    "`spawn {callee}(..)` is not allowed: `{callee}` \
-                         (or something it calls) invokes a stored function value \
-                         (RFC-0037) whose possible targets do I/O or touch shared \
-                         mutable state, so running it as a task could race. A \
-                         spawned function must be isolated (pure)."
-                );
-                d.file = program
-                    .functions
-                    .iter()
-                    .find(|f| &f.name == caller)
-                    .and_then(|f| f.module.clone());
-                out.push(d);
-            }
-        }
-    }
-
-    let let_types = checker.let_types.borrow().clone();
+    let binders = local_index(program, &checker.binder_types.borrow());
     let mut json_types = checker.json_types.borrow().clone();
     json_types.dedup_by_key(|t| format!("{t:?}"));
     let mut json_dec_types = checker.json_dec_types.borrow().clone();
     json_dec_types.dedup_by_key(|t| format!("{t:?}"));
-    (out, let_types, effects, json_types, json_dec_types)
+    (out, binders, effects, json_types, json_dec_types)
 }
 
 /// Check every `place` projection body (RFC-0091 M2).
@@ -1424,30 +1679,13 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         // handle reads the same bytes, but a write through one can land in
         // the copy, so `atSet`'s place stays a chain the store machinery can
         // prove writes through.
-        let mut roots: std::collections::HashSet<String> =
-            f.params.iter().map(|p| p.name.clone()).collect();
-        if f.params.first().map(|p| p.capability) != Some(crate::ast::Capability::Modify) {
-            for s in &f.body.stmts[..f.body.stmts.len() - 1] {
-                if let Stmt::Let { name, value, .. } = s {
-                    if let_borrows_from(value, &roots) {
-                        roots.insert(name.clone());
-                    }
-                }
-            }
-        }
-        match crate::project::place_root(y) {
-            Some(root) if roots.contains(&root) => {}
-            Some(root) => push(cerr_at!(
-                f.line,
-                f.name_span(),
-                "projection `{}` returns a place rooted at `{root}`, which the \
-                 access site does not own — a projection may only return a place \
-                 inside `self`, a parameter, or a prologue `let` that borrows \
-                 from one",
-                f.name
-            )),
-            None => {}
-        }
+        let modifies =
+            f.params.first().map(|p| p.capability) == Some(crate::ast::Capability::Modify);
+        let prologue = match modifies {
+            true => &f.body.stmts[..0],
+            false => &f.body.stmts[..f.body.stmts.len() - 1],
+        };
+        rooted_where_the_site_owns(f, y, prologue.iter(), &mut push);
         // The body itself, with `self` typed to the implementing type.
         let r = checker.function(f);
         if let Err(s) = r {
@@ -1549,12 +1787,37 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
     // Roots trace through borrowing `let`s of BOTH segments: the prologue's,
     // and the hit prologue's — the payload binding after the miss is decided
     // is `tryField`'s whole reason to have one.
+    let prologue = f.body.stmts[..n - 1]
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .map(|(_, s)| s);
+    rooted_where_the_site_owns(f, y, prologue, push);
+    if let Err(s) = checker.function(f) {
+        push(s);
+    }
+    for s in checker.errors.borrow_mut().drain(..) {
+        push(s);
+    }
+}
+
+/// Rule 3 for both projection shapes: what a projection yields is rooted where
+/// the access site owns — `self`, a parameter, or a prologue `let` that borrows
+/// from one.
+///
+/// `prologue` is the statements a root traces through, and it is the whole of
+/// what the two shapes differ in: the plain kind traces its own prologue and
+/// nothing when the receiver is `modify`, and the optional kind traces both
+/// segments' but not the decision itself.
+fn rooted_where_the_site_owns<'s>(
+    f: &Function,
+    y: &Expr,
+    prologue: impl Iterator<Item = &'s Stmt>,
+    push: &mut impl FnMut(Diagnostic),
+) {
     let mut roots: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
-    for (i, s) in f.body.stmts[..n - 1].iter().enumerate() {
-        if i == at {
-            continue;
-        }
+    for s in prologue {
         if let Stmt::Let { name, value, .. } = s {
             if let_borrows_from(value, &roots) {
                 roots.insert(name.clone());
@@ -1573,12 +1836,6 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
             f.name
         )),
         None => {}
-    }
-    if let Err(s) = checker.function(f) {
-        push(s);
-    }
-    for s in checker.errors.borrow_mut().drain(..) {
-        push(s);
     }
 }
 
@@ -1613,9 +1870,9 @@ fn let_borrows_from(e: &Expr, roots: &std::collections::HashSet<String>) -> bool
                 return true;
             }
         }
-        let binders = pattern_binders(&arm.pattern);
+        let binders = arm.pattern.bindings();
         crate::project::is_place(body)
-            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r))
+            && crate::project::place_root(body).is_some_and(|r| binders.contains(&r.as_str()))
     })
 }
 
@@ -1643,18 +1900,28 @@ fn count_yields(b: &crate::ast::Block) -> usize {
         .sum()
 }
 
-/// Check every `test` body (RFC-0015). Duplicate names per module are reported;
-/// each body is checked with `in_test` set so `assert`/`assertEq` are legal.
-fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    // Duplicate test names are per-file (per-module): group by module so the same
+/// Check every `test` body (RFC-0015) or every `bench` body (RFC-0055). The two
+/// are one sentence: a name may not repeat inside one module, and each body is
+/// checked as a Unit-returning function under a synthetic `<noun>@<index>` name
+/// with the host flag set, so `assert`/`assertEq` are legal in a `test` and
+/// `blackBox` is legal in a `bench`. They differ in the keyword, in the noun the
+/// duplicate refusal quotes, and in which flag is raised; `host` is the flag.
+fn check_named_blocks(
+    checker: &Checker,
+    blocks: &[NamedBlock],
+    noun: &str,
+    host: &RefCell<bool>,
+    out: &mut Vec<Diagnostic>,
+) {
+    // Duplicate names are per-file (per-module): group by module so the same
     // name in two different files is fine, but twice in one file is an error.
     let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
-    for t in &program.tests {
+    for t in blocks {
         let key = (t.module.clone(), t.name.clone());
         if let Some(prev) = seen.get(&key) {
             let mut d = cerr!(
                 t.line,
-                "duplicate test name {:?} (already declared on line {prev})",
+                "duplicate {noun} name {:?} (already declared on line {prev})",
                 t.name
             );
             d.file = t.module.clone();
@@ -1663,13 +1930,15 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             seen.insert(key, t.line);
         }
     }
-    *checker.in_test.borrow_mut() = true;
-    for (i, t) in program.tests.iter().enumerate() {
-        // A synthetic Unit-returning function with an unspellable name; its body
-        // is a clone (the checker keys nothing on node identity — only ownership
-        // does, and that pass analyses the real body directly).
+    *host.borrow_mut() = true;
+    for (i, t) in blocks.iter().enumerate() {
+        // A synthetic Unit-returning function with an unspellable name. The
+        // head is synthetic; the BODY handed to the checker is the real node
+        // (`function_body`), so the answers the checker records land on the
+        // nodes `own`, the lowering and the interpreter walk — RFC-0125 §3 M6,
+        // seventh slice. A clone left them untyped and a test body had no core.
         let synthetic = Function {
-            name: format!("test@{i}"),
+            name: format!("{noun}@{i}"),
             exported: false,
             module: t.module.clone(),
             doc: None,
@@ -1677,7 +1946,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             type_bounds: Default::default(),
             params: Vec::new(),
             ret: Type::Unit,
-            body: t.body.clone(),
+            body: Block { stmts: Vec::new() },
             line: t.line,
             col: 0,
             is_extern: false,
@@ -1685,7 +1954,7 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             is_gen: false,
             is_mut: false,
         };
-        if let Err(s) = checker.function(&synthetic) {
+        if let Err(s) = checker.function_body(&synthetic, &t.body) {
             let mut d = s;
             d.file = t.module.clone();
             out.push(d);
@@ -1696,69 +1965,16 @@ fn check_tests(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) 
             out.push(d);
         }
     }
-    *checker.in_test.borrow_mut() = false;
-}
-
-/// Check every `bench` body (RFC-0055). Structurally identical to [`check_tests`]:
-/// duplicate names per module are reported; each body is checked as a Unit-
-/// returning function under a synthetic `bench@<index>` name with `in_bench` set so
-/// `blackBox` is legal.
-fn check_benches(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>) {
-    let mut seen: HashMap<(Option<String>, String), usize> = HashMap::new();
-    for b in &program.benches {
-        let key = (b.module.clone(), b.name.clone());
-        if let Some(prev) = seen.get(&key) {
-            let mut d = cerr!(
-                b.line,
-                "duplicate bench name {:?} (already declared on line {prev})",
-                b.name
-            );
-            d.file = b.module.clone();
-            out.push(d);
-        } else {
-            seen.insert(key, b.line);
-        }
-    }
-    *checker.in_bench.borrow_mut() = true;
-    for (i, b) in program.benches.iter().enumerate() {
-        let synthetic = Function {
-            name: format!("bench@{i}"),
-            exported: false,
-            module: b.module.clone(),
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params: Vec::new(),
-            ret: Type::Unit,
-            body: b.body.clone(),
-            line: b.line,
-            col: 0,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        };
-        if let Err(s) = checker.function(&synthetic) {
-            let mut d = s;
-            d.file = b.module.clone();
-            out.push(d);
-        }
-        for s in checker.errors.borrow_mut().drain(..) {
-            let mut d = s;
-            d.file = b.module.clone();
-            out.push(d);
-        }
-    }
-    *checker.in_bench.borrow_mut() = false;
+    *host.borrow_mut() = false;
 }
 
 /// Type-check the program, returning **all** problems found across functions
 /// and types as structured [`Diagnostic`]s. Thin shim over
-/// [`check_accum_with_let_types`] that drops the inferred-`let`-type table (the
+/// [`check_accum_with_binders`] that drops the editor's local index (the
 /// CLI/`diagnostics()` path doesn't need it). See that function for the
-/// bounded accumulation behavior and the retained `let`/`for`-var types.
+/// bounded accumulation behavior and the recorded bindings.
 pub fn check_accum(program: &Program) -> Vec<Diagnostic> {
-    check_accum_with_let_types(program).0
+    check_accum_with_binders(program).0
 }
 
 /// Type-check the program, returning the first problem found (rendered as the
@@ -1808,6 +2024,17 @@ thread_local! {
 pub struct Recorded {
     /// The static type of every expression the checker typed.
     pub node_types: HashMap<usize, Type>,
+    /// The static type of every JOIN — a `match` or an `if` used as an
+    /// expression — as the checker gave it, before any instantiation
+    /// substitutes for it.
+    ///
+    /// It is a subset of [`Recorded::node_types`] and it is named apart
+    /// because of who reads it: an EMITTER, which has no key but the node's
+    /// address and used to reconcile a join's type from its arms instead
+    /// (RFC-0125 §3 M5). The whole map is too large to hand an emitter and
+    /// an address alone cannot say which nodes are joins, so the recording
+    /// wrapper — which holds the `&Expr` — separates them here.
+    pub joins: HashMap<usize, Type>,
     /// Every place the checker SOLVES a type parameter: a generic call and a
     /// generic record literal. The name is the callee or the record, and the
     /// arguments are in its own type-parameter order where they are solved.
@@ -1825,17 +2052,140 @@ impl Recorded {
     }
 }
 
+/// One check that both reports and records: the diagnostics, the root module's
+/// bindings and what the checker decided about every node, from a single pass.
+fn recording_check(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>, Recorded) {
+    RECORD.with(|r| *r.borrow_mut() = Recorded::new());
+    PENDING_SUBST.with(|p| *p.borrow_mut() = None);
+    RECORDING.with(|c| c.set(true));
+    let (diags, binders, _, _, _) = check_accum_full(program);
+    RECORDING.with(|c| c.set(false));
+    let made = RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()));
+    (diags, binders, made)
+}
+
 /// Type-check `program` and return what the checker decided about every node.
 ///
 /// Diagnostics are dropped: a caller that wants them calls [`check_accum`],
 /// and a caller of this one has already established that the program checks.
 pub fn record(program: &Program) -> Recorded {
-    RECORD.with(|r| *r.borrow_mut() = Recorded::new());
-    PENDING_SUBST.with(|p| *p.borrow_mut() = None);
-    RECORDING.with(|c| c.set(true));
-    let _ = check_accum_full(program);
-    RECORDING.with(|c| c.set(false));
-    RECORD.with(|r| std::mem::replace(&mut *r.borrow_mut(), Recorded::new()))
+    recording_check(program).2
+}
+
+/// **The analysis's own check, recording as it goes** — RFC-0125 §3 M3, the one
+/// check.
+///
+/// [`check_accum_with_binders`] and [`record`] are the same pass over the same
+/// program asked for two different halves of one answer, and an editor ran both:
+/// the analysis checked, and the lowering the placer runs then checked again to
+/// learn the type of every node. This is that pass, asked once, with both halves
+/// kept — [`recorded`] serves the second half to the lowering.
+///
+/// It is the FULL check, not [`check_accum_reusing`], and that is not a choice
+/// but the rule: a reused body is one this pass does not walk, so it records
+/// nothing for it, and a record with holes in it is not a record. Reuse and
+/// recording are alternatives, and the caller picks by whether the record has a
+/// reader — see `symbols.rs`, where a host with no placer keeps the memo.
+pub fn check_accum_recording(program: &Program) -> (Vec<Diagnostic>, Vec<LocalBinding>) {
+    let (diags, binders, made) = recording_check(program);
+    hold(program, std::rc::Rc::new(made));
+    (diags, binders)
+}
+
+thread_local! {
+    /// The program a record may be held for, as an address, or 0. Set by
+    /// [`crate::own::Memo`], whose guard borrows that program — which is the
+    /// whole proof that the address is a sound key, and it is written down at
+    /// [`crate::own::Memo::open`].
+    static HOLDING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// `(program address, generator host, test host, the record)`. The two
+    /// flags are part of the key because they are part of the answer: the same
+    /// module checked as a generator host types `lex`, `Code` and `Token`, and
+    /// checked as ordinary code records `<type error>` where they stand — and
+    /// the same is true of `assert` under the test host.
+    #[allow(clippy::type_complexity)]
+    static HELD: RefCell<Option<(usize, bool, bool, std::rc::Rc<Recorded>)>> =
+        const { RefCell::new(None) };
+}
+
+/// Open the record slot for `program`. Called by [`crate::own::Memo::open`],
+/// so a record lives exactly as long as the analysis it belongs to.
+pub(crate) fn hold_open(program: &Program) {
+    HOLDING.with(|h| h.set(program as *const Program as usize));
+    HELD.with(|h| *h.borrow_mut() = None);
+}
+
+/// Close it. Called by [`crate::own::Memo`]'s `Drop`.
+pub(crate) fn hold_close() {
+    HOLDING.with(|h| h.set(0));
+    HELD.with(|h| *h.borrow_mut() = None);
+}
+
+/// The record slot held by a caller that is not an analysis —
+/// `crate::check_and_synthesize`, for the span between the synthesis and the
+/// last judgment (RFC-0125 §3 M3, the type slice).
+///
+/// Three readers want one record of the post-synthesis program inside that
+/// span: the move check, the kernel's own move check, and the lowering the
+/// placer runs for both. Without the slot each makes its own, because
+/// [`hold`] writes nothing where nothing is holding. It is the same rule
+/// [`crate::own::Memo`] states, for the one program a load ends on, and the
+/// guard borrows that program for exactly the same reason.
+///
+/// It stands aside where an analysis already holds the slot, so it can never
+/// close another holder's.
+pub(crate) struct Held(bool);
+
+impl Held {
+    pub(crate) fn open(program: &Program) -> Held {
+        if HOLDING.with(|h| h.get()) != 0 {
+            return Held(false);
+        }
+        hold_open(program);
+        Held(true)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.0 {
+            hold_close();
+        }
+    }
+}
+
+fn hold(program: &Program, made: std::rc::Rc<Recorded>) {
+    let key = program as *const Program as usize;
+    if HOLDING.with(|h| h.get()) == key {
+        HELD.with(|h| *h.borrow_mut() = Some((key, gen_host(), test_host(), made)));
+    }
+}
+
+/// What the checker decided about every node of `program`, from the analysis's
+/// own check where it made one and from a check of its own where it did not.
+///
+/// The lowering asks this rather than [`record`]. Two readers want the same
+/// answer inside one command — the placer, and the `lower` an engine runs after
+/// it — and the command line adds a third asker before either: `check_and_
+/// synthesize` checks, and then EXTENDS the program with the JSON codecs and
+/// the `where` constructors it synthesizes, so the record its check could make
+/// would be missing exactly the bodies it added. There the first ask pays and
+/// the second is served; in the editor nothing is synthesized, the analysis's
+/// own check records, and both asks are served.
+pub fn recorded(program: &Program) -> std::rc::Rc<Recorded> {
+    let key = program as *const Program as usize;
+    let held = HELD.with(|h| {
+        h.borrow()
+            .as_ref()
+            .filter(|(k, g, t, _)| *k == key && *g == gen_host() && *t == test_host())
+            .map(|(_, _, _, r)| r.clone())
+    });
+    if let Some(r) = held {
+        return r;
+    }
+    let made = std::rc::Rc::new(record(program));
+    hold(program, made.clone());
+    made
 }
 
 fn recording() -> bool {
@@ -1867,7 +2217,6 @@ struct Checker<'a> {
     /// none of its own.
     caps_by_sig: &'a HashMap<String, Vec<Capability>>,
     /// Functions that may be run as a concurrent task (`spawn`) — isolated/pure.
-    spawn_safe: &'a std::collections::HashSet<String>,
     types: &'a HashMap<String, TypeDecl>,
     /// Module contracts (RFC-0071): name -> declaration. Comptime-only — used to
     /// validate member types and to resolve `contractOf(Name)`.
@@ -1895,19 +2244,17 @@ struct Checker<'a> {
     /// which a binding is "outer" — a heap value must not be assigned there, or
     /// it would dangle when the region frees at block exit.
     region_floor: RefCell<Vec<usize>>,
-    /// The arms of a `match` sitting DIRECTLY in statement position
-    /// (RFC-0118), by the arms slice's address; 0 = none. Set by `Stmt::Expr`
-    /// and consumed by `check_match`, so block arms are legal exactly there
-    /// and a nested match — expression position by construction — never
-    /// inherits it.
-    stmt_match: std::cell::Cell<usize>,
-    /// Inferred (or declared) type of each `let` binding and each `for`-in loop
-    /// variable that checked cleanly, keyed by `(line, name)`. Populated as a
-    /// side effect of checking so the symbol-query layer can show `let x: Int`
-    /// on hover for an unannotated `let x = 5` (the checker computes the type
-    /// either way; this just retains it). Best-effort: a binding after a
-    /// same-function error isn't reached, so it simply won't appear here.
-    let_types: RefCell<HashMap<(usize, String), Type>>,
+    /// The type of every binding this check decided, keyed by the position the
+    /// binder is spelled at. It is what the editor shows on hover, so an
+    /// unannotated `let x = 5` reads `let x: Int64` — the checker computes the
+    /// type either way and this retains it. Best-effort by nature: a binding
+    /// inside a statement that did not type has no row, and the index shows it
+    /// with no type rather than losing it.
+    binder_types: RefCell<HashMap<(usize, usize), Type>>,
+    /// Whether the function being checked is the root module's. Only the root
+    /// is retained: the editor indexes the file being edited, and two modules
+    /// share a position.
+    in_root: std::cell::Cell<bool>,
     /// Inside-body error sink (RFC-0006 accumulation). Cleared per function;
     /// `block` pushes a statement's error here and continues to the next
     /// statement instead of `?`-aborting the whole body, so every statement-level
@@ -1929,7 +2276,8 @@ struct Checker<'a> {
     in_test: RefCell<bool>,
     /// True while checking a `bench` body (RFC-0055). `blackBox` is legal only
     /// inside a `test` or `bench` body (`in_test || in_bench`); `assert`/`assertEq`
-    /// stay `test`-only. Set for the duration of [`check_benches`].
+    /// stay `test`-only. It is the host flag [`check_named_blocks`] raises over
+    /// `program.benches`, as `in_test` is the one it raises over `program.tests`.
     in_bench: RefCell<bool>,
     /// True while checking a `gen fn` body (RFC-0021/0054). The `Code` type and the
     /// code-quote builtins (`vyrn"…"`, `render`, `rawAt`, `raw`, `lex`) are legal
@@ -1974,22 +2322,56 @@ struct Checker<'a> {
     /// RFC-0037 defunctionalization sources collected during checking: every
     /// lambda literal or named function that flows into a stored fn value.
     stored_sources: RefCell<Vec<StoredSource>>,
+    /// RFC-0023's ARGUMENT position: every lambda literal and every bare
+    /// function name handed straight to a `fn`-typed parameter. Not a
+    /// defunctionalization source — the position is monomorphized and the
+    /// value gets no tag — so it is a list of its own; see
+    /// [`StoredFnEffects::arg_sources`].
+    arg_sources: RefCell<Vec<StoredSource>>,
     /// RFC-0037: each call through a stored (non-parameter) fn-typed binding,
     /// as (enclosing function, signature).
     stored_calls: RefCell<Vec<(String, Type)>>,
-    /// `spawn` sites that passed the pre-check spawn-safety test, re-verified
-    /// after checking against the stored-closure-extended fixpoint (RFC-0037):
-    /// (caller, callee, line).
-    spawn_sites: RefCell<Vec<(String, String, usize)>>,
     /// RFC-0078 M2b: the static type of every `toJson(x)` argument in the program.
     /// This is the ONE place in the pipeline that knows it — the loader can add
     /// functions to a linked program but not type an expression, and the engines
     /// type expressions but build their function tables once, from a `&Program`.
     /// So the checker collects, and `lib::load_warned` synthesizes the encoders.
     json_types: RefCell<Vec<Type>>,
-    /// RFC-0078 M3: the target type of every `fromJson(T, s)` in the program, for
+    /// RFC-0078 M3: the target type of every `fromJson<T>(s)` in the program, for
     /// the same reason and synthesized at the same point — the decoders.
     json_dec_types: RefCell<Vec<Type>>,
+}
+
+/// A declaration a call is checked against, and the three side columns the
+/// checker reads beside its signature.
+///
+/// A user function, a seeded builtin row, an impl method and a protocol member
+/// are all one thing here: a name, an arity, parameter types with capabilities,
+/// type parameters with bounds, and a result. [`Checker::check_declared_call`]
+/// is the single reading, and the dispatcher above it keeps only the question a
+/// declaration cannot answer — which impl answers.
+struct DeclaredCall<'a> {
+    /// The name `generics`, `all_bounds` and the monomorphization worklist are
+    /// keyed by: a plain function name, or an impl method's mangled one.
+    key: &'a str,
+    /// The name a refusal prints. An `@` spelling is the sugar's internal one
+    /// and no source can lex it, and a dispatched call prints the SURFACE
+    /// method the reader wrote rather than the mangled impl symbol.
+    shown: &'a str,
+    params: &'a [Type],
+    ret: &'a Type,
+    type_params: Option<&'a Vec<String>>,
+    caps: Option<&'a Vec<Capability>>,
+    bounds: Option<&'a HashMap<String, Vec<String>>>,
+    /// `Some` when argument 0 is a receiver dispatch already typed — it is
+    /// typed once, and it is solved rather than coerced, because the impl was
+    /// selected BY it.
+    recv: Option<&'a Type>,
+    /// The type arguments the CALLER wrote (RFC-0125 §3 M6):
+    /// `fromJson<Shape>(s)`. They seed the solve in declaration order, and the
+    /// arguments infer whatever is left, so a partial list is legal. Empty for
+    /// every call that writes none, and for a dispatched or synthesized one.
+    written: &'a [Type],
 }
 
 /// What an enum variant name resolves to.
@@ -2058,6 +2440,23 @@ impl std::ops::DerefMut for Scope {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.frames
     }
+}
+
+/// What [`Checker::reaches`] does at one type: answer, or look at its parts.
+///
+/// Three walks over a type's parts used to be written out here, one per
+/// question — does this type reach a `Stream`, a function value, a heap
+/// allocation. Each spelled the same descent: every part of every container,
+/// a named type through its declaration, a `seen` list of declaration heads so
+/// a recursive record does not recur forever. They differed only in the answer
+/// at a leaf, which is what this enum is (RFC-0125 §3 M6, the size strand).
+enum Reach {
+    /// The question is answered here: yes.
+    Yes,
+    /// The question is answered here: no, and the parts are not looked at.
+    No,
+    /// Not answered here — look at the parts.
+    Parts,
 }
 
 impl<'a> Checker<'a> {
@@ -2218,34 +2617,15 @@ impl<'a> Checker<'a> {
             return Ok(None);
         }
         self.refuse_chained_projection(&args[0], scope, line)?;
-        if !matches!(pattern, crate::ast::Pattern::Some(_)) {
+        if !matches!(pattern, crate::ast::Pattern::Variant(v, _) if v == "Some") {
             return Err(cerr!(
                 line,
                 "an optional place is tested for its hit — write \
                  `if let Some(x) = ..{name}(..)`; the miss is the `else` arm"
             ));
         }
-        if args.len() - 1 != f.params.len() - 1 {
-            return Err(cerr!(
-                line,
-                "projection `{name}` expects {} argument(s) besides `self`, got {}",
-                f.params.len() - 1,
-                args.len() - 1
-            ));
-        }
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        self.unify(&imp.ty, &recv, &mut subst, line)?;
-        for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
-            let want = crate::types::substitute(&p.ty, &subst);
-            let got = self.expr(arg, scope, Some(&want), Some(fn_ret))?;
-            if !self.coercible(&got, &want) {
-                return Err(cerr!(
-                    line,
-                    "projection `{name}` argument is {got}, expected {want}"
-                ));
-            }
-            self.prove_coercion(arg, &want, line)?;
-        }
+        let subst =
+            self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
         if recording() {
             if let Ok(Some(p)) = crate::project::optional_site(
                 self.impl_blocks,
@@ -2310,30 +2690,49 @@ impl<'a> Checker<'a> {
             ));
         }
         let recv = recv.clone();
+        let subst = self.solve_projection_call(imp, f, method, &recv, args, scope, fn_ret, line)?;
+        Ok(Some(crate::types::substitute(&f.ret, &subst)))
+    }
+
+    /// A projection call against the projection it names: the arity besides
+    /// `self`, the impl head solved against the receiver, and every argument at
+    /// the type that solution gives it. Both readers ask — the access site and
+    /// the `if let` an optional projection is tested by — and each reads its own
+    /// result through the substitution this answers with.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_projection_call(
+        &self,
+        imp: &crate::ast::ImplBlock,
+        f: &crate::ast::Function,
+        name: &str,
+        recv: &Type,
+        args: &[Expr],
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<HashMap<String, Type>, Diagnostic> {
         if args.len() - 1 != f.params.len() - 1 {
             return Err(cerr!(
                 line,
-                "projection `{method}` expects {} argument(s) besides `self`, got {}",
+                "projection `{name}` expects {} argument(s) besides `self`, got {}",
                 f.params.len() - 1,
                 args.len() - 1
             ));
         }
-        // Solve `impl<T> .. for Ring<T>` against the receiver, so a projection
-        // declared `-> T` answers with the element type at this call.
         let mut subst: HashMap<String, Type> = HashMap::new();
-        self.unify(&imp.ty, &recv, &mut subst, line)?;
+        self.unify(&imp.ty, recv, &mut subst, line)?;
         for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
             let want = crate::types::substitute(&p.ty, &subst);
             let got = self.expr(arg, scope, Some(&want), fn_ret)?;
             if !self.coercible(&got, &want) {
                 return Err(cerr!(
                     line,
-                    "projection `{method}` argument is {got}, expected {want}"
+                    "projection `{name}` argument is {got}, expected {want}"
                 ));
             }
             self.prove_coercion(arg, &want, line)?;
         }
-        Ok(Some(crate::types::substitute(&f.ret, &subst)))
+        Ok(subst)
     }
 
     /// Solve `impl<T> .. for Slots<T>` against the receiver, and read `ty`
@@ -2389,14 +2788,12 @@ impl<'a> Checker<'a> {
         }
         let mut deeper = |t: &Type| self.declared_owned_in(t, seen);
         match self.base(ty) {
-            Type::Option(t)
-            | Type::ArrayN(t, _)
+            Type::ArrayN(t, _)
             | Type::Array(t)
             | Type::SmallArray(t, _)
             | Type::Lazy(t)
             | Type::Task(t)
             | Type::Stream(t) => deeper(&t),
-            Type::Result(a, b) => deeper(&a).or_else(|| deeper(&b)),
             Type::Map(k, v) => deeper(&k).or_else(|| deeper(&v)),
             Type::Record(fs) => fs.iter().find_map(|f| deeper(&f.ty)),
             Type::Enum(vs) => vs
@@ -2415,51 +2812,56 @@ impl<'a> Checker<'a> {
             .unwrap_or_default()
     }
 
-    /// Whether `ty` transitively contains a `Stream<T>` (RFC-0075), resolving
-    /// named types so `type Feed = Stream<Int64>` cannot launder one into a
-    /// record field. Structural rather than a `contains_fn` clone because a
-    /// stream may not be a type argument either: `Option<Stream<T>>` is exactly
-    /// the storage the scope rule forbids.
-    fn contains_stream(&self, ty: &Type) -> bool {
-        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
+    /// Whether any part of `ty` answers [`Reach::Yes`], resolving a named type
+    /// through its declaration and guarding a cycle with the heads already
+    /// visited.
+    ///
+    /// This is the descent the three questions below share. A container is
+    /// looked into, a record's fields and an enum's payloads are looked into,
+    /// a `Named`/`App` is looked into through its type arguments AND through
+    /// the declaration it names — and a declaration head is entered once, so
+    /// `type Node = { v: Int64, next: Option<Node> }` terminates. A `fn` type
+    /// is not looked into by any of them: what a call takes and answers is not
+    /// what the value holds, so every caller decides at the `Fn` itself.
+    fn reaches(&self, ty: &Type, at: &dyn Fn(&Type) -> Reach) -> bool {
+        fn go(
+            ty: &Type,
+            types: &HashMap<String, TypeDecl>,
+            at: &dyn Fn(&Type) -> Reach,
+            seen: &mut Vec<String>,
+        ) -> bool {
+            match at(ty) {
+                Reach::Yes => return true,
+                Reach::No => return false,
+                Reach::Parts => {}
+            }
             match ty {
-                Type::Stream(_) => true,
-                Type::Option(i)
-                | Type::Array(i)
+                Type::Array(i)
                 | Type::ArrayN(i, _)
                 | Type::SmallArray(i, _)
                 | Type::Task(i)
                 | Type::Partial(i)
-                // A `lazy T` field stores a T (forced on read), so a stream
-                // behind it is exactly the storage the scope rule forbids.
-                | Type::Lazy(i) => walk(i, types, seen),
-                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
+                | Type::Stream(i)
+                | Type::Lazy(i)
+                | Type::Omit(i, _)
+                | Type::Pick(i, _) => go(i, types, at, seen),
+                Type::Map(a, b) | Type::Merge(a, b) => {
+                    go(a, types, at, seen) || go(b, types, at, seen)
                 }
-                Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
-                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
+                Type::Record(fs) => fs.iter().any(|f| go(&f.ty, types, at, seen)),
                 Type::Enum(vs) => vs
                     .iter()
-                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                // NOT a storing position, and this is RFC-0074 M3a's finding: a
-                // `fn` type's parameters and return ARE the two places M1 declared
-                // legal, so `fn(Request) -> Stream<String>` stores no stream — it
-                // describes a call that produces one, and the caller owes it the
-                // moment it exists. Descending here was safe only while nothing in
-                // the corpus had a `fn` type mentioning a stream; `std/http`'s
-                // `Feed` is one, and rejecting it would forbid the shape M1's own
-                // rules already permit twice over.
-                Type::Fn(_, _) => false,
+                    .any(|v| v.payload.iter().any(|p| go(p, types, at, seen))),
                 Type::Named(n) | Type::App(n, _) => {
                     let args = match ty {
                         Type::App(_, a) => a.as_slice(),
                         _ => &[],
                     };
-                    args.iter().any(|a| walk(a, types, seen))
+                    args.iter().any(|a| go(a, types, at, seen))
                         || (!seen.iter().any(|s| s == n)
                             && types.get(n).is_some_and(|d| {
                                 seen.push(n.clone());
-                                let r = walk(&d.base, types, seen);
+                                let r = go(&d.base, types, at, seen);
                                 seen.pop();
                                 r
                             }))
@@ -2467,7 +2869,29 @@ impl<'a> Checker<'a> {
                 _ => false,
             }
         }
-        walk(ty, self.types, &mut Vec::new())
+        go(ty, self.types, at, &mut Vec::new())
+    }
+
+    /// Whether `ty` transitively contains a `Stream<T>` (RFC-0075), resolving
+    /// named types so `type Feed = Stream<Int64>` cannot launder one into a
+    /// record field. A stream may not be a type argument either:
+    /// `Option<Stream<T>>` is exactly the storage the scope rule forbids.
+    fn contains_stream(&self, ty: &Type) -> bool {
+        self.reaches(ty, &|t| match t {
+            Type::Stream(_) => Reach::Yes,
+            // NOT a storing position, and this is RFC-0074 M3a's finding: a
+            // `fn` type's parameters and return ARE the two places M1 declared
+            // legal, so `fn(Request) -> Stream<String>` stores no stream — it
+            // describes a call that produces one, and the caller owes it the
+            // moment it exists. Descending here was safe only while nothing in
+            // the corpus had a `fn` type mentioning a stream; `std/http`'s
+            // `Feed` is one, and rejecting it would forbid the shape M1's own
+            // rules already permit twice over.
+            Type::Fn(_, _) => Reach::No,
+            // A `lazy T` field stores a T (forced on read), so a stream behind
+            // it is exactly the storage the scope rule forbids.
+            _ => Reach::Parts,
+        })
     }
 
     /// Whether `ty` transitively contains a function-value type (RFC-0037),
@@ -2475,48 +2899,18 @@ impl<'a> Checker<'a> {
     /// the positions that stay illegal: `extern`/`gen` signatures, `Task`
     /// payloads, and nested function signatures.
     fn contains_fn(&self, ty: &Type) -> bool {
-        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
-            match ty {
-                // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
-                // position a stored function value is kept out of.
-                Type::Fn(..) | Type::Lazy(_) => true,
-                Type::Option(i)
-                | Type::Array(i)
-                | Type::ArrayN(i, _)
-                | Type::SmallArray(i, _)
-                | Type::Task(i)
-                | Type::Partial(i) => walk(i, types, seen),
-                Type::Result(a, b) | Type::Map(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
-                }
-                Type::Omit(b, _) | Type::Pick(b, _) => walk(b, types, seen),
-                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
-                Type::Enum(vs) => vs
-                    .iter()
-                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                Type::App(n, args) => {
-                    args.iter().any(|a| walk(a, types, seen))
-                        || (!seen.iter().any(|s| s == n)
-                            && types.get(n).is_some_and(|d| {
-                                seen.push(n.clone());
-                                let r = walk(&d.base, types, seen);
-                                seen.pop();
-                                r
-                            }))
-                }
-                Type::Named(n) => {
-                    !seen.iter().any(|s| s == n)
-                        && types.get(n).is_some_and(|d| {
-                            seen.push(n.clone());
-                            let r = walk(&d.base, types, seen);
-                            seen.pop();
-                            r
-                        })
-                }
-                _ => false,
-            }
-        }
-        walk(ty, self.types, &mut Vec::new())
+        self.reaches(ty, &|t| match t {
+            // A `lazy T` field IS one (RFC-0085 M4a), so it inherits every
+            // position a stored function value is kept out of.
+            Type::Fn(..) | Type::Lazy(_) => Reach::Yes,
+            // A `Stream<T>`'s element is not looked at, which is where this
+            // walk differs from the two beside it. It differed before the
+            // walk was stated once, by having no `Stream` arm at all; the
+            // difference is recorded rather than repaired, because repairing
+            // it refuses programs and this slice refuses none.
+            Type::Stream(_) => Reach::No,
+            _ => Reach::Parts,
+        })
     }
 
     /// Whether a value of type `from` can be used where `to` is expected.
@@ -2573,17 +2967,16 @@ impl<'a> Checker<'a> {
         // DeleteResult = Result<Bool, String>`) is interchangeable with its
         // resolved form — it carries no `where` obligation of its own.
         let transparent = |b: &Type| {
-            matches!(
-                b,
-                Type::Result(..)
-                    | Type::Option(..)
-                    | Type::Map(..)
+            crate::types::is_sum_alias(b)
+                || matches!(
+                    b,
+                    Type::Map(..)
                     | Type::Array(_)
                     | Type::ArrayN(..)
                     // A named function type (`type Middleware = fn(..) -> ..`,
                     // RFC-0037) is interchangeable with its structural form.
                     | Type::Fn(..)
-            )
+                )
         };
         if let Type::Named(n) = to {
             if let Some(d) = self.types.get(n) {
@@ -2607,10 +3000,16 @@ impl<'a> Checker<'a> {
             }
         }
         // Option/Result are covariant in their payloads (values are immutable).
-        if let (Type::Option(a), Type::Option(b)) = (from, to) {
+        if let (Some(a), Some(b)) = (
+            crate::types::option_payload(from),
+            crate::types::option_payload(to),
+        ) {
             return self.assignable_d(a, b, depth + 1);
         }
-        if let (Type::Result(a, e1), Type::Result(b, e2)) = (from, to) {
+        if let (Some((a, e1)), Some((b, e2))) = (
+            crate::types::result_payloads(from),
+            crate::types::result_payloads(to),
+        ) {
             return self.assignable_d(a, b, depth + 1) && self.assignable_d(e1, e2, depth + 1);
         }
         // A Map is covariant in its value type (keys recurse the same way;
@@ -2667,22 +3066,13 @@ impl<'a> Checker<'a> {
     /// f<T>`) reads as rigid — the two are the same type wherever the shadowing
     /// literal type-checks, so the reading costs nothing.
     fn mentions_open_param(&self, ty: &Type) -> bool {
-        let cur = self.cur_fn.borrow();
-        let rigid = self.generics.get(cur.as_str());
-        let mut found = false;
-        walk_type(ty, &mut |t| {
-            if let Type::Param(n) = t {
-                if !rigid.is_some_and(|ps| ps.contains(n)) {
-                    found = true;
-                }
-            }
-        });
-        found
+        !self.open_params(ty).is_empty()
     }
 
     /// The parameters [`Self::mentions_open_param`] finds, by name, in the order
-    /// they occur and without repeats. For the one diagnostic that has to NAME
-    /// them (see [`Self::stored_fn_named`]); every other reader wants the bool.
+    /// they occur and without repeats. The rule itself is here: the reader that
+    /// has to NAME them wants the list (see [`Self::stored_fn_named`]), every
+    /// other reader wants the bool above.
     fn open_params(&self, ty: &Type) -> Vec<String> {
         let cur = self.cur_fn.borrow();
         let rigid = self.generics.get(cur.as_str());
@@ -2942,11 +3332,6 @@ impl<'a> Checker<'a> {
                 for a in args {
                     self.ensure_type_exists(a, line)?;
                 }
-            }
-            Type::Option(inner) => self.ensure_type_exists(inner, line)?,
-            Type::Result(ok, err) => {
-                self.ensure_type_exists(ok, line)?;
-                self.ensure_type_exists(err, line)?;
             }
             Type::Record(fields) => {
                 for f in fields {
@@ -3265,38 +3650,13 @@ impl<'a> Checker<'a> {
                 self.ensure_no_stream(&f.ty, t.line, "a record field")?;
                 self.ensure_type_exists(&f.ty, t.line)?;
             }
-            if let Some(pred) = &t.predicate {
-                if consteval::contains_call(pred) {
-                    return Err(cerr!(
-                        t.line,
-                        "cross-field predicate for `{}` may not contain calls (v0.1)",
-                        t.name
-                    ));
-                }
-                // The predicate sees every field in scope, by name.
-                let mut scope = Scope::closed();
-                for f in fields {
-                    scope[0].insert(
-                        f.name.clone(),
-                        Binding {
-                            ty: f.ty.clone(),
-                            mutable: false,
-                        },
-                    );
-                }
-                let pty = self.expr(pred, &scope, None, None)?;
-                if self.base(&pty) != Type::Bool {
-                    return Err(cerr!(
-                        t.line,
-                        "cross-field predicate for `{}` must be Bool, found {pty}",
-                        t.name
-                    ));
-                }
-            }
+            // The predicate sees every field in scope, by name.
+            let binds = fields.iter().map(|f| (f.name.clone(), f.ty.clone()));
+            self.check_predicate(t, "cross-field", binds)?;
             return Ok(());
         }
         // Enum declaration (RFC-0002 §4).
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             if t.predicate.is_some() {
                 return Err(cerr!(t.line, "an enum type cannot have a `where` clause"));
             }
@@ -3311,40 +3671,28 @@ impl<'a> Checker<'a> {
             }
             return Ok(());
         }
-        // A transparent alias to a built-in generic wrapper: `type DeleteResult =
-        // Result<Bool, String>` / `type Maybe = Option<Int64>`. Allowed so a
-        // codable `Result`/`Option` can be named and handed to `fromJson`/
-        // `jsonSchema` by name (RFC-0024's RPC ripple). No `where` clause (its
-        // payloads carry their own refinements); the payload types must exist.
-        if matches!(t.base, Type::Result(..) | Type::Option(..)) {
-            if t.predicate.is_some() {
-                return Err(cerr!(
-                    t.line,
-                    "a `{}` alias cannot have a `where` clause",
-                    if matches!(t.base, Type::Result(..)) {
-                        "Result"
-                    } else {
-                        "Option"
-                    }
-                ));
+        // A transparent alias to a built-in generic wrapper or collection: `type
+        // DeleteResult = Result<Bool, String>`, `type Maybe = Option<Int64>`,
+        // `type Bag = Map<String, Int64>`. Allowed so a codable one can be named
+        // and handed to `fromJson`/`jsonSchema` by name (RFC-0024's RPC ripple,
+        // RFC-0028, RFC-0011). No `where` clause — the payloads and elements
+        // carry their own refinements — and the types inside must exist.
+        let wrapper = match &t.base {
+            b if crate::types::is_sum_alias(b) => {
+                Some(match crate::types::result_payloads(b).is_some() {
+                    true => "Result",
+                    false => "Option",
+                })
             }
-            self.ensure_type_exists(&t.base, t.line)?;
-            return Ok(());
-        }
-        // A transparent alias to a `Map`/`Array` (RFC-0028/RFC-0011), so a codable
-        // collection can be named and handed to `fromJson`/`jsonSchema` by name
-        // (the same rationale as the `Result`/`Option` aliases above). No `where`
-        // clause; the element/value types must exist.
-        if matches!(t.base, Type::Map(..) | Type::Array(_) | Type::ArrayN(..)) {
+            Type::Map(..) => Some("Map"),
+            Type::Array(_) | Type::ArrayN(..) => Some("Array"),
+            _ => None,
+        };
+        if let Some(noun) = wrapper {
             if t.predicate.is_some() {
                 return Err(cerr!(
                     t.line,
-                    "a `{}` alias cannot have a `where` clause",
-                    if matches!(t.base, Type::Map(..)) {
-                        "Map"
-                    } else {
-                        "Array"
-                    }
+                    "a `{noun}` alias cannot have a `where` clause"
                 ));
             }
             self.ensure_type_exists(&t.base, t.line)?;
@@ -3385,32 +3733,52 @@ impl<'a> Checker<'a> {
             ));
         }
         // `String` refinements are allowed (e.g. `value.byteLength >= 3`); like all
-        // predicates they must be call-free and const-analyzable (checked below).
-        if let Some(pred) = &t.predicate {
-            if consteval::contains_call(pred) {
-                return Err(cerr!(
-                    t.line,
-                    "refinement predicate for `{}` may not contain calls (v0.1)",
-                    t.name
-                ));
-            }
-            // Predicate is checked in an environment where `value` has the base type.
-            let mut scope = Scope::closed();
-            scope[0].insert(
-                "value".into(),
-                Binding {
-                    ty: t.base.clone(),
-                    mutable: false,
-                },
-            );
-            let pty = self.expr(pred, &scope, None, None)?;
-            if self.base(&pty) != Type::Bool {
-                return Err(cerr!(
-                    t.line,
-                    "refinement predicate for `{}` must be Bool, found {pty}",
-                    t.name
-                ));
-            }
+        // predicates they must be call-free and const-analyzable.
+        //
+        // The predicate is checked in an environment where `value` has the base
+        // type.
+        self.check_predicate(
+            t,
+            "refinement",
+            std::iter::once(("value".to_string(), t.base.clone())),
+        )
+    }
+
+    /// A type declaration's `where` predicate, wherever it is written: it may
+    /// contain no call, and it must be Bool in a scope holding `binds` and
+    /// nothing else.
+    ///
+    /// `kind` is the adjective the two refusals name it by — a record's
+    /// predicate is cross-field and sees its fields, a scalar's is a refinement
+    /// and sees `value` — and it is the whole of what the two spellings of this
+    /// rule differed in.
+    fn check_predicate(
+        &self,
+        t: &TypeDecl,
+        kind: &str,
+        binds: impl Iterator<Item = (String, Type)>,
+    ) -> Result<(), Diagnostic> {
+        let Some(pred) = &t.predicate else {
+            return Ok(());
+        };
+        if consteval::contains_call(pred) {
+            return Err(cerr!(
+                t.line,
+                "{kind} predicate for `{}` may not contain calls (v0.1)",
+                t.name
+            ));
+        }
+        let mut scope = Scope::closed();
+        for (name, ty) in binds {
+            scope[0].insert(name, Binding { ty, mutable: false });
+        }
+        let pty = self.expr(pred, &scope, None, None)?;
+        if self.base(&pty) != Type::Bool {
+            return Err(cerr!(
+                t.line,
+                "{kind} predicate for `{}` must be Bool, found {pty}",
+                t.name
+            ));
         }
         Ok(())
     }
@@ -3438,6 +3806,31 @@ impl<'a> Checker<'a> {
     fn type_satisfies(&self, ty: &Type, bound: &str) -> bool {
         let base = self.base(ty);
         match bound {
+            // The compiler's own bound (RFC-0125 §3 M6): the element of a
+            // collection an operation forgets or overwrites without releasing
+            // it. Unlexable, so only a seeded row can carry it.
+            crate::prelude::HEAPLESS => !crate::declared::owns_heap(&base, self.types),
+            // `fromJson<T>`'s target (RFC-0125 §3 M6): the whole of what its
+            // deleted arm checked that a signature cannot say.
+            crate::prelude::DECODABLE => crate::codec::decodable(&base, self.types).is_ok(),
+            // The union `print` and `@str` take, stated once (RFC-0125 §3 M6,
+            // the `Show` slice). It was written out in two arms of
+            // [`Self::call`], each testing [`crate::types::renders`] and then
+            // asking the declaration; the two are one bound now, and the arms
+            // are gone. The rule is additive, which is what the union always
+            // was: a scalar renders by the language's own lowering, and a type
+            // the language cannot render asks its `impl Show`.
+            //
+            // A scalar therefore satisfies the bound with no impl, and it must:
+            // the emitter checks `renders` FIRST, so an `impl Show for Int64`
+            // is never reached and is refused where it is written.
+            crate::types::SHOW => match &base {
+                // Inside `fn f<T: Show>(x: T)` the impl is selected per
+                // specialization, exactly as `x.show()` is (RFC-0002 §5), so
+                // the bound on the enclosing function is the whole answer.
+                Type::Param(p) => self.param_has_bound(p, bound),
+                _ => crate::types::renders(&base) || self.declares_an_impl(ty, &base, bound),
+            },
             "Num" | "Ord" => matches!(
                 base,
                 Type::Int | Type::Float | Type::Float32 | Type::IntN { .. }
@@ -3465,14 +3858,25 @@ impl<'a> Checker<'a> {
                 .any(|entries| entries.iter().any(|(p, _)| p == bound))
                 || self.impls.iter().any(|(p, _)| p == bound) =>
             {
-                [crate::types::type_key(ty), crate::types::type_key(&base)]
-                    .into_iter()
-                    .flatten()
-                    .any(|k| self.impls.contains(&(bound.to_string(), k)))
+                self.declares_an_impl(ty, &base, bound)
             }
             // Unknown bound names: unsatisfiable.
             _ => false,
         }
+    }
+
+    /// Whether `ty` declares an `impl <bound> for` itself.
+    ///
+    /// The type's OWN key first, the resolved base's second. An impl is keyed
+    /// on the name it was written for, and resolving first would erase that
+    /// name — `Box` resolves to a bare `Type::Record`, which has no key at all
+    /// (RFC-0084 M1). The base is still consulted so a plain alias (`type
+    /// Meters = Int64`) keeps satisfying the impl on what it aliases.
+    fn declares_an_impl(&self, ty: &Type, base: &Type, bound: &str) -> bool {
+        [crate::types::type_key(ty), crate::types::type_key(base)]
+            .into_iter()
+            .flatten()
+            .any(|k| self.impls.contains(&(bound.to_string(), k)))
     }
 
     /// Enforce the `extern` ABI type domain (RFC-0012): every parameter type
@@ -3650,9 +4054,40 @@ impl<'a> Checker<'a> {
     }
 
     fn function(&self, f: &Function) -> Result<(), Diagnostic> {
+        self.function_body(f, &f.body)
+    }
+
+    /// Retain the type of one binding for the editor, at the position its
+    /// binder is spelled.
+    ///
+    /// A binder with no column is a desugar's — no source token spells it, so
+    /// no reader asks about it. A binder outside the root module has no reader
+    /// either: the editor indexes the file being edited, and two modules share
+    /// a position. The FIRST answer stands, because a desugar re-types a copy
+    /// of a body this pass already typed.
+    fn bind_seen(&self, ty: Option<Type>, line: usize, col: usize) {
+        let Some(ty) = ty else { return };
+        if col == 0 || !self.in_root.get() {
+            return;
+        }
+        self.binder_types
+            .borrow_mut()
+            .entry((line, col))
+            .or_insert(ty);
+    }
+
+    /// Check `f` with `body` as its body. The two are the same node for an
+    /// ordinary function; they differ for a `test` (RFC-0015) or a `bench`
+    /// (RFC-0055), whose head is synthetic and whose body is the REAL node
+    /// the lowering and `own` walk. The checker keys its recorded answers by
+    /// node ADDRESS (RFC-0101 M1), so a body checked as a clone leaves the
+    /// real nodes untyped — which is why a test body had no core
+    /// (RFC-0125 §3 M6, seventh slice).
+    fn function_body(&self, f: &Function, body: &Block) -> Result<(), Diagnostic> {
         *self.cur_bounds.borrow_mut() = f.type_bounds.clone();
         *self.cur_fn.borrow_mut() = f.name.clone();
-        *self.in_gen.borrow_mut() = f.is_gen;
+        *self.in_gen.borrow_mut() = in_gen_of(f);
+        self.in_root.set(f.module.is_none());
         self.errors.borrow_mut().clear();
         // Module state (RFC-0013) sits BELOW every frame: a local (param/let/for)
         // with the same name shadows a global, since `lookup` walks frames from
@@ -3663,6 +4098,7 @@ impl<'a> Checker<'a> {
             // A `modify` parameter is mutable inside the body (that is the point);
             // others are read-only bindings.
             let mutable = p.capability == Capability::Modify;
+            self.bind_seen(Some(p.ty.clone()), p.line, p.col);
             scope.last_mut().unwrap().insert(
                 p.name.clone(),
                 Binding {
@@ -3674,7 +4110,7 @@ impl<'a> Checker<'a> {
         // `block` no longer propagates the first error via `?`; it pushes each
         // statement's error to the `errors` sink and continues, so every
         // statement-level error in the body is reported.
-        let returns = self.block(&f.body, &f.ret, &mut scope);
+        let returns = self.block(body, &f.ret, &mut scope);
         if f.ret != Type::Unit && !returns {
             // A missing-return diagnostic is reported alongside any body errors
             // (it is about the function as a whole, not one statement).
@@ -3767,7 +4203,17 @@ impl<'a> Checker<'a> {
     /// not the declared/element type (the check that computes it failed).
     fn recover_binding(&self, stmt: &Stmt, scope: &mut Scope) {
         match stmt {
-            Stmt::Let { name, mutable, .. } => {
+            Stmt::Let {
+                name,
+                mutable,
+                ty,
+                line,
+                col,
+                ..
+            } => {
+                // The annotation is still the reader's answer on hover when the
+                // initializer did not type.
+                self.bind_seen(ty.clone(), *line, *col);
                 scope.last_mut().unwrap().insert(
                     name.clone(),
                     Binding {
@@ -3794,8 +4240,8 @@ impl<'a> Checker<'a> {
 
     fn stmt(&self, stmt: &Stmt, ret: &Type, scope: &mut Scope) -> Result<bool, Diagnostic> {
         // The literal `Expr` variants carry no line, so a range error on one
-        // is attributed to the statement being checked (see `stmt_source_line`).
-        *self.stmt_line.borrow_mut() = stmt_source_line(stmt);
+        // is attributed to the statement being checked (see `Stmt::line`).
+        *self.stmt_line.borrow_mut() = stmt.line();
         match stmt {
             Stmt::Let {
                 name,
@@ -3803,6 +4249,7 @@ impl<'a> Checker<'a> {
                 ty,
                 value,
                 line,
+                col,
             } => {
                 if let Some(declared) = ty {
                     self.ensure_type_exists(declared, *line)?;
@@ -3825,9 +4272,7 @@ impl<'a> Checker<'a> {
                 let bty = ty.clone().unwrap_or(vty);
                 // Retain it for the symbol-query layer so hovering an
                 // unannotated `let x = 5` shows `let x: Int`.
-                self.let_types
-                    .borrow_mut()
-                    .insert((*line, name.clone()), bty.clone());
+                self.bind_seen(Some(bty.clone()), *line, *col);
                 scope.last_mut().unwrap().insert(
                     name.clone(),
                     Binding {
@@ -4103,11 +4548,9 @@ impl<'a> Checker<'a> {
                 // hover, exactly as `match` arm bindings would be.
                 scope.push(HashMap::new());
                 for (name, ty) in &binders {
-                    self.let_types
-                        .borrow_mut()
-                        .insert((*line, name.clone()), ty.clone());
+                    self.bind_seen(Some(ty.clone()), name.line, name.col);
                     scope.last_mut().unwrap().insert(
-                        name.clone(),
+                        name.name.clone(),
                         Binding {
                             ty: ty.clone(),
                             mutable: false,
@@ -4153,6 +4596,7 @@ impl<'a> Checker<'a> {
                 iter,
                 body,
                 line,
+                col,
                 ..
             } => {
                 let ity = self.expr(iter, scope, None, Some(ret))?;
@@ -4199,9 +4643,7 @@ impl<'a> Checker<'a> {
                 // Bind the loop variable (immutable, element-typed) in a scope
                 // frame that wraps the body, so it is not visible after the loop.
                 // Retain the element type so `for s in arr` hovers as `for s: Int`.
-                self.let_types
-                    .borrow_mut()
-                    .insert((*line, var.clone()), elem.clone());
+                self.bind_seen(Some(elem.clone()), *line, *col);
                 scope.push(HashMap::new());
                 scope.last_mut().unwrap().insert(
                     var.clone(),
@@ -4306,8 +4748,8 @@ impl<'a> Checker<'a> {
                         | Type::SmallArray(..)
                         | Type::Map(..)
                         | Type::Task(_)
-                ) || (matches!(t, Type::Option(_) | Type::Result(..))
-                    && crate::own::owns_heap(&t, &self.types))
+                ) || (crate::types::is_sum_alias(&t)
+                    && crate::declared::owns_heap(&t, &self.types))
                 {
                     return Ok(false);
                 }
@@ -4329,12 +4771,6 @@ impl<'a> Checker<'a> {
                 ))
             }
             Stmt::Expr(e) => {
-                // A `match` directly here is in STATEMENT position (RFC-0118):
-                // its arms may be blocks. The flag is the arms' address, so a
-                // match nested anywhere inside stays expression-position.
-                if let Expr::Match { arms, .. } = e {
-                    self.stmt_match.set(arms.as_ptr() as usize);
-                }
                 // A `panic` statement is `Never`-typed, so it satisfies the
                 // return-path check the way a `return` does (RFC-0079): the
                 // statements after it are unreachable and a function whose body
@@ -4362,58 +4798,27 @@ impl<'a> Checker<'a> {
     /// record/enum/Option/Result that transitively contains one).
     /// Used by the `region` escape guard.
     ///
-    /// The walk threads a `seen` list of declaration heads, exactly like
-    /// [`Self::contains_stream`]/[`Self::contains_fn`]: a legal recursive
-    /// record (`type Node = { v: Int64, next: Option<Node> }`) re-enters
-    /// itself through its own name, and an unguarded descent overflowed
-    /// the stack the moment such a value was stored inside a `region`.
+    /// The walk threads a `seen` list of declaration heads ([`Self::reaches`]):
+    /// a legal recursive record (`type Node = { v: Int64, next: Option<Node> }`)
+    /// re-enters itself through its own name, and an unguarded descent
+    /// overflowed the stack the moment such a value was stored inside a
+    /// `region`.
     fn contains_heap(&self, ty: &Type) -> bool {
-        fn walk(ty: &Type, types: &HashMap<String, TypeDecl>, seen: &mut Vec<String>) -> bool {
-            match ty {
-                Type::Str => true,
-                // Array buffers are always malloc'd (never in the region arena),
-                // so only their *contents* can dangle.
-                // A `Stream<T>` is an `Array<T>`'s three words with a malloc'd
-                // buffer (RFC-0075), so it dangles exactly where an array does.
-                Type::Array(inner)
-                | Type::ArrayN(inner, _)
-                | Type::SmallArray(inner, _)
-                | Type::Stream(inner)
-                | Type::Task(inner) => walk(inner, types, seen),
-                // A Map's buffers are malloc'd; its keys are always heap (String)
-                // and its values may be — either way it carries heap (RFC-0028).
-                Type::Map(..) => true,
-                Type::Record(fs) => fs.iter().any(|f| walk(&f.ty, types, seen)),
-                Type::Enum(vs) => vs
-                    .iter()
-                    .any(|v| v.payload.iter().any(|p| walk(p, types, seen))),
-                Type::Option(inner) => walk(inner, types, seen),
-                Type::Result(a, b) | Type::Merge(a, b) => {
-                    walk(a, types, seen) || walk(b, types, seen)
-                }
-                Type::Omit(b, _) | Type::Pick(b, _) | Type::Partial(b) => walk(b, types, seen),
-                // A stored function value (RFC-0037) may hold heap captures
-                // (a snapshotted String/Array/record), so treat it as
-                // heap-carrying. A `lazy T` field is one (RFC-0085 M4a).
-                Type::Fn(..) | Type::Lazy(_) => true,
-                Type::Named(n) | Type::App(n, _) => {
-                    let args = match ty {
-                        Type::App(_, a) => a.as_slice(),
-                        _ => &[],
-                    };
-                    args.iter().any(|a| walk(a, types, seen))
-                        || (!seen.iter().any(|s| s == n)
-                            && types.get(n).is_some_and(|d| {
-                                seen.push(n.clone());
-                                let r = walk(&d.base, types, seen);
-                                seen.pop();
-                                r
-                            }))
-                }
-                _ => false,
-            }
-        }
-        walk(ty, self.types, &mut Vec::new())
+        self.reaches(ty, &|t| match t {
+            Type::Str => Reach::Yes,
+            // A Map's buffers are malloc'd; its keys are always heap (String)
+            // and its values may be — either way it carries heap (RFC-0028).
+            Type::Map(..) => Reach::Yes,
+            // A stored function value (RFC-0037) may hold heap captures
+            // (a snapshotted String/Array/record), so treat it as
+            // heap-carrying. A `lazy T` field is one (RFC-0085 M4a).
+            Type::Fn(..) | Type::Lazy(_) => Reach::Yes,
+            // Array buffers are always malloc'd (never in the region arena),
+            // so only their *contents* can dangle. A `Stream<T>` is an
+            // `Array<T>`'s three words with a malloc'd buffer (RFC-0075), so
+            // it dangles exactly where an array does.
+            _ => Reach::Parts,
+        })
     }
 
     /// The `region` escape guard for a store into the binding `name`: inside a
@@ -4505,6 +4910,9 @@ impl<'a> Checker<'a> {
         RECORD.with(|r| {
             let mut r = r.borrow_mut();
             r.node_types.insert(key, t.clone());
+            if matches!(expr, Expr::Match { .. } | Expr::IfExpr { .. }) {
+                r.joins.insert(key, t.clone());
+            }
             if let Some(call) = pending {
                 r.node_substs.insert(key, call);
             }
@@ -4629,7 +5037,9 @@ impl<'a> Checker<'a> {
                     // The type RETURNED is the one written, so the binding keeps
                     // its name.
                     return match expected.map(|t| self.base(t)) {
-                        Some(Type::Option(_)) => Ok(expected.unwrap().clone()),
+                        Some(b) if crate::types::option_payload(&b).is_some() => {
+                            Ok(expected.unwrap().clone())
+                        }
                         _ => Err(cerr!(
                             line,
                             "cannot infer the type of `None`; \
@@ -4887,14 +5297,18 @@ impl<'a> Checker<'a> {
                 }
                 self.binop_type(*op, l, r, *line)
             }
-            Expr::Call { name, args, line } => {
-                self.call(name, args, *line, scope, expected, fn_ret)
-            }
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                line,
+            } => self.call(name, args, type_args, *line, scope, expected, fn_ret),
             Expr::Match {
                 scrutinee,
                 arms,
+                stmt_pos,
                 line,
-            } => self.check_match(scrutinee, arms, *line, scope, expected, fn_ret),
+            } => self.check_match(scrutinee, arms, *stmt_pos, *line, scope, expected, fn_ret),
             Expr::IfExpr {
                 cond,
                 then_branch,
@@ -4981,7 +5395,7 @@ impl<'a> Checker<'a> {
                         "`{name}` is built from {base}, but the argument is {aty}"
                     ));
                 }
-                Ok(Type::Option(Box::new(Type::Named(name.clone()))))
+                Ok(Type::option(Type::Named(name.clone())))
             }
             Expr::Spawn { name, args, line } => {
                 let (params, ret) = self
@@ -5000,14 +5414,6 @@ impl<'a> Checker<'a> {
                          never emitted (RFC-0021)"
                     ));
                 }
-                if !self.spawn_safe.contains(name) {
-                    return Err(cerr!(
-                        line,
-                        "`spawn {name}(..)` is not allowed: `{name}` (or something it \
-                         calls) does I/O or touches shared mutable state, so running it as a task \
-                         could race or interleave. A spawned function must be isolated (pure)."
-                    ));
-                }
                 // A spawned callee cannot take function-value parameters: its
                 // per-callee thunk carries plain data only (RFC-0037 keeps the
                 // v1 rejection, now with a named diagnostic).
@@ -5018,14 +5424,6 @@ impl<'a> Checker<'a> {
                          may not take function-value parameters (RFC-0037)"
                     ));
                 }
-                // The pre-check spawn-safety fixpoint cannot see calls through
-                // stored function values (RFC-0037) — record the site and
-                // re-verify it against the extended fixpoint after checking.
-                self.spawn_sites.borrow_mut().push((
-                    self.cur_fn.borrow().clone(),
-                    name.clone(),
-                    *line,
-                ));
                 if params.len() != args.len() {
                     return Err(cerr!(
                         line,
@@ -5096,7 +5494,7 @@ impl<'a> Checker<'a> {
                 // used to check `ok` in 0.1 s, run correctly under the
                 // interpreter, and then die `LLVM ERROR: out of memory` after
                 // clang had run for over two minutes.
-                if elems.len() > crate::interp::ARRAY_LIT_LIMIT {
+                if elems.len() > crate::trap::ARRAY_LIT_LIMIT {
                     return Err(cerr!(
                         line,
                         "this array literal has {} elements, past the limit of {}\n  \
@@ -5105,7 +5503,7 @@ impl<'a> Checker<'a> {
                          note: a table this long belongs in a file the program reads, not in \
                          the program",
                         elems.len(),
-                        crate::interp::ARRAY_LIT_LIMIT
+                        crate::trap::ARRAY_LIT_LIMIT
                     ));
                 }
                 let small_cap = match expected {
@@ -5423,28 +5821,37 @@ impl<'a> Checker<'a> {
     ) -> Result<Type, Diagnostic> {
         let ety = self.expr(expr, scope, None, fn_ret)?;
         let ret = fn_ret.ok_or_else(|| cerr!(line, "`?` can only be used inside a function"))?;
-        match &ety {
-            Type::Option(t) => match ret {
-                Type::Option(_) => Ok((**t).clone()),
-                _ => Err(cerr!(
+        // The two built-in sums are read through their payloads, and the
+        // DECLARED `Fallible` is read after them (RFC-0126 §8.15). Both are a
+        // variant list now, so the ORDER is the rule: `?` on an `Option` or a
+        // `Result` is the built-in propagation, and a declared sum reaches the
+        // protocol below it.
+        if let Some(t) = crate::types::option_payload(&ety) {
+            return match crate::types::option_payload(ret) {
+                Some(_) => Ok(t.clone()),
+                None => Err(cerr!(
                     line,
                     "`?` on an Option requires the function to return Option, \
                      but it returns {ret}"
                 )),
-            },
-            Type::Result(t, e) => match ret {
-                Type::Result(_, re) if self.assignable(e, re) => Ok((**t).clone()),
-                Type::Result(_, re) => Err(cerr!(
+            };
+        }
+        if let Some((t, e)) = crate::types::result_payloads(&ety) {
+            return match crate::types::result_payloads(ret) {
+                Some((_, re)) if self.assignable(e, re) => Ok(t.clone()),
+                Some((_, re)) => Err(cerr!(
                     line,
                     "`?` propagates error {e}, but the function returns \
                      Result<_, {re}>"
                 )),
-                _ => Err(cerr!(
+                None => Err(cerr!(
                     line,
                     "`?` on a Result requires the function to return Result, \
                      but it returns {ret}"
                 )),
-            },
+            };
+        }
+        match &ety {
             other => {
                 let key = crate::types::type_key(other)
                     .filter(|k| self.impls.contains(&(FALLIBLE.to_string(), k.clone())));
@@ -5474,6 +5881,7 @@ impl<'a> Checker<'a> {
                 self.call(
                     &crate::types::impl_method_name(FALLIBLE, &key, "success"),
                     std::slice::from_ref(expr),
+                    &[],
                     line,
                     scope,
                     None,
@@ -5485,135 +5893,49 @@ impl<'a> Checker<'a> {
 
     /// Check a `match` over an `Option` or `Result`: both variants covered
     /// exactly once with the right patterns, all arm bodies a common type.
+    #[allow(clippy::too_many_arguments)]
     fn check_match(
         &self,
         scrutinee: &Expr,
         arms: &[MatchArm],
+        stmt_pos: bool,
         line: usize,
         scope: &Scope,
         expected: Option<&Type>,
         fn_ret: Option<&Type>,
     ) -> Result<Type, Diagnostic> {
-        // Statement position (RFC-0118), consumed HERE so a nested match —
-        // expression position by construction — sees the flag cleared. The
-        // enum path receives it as a plain bool.
-        let stmt_pos = self.stmt_match.replace(0) == arms.as_ptr() as usize;
         let raw_sty = self.expr(scrutinee, scope, None, fn_ret)?;
         // Resolve a transparent alias so `match` over `type X = Result<..>` (or an
         // `Option`/enum alias) dispatches on the underlying shape (RFC-0024).
         let sty = match &raw_sty {
             Type::Named(n) => match self.types.get(n) {
-                Some(d)
-                    if d.predicate.is_none()
-                        && matches!(d.base, Type::Result(..) | Type::Option(..)) =>
-                {
+                Some(d) if d.predicate.is_none() && crate::types::is_sum_alias(&d.base) => {
                     crate::types::resolve(&raw_sty, self.types)
                 }
                 _ => raw_sty.clone(),
             },
             _ => raw_sty.clone(),
         };
-        // A user enum dispatches to its own (N-variant) checker.
-        if let Type::Enum(evs) = self.base(&sty) {
-            return self
-                .check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos);
-        }
-        // The two patterns an Option/Result scrutinee requires.
-        let want: [&str; 2] = match &sty {
-            Type::Option(_) => ["Some", "None"],
-            Type::Result(_, _) => ["Ok", "Err"],
-            other => {
-                return Err(cerr!(
-                    line,
-                    "`match` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
-            }
-        };
-        let mut seen: Vec<&str> = Vec::new();
-        let mut result: Option<Type> = expected.cloned();
-        for arm in arms {
-            let (tag, bind): (&str, Option<&str>) = match &arm.pattern {
-                Pattern::Some(b) => ("Some", Some(b)),
-                Pattern::None => ("None", None),
-                Pattern::Ok(b) => ("Ok", Some(b)),
-                Pattern::Err(b) => ("Err", Some(b)),
-                // The `??` desugar's two patterns (RFC-0079): they take whichever
-                // tag the scrutinee's own shape names, which is the one thing the
-                // parser could not do. `Failure` binds only on the `Result` path
-                // — an `Option`'s tag-0 has no payload — which is exactly what
-                // this per-arm `Option<&str>` seam is for.
-                Pattern::Success(b) => (want[0], Some(b)),
-                Pattern::Failure(b) => (
-                    want[1],
-                    matches!(sty, Type::Result(..)).then_some(b.as_str()),
-                ),
-                Pattern::Variant(n, _) => {
-                    return Err(cerr!(
-                        line,
-                        "pattern `{n}` does not match scrutinee of type {sty}"
-                    ))
-                }
-                // The refutable-`let` desugar's default arm (RFC-0121) belongs
-                // to an enum `match`; an Option/Result scrutinee spells both
-                // tags, so nothing produces it here.
-                Pattern::Other => {
-                    return Err(cerr!(line, "the default arm belongs to an enum `match`"))
-                }
-            };
-            if !want.contains(&tag) {
-                return Err(cerr!(
-                    line,
-                    "pattern `{tag}` does not match scrutinee of type {sty}"
-                ));
-            }
-            if seen.contains(&tag) {
-                return Err(cerr!(line, "duplicate `{tag}` arm"));
-            }
-            seen.push(tag);
-
-            let mut inner_scope = scope.clone();
-            if let Some(name) = bind {
-                let bty = self.binding_type(&sty, tag);
-                inner_scope.push(HashMap::new());
-                inner_scope.last_mut().unwrap().insert(
-                    name.to_string(),
-                    Binding {
-                        ty: bty,
-                        mutable: false,
-                    },
-                );
-            }
-            match &arm.body {
-                ArmBody::Expr(e) => {
-                    let bty = self.expr(e, &inner_scope, result.as_ref(), fn_ret)?;
-                    self.unify_arm(&mut result, bty, line)?;
-                }
-                // A block arm (RFC-0118): statement position only, checked as
-                // the block it is, contributing no type — the expression arms
-                // beside it still unify among themselves.
-                ArmBody::Block(b) => {
-                    self.arm_block(b, stmt_pos, line, &mut inner_scope, fn_ret)?;
-                }
-            }
-        }
-        if !want.iter().all(|w| seen.contains(w)) {
+        // EVERY sum goes to the N-variant checker. Since RFC-0126 §8.11's M4b
+        // `base` answers `Enum` for an `Option` and a `Result` too, so the
+        // two-tag path that stood here — its own `want` table, its own
+        // exhaustiveness message and its own arm loop, sixty lines of it — is
+        // the enum's path, and a built-in sum gets the wording a declared enum
+        // already had.
+        let Type::Enum(evs) = self.base(&sty) else {
             return Err(cerr!(
                 line,
-                "`match` must cover both `{}` and `{}`",
-                want[0],
-                want[1]
+                "`match` scrutinee must be an Option, Result, or enum, found {sty}"
             ));
-        }
-        // A statement match whose arms are all blocks yields nothing, which is
-        // exactly what its position consumes.
-        if stmt_pos && result.is_none() {
-            return Ok(Type::Unit);
-        }
-        result.ok_or_else(|| cerr!(line, "empty `match`"))
+        };
+        self.check_match_enum(&sty, &evs, arms, line, scope, expected, fn_ret, stmt_pos)
     }
 
     /// Check one block arm (RFC-0118): legal only in statement position, and
-    /// then checked exactly as the block it is.
+    /// then checked exactly as the block it is. `stmt_pos` is the node's own
+    /// field, which the parser set — this used to be recovered here by
+    /// comparing the arms slice's address with a `Cell` the statement walk had
+    /// written.
     fn arm_block(
         &self,
         b: &Block,
@@ -5683,6 +6005,28 @@ impl<'a> Checker<'a> {
                 // pattern-matches at all; `??` does, so it stops here, and it says
                 // so in the source's own words rather than naming a pattern nobody
                 // wrote.
+                // A two-variant sum is what `??` was written for, and since
+                // RFC-0126 §8.11's M4b that includes the two built-in ones,
+                // which reach here as `| None | Some(T)` and `| Err(E) | Ok(T)`.
+                // The pair names a TAG: variant 1 succeeds, variant 0 fails.
+                // Anything wider has no success side as a PATTERN — that would
+                // be a wildcard over N-1 variants, and `Pattern` has none — so
+                // it says so in the source's own words.
+                Pattern::Success(b) | Pattern::Failure(b)
+                    if crate::types::option_payload(&Type::Enum(evs.to_vec())).is_some()
+                        || crate::types::result_payloads(&Type::Enum(evs.to_vec())).is_some() =>
+                {
+                    let at = usize::from(matches!(arm.pattern, Pattern::Success(_)));
+                    let v = &evs[at];
+                    (
+                        v.name.clone(),
+                        if v.payload.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![b.clone()]
+                        },
+                    )
+                }
                 Pattern::Success(_) | Pattern::Failure(_) => {
                     return Err(cerr!(
                         line,
@@ -5713,8 +6057,9 @@ impl<'a> Checker<'a> {
             if !bind.is_empty() {
                 inner.push(HashMap::new());
                 for (bname, pty) in bind.iter().zip(&ev.payload) {
+                    self.bind_seen(Some(pty.clone()), bname.line, bname.col);
                     inner.last_mut().unwrap().insert(
-                        bname.clone(),
+                        bname.name.clone(),
                         Binding {
                             ty: pty.clone(),
                             mutable: false,
@@ -5815,12 +6160,13 @@ impl<'a> Checker<'a> {
 
     /// The type bound by pattern `tag` when matching a value of type `sty`.
     fn binding_type(&self, sty: &Type, tag: &str) -> Type {
-        match (sty, tag) {
-            (Type::Option(t), "Some") => (**t).clone(),
-            (Type::Result(t, _), "Ok") => (**t).clone(),
-            (Type::Result(_, e), "Err") => (**e).clone(),
-            _ => Type::Unit,
+        match tag {
+            "Some" => crate::types::option_payload(sty).cloned(),
+            "Ok" => crate::types::result_payloads(sty).map(|(t, _)| t.clone()),
+            "Err" => crate::types::result_payloads(sty).map(|(_, e)| e.clone()),
+            _ => None,
         }
+        .unwrap_or(Type::Unit)
     }
 
     /// Resolve a scrutinee's type through a transparent Option/Result/enum alias
@@ -5829,13 +6175,7 @@ impl<'a> Checker<'a> {
     fn resolve_scrutinee(&self, raw: &Type) -> Type {
         match raw {
             Type::Named(n) => match self.types.get(n) {
-                Some(d)
-                    if d.predicate.is_none()
-                        && matches!(
-                            d.base,
-                            Type::Result(..) | Type::Option(..) | Type::Enum(..)
-                        ) =>
-                {
+                Some(d) if d.predicate.is_none() && matches!(d.base, Type::Enum(..)) => {
                     crate::types::resolve(raw, self.types)
                 }
                 _ => raw.clone(),
@@ -5853,7 +6193,7 @@ impl<'a> Checker<'a> {
         sty: &Type,
         pattern: &Pattern,
         line: usize,
-    ) -> Result<Vec<(String, Type)>, Diagnostic> {
+    ) -> Result<Vec<(Binder, Type)>, Diagnostic> {
         if let Type::Enum(evs) = self.base(sty) {
             let (vname, binds) = match pattern {
                 Pattern::Variant(n, b) => (n.clone(), b.clone()),
@@ -5878,21 +6218,16 @@ impl<'a> Checker<'a> {
             }
             return Ok(binds.into_iter().zip(ev.payload.iter().cloned()).collect());
         }
-        let (tag, bind): (&str, Option<String>) = match pattern {
-            Pattern::Some(b) => ("Some", Some(b.clone())),
-            Pattern::None => ("None", None),
-            Pattern::Ok(b) => ("Ok", Some(b.clone())),
-            Pattern::Err(b) => ("Err", Some(b.clone())),
+        let (tag, bind): (&str, Option<Binder>) = match pattern {
+            // §8's one spelling again: the name, and what it binds.
+            Pattern::Variant(v, binds) => {
+                sum_arm_arity(v, binds.len(), line)?;
+                (v.as_str(), binds.first().cloned())
+            }
             // `??` desugars to a `match`, never to an `if let`/`while let`, so
             // these cannot reach here.
             Pattern::Success(_) | Pattern::Failure(_) => {
                 unreachable!("the `??` patterns are produced only inside a `match`")
-            }
-            Pattern::Variant(n, _) => {
-                return Err(cerr!(
-                    line,
-                    "pattern `{n}` does not match scrutinee of type {sty}"
-                ))
             }
             // Produced only inside the refutable-`let` desugar's `match`
             // (RFC-0121); an `if let` never carries it.
@@ -5900,15 +6235,15 @@ impl<'a> Checker<'a> {
                 return Err(cerr!(line, "the default arm belongs to an enum `match`"))
             }
         };
-        let want: [&str; 2] = match sty {
-            Type::Option(_) => ["Some", "None"],
-            Type::Result(_, _) => ["Ok", "Err"],
-            other => {
-                return Err(cerr!(
-                    line,
-                    "`if let` scrutinee must be an Option, Result, or enum, found {other}"
-                ))
-            }
+        let want: [&str; 2] = if crate::types::option_payload(sty).is_some() {
+            ["Some", "None"]
+        } else if crate::types::result_payloads(sty).is_some() {
+            ["Ok", "Err"]
+        } else {
+            return Err(cerr!(
+                line,
+                "`if let` scrutinee must be an Option, Result, or enum, found {sty}"
+            ));
         };
         if !want.contains(&tag) {
             return Err(cerr!(
@@ -6574,9 +6909,9 @@ impl<'a> Checker<'a> {
     /// is selected per specialization, exactly as `x.show()` is inside the same
     /// generic (RFC-0002 §5), so this only agrees that one exists.
     ///
-    /// The protocol is an ordinary declaration — the compiler knows only the
-    /// name — so a program is free to declare `fn show(self) -> Int64`, and the
-    /// three renderers must not then be handed one.
+    /// That a `show` hands back a String is stated at the IMPL, beside the
+    /// other rule about a `Show` impl, so an impl nobody calls is checked too.
+    /// This types the call, which is what `value` still needs.
     fn renders_by_declaration(
         &self,
         t: &Type,
@@ -6591,22 +6926,15 @@ impl<'a> Checker<'a> {
         let Some(m) = self.show_dispatch(t) else {
             return Ok(false);
         };
-        let r = self.call(&m, args, line, scope, Some(&Type::Str), fn_ret)?;
-        match self.base(&r) {
-            Type::Str | Type::Err => Ok(true),
-            other => Err(cerr!(
-                line,
-                "`{}`'s `show` must hand back a String to render through, found \
-                 {other}",
-                crate::types::SHOW
-            )),
-        }
+        self.call(&m, args, &[], line, scope, Some(&Type::Str), fn_ret)?;
+        Ok(true)
     }
 
     fn call(
         &self,
         name: &str,
         args: &[Expr],
+        written: &[Type],
         line: usize,
         scope: &Scope,
         expected: Option<&Type>,
@@ -6666,73 +6994,19 @@ impl<'a> Checker<'a> {
                 return Ok((*ret).clone());
             }
         }
-        // Removed free-function builtins → their method/operator replacements.
-        // These fire only for the *bare* user-written spelling; the desugaring
-        // and method forms use the unspellable `@`-prefixed internal names
-        // (`@str`/`@concat`/`@list`/`@join`/`@push`/`@at`), which flow past this
-        // guard.
-        match name {
-            "str" => {
-                return Err(cerr!(
-                    line,
-                    "`str(x)` was removed; render a value with `x.toString()`"
-                ))
-            }
-            "concat" => {
-                return Err(cerr!(
-                    line,
-                    "`concat(a, b)` was removed; concatenate Strings with `a + b`"
-                ))
-            }
-            "len" => {
-                return Err(cerr!(
-                    line,
-                    "`len(s)` was removed; a String's byte length is `s.byteLength`"
-                ))
-            }
-            "list" => {
-                return Err(cerr!(
-                    line,
-                    "`list([..])` was removed; write the array literal `[..]` \
-                     directly where an `Array<T>` is expected"
-                ))
-            }
-            "join" => {
-                return Err(cerr!(
-                    line,
-                    "`join(t)` was removed; await a task's result with `t.join()`"
-                ))
-            }
-            "toString" => return Err(cerr!(line, "`toString` is a method; write `x.toString()`")),
-            // The collection verbs. `xs.push(v)`, `xs[i]`, `xs.length` and `[]`
-            // are the whole surface; the verb forms were the second spelling of
-            // each, which is what this repo removes.
-            "push" => {
-                return Err(cerr!(
-                    line,
-                    "`push(xs, v)` was removed; push with `xs.push(v)`"
-                ))
-            }
-            "at" => return Err(cerr!(line, "`at(xs, i)` was removed; index with `xs[i]`")),
-            "alen" => {
-                return Err(cerr!(
-                    line,
-                    "`alen(xs)` was removed; a collection's length is `xs.length`"
-                ))
-            }
-            "array" => {
-                return Err(cerr!(
-                    line,
-                    "`array()` was removed; write the array literal `[]`"
-                ))
-            }
-            _ => {}
+        // A removed free-function spelling ([`MOVED_TO_STD`]'s [`Gone::Removed`]
+        // half). This must be asked HERE rather than at the unknown-name
+        // fall-through: `at` is also the name of a user's `place at`, so a
+        // program with `impl Index for Ring` would type `at(r, 0)` as a
+        // projection rather than being told the verb form is gone.
+        if let Some(g @ Gone::Removed(_)) = moved_to_std(name) {
+            return Err(cerr!(line, "{}", g.hint(name)));
         }
         // Test builtins (RFC-0015): `assert`/`assertEq` are legal ONLY inside a
         // `test` body. In ordinary code they are a checker error steering the
         // programmer to the production tools (validated types / `Result`).
         if name == "assert" || name == "assertEq" {
-            if !*self.in_test.borrow() {
+            if !*self.in_test.borrow() && !test_host() {
                 return Err(cerr!(
                     line,
                     "`{name}` is only available inside a `test` block — in ordinary \
@@ -6794,7 +7068,7 @@ impl<'a> Checker<'a> {
         // and its result can't be constant-folded. Legal ONLY inside a `bench` or a
         // `test` body (same steering rule/wording style as `assert`).
         if name == "blackBox" {
-            if !*self.in_test.borrow() && !*self.in_bench.borrow() {
+            if !*self.in_test.borrow() && !*self.in_bench.borrow() && !test_host() {
                 return Err(cerr!(
                     line,
                     "`blackBox` is only available inside a `bench` or `test` block — \
@@ -6847,205 +7121,42 @@ impl<'a> Checker<'a> {
             return Ok(Type::Never);
         }
 
-        // built-in: print(Int|Bool) -> Unit
-        if name == "print" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "print expects 1 argument, got {}", args.len()));
-            }
-            let written = self.expr(&args[0], scope, None, fn_ret)?;
-            let t = self.base(&written);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if !crate::types::renders(&t) {
-                // RFC-0094 M3: the type answers where the language cannot.
-                if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
-                    return Ok(Type::Unit);
-                }
-                return Err(cerr!(
-                    line,
-                    "print needs a number, Bool, or String, found {t}{}",
-                    self.show_hint(&written)
-                ));
-            }
-            return Ok(Type::Unit);
-        }
-
-        // built-in: logger(String) -> Logger (RFC-0008).
-        if name == "logger" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`logger` takes 1 argument, got {}", args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`logger` needs a String name, found {t}"));
-            }
-            return Ok(Type::Logger);
-        }
-        // built-in log methods: <level>(Logger, String) -> Unit. Written
-        // subject-first via method sugar: `log.info("..")`.
-        if crate::ast::is_log_level(name) {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`{name}` takes a Logger and a String, got {} argument(s)",
-                    args.len()
-                ));
-            }
-            let l = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-            if matches!(l, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if l != Type::Logger {
-                return Err(cerr!(
-                    line,
-                    "`{name}` must be called on a Logger (e.g. `log.{name}(..)`), \
-                     found {l}"
-                ));
-            }
-            let m = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(m, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if m != Type::Str {
-                return Err(cerr!(line, "`{name}` message must be a String, found {m}"));
-            }
-            return Ok(Type::Unit);
-        }
-
-        // Input I/O effects (RFC-0014). Free builtins like `print`/`logger`; each
-        // joins `SPAWN_FORBIDDEN` and is never constant (`Expr::Call` never folds).
-        // Error payloads are canonical Vyrn wording (never OS text) — the parity
-        // rule; the strings are built at the use site in the interpreter and by
-        // the codegen, kept byte-identical.
-        if name == "args" {
-            if !args.is_empty() {
-                return Err(cerr!(line, "`args` takes no arguments, got {}", args.len()));
-            }
-            return Ok(Type::Array(Box::new(Type::Str)));
-        }
-        if name == "readLine" {
-            if !args.is_empty() {
-                return Err(cerr!(
-                    line,
-                    "`readLine` takes no arguments, got {}",
-                    args.len()
-                ));
-            }
-            return Ok(Type::Option(Box::new(Type::Str)));
-        }
-        if name == "readFile" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`readFile` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`readFile` needs a String path, found {t}"));
-            }
-            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
-        }
-        // `listDir(path) -> Result<Array<String>, String>` (RFC-0021 family): the
-        // entry names directly under `path` (no `.`/`..`, unsorted-by-OS order the
-        // interpreter sorts for determinism). At generation time it is mediated
-        // through the loader's resolver and scoped to the generator's path args;
-        // at runtime it lists the real filesystem. Canonical error `cannot list
-        // \`p\``.
-        // `lineAt(bytes, off)` / `colAt(bytes, off)` — the 1-based line and
-        // column of a byte offset in a UTF-8 buffer (RFC-0033 origin directives
-        // are 1-based, and this is what feeds them).
+        // (RFC-0125 §3 M6 deleted the sixteen arms whose whole behaviour was the
+        // arity, the parameter types and the result of a row in
+        // `prelude::rows`: the ten input/output builtins (`args`, `readLine`,
+        // `readFile`, `readFileBytes`, `writeFile`, `writeFileBytes`,
+        // `writeStdout`, `renameFile`, `fsyncFile`, `stringFromBytes`), the two
+        // directory listings (`listDir`, `listDirKinds`), the two IEEE-754 bit
+        // views (`floatBits`, `floatFromBits`), `parse`, and `@concat`. Each was
+        // a second statement of its row, and the fall-through below states it
+        // once: [`crate::prelude::checkable`] hands over the row and the
+        // ordinary call path types the call against it. What the arms carried
+        // beyond the row was the WORDING of two refusals — "`readFile`
+        // takes 1 argument, got 2" against the generic "`readFile` expects 1
+        // argument, got 2" — and RFC-0094 M1 held them back for exactly that.
+        // Their spans and their refusal counts are the M6 record's table.
         //
-        // A builtin rather than a library loop because the obvious loop is
-        // quadratic: counting newlines from byte 0 on every call is O(offset),
-        // and a scanner asks once per node. `std/vyx` spent 122 ms of a 291 ms
-        // page compile in exactly that shape. The interpreter memoizes a
-        // line-start table per buffer, which a Vyrn library cannot do —
-        // generators may not touch module state (comptime purity), so the cache
-        // has to live below them. Any generator gets it, not just std.
-        if name == "lineAt" || name == "colAt" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`{name}` takes 2 arguments (bytes, offset), got {}",
-                    args.len()
-                ));
-            }
-            // The buffer must be a BYTE buffer, not any array. Two reasons, and
-            // they point the same way:
-            //
-            // - The engines disagreed on anything else. The interpreter reads
-            //   `v as u8` per *element*, so `[1, 10]: Array<Int64>` looks like the
-            //   bytes `01 0a`; native hands the `{ ptr, i64, i64 }` data pointer to
-            //   `__vyrn_line_at` as `unsigned char*`, where element 1 starts at
-            //   byte 8 and byte 1 is the zero padding of `01 00 00 …`. RFC-0077's
-            //   M2n note found `lineAt([1, 10], 2)` answering 2 interpreted and 1
-            //   native, and refused to pick a winner — correctly, because a line
-            //   number over an `Array<Int64>` is nonsense in both readings. So this
-            //   rejects the call instead of answering it.
-            // - `ArrayN`/`SmallArray` were never lowerable here anyway: the native
-            //   emitter `extractvalue`s a `{ ptr, i64, i64 }`, which is the growable
-            //   `Array` layout alone (`[N x T]` and `{ i64, i64, ptr, [N x T] }` are
-            //   different aggregates). Accepting them was a front-end promise no
-            //   backend kept.
-            //
-            // `bytes(s)` produces exactly `Array<UInt8>`, and that is what every
-            // real caller passes (`std/vyx`'s scanner, `std/text`'s oracles). The
-            // element goes through `base` so a validated newtype over `UInt8` — same
-            // byte, same stride — still counts.
-            let b = self.base(&self.expr(&args[0], scope, None, fn_ret)?);
-            let is_bytes = match &b {
-                Type::Array(el) => {
-                    matches!(
-                        self.base(el),
-                        Type::IntN {
-                            bits: 8,
-                            signed: false
-                        }
-                    )
-                }
-                _ => false,
-            };
-            if !matches!(b, Type::Err) && !is_bytes {
-                return Err(cerr!(
-                    line,
-                    "`{name}` needs an `Array<UInt8>` buffer, found {b}"
-                ));
-            }
-            let o = self.base(&self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?);
-            if !matches!(o, Type::Err | Type::Int) {
-                return Err(cerr!(line, "`{name}`'s offset must be an `Int64`"));
-            }
-            return Ok(Type::Int);
-        }
-        // `listDirKinds(path)` (RFC-0119): `listDir`'s listing with each
-        // directory entry's name carrying a trailing `/`, because `listDir`'s
-        // error cannot tell "not a directory" from "unreadable" and a walker
-        // was listing every subdirectory twice to find out.
-        if name == "listDir" || name == "listDirKinds" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`{name}` needs a String path, found {t}"));
-            }
-            return Ok(Type::Result(
-                Box::new(Type::Array(Box::new(Type::Str))),
-                Box::new(Type::Str),
-            ));
-        }
+        // What the deletion FOUND: `floatBits` answered a `UInt64` in the arm
+        // and an `Int64` on its row, and `floatFromBits` took the mirror pair.
+        // Nothing read the wrong half, because both are scalars and every
+        // reading of the row asks about heap. The row says `UInt64` now.
+        //
+        // The remaining arms are the ones a row cannot carry: a gate on where
+        // the call stands (`assert`, `blackBox`, `moduleInterface`,
+        // `contractOf`, the code quotes), a type NAME as an argument
+        // (`schemaOf`, `jsonSchema`, `fromJson`), a result taken from the
+        // context (`unboxStream`, `pullAt`), a parameter that is a union
+        // (`print`, `@str`, `toJson`, `value`, `@push`'s two container kinds,
+        // `bytes`'s two arities), or a refusal about the ELEMENT type
+        // (`@append`, `@copyFrom`, `@clear`), which is a rule and not a
+        // signature. Four more names had no row at all, and the seed extension
+        // in the same milestone gave them one: `logger`, `lineAt`, `colAt` and
+        // `@charCount` are typed by their rows too, and `@charCount`'s row
+        // retired a hand-written exception in `prelude::capability`. The five
+        // log levels followed once the sugar carried an unlexable name: their
+        // rows are keyed `@trace`..`@error`, so the five surface words went
+        // back to programs and the second hand-written exception went too.
+
         // `moduleInterface(path) -> ModuleInterface` (RFC-0021): generation-time
         // reflection over a module's exported surface. It is generation-ONLY —
         // the interpreter refuses it outside a generation and neither compiling
@@ -7056,7 +7167,7 @@ impl<'a> Checker<'a> {
         // `vyrn build --target wasm` printed `direct backend: no lowering for
         // the call`, which is an emitter's own words in a user's diagnostic.
         // `listDir` is NOT gated with it — that one has a runtime under `vyrn
-        // run` (see [`COMPTIME_FORBIDDEN`]), and only the compiling backends
+        // run` (see the lattice's `gen` column), and only the compiling backends
         // lack a lowering for it.
         if name == "moduleInterface" {
             if !*self.in_gen.borrow() {
@@ -7193,187 +7304,6 @@ impl<'a> Checker<'a> {
                 _ => unreachable!(),
             }
         }
-        if name == "writeFile" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`writeFile` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if t != Type::Str {
-                    return Err(cerr!(line, "`writeFile` needs String arguments, found {t}"));
-                }
-            }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
-        }
-        // RFC-0111: the byte sink. `writeFile` for bytes that are not text —
-        // same create/truncate/write-all, same `Result<Bool, String>`, same
-        // canonical `@.io.writeerr` wording. It exists because a Vyrn `String`
-        // cannot hold a NUL or invalid UTF-8, so a program could compute a
-        // binary artifact and have no way to emit it.
-        if name == "writeFileBytes" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`writeFileBytes` takes 2 arguments (path, bytes), got {}",
-                    args.len()
-                ));
-            }
-            let p = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(p, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if p != Type::Str {
-                return Err(cerr!(
-                    line,
-                    "`writeFileBytes` needs a String path, found {p}"
-                ));
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let b = self.base(&self.expr(&args[1], scope, Some(&want), fn_ret)?);
-            if matches!(b, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if b != want {
-                return Err(cerr!(
-                    line,
-                    "`writeFileBytes` needs an Array<UInt8>, found {b}"
-                ));
-            }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
-        }
-        // RFC-0111: `print` for bytes. No result, for `print`'s reason — a
-        // write to a closed stdout is not a condition a Vyrn program can act
-        // on, and inventing one here would make the two output builtins
-        // disagree about whether output can fail.
-        if name == "writeStdout" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`writeStdout` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let b = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
-            if matches!(b, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if b != want {
-                return Err(cerr!(
-                    line,
-                    "`writeStdout` needs an Array<UInt8>, found {b}"
-                ));
-            }
-            return Ok(Type::Unit);
-        }
-        // RFC-0044: atomically move `from` over `to` (the host primitive behind
-        // `writeAtomic`). Same error shape as `writeFile` — `Result<Bool, String>`
-        // with canonical `@.io.*` wording.
-        if name == "renameFile" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`renameFile` takes 2 arguments (from, to), got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                let t = self.base(&self.expr(a, scope, Some(&Type::Str), fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if t != Type::Str {
-                    return Err(cerr!(
-                        line,
-                        "`renameFile` needs String arguments, found {t}"
-                    ));
-                }
-            }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
-        }
-        // RFC-0044: flush a file's contents to stable storage (the optional
-        // power-durability upgrade over `writeAtomic`'s crash-consistency).
-        if name == "fsyncFile" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`fsyncFile` takes 1 argument (a path), got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`fsyncFile` needs a String path, found {t}"));
-            }
-            return Ok(Type::Result(Box::new(Type::Bool), Box::new(Type::Str)));
-        }
-        // RFC-0014 M2 (bytes): binary read + the byte<->String bridge.
-        if name == "readFileBytes" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`readFileBytes` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(
-                    line,
-                    "`readFileBytes` needs a String path, found {t}"
-                ));
-            }
-            return Ok(Type::Result(
-                Box::new(Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                }))),
-                Box::new(Type::Str),
-            ));
-        }
-        if name == "stringFromBytes" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`stringFromBytes` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != want {
-                return Err(cerr!(
-                    line,
-                    "`stringFromBytes` needs an Array<UInt8>, found {t}"
-                ));
-            }
-            return Ok(Type::Result(Box::new(Type::Str), Box::new(Type::Str)));
-        }
 
         // (`len(String)` was removed — see the migration hint above; its byte
         // length now lives on the `String.length` field, resolved at `Expr::Field`.)
@@ -7384,48 +7314,6 @@ impl<'a> Checker<'a> {
         // states. `slice` carried one line more — it read its return type out of
         // the link, because the type it answers is a std declaration — and that
         // reading is what an ordinary imported call does for free.)
-
-        // The two IEEE-754 bit views (RFC-0078 M4a). `floatBits` is a `Float64`
-        // read as its 64 raw bits and `floatFromBits` is the inverse — not a
-        // numeric conversion, which rounds, but a reinterpretation, which is
-        // one instruction on every engine (`f64::to_bits`,
-        // `bitcast double to i64`, `i64.reinterpret_f64`).
-        //
-        // They are here because they are irreducible. Given them, decimal ->
-        // binary and binary -> decimal are ordinary Vyrn (`std/num`); without
-        // them there is no expression in the language that can BUILD a
-        // `Float64` from anything but another number, which is what blocked
-        // RFC-0078 M3.
-        if name == "floatBits" || name == "floatFromBits" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
-            }
-            let (want, got) = if name == "floatBits" {
-                (
-                    Type::Float,
-                    Type::IntN {
-                        bits: 64,
-                        signed: false,
-                    },
-                )
-            } else {
-                (
-                    Type::IntN {
-                        bits: 64,
-                        signed: false,
-                    },
-                    Type::Float,
-                )
-            };
-            let t = self.base(&self.expr(&args[0], scope, Some(&want), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != want {
-                return Err(cerr!(line, "`{name}` needs a {want}, found {t}"));
-            }
-            return Ok(got);
-        }
 
         // (RFC-0094 M2 deleted the two codec arms here — three encoders and three
         // decoders, all routed to `std/codecs` since RFC-0078 M4b — and the
@@ -7470,290 +7358,6 @@ impl<'a> Checker<'a> {
                 bits: 8,
                 signed: false,
             })));
-        }
-
-        // Internal string concat (`a + b` on Strings, and interpolation): the
-        // `@concat` spelling is produced by the desugarer / the `+` lowering,
-        // never by user source. Heap-allocated result.
-        if name == "@concat" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`@concat` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for a in args {
-                let t = self.base(&self.expr(a, scope, None, fn_ret)?);
-                if matches!(t, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if t != Type::Str {
-                    return Err(cerr!(line, "`@concat` needs Strings, found {t}"));
-                }
-            }
-            return Ok(Type::Str);
-        }
-
-        // `@join` — the internal spelling of `t.join()`: await a spawned task.
-        if name == "@join" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`join` takes no arguments"));
-            }
-            match self.base(&self.expr(&args[0], scope, None, fn_ret)?) {
-                Type::Task(inner) => return Ok((*inner).clone()),
-                Type::Err => return Ok(Type::Err),
-                other => return Err(cerr!(line, "`.join()` needs a Task, found {other}")),
-            }
-        }
-
-        // `@str` — the internal spelling of `x.toString()` and of interpolation
-        // holes: render a scalar to a fresh String. `parse` (below) is the
-        // fallible inverse.
-        if name == "@str" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`toString` takes no arguments"));
-            }
-            // `str` renders a scalar to a fresh String — Int, sized IntN, Float,
-            // Bool, or String (String is copied). Interpolation lowers to this.
-            let written = self.expr(&args[0], scope, None, fn_ret)?;
-            let t = self.base(&written);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if !crate::types::renders(&t) {
-                // RFC-0094 M3. `"\{x}"` desugars to this call, so one dispatch
-                // serves interpolation and `x.toString()` both.
-                if self.renders_by_declaration(&written, args, line, scope, fn_ret)? {
-                    return Ok(Type::Str);
-                }
-                return Err(cerr!(
-                    line,
-                    "`toString` renders a number, Bool, or String, found {t}{}",
-                    self.show_hint(&written)
-                ));
-            }
-            return Ok(Type::Str);
-        }
-        // `@charCount` — the internal spelling of `s.charCount()` (RFC-0058):
-        // the number of Unicode scalar values in a String. O(n): counts the
-        // non-continuation bytes (`b & 0xC0 != 0x80`) of validated UTF-8.
-        if name == "@charCount" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`charCount` takes no arguments"));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(
-                    line,
-                    "`charCount` counts the Unicode scalars of a String, found {t}"
-                ));
-            }
-            return Ok(Type::Int);
-        }
-        if name == "parse" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`parse` takes 1 argument, got {}", args.len()));
-            }
-            let t = self.base(&self.expr(&args[0], scope, Some(&Type::Str), fn_ret)?);
-            if matches!(t, Type::Err) {
-                return Ok(Type::Err);
-            }
-            if t != Type::Str {
-                return Err(cerr!(line, "`parse` needs a String, found {t}"));
-            }
-            return Ok(Type::Option(Box::new(Type::Int)));
-        }
-
-        // `xs.reserve(n)` / `xs.append(ys)` (RFC-0115). Growable `Array` only:
-        // a `SmallArray`'s capacity is part of its type and a fixed array has
-        // none to grow. `append` is a byte copy of the source's elements in
-        // the compiled backends, so an element type that owns heap is refused
-        // — copying such an element by bytes would give two arrays one buffer.
-        if name == "@reserve" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`reserve` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&at) {
-                Type::Array(_) => {}
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`reserve` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            }
-            let n = self.expr(&args[1], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`reserve` count is {n}, not an Int64"));
-            }
-            return Ok(at);
-        }
-        // `m.tally(k, n)` (RFC-0116): one probe where a read-then-store made
-        // two. `Int64` values only — the add is the operation, and the
-        // signature can spell it for no other value type.
-        if name == "@tally" {
-            if args.len() != 3 {
-                return Err(cerr!(line, "`tally` takes 3 arguments, got {}", args.len()));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let key_ty = match self.base(&at) {
-                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => (*k).clone(),
-                Type::Err => return Ok(Type::Err),
-                Type::Map(_, v) => {
-                    return Err(cerr!(
-                        line,
-                        "`tally` counts Int64 values, and this map holds {v}"
-                    ))
-                }
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`tally` needs a Map<K, Int64> as its receiver, found {other}"
-                    ))
-                }
-            };
-            let k = self.expr(&args[1], scope, Some(&key_ty), fn_ret)?;
-            if !self.coercible(&self.base(&k), &self.base(&key_ty)) {
-                return Err(cerr!(
-                    line,
-                    "the map is keyed by {key_ty}, but the `tally` key is {k}"
-                ));
-            }
-            self.prove_coercion(&args[1], &key_ty, line)?;
-            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`tally` count is {n}, not an Int64"));
-            }
-            return Ok(at);
-        }
-        // `m.tallyBytes(w, n)` (RFC-0116): `tally` keyed by raw bytes.
-        if name == "@tallyBytes" {
-            if args.len() != 3 {
-                return Err(cerr!(
-                    line,
-                    "`tallyBytes` takes 3 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            match self.base(&at) {
-                Type::Map(k, v) if matches!(self.base(&v), Type::Int) => {
-                    // Bytes become a String, so only a String-keyed map can
-                    // take them — an Int64-keyed map has `tally` (RFC-0117).
-                    if crate::types::resolve(&k, self.types) != Type::Str {
-                        return Err(cerr!(
-                            line,
-                            "`tallyBytes` builds a String key, and this map is keyed by {k} — use `tally` with the key itself"
-                        ));
-                    }
-                }
-                Type::Err => return Ok(Type::Err),
-                Type::Map(_, v) => {
-                    return Err(cerr!(
-                        line,
-                        "`tallyBytes` counts Int64 values, and this map holds {v}"
-                    ))
-                }
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`tallyBytes` needs a Map<String, Int64> as its receiver, found {other}"
-                    ))
-                }
-            }
-            let want = Type::Array(Box::new(Type::IntN {
-                bits: 8,
-                signed: false,
-            }));
-            let w = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&w, &want) {
-                return Err(cerr!(line, "`tallyBytes` key is {w}, not an Array<UInt8>"));
-            }
-            let n = self.expr(&args[2], scope, Some(&Type::Int), fn_ret)?;
-            if !self.coercible(&n, &Type::Int) {
-                return Err(cerr!(line, "`tallyBytes` count is {n}, not an Int64"));
-            }
-            return Ok(at);
-        }
-        if name == "@copyFrom" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`copyFrom` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            let want = Type::Array(Box::new(elem.clone()));
-            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&xs, &want) {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` source is {xs} but the receiver holds {elem} elements"
-                ));
-            }
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`copyFrom` overwrites the receiver's elements by bytes, and `{elem}` owns heap — the overwritten elements would never be released"
-                ));
-            }
-            return Ok(at);
-        }
-        if name == "@append" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`append` takes 2 arguments, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let elem = match self.base(&at) {
-                Type::Array(inner) => (*inner).clone(),
-                Type::Err => return Ok(Type::Err),
-                other => {
-                    return Err(cerr!(
-                        line,
-                        "`append` needs a growable Array as its receiver, found {other}"
-                    ))
-                }
-            };
-            let want = Type::Array(Box::new(elem.clone()));
-            let xs = self.expr(&args[1], scope, Some(&want), fn_ret)?;
-            if !self.coercible(&xs, &want) {
-                return Err(cerr!(
-                    line,
-                    "`append` source is {xs} but the receiver holds {elem} elements"
-                ));
-            }
-            if crate::own::owns_heap(&elem, &self.types) {
-                return Err(cerr!(
-                    line,
-                    "`append` copies its source's elements by bytes, and `{elem}` owns heap — push each element with `.copy()` in a loop instead"
-                ));
-            }
-            return Ok(at);
         }
 
         // Growable arrays. `[]` builds one, `xs.push(v)` (`@push`) appends and
@@ -7855,7 +7459,7 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(&args[1], &key, line)?;
-                return Ok(Type::Option(val));
+                return Ok(Type::option(*val));
             }
             let elem = match self.base(&at) {
                 Type::Array(inner) | Type::ArrayN(inner, _) | Type::SmallArray(inner, _) => {
@@ -7886,85 +7490,6 @@ impl<'a> Checker<'a> {
             }
             return Ok(elem);
         }
-        // RFC-0075. `fromArray(xs)` hands an array's buffer to a `Stream<T>`;
-        // `fromStep(seed, f)` (M2b) hands over a producer instead; `close(s)` is
-        // the explicit release for either. All three are builtins because none
-        // can be written in Vyrn — there is no other way to make or unmake a
-        // `Stream`.
-        if name == "fromArray" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`fromArray` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Err);
-            }
-            let Type::Array(inner) = at else {
-                return Err(cerr!(line, "`fromArray` needs an `Array<T>`, found {at}"));
-            };
-            return Ok(Type::Stream(inner));
-        }
-        // RFC-0075 M2b, re-hosted by RFC-0090 M3. `fromStep(slot, gen, step)` is
-        // the pull producer: the stream carries the two words of a cursor its
-        // CALLER minted, and every `next` hands them back to `step`, which reads
-        // the cursor, writes the next one, and answers `Some(v)` or `None`.
-        //
-        // The cursor used to be a `Ref<Int64>` — a Path B cell, allocated here.
-        // It is two plain `Int64`s now, and the slab they index lives in
-        // `std/stream` over `std/slots`. What did not change is the property the
-        // `Ref` was pinned at `Int64` for: the dispatcher a stream calls is keyed
-        // by the step's SIGNATURE, so that signature must be a function of the
-        // element type alone.
-        //
-        // The third parameter is how a release reaches the slab. A close is
-        // type-erased in the runtime and the slab is not, so `close` asks the
-        // step to release itself: `closing` is true exactly once per stream, and
-        // the step answers `None` after giving its slot back. That is also what
-        // makes a wrapper's walk ordinary Vyrn — it closes its own source, and
-        // `movecheck` checks that release like any other.
-        if name == "fromStep" {
-            if args.len() != 3 {
-                return Err(cerr!(
-                    line,
-                    "`fromStep` takes 3 arguments, got {}",
-                    args.len()
-                ));
-            }
-            for (i, what) in ["slot", "generation"].iter().enumerate() {
-                let st = self.expr(&args[i], scope, Some(&Type::Int), fn_ret)?;
-                let st = self.base(&st);
-                if matches!(st, Type::Err) {
-                    return Ok(Type::Err);
-                }
-                if st != Type::Int {
-                    return Err(cerr!(
-                        line,
-                        "`fromStep` needs an `Int64` cursor {what}, found {st}"
-                    ));
-                }
-            }
-            let ft = self.expr(&args[2], scope, None, fn_ret)?;
-            let want = "fn(Int64, Int64, Bool) -> Option<T>";
-            let Type::Fn(ps, ret) = crate::types::resolve(&ft, self.types) else {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            };
-            if ps.len() != 3
-                || self.base(&ps[0]) != Type::Int
-                || self.base(&ps[1]) != Type::Int
-                || self.base(&ps[2]) != Type::Bool
-            {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            }
-            let Type::Option(inner) = self.base(&ret) else {
-                return Err(cerr!(line, "`fromStep` needs a `{want}` step, found {ft}"));
-            };
-            return Ok(Type::Stream(inner));
-        }
         // RFC-0075 M2c, re-hosted by RFC-0090 M3. `boxStream(s)` moves a
         // stream into one heap box and hands back its address, `unboxStream(a)` takes
         // it back out, and `pullAt(a)` asks the stream at `a` for one element.
@@ -7979,24 +7504,6 @@ impl<'a> Checker<'a> {
         // `unboxStream` are the two halves of ONE move — `movecheck` sees the first as
         // a disposal and the second as an acquisition, so a chain that fails to
         // close its source does not compile.
-        if name == "boxStream" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`boxStream` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let st = self.expr(&args[0], scope, None, fn_ret)?;
-            let st = self.base(&st);
-            if matches!(st, Type::Err) {
-                return Ok(Type::Int);
-            }
-            if !matches!(st, Type::Stream(_)) {
-                return Err(cerr!(line, "`boxStream` needs a `Stream<T>`, found {st}"));
-            }
-            return Ok(Type::Int);
-        }
         if name == "unboxStream" || name == "pullAt" {
             if args.len() != 1 {
                 return Err(cerr!(line, "`{name}` takes 1 argument, got {}", args.len()));
@@ -8022,65 +7529,12 @@ impl<'a> Checker<'a> {
             };
             let ok = match name {
                 "unboxStream" => matches!(self.base(exp), Type::Stream(_)),
-                _ => matches!(self.base(exp), Type::Option(_)),
+                _ => crate::types::option_payload(&self.base(exp)).is_some(),
             };
             if !ok {
                 return Err(cerr!(line, "`{name}` answers a `{want}`, not {exp}"));
             }
             return Ok(exp.clone());
-        }
-        if name == "close" {
-            if args.len() != 1 {
-                return Err(cerr!(line, "`close` takes 1 argument, got {}", args.len()));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            if !matches!(at, Type::Stream(_)) {
-                return Err(cerr!(line, "`close` needs a `Stream<T>`, found {at}"));
-            }
-            return Ok(Type::Unit);
-        }
-        // RFC-0074 M3a. `serveStream(s)` hands a producer to the HOST: the
-        // request that opened it returns an ordinary `Response` carrying only the
-        // header block, and the host then pulls one element at a time, writes it,
-        // and `close`s the stream the first time a write fails. That is the whole
-        // disconnect mechanism — the socket rather than a host event — and it is
-        // why this is a builtin rather than a library function: a stream must
-        // escape the call that made it, which is the one thing M1's linearity
-        // otherwise forbids, and `close` on the far side is what discharges it.
-        //
-        // `Stream<String>` and not `Stream<Event>`: the element is one already
-        // encoded frame, so every byte of SSE's syntax stays in `std/http` where
-        // the vocabulary belongs, and the host learns nothing about the protocol
-        // beyond "write this, flush, ask again". `ws` (M3b) is the same handoff
-        // with a different encoder.
-        if name == "serveStream" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`serveStream` takes 1 argument, got {}",
-                    args.len()
-                ));
-            }
-            let at = self.expr(&args[0], scope, None, fn_ret)?;
-            let at = self.base(&at);
-            if matches!(at, Type::Err) {
-                return Ok(Type::Unit);
-            }
-            let ok = match &at {
-                Type::Stream(inner) => self.base(inner) == Type::Str,
-                _ => false,
-            };
-            if !ok {
-                return Err(cerr!(
-                    line,
-                    "`serveStream` needs a `Stream<String>` of encoded frames, found {at}"
-                ));
-            }
-            return Ok(Type::Unit);
         }
         // `a.pop()` (RFC-0011) — remove and return the last element as
         // `Option<T>`. Method-only (`@pop`); the receiver must be a `mut`
@@ -8093,7 +7547,7 @@ impl<'a> Checker<'a> {
             let elem = self.mut_array_receiver(&args[0], scope, line, name, "pop")?;
             return Ok(match elem {
                 Type::Err => Type::Err,
-                t => Type::Option(Box::new(t)),
+                t => Type::option(t),
             });
         }
         // `a.swapRemove(i)` (RFC-0011) — O(1) unordered remove: move the last
@@ -8175,7 +7629,7 @@ impl<'a> Checker<'a> {
                     .contains(&(crate::types::COPY.to_string(), key.clone()))
                 {
                     let mangled = crate::types::impl_method_name(crate::types::COPY, &key, "copy");
-                    return self.call(&mangled, args, line, scope, expected, fn_ret);
+                    return self.call(&mangled, args, &[], line, scope, expected, fn_ret);
                 }
             }
             let mut owned_seen = std::collections::HashSet::new();
@@ -8201,7 +7655,7 @@ impl<'a> Checker<'a> {
             // the value needs recursion in the code, so the answer is a function
             // (`std/json`'s `copyJson` is the worked example), and since
             // RFC-0091 M1 `impl Copy for T` is where that function goes.
-            if let Some(name) = crate::own::self_referring(&t, &self.types) {
+            if let Some(name) = crate::declared::self_referring(&t, &self.types) {
                 return Err(cerr!(
                     line,
                     "`copy` cannot copy `{name}`: it refers to itself, so a \
@@ -8300,29 +7754,30 @@ impl<'a> Checker<'a> {
         {
             return self.vector_call(name, args, line, scope, fn_ret);
         }
-        // built-in: schemaOf(TypeName) -> Schema — compile-time reflection of a
-        // validated type's `where` predicate (RFC-0003). The argument is a *type
-        // name*, not a value; the bounds are extracted from the type declaration.
-        if name == "schemaOf" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`schemaOf` takes 1 argument (a type name), got {}",
-                    args.len()
-                ));
-            }
-            match &args[0] {
-                Expr::Var { name: tn, .. } if self.types.contains_key(tn) => {
-                    return Ok(Type::Named("Schema".to_string()))
+        // The three reflection builtins are REWRITTEN at their call site, not
+        // called: `schemaOf<T>()` and `jsonSchema<T>()` fold to a compile-time
+        // literal, and `fromJson<T>(s)` expands to the decoder generated for
+        // `T`. So both emitters need the target AT THE NODE, and the node
+        // carries it only where the caller wrote it — an expected type would
+        // answer the checker and leave the emitters with nothing. One sentence
+        // for the three, where the 77-line arm that read `args[0]` as a type
+        // name stood (RFC-0125 §3 M6).
+        if written.is_empty() && matches!(name, "schemaOf" | "jsonSchema" | "fromJson") {
+            // The OLD spelling put the target in argument position. Name the
+            // new one rather than letting the row answer "expects 0
+            // argument(s), got 1", which says nothing about what to write.
+            let was = match args.first() {
+                Some(Expr::Var { name: tn, .. }) if self.types.contains_key(tn) => tn.clone(),
+                _ => "Type".to_string(),
+            };
+            return Err(cerr!(
+                line,
+                "`{name}` names its target as a type argument — write `{name}<{was}>({})`",
+                match name {
+                    "fromJson" => "s",
+                    _ => "",
                 }
-                Expr::Var { name: tn, .. } => {
-                    return Err(cerr!(
-                        line,
-                        "`schemaOf` needs a declared type name; `{tn}` is not a type"
-                    ))
-                }
-                _ => return Err(cerr!(line, "`schemaOf` needs a type name")),
-            }
+            ));
         }
         // built-in: contractOf(ContractName) -> ContractInfo — compile-time
         // reflection of a module contract (RFC-0071). Shaped exactly like
@@ -8355,28 +7810,6 @@ impl<'a> Checker<'a> {
                 _ => return Err(cerr!(line, "`contractOf` needs a contract name")),
             }
         }
-        // built-in: jsonSchema(TypeName) -> String — compile-time rendering of a
-        // declared type as a JSON Schema (draft 2020-12) document. Like `schemaOf`,
-        // the argument is a *type name*; the string is computed from the declaration.
-        if name == "jsonSchema" {
-            if args.len() != 1 {
-                return Err(cerr!(
-                    line,
-                    "`jsonSchema` takes 1 argument (a type name), got {}",
-                    args.len()
-                ));
-            }
-            match &args[0] {
-                Expr::Var { name: tn, .. } if self.types.contains_key(tn) => return Ok(Type::Str),
-                Expr::Var { name: tn, .. } => {
-                    return Err(cerr!(
-                        line,
-                        "`jsonSchema` needs a declared type name; `{tn}` is not a type"
-                    ))
-                }
-                _ => return Err(cerr!(line, "`jsonSchema` needs a type name")),
-            }
-        }
         // built-in: toJson(x) -> String (RFC-0018) — encode any *codable* value
         // to canonical JSON. Pure (not constant: kept out of consteval), never
         // traps. The argument's type must be encodable (scalars, validated
@@ -8403,47 +7836,6 @@ impl<'a> Checker<'a> {
             // in the linked program by the time an engine lowers this call.
             self.json_types.borrow_mut().push(at);
             return Ok(Type::Str);
-        }
-        // built-in: fromJson(TypeName, s) -> Validation<T> (RFC-0018) —
-        // type-directed decode (the `schemaOf`/`jsonSchema` precedent: the first
-        // argument is a *type name*). Never traps; every problem is an `Issue`
-        // accumulated into the returned `Validation<T>`.
-        if name == "fromJson" {
-            if args.len() != 2 {
-                return Err(cerr!(
-                    line,
-                    "`fromJson` takes 2 arguments (a type name and a String), got {}",
-                    args.len()
-                ));
-            }
-            let tn = match &args[0] {
-                Expr::Var { name: tn, .. } if self.types.contains_key(tn) => tn.clone(),
-                Expr::Var { name: tn, .. } => {
-                    return Err(cerr!(
-                        line,
-                        "`fromJson` needs a declared type name; `{tn}` is not a type"
-                    ))
-                }
-                _ => return Err(cerr!(line, "`fromJson` needs a type name")),
-            };
-            let target = Type::Named(tn.clone());
-            if let Err(off) = crate::codec::decodable(&target, self.types) {
-                return Err(cerr!(
-                    line,
-                    "`fromJson` cannot decode into `{off}` (not a codable type)"
-                ));
-            }
-            let sty = self.base(&self.expr(&args[1], scope, Some(&Type::Str), fn_ret)?);
-            if !matches!(sty, Type::Str | Type::Err) {
-                return Err(cerr!(
-                    line,
-                    "`fromJson`'s second argument must be a String, found {sty}"
-                ));
-            }
-            // RFC-0078 M3: record the target so its decoder exists in the linked
-            // program by the time an engine lowers this call.
-            self.json_dec_types.borrow_mut().push(target.clone());
-            return Ok(Type::App("Validation".to_string(), vec![target]));
         }
         // built-in: value(x) -> Value — box a scalar into the interpolation value
         // type (RFC-0007). What a tagged template's holes desugar to.
@@ -8497,22 +7889,15 @@ impl<'a> Checker<'a> {
             }
             // Resolved, as `Ok`/`Err` below do: `type MaybeAge = Option<Age>` is
             // a named Option, and the payload's refinement rides on `Age`.
-            let inner_expected = match expected.map(|t| self.base(t)) {
-                Some(Type::Option(t)) => Some((*t).clone()),
-                _ => None,
-            };
+            let inner_expected = expected
+                .map(|t| self.base(t))
+                .and_then(|b| crate::types::option_payload(&b).cloned());
             let aty = self.expr(&args[0], scope, inner_expected.as_ref(), fn_ret)?;
             // The expectation still names the payload's SHAPE when its element
             // type is an unsolved parameter, so it is handed to the payload
             // either way. It is not the answer there — the payload is (see
             // [`Checker::mentions_open_param`]).
             let inner_expected = inner_expected.filter(|want| !self.is_open_param(want));
-            if matches!(
-                crate::types::resolve(&aty, self.types),
-                Type::Option(_) | Type::Result(..)
-            ) {
-                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
-            }
             if let Some(want) = &inner_expected {
                 if !self.coercible(&aty, want) {
                     return Err(cerr!(
@@ -8521,9 +7906,9 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 self.prove_coercion(&args[0], want, line)?;
-                return Ok(Type::Option(Box::new(want.clone())));
+                return Ok(Type::option(want.clone()));
             }
-            return Ok(Type::Option(Box::new(aty)));
+            return Ok(Type::option(aty));
         }
 
         // built-in: Ok(x) / Err(e) — need the other type parameter from context.
@@ -8534,23 +7919,16 @@ impl<'a> Checker<'a> {
             // Resolve a named alias (`type DeleteResult = Result<..>`) so the
             // expected `Result<T, E>` is visible for payload inference (RFC-0024).
             let expected_res = expected.map(|e| crate::types::resolve(e, self.types));
-            let want = match &expected_res {
-                Some(Type::Result(t, e)) => Some(
-                    (name == "Ok")
-                        .then(|| (**t).clone())
-                        .unwrap_or_else(|| (**e).clone()),
-                ),
-                _ => None,
-            };
+            let res_pair = expected_res
+                .as_ref()
+                .and_then(crate::types::result_payloads)
+                .map(|(t, e)| (t.clone(), e.clone()));
+            let want = res_pair
+                .as_ref()
+                .map(|(t, e)| if name == "Ok" { t.clone() } else { e.clone() });
             let aty = self.expr(&args[0], scope, want.as_ref(), fn_ret)?;
-            if matches!(
-                crate::types::resolve(&aty, self.types),
-                Type::Option(_) | Type::Result(..)
-            ) {
-                return Err(cerr!(line, "nested Option/Result is not supported in v0.1"));
-            }
-            let (mut t, mut e) = match &expected_res {
-                Some(Type::Result(t, e)) => ((**t).clone(), (**e).clone()),
+            let (mut t, mut e) = match res_pair {
+                Some(pair) => pair,
                 _ => {
                     return Err(cerr!(
                         line,
@@ -8575,7 +7953,7 @@ impl<'a> Checker<'a> {
                     "`{name}` payload is {aty} but {want_ty} was expected"
                 ));
             }
-            return Ok(Type::Result(Box::new(t), Box::new(e)));
+            return Ok(Type::result(t, e));
         }
 
         // enum variant construction with payload(s): `Circle(r)`, `Rect(w, h)`.
@@ -8724,48 +8102,46 @@ impl<'a> Checker<'a> {
                              concrete type, where the impl (and so `{a}`) is known"
                         ));
                     }
-                    // Check arity, then EVERY remaining argument against the
-                    // signature (a bare `zip` would silently drop extras and
-                    // leave them entirely unchecked).
-                    if args.len() - 1 != sig.params.len() {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` expects {} argument(s) besides `self`, got {}",
-                            sig.params.len(),
-                            args.len() - 1
-                        ));
-                    }
-                    // The receiver's capability comes from the PROTOCOL here —
-                    // the impl is not selected, and conformance has already made
-                    // the two agree. A `modify self` method demands the same
-                    // mutable variable at this call site that a `modify`
-                    // parameter demands at any other.
-                    if sig.recv == Capability::Modify {
-                        self.check_modify_arg(name, 0, &args[0], &recv, &recv, scope, line)?;
-                    }
-                    for (i, (arg, pty)) in args[1..].iter().zip(&sig.params).enumerate() {
-                        let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-                        if !self.coercible(&aty, pty) {
-                            return Err(cerr!(line, "`{name}` argument is {aty}, expected {pty}"));
-                        }
-                        self.prove_coercion(arg, pty, line)?;
-                        if sig.param_caps.get(i) == Some(&Capability::Modify) {
-                            self.check_modify_arg(name, i + 1, arg, &aty, pty, scope, line)?;
-                        }
-                    }
-                    return Ok(sig.ret.clone());
+                    // The PROTOCOL's own signature is the declaration here —
+                    // the impl is not selected, and conformance has already
+                    // made the two agree — so the receiver's capability and
+                    // every parameter's come off the member. A `modify self`
+                    // method demands the same mutable variable at this call
+                    // site that a `modify` parameter demands at any other.
+                    let mut params = vec![recv.clone()];
+                    params.extend(sig.params.iter().cloned());
+                    let mut caps = vec![sig.recv];
+                    caps.extend(sig.param_caps.iter().copied());
+                    return self.check_declared_call(
+                        &DeclaredCall {
+                            key: name,
+                            shown: name,
+                            params: &params,
+                            ret: &sig.ret,
+                            type_params: None,
+                            caps: Some(&caps),
+                            bounds: None,
+                            recv: Some(&recv),
+                            written: &[],
+                        },
+                        args,
+                        scope,
+                        expected,
+                        fn_ret,
+                        line,
+                    );
                 }
             }
             match crate::types::type_key(&recv) {
                 Some(key) if self.impls.contains(&(proto.clone(), key.clone())) => {
                     let mangled = crate::types::impl_method_name(&proto, &key, name);
-                    // The receiver above was already checked ONCE; routing the
-                    // whole `args` slice back through `call` evaluated it a
-                    // second time and doubled everything its check records
-                    // (stored function sources, stored calls). Check the
-                    // remaining arguments against the impl method's signature
-                    // directly — exactly as the concrete path below checks its
-                    // arguments.
+                    // The impl method is a declaration like any other, and the
+                    // shared reading below is the pass reading it: arity, the
+                    // parameter types, the capability discipline (the
+                    // RECEIVER's rides at index 0 of the method's table), the
+                    // solve over the impl head's type variables, the bounds and
+                    // the result. What stays here is dispatch — which impl
+                    // answers — and the receiver it had to type to decide.
                     let (mparams, mret) = self.sigs.get(mangled.as_str()).ok_or_else(|| {
                         cerr!(
                             line,
@@ -8773,91 +8149,24 @@ impl<'a> Checker<'a> {
                              (needed for `.{name}(..)`)"
                         )
                     })?;
-                    if mparams.len() != args.len() {
-                        return Err(cerr!(
-                            line,
-                            "`{name}` expects {} argument(s), got {}",
-                            mparams.len() - 1,
-                            args.len() - 1
-                        ));
-                    }
-                    let caps = self.caps.get(mangled.as_str());
-                    // The RECEIVER's capability rides at index 0 of the impl
-                    // method's table — the same entry the removed re-`call`
-                    // used to enforce when it re-checked all of `args`. A
-                    // `modify self` method still demands a `mut` binding here,
-                    // exactly as a `modify` parameter does at any other call.
-                    match caps.and_then(|c| c.first()) {
-                        Some(&Capability::Modify) => {
-                            self.check_modify_arg(name, 0, &args[0], &recv, &recv, scope, line)?
-                        }
-                        Some(&Capability::Consume) => {
-                            self.region_consume_guard(name, 0, &recv, line)?
-                        }
-                        _ => {}
-                    }
-                    // The flattened impl method keeps its head's type
-                    // variables (`fn Unwrap__Option__valueOr(f: T)`), so every
-                    // declared slot is read through the substitution the
-                    // receiver (and earlier arguments) solve — the same
-                    // instantiate-then-check the generic-call path does.
-                    let mut solved: HashMap<String, Type> = HashMap::new();
-                    if let Some(rty) = mparams.first() {
-                        crate::types::solve_param(rty, &recv, &mut solved);
-                    }
-                    let expected_of = |pty: &Type, solved: &HashMap<String, Type>| -> Type {
-                        crate::types::substitute(pty, solved)
-                    };
-                    let _checked: Vec<Type> = Vec::with_capacity(args.len() - 1);
-                    for (i, (arg, pty)) in args[1..].iter().zip(&mparams[1..]).enumerate() {
-                        let expected = expected_of(pty, &solved);
-                        // A `fn`-typed parameter goes through the shared helper
-                        // (RFC-0023), as everywhere else.
-                        if let Type::Fn(..) = &expected {
-                            let mut ignored: HashMap<String, Type> = HashMap::new();
-                            self.check_fn_arg(
-                                name,
-                                i + 1,
-                                arg,
-                                &expected,
-                                scope,
-                                fn_ret,
-                                &mut ignored,
-                                line,
-                            )?;
-                            continue;
-                        }
-                        let aty = self.expr(arg, scope, Some(&expected), fn_ret)?;
-                        if !self.coercible(&aty, &expected) {
-                            return Err(cerr!(
-                                line,
-                                "`{name}` argument is {aty}, expected {expected}"
-                            ));
-                        }
-                        self.prove_coercion(arg, &expected, line)?;
-                        self.prove_string_interpolation(arg, &expected, scope, fn_ret, line)?;
-                        crate::types::solve_param(pty, &aty, &mut solved);
-                        match caps.and_then(|c| c.get(i + 1)) {
-                            Some(&Capability::Modify) => {
-                                self.check_modify_arg(name, i + 1, arg, &aty, pty, scope, line)?
-                            }
-                            Some(&Capability::Consume) => {
-                                self.region_consume_guard(name, i + 1, &aty, line)?
-                            }
-                            _ => {}
-                        }
-                    }
-                    // RFC-0101's recording: the lowering's worklist learns this
-                    // specialization from the call node's substitution — the
-                    // entry the removed re-`call` used to write as a side
-                    // effect of checking the receiver twice. Solve the impl
-                    // method's own parameters the way the generic-call path
-                    // would have: receiver first, then every argument's
-                    // checked type against its declared slot.
-                    if let Some(type_params) = self.generics.get(mangled.as_str()) {
-                        note_subst(mangled.as_str(), &solved, type_params);
-                    }
-                    return Ok(crate::types::substitute(&mret, &solved));
+                    return self.check_declared_call(
+                        &DeclaredCall {
+                            key: mangled.as_str(),
+                            shown: name,
+                            params: mparams,
+                            ret: mret,
+                            type_params: self.generics.get(mangled.as_str()),
+                            caps: self.caps.get(mangled.as_str()),
+                            bounds: self.all_bounds.get(mangled.as_str()),
+                            recv: Some(&recv),
+                            written: &[],
+                        },
+                        args,
+                        scope,
+                        expected,
+                        fn_ret,
+                        line,
+                    );
                 }
                 _ => {
                     return Err(cerr!(
@@ -8927,29 +8236,160 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
-        let (params, ret) = self
-            .sigs
-            .get(name)
-            .ok_or_else(|| match moved_to_std(name) {
-                Some(module) => cerr!(
-                    line,
-                    "`{name}` is `{module}`'s — add \
-                 `import {{ {name} }} from \"{module}\"`"
-                ),
-                None => cerr!(line, "call to unknown function `{name}`"),
-            })?;
+        if let Some(t) = gen_host_primitive(name, args.len()) {
+            for a in args {
+                self.expr(a, scope, None, fn_ret)?;
+            }
+            return Ok(t);
+        }
+        // A seeded builtin's row is a declaration (RFC-0094: *a builtin's
+        // contract is its signature; the compiler seeds the signature; the
+        // passes read it; there is no second list*), and this is the pass
+        // reading it. A row that spells a type it does not mean answers `None`
+        // — [`crate::prelude::checkable`] says which — and the guarded arms
+        // above still hold those names, so nothing reaches here that the row
+        // cannot type.
+        //
+        // A user declaration WINS: `self.sigs` is asked first, exactly as the
+        // binding lookup at the head of this function shadows a builtin.
+        let seeded = match self.sigs.contains_key(name) {
+            true => None,
+            false => crate::prelude::checkable(name),
+        };
+        let seeded_sig = seeded.map(|f| {
+            (
+                f.params.iter().map(|p| p.ty.clone()).collect::<Vec<Type>>(),
+                f.ret.clone(),
+            )
+        });
+        let (params, ret) = match (self.sigs.get(name), &seeded_sig) {
+            (Some(sig), _) => sig,
+            (None, Some(sig)) => sig,
+            (None, None) => {
+                return Err(match moved_to_std(name) {
+                    Some(g) => cerr!(line, "{}", g.hint(name)),
+                    None => cerr!(line, "call to unknown function `{name}`"),
+                })
+            }
+        };
+        // The row's other two columns, read the same way: its type parameters
+        // are solved from the arguments like any generic call's, and its
+        // capabilities discipline the call like any declaration's.
+        let seeded_generics = seeded
+            .map(|f| f.type_params.clone())
+            .filter(|tps| !tps.is_empty());
+        let seeded_caps = seeded.map(|f| {
+            f.params
+                .iter()
+                .map(|p| p.capability)
+                .collect::<Vec<Capability>>()
+        });
+        // And its bounds, which is where a row states a rule about the type
+        // ARGUMENT rather than about a parameter (RFC-0125 §3 M6:
+        // [`crate::prelude::HEAPLESS`]).
+        let seeded_bounds = seeded.map(|f| &f.type_bounds).filter(|bs| !bs.is_empty());
+        // The name a reader can WRITE. An `@` spelling is the sugar's internal
+        // one and no source can lex it, so a refusal that printed it would name
+        // something the reader cannot type — PR #120's lesson, which
+        // [`Self::show_hint`] states for a loader-prefixed type.
+        // [`crate::parser::METHOD_BUILTINS`] is where the surface spelling of
+        // an internal name is written down, and reading it here is what makes
+        // `@str` print as `toString` rather than as `str`. Stripping the `@`
+        // covers the internal names that are not method sugar (`@list`,
+        // `@panicAt`), and both are a no-op for a user declaration, which is
+        // every other call on this path.
+        let shown = crate::parser::method_surface(name).trim_start_matches('@');
+        self.check_declared_call(
+            &DeclaredCall {
+                key: name,
+                shown,
+                params,
+                ret,
+                type_params: self.generics.get(name).or(seeded_generics.as_ref()),
+                caps: self.caps.get(name).or(seeded_caps.as_ref()),
+                bounds: self.all_bounds.get(name).or(seeded_bounds),
+                recv: None,
+                written,
+            },
+            args,
+            scope,
+            expected,
+            fn_ret,
+            line,
+        )
+    }
+
+    /// Type a call against a DECLARATION: its arity, its parameter types, the
+    /// generic solve over its type parameters, its capability discipline, the
+    /// coercion proof, and its result.
+    ///
+    /// This is the one path that reads a declaration at a call site, and three
+    /// kinds of declaration reach it. A user function and a seeded builtin row
+    /// arrive through the fall-through above (RFC-0094: *a builtin's contract
+    /// is its signature*). An impl method and a protocol member arrive through
+    /// the dispatcher, which owns the question a declaration cannot answer —
+    /// WHICH impl answers — and owned all of these as well until RFC-0125 §3
+    /// M6 read the two statements together.
+    #[allow(clippy::too_many_arguments)]
+    fn check_declared_call(
+        &self,
+        d: &DeclaredCall,
+        args: &[Expr],
+        scope: &Scope,
+        expected: Option<&Type>,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<Type, Diagnostic> {
+        let DeclaredCall {
+            shown,
+            params,
+            ret,
+            recv,
+            caps,
+            ..
+        } = *d;
         if params.len() != args.len() {
             return Err(cerr!(
                 line,
-                "`{name}` expects {} argument(s), got {}",
+                "`{shown}` expects {} argument(s), got {}",
                 params.len(),
                 args.len()
             ));
         }
 
+        // A type argument the CALLER wrote is refused where the callee declares
+        // none — `f<Int64>(x)` on a concrete `f` is a mistake about `f`, and
+        // saying nothing would make the annotation look honoured.
+        if !d.written.is_empty() && d.type_params.is_none_or(|tps| tps.is_empty()) {
+            return Err(cerr!(
+                line,
+                "`{shown}` declares no type parameters, so it takes no type arguments"
+            ));
+        }
         // Generic call: infer the type parameters from the argument types.
-        if let Some(type_params) = self.generics.get(name) {
+        if let Some(type_params) = d.type_params {
             let mut subst: HashMap<String, Type> = HashMap::new();
+            // The written type arguments seed the solve, in declaration order
+            // (RFC-0125 §3 M6). Everything below then infers what is left, so a
+            // partial list is legal and a call that writes none reads exactly as
+            // it did. A parameter the arguments cannot reach — `fromJson<T>`'s,
+            // whose `T` is in the RESULT — has no other source, and this is it.
+            if d.written.len() > type_params.len() {
+                return Err(cerr!(
+                    line,
+                    "`{shown}` takes {} type argument(s), got {}",
+                    type_params.len(),
+                    d.written.len()
+                ));
+            }
+            for (tp, ty) in type_params.iter().zip(d.written) {
+                // A written type argument is a type the program named, so it
+                // gets the answer every other type spelling gets. Without it
+                // `schemaOf<Nope>()` passed `vyrn check` and failed in the
+                // emitter, which is the check/build fork RFC-0096 M3 removed.
+                self.ensure_type_exists(ty, line)?;
+                subst.insert(tp.clone(), ty.clone());
+            }
             let mut atys: Vec<Type> = vec![Type::Err; args.len()];
             // Pass 1: the ordinary (non-`fn`) arguments bind the type parameters
             // that flow IN (e.g. `T` from `xs: Array<T>`). This must run before the
@@ -8961,13 +8401,34 @@ impl<'a> Checker<'a> {
                 if matches!(pty, Type::Fn(..)) {
                     continue;
                 }
+                // A dispatched receiver is already typed, and it is SOLVED
+                // rather than unified: the impl was selected by this very type,
+                // so there is nothing here left to refuse. Typing it a second
+                // time doubled every record the check writes (stored function
+                // sources, stored calls).
+                if let (0, Some(r)) = (i, recv) {
+                    crate::types::solve_param(pty, r, &mut subst);
+                    atys[0] = r.clone();
+                    continue;
+                }
                 // The parameter type is the expectation, exactly as the
                 // concrete path below passes it: a bare `None`/`Ok`/`Err`/`[]`
                 // argument types FROM the parameter (`unwrapOr(Ok(1), 5)`
                 // against `r: Result<T, String>`), and the unify then binds
                 // whatever parameter the literal left open.
                 let want = crate::types::substitute(pty, &subst);
-                let aty = self.expr(arg, scope, Some(&want), fn_ret)?;
+                // A bare type parameter the solve has not reached yet is not an
+                // expectation, and offering it as one is wrong: a `match`
+                // unifies its arms against what it is expected to be, so
+                // `print(match o { Some(v) => v, None => 0 })` came back as
+                // "arms have differing types: T vs Int64". Every other shape
+                // still names its constructor (`Array<T>` says "an array") and
+                // is passed through.
+                let want_hint = match want {
+                    Type::Param(_) => None,
+                    ref w => Some(w),
+                };
+                let aty = self.expr(arg, scope, want_hint, fn_ret)?;
                 self.unify(pty, &aty, &mut subst, line)?;
                 // The concrete path proves each constant argument against its
                 // (predicated) parameter type at the boundary; the generic path
@@ -8986,21 +8447,38 @@ impl<'a> Checker<'a> {
             for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
                 if let Type::Fn(..) = pty {
                     let expected_fn = crate::types::substitute(pty, &subst);
-                    self.check_fn_arg(name, i, arg, &expected_fn, scope, fn_ret, &mut subst, line)?;
+                    self.check_fn_arg(
+                        shown,
+                        i,
+                        arg,
+                        &expected_fn,
+                        scope,
+                        fn_ret,
+                        &mut subst,
+                        line,
+                    )?;
                 }
             }
             // Capability discipline applies to generic calls exactly as to
             // concrete ones (this path used to return early and skip it,
             // letting `f<T>(c: modify C, ..)` mutate immutable bindings).
-            let caps = self.caps.get(name);
             for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
                 match caps.and_then(|c| c.get(i)) {
                     Some(&Capability::Modify) => {
                         let concrete_pty = crate::types::substitute(pty, &subst);
-                        self.check_modify_arg(name, i, arg, &atys[i], &concrete_pty, scope, line)?;
+                        self.check_modify_arg(
+                            shown,
+                            i,
+                            arg,
+                            args,
+                            &atys[i],
+                            &concrete_pty,
+                            scope,
+                            line,
+                        )?;
                     }
                     Some(&Capability::Consume) => {
-                        self.region_consume_guard(name, i, &atys[i], line)?
+                        self.region_consume_guard(shown, i, &atys[i], line)?
                     }
                     _ => {}
                 }
@@ -9024,76 +8502,140 @@ impl<'a> Checker<'a> {
             }
             for tp in type_params {
                 if !subst.contains_key(tp) {
+                    // An argument that failed to type is `Type::Err`, and the
+                    // parameter it should have bound stays open. Every block a
+                    // seeded row replaced answered `Ok(Type::Err)` there rather
+                    // than a second sentence about the same mistake, and so
+                    // does this: `close(s.copy())` on a `Stream` said "cannot
+                    // infer type parameter `T` of `close`" under a `copy` that
+                    // had already been refused (RFC-0125 §3 M6).
+                    if atys.iter().any(|t| matches!(t, Type::Err)) {
+                        return Ok(Type::Err);
+                    }
                     return Err(cerr!(
                         line,
-                        "cannot infer type parameter `{tp}` of `{name}`"
+                        "cannot infer type parameter `{tp}` of `{shown}`"
                     ));
                 }
             }
             // Check each inferred type argument against the parameter's bounds.
-            if let Some(bounds) = self.all_bounds.get(name) {
+            if let Some(bounds) = d.bounds {
                 for (tp, bs) in bounds {
-                    let concrete = &subst[tp];
+                    let Some(concrete) = subst.get(tp) else {
+                        continue;
+                    };
+                    // A bound has nothing to say about a type that already
+                    // failed: every arm this reading replaced answered `Ok`
+                    // for `Type::Err` and stopped, so that a second sentence
+                    // is not printed at a call whose argument is already
+                    // refused.
+                    if matches!(self.base(concrete), Type::Err) {
+                        continue;
+                    }
                     for b in bs {
                         if !self.type_satisfies(concrete, b) {
-                            return Err(cerr!(line, "`{name}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
+                            // The compiler's own bound is refused in its own
+                            // words. A reader cannot write `@Heapless`, so the
+                            // generic sentence would name something nobody can
+                            // type (PR #120's lesson), and the rule is about
+                            // what the call does to the elements rather than
+                            // about a protocol the type failed to implement.
+                            // One sentence for `clear`, `append` and
+                            // `copyFrom`, where each block had its own.
+                            if b == crate::prelude::HEAPLESS {
+                                return Err(cerr!(
+                                    line,
+                                    "`{shown}` forgets or overwrites elements without releasing \
+                                     them, and `{concrete}` owns heap — move the elements one at \
+                                     a time instead"
+                                ));
+                            }
+                            // `Show` is the union `print` and `@str` take,
+                            // and the two arms it replaces named it as a union
+                            // rather than as a protocol a type failed. The
+                            // sentence is theirs, with the hint that told a
+                            // reader what to write.
+                            // The offending PART of the type, which is what
+                            // the deleted arm printed and what sends a reader
+                            // to the field that cannot cross.
+                            if b == crate::prelude::DECODABLE {
+                                let off = crate::codec::decodable(concrete, self.types)
+                                    .err()
+                                    .unwrap_or_else(|| concrete.to_string());
+                                return Err(cerr!(
+                                    line,
+                                    "`{shown}` cannot decode into `{off}` (not a codable type)"
+                                ));
+                            }
+                            if b == crate::types::SHOW {
+                                return Err(cerr!(
+                                    line,
+                                    "`{shown}` needs a number, Bool, or String, \
+                                     found {concrete}{}",
+                                    self.show_hint(concrete)
+                                ));
+                            }
+                            return Err(cerr!(line, "`{shown}` requires `{tp}: {b}`, but {concrete} does not satisfy `{b}`"
                             ));
                         }
                     }
                 }
             }
-            // The v0.1 "no nested Option/Result" rule holds through inference
-            // too: `wrap(Some(1))` with `fn wrap<T>(x: T) -> Option<T>` must
-            // not materialize an Option<Option<Int>>.
-            let rty = crate::types::substitute(ret, &subst);
-            let nested = params
-                .iter()
-                .map(|p| crate::types::substitute(p, &subst))
-                .chain(std::iter::once(rty.clone()))
-                .any(|t| has_nested_wrap(&t, self.types));
-            if nested {
-                return Err(cerr!(
-                    line,
-                    "nested Option/Result is not supported in v0.1 \
-                     (inferred through `{name}`)"
-                ));
+            // RFC-0078 M3: `fromJson<T>` needs `T`'s decoder in the linked
+            // program before any engine lowers the call, and the solve is the
+            // one place `T` is known. Its own arm recorded it until the row
+            // replaced the arm (RFC-0125 §3 M6); the recording is not a rule
+            // and had nowhere else to go.
+            if d.key == "fromJson" {
+                if let Some(t) = subst.get("T") {
+                    self.json_dec_types.borrow_mut().push(t.clone());
+                }
             }
+            let rty = crate::types::substitute(ret, &subst);
             // RFC-0101 M1: `subst` is complete here and dies at the end of this
             // block. This is the one place the type arguments of a generic call
             // exist, and both backends re-solve them afterwards.
             if recording() {
-                note_subst(name, &subst, type_params);
+                note_subst(d.key, &subst, type_params);
             }
             return Ok(rty);
         }
 
-        let caps = self.caps.get(name);
         for (i, (arg, pty)) in args.iter().zip(params).enumerate() {
-            // A `fn`-typed parameter (RFC-0023) takes a lambda, a named function,
-            // or a pass-through `fn`-typed parameter — never an ordinary value —
-            // and is checked/monomorphized by the shared helper.
-            if let Type::Fn(..) = pty {
-                let mut ignored: HashMap<String, Type> = HashMap::new();
-                self.check_fn_arg(name, i, arg, pty, scope, fn_ret, &mut ignored, line)?;
-                continue;
-            }
-            let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
-            if !self.coercible(&aty, pty) {
-                return Err(cerr!(
-                    line,
-                    "`{name}` argument {} expects {pty}, found {aty}",
-                    i + 1
-                ));
-            }
-            self.prove_coercion(arg, pty, line)?;
-            self.prove_string_interpolation(arg, pty, scope, fn_ret, line)?;
+            let aty = match (i, recv) {
+                // The dispatched receiver again: typed once, above, and neither
+                // coerced nor proved here. Its capability still applies.
+                (0, Some(r)) => r.clone(),
+                _ => {
+                    // A `fn`-typed parameter (RFC-0023) takes a lambda, a named
+                    // function, or a pass-through `fn`-typed parameter — never an
+                    // ordinary value — and is checked/monomorphized by the shared
+                    // helper.
+                    if let Type::Fn(..) = pty {
+                        let mut ignored: HashMap<String, Type> = HashMap::new();
+                        self.check_fn_arg(shown, i, arg, pty, scope, fn_ret, &mut ignored, line)?;
+                        continue;
+                    }
+                    let aty = self.expr(arg, scope, Some(pty), fn_ret)?;
+                    if !self.coercible(&aty, pty) {
+                        return Err(cerr!(
+                            line,
+                            "`{shown}` argument {} expects {pty}, found {aty}",
+                            i + 1
+                        ));
+                    }
+                    self.prove_coercion(arg, pty, line)?;
+                    self.prove_string_interpolation(arg, pty, scope, fn_ret, line)?;
+                    aty
+                }
+            };
             // A `modify` parameter receives the caller's binding by reference —
             // full discipline checked in the shared helper.
             match caps.and_then(|c| c.get(i)) {
                 Some(&Capability::Modify) => {
-                    self.check_modify_arg(name, i, arg, &aty, pty, scope, line)?
+                    self.check_modify_arg(shown, i, arg, args, &aty, pty, scope, line)?
                 }
-                Some(&Capability::Consume) => self.region_consume_guard(name, i, &aty, line)?,
+                Some(&Capability::Consume) => self.region_consume_guard(shown, i, &aty, line)?,
                 _ => {}
             }
         }
@@ -9146,6 +8688,52 @@ impl<'a> Checker<'a> {
             Type::Fn(ps, r) => (ps.clone(), (**r).clone()),
             _ => return Ok(()),
         };
+        // Contravariance, and the return unified: the value's own parameter
+        // type must accept whatever the callee will pass. Checking the reverse
+        // direction too let the callee pass a NARROWER record than the value
+        // reads — a missing field at dispatch. A type parameter that occurs
+        // ONLY inside this `fn` parameter's own parameter list is solved from
+        // the value's declared types, exactly as a bare name solves it
+        // (RFC-0071 M2b). All three arms below that hand over a function value
+        // ask it; `owner` is how each names the value.
+        let params_accept = |owner: &str,
+                             vptys: &[Type],
+                             vret: &Type,
+                             subst: &mut HashMap<String, Type>|
+         -> Result<(), Diagnostic> {
+            for (a, b) in vptys.iter().zip(&ptys) {
+                let b = &self.solve_fn_param(b, a, subst, line);
+                if !self.assignable(b, a) {
+                    return Err(cerr!(
+                        line,
+                        "{owner} expects a {a} argument, but `{callee}` \
+                         will pass it {b}"
+                    ));
+                }
+            }
+            self.unify(&ret, vret, subst, line)
+        };
+        // The two arms that hand over a value of `fn` TYPE share their arity
+        // sentence as well; the named-function arm below has its own, because a
+        // declaration is not a value and the sentence says so.
+        let value_matches = |subject: &str,
+                             owner: &str,
+                             vptys: &[Type],
+                             vret: &Type,
+                             subst: &mut HashMap<String, Type>|
+         -> Result<(), Diagnostic> {
+            if vptys.len() != ptys.len() {
+                return Err(cerr!(
+                    line,
+                    "{subject} is a {}-argument function value, but \
+                     `{callee}` argument {} expects {}",
+                    vptys.len(),
+                    i + 1,
+                    ptys.len()
+                ));
+            }
+            params_accept(owner, vptys, vret, subst)
+        };
         match arg {
             Expr::Lambda {
                 params,
@@ -9168,8 +8756,9 @@ impl<'a> Checker<'a> {
                 let mut inner = scope.clone();
                 inner.push(HashMap::new());
                 for (pn, pty) in params.iter().zip(&ptys) {
+                    self.bind_seen(Some(pty.clone()), pn.line, pn.col);
                     inner.last_mut().unwrap().insert(
-                        pn.clone(),
+                        pn.name.clone(),
                         Binding {
                             ty: pty.clone(),
                             mutable: false,
@@ -9178,7 +8767,7 @@ impl<'a> Checker<'a> {
                 }
                 // Enforce the capture rules: a lambda may not assign to, `drop`, or
                 // `consume` a captured (outer) binding — it captures by read.
-                let mut locals: HashSet<String> = params.iter().cloned().collect();
+                let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
                 self.check_lambda_body_captures(body, scope, &mut locals, *lline)?;
                 // Type-check the body and infer its result type.
                 let ret_known = !matches!(ret, Type::Param(_));
@@ -9215,6 +8804,8 @@ impl<'a> Checker<'a> {
                     }
                 };
                 if ret == Type::Unit {
+                    let sig = crate::types::substitute(expected_fn, subst);
+                    self.record_arg_fn(&sig, None, Some(*lline));
                     return Ok(());
                 }
                 if ret_known {
@@ -9232,42 +8823,33 @@ impl<'a> Checker<'a> {
                     // Infer the generic return parameter (`U`) from the body type.
                     self.unify(&ret, &body_ty, subst, *lline)?;
                 }
+                let sig = crate::types::substitute(expected_fn, subst);
+                self.record_arg_fn(&sig, None, Some(*lline));
                 Ok(())
             }
             // A bare name: either a pass-through `fn`-typed parameter, or a named
             // top-level function used as a function value.
             Expr::Var { name: vn, .. } => {
+                // Type the argument as an expression first, so its node is
+                // RECORDED (RFC-0101 M1) the way every other argument's is.
+                // Nothing here needs the answer — the arms below read the
+                // binding themselves — but the core does: `vyrn_lower`'s walk
+                // reads `node_types` for each row, and a call argument with no
+                // row type is one the ownership rules cannot see. It showed as
+                // a double release the first time a `consume` parameter was
+                // `fn`-typed: `fromStep(c.slot, c.gen, run)` moved `run` into
+                // the step slot AND released it at its binding (RFC-0125 §3
+                // M6, the `consume` slice). The error is discarded because a
+                // top-level function name is not a binding, and the named-fn
+                // arm below is what answers for it.
+                let _ = self.expr(arg, scope, None, fn_ret);
                 // Base-resolve so a stored value under a named fn-type alias
                 // (RFC-0037, e.g. `Transform`) passes through too.
                 if let Some(Type::Fn(vptys, vret)) =
                     self.lookup(scope, vn).map(|b| self.base(&b.ty))
                 {
-                    if vptys.len() != ptys.len() {
-                        return Err(cerr!(
-                            line,
-                            "`{vn}` is a {}-argument function value, but \
-                             `{callee}` argument {} expects {}",
-                            vptys.len(),
-                            i + 1,
-                            ptys.len()
-                        ));
-                    }
-                    // Contravariant, like the named-function arm below: the
-                    // value's own parameter type must accept whatever the
-                    // callee will pass. Checking the reverse direction too let
-                    // the callee pass a NARROWER record than the value reads
-                    // — a missing field at dispatch.
-                    for (a, b) in vptys.iter().zip(&ptys) {
-                        let b = &self.solve_fn_param(b, a, subst, line);
-                        if !self.assignable(b, a) {
-                            return Err(cerr!(
-                                line,
-                                "`{vn}` expects a {a} argument, but `{callee}` \
-                                 will pass it {b}"
-                            ));
-                        }
-                    }
-                    self.unify(&ret, &vret, subst, line)?;
+                    let vn = format!("`{vn}`");
+                    value_matches(&vn, &vn, &vptys, &vret, subst)?;
                     return Ok(());
                 }
                 let sig = self.sigs.get(vn).ok_or_else(|| {
@@ -9297,17 +8879,12 @@ impl<'a> Checker<'a> {
                         ptys.len()
                     ));
                 }
-                for (a, b) in sig.0.iter().zip(&ptys) {
-                    let b = &self.solve_fn_param(b, a, subst, line);
-                    if !self.assignable(b, a) {
-                        return Err(cerr!(
-                            line,
-                            "`{vn}` expects a {a} argument, but `{callee}` will \
-                             pass it {b}"
-                        ));
-                    }
-                }
-                self.unify(&ret, &sig.1, subst, line)?;
+                params_accept(&format!("`{vn}`"), &sig.0, &sig.1, subst)?;
+                self.record_arg_fn(
+                    &crate::types::substitute(expected_fn, subst),
+                    Some(vn),
+                    None,
+                );
                 Ok(())
             }
             // Any other expression of `fn` type (RFC-0037): a field read, an
@@ -9320,42 +8897,24 @@ impl<'a> Checker<'a> {
             other => {
                 let aty = self.expr(other, scope, None, fn_ret)?;
                 let Type::Fn(vptys, vret) = self.base(&aty) else {
+                    // A literal carries no line of its own — `Expr::line`
+                    // answers 0 for the five of them — so `fromStep(0, 0, 5)`
+                    // printed this refusal at `0:0` the moment a row rather
+                    // than a block typed the call. The call's own line is the
+                    // one the reader wrote (RFC-0125 §3 M6).
+                    let at = match other.line() {
+                        0 => line,
+                        l => l,
+                    };
                     return Err(cerr!(
-                        other.line(),
+                        at,
                         "`{callee}` argument {} must be a lambda `|..| ..`, a \
                          function name, or an expression of `fn` type (RFC-0023); \
                          found {aty}",
                         i + 1
                     ));
                 };
-                if vptys.len() != ptys.len() {
-                    return Err(cerr!(
-                        line,
-                        "this is a {}-argument function value, but \
-                         `{callee}` argument {} expects {}",
-                        vptys.len(),
-                        i + 1,
-                        ptys.len()
-                    ));
-                }
-                // Contravariant (see the Var arm above): the value's declared
-                // parameter type must accept what the callee will pass.
-                for (a, b) in vptys.iter().zip(&ptys) {
-                    // A type parameter that occurs ONLY inside this `fn`
-                    // parameter's own parameter list is solved from the value's
-                    // declared types, exactly as a bare name solves it
-                    // (RFC-0071 M2b).
-                    let b = &self.solve_fn_param(b, a, subst, line);
-                    if !self.assignable(b, a) {
-                        return Err(cerr!(
-                            line,
-                            "this function value expects a {a} argument, \
-                             but `{callee}` will pass it {b}"
-                        ));
-                    }
-                }
-                self.unify(&ret, &vret, subst, line)?;
-                Ok(())
+                value_matches("this", "this function value", &vptys, &vret, subst)
             }
         }
     }
@@ -9396,8 +8955,9 @@ impl<'a> Checker<'a> {
         let mut inner = scope.clone();
         inner.push(HashMap::new());
         for (pn, pty) in params.iter().zip(ptys) {
+            self.bind_seen(Some(pty.clone()), pn.line, pn.col);
             inner.last_mut().unwrap().insert(
-                pn.clone(),
+                pn.name.clone(),
                 Binding {
                     ty: pty.clone(),
                     mutable: false,
@@ -9405,7 +8965,7 @@ impl<'a> Checker<'a> {
             );
         }
         // RFC-0023 capture rules verbatim: read-only, no nested lambda literal.
-        let mut locals: HashSet<String> = params.iter().cloned().collect();
+        let mut locals: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         self.check_lambda_body_captures(body, scope, &mut locals, *line)?;
         // Calls through OTHER stored fn values inside this body belong to this
         // lambda's own effect summary (the body runs wherever the value is
@@ -9439,19 +8999,22 @@ impl<'a> Checker<'a> {
             .iter()
             .map(|(_, s)| s.clone())
             .collect();
-        // Effect summary for the extended spawn/workers fixpoint: the body's
-        // call names, the first module-state binding it touches (if any), and
-        // whether it performs a spawn-forbidden op.
+        // Effect summary for the `--workers` walk (RFC-0025): the body's call
+        // names and the first module-state binding it touches, if any.
         let mut calls: std::collections::HashSet<String> = Default::default();
-        match body {
-            LambdaBody::Expr(e) => calls_expr(e, &mut calls),
-            LambdaBody::Block(b) => calls_block(b, &mut calls),
+        {
+            let mut v = Calls(&mut calls);
+            let mut locals = HashSet::new();
+            match body {
+                LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+                LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+            }
         }
         // Names that shadow module state at this point: the lambda's own
         // params/binders plus every enclosing LOCAL binding. Every frame is a
         // local one — module state is not a frame any more, it is the
         // fall-through [`Scope`] takes when the frames run out.
-        let mut local_names: HashSet<String> = params.iter().cloned().collect();
+        let mut local_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
         if let LambdaBody::Block(b) = body {
             collect_binders_block(b, &mut local_names);
         }
@@ -9472,8 +9035,6 @@ impl<'a> Checker<'a> {
                 }
             })
             .cloned();
-        let forbidden = calls.iter().any(|c| SPAWN_FORBIDDEN.contains(&c.as_str()))
-            || matches!(body, LambdaBody::Block(b) if contains_drop(b));
         self.stored_sources.borrow_mut().push(StoredSource {
             sig: sig.clone(),
             named: None,
@@ -9482,7 +9043,6 @@ impl<'a> Checker<'a> {
                 line: *line,
                 calls,
                 touches_global,
-                forbidden,
                 nested_sigs,
             }),
         });
@@ -9559,6 +9119,32 @@ impl<'a> Checker<'a> {
         Ok(exp.clone())
     }
 
+    /// Record the function a `fn`-typed ARGUMENT hands its callee — RFC-0125
+    /// §3 M6, seventh slice.
+    ///
+    /// The set is closed the way RFC-0037's is: [`Self::check_fn_arg`] accepts
+    /// a lambda literal, a bare function name, or an expression of `fn` type,
+    /// and only the first two are new functions — the third forwards a value
+    /// some other position already collected. `sig` is the parameter's type
+    /// under everything the call has solved, so a generic `fn(T) -> U` is
+    /// recorded as the concrete signature the instance calls through.
+    fn record_arg_fn(&self, sig: &Type, named: Option<&str>, lambda_line: Option<usize>) {
+        self.arg_sources.borrow_mut().push(StoredSource {
+            sig: self.base(sig),
+            named: named.map(str::to_string),
+            // The spawn fields are the spawn analysis's, and it reads
+            // `sources` alone; the judgment reads the two a frame is keyed by
+            // (see `StoredFnEffects::arg_sources`).
+            lambda: lambda_line.map(|line| StoredLambda {
+                defined_in: self.cur_fn.borrow().clone(),
+                line,
+                calls: HashSet::new(),
+                touches_global: None,
+                nested_sigs: Vec::new(),
+            }),
+        });
+    }
+
     /// The RFC-0037 gate on using a named function as a value: generic,
     /// `extern`, and `gen` functions are rejected with named diagnostics.
     fn storable_named_fn(&self, name: &str, line: usize) -> Result<(), Diagnostic> {
@@ -9590,6 +9176,16 @@ impl<'a> Checker<'a> {
     /// captured (outer) binding may be READ but never assigned, `drop`ped, or
     /// passed to a `consume` parameter. Names introduced inside the lambda
     /// (parameters, `let`s, `for`-vars) are tracked in `locals` and are exempt.
+    ///
+    /// The descent and the scope stack are `ast::body_scope_descent!`'s since
+    /// RFC-0125 §3 M6. This pass carried its own copy of both, and the scope it
+    /// kept was the walk's, arm for arm: a branch clones, an `if let` binds its
+    /// pattern into the then-block alone, a `for`-var and an arm binder join the
+    /// block they open. What is this pass's own is the entry — a lambda's own
+    /// parameters are in `locals` before the body is walked — and three lines at
+    /// sites: a nested lambda literal is refused rather than descended, a
+    /// `consume` argument is checked before that argument is walked, and the
+    /// first violation is the one reported.
     fn check_lambda_body_captures(
         &self,
         body: &LambdaBody,
@@ -9597,239 +9193,177 @@ impl<'a> Checker<'a> {
         locals: &mut HashSet<String>,
         line: usize,
     ) -> Result<(), Diagnostic> {
-        match body {
-            LambdaBody::Expr(e) => self.captures_expr(e, outer, locals),
-            LambdaBody::Block(b) => self.captures_block(b, outer, &mut locals.clone()),
+        /// The rule's line at each site. A captured binding is one visible in
+        /// the enclosing scope and NOT shadowed by a name introduced inside the
+        /// lambda, which is what `locals` holds.
+        struct Captures<'a, 'b> {
+            ck: &'a Checker<'b>,
+            outer: &'a Scope,
+            err: Option<String>,
         }
-        .map_err(|m| cerr!(line, "{m}"))
-    }
 
-    fn captures_block(
-        &self,
-        b: &Block,
-        outer: &Scope,
-        locals: &mut HashSet<String>,
-    ) -> Result<(), String> {
-        for s in &b.stmts {
-            self.captures_stmt(s, outer, locals)?;
+        impl Captures<'_, '_> {
+            fn is_capture(&self, n: &str, locals: &HashSet<String>) -> bool {
+                !locals.contains(n) && self.ck.lookup(self.outer, n).is_some()
+            }
+
+            fn fail(&mut self, m: String) {
+                if self.err.is_none() {
+                    self.err = Some(m);
+                }
+            }
         }
-        Ok(())
-    }
 
-    fn captures_stmt(
-        &self,
-        s: &Stmt,
-        outer: &Scope,
-        locals: &mut HashSet<String>,
-    ) -> Result<(), String> {
-        // A captured binding is one visible in the enclosing scope and NOT shadowed
-        // by a name introduced inside the lambda.
-        let is_capture = |n: &str, locals: &HashSet<String>| {
-            !locals.contains(n) && self.lookup(outer, n).is_some()
-        };
-        match s {
-            Stmt::Let { name, value, .. } => {
-                self.captures_expr(value, outer, locals)?;
-                locals.insert(name.clone());
-                Ok(())
-            }
-            Stmt::Assign { name, value, line } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot assign to the captured \
-                         binding `{name}` (line {line})"
-                    ));
+        impl BodyVisit<'_> for Captures<'_, '_> {
+            fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
+                match s {
+                    Stmt::Assign { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot assign to the captured \
+                             binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::SetField { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot mutate a field of the \
+                             captured binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::IndexSet { name, line, .. } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda captures by read; it cannot store into the captured \
+                             binding `{name}` (line {line})"
+                        ));
+                    }
+                    Stmt::Drop { name, line } if self.is_capture(name, locals) => {
+                        self.fail(format!(
+                            "a lambda cannot `drop` the captured binding `{name}` (line {line})"
+                        ));
+                    }
+                    _ => {}
                 }
-                self.captures_expr(value, outer, locals)
             }
-            Stmt::SetField {
-                name, value, line, ..
-            } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot mutate a field of the \
-                         captured binding `{name}` (line {line})"
-                    ));
-                }
-                self.captures_expr(value, outer, locals)
-            }
-            Stmt::IndexSet {
-                name,
-                index,
-                value,
-                line,
-            } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda captures by read; it cannot store into the captured \
-                         binding `{name}` (line {line})"
-                    ));
-                }
-                self.captures_expr(index, outer, locals)?;
-                self.captures_expr(value, outer, locals)
-            }
-            Stmt::Drop { name, line } => {
-                if is_capture(name, locals) {
-                    return Err(format!(
-                        "a lambda cannot `drop` the captured binding `{name}` (line {line})"
-                    ));
-                }
-                Ok(())
-            }
-            Stmt::Return { value: Some(e), .. } => self.captures_expr(e, outer, locals),
-            Stmt::Return { value: None, .. } | Stmt::Break { .. } | Stmt::Continue { .. } => Ok(()),
-            Stmt::Expr(e) => self.captures_expr(e, outer, locals),
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_block(then_block, outer, &mut locals.clone())?;
-                if let Some(eb) = else_block {
-                    self.captures_block(eb, outer, &mut locals.clone())?;
-                }
-                Ok(())
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.captures_expr(scrutinee, outer, locals)?;
-                let mut inner = locals.clone();
-                for b in crate::movecheck::pattern_bindings(pattern) {
-                    inner.insert(b.to_string());
-                }
-                self.captures_block(then_block, outer, &mut inner)?;
-                if let Some(eb) = else_block {
-                    self.captures_block(eb, outer, &mut locals.clone())?;
-                }
-                Ok(())
-            }
-            Stmt::While { cond, body, .. } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_block(body, outer, &mut locals.clone())
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                self.captures_expr(iter, outer, locals)?;
-                let mut inner = locals.clone();
-                inner.insert(var.clone());
-                self.captures_block(body, outer, &mut inner)
-            }
-            Stmt::Region { body, .. } => self.captures_block(body, outer, &mut locals.clone()),
-        }
-    }
 
-    fn captures_expr(
-        &self,
-        e: &Expr,
-        outer: &Scope,
-        locals: &HashSet<String>,
-    ) -> Result<(), String> {
-        let is_capture = |n: &str| !locals.contains(n) && self.lookup(outer, n).is_some();
-        match e {
-            Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
-                // Passing a captured binding to a `consume` parameter would move it
-                // out of the enclosing scope from inside the lambda — forbidden.
-                let caps = self.caps.get(name);
-                for (k, a) in args.iter().enumerate() {
-                    if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
-                        if let Expr::Var { name: vn, .. } = a {
-                            if is_capture(vn) {
-                                return Err(format!(
-                                    "a lambda cannot consume the captured binding `{vn}` \
-                                     (line {line})"
-                                ));
+            fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+                if self.err.is_some() {
+                    return false;
+                }
+                match e {
+                    Expr::Call {
+                        name,
+                        args,
+                        line,
+                        type_args: _,
+                    }
+                    | Expr::Spawn { name, args, line } => {
+                        // Passing a captured binding to a `consume` parameter
+                        // would move it out of the enclosing scope from inside
+                        // the lambda — forbidden. The argument is checked before
+                        // it is walked, so the FIRST violation in source order is
+                        // the one reported; the walk of the arguments is
+                        // therefore this arm's own.
+                        let caps = self.ck.caps.get(name);
+                        for (k, a) in args.iter().enumerate() {
+                            if caps.and_then(|c| c.get(k)) == Some(&Capability::Consume) {
+                                if let Expr::Var { name: vn, .. } = a {
+                                    if self.is_capture(vn, locals) {
+                                        self.fail(format!(
+                                            "a lambda cannot consume the captured binding \
+                                             `{vn}` (line {line})"
+                                        ));
+                                        return false;
+                                    }
+                                }
+                            }
+                            body_expr(a, locals, self);
+                            if self.err.is_some() {
+                                return false;
                             }
                         }
+                        false
                     }
-                    self.captures_expr(a, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::TryConstruct { args, .. } | Expr::ArrayLit { elems: args, .. } => {
-                for a in args {
-                    self.captures_expr(a, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-                self.captures_expr(expr, outer, locals)
-            }
-            Expr::Binary { lhs, rhs, .. } => {
-                self.captures_expr(lhs, outer, locals)?;
-                self.captures_expr(rhs, outer, locals)
-            }
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                self.captures_expr(scrutinee, outer, locals)?;
-                for arm in arms {
-                    let mut inner = locals.clone();
-                    for b in crate::movecheck::pattern_bindings(&arm.pattern) {
-                        inner.insert(b.to_string());
+                    // A nested lambda literal is NOT permitted inside a lambda
+                    // body in v1 (RFC-0023 nesting lock): it would compound
+                    // monomorphization. A lambda body MAY call functions that
+                    // themselves take `fn` parameters — that is an ordinary
+                    // call, handled above.
+                    Expr::Lambda { line, .. } => {
+                        self.fail(format!(
+                            "a lambda body may not contain another lambda literal in v1 \
+                             (line {line})"
+                        ));
+                        false
                     }
-                    match &arm.body {
-                        ArmBody::Expr(e) => self.captures_expr(e, outer, &inner)?,
-                        ArmBody::Block(b) => self.captures_block(b, outer, &mut inner)?,
-                    }
+                    // Everything else reads, and a read is what a capture is
+                    // allowed to be.
+                    _ => true,
                 }
-                Ok(())
             }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.captures_expr(cond, outer, locals)?;
-                self.captures_expr(then_branch, outer, locals)?;
-                if let Some(eb) = else_branch {
-                    self.captures_expr(eb, outer, locals)?;
-                }
-                Ok(())
-            }
-            Expr::StructLit { fields, .. } => {
-                for (_, v) in fields {
-                    self.captures_expr(v, outer, locals)?;
-                }
-                Ok(())
-            }
-            // A nested lambda literal is NOT permitted inside a lambda body in v1
-            // (RFC-0023 nesting lock): it would compound monomorphization. A lambda
-            // body MAY call functions that themselves take `fn` parameters — that is
-            // an ordinary call, handled above.
-            Expr::Lambda { line, .. } => Err(format!(
-                "a lambda body may not contain another lambda literal in v1 \
-                 (line {line})"
-            )),
-            // Scalar leaves and plain variable reads (captures by read) are fine.
-            _ => Ok(()),
+        }
+
+        let mut v = Captures {
+            ck: self,
+            outer,
+            err: None,
+        };
+        let mut locals = locals.clone();
+        match body {
+            LambdaBody::Expr(e) => body_expr(e, &locals, &mut v),
+            LambdaBody::Block(b) => body_block(b, &mut locals, &mut v),
+        }
+        match v.err {
+            Some(m) => Err(cerr!(line, "{m}")),
+            None => Ok(()),
         }
     }
 
     /// The call-site discipline for a `modify` parameter, shared by concrete
     /// and generic calls: the argument must be a *mutable variable* (not a
-    /// temporary), and its type must be EXACTLY the parameter type. Width
-    /// subtyping is unsound here: the callee may whole-reassign the parameter
-    /// (`n = Named { .. }`), and writing that back through a wider caller
-    /// record would silently drop the caller's extra fields.
+    /// temporary), its type must be EXACTLY the parameter type, and no other
+    /// argument of the same call may name it. Width subtyping is unsound here:
+    /// the callee may whole-reassign the parameter (`n = Named { .. }`), and
+    /// writing that back through a wider caller record would silently drop the
+    /// caller's extra fields.
+    ///
+    /// EXCLUSIVITY (RFC-0090) is the third of the three and it came here from
+    /// `movecheck::check_exclusive` (RFC-0125 §3 M3, row 23). `modify` is
+    /// exclusive in-place access: handing one place to a `modify` parameter
+    /// and to any other parameter of the same call gives the callee two names
+    /// for one value, and the callee was told it had one. It is a rule about
+    /// the CALL — the capabilities a declaration wrote against the arguments
+    /// a reader wrote — which is the question the other two ask, so the three
+    /// are stated together and the memory judgment states none of them.
     fn check_modify_arg(
         &self,
         fname: &str,
         i: usize,
         arg: &Expr,
+        args: &[Expr],
         aty: &Type,
         pty: &Type,
         scope: &Scope,
         line: usize,
     ) -> Result<(), Diagnostic> {
+        if let Some((root, path)) = crate::ast::place_path(arg) {
+            for (j, b) in args.iter().enumerate() {
+                if j != i && crate::ast::mentions(b, &root) {
+                    let mut d = cerr!(
+                        line,
+                        "`{path}` is passed to `{fname}` as `modify` and read again in the \
+                         same call — a `modify` borrow is exclusive"
+                    );
+                    d.message.push_str(&format!(
+                        "
+  fix: `{root}.copy()` for the second argument"
+                    ));
+                    d.message.push_str(
+                        "
+  fix: or split the call so the two accesses do not overlap",
+                    );
+                    return Err(d);
+                }
+            }
+        }
         match arg {
             Expr::Var { name: vn, .. } => {
                 let b = self
@@ -9897,17 +9431,23 @@ impl<'a> Checker<'a> {
                     Ok(())
                 }
             },
-            Type::Option(inner) => match aty {
-                Type::Option(a) => self.unify(inner, a, subst, line),
-                _ => Err(cerr!(line, "expected Option, found {aty}")),
-            },
-            Type::Result(pt, pe) => match aty {
-                Type::Result(at, ae) => {
-                    self.unify(pt, at, subst, line)?;
-                    self.unify(pe, ae, subst, line)
+            _ if crate::types::option_payload(pty).is_some() => {
+                let inner = crate::types::option_payload(pty).expect("an Option payload");
+                match crate::types::option_payload(aty) {
+                    Some(a) => self.unify(inner, a, subst, line),
+                    None => Err(cerr!(line, "expected Option, found {aty}")),
                 }
-                _ => Err(cerr!(line, "expected Result, found {aty}")),
-            },
+            }
+            _ if crate::types::result_payloads(pty).is_some() => {
+                let (pt, pe) = crate::types::result_payloads(pty).expect("Result payloads");
+                match crate::types::result_payloads(aty) {
+                    Some((at, ae)) => {
+                        self.unify(pt, at, subst, line)?;
+                        self.unify(pe, ae, subst, line)
+                    }
+                    None => Err(cerr!(line, "expected Result, found {aty}")),
+                }
+            }
             Type::App(pn, pargs) => match aty {
                 Type::App(an, aargs) if pn == an && pargs.len() == aargs.len() => {
                     for (p, a) in pargs.iter().zip(aargs) {
@@ -9935,6 +9475,16 @@ impl<'a> Checker<'a> {
             // so `type Feed = Stream<Paste>` unifies like the stream it is.
             Type::Stream(inner) => match crate::types::resolve(aty, self.types) {
                 Type::Stream(a) => self.unify(inner, &a, subst, line),
+                _ => Err(cerr!(line, "expected {pty}, found {aty}")),
+            },
+            // A generic `Task<T>` binds `T` the way `Stream<T>` does, and for
+            // the same reason: `@join`'s row is `(self: consume Task<T>) -> T`,
+            // so without this arm every `t.join()` reported "argument expects
+            // Task<T>, found Task<Int64>". The arm was missing because no rule
+            // had ever unified against a `Task` — `@join` was hand-written and
+            // read the payload out of the type itself (RFC-0125 §3 M6).
+            Type::Task(inner) => match crate::types::resolve(aty, self.types) {
+                Type::Task(a) => self.unify(inner, &a, subst, line),
                 _ => Err(cerr!(line, "expected {pty}, found {aty}")),
             },
             // A generic `SmallArray<T, N>` binds `T` from the element type; `N`
@@ -10142,27 +9692,10 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
             }
         }
         Expr::Binary { op, lhs, rhs, .. } => {
-            let o = match op {
-                BinOp::Add => "+",
-                BinOp::Sub => "-",
-                BinOp::Mul => "*",
-                BinOp::Div => "/",
-                BinOp::Rem => "%",
-                BinOp::Lt => "<",
-                BinOp::LtEq => "<=",
-                BinOp::Gt => ">",
-                BinOp::GtEq => ">=",
-                BinOp::Eq => "==",
-                BinOp::NotEq => "!=",
-                BinOp::And => "&&",
-                BinOp::Or => "||",
-                BinOp::Match => "=~",
-                BinOp::BitAnd => "&",
-                BinOp::BitOr => "|",
-                BinOp::BitXor => "^",
-                BinOp::Shl => "<<",
-                BinOp::Shr => ">>",
-            };
+            // The spelling is the lexer's, reached through the parser's
+            // precedence table (RFC-0125 §3 M6). It was nineteen rows here,
+            // beside the nineteen the parser already had.
+            let o = crate::parser::binop_text(*op);
             format!("{} {o} {}", pred_summary(lhs), pred_summary(rhs))
         }
         // `@at(s, i)` is the desugaring of indexing — render it back as `s[i]`.
@@ -10180,7 +9713,14 @@ pub(crate) fn pred_summary(expr: &Expr) -> String {
         Expr::MapLit { .. } => "[..:..]".to_string(),
         Expr::Spawn { name, .. } => format!("spawn {name}(..)"),
         Expr::Consume { place, .. } => format!("consume {}", pred_summary(place)),
-        Expr::Lambda { params, .. } => format!("|{}| ..", params.join(", ")),
+        Expr::Lambda { params, .. } => format!(
+            "|{}| ..",
+            params
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 
@@ -10199,63 +9739,6 @@ fn type_mentions_self(ty: &Type) -> bool {
         }
     });
     found
-}
-
-/// Apply `f` to `ty` and to every type nested inside it.
-/// Whether a type contains a directly nested `Option`/`Result` (the v0.1
-/// prohibition), anywhere inside it.
-fn has_nested_wrap(ty: &Type, types: &HashMap<String, TypeDecl>) -> bool {
-    // `wrapped` resolves too: a transparent alias IS the Option/Result it
-    // names everywhere else (`resolve_scrutinee`, `assignable`), so
-    // `type M = Option<Int64>` cannot launder a nesting past the ban either.
-    let wrapped = |t: &Type| {
-        matches!(
-            crate::types::resolve(t, types),
-            Type::Option(_) | Type::Result(..)
-        )
-    };
-    match ty {
-        Type::Option(t) => wrapped(t) || has_nested_wrap(t, types),
-        Type::Result(a, b) => {
-            wrapped(a) || wrapped(b) || has_nested_wrap(a, types) || has_nested_wrap(b, types)
-        }
-        Type::Array(t) | Type::ArrayN(t, _) | Type::SmallArray(t, _) | Type::Task(t) => {
-            has_nested_wrap(t, types)
-        }
-        Type::Map(k, v) => has_nested_wrap(k, types) || has_nested_wrap(v, types),
-        Type::Record(fs) => fs.iter().any(|f| has_nested_wrap(&f.ty, types)),
-        // A named type reaches here only unresolved (a generic parameter's
-        // bound, or a depth-capped `resolve`); descend when naming it made a
-        // difference, and stop when it did not — that is the cycle guard.
-        Type::Named(_) | Type::App(..) => {
-            let r = crate::types::resolve(ty, types);
-            &r != ty && has_nested_wrap(&r, types)
-        }
-        _ => false,
-    }
-}
-
-/// The line of the statement a literal's range error is attributed to. The
-/// literal `Expr` variants carry no line of their own ([`Expr::line`] answers
-/// 0 for them), so the checker records the enclosing statement's line as it
-/// walks and the three range diagnostics report that.
-fn stmt_source_line(s: &Stmt) -> usize {
-    match s {
-        Stmt::Let { line, .. }
-        | Stmt::Assign { line, .. }
-        | Stmt::SetField { line, .. }
-        | Stmt::IndexSet { line, .. }
-        | Stmt::Return { line, .. }
-        | Stmt::Break { line }
-        | Stmt::Continue { line }
-        | Stmt::If { line, .. }
-        | Stmt::IfLet { line, .. }
-        | Stmt::While { line, .. }
-        | Stmt::ForIn { line, .. }
-        | Stmt::Drop { line, .. }
-        | Stmt::Region { line, .. } => *line,
-        Stmt::Expr(e) => e.line(),
-    }
 }
 
 /// Whether an integer literal `n` fits the sized type. The lexer wraps
@@ -10344,41 +9827,6 @@ fn render_int_literal(n: i64) -> String {
     }
 }
 
-/// Builtins a concurrent task may not use: `print` (observable ordering) and
-/// the log methods.
-///
-/// Every name here is also in [`RESERVED`], and has to be: a name the compiler
-/// does not own is a user function, which this list would then forbid by
-/// coincidence of spelling. `spawn_forbidden_names_are_reserved` checks it.
-const SPAWN_FORBIDDEN: &[&str] = &[
-    "print",
-    // `close` frees a stream's buffer: the caller may still hold it across the
-    // task boundary.
-    "close",
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error",
-    // Input I/O effects (RFC-0014): observe/mutate the outside world (stdin
-    // cursor, the filesystem), so they must not cross a task boundary. `listDir`
-    // reads the filesystem too (RFC-0021).
-    "args",
-    "readLine",
-    "readFile",
-    "writeFile",
-    "writeFileBytes",
-    "writeStdout",
-    "renameFile",
-    "fsyncFile",
-    "readFileBytes",
-    "stringFromBytes",
-    "listDir",
-    "listDirKinds",
-    "lineAt",
-    "colAt",
-];
-
 /// Whether a type may appear in an `extern` signature (RFC-0012 ABI). The scalar
 /// primitives cross by value; a `String` crosses as a `(ptr, len)` pair. Nothing
 /// else — named/validated types, records, options, arrays, refs — has a v1
@@ -10393,133 +9841,40 @@ fn extern_abi_type_ok(ty: &Type, allow_unit: bool) -> bool {
     }
 }
 
-/// Whether a block contains a `drop` statement anywhere (including nested blocks).
-/// Used by spawn-safety: `drop` can release a shared `Ref`, so a task must not.
-fn contains_drop(b: &Block) -> bool {
-    b.stmts.iter().any(|s| match s {
-        Stmt::Drop { .. } => true,
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => contains_drop(then_block) || else_block.as_ref().is_some_and(contains_drop),
-        Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
-            contains_drop(body)
-        }
-        _ => false,
-    })
-}
+/// The probe's line at each site: a `spawn` is the answer, wherever it stands.
+struct Spawns(bool);
 
-/// Whether an expression tree uses `spawn` anywhere.
-fn expr_contains_spawn(e: &Expr) -> bool {
-    match e {
-        Expr::Spawn { .. } => true,
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            expr_contains_spawn(expr)
-        }
-        Expr::Binary { lhs, rhs, .. } => expr_contains_spawn(lhs) || expr_contains_spawn(rhs),
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => args.iter().any(expr_contains_spawn),
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            expr_contains_spawn(scrutinee)
-                || arms.iter().any(|a| match &a.body {
-                    ArmBody::Expr(e) => expr_contains_spawn(e),
-                    ArmBody::Block(b) => contains_spawn(b),
-                })
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            expr_contains_spawn(cond)
-                || expr_contains_spawn(then_branch)
-                || else_branch.as_ref().is_some_and(|e| expr_contains_spawn(e))
-        }
-        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_spawn(v)),
+impl BodyVisit<'_> for Spawns {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
         // A spawn hides from the comptime-purity probe just as well behind a
-        // lambda literal as behind a call — the generator can invoke the
-        // stored value at generation time (`calls_expr` descends here too).
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e) => expr_contains_spawn(e),
-            LambdaBody::Block(b) => contains_spawn(b),
-        },
-        _ => false,
+        // lambda literal as behind a call, so the walk descends into one.
+        if matches!(e, Expr::Spawn { .. }) {
+            self.0 = true;
+        }
+        !self.0
     }
 }
 
 /// Whether a block uses `spawn` anywhere (including nested blocks) — used by the
 /// comptime-purity analysis (RFC-0021): a generator may not spawn.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6. It was two
+/// arm lists whose catch-alls entered neither a map literal nor a `consume`, so
+/// a `spawn` under either was invisible to the probe.
 fn contains_spawn(b: &Block) -> bool {
-    fn stmt(s: &Stmt) -> bool {
-        match s {
-            Stmt::Let { value, .. }
-            | Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::Expr(value) => expr_contains_spawn(value),
-            Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_contains_spawn),
-            Stmt::IndexSet { index, value, .. } => {
-                expr_contains_spawn(index) || expr_contains_spawn(value)
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                expr_contains_spawn(cond)
-                    || contains_spawn(then_block)
-                    || else_block.as_ref().is_some_and(contains_spawn)
-            }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                expr_contains_spawn(scrutinee)
-                    || contains_spawn(then_block)
-                    || else_block.as_ref().is_some_and(contains_spawn)
-            }
-            Stmt::While { cond, body, .. } => expr_contains_spawn(cond) || contains_spawn(body),
-            Stmt::ForIn { iter, body, .. } => expr_contains_spawn(iter) || contains_spawn(body),
-            Stmt::Region { body, .. } => contains_spawn(body),
-            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => false,
-        }
-    }
-    b.stmts.iter().any(stmt)
+    let mut v = Spawns(false);
+    body_block(b, &mut HashSet::new(), &mut v);
+    v.0
 }
-
-/// Builtins a `gen fn` (RFC-0021) may not use at generation time: they observe
-/// or mutate the outside world in a way the deterministic, cache-keyed sandbox
-/// cannot mediate. `readFile`/`listDir`/`moduleInterface` are deliberately
-/// ABSENT — they route through the loader's resolver at generation time and are
-/// recorded as cache inputs. Logging sinks (`trace`..`error`) are here too.
-const COMPTIME_FORBIDDEN: &[&str] = &[
-    "writeFile",
-    "writeFileBytes",
-    "writeStdout",
-    "renameFile",
-    "fsyncFile",
-    "readLine",
-    "args",
-    "readFileBytes",
-    "trace",
-    "debug",
-    "info",
-    "warn",
-    "error",
-];
 
 /// Comptime-purity analysis (RFC-0021), the spawn-isolation sibling. Every
 /// `gen fn` — and everything it transitively calls — must be pure enough to run
 /// deterministically in the compiler's interpreter at generation time: no
-/// `extern`, `spawn`, module state, or the [`COMPTIME_FORBIDDEN`] effect
-/// builtins. Because a `gen fn` may be *used* as an import target anywhere it is
+/// `extern`, `spawn`, module state, or an atom the lattice's `gen` column
+/// refuses ([`crate::effects::gen_refusal`]). Because a `gen fn` may be *used* as an
+/// import target anywhere it is
 /// visible, the restriction is enforced on EVERY `gen fn` unconditionally (v1:
 /// simpler and sound than a whole-program "reached as a generation target"
 /// analysis; a `gen fn` called only at runtime pays the same discipline, which
@@ -10535,10 +9890,15 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         .iter()
         .map(|f| (f.name.as_str(), f))
         .collect();
+    // RFC-0103 M2's host-boundary rule: `hostNowMillis` and its two neighbours
+    // are not host imports — the runtime shim implements them on every target —
+    // so the fence must not call them "the extern" (RFC-0125 §3 M6 finding 13).
+    // They are atoms of the `clock` and `random` rows and the table refuses them
+    // there, in the row's own words.
     let extern_fns: std::collections::HashSet<&str> = program
         .functions
         .iter()
-        .filter(|f| f.is_extern)
+        .filter(|f| f.is_extern && crate::trap::host_boundary_extern(&f.name).is_none())
         .map(|f| f.name.as_str())
         .collect();
     let global_names: std::collections::HashSet<String> =
@@ -10575,8 +9935,8 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
             return Some("reads or writes module state".to_string());
         }
         for c in expand(fn_calls(&f.body)) {
-            if COMPTIME_FORBIDDEN.contains(&c.as_str()) {
-                return Some(format!("calls `{c}`"));
+            if let Some(why) = crate::effects::gen_refusal(&c) {
+                return Some(why);
             }
             if extern_fns.contains(c.as_str()) {
                 return Some(format!("calls the extern `{c}`"));
@@ -10585,8 +9945,8 @@ fn check_comptime_purity(program: &Program, out: &mut Vec<Diagnostic>) {
         None
     };
     const HINT: &str = "generators run at compile time — they may not use `extern`, `spawn`, \
-                        module state, `writeFile`, `readLine`, `args`, `readFileBytes`, or logging \
-                        sinks";
+                        module state, `print`, `writeFile`, `readLine`, `args`, `readFileBytes`, \
+                        the clock, entropy, or logging sinks";
     // Whether a function violates purity on its own, and the call edges out of
     // it, computed ONCE per function and shared by every generator's search.
     // Both are functions of the body alone — nothing about them depends on which
@@ -10671,8 +10031,6 @@ pub struct StoredLambda {
     pub calls: std::collections::HashSet<String>,
     /// The first module-state binding the body reads or writes, if any.
     pub touches_global: Option<String>,
-    /// Whether the body performs a spawn-forbidden op (I/O, cells, `drop`, ...).
-    pub forbidden: bool,
     /// Signatures of OTHER stored function values the body itself calls.
     pub nested_sigs: Vec<Type>,
 }
@@ -10681,15 +10039,43 @@ pub struct StoredLambda {
 #[derive(Debug, Clone, Default)]
 pub struct StoredFnEffects {
     pub sources: Vec<StoredSource>,
+    /// The functions handed to a `fn`-typed PARAMETER at a call site — a
+    /// lambda literal or a bare function name, checked by
+    /// [`Checker::check_fn_arg`] and monomorphized there (RFC-0023).
+    ///
+    /// A list of its own, and not part of [`sources`](Self::sources), because
+    /// the two positions are different things: a stored value carries a
+    /// defunctionalization tag and one enum variant, and an argument carries
+    /// neither. The spawn and `--workers` analyses read `sources` alone, so
+    /// their verdicts do not move. What reads BOTH is the effect judgment
+    /// (RFC-0125 §2.2): a parameter's call reaches whatever a caller handed
+    /// it, whichever route the value took. Before this list, whether a source
+    /// was collected turned on how the parameter's type was SPELLED — a named
+    /// alias (`f: Bump`) went through the stored path and a bare `fn(..)` did
+    /// not — which is RFC-0125 §3 M6's finding 14.
+    ///
+    /// Only `sig`, `named` and a lambda's `defined_in`/`line` are filled: the
+    /// rest of [`StoredLambda`] is the spawn analysis's, and the spawn
+    /// analysis does not read this list.
+    pub arg_sources: Vec<StoredSource>,
     /// `(function, signature)` for each call through a stored fn value.
     pub calls: Vec<(String, Type)>,
+}
+
+impl StoredFnEffects {
+    /// Every function a value of some `fn` type may be, whichever position it
+    /// came from — what the effect judgment joins over.
+    pub fn every_source(&self) -> impl Iterator<Item = &StoredSource> {
+        self.sources.iter().chain(self.arg_sources.iter())
+    }
 }
 
 /// Whether two collected fn signatures could describe the same stored value.
 /// Structural equality, loosened so a generic `Type::Param` matches anything
 /// (a stored fn type inside a generic function is collected pre-substitution;
-/// matching loosely keeps the effect union conservative).
-fn fn_sigs_match(a: &Type, b: &Type) -> bool {
+/// matching loosely keeps the effect union conservative). Public because the
+/// effect judgment (RFC-0125 §2.2) joins over the same sources.
+pub fn fn_sigs_match(a: &Type, b: &Type) -> bool {
     if matches!(a, Type::Param(_)) || matches!(b, Type::Param(_)) {
         return true;
     }
@@ -10699,116 +10085,31 @@ fn fn_sigs_match(a: &Type, b: &Type) -> bool {
                 && ap.iter().zip(bp).all(|(x, y)| fn_sigs_match(x, y))
                 && fn_sigs_match(ar, br)
         }
-        (Type::Option(x), Type::Option(y))
-        | (Type::Array(x), Type::Array(y))
+        (Type::Array(x), Type::Array(y))
         | (Type::Task(x), Type::Task(y))
         | (Type::Stream(x), Type::Stream(y)) => fn_sigs_match(x, y),
-        (Type::Result(x1, x2), Type::Result(y1, y2)) | (Type::Map(x1, x2), Type::Map(y1, y2)) => {
+        (Type::Map(x1, x2), Type::Map(y1, y2)) => fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2),
+        // The two built-in sums, read through their payloads (RFC-0126 §8.15):
+        // a nested `Param` matches loosely through a payload the way it does
+        // through an `Array`'s element. A DECLARED enum still compares equal,
+        // which is the reading it had before the collapse.
+        _ if crate::types::option_payload(a).is_some()
+            && crate::types::option_payload(b).is_some() =>
+        {
+            fn_sigs_match(
+                crate::types::option_payload(a).expect("an Option payload"),
+                crate::types::option_payload(b).expect("an Option payload"),
+            )
+        }
+        _ if crate::types::result_payloads(a).is_some()
+            && crate::types::result_payloads(b).is_some() =>
+        {
+            let (x1, x2) = crate::types::result_payloads(a).expect("Result payloads");
+            let (y1, y2) = crate::types::result_payloads(b).expect("Result payloads");
             fn_sigs_match(x1, y1) && fn_sigs_match(x2, y2)
         }
         _ => a == b,
     }
-}
-
-/// The signatures whose stored values are NOT spawn-safe to call, under the
-/// current safe-function assumption: a signature is unsafe when ANY collected
-/// source is — a named source outside `safe`, or a lambda source that touches
-/// module state, performs a forbidden op, calls an unsafe function, or calls
-/// a stored value of an unsafe signature (iterated to fixpoint).
-fn stored_unsafe_sigs(
-    effects: &StoredFnEffects,
-    safe: &std::collections::HashSet<String>,
-    fn_names: &std::collections::HashSet<String>,
-) -> Vec<Type> {
-    let mut unsafe_sigs: Vec<Type> = Vec::new();
-    loop {
-        let mut changed = false;
-        for src in &effects.sources {
-            if unsafe_sigs.iter().any(|u| fn_sigs_match(u, &src.sig)) {
-                continue;
-            }
-            let bad = if let Some(n) = &src.named {
-                !safe.contains(n)
-            } else if let Some(l) = &src.lambda {
-                l.touches_global.is_some()
-                    || l.forbidden
-                    || l.calls
-                        .iter()
-                        .any(|c| fn_names.contains(c) && !safe.contains(c))
-                    || l.nested_sigs
-                        .iter()
-                        .any(|s| unsafe_sigs.iter().any(|u| fn_sigs_match(u, s)))
-            } else {
-                false
-            };
-            if bad {
-                unsafe_sigs.push(src.sig.clone());
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    unsafe_sigs
-}
-
-/// Extend the pre-check spawn-safety set with stored-function-value edges
-/// (RFC-0037): a function that calls a stored value of an unsafe signature
-/// becomes unsafe, and the ordinary call graph re-propagates until fixed.
-fn extend_spawn_safe(
-    program: &Program,
-    pre: &std::collections::HashSet<String>,
-    effects: &StoredFnEffects,
-) -> std::collections::HashSet<String> {
-    let fn_names: std::collections::HashSet<String> =
-        program.functions.iter().map(|f| f.name.clone()).collect();
-    let mut method_impls: HashMap<String, Vec<String>> = HashMap::new();
-    for imp in &program.impls {
-        if let Some(key) = crate::types::type_key(&imp.ty) {
-            for m in &imp.methods {
-                method_impls
-                    .entry(m.name.clone())
-                    .or_default()
-                    .push(crate::types::impl_method_name(&imp.protocol, &key, &m.name));
-            }
-        }
-    }
-    let mut ext = pre.clone();
-    loop {
-        let mut changed = false;
-        let unsafe_sigs = stored_unsafe_sigs(effects, &ext, &fn_names);
-        for (f, sig) in &effects.calls {
-            if ext.contains(f) && unsafe_sigs.iter().any(|u| fn_sigs_match(u, sig)) {
-                ext.remove(f);
-                changed = true;
-            }
-        }
-        // Ordinary call-graph propagation over the shrunk set.
-        let snapshot = ext.clone();
-        for f in &program.functions {
-            if snapshot.contains(&f.name) {
-                let mut callees: std::collections::HashSet<String> = Default::default();
-                for c in fn_calls(&f.body) {
-                    if let Some(impls) = method_impls.get(&c) {
-                        callees.extend(impls.iter().cloned());
-                    }
-                    callees.insert(c);
-                }
-                let ok = callees
-                    .iter()
-                    .filter(|c| fn_names.contains(*c))
-                    .all(|c| snapshot.contains(c));
-                if !ok && ext.remove(&f.name) {
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    ext
 }
 
 /// RFC-0025 (`vyrn serve --workers`): does `root` — transitively — read or
@@ -10992,162 +10293,195 @@ fn collect_binders_block(b: &Block, out: &mut std::collections::HashSet<String>)
     }
 }
 
-/// The names a pattern binds — `Some(x)`, `Ok(e)`, `Circle(w, h)`.
-///
-/// A match arm's binder shadows a module global for the length of that arm, and
-/// nothing used to collect these: `JArr(items) => emitArr(items)` in `std/json`
-/// read as a reference to some *other* module's `items` state, so a project that
-/// happened to name a global `items` made every generator reaching `emit`
-/// impure. Naming a binder after a global in a module it cannot see is not a
-/// purity violation; it is a coincidence.
-fn pattern_binders(p: &Pattern) -> Vec<String> {
-    match p {
-        Pattern::Some(n)
-        | Pattern::Ok(n)
-        | Pattern::Err(n)
-        | Pattern::Success(n)
-        | Pattern::Failure(n) => vec![n.clone()],
-        Pattern::Variant(_, ns) => ns.clone(),
-        Pattern::None | Pattern::Other => Vec::new(),
+/// The payload count a built-in sum's variant name carries: `None` binds
+/// nothing and the other three bind one. A declared enum states its own arity in
+/// its declaration and is checked against that; these four have no declaration,
+/// so the rule is here (RFC-0126 §8).
+fn sum_arm_arity(name: &str, binds: usize, line: usize) -> Result<(), Diagnostic> {
+    let want = usize::from(name != "None");
+    if binds != want {
+        return Err(cerr!(
+            line,
+            "variant `{name}` has {want} payload(s), but the pattern binds {binds}"
+        ));
+    }
+    Ok(())
+}
+
+/// The purity walk's line at each site: a name that a global answers to and no
+/// local shadows is a reference, whether it is read, written, dropped or called.
+struct GlobalRef<'a> {
+    globals: &'a HashSet<String>,
+    found: bool,
+}
+
+impl GlobalRef<'_> {
+    fn hit(&mut self, n: &str, locals: &HashSet<String>) {
+        if self.globals.contains(n) && !locals.contains(n) {
+            self.found = true;
+        }
     }
 }
 
-/// `local` extended with what `p` binds — the scope of one arm.
-fn locals_with(
-    local: &std::collections::HashSet<String>,
-    p: &Pattern,
-) -> std::collections::HashSet<String> {
-    let mut out = local.clone();
-    out.extend(pattern_binders(p));
-    out
+impl BodyVisit<'_> for GlobalRef<'_> {
+    fn stmt(&mut self, s: &Stmt, locals: &HashSet<String>) {
+        match s {
+            Stmt::Assign { name, .. }
+            | Stmt::SetField { name, .. }
+            | Stmt::IndexSet { name, .. }
+            | Stmt::Drop { name, .. } => self.hit(name, locals),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+        if self.found {
+            return false;
+        }
+        match e {
+            Expr::Var { name, .. } => self.hit(name, locals),
+            // Calling a fn-typed module global READS it (`g(x)` dispatches
+            // through the stored value, exactly like any other use), so the
+            // callee name is a reference too — a generator that only ever
+            // called such a global used to pass the purity walk. A declared
+            // function never collides: functions and module state share one
+            // namespace.
+            //
+            // A lambda body (RFC-0023) that reads module state makes the
+            // enclosing call chain non-spawn-safe, and the walk descends into
+            // one, so the effect is attributed to the instantiation site.
+            Expr::Call { name, .. } => self.hit(name, locals),
+            _ => {}
+        }
+        !self.found
+    }
 }
 
 /// Whether a block references a global (reads it via `Var`, or writes it via
 /// `Assign`/`SetField`/`IndexSet`) that no local of the same name shadows.
+///
+/// The descent and the scope stack are `ast::body_scope_descent!`'s since
+/// RFC-0125 §3 M6. The shadow set this pass carried was NOT the walk's: it was
+/// one flat set for the whole function, from [`collect_binders_block`], plus a
+/// per-arm extension for a pattern's binders. The caller still seeds that flat
+/// set, so a name read ABOVE its own `let` is answered as it always was; what
+/// the walk adds is the two shadows the flat set never held — a lambda's own
+/// parameters, and a `let` inside a lambda body or a `match` block arm.
 fn global_ref_block(
     b: &Block,
     globals: &std::collections::HashSet<String>,
     local: &std::collections::HashSet<String>,
 ) -> bool {
-    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
-    b.stmts.iter().any(|s| match s {
-        Stmt::Let { value, .. } | Stmt::Expr(value) => global_ref_expr(value, globals, local),
-        Stmt::Assign { name, value, .. } | Stmt::SetField { name, value, .. } => {
-            is_global(name) || global_ref_expr(value, globals, local)
-        }
-        Stmt::IndexSet {
-            name, index, value, ..
-        } => {
-            is_global(name)
-                || global_ref_expr(index, globals, local)
-                || global_ref_expr(value, globals, local)
-        }
-        Stmt::Return { value: Some(e), .. } => global_ref_expr(e, globals, local),
-        Stmt::Return { value: None, .. } => false,
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            global_ref_expr(cond, globals, local)
-                || global_ref_block(then_block, globals, local)
-                || else_block
-                    .as_ref()
-                    .is_some_and(|eb| global_ref_block(eb, globals, local))
-        }
-        Stmt::IfLet {
-            pattern,
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            global_ref_expr(scrutinee, globals, local)
-                || global_ref_block(then_block, globals, &locals_with(local, pattern))
-                || else_block
-                    .as_ref()
-                    .is_some_and(|eb| global_ref_block(eb, globals, local))
-        }
-        Stmt::While { cond, body, .. } => {
-            global_ref_expr(cond, globals, local) || global_ref_block(body, globals, local)
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            global_ref_expr(iter, globals, local) || global_ref_block(body, globals, local)
-        }
-        Stmt::Drop { name, .. } => is_global(name),
-        Stmt::Region { body, .. } => global_ref_block(body, globals, local),
-        Stmt::Break { .. } | Stmt::Continue { .. } => false,
-    })
+    let mut locals = local.clone();
+    let mut v = GlobalRef {
+        globals,
+        found: false,
+    };
+    body_block(b, &mut locals, &mut v);
+    v.found
 }
 
+/// The same question of one expression.
 fn global_ref_expr(
     e: &Expr,
     globals: &std::collections::HashSet<String>,
     local: &std::collections::HashSet<String>,
 ) -> bool {
-    let is_global = |n: &str| globals.contains(n) && !local.contains(n);
-    match e {
-        Expr::Var { name, .. } => is_global(name),
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => false,
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            global_ref_expr(expr, globals, local)
+    let mut v = GlobalRef {
+        globals,
+        found: false,
+    };
+    body_expr(e, local, &mut v);
+    v.found
+}
+
+/// The rule's line at each site, and its first violation.
+struct InitRules<'a> {
+    forbidden: &'a HashSet<String>,
+    fn_module: &'a HashMap<String, Option<String>>,
+    own_module: &'a Option<String>,
+    all_globals: &'a HashSet<&'a str>,
+    ready: &'a HashSet<String>,
+    own_name: &'a str,
+    line: usize,
+    err: Option<Diagnostic>,
+}
+
+impl InitRules<'_> {
+    fn fail(&mut self, d: Diagnostic) {
+        if self.err.is_none() {
+            self.err = Some(d);
         }
-        Expr::Consume { place, .. } => global_ref_expr(place, globals, local),
-        Expr::Binary { lhs, rhs, .. } => {
-            global_ref_expr(lhs, globals, local) || global_ref_expr(rhs, globals, local)
+    }
+}
+
+impl BodyVisit<'_> for InitRules<'_> {
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        if self.err.is_some() {
+            return false;
         }
-        // Calling a fn-typed module global READS it (`g(x)` dispatches
-        // through the stored value, exactly like any other use), so the
-        // callee name is a reference too — a generator that only ever
-        // called such a global used to pass the purity walk. A declared
-        // function never collides: functions and module state share one
-        // namespace.
-        Expr::Call { name, args, .. } => {
-            is_global(name) || args.iter().any(|a| global_ref_expr(a, globals, local))
+        let (own_name, line) = (self.own_name, self.line);
+        match e {
+            Expr::Var { name, .. }
+                if self.all_globals.contains(name.as_str()) && !self.ready.contains(name) =>
+            {
+                if name == own_name {
+                    self.fail(cerr!(
+                        line,
+                        "module state `{own_name}` may not read itself in its                          own initializer"
+                    ));
+                } else {
+                    self.fail(cerr!(
+                        line,
+                        "initializer of `{own_name}` reads `{name}`, a module-state                          binding declared later — a global may only read earlier ones"
+                    ));
+                }
+                false
+            }
+            Expr::Call { name, .. }
+                // An `extern` or protocol method is never callable before
+                // `main`. A SAME-MODULE ordinary function is forbidden too —
+                // only imported modules are guaranteed initialized first
+                // (RFC-0029).
+                if self.forbidden.contains(name)
+                    || matches!(self.fn_module.get(name), Some(m) if m == self.own_module) =>
+            {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not call `{name}` — a                      module-state initializer runs before `main`, so it may use only                      literals, operators, built-ins, and functions imported from another                      module (whose state initializes first)"
+                ));
+                false
+            }
+            Expr::Spawn { name, .. } => {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not `spawn {name}` — a                      module-state initializer runs before `main` (no user calls)"
+                ));
+                false
+            }
+            // A module-state initializer is an expression, and a block arm
+            // exists only in statement position — unreachable, and refused
+            // rather than assumed.
+            Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
+                self.fail(cerr!(
+                    line,
+                    "initializer of `{own_name}` may not use a block match arm"
+                ));
+                false
+            }
+            // A lambda literal can never appear in a valid initializer (the
+            // checker's position rule rejects it outside a call argument, and
+            // initializers make no calls); an expression body is walked for
+            // completeness so the deeper diagnostic still fires, and a block
+            // body holds statements an initializer cannot have.
+            Expr::Lambda {
+                body: LambdaBody::Block(_),
+                ..
+            } => false,
+            _ => true,
         }
-        Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
-            args.iter().any(|a| global_ref_expr(a, globals, local))
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            global_ref_expr(scrutinee, globals, local)
-                || arms.iter().any(|a| match &a.body {
-                    ArmBody::Expr(e) => {
-                        global_ref_expr(e, globals, &locals_with(local, &a.pattern))
-                    }
-                    ArmBody::Block(b) => {
-                        global_ref_block(b, globals, &locals_with(local, &a.pattern))
-                    }
-                })
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            global_ref_expr(cond, globals, local)
-                || global_ref_expr(then_branch, globals, local)
-                || else_branch
-                    .as_ref()
-                    .is_some_and(|e| global_ref_expr(e, globals, local))
-        }
-        Expr::StructLit { fields, .. } => fields
-            .iter()
-            .any(|(_, v)| global_ref_expr(v, globals, local)),
-        Expr::ArrayLit { elems, .. } => elems.iter().any(|v| global_ref_expr(v, globals, local)),
-        Expr::MapLit { entries, .. } => entries
-            .iter()
-            .any(|(k, v)| global_ref_expr(k, globals, local) || global_ref_expr(v, globals, local)),
-        // A lambda body (RFC-0023) that reads module state makes the enclosing
-        // call chain non-spawn-safe — the effect is attributed to the
-        // instantiation site (this function).
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => global_ref_expr(e2, globals, local),
-            LambdaBody::Block(b) => global_ref_block(b, globals, local),
-        },
     }
 }
 
@@ -11157,6 +10491,9 @@ fn global_ref_expr(
 /// another module (which initialize first). A same-module ordinary function,
 /// any `extern`, a protocol method, or a `spawn` is rejected. Returns the first
 /// violation.
+///
+/// The descent is `ast::body_scope_descent!`'s since RFC-0125 §3 M6; every arm
+/// this pass wrote out was either a refusal or a plain recursion.
 #[allow(clippy::too_many_arguments)]
 fn init_restrictions(
     e: &Expr,
@@ -11168,315 +10505,103 @@ fn init_restrictions(
     own_name: &str,
     line: usize,
 ) -> Result<(), Diagnostic> {
-    let recur = |e: &Expr| {
-        init_restrictions(
-            e,
-            forbidden,
-            fn_module,
-            own_module,
-            all_globals,
-            ready,
-            own_name,
-            line,
-        )
+    let mut v = InitRules {
+        forbidden,
+        fn_module,
+        own_module,
+        all_globals,
+        ready,
+        own_name,
+        line,
+        err: None,
     };
-    match e {
-        Expr::Var { name, .. } => {
-            if all_globals.contains(name.as_str()) && !ready.contains(name) {
-                if name == own_name {
-                    return Err(cerr!(
-                        line,
-                        "module state `{own_name}` may not read itself in its \
-                         own initializer"
-                    ));
-                }
-                return Err(cerr!(
-                    line,
-                    "initializer of `{own_name}` reads `{name}`, a module-state \
-                     binding declared later — a global may only read earlier ones"
-                ));
-            }
-            Ok(())
-        }
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => Ok(()),
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => recur(expr),
-        Expr::Consume { place, .. } => recur(place),
-        Expr::Binary { lhs, rhs, .. } => {
-            recur(lhs)?;
-            recur(rhs)
-        }
-        Expr::Call { name, args, .. } => {
-            // An `extern` or protocol method is never callable before `main`.
-            let forbidden_here = forbidden.contains(name)
-                // A SAME-MODULE ordinary function is forbidden too — only
-                // imported modules are guaranteed initialized first (RFC-0029).
-                || matches!(fn_module.get(name), Some(m) if m == own_module);
-            if forbidden_here {
-                return Err(cerr!(
-                    line,
-                    "initializer of `{own_name}` may not call `{name}` — a \
-                     module-state initializer runs before `main`, so it may use only \
-                     literals, operators, built-ins, and functions imported from another \
-                     module (whose state initializes first)"
-                ));
-            }
-            for a in args {
-                recur(a)?;
-            }
-            Ok(())
-        }
-        Expr::Spawn { name, .. } => Err(cerr!(
-            line,
-            "initializer of `{own_name}` may not `spawn {name}` — a \
-             module-state initializer runs before `main` (no user calls)"
-        )),
-        Expr::TryConstruct { args, .. } => {
-            for a in args {
-                recur(a)?;
-            }
-            Ok(())
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            recur(scrutinee)?;
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => recur(e)?,
-                    // A module-state initializer is an expression, and a block
-                    // arm exists only in statement position — unreachable, and
-                    // refused rather than assumed.
-                    ArmBody::Block(_) => {
-                        return Err(cerr!(
-                            line,
-                            "initializer of `{own_name}` may not use a block match arm"
-                        ))
-                    }
-                }
-            }
-            Ok(())
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            recur(cond)?;
-            recur(then_branch)?;
-            if let Some(eb) = else_branch {
-                recur(eb)?;
-            }
-            Ok(())
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                recur(v)?;
-            }
-            Ok(())
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                recur(v)?;
-            }
-            Ok(())
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                recur(k)?;
-                recur(v)?;
-            }
-            Ok(())
-        }
-        // A lambda literal can never appear in a valid initializer (the checker's
-        // position rule rejects it outside a call argument, and initializers make
-        // no calls); recurse for completeness so the deeper diagnostic still fires.
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => recur(e2),
-            LambdaBody::Block(_) => Ok(()),
-        },
+    body_expr(e, &HashSet::new(), &mut v);
+    match v.err {
+        Some(d) => Err(d),
+        None => Ok(()),
     }
 }
 
-/// The names of every function/builtin called (or spawned) anywhere in a block.
+// The descent over a body is `ast::body_scope_descent!`'s, where the AST is
+// declared (RFC-0125 §3 M6). Every reader in this file that wants to know one
+// thing about a body — and not to type it — is an impl of this trait.
+crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+
+/// The collector's line at each site: a call, a spawn and a `try`-construct
+/// each name what they reach, and no other form does.
+struct Calls<'a>(&'a mut HashSet<String>);
+
+impl BodyVisit<'_> for Calls<'_> {
+    // The question is what a body reaches, not what shadows what.
+    const SCOPED: bool = false;
+
+    fn expr(&mut self, e: &Expr, _: &HashSet<String>) -> bool {
+        // A call inside a lambda body (RFC-0023) is attributed to the enclosing
+        // function — that is the monomorphization site, so a lambda that
+        // performs I/O (or, via `global_ref_expr`, reads module state) makes the
+        // enclosing function non-spawn-safe. The walk descends into one, so
+        // there is nothing to say here about it.
+        if let Expr::Call { name, .. }
+        | Expr::TryConstruct { name, .. }
+        | Expr::Spawn { name, .. } = e
+        {
+            self.0.insert(name.clone());
+        }
+        true
+    }
+}
+
 /// Every function name called anywhere in `b`.
 ///
 /// Public because RFC-0076's wasm engine needs the same question the
 /// comptime-purity check asks — "what does this reach?" — to decide whether a
 /// generator touches a capability it cannot yet serve. One walker, one answer.
-pub fn fn_calls(b: &Block) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    calls_block(b, &mut out);
+pub fn fn_calls(b: &Block) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut locals = HashSet::new();
+    body_block(b, &mut locals, &mut Calls(&mut out));
     out
-}
-fn calls_block(b: &Block, out: &mut std::collections::HashSet<String>) {
-    for s in &b.stmts {
-        calls_stmt(s, out);
-    }
-}
-fn calls_stmt(s: &Stmt, out: &mut std::collections::HashSet<String>) {
-    match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => calls_expr(value, out),
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                calls_expr(e, out);
-            }
-        }
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            calls_expr(cond, out);
-            calls_block(then_block, out);
-            if let Some(eb) = else_block {
-                calls_block(eb, out);
-            }
-        }
-        Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            calls_expr(scrutinee, out);
-            calls_block(then_block, out);
-            if let Some(eb) = else_block {
-                calls_block(eb, out);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            calls_expr(cond, out);
-            calls_block(body, out);
-        }
-        Stmt::ForIn { iter, body, .. } => {
-            calls_expr(iter, out);
-            calls_block(body, out);
-        }
-        Stmt::IndexSet { index, value, .. } => {
-            calls_expr(index, out);
-            calls_expr(value, out);
-        }
-        Stmt::Region { body, .. } => calls_block(body, out),
-        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-    }
-}
-fn calls_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
-    match e {
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            calls_expr(expr, out)
-        }
-        Expr::Consume { place, .. } => calls_expr(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            calls_expr(lhs, out);
-            calls_expr(rhs, out);
-        }
-        Expr::Call { name, args, .. } | Expr::TryConstruct { name, args, .. } => {
-            out.insert(name.clone());
-            for a in args {
-                calls_expr(a, out);
-            }
-        }
-        Expr::Spawn { name, args, .. } => {
-            out.insert(name.clone());
-            for a in args {
-                calls_expr(a, out);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            calls_expr(scrutinee, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => calls_expr(e, out),
-                    ArmBody::Block(b) => calls_block(b, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            calls_expr(cond, out);
-            calls_expr(then_branch, out);
-            if let Some(eb) = else_branch {
-                calls_expr(eb, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                calls_expr(v, out);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                calls_expr(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                calls_expr(k, out);
-                calls_expr(v, out);
-            }
-        }
-        // Calls inside a lambda body (RFC-0023) are attributed to the enclosing
-        // function — that is the monomorphization site, so a lambda that performs
-        // I/O (or, via `global_ref_expr`, reads module state) makes the enclosing
-        // function non-spawn-safe.
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(e2) => calls_expr(e2, out),
-            LambdaBody::Block(b) => calls_block(b, out),
-        },
-    }
 }
 
 #[cfg(test)]
 mod tests {
 
-    /// Every log level is reserved, and every log level is an effect.
+    /// Every log level reaches one internal name, and that name is an effect.
     ///
-    /// `trace`/`debug`/`info`/`warn`/`error` are spelled out inside three long
-    /// lists here — `RESERVED`, `SPAWN_FORBIDDEN`, `COMPTIME_FORBIDDEN` — mixed
-    /// among dozens of unrelated builtin names. They cannot read
-    /// [`ast::LOG_LEVELS`] directly, because splicing a const array into an
-    /// array literal costs more than it saves and would make three readable
-    /// lists unreadable.
+    /// The five words used to be spelled out inside `RESERVED`. They are
+    /// ordinary identifiers again (M6's levels slice), and what makes a level
+    /// call a level is the spelling its call site carries: the parser's method
+    /// sugar maps `info` to `@info`, the row is seeded under that, and the
+    /// effect atom is keyed by it. Three tables, one per file, and none can
+    /// splice `ast::LOG_LEVELS` into an array literal without making a readable
+    /// list unreadable.
     ///
     /// So this compares them instead. A sixth level added to `ast::LOG_LEVELS`
-    /// and to the dispatch, but not to these lists, is a level that logs while
-    /// counting as neither an effect nor a reserved word: `spawn` would let it
-    /// cross a task boundary, and a `gen fn` would be allowed to call it at
-    /// compile time.
+    /// and to the dispatch, but not to the method table, is a level a program
+    /// cannot write; one missing from the lattice is a level that logs while
+    /// counting as no effect at all.
     #[test]
-    fn every_log_level_is_reserved_and_forbidden_where_effects_are() {
-        for list in [
-            ("RESERVED", RESERVED),
-            ("SPAWN_FORBIDDEN", SPAWN_FORBIDDEN),
-            ("COMPTIME_FORBIDDEN", COMPTIME_FORBIDDEN),
-        ] {
-            let (what, names) = list;
-            let missing: Vec<&str> = crate::ast::LOG_LEVELS
-                .iter()
-                .copied()
-                .filter(|lvl| !names.contains(lvl))
-                .collect();
+    fn every_log_level_is_a_method_builtin_and_an_effect() {
+        for lvl in crate::ast::LOG_LEVELS {
+            let internal = crate::parser::method_builtin(lvl)
+                .unwrap_or_else(|| panic!("`{lvl}` is not a method-form builtin"));
+            assert_eq!(
+                crate::ast::log_internal(internal),
+                crate::ast::log_level_ordinal(lvl),
+                "`{lvl}` maps to `{internal}`, which is not its internal spelling"
+            );
             assert!(
-                missing.is_empty(),
-                "{what} does not hold every log level — missing: {}",
-                missing.join(", ")
+                crate::prelude::signature(internal).is_some(),
+                "`{internal}` has no seeded row"
+            );
+            assert!(
+                crate::effects::gen_refusal(internal).is_some(),
+                "`{lvl}` is a log level a `gen fn` may call"
+            );
+            let e = crate::effects::atom(internal).expect("a log level is an atom");
+            assert!(
+                !crate::effects::Effects::SPAWN_ALLOWS.has(e),
+                "`{lvl}` is a log level a task may call"
             );
         }
     }
@@ -11536,6 +10661,53 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "id");
         assert_eq!(calls[0].1, vec![("T".to_string(), Type::Int)]);
+    }
+
+    /// **One check per analysis** — RFC-0125 §3 M3, the one check.
+    ///
+    /// The analysis checks, and the lowering the placer runs used to check the
+    /// same program again to learn the type of every node. Now the analysis's
+    /// check records and the lowering reads what it recorded, so the pin is
+    /// that the two answers are the SAME answer: what
+    /// [`check_accum_recording`] holds is what [`record`] would have made.
+    ///
+    /// The second half is the key. A record is held for ONE program, and the
+    /// address of a program is only a key while something borrows it — so a
+    /// second program, and the same program with no [`crate::own::Memo`] open,
+    /// each get a record of their own.
+    #[test]
+    fn the_analysiss_own_check_records_what_the_lowering_reads() {
+        let src = "fn id<T>(x: T) -> T {\n    return x\n}\n\n\
+                   fn main() -> Int64 {\n    let n: Int64 = id(1)\n    return n\n}\n";
+        let p = parse(lex(src).unwrap()).unwrap();
+        let want = record(&p);
+
+        // With the analysis open, the check makes the record and the lowering
+        // is served it — one check, two readers.
+        {
+            let _memo = crate::own::Memo::open(&p);
+            let (diags, _) = check_accum_recording(&p);
+            assert!(diags.is_empty(), "{diags:?}");
+            let got = recorded(&p);
+            assert_eq!(got.node_types, want.node_types);
+            assert_eq!(got.joins, want.joins);
+            assert_eq!(got.node_substs.len(), want.node_substs.len());
+            // A DIFFERENT program borrowed at the same time is not this one,
+            // and asking for it makes a record of its own.
+            let q = parse(lex(src).unwrap()).unwrap();
+            let other = recorded(&q);
+            assert!(
+                other
+                    .node_types
+                    .keys()
+                    .all(|k| !got.node_types.contains_key(k)),
+                "a record served for the wrong program"
+            );
+        }
+
+        // Nothing borrows the program now, so nothing is held for it.
+        let after = recorded(&p);
+        assert_eq!(after.node_types, want.node_types);
     }
 
     // ---- RFC-0091 M2: place projections ------------------------------------
@@ -12020,7 +11192,13 @@ mod tests {
              fn main() -> Int64 { return label(1).byteLength }",
         )
         .unwrap_err();
-        assert!(e.contains("`toString` renders"), "{e}");
+        // One sentence for both renderers since the union became a bound
+        // (RFC-0125 §3 M6): `print` always said "needs", `toString` said
+        // "renders", and the two arms that carried them are one row's bound.
+        assert!(
+            e.contains("`toString` needs a number, Bool, or String"),
+            "{e}"
+        );
     }
 
     /// A type with no `impl Show` is refused as before, and the refusal names
@@ -12242,7 +11420,9 @@ mod tests {
              fn main() -> Int64 { if let Ok(v) = f() { return v } return 0 }",
         )
         .unwrap_err();
-        assert!(bad.contains("does not match scrutinee"), "{bad}");
+        // The enum path's wording, since RFC-0126 §8.11's M4b took every sum
+        // to it: a name that is not one of the scrutinee's variants.
+        assert!(bad.contains("is not a variant of"), "{bad}");
     }
 
     #[test]
@@ -12270,29 +11450,6 @@ mod tests {
     }
 
     // ---- stored function values: spawn / workers pins (RFC-0037) ---------
-
-    #[test]
-    fn spawning_through_a_stateful_stored_value_is_rejected() {
-        // `work` looks pure to the pre-check fixpoint (its only impurity flows
-        // through a stored function value whose source reads module state) —
-        // the extended fixpoint must catch the spawn.
-        let src = "let mut hits: Int64 = 0\n\
-             fn stateful() -> Int64 { return hits }\n\
-             fn make() -> fn() -> Int64 { return stateful }\n\
-             fn work() -> Int64 { let f = make()  return f() }\n\
-             fn main() -> Int64 { let t = spawn work()  return t.join() }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("invokes a stored function value"), "{e}");
-    }
-
-    #[test]
-    fn spawning_through_an_isolated_stored_value_is_fine() {
-        let src = "fn pure() -> Int64 { return 7 }\n\
-             fn make() -> fn() -> Int64 { return pure }\n\
-             fn work() -> Int64 { let f = make()  return f() }\n\
-             fn main() -> Int64 { let t = spawn work()  return t.join() }";
-        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
 
     #[test]
     fn spawned_function_may_not_take_fn_parameters() {
@@ -12389,7 +11546,7 @@ mod tests {
     fn payload_enum_is_codable() {
         let src = "type Shape = | Circle(Int64) | Rect(Int64, Int64) | Unit \
                    fn f(s: Shape) -> String { return toJson(s) } \
-                   fn g(s: String) -> Validation<Shape> { return fromJson(Shape, s) } \
+                   fn g(s: String) -> Validation<Shape> { return fromJson<Shape>(s) } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
@@ -12398,7 +11555,7 @@ mod tests {
     fn result_is_codable_and_named_aliases_work() {
         let src = "type R = Result<Bool, String> \
                    fn f(x: R) -> String { return toJson(x) } \
-                   fn g(s: String) -> Validation<R> { return fromJson(R, s) } \
+                   fn g(s: String) -> Validation<R> { return fromJson<R>(s) } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
@@ -12419,7 +11576,7 @@ mod tests {
     #[test]
     fn validation_stays_non_codable() {
         let src = "fn f(s: String) -> String { \
-                       let v = fromJson(Issue, s) \
+                       let v = fromJson<Issue>(s) \
                        return toJson(v) } \
                    fn main() -> Int64 { return 0 }";
         let e = check_src(src).unwrap_err();
@@ -12430,7 +11587,7 @@ mod tests {
     fn option_of_result_is_codable() {
         let src = "type Wrap = { r: Option<Result<Int64, String>> } \
                    fn f(w: Wrap) -> String { return toJson(w) } \
-                   fn g(s: String) -> Validation<Wrap> { return fromJson(Wrap, s) } \
+                   fn g(s: String) -> Validation<Wrap> { return fromJson<Wrap>(s) } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
@@ -12484,6 +11641,23 @@ mod tests {
         .unwrap_err();
         assert!(e.contains("not comptime-pure"), "{e}");
         assert!(e.contains("`writeFile`"), "{e}");
+    }
+
+    /// RFC-0125 M6 finding 4: `write-output` is one effect and its `gen` cell
+    /// is one cell. The fence used to refuse `writeStdout` and allow `print`,
+    /// which is one effect with two verdicts. A generator is re-run only when
+    /// its cache key changes, so a `print` in a `gen fn` is silent on a cache
+    /// hit, and the same build prints or does not print by the state of the
+    /// cache.
+    #[test]
+    fn gen_fn_using_print_is_rejected() {
+        let src = "gen fn g() -> String { print(\"hi\") return \"\" } \
+                   fn main() -> Int64 { return 0 }";
+        let e = check_src(src).unwrap_err();
+        assert!(
+            e.contains("not comptime-pure") && e.contains("`print`"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -12571,19 +11745,46 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
+    /// Every refusal these five calls used to get from a hand-written arm, in
+    /// the words the seeded row now gets them (RFC-0125 §3 M6). The arms said
+    /// "`readFile` needs a String path"; the row says which argument and what
+    /// it expects, which is what every user declaration has always said.
     #[test]
     fn io_builtins_reject_wrong_arguments() {
         let e = check_src("fn main() -> Int64 { let r = readFile(5); return 0 }").unwrap_err();
-        assert!(e.contains("`readFile` needs a String path"), "{e}");
+        assert!(e.contains("`readFile` argument 1 expects String"), "{e}");
         let e = check_src("fn main() -> Int64 { let r = writeFile(\"p\"); return 0 }").unwrap_err();
-        assert!(e.contains("`writeFile` takes 2 arguments"), "{e}");
+        assert!(e.contains("`writeFile` expects 2 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let a = args(1); return 0 }").unwrap_err();
-        assert!(e.contains("`args` takes no arguments"), "{e}");
+        assert!(e.contains("`args` expects 0 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let l = readLine(\"x\"); return 0 }").unwrap_err();
-        assert!(e.contains("`readLine` takes no arguments"), "{e}");
+        assert!(e.contains("`readLine` expects 0 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let s = stringFromBytes(\"x\"); return 0 }")
             .unwrap_err();
-        assert!(e.contains("`stringFromBytes` needs an Array<UInt8>"), "{e}");
+        assert!(
+            e.contains("`stringFromBytes` argument 1 expects Array<UInt8>"),
+            "{e}"
+        );
+    }
+
+    /// The two bit views, and the drift the deletion found: the arm answered a
+    /// `UInt64` and the row said `Int64`. The row says `UInt64` now, and this
+    /// is the assertion that says which (RFC-0125 §3 M6).
+    #[test]
+    fn the_bit_views_answer_a_uint64() {
+        let src = "fn main() -> Int64 { \
+                       let b: UInt64 = floatBits(1.0) \
+                       let f: Float64 = floatFromBits(b) \
+                       return 0 }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+        let e = check_src("fn main() -> Int64 { let b = floatBits(7); return 0 }").unwrap_err();
+        assert!(e.contains("`floatBits` argument 1 expects Float64"), "{e}");
+        let e =
+            check_src("fn main() -> Int64 { let f = floatFromBits(1.5); return 0 }").unwrap_err();
+        assert!(
+            e.contains("`floatFromBits` argument 1 expects UInt64"),
+            "{e}"
+        );
     }
 
     /// The eleven names RFC-0094 M2 gave back, and what a caller who spells one
@@ -12618,34 +11819,106 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
-    /// No name may sit in both tables: a reader sent to an import that
-    /// `RESERVED` forbids declaring has been sent nowhere.
+    /// The census held `@reserve` and `@tally` back because their blocks
+    /// answered `Ok(at)` — the receiver's OWN type — where the rows answer
+    /// `Array<T>` and `Map<K, Int64>`, so a `type Buf = Array<Int64>` receiver
+    /// was said to stop being a `Buf`. It does not. An `Array` is covariant in
+    /// its element and a `Named` decays to its base, so the rebuilt value goes
+    /// back into the binding through the same coercion every other assignment
+    /// takes. This is the program the census's reason said would break
+    /// (RFC-0125 §3 M6).
+    #[test]
+    fn a_rebuilt_receiver_keeps_its_alias() {
+        let src = "type Buf = Array<Int64> \
+                   type Counts = Map<String, Int64> \
+                   type Box = { b: Buf, c: Counts } \
+                   fn fill(b: Buf) -> Int64 { return b.length } \
+                   fn main() -> Int64 { \
+                       let mut x = Box { b: [], c: [:] } \
+                       x.b.reserve(8) \
+                       x.b.push(3) \
+                       x.c.tally(\"k\", 5) \
+                       x.b.clear() \
+                       x.b.append([1, 2]) \
+                       x.b.copyFrom([3, 4]) \
+                       x.c.tallyBytes(bytes(\"k\"), 1) \
+                       return fill(x.b) + x.c.keys().length }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// The one thing three of those rows say that no parameter type can:
+    /// `clear`, `append` and `copyFrom` do not release what they forget or
+    /// overwrite, so their element must own no heap (RFC-0125 §3 M6). One
+    /// bound, [`crate::prelude::HEAPLESS`], one sentence, three names — where
+    /// each name had a hand-written block and a sentence of its own.
+    #[test]
+    fn the_heapless_bound_holds_the_three_that_forget_their_elements() {
+        for call in ["xs.clear()", "xs.append(ys)", "xs.copyFrom(ys)"] {
+            let src = format!(
+                "fn main() -> Int64 {{ \
+                   let mut xs: Array<String> = [] \
+                   let ys: Array<String> = [] \
+                   {call} \
+                   return xs.length }}"
+            );
+            let e = check_src(&src).unwrap_err();
+            assert!(
+                e.contains("owns heap — move the elements one at a time instead"),
+                "{call}: {e}"
+            );
+        }
+        // The same three on a heapless element are accepted, which is what the
+        // bound is FOR — a rule that refused everything would pass the test
+        // above and break every caller.
+        let ok = "fn main() -> Int64 { \
+                    let mut xs: Array<Int64> = [] \
+                    let ys: Array<Int64> = [1] \
+                    xs.append(ys) \
+                    xs.copyFrom(ys) \
+                    xs.clear() \
+                    return xs.length }";
+        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
+    }
+
+    /// A `Gone::Module` name may not be reserved: a reader sent to an import
+    /// that `RESERVED` forbids declaring has been sent nowhere. A
+    /// `Gone::Removed` name must be reserved, which is the same rule read the
+    /// other way — a program that could declare `fn push` would shadow the hint
+    /// with its own function, and the reader would never see it.
     #[test]
     fn every_moved_name_is_gone_from_reserved() {
-        for (n, _) in MOVED_TO_STD {
-            assert!(
-                !RESERVED.contains(n),
-                "`{n}` is both reserved and said to live in a std module"
-            );
+        for (n, g) in MOVED_TO_STD {
+            match g {
+                // A desugared name is an ordinary export of its module, so it
+                // follows the `Module` rule: reserve it and the import line the
+                // sentence names could not be written.
+                Gone::Module(_) | Gone::Desugared { .. } => assert!(
+                    !RESERVED.contains(n),
+                    "`{n}` is both reserved and said to live in a std module"
+                ),
+                Gone::Removed(_) => assert!(
+                    RESERVED.contains(n),
+                    "`{n}` is said to be removed but a program may declare it, \
+                     which would shadow the hint"
+                ),
+            }
         }
     }
 
+    /// The ten removed spellings were ten `match` arms in `Checker::call` until
+    /// RFC-0125 §3 M6. Each is a row of [`MOVED_TO_STD`] now, and this is the
+    /// sentence each row still gives.
     #[test]
-    fn io_builtins_are_spawn_forbidden() {
-        // A function touching stdin/files/argv is an effect — never a task.
-        for body in [
-            "let l = readLine()",
-            "let r = readFile(\"p\")",
-            "let w = writeFile(\"p\", \"c\")",
-            "let a = args()",
-        ] {
-            let src = format!(
-                "fn job() -> Int64 {{ {body} return 0 }} \
-                 fn main() -> Int64 {{ let t = spawn job() return t.join() }}"
-            );
-            let e = check_src(&src).unwrap_err();
-            assert!(e.contains("is not allowed"), "{body}: {e}");
-        }
+    fn removed_spellings_are_rows_of_one_table() {
+        let removed: Vec<&str> = MOVED_TO_STD
+            .iter()
+            .filter(|(_, g)| matches!(g, Gone::Removed(_)))
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            removed,
+            vec!["str", "concat", "len", "list", "join", "toString", "push", "at", "alen", "array"]
+        );
     }
 
     #[test]
@@ -12702,34 +11975,6 @@ mod tests {
 
     // ---- structured concurrency -----------------------------------------
 
-    #[test]
-    fn accepts_spawn_of_pure_function() {
-        let src = "fn sq(n: Int64) -> Int64 { return n * n; } \
-                   fn main() -> Int64 { let t = spawn sq(5); return t.join(); }";
-        assert!(check_src(src).is_ok());
-    }
-
-    #[test]
-    fn rejects_spawn_of_impure_function() {
-        let e = check_src(
-            "fn noisy(n: Int64) -> Int64 { print(n); return n; } \
-                           fn main() -> Int64 { let t = spawn noisy(5); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
-    #[test]
-    fn rejects_spawn_of_transitively_impure_function() {
-        let e = check_src(
-            "fn inner(n: Int64) -> Int64 { print(n); return n; } \
-                           fn outer(n: Int64) -> Int64 { return inner(n); } \
-                           fn main() -> Int64 { let t = spawn outer(5); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
     // ---- RFC-0044 storage host effects (renameFile / fsyncFile) ------------
 
     #[test]
@@ -12741,9 +11986,9 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
         let e =
             check_src("fn main() -> Int64 { let r = renameFile(\"a\"); return 0 }").unwrap_err();
-        assert!(e.contains("`renameFile` takes 2 arguments"), "{e}");
+        assert!(e.contains("`renameFile` expects 2 argument(s)"), "{e}");
         let e = check_src("fn main() -> Int64 { let r = fsyncFile(1); return 0 }").unwrap_err();
-        assert!(e.contains("`fsyncFile` needs a String path"), "{e}");
+        assert!(e.contains("`fsyncFile` argument 1 expects String"), "{e}");
     }
 
     #[test]
@@ -12759,18 +12004,6 @@ mod tests {
     }
 
     #[test]
-    fn rfc0044_rename_and_fsync_are_effects_not_tasks() {
-        for io in ["renameFile(\"a\", \"b\")", "fsyncFile(\"a\")"] {
-            let src = format!(
-                "fn eff(n: Int64) -> Int64 {{ let w = {io} return n }} \
-                 fn main() -> Int64 {{ let t = spawn eff(5); return t.join() }}"
-            );
-            let e = check_src(&src).unwrap_err();
-            assert!(e.contains("isolated (pure)"), "{io}: {e}");
-        }
-    }
-
-    #[test]
     fn rfc0044_load_result_prelude_enum_is_matchable() {
         // `load` is a call-site desugar; the injected `LoadResult<T>` enum lets a
         // caller match all three outcomes without importing anything.
@@ -12782,10 +12015,25 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
+    /// `unify` had no `Task` arm until RFC-0125 §3 M6, because no rule had ever
+    /// unified against one — `@join` was hand-written and read the payload out
+    /// of the type itself. Its row is the first signature that names a `Task`,
+    /// and without the arm every `t.join()` reported "argument expects
+    /// `Task<T>`, found `Task<Int64>`".
+    #[test]
+    fn a_task_binds_its_payload_through_a_signature() {
+        let src = "fn work() -> Int64 { return 7 } \
+                   fn main() -> Int64 { let t = spawn work() return t.join() }";
+        assert!(check_src(src).is_ok(), "{:?}", check_src(src));
+    }
+
+    /// `@join`'s row is `(self: consume Task<T>) -> T`, so the receiver is
+    /// refused by the unify against `Task<T>` — the sentence the row gives, in
+    /// place of the block's "`.join()` needs a Task" (RFC-0125 §3 M6).
     #[test]
     fn rejects_join_of_non_task() {
         let e = check_src("fn main() -> Int64 { let x = 5; return x.join(); }").unwrap_err();
-        assert!(e.contains("`.join()` needs a Task"), "{e}");
+        assert!(e.contains("expected Task<T>, found Int64"), "{e}");
     }
 
     // ---- extern (RFC-0012 M1) --------------------------------------------
@@ -12842,6 +12090,14 @@ mod tests {
         let e =
             check_src("test \"dup\" { assert(true) } test \"dup\" { assert(true) }").unwrap_err();
         assert!(e.contains("duplicate test name"), "{e}");
+    }
+
+    #[test]
+    fn duplicate_bench_names_are_rejected() {
+        // The same walk as above, over `program.benches` with the other noun
+        // (RFC-0125 §3 M6): the refusal must still say `bench`.
+        let e = check_src("bench \"dup\" { let a = 1 } bench \"dup\" { let a = 1 }").unwrap_err();
+        assert!(e.contains("duplicate bench name"), "{e}");
     }
 
     #[test]
@@ -12903,19 +12159,6 @@ mod tests {
         .is_ok());
     }
 
-    #[test]
-    fn extern_calls_are_not_spawn_safe() {
-        // An extern is a host effect; a task calling one (even transitively)
-        // is not isolated.
-        let e = check_src(
-            "extern fn jsNow() -> Float64 \
-             fn sample(n: Int64) -> Int64 { let t = jsNow(); return n; } \
-             fn main() -> Int64 { let t = spawn sample(1); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
     // ---- RFC-0043 time/random effect pins --------------------------------
     // now()/monotonic()/randomSeed() are host-boundary externs, so the EXISTING
     // purity analysis (not new machinery) governs where they may appear: they
@@ -12924,8 +12167,11 @@ mod tests {
 
     #[test]
     fn rfc0043_host_clock_extern_is_rejected_in_a_generator() {
-        // A gen fn reaching the clock extern (what `now()` wraps) is not
-        // comptime-pure — pinned via the existing extern rule.
+        // A gen fn reaching the clock is not comptime-pure, and the reason is
+        // the lattice's `clock` row. It used to be "calls the extern
+        // `hostNowMillis`", which RFC-0103 M2 says is wrong: the three
+        // host-boundary names are not host imports at all, because the runtime
+        // shim implements them on every target (RFC-0125 §3 M6 finding 13).
         let e = check_src(
             "extern fn hostNowMillis() -> Int64 \
              fn now() -> Int64 { return hostNowMillis() } \
@@ -12934,9 +12180,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            e.contains("not comptime-pure") && e.contains("extern"),
+            e.contains("not comptime-pure") && e.contains("which reads the clock"),
             "{e}"
         );
+        assert!(!e.contains("the extern `hostNowMillis`"), "{e}");
     }
 
     #[test]
@@ -12950,21 +12197,6 @@ mod tests {
                    } \
                    fn main() -> Int64 { return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
-    }
-
-    #[test]
-    fn rfc0043_spawned_task_calling_the_clock_is_rejected() {
-        // A task calling now()/randomSeed() does host I/O; like print/file I/O it
-        // is not isolated, so `spawn` rejects it (consistent treatment — the RFC
-        // prose's "allowed" is inaccurate: host I/O in a task is forbidden, as
-        // `parallel.vyrn` documents).
-        let e = check_src(
-            "extern fn hostRandomSeed() -> Int64 \
-             fn seed() -> Int64 { return hostRandomSeed() } \
-             fn main() -> Int64 { let t = spawn seed(); return t.join() }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
     }
 
     #[test]
@@ -13024,34 +12256,6 @@ mod tests {
             !e.is_empty(),
             "a type error in the body must be reported: {e}"
         );
-    }
-
-    #[test]
-    fn export_extern_participates_in_spawn_purity_by_its_body() {
-        // A pure-bodied exported extern is spawn-safe (it is a normal fn); one
-        // whose body calls an import extern is not (transitive host effect).
-        let ok = "export extern fn dbl(n: Int64) -> Int64 { return n + n } \
-                  fn main() -> Int64 { let t = spawn dbl(3); return t.join() }";
-        assert!(check_src(ok).is_ok(), "{:?}", check_src(ok));
-
-        let bad = "extern fn jsNow() -> Float64 \
-                   export extern fn impure(n: Int64) -> Int64 { let t = jsNow(); return n } \
-                   fn main() -> Int64 { let t = spawn impure(1); return t.join() }";
-        let e = check_src(bad).unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
-    #[test]
-    fn rejects_spawn_of_function_that_drops() {
-        // `drop` reclaims storage the spawning frame may still name, so a task
-        // must not contain it — even though `drop` is a statement, not a call.
-        let e = check_src(
-            "fn work(n: Int64) -> Int64 { let mut a: Array<Int64> = [] \
-             a.push(n) let v = a[0] drop a return v } \
-             fn main() -> Int64 { let t = spawn work(1); return t.join(); }",
-        )
-        .unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
     }
 
     // ---- modify capability ----------------------------------------------
@@ -13423,33 +12627,45 @@ mod tests {
         assert!(e.contains("must be declared `mut`"), "{e}");
     }
 
-    #[test]
-    fn rejects_spawn_of_protocol_method_that_prints() {
-        // Purity must see through protocol dispatch: the impl body does I/O.
-        let src = "protocol Noise { fn burp(self) -> Int64 } \
-                   impl Noise for Int64 { fn burp(self) -> Int64 { print(self) return self } } \
-                   fn task(n: Int64) -> Int64 { return n.burp() } \
-                   fn main() -> Int64 { let t = spawn task(5) return t.join() }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("isolated (pure)"), "{e}");
-    }
-
-    /// The two hand-written name lists in this file, checked against each other.
+    /// The hand-written name list this file still has, checked against the
+    /// lattice.
     ///
-    /// They are not the same set and are not meant to be: `RESERVED` is every
-    /// name the compiler owns, `SPAWN_FORBIDDEN` the few of those a task may not
-    /// reach. But the second is meaningless outside the first — `SPAWN_FORBIDDEN`
-    /// is consulted by name, so an entry the compiler does not own would forbid
-    /// whatever user function happened to share the spelling, and an entry that
-    /// LEAVES `RESERVED` would keep forbidding it silently. Removing `afree` is
-    /// how that became checkable rather than remembered.
+    /// There were two, and the second was `SPAWN_FORBIDDEN` — the few names the
+    /// compiler owns that a task may not reach. It was meaningless outside
+    /// `RESERVED`: it was consulted by name, so an entry the compiler did not
+    /// own would forbid whatever user function shared the spelling, and an
+    /// entry that LEFT `RESERVED` would keep forbidding it silently. The list
+    /// is gone (RFC-0125 §3 M6, the isolation slice) and the effect judgment
+    /// states the rule, so what stands is the direction that outlived it: every
+    /// atom the isolation rule refuses is a name the compiler owns.
     #[test]
-    fn spawn_forbidden_names_are_reserved() {
-        for n in SPAWN_FORBIDDEN {
+    fn the_atoms_a_task_may_not_reach_are_names_the_compiler_owns() {
+        for (n, e) in crate::effects::ATOMS {
+            if crate::effects::Effects::SPAWN_ALLOWS.has(*e) {
+                continue;
+            }
+            // The generation vocabulary is not a task's: a `gen fn` cannot be
+            // spawned at all, and the fence refuses these names by row wherever
+            // they are reached. `lex` and `render` are not `RESERVED`, and
+            // making them so is RFC-0094 M2's question and not this one.
+            if *e == crate::effects::Effect::GenOnly {
+                continue;
+            }
+            // A name no source can spell is nobody's to shadow: the runtime's
+            // own primitives and the compiler's `@`-spelled internals. A
+            // host-boundary name (RFC-0103 M2) is a DECLARATION the runtime
+            // shim answers on every target, so a program that spells it means
+            // the atom.
+            if n.contains('$')
+                || n.starts_with('@')
+                || crate::trap::host_boundary_extern(n).is_some()
+            {
+                continue;
+            }
             assert!(
                 RESERVED.contains(n),
-                "`{n}` is forbidden inside a task but is not a name the compiler \
-                 owns — it now forbids any user function spelled that way"
+                "`{n}` is an atom a task may not reach but is not a name the compiler \
+                 owns — a user function spelled that way would be judged as the atom"
             );
         }
     }
@@ -13460,13 +12676,24 @@ mod tests {
     /// `get` rot out of `movecheck`'s view list. One list was updated when a
     /// builtin was deleted, a second was not, and a `Slots<String>` leaked
     /// silently for two milestones. `SPAWN_FORBIDDEN` has been pinned since
-    /// `afree` left; `COMPTIME_FORBIDDEN` reads the same way and was pinned by
-    /// nothing.
+    /// `afree` left; the generation fence's list read the same way and was
+    /// pinned by nothing. The list is gone and the fence reads the lattice's
+    /// `gen` column, so this asks the column instead.
     #[test]
     fn comptime_forbidden_names_are_reserved() {
-        for n in COMPTIME_FORBIDDEN {
+        for (n, _) in crate::effects::ATOMS {
+            if crate::effects::gen_allows(n) {
+                continue;
+            }
+            // A name no source can spell is nobody's to shadow, exactly as in
+            // the test above: the runtime's own primitives and the compiler's
+            // `@`-spelled internals, which the five log levels joined when
+            // their rows were seeded.
+            if n.contains('$') || n.starts_with('@') {
+                continue;
+            }
             assert!(
-                RESERVED.contains(n),
+                RESERVED.contains(n) || crate::trap::host_boundary_extern(n).is_some(),
                 "`{n}` is forbidden inside a `gen fn` but is not a name the \
                  compiler owns — it now forbids any user function spelled that way"
             );
@@ -13480,17 +12707,49 @@ mod tests {
                    fn go<T: P>(x: T) -> Int64 { return x.m(1, 2, 3) } \
                    fn main() -> Int64 { return go(4) }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("expects 1 argument(s) besides `self`"), "{e}");
+        // The receiver is argument 1, as it is for every other builtin and
+        // user call this reading serves (RFC-0125 §3 M6): the checker holds
+        // `m(x, 1, 2, 3)` by the time it types the call, and subtracting one
+        // for a receiver would be the hand-written exception this milestone
+        // deletes. The same trade `@join`'s row made.
+        assert!(e.contains("`m` expects 2 argument(s), got 4"), "{e}");
     }
 
+    /// One reading, one sentence. A wrong argument is refused in the same
+    /// words whether it reaches a declaration through dispatch or by name
+    /// (RFC-0125 §3 M6): the dispatcher answers which impl, and the
+    /// declaration answers everything else.
     #[test]
-    fn rejects_nested_option_via_generic_inference() {
+    fn a_dispatched_call_and_a_plain_call_are_refused_in_the_same_words() {
+        let through_an_impl = "protocol P { fn m(self, k: Int64) -> Int64 } \
+                               impl P for Int64 { fn m(self, k: Int64) -> Int64 { return self + k } } \
+                               fn main() -> Int64 { return 7.m(\"x\") }";
+        let through_a_bound = "protocol P { fn m(self, k: Int64) -> Int64 } \
+                               impl P for Int64 { fn m(self, k: Int64) -> Int64 { return self + k } } \
+                               fn go<T: P>(x: T) -> Int64 { return x.m(\"x\") } \
+                               fn main() -> Int64 { return go(7) }";
+        let by_name = "fn m(x: Int64, k: Int64) -> Int64 { return x + k } \
+                       fn main() -> Int64 { return m(7, \"x\") }";
+        for src in [through_an_impl, through_a_bound, by_name] {
+            let e = check_src(src).unwrap_err();
+            assert!(
+                e.contains("`m` argument 2 expects Int64, found String"),
+                "{e}"
+            );
+        }
+    }
+
+    /// Inference may now materialize an `Option<Option<..>>` (RFC-0126 §8):
+    /// `T` solves to `Option<Int64>` here, which the v0.1 rule refused. All
+    /// three engines already boxed the inner sum in the outer's payload word —
+    /// `examples/nestedsum.vyrn` runs the shape on every one of them.
+    #[test]
+    fn accepts_nested_option_via_generic_inference() {
         let src = "fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
                    fn main() -> Int64 { \
                        let o = wrap(Some(1)) \
                        return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     #[test]
@@ -13701,7 +12960,7 @@ mod tests {
         let src = "fn main() -> Int64 { let o: Option<Int64> = Some(1); \
                    return match o { Some(x) => x }; }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("cover both"), "{e}");
+        assert!(e.contains("missing variant `None`"), "{e}");
     }
 
     #[test]
@@ -13741,7 +13000,7 @@ mod tests {
         let src = "fn main() -> Int64 { let o: Option<Int64> = Some(1); \
                    return match o { Ok(x) => x, None => 0 }; }";
         let e = check_src(src).unwrap_err();
-        assert!(e.contains("does not match"), "{e}");
+        assert!(e.contains("is not a variant of"), "{e}");
     }
 
     // ---- generic functions ---------------------------------------------
@@ -14290,37 +13549,6 @@ mod tests {
     }
 
     #[test]
-    fn function_touching_a_global_is_not_spawnable() {
-        // `bump` writes a global, so it is not isolated; spawning it is rejected.
-        let e = check_src(
-            "let mut hits = 0\n\
-             fn bump() -> Int64 { hits = hits + 1 return hits }\n\
-             fn main() -> Int64 { let t = spawn bump() return t.join() }",
-        )
-        .unwrap_err();
-        assert!(
-            e.contains("isolated") || e.contains("spawn") || e.contains("pure"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn spawn_impurity_is_transitive_through_globals() {
-        // `outer` calls `bump` (which touches a global); spawning `outer` fails.
-        let e = check_src(
-            "let mut hits = 0\n\
-             fn bump() -> Int64 { hits = hits + 1 return hits }\n\
-             fn outer() -> Int64 { return bump() }\n\
-             fn main() -> Int64 { let t = spawn outer() return t.join() }",
-        )
-        .unwrap_err();
-        assert!(
-            e.contains("isolated") || e.contains("spawn") || e.contains("pure"),
-            "{e}"
-        );
-    }
-
-    #[test]
     fn local_shadowing_a_global_may_be_spawned() {
         // A local `hits` shadows the global inside `pure`, so `pure` is isolated.
         let ok = "let mut hits = 0\n\
@@ -14743,20 +13971,6 @@ mod tests {
     }
 
     #[test]
-    fn lambda_reading_module_state_poisons_spawn() {
-        // A lambda that reads a global makes the enclosing function non-spawn-safe.
-        let src = "let g: Int64 = 5\n\
-             fn apply(x: Int64, f: fn(Int64) -> Int64) -> Int64 { return f(x) }\n\
-             fn worker(x: Int64) -> Int64 { return apply(x, y -> y + g) }\n\
-             fn main() -> Int64 { let t = spawn worker(1)  return t.join() }";
-        assert!(
-            check_src(src).unwrap_err().contains("not allowed"),
-            "{:?}",
-            check_src(src)
-        );
-    }
-
-    #[test]
     fn extern_cannot_take_fn_param() {
         let src = "extern fn e(f: fn(Int64) -> Int64) -> Int64\nfn main() -> Int64 { return 0 }";
         assert!(
@@ -14903,8 +14117,8 @@ mod tests {
     fn map_alias_is_codable_by_name() {
         let src = "type M = Map<String, Int64>\n\
              fn main() -> Int64 {\n\
-             let v = fromJson(M, \"{}\")\n\
-             print(jsonSchema(M))\n\
+             let v = fromJson<M>(\"{}\")\n\
+             print(jsonSchema<M>())\n\
              return 0 }";
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
@@ -15159,7 +14373,7 @@ mod tests {
 
     /// `listDir` is NOT gated with them, and the asymmetry is deliberate: it
     /// lists the real filesystem under `vyrn run` (which is why
-    /// [`COMPTIME_FORBIDDEN`] omits it and the interpreter serves it), so the
+    /// the lattice's `gen` column allows it and the interpreter serves it), so the
     /// front end has nothing to refuse. Only the two compiling backends lack a
     /// lowering, and each says so itself.
     #[test]
@@ -15176,6 +14390,9 @@ mod tests {
         assert!(check_src(src).is_ok(), "{:?}", check_src(src));
     }
 
+    /// The buffer type is the rule, and since RFC-0125 §3 M6's seed extension
+    /// the ROW is where it is written. These are the same four programs the
+    /// hand-written block refused, in the words a declaration refuses them in.
     #[test]
     fn line_at_and_col_at_demand_a_byte_buffer() {
         // The shape every real caller passes.
@@ -15195,14 +14412,14 @@ mod tests {
             .unwrap_err();
             assert_eq!(
                 e,
-                format!("line 1: `{name}` needs an `Array<UInt8>` buffer, found Array<Int64>")
+                format!("line 1: `{name}` argument 1 expects Array<UInt8>, found Array<Int64>")
             );
         }
         // Not an array at all.
         let s = check_src("fn main() -> Int64 { print(lineAt(\"ab\", 1))  return 0 }").unwrap_err();
         assert_eq!(
             s,
-            "line 1: `lineAt` needs an `Array<UInt8>` buffer, found String"
+            "line 1: `lineAt` argument 1 expects Array<UInt8>, found String"
         );
         // A `SmallArray` of bytes is refused too, and deliberately: the native
         // emitter reads a `{ ptr, i64, i64 }`, which a `SmallArray`'s
@@ -15214,7 +14431,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            sa.contains("`lineAt` needs an `Array<UInt8>` buffer"),
+            sa.contains("`lineAt` argument 1 expects Array<UInt8>"),
             "{sa}"
         );
     }
@@ -15856,15 +15073,15 @@ mod tests {
     }
 
     /// A transparent alias IS the Option it names, so `Option<M>` for
-    /// `type M = Option<Int64>` is the nested wrap the v0.1 rule refuses when
-    /// written directly.
+    /// `type M = Option<Int64>` is a nesting — accepted since RFC-0126 §8. The
+    /// alias is kept as a case because it is the one spelling where the nesting
+    /// is invisible until `resolve` runs.
     #[test]
-    fn a_transparent_alias_cannot_launder_a_nested_option() {
+    fn a_transparent_alias_may_name_a_nested_option() {
         let src = "type M = Option<Int64> \
                    fn wrap<T>(x: T) -> Option<T> { return Some(x) } \
                    fn main() -> Int64 { let m: M = None let w = wrap(m) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     /// The owned-container walk under `copy` is unbounded (cycle-guarded): an
@@ -15986,14 +15203,14 @@ mod tests {
         assert!(check_src(bad).is_err());
     }
 
-    /// Direct construction cannot launder a nested wrap through a transparent
-    /// alias either: the payload resolves before the prohibition checks it.
+    /// Direct construction of a nesting whose inner layer hides behind a
+    /// transparent alias. Paired with the inference case above, so both routes
+    /// to a nested sum stay covered (RFC-0126 §8).
     #[test]
-    fn some_refuses_a_payload_alias_that_names_an_option() {
+    fn some_accepts_a_payload_alias_that_names_an_option() {
         let src = "type M = Option<Int64> \
                    fn main() -> Int64 { let m: M = None let w = Some(m) return 0 }";
-        let e = check_src(src).unwrap_err();
-        assert!(e.contains("nested Option/Result"), "{e}");
+        assert!(check_src(src).is_ok());
     }
 
     /// A parameter bounded by a NON-first protocol dispatches through the

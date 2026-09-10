@@ -1,0 +1,1 @@
+heapfieldkey.vyrn:15:0: `Tag` owns heap somewhere in its fields, and a `Map` key is stored, compared and freed by the map — a key must be heapless all the way down (RFC-0117 M2)

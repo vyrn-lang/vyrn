@@ -160,6 +160,29 @@ pub fn roles_from_manifest(doc: &Json) -> Vec<Role> {
     out
 }
 
+/// A project's roles: the ones its manifest DECLARES when it declares any, and
+/// otherwise the ones [`discovered_roles`] finds in the generator call sites the
+/// app already writes.
+///
+/// The fallback is one rule, and both readers of it — `vyrn why --contract` and
+/// the language server — stated it. `doc` is the manifest document the caller
+/// already read ([`crate::manifest::role_roots`] says why it is passed in rather
+/// than read here), and `roots` is what that function answered.
+pub fn roles_for_project(
+    doc: Option<&Json>,
+    roots: &[(String, String)],
+    opts: &LoadOptions,
+    resolver: &dyn ModuleResolver,
+) -> Vec<Role> {
+    if let Some(doc) = doc {
+        let declared = roles_from_manifest(doc);
+        if !declared.is_empty() {
+            return declared;
+        }
+    }
+    discovered_roles(roots, opts, resolver)
+}
+
 /// The roles a project declares NOWHERE — discovered from the generator call
 /// sites it already has.
 ///

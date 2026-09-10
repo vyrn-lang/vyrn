@@ -1,0 +1,9 @@
+// RFC-0037: a closure's result is its caller's, and a captured binding is not
+// the closure's to give away.
+fn main() -> Int64 {
+    let s = "hello".copy()
+    let f: fn() -> String = () -> s
+    let t = f()
+    print(t.byteLength)
+    return 0
+}

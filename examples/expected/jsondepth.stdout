@@ -1,0 +1,5 @@
+ok 256 bytes
+err line 1, col 129: nesting deeper than 128 levels
+err line 1, col 129: nesting deeper than 128 levels
+err line 1, col 641: nesting deeper than 128 levels
+ok 20 bytes

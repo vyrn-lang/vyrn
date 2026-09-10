@@ -1,0 +1,9 @@
+ok: Hello from a file — Vyrn can read now.
+error: cannot read `data/no_such_file.txt`
+wrote: true
+ok: three lines
+written by
+files.vyrn
+café ☕ is 9 bytes (9 via .byteLength)
+round-trip: café ☕
+report.tmp.txt is 33 bytes

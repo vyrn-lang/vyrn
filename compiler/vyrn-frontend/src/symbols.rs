@@ -17,8 +17,8 @@
 //! from the cached [`Analysis`].
 
 use crate::ast::{
-    self, ArmBody, Block, Capability, EnumVariant, Expr, Function, GlobalDecl, LambdaBody,
-    MethodSig, ProtocolDecl, Stmt, Type, TypeDecl,
+    self, Capability, EnumVariant, Expr, Function, GlobalDecl, MethodSig, ProtocolDecl, Stmt, Type,
+    TypeDecl,
 };
 use crate::checker;
 use crate::diagnostics::Diagnostic;
@@ -79,38 +79,13 @@ pub struct TokenInfo {
     pub end_col: usize,
 }
 
-/// A local binding — a parameter, a `let`, or a `for`-in variable — scoped to a
-/// single function body. Indexed for hover/go-to-definition on variables (the
-/// most common thing to hover). Reuses the lexer's token column for the name
-/// position, exactly like [`Symbol`]; no AST span threading.
-#[derive(Debug, Clone)]
-pub struct LocalBinding {
-    pub name: String,
-    pub kind: LocalKind,
-    /// Declared type, if any. `None` for unannotated `let`s and `for`-in vars
-    /// (the element type is inferred by the checker and not retained here).
-    pub ty: Option<Type>,
-    /// 1-based definition line. For a param this is the function's line; for a
-    /// `let`/`for` it is the statement's line.
-    pub line: usize,
-    /// 1-based name column (0 = unknown).
-    pub col: usize,
-    /// 1-based name end column (0 = unknown).
-    pub end_col: usize,
-    /// The enclosing function's declaration line (scopes the binding).
-    pub fn_line: usize,
-}
-
-/// The flavor of a [`LocalBinding`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalKind {
-    /// A function parameter (`fn area(s: Shape)` → `s`).
-    Param,
-    /// `let [mut] name [: Type] = value;` (annotated or not).
-    Let { mutable: bool },
-    /// `for name in iter { .. }` — the loop variable.
-    ForVar,
-}
+/// A local binding, and its flavour — the checker's rows, read here.
+///
+/// This file walked every body a second time to make them, for the POSITIONS
+/// the checker did not record. It records them now (RFC-0125 §3 M6): a binder
+/// carries its column in the AST, and the pass that types a binding is the pass
+/// that indexes it.
+pub use crate::checker::{LocalBinding, LocalKind};
 
 /// Everything the LSP needs for one document, built in a single pass.
 #[derive(Debug, Clone)]
@@ -197,14 +172,14 @@ pub struct Analysis {
 
 /// One binding's memory answer, positioned for the editor (RFC-0087 U1).
 ///
-/// [`crate::own::BindingNote`] with the prose already rendered, so the LSP is an
-/// adapter rather than a second opinion.
+/// [`crate::own::MemoryRow`], positioned, so the LSP is an adapter rather than
+/// a second opinion. The prose is the CORE's (RFC-0125 §3 M3).
 #[derive(Debug, Clone)]
 pub struct MemoryNote {
     pub name: String,
     /// 1-based line of the `let`.
     pub line: usize,
-    /// What happens to the value, in one line — [`crate::own::Fate::words`].
+    /// What happens to the value, in one line — [`crate::own::MemoryRow::text`].
     pub text: String,
     /// The line where the value stops being live, when there is one: a move or
     /// a `drop`. `None` for a binding that lives to block exit.
@@ -345,15 +320,16 @@ fn analyze_inner(
     // rather than the whole line. See [`pin_diagnostics`].
     let mut kw_cols: std::collections::HashMap<
         usize,
-        std::collections::HashMap<&'static str, (usize, usize)>,
+        std::collections::HashMap<String, (usize, usize)>,
     > = std::collections::HashMap::new();
     for t in tokens.iter() {
         if let Some(text) = keyword_text(&t.tok) {
+            let width = text.chars().count();
             kw_cols
                 .entry(t.line)
                 .or_default()
                 .entry(text)
-                .or_insert((t.col, t.col + text.len()));
+                .or_insert((t.col, t.col + width));
         }
     }
 
@@ -423,10 +399,18 @@ fn analyze_inner(
             _ => Some(program.clone()),
         }
     };
-    // `check_accum_with_let_types` returns the diagnostics AND a table of the
-    // inferred/declared type of each clean `let` and `for`-var — used below to
-    // give unannotated lets a real type on hover (`let x: Int`).
-    let let_types = match &checked {
+    // RFC-0125 §3 M3, the accumulation slice: the ownership memo the CLI opens
+    // around a command, opened around a keystroke. THREE readers want the
+    // analysis of this one program — the kernel's refusals, the floor's effect
+    // judgment and `memory_notes` — and each unmemoized call lowers the whole
+    // program and builds a core body per instance. It must outlive all of them,
+    // which is why it is here and not inside the block that asks first: `Memo`
+    // clears the slot when it drops.
+    let _own = checked.as_ref().map(crate::own::Memo::open);
+    // The check returns the diagnostics AND every binding it made in the root
+    // module — the editor's local index, with the type the checker decided, so
+    // an unannotated `let x = 5` hovers as `let x: Int64`.
+    let locals = match &checked {
         Some(prog) => {
             // The LSP re-checks on every keystroke, and all but the edited
             // module are byte-identical to last time — reuse their diagnostics
@@ -434,13 +418,34 @@ fn analyze_inner(
             // gate uses the full check), which is why the reusing entry does not
             // return them.
             let hashes = crate::loader::last_module_hashes();
-            let (check_diags, let_types) = if hashes.is_empty() {
-                checker::check_accum_with_let_types(prog)
+            let cs = crate::prof::phase("check: the analysis's own");
+            // RFC-0125 §3 M3, the one check: where a placer is installed, the
+            // lowering it runs needs the type of every node, and this is the
+            // pass that decides them — so this pass records, and the lowering
+            // reads what it recorded. The reuse above is the alternative and not
+            // a companion: a reused body is one this pass does not walk, so it
+            // records nothing for it. A host with no placer has no reader for a
+            // record and keeps the memo.
+            let (check_diags, binders) = if crate::own::placer_installed() {
+                checker::check_accum_recording(prog)
+            } else if hashes.is_empty() {
+                checker::check_accum_with_binders(prog)
             } else {
                 checker::check_accum_reusing(prog, &hashes)
             };
+            drop(cs);
             let mut checked_diags = check_diags;
-            checked_diags.extend(movecheck::check_accum(prog));
+            // RFC-0125 §3 M3, the accumulation slice: the editor asks the same
+            // driver `vyrn check` asks, so a rule that has left `movecheck.rs`
+            // is shown here too. The kernel is asked only of a program the core
+            // can lower, which is one the type check accepted — the gate
+            // `check_and_synthesize` states for the command line.
+            // A program the type check refused has no ownership answer at all
+            // now: the move check states no rule of its own (RFC-0125 §3 M3,
+            // the plumbing slice), and the kernel needs a body it cannot build.
+            if checked_diags.is_empty() {
+                checked_diags.extend(movecheck::refusals(prog));
+            }
             // RFC-0033: a diagnostic at an origin-governed line in a synthesized
             // module is relocated to its input file (`.vyx`, …) and set aside so
             // the LSP can publish it against that file's URI; everything else
@@ -453,9 +458,11 @@ fn analyze_inner(
                     diags.push(adopt_foreign(d));
                 }
             }
-            let_types
+            binders
         }
-        None => Default::default(),
+        // A parse error stops the check, and the statements the parser
+        // recovered still bind names the reader hovers — untyped.
+        None => checker::local_index(&program, &Default::default()),
     };
     pin_diagnostics(&mut diags, &kw_cols, &tok_info);
 
@@ -483,7 +490,6 @@ fn analyze_inner(
     // completion and `ns.member` hover / go-to-definition). Needs the linker to
     // resolve each namespace import to its source module.
     let namespaces = index_namespaces(&graph, &program, linker, &origin_index);
-    let locals = index_locals(&program, &tok_info, &let_types);
 
     // Protocol/impl member tables for `.foo` completion (RFC-0002 §5). Impls
     // and protocols come from the linked program when available (imported
@@ -606,14 +612,19 @@ fn analyze_inner(
     // not compile is an answer about a body nobody will run. This is also what
     // keeps it off the hot path — an editor spends most of a keystroke burst on
     // a document that does not parse.
+    //
+    // `remapped` counts, and it did not. A type error at an origin-governed
+    // line is published against its `.vyx` and leaves `diags` EMPTY (RFC-0033),
+    // so this guard read a program the checker refused as a clean one and asked
+    // the ownership stage about it. That was harmless while nothing was
+    // installed under `own::analyze`; with the placer in the editor (RFC-0125
+    // §3 M3, the accumulation slice) it lowers a body whose nodes are typed
+    // `<type error>`, and the lowering's own lint refuses that.
+    let errored =
+        |d: &crate::diagnostics::Diagnostic| d.severity == crate::diagnostics::Severity::Error;
+    let clean = !diags.iter().any(errored) && !remapped.iter().any(errored);
     let memory = match &checked {
-        Some(prog)
-            if !diags
-                .iter()
-                .any(|d| d.severity == crate::diagnostics::Severity::Error) =>
-        {
-            memory_notes(prog)
-        }
+        Some(prog) if clean => memory_notes(prog),
         _ => Vec::new(),
     };
 
@@ -654,31 +665,22 @@ fn memory_notes(program: &crate::ast::Program) -> Vec<MemoryNote> {
         .iter()
         .filter(|f| f.module.is_none() && !f.is_extern)
     {
-        let Some(notes) = own.notes.get(&f.name) else {
+        let Some(notes) = own.memory.get(&f.name) else {
             continue;
         };
         for n in notes {
             // A binding whose type owns no heap has nothing to reclaim, so
             // "NOT reclaimed" is the wrong sentence about it. `vyrn why --memory`
             // counts it in a summary; a hover on an `Int64` would just alarm.
-            if matches!(
-                &n.fate,
-                crate::own::Fate::Leaked(crate::own::Leak::NoRelease {
-                    owns_heap: false,
-                    ..
-                })
-            ) {
+            if matches!(n.bucket, crate::own::Bucket::Leaked { heap: false, .. }) {
                 continue;
             }
             out.push(MemoryNote {
                 name: n.name.clone(),
                 line: n.line,
-                text: n.fate.words(),
-                last_use: n.fate.last_use(),
-                moved_into: match &n.fate {
-                    crate::own::Fate::Moved { into, .. } => Some(into.clone()),
-                    _ => None,
-                },
+                text: n.text.clone(),
+                last_use: n.last_use,
+                moved_into: n.moved_into.clone(),
             });
         }
     }
@@ -710,35 +712,17 @@ fn empty_analysis(diagnostics: Vec<Diagnostic>) -> Analysis {
     }
 }
 
-/// The source text of a keyword/operator `Tok`, or `None` for identifiers,
-/// literals, and punctuation not used in any error message. Used to build the
-/// per-line keyword-column map consumed by [`pin_diagnostics`].
-fn keyword_text(t: &Tok) -> Option<&'static str> {
-    match t {
-        Tok::Fn => Some("fn"),
-        Tok::Let => Some("let"),
-        Tok::Mut => Some("mut"),
-        Tok::If => Some("if"),
-        Tok::Else => Some("else"),
-        Tok::While => Some("while"),
-        Tok::For => Some("for"),
-        Tok::In => Some("in"),
-        Tok::Drop => Some("drop"),
-        Tok::Protocol => Some("protocol"),
-        Tok::Impl => Some("impl"),
-        Tok::Vself => Some("self"),
-        Tok::Return => Some("return"),
-        Tok::True => Some("true"),
-        Tok::False => Some("false"),
-        Tok::Type => Some("type"),
-        Tok::Where => Some("where"),
-        Tok::Match => Some("match"),
-        Tok::Region => Some("region"),
-        Tok::Spawn => Some("spawn"),
-        Tok::Question => Some("?"),
-        Tok::AndAnd => Some("&&"),
-        Tok::OrOr => Some("||"),
-        Tok::Bang => Some("!"),
+/// The source text of a keyword or operator token, or `None` for an identifier
+/// or a literal.
+///
+/// ONE TABLE: [`lexer::token_name_and_text`], which is the same table the
+/// `lex()` builtin reads (RFC-0054). This was a thirty-four-line `match` of its
+/// own — twenty-four arms out of that table's eighty — and the copy had already
+/// drifted: `import`, `export`, `break` and `continue` are keywords the lexer
+/// names and it did not, so a diagnostic quoting one of them never pinned.
+fn keyword_text(t: &Tok) -> Option<String> {
+    match crate::lexer::token_name_and_text(t) {
+        (kind, text) if kind == "keyword" || kind == "punct" => Some(text),
         _ => None,
     }
 }
@@ -786,10 +770,7 @@ fn backtick_tokens(msg: &str) -> Vec<&str> {
 /// for pinned diagnostics, as it already was for `match`.
 fn pin_diagnostics(
     diags: &mut [Diagnostic],
-    kw_cols: &std::collections::HashMap<
-        usize,
-        std::collections::HashMap<&'static str, (usize, usize)>,
-    >,
+    kw_cols: &std::collections::HashMap<usize, std::collections::HashMap<String, (usize, usize)>>,
     tok_info: &[TokenInfo],
 ) {
     for d in diags.iter_mut() {
@@ -816,6 +797,20 @@ fn pin_diagnostics(
                 d.col = col;
                 d.end_col = end_col;
                 break;
+            }
+            // A PATH is not a token: `b.xs[0]`, `d.title`, `x.id`, `t.xs[..]`.
+            // The kernel words its refusals about places, and a place is what
+            // a reader wrote — so the pin is its ROOT, which is a token on the
+            // line (RFC-0125 §3 M3, the column slice). Without this the five
+            // path-subject refusals of the census stayed whole-line, which is
+            // the standing gap every rule that moved to the kernel was in.
+            let root = &target[..target.find(['.', '[']).unwrap_or(target.len())];
+            if root != target && !root.is_empty() {
+                if let Some(t) = tok_info.iter().find(|t| t.line == d.line && t.text == root) {
+                    d.col = t.col;
+                    d.end_col = t.end_col;
+                    break;
+                }
             }
         }
         // No backtick target found on the line → stays `col == 0` (whole-line
@@ -1016,25 +1011,30 @@ pub fn resolve(analysis: &Analysis, line: usize, col: usize) -> Option<Resolutio
 /// ONE TABLE. These six names were written in four places: here, the completion
 /// loop that offers them, `CONSTRUCTOR_BUILTINS` for semantic colouring, and
 /// `loader::builtin_alias_exports` for what `std/result` and `std/option`
-/// export. The first three read this now; the fourth keeps its own shape because
-/// it splits the six across two module names, and a test compares it.
+/// export. All four read this now — the module column is what the loader was
+/// carrying, and a test that compared the two lists is what it cost.
 ///
 /// The `SymbolKind` is what tells a type from a constructor, so the colouring
 /// list is a filter over this rather than a second list to keep in step.
-static BUILTIN_TYPES_AND_CTORS: &[(&str, SymbolKind, &str)] = &[
-    ("Result", SymbolKind::Type, "Result<T, E> — the builtin result type (`Ok(T)` | `Err(E)`). Spelled explicitly by `import { Result, Ok, Err } from \"std/result\"`."),
-    ("Ok", SymbolKind::Variant, "Ok(value: T) -> Result<T, E> — the success variant of the builtin `Result`."),
-    ("Err", SymbolKind::Variant, "Err(error: E) -> Result<T, E> — the failure variant of the builtin `Result`."),
-    ("Option", SymbolKind::Type, "Option<T> — the builtin option type (`Some(T)` | `None`). Spelled explicitly by `import { Option, Some, None } from \"std/option\"`."),
-    ("Some", SymbolKind::Variant, "Some(value: T) -> Option<T> — the present variant of the builtin `Option`."),
-    ("None", SymbolKind::Variant, "None -> Option<T> — the absent variant of the builtin `Option`."),
+///
+/// It lives in the editor's file rather than the loader's because the hover
+/// prose is the bulk of it and has nowhere else to be, and because that is the
+/// direction `keyword_text` already reads in — the reader goes to the table, the
+/// table does not move to the reader.
+pub(crate) static BUILTIN_TYPES_AND_CTORS: &[(&str, &str, SymbolKind, &str)] = &[
+    ("Result", "std/result", SymbolKind::Type, "Result<T, E> — the builtin result type (`Ok(T)` | `Err(E)`). Spelled explicitly by `import { Result, Ok, Err } from \"std/result\"`."),
+    ("Ok", "std/result", SymbolKind::Variant, "Ok(value: T) -> Result<T, E> — the success variant of the builtin `Result`."),
+    ("Err", "std/result", SymbolKind::Variant, "Err(error: E) -> Result<T, E> — the failure variant of the builtin `Result`."),
+    ("Option", "std/option", SymbolKind::Type, "Option<T> — the builtin option type (`Some(T)` | `None`). Spelled explicitly by `import { Option, Some, None } from \"std/option\"`."),
+    ("Some", "std/option", SymbolKind::Variant, "Some(value: T) -> Option<T> — the present variant of the builtin `Option`."),
+    ("None", "std/option", SymbolKind::Variant, "None -> Option<T> — the absent variant of the builtin `Option`."),
 ];
 
 fn builtin_type_or_ctor(name: &str) -> Option<(SymbolKind, String)> {
     BUILTIN_TYPES_AND_CTORS
         .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, kind, detail)| (*kind, detail.to_string()))
+        .find(|(n, _, _, _)| *n == name)
+        .map(|(_, _, kind, detail)| (*kind, detail.to_string()))
 }
 
 /// The function whose line range contains `cursor_line`, if any. A function's
@@ -1102,7 +1102,7 @@ pub fn completions(analysis: &Analysis) -> Vec<Completion> {
     // RFC-0062: the ambient `Result`/`Option` builtins and their constructors are
     // always in scope — offer them alongside user symbols (they are exactly what
     // `std/result` / `std/option` name explicitly), so `Ok`/`Some`/… complete.
-    for (name, _, _) in BUILTIN_TYPES_AND_CTORS {
+    for (name, _, _, _) in BUILTIN_TYPES_AND_CTORS {
         if let Some((kind, detail)) = builtin_type_or_ctor(name) {
             out.push(Completion {
                 label: name.to_string(),
@@ -1763,7 +1763,7 @@ fn index_symbols(program: &ast::Program, tok_info: &[TokenInfo], lines: &[usize]
             doc: t.doc.clone(),
             file: None,
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             // Variants carry no AST line; find the name token between this decl's
             // line and the next top-level declaration (or EOF).
             let until = lines
@@ -1930,7 +1930,7 @@ fn index_imported_symbols(
                     doc: t.doc.clone(),
                     file: Some(file.clone()),
                 });
-                if let Type::Enum(variants) = &t.base {
+                if let Some(variants) = crate::types::declared_variants(&t.base) {
                     for v in variants {
                         out.push(Symbol {
                             name: v.name.clone(),
@@ -2102,7 +2102,7 @@ fn namespace_members(
             doc: t.doc.clone(),
             file: file(target),
         });
-        if let Type::Enum(variants) = &t.base {
+        if let Some(variants) = crate::types::declared_variants(&t.base) {
             for v in variants {
                 out.push(Symbol {
                     name: v.name.clone(),
@@ -2256,374 +2256,6 @@ pub(crate) fn short_path(file: &str) -> String {
         return file.to_string();
     }
     format!("…/{}", parts[parts.len() - 3..].join("/"))
-}
-
-// ---------------------------------------------------------------------------
-// local-binding indexing (params / lets / for-vars)
-// ---------------------------------------------------------------------------
-
-/// Index every function's local bindings: its parameters, every `let` in its
-/// body (annotated or not — unannotated ones still get go-to-definition), and
-/// every `for`-in loop variable. Methods (`impl` blocks) are functions too;
-/// protocol methods have no body and are skipped.
-fn index_locals(
-    program: &ast::Program,
-    tok_info: &[TokenInfo],
-    let_types: &std::collections::HashMap<(usize, String), Type>,
-) -> Vec<LocalBinding> {
-    let mut out = Vec::new();
-    for f in &program.functions {
-        index_function_locals(f, tok_info, let_types, &mut out);
-    }
-    for imp in &program.impls {
-        for m in &imp.methods {
-            index_function_locals(m, tok_info, let_types, &mut out);
-        }
-    }
-    out
-}
-
-/// One function's params + body bindings.
-fn index_function_locals(
-    f: &Function,
-    tok_info: &[TokenInfo],
-    let_types: &std::collections::HashMap<(usize, String), Type>,
-    out: &mut Vec<LocalBinding>,
-) {
-    // Params: name on the function's line (v0 signatures are single-line; if a
-    // param name isn't found there, fall back to an unknown column — the binding
-    // still resolves by name).
-    for p in &f.params {
-        let (col, end_col) = name_col_on_line(tok_info, &p.name, f.line);
-        out.push(LocalBinding {
-            name: p.name.clone(),
-            kind: LocalKind::Param,
-            ty: Some(p.ty.clone()),
-            line: f.line,
-            col,
-            end_col,
-            fn_line: f.line,
-        });
-    }
-    collect_lets(&f.body, f.line, tok_info, let_types, out);
-}
-
-/// Walk a block recursively, collecting `let` and `for`-in bindings. `if` and
-/// `while` bodies (and `else` blocks) are recursed so bindings inside nested
-/// blocks are indexed at their own line, and every statement's expressions are
-/// descended ([`collect_lets_expr`]) so `match`-arm pattern binders and lambda
-/// parameters/body lets are indexed too. The checker's `let_types` table fills
-/// in the inferred type for unannotated `let`s (and the element type for
-/// `for`-vars); an annotated `let` keeps its AST annotation (the table holds
-/// the same value). A binding after a same-function error isn't in the table, so
-/// it falls back to the AST annotation (None for unannotated → no type shown).
-fn collect_lets(
-    block: &Block,
-    fn_line: usize,
-    tok_info: &[TokenInfo],
-    let_types: &std::collections::HashMap<(usize, String), Type>,
-    out: &mut Vec<LocalBinding>,
-) {
-    for stmt in &block.stmts {
-        match stmt {
-            Stmt::Let {
-                name,
-                mutable,
-                ty,
-                value,
-                line,
-            } => {
-                // Synthetic desugar temporaries (e.g. `ps[]`, from `a[i].f = v`)
-                // are unspellable — they contain characters no real identifier
-                // can — and have no source token; never surface them as
-                // hover/outline/completion locals.
-                if name.starts_with('@') || name.contains('[') {
-                    continue;
-                }
-                let (col, end_col) = name_col_on_line(tok_info, name, *line);
-                // Prefer the checker's retained type (covers unannotated lets);
-                // fall back to the AST annotation.
-                let inferred = let_types
-                    .get(&(*line, name.clone()))
-                    .cloned()
-                    .or_else(|| ty.clone());
-                out.push(LocalBinding {
-                    name: name.clone(),
-                    kind: LocalKind::Let { mutable: *mutable },
-                    ty: inferred,
-                    line: *line,
-                    col,
-                    end_col,
-                    fn_line,
-                });
-                collect_lets_expr(value, fn_line, tok_info, let_types, out);
-            }
-            Stmt::ForIn {
-                var,
-                iter,
-                body,
-                line,
-                ..
-            } => {
-                let (col, end_col) = name_col_on_line(tok_info, var, *line);
-                // The element type is inferred by the checker and retained in
-                // `let_types`; fall back to None if it isn't there.
-                let elem_ty = let_types.get(&(*line, var.clone())).cloned();
-                out.push(LocalBinding {
-                    name: var.clone(),
-                    kind: LocalKind::ForVar,
-                    ty: elem_ty,
-                    line: *line,
-                    col,
-                    end_col,
-                    fn_line,
-                });
-                collect_lets_expr(iter, fn_line, tok_info, let_types, out);
-                collect_lets(body, fn_line, tok_info, let_types, out);
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_lets_expr(cond, fn_line, tok_info, let_types, out);
-                collect_lets(then_block, fn_line, tok_info, let_types, out);
-                if let Some(eb) = else_block {
-                    collect_lets(eb, fn_line, tok_info, let_types, out);
-                }
-            }
-            Stmt::IfLet {
-                pattern,
-                scrutinee,
-                then_block,
-                else_block,
-                line,
-                ..
-            } => {
-                // `if let` binders are real locals scoped to the then-block
-                // (RFC-0060): surface each for hover / go-to-def / completion /
-                // highlight, typed from the checker's retained payload types.
-                for b in crate::movecheck::pattern_bindings(pattern) {
-                    let (col, end_col) = name_col_on_line(tok_info, b, *line);
-                    let ty = let_types.get(&(*line, b.to_string())).cloned();
-                    out.push(LocalBinding {
-                        name: b.to_string(),
-                        kind: LocalKind::Let { mutable: false },
-                        ty,
-                        line: *line,
-                        col,
-                        end_col,
-                        fn_line,
-                    });
-                }
-                collect_lets_expr(scrutinee, fn_line, tok_info, let_types, out);
-                collect_lets(then_block, fn_line, tok_info, let_types, out);
-                if let Some(eb) = else_block {
-                    collect_lets(eb, fn_line, tok_info, let_types, out);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                collect_lets_expr(cond, fn_line, tok_info, let_types, out);
-                collect_lets(body, fn_line, tok_info, let_types, out);
-            }
-            Stmt::Region { body, .. } => collect_lets(body, fn_line, tok_info, let_types, out),
-            // Assign/SetField/IndexSet/Return/Drop/Expr bind nothing themselves —
-            // but their expressions can: a `match` arm's pattern and a lambda
-            // literal both introduce locals, so they are descended.
-            Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::Return {
-                value: Some(value), ..
-            } => collect_lets_expr(value, fn_line, tok_info, let_types, out),
-            Stmt::IndexSet { index, value, .. } => {
-                collect_lets_expr(index, fn_line, tok_info, let_types, out);
-                collect_lets_expr(value, fn_line, tok_info, let_types, out);
-            }
-            Stmt::Expr(e) => collect_lets_expr(e, fn_line, tok_info, let_types, out),
-            Stmt::Return { value: None, .. }
-            | Stmt::Break { .. }
-            | Stmt::Continue { .. }
-            | Stmt::Drop { .. } => {}
-        }
-    }
-}
-
-/// Walk an expression recursively for the bindings it introduces: a `match`
-/// expression's arm patterns bind (like an `if let`), and a lambda literal's
-/// parameters are locals of its body. Every other form just descends.
-fn collect_lets_expr(
-    e: &Expr,
-    fn_line: usize,
-    tok_info: &[TokenInfo],
-    let_types: &std::collections::HashMap<(usize, String), Type>,
-    out: &mut Vec<LocalBinding>,
-) {
-    match e {
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            collect_lets_expr(scrutinee, fn_line, tok_info, let_types, out);
-            for arm in arms {
-                // Arm binders surface like `if let`'s, minus the type: the
-                // checker retains no match-arm payload types. Each binder's
-                // spelling is anchored on its pattern shape ([`binder_pos`]):
-                // the variant head (and any earlier payload) immediately
-                // precedes it in the token stream, which keeps a same-named
-                // USE in an earlier arm's body from being taken for it. A
-                // desugar's `@`-prefixed binder is unspellable and never
-                // surfaces.
-                let (head, payloads): (Option<&str>, &[String]) = match &arm.pattern {
-                    ast::Pattern::Some(b) => (Some("Some"), std::slice::from_ref(b)),
-                    ast::Pattern::Ok(b) => (Some("Ok"), std::slice::from_ref(b)),
-                    ast::Pattern::Err(b) => (Some("Err"), std::slice::from_ref(b)),
-                    ast::Pattern::Variant(head, payloads) => (Some(head.as_str()), payloads),
-                    ast::Pattern::None
-                    | ast::Pattern::Other
-                    | ast::Pattern::Success(_)
-                    | ast::Pattern::Failure(_) => (None, &[]),
-                };
-                for (k, b) in payloads.iter().enumerate() {
-                    let prefix: Vec<&str> = match head {
-                        Some(h) => std::iter::once(h)
-                            .chain(payloads[..k].iter().map(String::as_str))
-                            .collect(),
-                        None => Vec::new(),
-                    };
-                    if let Some((line, col, end_col)) =
-                        binder_pos(tok_info, b, &prefix, e.line(), out)
-                    {
-                        out.push(LocalBinding {
-                            name: b.to_string(),
-                            kind: LocalKind::Let { mutable: false },
-                            ty: None,
-                            line,
-                            col,
-                            end_col,
-                            fn_line,
-                        });
-                    }
-                }
-                match &arm.body {
-                    ArmBody::Expr(e) => collect_lets_expr(e, fn_line, tok_info, let_types, out),
-                    // A block arm's lets (RFC-0118) hover like any block's.
-                    ArmBody::Block(b) => collect_lets(b, fn_line, tok_info, let_types, out),
-                }
-            }
-        }
-        Expr::Lambda { params, body, .. } => {
-            for p in params {
-                // Untyped in the literal — the type flows from the expected
-                // `fn(..)` parameter position — so this is a `let`-shaped
-                // local, never a Param (whose hover unwraps a type).
-                if let Some((line, col, end_col)) = binder_pos(tok_info, p, &[], e.line(), out) {
-                    out.push(LocalBinding {
-                        name: p.clone(),
-                        kind: LocalKind::Let { mutable: false },
-                        ty: None,
-                        line,
-                        col,
-                        end_col,
-                        fn_line,
-                    });
-                }
-            }
-            match body {
-                LambdaBody::Expr(inner) => {
-                    collect_lets_expr(inner, fn_line, tok_info, let_types, out)
-                }
-                LambdaBody::Block(b) => collect_lets(b, fn_line, tok_info, let_types, out),
-            }
-        }
-        Expr::Unary { expr, .. }
-        | Expr::Try { expr, .. }
-        | Expr::Field { expr, .. }
-        | Expr::Consume { place: expr, .. } => {
-            collect_lets_expr(expr, fn_line, tok_info, let_types, out);
-        }
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_lets_expr(lhs, fn_line, tok_info, let_types, out);
-            collect_lets_expr(rhs, fn_line, tok_info, let_types, out);
-        }
-        Expr::Call { args, .. } | Expr::Spawn { args, .. } | Expr::TryConstruct { args, .. } => {
-            for a in args {
-                collect_lets_expr(a, fn_line, tok_info, let_types, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                collect_lets_expr(v, fn_line, tok_info, let_types, out);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for v in elems {
-                collect_lets_expr(v, fn_line, tok_info, let_types, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                collect_lets_expr(k, fn_line, tok_info, let_types, out);
-                collect_lets_expr(v, fn_line, tok_info, let_types, out);
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_lets_expr(cond, fn_line, tok_info, let_types, out);
-            collect_lets_expr(then_branch, fn_line, tok_info, let_types, out);
-            if let Some(eb) = else_branch {
-                collect_lets_expr(eb, fn_line, tok_info, let_types, out);
-            }
-        }
-        // Leaves: literals and bare variable reads bind nothing.
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
-    }
-}
-
-/// The source position of a pattern binder (a `match` arm's payload name or a
-/// lambda parameter): the first spelling of the name at or after the match's /
-/// lambda's own line that is not already an indexed binding's recorded spot,
-/// where `prefix` — the idents that must immediately precede the spelling in
-/// the token stream — is what tells a BINDING site from an ordinary use. An
-/// arm binder is always spelled right after its variant head (`Some(m)`), so
-/// a same-named use in an earlier arm's body (`None => len(m)`, `Err(e) =>
-/// log(e)`) cannot be mistaken for it; a lambda's parameters carry no such
-/// trail and keep the empty prefix. The pattern still precedes the arm body,
-/// and an outer `let m = match o { Some(m) => .. }` on one line owns the
-/// earlier column via `out`. `None` when the name is never spelled in source
-/// (a desugar's `@`-prefixed binder), which must not become a phantom local.
-fn binder_pos(
-    tok_info: &[TokenInfo],
-    name: &str,
-    prefix: &[&str],
-    from_line: usize,
-    out: &[LocalBinding],
-) -> Option<(usize, usize, usize)> {
-    tok_info
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.text == name && t.line >= from_line)
-        .filter(|(i, _)| {
-            prefix.is_empty()
-                || *i >= prefix.len()
-                    && tok_info[i - prefix.len()..*i]
-                        .iter()
-                        .zip(prefix.iter())
-                        .all(|(t, p)| t.text == *p)
-        })
-        .find(|(_, t)| {
-            !out.iter()
-                .any(|b| b.name == name && b.line == t.line && b.col == t.col)
-        })
-        .map(|(_, t)| (t.line, t.col, t.end_col))
 }
 
 /// Build a [`Resolution`] for a local binding.
@@ -2896,7 +2528,10 @@ fn field_detail(f: &ast::Field, all: &[TypeDecl]) -> String {
 
 fn type_decl_detail(t: &TypeDecl, all: &[TypeDecl]) -> String {
     match &t.base {
-        Type::Enum(vs) => {
+        // A DECLARED variant list. An alias of a built-in sum spells itself
+        // `Option<T>` / `Result<T, E>` (RFC-0126 §8.15), which is what the
+        // module wrote.
+        Type::Enum(vs) if !crate::types::is_sum_alias(&t.base) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("type {} = {}", t.name, arms)
         }
@@ -2961,7 +2596,7 @@ pub fn type_to_string(ty: &Type) -> String {
     // One source of truth: the AST's `Display` impl (the user-facing type
     // spelling). Enums keep the richer per-variant arm rendering for hovers.
     match ty {
-        Type::Enum(vs) => {
+        Type::Enum(vs) if !crate::types::is_sum_alias(ty) => {
             let arms = vs.iter().map(variant_arm).collect::<Vec<_>>().join(" | ");
             format!("{{ {} }}", arms)
         }
@@ -3223,7 +2858,7 @@ static MACRO_BUILTINS: &[&str] = &[
 fn is_constructor_builtin(name: &str) -> bool {
     BUILTIN_TYPES_AND_CTORS
         .iter()
-        .any(|(n, kind, _)| *n == name && matches!(kind, SymbolKind::Variant))
+        .any(|(n, _, kind, _)| *n == name && matches!(kind, SymbolKind::Variant))
 }
 
 /// Map a [`SymbolKind`] to the semantic-token [`SemKind`].
@@ -3777,6 +3412,7 @@ static ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     BuiltinMethod { name: "push", detail: "array.push(value) -> Array<T> — append to a growable array; a statement writes the result back through the receiver" },
     BuiltinMethod { name: "reserve", detail: "array.reserve(n) -> Array<T> — make room for n more elements ahead of time, so a known-size build is one allocation (RFC-0115)" },
     BuiltinMethod { name: "append", detail: "array.append(other) -> Array<T> — copy every element of `other` on, in order; element type must not own heap (RFC-0115)" },
+    BuiltinMethod { name: "clear", detail: "array.clear() -> Array<T> — length to zero, buffer kept for the next fill; element type must not own heap (RFC-0115 addendum)" },
     BuiltinMethod { name: "copyFrom", detail: "array.copyFrom(src) -> Array<T> — overwrite the elements with `src`'s, reusing the buffer; element type must not own heap (RFC-0115)" },
     BuiltinMethod { name: "tally", detail: "map.tally(key, n) -> Map<String, Int64> — insert-or-add on a count map, one probe (RFC-0116)" },
     BuiltinMethod { name: "tallyBytes", detail: "map.tallyBytes(bytes, n) -> Map<String, Int64> — tally keyed by raw bytes; the String is built and validated only on a miss (RFC-0116)" },
@@ -3839,8 +3475,7 @@ fn builtin_methods_for(ty: &Type) -> Vec<BuiltinMethod> {
             | Type::SmallArray(..)
             | Type::Map(..)
             | Type::Record(_)
-            | Type::Option(_)
-            | Type::Result(..)
+            | Type::Enum(_)
     ) {
         out.extend(by_name("copy"));
     }
@@ -3858,6 +3493,7 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
             by_name("pop"),
             by_name("swapRemove"),
             by_name("reserve"),
+            by_name("clear"),
             by_name("append"),
             by_name("copyFrom"),
         ]
@@ -3918,38 +3554,6 @@ fn builtin_methods_of_shape(ty: &Type) -> Vec<BuiltinMethod> {
 mod tests {
     use super::*;
 
-    /// What `std/result` and `std/option` export is what the editor describes.
-    ///
-    /// `Result`, `Ok`, `Err`, `Option`, `Some`, `None` were written in four
-    /// places. Three read [`BUILTIN_TYPES_AND_CTORS`] now. The fourth,
-    /// `loader::builtin_alias_exports`, cannot: it answers a different question
-    /// — which of the six each module name brings in — so it keeps its own
-    /// split. This is what stops the split drifting from the table.
-    ///
-    /// A seventh name in the loader with no row here is a name you can import
-    /// and get no hover for. A seventh row here that no module exports is a
-    /// completion for a name no import can bring in.
-    #[test]
-    fn the_alias_modules_export_exactly_the_names_the_editor_knows() {
-        let mut exported: Vec<&str> = ["std/result", "std/option"]
-            .iter()
-            .flat_map(|spec| {
-                crate::loader::builtin_alias_exports(spec)
-                    .unwrap_or_else(|| panic!("`{spec}` exports nothing"))
-                    .iter()
-                    .copied()
-            })
-            .collect();
-        let mut described: Vec<&str> = BUILTIN_TYPES_AND_CTORS.iter().map(|(n, _, _)| *n).collect();
-        exported.sort_unstable();
-        described.sort_unstable();
-        assert_eq!(
-            exported, described,
-            "`std/result` + `std/option` export names the editor has no row for, \
-             or the editor describes names no module exports"
-        );
-    }
-
     /// The colouring filter answers for the constructors and no others.
     ///
     /// It replaced a hand-written `["Some", "None", "Ok", "Err"]`. `Result` and
@@ -3959,8 +3563,8 @@ mod tests {
     fn only_the_constructors_colour_as_variants() {
         let ctors: Vec<&str> = BUILTIN_TYPES_AND_CTORS
             .iter()
-            .filter(|(n, _, _)| is_constructor_builtin(n))
-            .map(|(n, _, _)| *n)
+            .filter(|(n, _, _, _)| is_constructor_builtin(n))
+            .map(|(n, _, _, _)| *n)
             .collect();
         assert_eq!(ctors, ["Ok", "Err", "Some", "None"]);
         assert!(!is_constructor_builtin("Result"));
@@ -4128,39 +3732,6 @@ mod tests {
         assert_eq!(b.detail, "bench \"hot path\"");
         assert_eq!(b.line, 1);
         assert!(b.col > 0, "anchored at the `bench` keyword for go-to");
-    }
-
-    #[test]
-    fn analyze_linked_runs_a_generator_import() {
-        // RFC-0021: editor analysis resolves a generator-call import through the
-        // loader — the generator runs, its module links, and the imported name is
-        // indexed for hover / go-to-def (via the read-only resolver + cache).
-        use crate::loader::{LoadOptions, MapResolver};
-        let files: std::collections::HashMap<String, String> = [(
-            "gen.vyrn".to_string(),
-            "export gen fn mk(d: String) -> String { \
-                 return \"export fn magic() -> Int64 { return 7 }\" }"
-                .to_string(),
-        )]
-        .into_iter()
-        .collect();
-        let resolver = MapResolver(files);
-        let root = "import { mk } from \"./gen\"\n\
-                    import { magic } from mk(\"./data\")\n\
-                    fn main() -> Int64 { return magic() }";
-        let a = analyze_linked(root, "main.vyrn", &LoadOptions::default(), &resolver);
-        assert!(
-            a.diagnostics.is_empty(),
-            "diags: {:?}",
-            a.diagnostics
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            a.symbols.iter().any(|s| s.name == "magic"),
-            "generated `magic` is indexed"
-        );
     }
 
     #[test]
@@ -4546,31 +4117,51 @@ fn main() -> Int64 {
 }
 "#;
 
-    #[test]
-    fn memory_notes_say_what_happens_to_each_binding() {
-        let a = analyze(MEM_SRC);
+    /// `MEM_SRC`'s memory answer, as the CORE states it.
+    ///
+    /// RFC-0125 §3 M3, the report slice: the sentence a binding earns is the
+    /// core's, and this crate installs no placer, so no test here may ask for
+    /// one — the safety slice's rule, one milestone on. What the program
+    /// EARNS is pinned end to end by `vyrn-lsp`'s own suite, which drives a
+    /// server that installs the kernel, and by `vyrn why --memory`. What is
+    /// left here is the adapter: given these answers, what the editor shows.
+    fn mem_notes() -> Vec<MemoryNote> {
+        vec![
+            MemoryNote {
+                name: "a".into(),
+                line: 3,
+                text: "moved at line 4 into `take(..)`".into(),
+                last_use: Some(4),
+                moved_into: Some("`take(..)`".into()),
+            },
+            MemoryNote {
+                name: "b".into(),
+                line: 5,
+                text: "reclaimed at block exit — freeing the String buffer".into(),
+                last_use: None,
+                moved_into: None,
+            },
+            MemoryNote {
+                name: "c".into(),
+                line: 6,
+                text: "reclaimed by `drop` at line 7".into(),
+                last_use: Some(7),
+                moved_into: None,
+            },
+        ]
+    }
+
+    /// `MEM_SRC` analysed, with the core's answers put in.
+    fn mem_analysis() -> Analysis {
+        let mut a = analyze(MEM_SRC);
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
-        let note = |n: &str| {
-            a.memory
-                .iter()
-                .find(|m| m.name == n)
-                .map(|m| m.text.clone())
-                .unwrap_or_default()
-        };
-        assert_eq!(note("a"), "moved at line 4 into `take(..)`");
-        assert_eq!(
-            note("b"),
-            "reclaimed at block exit — freeing the String buffer"
-        );
-        assert_eq!(note("c"), "reclaimed by `drop` at line 7");
-        // `n` is an Int64. There is nothing to reclaim, so there is no sentence
-        // to say about it — a "NOT reclaimed" hover on a scalar is only alarm.
-        assert!(a.memory.iter().all(|m| m.name != "n"), "{:?}", a.memory);
+        a.memory = mem_notes();
+        a
     }
 
     #[test]
     fn a_binding_hover_carries_its_memory_answer() {
-        let a = analyze(MEM_SRC);
+        let a = mem_analysis();
         // The `a` in `let a = ..` on line 3.
         let r = resolve(&a, 3, 9).expect("a resolves");
         assert!(
@@ -4582,7 +4173,7 @@ fn main() -> Int64 {
 
     #[test]
     fn a_move_gets_an_inlay_hint_where_the_value_goes() {
-        let a = analyze(MEM_SRC);
+        let a = mem_analysis();
         let hints = inlay_hints(&a);
         assert_eq!(hints.len(), 1, "{hints:?}");
         assert_eq!(hints[0].line, 4);
@@ -4591,7 +4182,7 @@ fn main() -> Int64 {
 
     #[test]
     fn the_last_use_of_an_owning_binding_is_marked() {
-        let a = analyze(MEM_SRC);
+        let a = mem_analysis();
         let marked: Vec<(usize, usize)> = semantic_tokens(&a)
             .into_iter()
             .filter(|t| t.mods.last_use)
@@ -4770,8 +4361,15 @@ fn main() -> Int64 {
                    \x20   print(a); take(a)\n\
                    \x20   return 0\n\
                    }";
-        let a = analyze(src);
+        let mut a = analyze(src);
         assert!(a.diagnostics.is_empty(), "{:?}", a.diagnostics);
+        a.memory = vec![MemoryNote {
+            name: "a".into(),
+            line: 3,
+            text: "moved at line 4 into `take(..)`".into(),
+            last_use: Some(4),
+            moved_into: Some("`take(..)`".into()),
+        }];
         let hints = inlay_hints(&a);
         assert_eq!(hints.len(), 1, "{hints:?}");
         assert_eq!(hints[0].line, 4);

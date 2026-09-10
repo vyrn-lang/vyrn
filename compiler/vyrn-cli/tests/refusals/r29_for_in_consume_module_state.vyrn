@@ -1,0 +1,11 @@
+// RFC-0013 at `for .. in consume`: nothing may take ownership of module state.
+let mut names: Array<String> = ["a", "b"]
+
+fn main() -> Int64 {
+    let mut n = 0
+    for s in consume names {
+        n = n + s.byteLength
+    }
+    print(n)
+    return 0
+}

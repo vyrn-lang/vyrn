@@ -35,7 +35,7 @@ impl Show for Int64 {
 // (RFC-0007). A `Point` reaches it as the `StrVal` it renders to, so a hole is
 // still data and still cannot become the tag's own structure.
 fn tag(parts: Array<String>, values: Array<Value>) -> String {
-    let mut out = parts[0]
+    let mut out: String = parts[0].copy()
     let mut i = 0
     for v in values {
         out = out + "[" + showValue(v) + "]"

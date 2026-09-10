@@ -80,50 +80,29 @@ fn check_shim_matches_first_rendered() {
     );
 }
 
-/// A move-check error (use-after-consume) is reported with the right stage and
-/// accumulates with a type error in another function.
+/// RFC-0006's accumulation, for the two passes that still refuse here.
+///
+/// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
+/// row 06), then a hand-over to a `consume` parameter until that one left too
+/// (rows 13 and 14), then a store until rule 2 left (rows 01, 02, 03, 27 and
+/// 34), then a `for .. in consume` of a `read` parameter until rows 10, 11 and
+/// 29 left, then a closure's capture until row 24 left. `movecheck.rs` states
+/// NO refusal now, and this crate cannot reach the kernel — the memory
+/// judgment lives above it and is installed through a slot — so what
+/// accumulates here is the checker's own, and the shapes the memory judgment
+/// refuses are pinned where the kernel is reachable
+/// (`vyrn-cli/tests/refusals.rs`, the accumulation tests below the census rows
+/// and `the_shapes_the_last_three_rules_unit_tests_pinned_are_still_refused`).
 #[test]
-fn movecheck_accumulates_with_check() {
-    let src = "type T = { id: Int64 };\n\
-               fn take(t: consume T) -> Int64 { return t.id; }\n\
-               fn bad() -> Int64 { return true; }\n\
-               fn main() -> Int64 { let x = T { id: 1 }; let a = take(x); return take(x); }";
+fn the_checker_accumulates_across_declarations() {
+    let src = "fn bad() -> Int64 { return true; }
+               fn worse() -> String { return 1; }
+               fn main() -> Int64 { return 0; }";
     let diags = diagnostics(src);
-    // One check error (bad returns Bool) and one movecheck error (x used twice).
-    let check_errs = diags.iter().filter(|d| d.stage == "check").count();
-    let move_errs = diags.iter().filter(|d| d.stage == "movecheck").count();
-    assert_eq!(check_errs, 1, "{:?}", diags);
-    assert_eq!(move_errs, 1, "{:?}", diags);
-    assert!(
-        diags
-            .iter()
-            .any(|d| d.stage == "movecheck" && d.message.contains("already consumed")),
-        "{diags:?}"
-    );
-}
-
-/// Inside-body accumulation for movecheck (RFC-0006): two *independent*
-/// use-after-consume bugs in ONE function body are both reported — `block`
-/// push-and-continues at each statement, so the `y` bug is still found after the
-/// `x` bug. Each is `movecheck`-stage; lines follow the source (the second
-/// `take(x)` on line 5, the second `take(y)` on line 6).
-#[test]
-fn movecheck_accumulates_within_function_body() {
-    let src = "type T = { id: Int64 };\n\
-               fn take(t: consume T) -> Int64 { return t.id; }\n\
-               fn main() -> Int64 {\n  let x = T { id: 1 }; let a = take(x); let b = take(x);\n  let y = T { id: 2 }; let c = take(y); let d = take(y);\n  return a + c;\n}";
-    let diags = diagnostics(src);
-    let move_errs: Vec<_> = diags.iter().filter(|d| d.stage == "movecheck").collect();
-    assert_eq!(move_errs.len(), 2, "{:?}", diags);
-    assert!(
-        move_errs
-            .iter()
-            .all(|d| d.message.contains("already consumed")),
-        "{:?}",
-        move_errs
-    );
-    assert_eq!(move_errs[0].line, 4);
-    assert_eq!(move_errs[1].line, 5);
+    assert_eq!(diags.len(), 2, "{:?}", diags);
+    assert!(diags.iter().all(|d| d.stage == "check"), "{:?}", diags);
+    assert_eq!(diags[0].line, 1);
+    assert_eq!(diags[1].line, 2);
 }
 
 /// Parser error recovery (RFC-0006): two bad top-level declarations are BOTH

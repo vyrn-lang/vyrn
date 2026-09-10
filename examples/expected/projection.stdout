@@ -1,0 +1,4 @@
+window: 20 30 50
+strided: 0 30 60
+clamped: 0 20 20
+array: 0 99 30

@@ -65,35 +65,35 @@ fn showColor(c: Color) -> String { return toJson(c) }
 fn showShape(v: Shape) -> String { return toJson(v) }
 
 fn famOf(s: String) -> String {
-    return match fromJson(Fam, s) {
+    return match fromJson<Fam>(s) {
         Valid(f) => "ok " + showFam(f),
         Invalid(iss) => issues(iss),
     }
 }
 
 fn numsOf(s: String) -> String {
-    return match fromJson(Nums, s) {
+    return match fromJson<Nums>(s) {
         Valid(n) => "ok " + showNums(n),
         Invalid(iss) => issues(iss),
     }
 }
 
 fn ageOf(s: String) -> String {
-    return match fromJson(Age, s) {
+    return match fromJson<Age>(s) {
         Valid(a) => "ok " + a.toString(),
         Invalid(iss) => issues(iss),
     }
 }
 
 fn colorOf(s: String) -> String {
-    return match fromJson(Color, s) {
+    return match fromJson<Color>(s) {
         Valid(c) => "ok " + showColor(c),
         Invalid(iss) => issues(iss),
     }
 }
 
 fn shapeOf(s: String) -> String {
-    return match fromJson(Shape, s) {
+    return match fromJson<Shape>(s) {
         Valid(v) => "ok " + showShape(v),
         Invalid(iss) => issues(iss),
     }
@@ -105,7 +105,7 @@ type S = { s: String }
 fn showS(v: S) -> String { return toJson(v) }
 
 fn sOf(src: String) -> String {
-    return match fromJson(S, src) {
+    return match fromJson<S>(src) {
         Valid(v) => "ok " + showS(v),
         Invalid(iss) => issues(iss),
     }
@@ -118,9 +118,9 @@ fn main() -> Int64 {
     // unknown fields are ignored, absent `Option` is `None` (RFC-0018)
     print(famOf("{\"sur\":\"a\",\"kids\":[],\"extra\":[1,2]}"))
     print(numsOf(
-            "{\"i\":9007199254740993,\"i8v\":-128,\"u32v\":4294967295,"
-            + "\"u64v\":18446744073709551615,\"f\":-0.5,\"b\":true}",
-        ))
+        "{\"i\":9007199254740993,\"i8v\":-128,\"u32v\":4294967295,"
+        + "\"u64v\":18446744073709551615,\"f\":-0.5,\"b\":true}",
+    ))
     print(ageOf("42"))
     print(colorOf("\"Green\""))
     print(shapeOf("\"Dot\""))

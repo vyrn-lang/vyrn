@@ -1,0 +1,16 @@
+// A builtin whose parameter declares `consume` takes what it is handed, and a
+// `read` parameter has nothing to give (RFC-0089 rule 2).
+fn seed(xs: Array<Int64>) -> Stream<Int64> {
+    return fromArray(xs)
+}
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    let s = seed(a)
+    let mut n = 0
+    for v in s {
+        n = n + v
+    }
+    print(n)
+    return 0
+}

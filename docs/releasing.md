@@ -103,8 +103,8 @@ produces, so the notice has to reach whoever ends up holding one.
 |---------|---------------|
 | `vyrn run`, `check`, `test`, `bench`, `fmt`, `doc` | none |
 | `vyrn build --target wasm` | none |
-| `vyrn build` (native) | `clang` on `PATH`, or `$CLANG` |
-| the three-way parity harness | a `wasmtime` binary via `$VYRN_WASMTIME` |
+| `vyrn build` (native) | `clang` on `PATH` (or `$CLANG`), plus `wasm2c` and simde (or `$VYRN_WASM2C` and `$VYRN_SIMDE`) |
+| the route harness | a `wasmtime` binary via `$VYRN_WASMTIME` |
 
 ## Install scripts
 

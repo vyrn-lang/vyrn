@@ -938,8 +938,12 @@ fn read_frame(s: &mut TcpStream) -> Option<Frame> {
 
 /// Read frames until a close arrives, and answer with its code. Bounded, so a
 /// server that never closes fails the test rather than hanging the suite.
+/// The pump learns of a client's close at the next frame boundary, and the
+/// producer behind these tests is endless, so a fast runner can push hundreds of
+/// frames before the boundary is reached (the arm runner did, twice). The claim
+/// is that the close is answered, not that it is answered within 64 frames.
 fn read_until_close(s: &mut TcpStream) -> Option<u16> {
-    for _ in 0..64 {
+    for _ in 0..8192 {
         let f = read_frame(s)?;
         if f.opcode == 8 {
             return Some(u16::from_be_bytes([f.payload[0], f.payload[1]]));

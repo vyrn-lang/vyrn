@@ -1,0 +1,11 @@
+// RFC-0089 rule 4: the place that owns a value releases it, so a borrow may
+// not be dropped.
+type Box = { items: Array<String> }
+
+fn main() -> Int64 {
+    let b = Box { items: ["a"] }
+    let owned = b.items
+    drop owned
+    print(b.items.length)
+    return 0
+}

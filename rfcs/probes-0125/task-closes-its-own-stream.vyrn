@@ -1,0 +1,18 @@
+/// RFC-0125 §3 M6, the four-names slice: `close` off `SPAWN_FORBIDDEN`.
+///
+/// The task makes the stream and closes it. Nothing outside the task ever
+/// holds it, so the hazard the list's comment named — "the caller may still
+/// hold it across the task boundary" — cannot arise here, and the program was
+/// refused all the same. It checks now.
+fn work(n: Int64) -> Int64 {
+  let mut xs: Array<Int64> = []
+  xs.push(n)
+  let s = fromArray(xs)
+  close(s)
+  return n
+}
+
+fn main() -> Int64 {
+  let t = spawn work(1)
+  return t.join()
+}

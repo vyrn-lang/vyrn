@@ -1,0 +1,11 @@
+// Rule 2, RFC-0092: an element read is a borrow of its container, so it may
+// not be stored anywhere that outlives the statement.
+type Box = { xs: Array<String> }
+
+fn main() -> Int64 {
+    let b = Box { xs: ["a", "b"] }
+    let mut out: Array<String> = []
+    out.push(b.xs[0])
+    print(out.length)
+    return 0
+}

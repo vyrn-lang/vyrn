@@ -1,0 +1,16 @@
+/// Row `region-depth` — RFC-0004. The arena stack the compiled prelude fixes
+/// at 64 frames, and the depth the interpreter counts to in the same words.
+
+fn down(n: Int64) -> Int64 {
+    region {
+        if n > 0 {
+            return down(n - 1)
+        }
+    }
+    return n
+}
+
+fn main() -> Int64 {
+    print(down(200))
+    return 0
+}

@@ -1,0 +1,9 @@
+// RFC-0093: an element is not a place a take reaches.
+fn take(s: consume String) -> Int64 { return s.byteLength }
+
+fn main() -> Int64 {
+    let xs: Array<String> = ["a", "b"]
+    let n = take(consume xs[0])
+    print(n)
+    return 0
+}

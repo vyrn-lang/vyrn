@@ -1,11 +1,11 @@
-/// Extractable `where` — RFC-0003 reflection. `schemaOf(TypeName)` reads a
+/// Extractable `where` — RFC-0003 reflection. `schemaOf<TypeName>()` reads a
 /// validated type's declaration *at compile time* and yields a `Schema`:
 /// its name, base spelling, `///` doc, and everything the `where` predicate
 /// implies (numeric bounds, `multipleOf`, string length bounds, the regex
 /// pattern). It is NOT runtime reflection (Vyrn erases types); the compiler
 /// computes it from the declaration, so the interpreter and native backend
 /// produce identical results. Turn it into OpenAPI, JSON Schema, etc.
-/// (For a ready-made JSON Schema document, use `jsonSchema(TypeName)` directly —
+/// (For a ready-made JSON Schema document, use `jsonSchema<TypeName>()` directly —
 /// see jsonschema.vyrn.)
 
 /// Age of an adult account holder.
@@ -57,9 +57,9 @@ fn openApiString(s: Schema) -> String {
 }
 
 fn main() -> Int64 {
-    print(openApi(schemaOf(Age))) // { "type": "integer", "minimum": 18, "description": "Age of an adult account holder." }
-    print(openApi(schemaOf(Port))) // { "type": "integer", "minimum": 1, "maximum": 65535 }
-    let u = schemaOf(Username)
+    print(openApi(schemaOf<Age>())) // { "type": "integer", "minimum": 18, "description": "Age of an adult account holder." }
+    print(openApi(schemaOf<Port>())) // { "type": "integer", "minimum": 1, "maximum": 65535 }
+    let u = schemaOf<Username>()
     print(u.name) // Username
     print(u.base) // String
     print(openApiString(u)) // { "type": "string", "minLength": 3, "maxLength": 16, "pattern": "[a-z]+" }

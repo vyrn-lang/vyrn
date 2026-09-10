@@ -1,0 +1,11 @@
+mustuse_abandoned.vyrn:35:0: `ops` may not be dropped — it is a second name for the `read` parameter `self`
+  fix: `consume` the place where `ops` is bound, so `ops` takes the value rather than naming it
+  fix: delete the `drop` — the place that owns it releases it (RFC-0089 rule 4)
+mustuse_abandoned.vyrn:54:0: `a` is a `Txn` and is never disposed
+  note: `Txn` declares `impl MustUse`, so a value of it must be handed on by name — passed to a call, forwarded by returning it, or released with `drop a` — on every path
+mustuse_abandoned.vyrn:59:0: `b` is a `Txn` and is disposed more than once
+  note: `Txn` declares `impl MustUse`, so a value of it must be handed on by name — passed to a call, forwarded by returning it, or released with `drop b` — on every path
+mustuse_abandoned.vyrn:65:0: `c` is a `Txn` and is never disposed
+  note: `Txn` declares `impl MustUse`, so a value of it must be handed on by name — passed to a call, forwarded by returning it, or released with `drop c` — on every path
+mustuse_abandoned.vyrn:79:0: `pool` is an `Array<Txn>` and is never disposed
+  note: `Txn` declares `impl MustUse` and a `Array<Txn>` holds one, so the container must be handed on by name — passed to a call, forwarded by returning it, or released with `drop pool`, which releases each element — on every path

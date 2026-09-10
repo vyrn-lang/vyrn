@@ -131,19 +131,15 @@ fn theirs(b: Array<UInt8>) -> String {
     }
 }
 
+/// Both verdicts, side by side, so the Rust side can compare each of them with
+/// `std::str::from_utf8` (RFC-0125 §3 M6, the third judgment's fifth slice).
+///
+/// It used to compare `mine` with `theirs` here and print `ok`. That oracle died
+/// when the slice made `stringFromBytes` call `std/text`: both sides read
+/// `utf8Width` now, so agreeing proves nothing. The corpus is unchanged and the
+/// judge is Rust's.
 fn row(b: Array<UInt8>) -> String {
-    let t = theirs(b)
-    let m = mine(b)
-    if t == "reject" {
-        if m == "reject" {
-            return "ok"
-        }
-        return "MISMATCH builtin rejected, decodeUtf8 gave " + m
-    }
-    if t == m {
-        return "ok"
-    }
-    return "MISMATCH decodeUtf8 " + m + " vs builtin " + t
+    return theirs(b) + "|" + mine(b)
 }
 "#;
 
@@ -237,8 +233,9 @@ fn row(b: Array<UInt8>) -> String {
     );
 }
 
-/// The malformed half: `decodeUtf8` must refuse exactly what `stringFromBytes`
-/// refuses (RFC-0078 M4b).
+/// The malformed half: `decodeUtf8` and `stringFromBytes` must each refuse
+/// exactly what Rust's `std::str::from_utf8` refuses (RFC-0078 M4b, and
+/// RFC-0125 §3 M6's fifth slice for the judge).
 ///
 /// This is the row the milestone exists for. Every shape RFC-0077 M2g pinned by
 /// hand is in here, but so is the cross product that a hand list cannot cover:
@@ -253,7 +250,7 @@ fn row(b: Array<UInt8>) -> String {
 /// refuses it for RFC-0014's reason rather than a decoding one — the one place
 /// the two verdicts legitimately differ.
 #[test]
-fn decodeutf8_refuses_exactly_what_stringfrombytes_refuses() {
+fn decodeutf8_and_stringfrombytes_refuse_exactly_what_rust_refuses() {
     let tails: [u8; 10] = [0x41, 0x7f, 0x80, 0x8f, 0x90, 0x9f, 0xa0, 0xbf, 0xc0, 0xff];
     let mut buffers: Vec<Vec<u8>> = Vec::new();
 
@@ -321,11 +318,23 @@ fn decodeutf8_refuses_exactly_what_stringfrombytes_refuses() {
     let src = format!("{DECODE_HARNESS}\nfn main() -> Int64 {{\n{calls}    return 0\n}}\n");
     let lines = run_lines("vyrn-m4b-malformed", &src);
     assert_eq!(lines.len(), buffers.len(), "one line per buffer");
+    // The judge is Rust's `from_utf8`, not the other Vyrn function: since
+    // RFC-0125 §3 M6's fifth slice `stringFromBytes` and `decodeUtf8` share
+    // `utf8Width`, so each is compared with an implementation neither can reach.
     let bad: Vec<String> = lines
         .iter()
         .zip(&buffers)
-        .filter(|(l, _)| *l != "ok")
-        .map(|(l, b)| format!("{b:02x?}: {l}"))
+        .filter_map(|(l, b)| {
+            let want = match std::str::from_utf8(b) {
+                Ok(s) => s
+                    .chars()
+                    .map(|c| (c as u32).to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                Err(_) => "reject".to_string(),
+            };
+            (*l != format!("{want}|{want}")).then(|| format!("{b:02x?}: {l} want {want}"))
+        })
         .collect();
     assert!(
         bad.is_empty(),

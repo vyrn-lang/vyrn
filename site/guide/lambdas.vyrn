@@ -14,8 +14,8 @@ export fn demo() -> String {
     let total = fold(nums, 0, (acc, x) -> acc + x)
 
     return joinWith([
-            "doubled last \{doubled[4]}",
-            "evens        \{evens.length}",
-            "total        \{total}",
-        ], "\n")
+        "doubled last \{doubled[4]}",
+        "evens        \{evens.length}",
+        "total        \{total}",
+    ], "\n")
 }

@@ -1,0 +1,12 @@
+// RFC-0013: a return is owned, and module state is nobody's to give.
+let mut names: Array<String> = ["a"]
+
+fn all() -> Array<String> {
+    return names
+}
+
+fn main() -> Int64 {
+    let xs = all()
+    print(xs.length)
+    return 0
+}

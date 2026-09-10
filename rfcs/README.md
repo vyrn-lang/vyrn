@@ -44,7 +44,7 @@ drifts: each header says which milestone landed and what did not, and the
 
 ## The index
 
-123 RFCs, numbered 0001 to 0124, with one gap. **There is no RFC-0066** — the
+126 RFCs, numbered 0001 to 0127, with one gap. **There is no RFC-0066** — the
 number was skipped and never used. The only mention of it in the repository is
 this sentence. Closing the gap would mean renumbering thirty files and breaking
 every cross-reference, so the gap stays.
@@ -180,6 +180,9 @@ claim is true — is written down in the test's own header.
 | [0122](RFC-0122-an-option-of-a-place.md) | an option of a place | Implemented; `-> read Option<T>` is a projection that may miss, read only where `if let` tests it — `slots.tryAt` reads a live handle at 3 ns against `get`'s 50 ns copy |
 | [0123](RFC-0123-the-arc-closes-its-gaps.md) | the arc closes its gaps | Implemented; staged tolerance, protocol-declared projections, chained receivers, and the writable name weighed and closed "not yet" |
 | [0124](RFC-0124-work-that-happens-once.md) | work that happens once | Implemented; generation-side at-most-once evaluation for provably effect-free nullary functions (referential transparency with its hypothesis screened, not assumed) — site export 16.7 s → 13.8 s; runtime once-only recorded as module state's answered question |
+| [0125](RFC-0125-a-rule-is-stated-once.md) | a rule is stated once | Draft; a named, place-based core, a kernel of three judgments, one emitter and a runtime in Vyrn — M1 (places) is the measured gate, and the probe that motivates it is in §1.4 |
+| [0126](RFC-0126-a-type-constructor-is-a-case-in-every-pass.md) | a type constructor is a case in every pass | Census closed, and its first collapse taken through M5: `ast::Type` is 33 constructors and 2,288 mentions in the seven files that decide, `Option<T>` IS `| None | Some(T)`, and RFC-0125 §2.8's array and Map candidates were already refused with numbers by RFC-0082 |
+| [0127](RFC-0127-a-form-is-an-arm-in-every-walk.md) | a form is an arm in every walk | Census closed; the rest of the surface priced — 38 statement, expression and pattern forms (1,777 mentions in nine files), 9 declarations, 24 keywords and 15 contextual words — with five ranked collapses, one taken (`test` and `bench` share a carrier) and the number that stopped each of the others |
 
 ## The other documents here
 
@@ -190,6 +193,7 @@ the same test as the index: a file here that nothing links to fails it.
 | File | What it is |
 |------|------------|
 | [`PLAN-memory-model.md`](PLAN-memory-model.md) | The execution plan for the memory-model arc: ten phases, in the order they landed. Complete, and it records the chain that continued past it into RFC-0092 and RFC-0093. |
+| [`PLAN-0125-runtime.md`](PLAN-0125-runtime.md) | The design for RFC-0125 M4, the runtime in Vyrn: the inventory of the three runtimes with counts and where they disagree, the raw primitives, the fence, the allocator and the arena, what the interpreter can use before M5, the migration order with a gate per family, and the cost. |
 | [`NOTES-dogfood-bin.md`](NOTES-dogfood-bin.md) | Friction record from writing `examples/bin`, the pastebin that survives restarts — the first persistent app. |
 | [`NOTES-dogfood-shelf.md`](NOTES-dogfood-shelf.md) | Friction record from writing `examples/shelf`, the full-stack app. |
 | [`NOTES-dogfood-vlog.md`](NOTES-dogfood-vlog.md) | Friction record from writing `examples/vlog.vyrn`, the CLI and text app. |

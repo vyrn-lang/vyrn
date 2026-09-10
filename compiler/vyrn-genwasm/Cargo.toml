@@ -6,12 +6,12 @@ license = "MIT OR Apache-2.0"
 publish = false
 description = "RFC-0076: runs `gen fn` generators as compiled wasm in an embedded wasmtime."
 
-# NOT part of the default workspace (see ../Cargo.toml `exclude`), for the same
-# reason `vyrn-lsp` is not: an embedded `wasmtime` is heavy, and neither crate is
-# needed to build or test the language. Both consumers depend on this one
-# OPTIONALLY, behind a feature spelled `wasm-gen` in each — off by default in
-# `vyrn-cli`, on by default in `vyrn-lsp`, which is the long-lived process the
-# engine pays off in.
+# NOT a member of the default workspace (see ../Cargo.toml `exclude`): nothing
+# needs its test suite to build or test the language. It IS in the default
+# resolve, and in both consumers unconditionally — `vyrn-cli` since RFC-0125 §3
+# M5's tenth slice and `vyrn-lsp` since its sixteenth, when the tree-walker that
+# could have answered instead was deleted. There is one generation engine and it
+# is this one.
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
 vyrn-codegen = { path = "../vyrn-codegen" }

@@ -50,7 +50,7 @@ let mut lastTree: Html = Empty
 // ---- helpers ---------------------------------------------------------------
 
 fn parseId(s: String) -> Int64 {
-    return match fromJson(IntArg, s) {
+    return match fromJson<IntArg>(s) {
         Valid(n) => n,
         Invalid(issues) => -1,
     }
@@ -120,14 +120,14 @@ fn bookViews() -> Array<BookView> {
         }
         if show {
             out.push(BookView {
-                    id: b.id,
-                    title: b.title.copy(),
-                    url: b.url.copy(),
-                    rating: b.rating,
-                    tagsText: tagsText(b.tags),
-                    confirming: b.id == confirmId,
-                    detailHref: "/books/\{b.id}",
-                })
+                id: b.id,
+                title: b.title.copy(),
+                url: b.url.copy(),
+                rating: b.rating,
+                tagsText: tagsText(b.tags),
+                confirming: b.id == confirmId,
+                detailHref: "/books/\{b.id}",
+            })
         }
     }
     return out
@@ -167,7 +167,7 @@ fn tagViews() -> Array<TagCount> {
         }
         let label = match transKey("tag." + name) {
             Some(k) => t(k),
-            None => name,
+            None => name.copy(),
         }
         let cls = if filter == name { "tag active" } else { "tag" }
         out.push(TagCount { name: name, label: label, count: count, cls: cls })
@@ -341,8 +341,10 @@ export extern fn setDraftTags(arg: String) {
 /// trapping, unlike constructing `AddBookReq` directly). Valid => fire the typed
 /// stub (a real server round trip); Invalid => surface the Issues in the UI.
 export extern fn submitAdd(arg: String) {
-    let raw = RawAdd { title: draftTitle, url: draftUrl, tags: splitTrim(draftTags, ",") }
-    match fromJson(api.AddBookReq, toJson(raw)) {
+    // A record literal takes what it is given, and nothing takes module state
+    // (RFC-0013, RFC-0125 §3 M3).
+    let raw = RawAdd { title: draftTitle.copy(), url: draftUrl.copy(), tags: splitTrim(draftTags, ",") }
+    match fromJson<api.AddBookReq>(toJson(raw)) {
         Valid(req) => api.booksAdd(req, onAddBook),
         Invalid(iss) => setIssues(renderIssues(api.rpcIssuesFrom(iss))),
     }
@@ -382,7 +384,7 @@ fn nextRating(id: Int64) -> Int64 {
 /// Render a raw server 422 body (the raw-payload demo). A body that is not an
 /// issue bag surfaces the decode issues instead.
 export extern fn showServerIssues(arg: String) {
-    match fromJson(IssueBag, arg) {
+    match fromJson<IssueBag>(arg) {
         Valid(bag) => setIssues(renderIssues(bag.issues)),
         Invalid(iss) => setIssues(renderIssues(api.rpcIssuesFrom(iss))),
     }
@@ -397,9 +399,9 @@ export extern fn clearFilter(arg: String) {
 
 export extern fn toggleLang(arg: String) {
     setLocale(match locale() {
-            En => Uk,
-            Uk => En,
-        })
+        En => Uk,
+        Uk => En,
+    })
 }
 
 /// The view as JSON for vyrn-dom.js (the boot view; the host builds the DOM once

@@ -250,3 +250,22 @@ test "every integer width prints its bounds" {
     assertEq(i64lo.toString(), "-9223372036854775808")
     assertEq(u64hi.toString(), "18446744073709551615")
 }
+
+/// A byte LITERAL adapts to the position it is in, so it never fixes the width
+/// an arithmetic or a comparison runs at (RFC-0125 §3 M5, the one-reader
+/// slice). `'A' - 'a'` is `Int64` and is -32; computed at eight bits it would
+/// be 224, and `c >= 'a'` would become an unsigned byte comparison instead of
+/// the signed 64-bit one the checker types.
+test "a byte literal does not fix the width of the operation it is in" {
+    let s = "A"
+    let mut d = 0
+    let mut ge = 0
+    for c in s {
+        d = c - 'a'
+        if c >= 'a' {
+            ge = 1
+        }
+    }
+    assertEq(d, 0 - 32)
+    assertEq(ge, 0)
+}

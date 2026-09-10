@@ -248,7 +248,7 @@ export fn steps() -> Array<Step> {
     return [
         Step {
             title: "Install the toolchain, which carries the server",
-            command: installTargets()[0].cmd,
+            command: installTargets()[0].cmd.copy(),
             what: "The archive holds <code>vyrn-lsp</code> beside <code>vyrn</code>, and the installer puts both in <code>~/.vyrn/bin</code>. On Windows the line is <code>" + installTargets()[1].cmd + "</code>. If you have run either, you have the server.",
         },
         Step {

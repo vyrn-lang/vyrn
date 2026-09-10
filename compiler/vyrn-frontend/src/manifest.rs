@@ -48,7 +48,10 @@ pub fn real_path(path: &str) -> Option<String> {
 /// stripping only the drive prefix left the literal letters `UNC/` in front of
 /// a string that matches no module key spelling anywhere else. Those spell back
 /// to the `//server/share/..` form every other part of the toolchain uses.
-fn dos_to_slash(s: &str) -> String {
+///
+/// Public because the driver spells a path ten times and needs the rule rather
+/// than a tenth reading of it (RFC-0125 §3 M5).
+pub fn dos_to_slash(s: &str) -> String {
     let stripped = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
         format!("//{rest}")
     } else {
@@ -262,6 +265,48 @@ fn from_doc(doc: Json, slash_dir: String) -> Result<Manifest, String> {
 pub fn doc_in(dir: &Path) -> Option<Json> {
     let text = std::fs::read_to_string(dir.join("vyrn.json")).ok()?;
     crate::schema::parse_json(&text).ok()
+}
+
+/// The `.vyrn` modules role discovery reads (RFC-0071 M4): the manifest's entry
+/// points plus every `.vyrn` sitting directly in the app directory, as
+/// `(slash path, source)` pairs.
+///
+/// Generator imports live in an app's ROOT modules by construction — a page tree
+/// is consumed by the server and the client roots, never by a page — so this is
+/// a shallow, bounded scan and not a recursive walk, which is what keeps the
+/// discovery fallback affordable.
+///
+/// `doc` is the manifest document the caller ALREADY read, not a second read of
+/// the same file: two readers of one manifest are two policies the moment one of
+/// them fails, and this reader would answer "this project declares no entry
+/// points" about a file the first reader refused. The driver and the language
+/// server each own that read; the scan is one rule and lives here.
+pub fn role_roots(app_dir: &Path, doc: Option<&Json>) -> Vec<(String, String)> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(doc) = doc {
+        for key in ["main", "server", "client"] {
+            if let Some(Json::Str(p)) = doc.get(key) {
+                paths.push(app_dir.join(p));
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(app_dir) {
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
+                paths.push(p);
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let src = std::fs::read_to_string(&p).ok()?;
+            Some((p.to_string_lossy().replace('\\', "/"), src))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

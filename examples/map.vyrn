@@ -14,7 +14,10 @@ fn scan(a: Array<Entry>, k: Int64, i: Int64) -> Option<Int64> {
 fn mapGet(a: Array<Entry>, k: Int64) -> Option<Int64> {
     return scan(a, k, 0)
 }
-fn put(a: Array<Entry>, k: Int64, v: Int64) -> Array<Entry> {
+// `put` hands `a`'s own buffer back through its result, so it takes `a`:
+// a `read` parameter cannot be returned, and `push` on one used to return the
+// caller's buffer while the caller still held it (RFC-0125 M2, defect 1).
+fn put(a: consume Array<Entry>, k: Int64, v: Int64) -> Array<Entry> {
     return a.push(Entry { key: k, value: v })
 }
 

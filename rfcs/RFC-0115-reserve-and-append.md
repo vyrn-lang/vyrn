@@ -64,3 +64,22 @@ buffer — is one `copyFrom` now, which is the benchmarks census's
 `std/html`'s `appendBytes` — a `for`-loop of per-byte `push` — is one
 `append` now. The remaining census items this serves (`fasta`'s and
 `reverse-complement`'s line builders) can take the same two calls.
+
+## Addendum (2026-09-02) — `clear`, the third of the family
+
+`xs.clear()` sets the length to zero and keeps the buffer, so the next fill
+reuses it. It is the third thing this RFC's family could not spell: `xs = []`
+is a fresh empty triple, and a `pop` loop frees nothing an allocator would
+hand back. RFC-0125 §1.4 read the price off reverse-complement's emitted
+code: `w = []` after every sixty-byte output line was a free and then a
+growth chain of four, eight, sixteen, thirty-two, sixty-four through
+`realloc` — about eight allocator calls per line, five million over the
+game's input.
+
+The rules are `append`'s: the receiver is a growable `Array`, the element
+type must not own heap (the elements are forgotten, not released, and a
+forgotten String is a leak — `examples/clearowned.vyrn` is the refusal), and
+the statement form writes the result back. The interpreter clears a vector;
+both compiled backends copy the header with its length zeroed and keep the
+pointer and the capacity. `examples/clearkeep.vyrn` is the three-way witness.
+The primitive census pin moves 97 to 98.

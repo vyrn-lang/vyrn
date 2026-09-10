@@ -45,10 +45,15 @@ use vyrn_frontend::own::DropKind;
 use vyrn_frontend::own::Exit as ExitKind;
 use vyrn_frontend::types as ftypes;
 use vyrn_frontend::types::INT32;
+/// RFC-0125 §2.3's own vocabulary: the statements the emitter walks, what each
+/// one computes, and the values it computes it from. `Body` is spelled out at
+/// each use, because this file's own `Body` is the AST's.
+use vyrn_lower::core::{Callee, Lit, Op, Rhs, St, Val};
 
 use crate::layout::{self, Layout};
 use crate::llt_of;
-use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP, HEAP_BASE};
+use crate::wasm::{self, BlockType, Frame, Instruction, MemArg, Module, ValType, HEAP_BASE};
+use crate::{ArmRef, BodyRef};
 
 /// What the direct backend cannot lower yet: the construct, and where.
 ///
@@ -85,16 +90,16 @@ fn too_big(what: &str, bytes: u64, line: usize) -> String {
 /// standalone instantiation walker for the same reason.
 ///
 /// M2p is the other end of it: [`wasm::Module::sweep`] drops what no export
-/// reaches AFTER the bodies exist, so the fourteen here cost a program only what
+/// reaches AFTER the bodies exist, so the fifteen here cost a program only what
 /// it calls (`fib.wasm` imports two). Which is why `path_rename` could be added at
 /// all — M2o refused it as a thirteenth UNCONDITIONAL import, renumbering every
-/// module in the corpus — and `fd_sync` joins on the same terms.
+/// module in the corpus — and `fd_sync` and `fd_readdir` join on the same terms.
 ///
 /// The set is implemented twice over: wasmtime provides all of preview1, and
 /// `web/wasi-min.js` implements exactly these for the browser — with RFC-0014's
 /// graceful degradation (no argv, EOF on stdin, no preopens, every `path_open`
 /// NOENT), which is what a page's `readFile` is supposed to be.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Wasi {
     fd_write: u32,
     fd_read: u32,
@@ -110,6 +115,9 @@ struct Wasi {
     environ_get: u32,
     clock_time_get: u32,
     random_get: u32,
+    /// `listDir` (RFC-0125 §3 M5): the directory's entries, in the host's
+    /// order, which `list_dir` sorts.
+    fd_readdir: u32,
 }
 
 fn wasi_imports(m: &mut Module) -> Wasi {
@@ -136,6 +144,7 @@ fn wasi_imports(m: &mut Module) -> Wasi {
         environ_get: im("environ_get", &[I32, I32], &[I32]),
         clock_time_get: im("clock_time_get", &[I32, I64, I32], &[I32]),
         random_get: im("random_get", &[I32, I32], &[I32]),
+        fd_readdir: im("fd_readdir", &[I32, I32, I32, I64, I32], &[I32]),
     }
 }
 
@@ -276,6 +285,47 @@ pub fn wat(program: &Program) -> Result<String, String> {
 /// `find_clang() == None` made it DECLINE — a `.vyx` keystroke was 54 ms or 250 ms
 /// depending on whether someone had installed a C toolchain, which is the shape
 /// RFC-0077 exists to remove and which M5 removed for `vyrn build` only.
+/// The functions with no run-time lowering because they reach a generator.
+///
+/// RFC-0021: a `gen fn` runs at generation time and has no runtime lowering at
+/// all, so neither has an ordinary function that calls one — nor one that calls
+/// THAT. [`compile`] skips the closure for the reason it skips an
+/// unspecializable shell: failing the whole build over a function nothing calls
+/// is the wrong answer. A call to a skipped name refuses at its own call site,
+/// naming it. `std/vyx-hints`'s `checkOf` is the shape: a helper its own test
+/// blocks call, in a module every `vyxHints` program imports.
+///
+/// Public because the driver asks the same question about a DOOR (RFC-0125 §3
+/// M5): a `test` body in this closure is a body that has to be compiled as
+/// generation, and the answer must be the one this backend gives, not a second
+/// walk that agrees with it today.
+pub fn gen_reach(program: &Program) -> std::collections::HashSet<String> {
+    let mut reach: std::collections::HashSet<String> = program
+        .functions
+        .iter()
+        .filter(|f| f.is_gen)
+        .map(|f| f.name.clone())
+        .collect();
+    loop {
+        let before = reach.len();
+        for f in &program.functions {
+            if f.is_extern || reach.contains(&f.name) {
+                continue;
+            }
+            if vyrn_frontend::checker::fn_calls(&f.body)
+                .iter()
+                .any(|c| reach.contains(c))
+            {
+                reach.insert(f.name.clone());
+            }
+        }
+        if reach.len() == before {
+            break;
+        }
+    }
+    reach
+}
+
 pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
     // The flag is thread-local because `llt_of` reads it (a `Code` is an `i64`
     // handle only here) and `llt_of` is shared with the textual emitter. Cleared
@@ -287,6 +337,15 @@ pub fn compile_gen_host(program: &Program) -> Result<Vec<u8>, String> {
 }
 
 fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
+    // RFC-0125 §3 M5: this emitter reads every expression's type off the
+    // checker's record rather than deriving one. `vyrn build` has already
+    // asked for it, through the lowering; a host that compiles a program the
+    // lowering never walked — a generator, a probe, a test — asks here, and a
+    // program the core already holds costs the key comparison and nothing
+    // else. The guard lives as long as the emit, so a record made here is not
+    // left behind for whatever `Program` next lands at this address.
+    let _decided = vyrn_lower::core::decide(program);
+    let _tally = Tally;
     let mut m = Module::new();
     // Imports first — they share the function index space with definitions, so
     // `wasm::Module` panics if one arrives late.
@@ -319,7 +378,10 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         );
     }
 
-    let rt = runtime(&mut m, &wasi, gen.as_ref());
+    // PLAN-0125-runtime §6 step 1: the runtime functions written in Vyrn are
+    // reserved before the hand-emitted runtime, which calls them.
+    let mut vyrn_rt = VyrnRt::reserve(&mut m);
+    let rt = runtime(&mut m, &wasi, &vyrn_rt);
 
     let types: HashMap<String, TypeDecl> = program
         .type_decls
@@ -328,7 +390,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         .collect();
     let mut variants: HashMap<String, Vec<(String, u64, Vec<Type>)>> = HashMap::new();
     for d in &program.type_decls {
-        if let Type::Enum(vs) = &d.base {
+        if let Some(vs) = vyrn_frontend::types::declared_variants(&d.base) {
             for (i, v) in vs.iter().enumerate() {
                 variants.entry(v.name.clone()).or_default().push((
                     d.name.clone(),
@@ -340,7 +402,9 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     }
     // Three kinds of function define nothing, and are skipped exactly as the
     // textual driver skips them (`lib.rs`, step 1). Lowering an unspecializable
-    // shell would fail the whole build over a function nothing calls.
+    // shell would fail the whole build over a function nothing calls. The
+    // fourth kind is [`gen_reach`]'s.
+    let gen_reach = gen_reach(program);
     let mut generics: HashMap<String, &Function> = HashMap::new();
     let mut higher_order: HashMap<String, &Function> = HashMap::new();
     let mut user: Vec<&Function> = Vec::new();
@@ -349,6 +413,20 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // only in the compiler's own interpreter and may use builtins with no
         // lowering at all.
         if f.is_extern || f.is_gen {
+            continue;
+        }
+        // An ENTRY POINT is never dropped — `main`, an export a host knocks on,
+        // a lifted test or serve door. It stays, and lowering it refuses at the
+        // call the closure was computed from, naming that call rather than
+        // reporting a program with no `main`. Everything else in `gen_reach` is
+        // a function no run-time entry can reach.
+        let entry = f.name == "main" || f.exported || f.is_export_extern;
+        if gen_reach.contains(&f.name) && !entry {
+            continue;
+        }
+        // PLAN-0125-runtime §3.2: a `std/mem` declaration has no body this
+        // emitter reads. `Fn_::mem_prim` lowers each call to one instruction.
+        if f.name.starts_with(vyrn_frontend::loader::MEM_PREFIX) {
             continue;
         }
         // RFC-0023: a function taking a `fn`-typed parameter exists only as
@@ -379,9 +457,13 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         .collect();
 
     let ownership = vyrn_frontend::own::analyze(program);
+    // RFC-0114 §25's instrument, and never on the GENERATOR path (RFC-0076
+    // M7): a generator module runs inside the compiler and its exit code is a
+    // protocol between the host and the module, so a residue report there
+    // would fail the build instead of measuring the program.
+    let audited = gen.is_none() && vyrn_frontend::loader::audit_build();
     let mut cx = Cx {
         types,
-        decls: &program.type_decls,
         lambdas: vyrn_frontend::ast::lambdas(program),
         impls: program.impls.clone(),
         sigs: HashMap::new(),
@@ -396,6 +478,7 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         fnvals: RefCell::new(Vec::new()),
         fnval_copy: 0,
         dispatch: RefCell::new(Dispatch::default()),
+        shapes: RefCell::new(Shapes::default()),
         globals: HashMap::new(),
         gappend: HashMap::new(),
         externs,
@@ -403,23 +486,19 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         // (`rfcs/census-call-arguments.md`), taken before `ownership` is moved
         // from.
         plan: ownership.plan.clone(),
+        // The core's own answers, folded once by the placer inside
+        // `own::analyze` above (RFC-0125 §3 M3).
+        facts: vyrn_lower::core::facts(),
         releases: ownership.releases,
-        droppable: ownership.droppable,
-        early: ownership.early,
         // RFC-0093 M2, flattened across functions: the key is the `let`'s node
         // address, which is unique in the program.
-        holes: ownership
-            .holes
-            .values()
-            .flatten()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect(),
         owned: ownership.proto,
         log_level: program.log_level,
         log_sink: program.log_sink.clone(),
         // Reserved only for a file sink, so every console-sink module — which is
         // every example — is byte-for-byte what it was.
         log_fd: matches!(program.log_sink, LogSink::File(_)).then(|| m.reserve(4, 4)),
+        audit: audited,
     };
 
     // Every function the module will define, indexed before any body exists, so a
@@ -437,14 +516,13 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     for f in user.iter() {
         let s = cx.signature(f)?;
         let (wp, wr) = cx.wasm_sig(&s, f.line)?;
-        cx.sigs.insert(
-            f.name.clone(),
-            Sig {
-                index: m.reserve_func(&wp, &wr),
-                ..s
-            },
-        );
+        let index = match vyrn_rt.take(&f.name, &wp, &wr, f.line)? {
+            Some(reserved) => reserved,
+            None => m.reserve_func(&wp, &wr),
+        };
+        cx.sigs.insert(f.name.clone(), Sig { index, ..s });
     }
+    vyrn_rt.check()?;
 
     // Module state (RFC-0013), before any body: a top-level `let` is one fixed
     // address per binding, reserved zeroed, and every read and write anywhere in
@@ -491,6 +569,12 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // where in the sequence it lands.
     let has_globals = !program.globals.is_empty();
     let init_index = m.reserve_func(&[], &[]);
+    // RFC-0114 §25: the teardown that drops every module-state binding after
+    // `main`, so what the instrument reports is the program's residue and not
+    // the module state it never had a place to release. Reserved only in an
+    // audited build, which is the whole of what keeps an ordinary module's
+    // indices where they were.
+    let teardown_index = (cx.audit && has_globals).then(|| m.reserve_func(&[], &[]));
     // The derived `fn`-value copy (Phase 10b), reserved for a dispatcher's
     // reason: its switch covers every construction in the module, so its body
     // cannot be written until the last body is walked, while a copy site in the
@@ -511,6 +595,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // module — and an empty body is two bytes.
     let init = lower_globals_init(&mut m, program, &cx)?;
     m.fill(init_index, init);
+    // Before the drain, like every other body: a global of a DECLARED generic
+    // release reaches the teardown and nowhere else, and its instance has to
+    // be on a worklist the drain below still reads. That instance is what
+    // `vyrn-lower`'s `<teardown>` root queues.
+    if let Some(ti) = teardown_index {
+        let t = lower_globals_teardown(&mut m, program, &cx)?;
+        m.fill(ti, t);
+    }
 
     // Drain what the bodies discovered, and then the dispatchers the drain
     // discovered, until neither has anything left. One body may discover more of
@@ -519,6 +611,14 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // value — so this reads both lists afresh every turn rather than iterating a
     // snapshot. That is what "the worklists feed each other" is here: appending to
     // the list being read.
+    //
+    // A frame past the limit waits for the drain to end. In a polymorphic
+    // recursion the frames double every instance, so the frame limit trips turns
+    // before the instantiation limit does — and the instantiation refusal is the
+    // one `vyrn check` and the textual backend give for that program (audit
+    // A5.2, RFC-0125 §3 M5). One program, one sentence: the drain goes on, and the
+    // frame refusal is returned only when no instantiation refusal came.
+    let mut deferred: Option<String> = None;
     loop {
         let p = {
             let mono = cx.mono.borrow();
@@ -552,10 +652,39 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
             });
             let body = lower_body(&mut m, &p.f, p.body, &p.sig, &cx, p.binds.clone());
             crate::observe::set_ctx(was);
-            let body = body?;
             cx.subst = HashMap::new();
-            m.fill(p.sig.index, body);
             cx.mono.borrow_mut().done += 1;
+            match body {
+                Ok(body) => {
+                    m.fill(p.sig.index, body);
+                    if std::env::var_os("VYRN_WASM_NAMES").is_some() {
+                        m.name(p.sig.index, &p.f.name);
+                    }
+                }
+                Err(e) if e.contains(crate::FRAME_LIMIT_NEEDLE) => {
+                    deferred.get_or_insert(e);
+                }
+                Err(e) => return Err(e),
+            }
+            continue;
+        }
+        // The release and the copy of a type, one body each (RFC-0125 §3 M3,
+        // the two shape walks). They are drained before the dispatchers and
+        // after the instances for the same reason the instances are drained
+        // this way: a shape body reaches a declared `release`, which is an
+        // ordinary call and may be a generic one, so writing it can put an
+        // instance on the list this loop has just read to the end. The
+        // substitution is EMPTY here — every shape's type was substituted at
+        // the site that asked for it.
+        let sh = {
+            let s = cx.shapes.borrow();
+            s.todo.get(s.done).cloned()
+        };
+        if let Some((index, (rel, ty, holes), line)) = sh {
+            cx.subst = HashMap::new();
+            let body = lower_shape(&mut m, &cx, rel, &ty, &holes, line)?;
+            m.fill(index, body);
+            cx.shapes.borrow_mut().done += 1;
             continue;
         }
         // A dispatcher's body is the one thing that cannot be written when its
@@ -571,30 +700,15 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         m.fill(dsig.index, body);
         cx.dispatch.borrow_mut().done += 1;
     }
-
-    // RFC-0114 §26's finish, the textual driver's twin: every plan row in a
-    // function this emission walked must have been consumed by a query — a
-    // missed site is a silent leak, made loud at build time instead of at
-    // the memory suite's profile.
-    {
-        let mut fn_emitted: std::collections::HashSet<String> =
-            user.iter().map(|f| f.name.clone()).collect();
-        for p in cx.mono.borrow().insts.iter() {
-            match &p.key {
-                Key::Generic(n, _) | Key::Ho(n, _, _) => {
-                    fn_emitted.insert(n.clone());
-                }
-                Key::Lambda(..) => {}
-            }
-        }
-        let missed = cx.plan.unconsumed(&fn_emitted);
-        if let Some((owner, class)) = missed.first() {
-            return Err(format!(
-                "internal: RFC-0114 §26 — the release plan placed {} decision(s) the emission never consumed, first {class} in `{owner}`; a missed site is a silent leak, and this failure is the loudness the plan exists for",
-                missed.len()
-            ));
-        }
+    if let Some(e) = deferred {
+        return Err(e);
     }
+
+    // RFC-0114 §26's finish check stood here. It counted the rows the PLAN
+    // placed and this emission never queried, and the emission queries no
+    // plan row any more (RFC-0125 §3 M3, the emitter-reads-the-core-alone
+    // slice). What answers the same question about the core's rows is
+    // measurement: the residue ratchet and the memory suite.
 
     // The registry is closed now, so the derived copy can be written.
     let fncopy = lower_fnval_copy(&cx)?;
@@ -628,7 +742,36 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
         };
         (at, cx.rt.intern(&mut m, path), cx.rt.open_at)
     });
+    // RFC-0114 §25's instrument, when the build is audited: the four wordings
+    // interned here and handed to `auditInit`, the way `boolStr` and
+    // `strFromBytes` are handed theirs. The two indices are ordinary module
+    // functions — nothing but this reaches them, so an unaudited build sweeps
+    // them away with the data.
+    let audit = if cx.audit {
+        let words = [
+            cx.rt.intern(&mut m, "free audit: "),
+            cx.rt.intern(&mut m, " block(s), "),
+            cx.rt.intern(&mut m, " bytes, never freed\n"),
+            cx.rt.intern(&mut m, "free audit: double or foreign free\n"),
+        ];
+        let at = |n: &str| {
+            cx.sigs.get(n).map(|s| s.index).ok_or_else(|| {
+                format!("direct backend: VYRN_LEAK_CHECK is set and `std/runtime` has no `{n}`")
+            })
+        };
+        Some((at("runtime$auditInit")?, at("runtime$auditExit")?, words))
+    } else {
+        None
+    };
     let start = m.func(&[], &[], &[], 0, |b| {
+        // First of all, so no block is handed out before the instrument can
+        // mark it: `auditInit` allocates its own state and only then arms.
+        if let Some((init, _, words)) = audit {
+            for w in words {
+                b.ins(&Instruction::I32Const(w as i32));
+            }
+            b.ins(&Instruction::Call(init));
+        }
         // Before the initializers, because a top-level `let` may log — the same
         // order `vyrn_entry` uses.
         if let Some((at, path, open_at)) = log_open {
@@ -658,6 +801,17 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
                 .ins(&Instruction::I32Load(word()))
                 .ins(&Instruction::Call(wasi.fd_close))
                 .ins(&Instruction::Drop);
+        }
+        // After the flush, so a leaking program's own output arrives before the
+        // report, and before the exit code, because the report REPLACES it with
+        // 135. The old instrument sat in exactly this place — after
+        // `vyrn_main` returned, on the normal path only, so a program that
+        // trapped reported nothing.
+        if let Some(ti) = teardown_index {
+            b.ins(&Instruction::Call(ti));
+        }
+        if let Some((_, exit, _)) = audit {
+            b.ins(&Instruction::Call(exit));
         }
         b.ins(&Instruction::I64Const(255))
             .ins(&Instruction::I64And)
@@ -707,6 +861,11 @@ fn compile_inner(program: &Program) -> Result<Vec<u8>, String> {
     // 39 runtime helpers, 12 WASI imports, every function of every linked module —
     // because nothing knows what a program reaches until its bodies are walked.
     // This is where that is known.
+    //
+    // And the data with them: every literal of every linked module was interned
+    // on its way past, and `runtime` below interned the UTF-8 table, the six I/O
+    // wordings and the trap rows before a body existed. `Module::sweep_pool`
+    // asks the same question of those bytes (RFC-0125 §3 M4).
     m.sweep();
     abi_section(&mut m, &user, program);
     m.finish()
@@ -833,6 +992,29 @@ enum MapKey {
     Str,
     I64,
     Pack(u32),
+}
+
+impl MapKey {
+    /// The `(kind, klen)` pair `std/runtime`'s one map body takes
+    /// (PLAN-0125-runtime §6 step 5): 0 for a String column, 1 for an `Int64`
+    /// column, 2 for a packed user key of `klen` bytes. Kind 3, a byte window
+    /// against a String column, is `tallyBytes`'s alone and has no `MapKey`.
+    fn kind(self) -> (i32, i32) {
+        match self {
+            MapKey::Str => (0, 0),
+            MapKey::I64 => (1, 8),
+            MapKey::Pack(n) => (2, n as i32),
+        }
+    }
+
+    /// The bytes one entry of the key column takes.
+    fn stride(self) -> i32 {
+        match self {
+            MapKey::Str => 4,
+            MapKey::I64 => 8,
+            MapKey::Pack(n) => n as i32,
+        }
+    }
 }
 
 /// How a value of some Vyrn type travels: nothing, a wasm value, or the address
@@ -1019,6 +1201,33 @@ struct Dispatch {
     done: usize,
 }
 
+/// The release and the copy of one type, each as a function of its own —
+/// RFC-0125 §2.3's "`drop` to a call" (§3 M3, the two shape walks).
+///
+/// The shape of a release is the TYPE: which fields, which elements, which
+/// payload slot under which tag. Nothing above this file can state it, because
+/// every step of it is a byte offset and a byte offset is [`crate::layout`]'s.
+/// What §2.3 asks for is the other half — that a drop SITE emit a call — and
+/// that is what this holds: one body per type, written once, called wherever a
+/// release or a copy of that type is reached.
+#[derive(Default)]
+struct Shapes {
+    /// `(a release rather than a copy, the substituted type, the take holes)`
+    /// → the function's index. A linear scan because [`Type`] is `Eq` and not
+    /// `Hash`, and a module has tens of these.
+    known: Vec<(ShapeKey, u32)>,
+    /// The bodies still to write, and how many of them are written. A body may
+    /// reach a type nothing has released yet, so the driver reads this list
+    /// afresh every turn exactly as it reads [`Mono`]'s.
+    todo: Vec<(u32, ShapeKey, usize)>,
+    done: usize,
+}
+
+/// What identifies one shape body. The holes are RFC-0093 M2's: a `consume`
+/// took a place, so a release that walks it would free what has an owner
+/// already — which makes a walk around them a DIFFERENT function.
+type ShapeKey = (bool, Type, Vec<String>);
+
 /// What a `fn`-typed argument resolved to (RFC-0023): the function a call through
 /// that parameter goes to **directly**, and how many of its leading parameters are
 /// captures the outer call site supplies.
@@ -1056,13 +1265,6 @@ struct Cx<'a> {
     /// cannot answer: a `where` predicate's node ADDRESS (RFC-0101 M6's third
     /// phase).
     ///
-    /// `types` is `decl_map`'s copy, made once per engine, and every validation
-    /// site copied the predicate out of it again. What the copying costs is not
-    /// the copy: no recorded type can reach a node the program does not hold, so
-    /// 1,043 of the corpus's off-program backend answers were inside one
-    /// (RFC-0101 §1.5). Read from here, the predicate is the same tree the
-    /// checker typed and the other two engines walk.
-    decls: &'a [TypeDecl],
     /// Every lambda literal the PROGRAM holds, by node address (RFC-0101 M6's
     /// third phase).
     ///
@@ -1114,6 +1316,9 @@ struct Cx<'a> {
     /// complete once the last body is walked.
     fnval_copy: u32,
     dispatch: RefCell<Dispatch>,
+    /// One release and one copy per type, and the worklist of the bodies still
+    /// to write — see [`Shapes`].
+    shapes: RefCell<Shapes>,
     /// Module state (RFC-0013): name → its fixed address and declared type. Every
     /// body sees all of them, which is the textual backend's `globals` fallback in
     /// [`Gen::lookup`] — the checker already forbids an initializer reading a
@@ -1132,30 +1337,22 @@ struct Cx<'a> {
     /// rather than this file's, which is also how RFC-0043's host boundary is
     /// reached by name.
     externs: HashMap<String, Ext>,
-    /// Per function, which `let` statements own a heap value and how to reclaim
-    /// it — `vyrn_frontend::own`'s answer, keyed by statement node address: the
-    /// same map, read with the same key, as the textual backend's `droppable`.
-    ///
-    /// Every kind is acted on since M6. The KIND itself is not read — the release
-    /// shape comes off the binding's type through [`Fn_::rel_for`], so an explicit
-    /// `drop x` and an inferred block-exit release cannot reclaim different things
-    /// — but the map's membership is `own`'s answer and stays authoritative about
-    /// WHICH `let`s own their value.
-    droppable: HashMap<String, HashMap<usize, DropKind>>,
-    early: HashMap<String, HashMap<usize, DropKind>>,
-    /// Per function: [`droppable`](Cx::droppable)'s rows PLACED — every step, at
-    /// the exit that runs it, in the order it runs (RFC-0101 M4). One order for
-    /// three engines, read at the exit instead of derived from a frame stack.
+    /// Per function: every release step PLACED — at the exit that runs it, in
+    /// the order it runs (RFC-0101 M4). One order for three engines, read at
+    /// the exit instead of derived from a frame stack.
     releases: HashMap<String, Vec<vyrn_frontend::own::Release>>,
-    /// Per `let` node, the places a `consume` took out of it (RFC-0093 M2). The
-    /// release walk skips them: the take already gave them an owner.
-    holes: HashMap<usize, Vec<String>>,
     /// The per-node release decisions (RFC-0114 §26) — the same artifact the
     /// textual backend reads, so the two cannot disagree about a site.
     plan: vyrn_frontend::own::ReleasePlan,
+    /// What the CORE says about the releases this emitter emits. The only
+    /// source: `own.rs` states none of them (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core-alone slice). `None` when the placer is not
+    /// installed (`VYRN_NO_PLACER=1`), and then no such release is emitted,
+    /// because the placer is the pass that states them.
+    facts: Option<vyrn_lower::core::Facts>,
     /// The `Owned` table (RFC-0086 M1) — the same one `own` decided with, so a
     /// user type's declared `release` reaches this backend without a second list.
-    owned: vyrn_frontend::own::Owned,
+    owned: vyrn_frontend::declared::Owned,
     /// RFC-0008's threshold, as an ordinal. Compile-time, and that is the point:
     /// with `logging { level: warn }` a `.debug(..)` call emits no write at all,
     /// which is what makes a disabled log site cost nothing on every engine. A
@@ -1169,9 +1366,168 @@ struct Cx<'a> {
     /// `None` for a console sink, so a program that does not log to a file
     /// reserves nothing and its module is unchanged.
     log_fd: Option<u32>,
+    /// RFC-0114 §25: this build is AUDITED, so `std/runtime`'s four `audit`
+    /// calls are emitted and `_start` arms the instrument and asserts on it.
+    /// False is every ordinary build: the calls are dropped, the bodies reach
+    /// no export, [`wasm::Module::sweep`] takes them, and not one byte moves.
+    audit: bool,
 }
 
+/// The reserved prefix of the exit-residue instrument's calls inside
+/// `std/runtime` (RFC-0114 §25). One prefix rather than four names, so a
+/// fifth hook needs no edit here.
+const AUDIT_PREFIX: &str = "runtime$audit";
+
 impl<'a> Cx<'a> {
+    /// RFC-0114 R1′ read off the core (RFC-0125 §3 M3, the
+    /// deletion-preparation slice): does this frame release the unnamed
+    /// receiver of the field read at `node`, and around which holes?
+    ///
+    /// The core states it as a `St::Drop` of the name whose
+    /// `NameInfo::receiver` is this node, with the name's own hole set.
+    ///
+    /// There is no second answer to fall back to: `own.rs` states no
+    /// receiver table any more (RFC-0125 §3 M3, the emitter-reads-the-core-
+    /// alone slice).
+    fn receiver_row(&self, node: usize) -> Option<Vec<String>> {
+        let f = self.facts.as_ref()?;
+        f.receivers.get(&self.plan.key_of(node)).cloned()
+    }
+
+    /// RFC-0114 M2 and exit-residue round eighteen read off the core
+    /// (RFC-0125 §3 M3, the emitter-reads-the-core slice): does the store at
+    /// `node` release the value it displaces?
+    ///
+    /// The core states the plan's two tables as ONE answer (`St::Store`'s
+    /// `releases`), because both compiled backends read them as one — the row, the
+    /// `mentions_place` guard, and round eighteen's `fresh_str` exception,
+    /// all of which the core now spells (`core::Builder::stmt`). What stays
+    /// the emitter's is the region gate, which is a property of where the
+    /// code stands and not of the store.
+    ///
+    /// A site the core states nothing for falls back to the plan: RFC-0091
+    /// M2's `place at` rewrite BUILDS the store statements a user
+    /// container's `c[h] = v` becomes, the checker walks those, and this
+    /// pass walks the source statement. `compiler/vyrn-cli/tests/coretables.rs`
+    /// pins that residue at twelve rows over the corpus.
+    fn store_row(&self, node: usize) -> bool {
+        self.store_fact(node).unwrap_or(false)
+    }
+
+    /// The core's answer alone, or `None` where it states none — a body this
+    /// pass could not lower, or a statement RFC-0091 M2's rewrite built. A
+    /// store to a NAME asks for it this way, because the answer it falls
+    /// back to is the plan's row AND the guards around it, not the row
+    /// alone.
+    fn store_fact(&self, node: usize) -> Option<bool> {
+        let f = self.facts.as_ref()?;
+        f.stores.get(&self.plan.key_of(node)).copied()
+    }
+
+    /// Round twenty-eight read off the core (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core slice): does this statement discard an owned
+    /// result the emission frees rather than drops? The core states it as a
+    /// `St::Drop` of the temporary the statement's value bound, keyed by the
+    /// `Stmt::Expr` node.
+    ///
+    /// There is no second answer to fall back to: `own.rs` states no
+    /// discarded table any more (RFC-0125 §3 M3, the
+    /// emitter-reads-the-core-alone slice).
+    fn discarded_row(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.discarded.contains(&self.plan.key_of(node)))
+    }
+
+    /// Does this `for` give its container back where it ends? The core states
+    /// it at the loop ([`vyrn_lower::core::Facts::loop_gives_back`]); this
+    /// emitter read the word `consume` off the source until RFC-0125 §3 M3's
+    /// event-stream slice.
+    fn loop_gives_back(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.loop_gives_back.contains(&self.plan.key_of(node)))
+    }
+
+    /// Does the container's release at this `for` walk the BUFFER alone? The
+    /// core states it at the loop
+    /// ([`vyrn_lower::core::Facts::loop_buffer_only`]), out of the same
+    /// sentence that says whose an element is; this emitter read the KIND of
+    /// the plan's own row until RFC-0125 §3 M3's container slice.
+    fn loop_buffer_only(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.loop_buffer_only.contains(&self.plan.key_of(node)))
+    }
+
+    /// RFC-0114 M1, stated by the core (RFC-0125 §3 M3, the last table's
+    /// slice): does the caller free this argument's value after the call or
+    /// operator above it? The core carries the key on the name the argument
+    /// bound ([`vyrn_lower::core::NameInfo`]'s `arg_drop`), which is where an
+    /// operator's operand gets one too — `a + b` is `@concat(a, b)` here.
+    ///
+    /// There is no second answer to fall back to, exactly as [`Cx::store_row`]
+    /// has none: `own.rs` states no argument table any more.
+    fn arg_drop_row(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.arg_drops.contains(&self.plan.key_of(node)))
+    }
+
+    /// RFC-0114 Rule N read off the core (RFC-0125 §3 M3, the derivation
+    /// slice): the releases one edge of the join at `node` owes because
+    /// another edge took the name. The core states each as a `St::Drop` at a
+    /// `Site::Edge`, which is the join and the edge — a position in a branch
+    /// is not a key, and this is why the drop carries one. The kernel's
+    /// `equalize` is the one statement of the rule, and `own.rs` states none.
+    fn edge_rows(&self, node: usize) -> Vec<(String, u32)> {
+        let Some(f) = self.facts.as_ref() else {
+            return Vec::new();
+        };
+        f.edges
+            .get(&self.plan.key_of(node))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Whether the construct at `node` switches on a value the frame MADE
+    /// ([`vyrn_lower::core::Facts::owns_scrutinee`]), so the boxes its
+    /// binders came out of are its own to give back.
+    ///
+    /// A wider question than [`Cx::match_consumes`] and it contains it: a
+    /// take is one way to own the scrutinee, and a `consume`, a call's
+    /// result, a literal and a `Map` lookup are the others. Each compiled
+    /// backend read those four off the SOURCE, beside the table that answered
+    /// the take; the core states all of them as one row (RFC-0125 §3 M3, the
+    /// box slice). A site the core has no answer for is a body no core was
+    /// built for.
+    fn owns_scrutinee(&self, node: usize) -> bool {
+        self.facts
+            .as_ref()
+            .is_some_and(|f| f.owns_scrutinee.contains(&self.plan.key_of(node)))
+    }
+
+    /// Round forty's table read off the core (RFC-0125 §3 M3, the
+    /// deletion-preparation slice): the payload binders the arm at
+    /// `(key, arm)` releases at its end, each with the holes the arm left in
+    /// it. The core states them as the trailing run of `St::Drop` in
+    /// `Arm::body`, with `NameInfo::holes` on each binder;
+    /// Since RFC-0125 §3 M3's derivation slice the rows are the kernel's own
+    /// answer over the core, and `own.rs` states none: the core answers at
+    /// every switch it lowers — a `match`, an `if let` and a `?` alike — and
+    /// a site with no answer is a body no core was built for.
+    fn arm_row(&self, key: usize, arm: u32) -> Option<Vec<(String, Vec<String>)>> {
+        let f = self.facts.as_ref()?;
+        let rows = f.arms.get(&(self.plan.key_of(key), arm))?;
+        // The kind the core carries beside each binder is the interpreter's
+        // reader; this backend reads the release off the type itself.
+        (!rows.is_empty()).then(|| {
+            rows.iter()
+                .map(|(n, h, _)| (n.clone(), h.clone()))
+                .collect()
+        })
+    }
+
     /// Substitute the monomorphization this lowering is inside.
     ///
     /// The chokepoint, and the point of having one: [`Cx::resolve`], [`Cx::ll`],
@@ -1203,32 +1559,24 @@ impl<'a> Cx<'a> {
         ftypes::resolve(&self.sub(ty), &self.types)
     }
 
-    /// `decl`'s `where` predicate as the PROGRAM holds it — see [`Cx::decls`].
-    ///
-    /// `Ok(None)` is a type with no refinement. Every `decl` that reaches this
-    /// backend was cloned out of [`Cx::types`], which is `decl_map`'s copy of
-    /// this list, so a decl that HAS a predicate and is not in the list is a
-    /// decl the program does not hold — a refusal rather than a silently skipped
-    /// validation.
-    fn predicate(&self, decl: &TypeDecl, line: usize) -> Result<Option<&'a Expr>, String> {
-        if decl.predicate.is_none() {
-            return Ok(None);
-        }
-        match self
-            .decls
-            .iter()
-            .find(|d| d.name == decl.name && d.base == decl.base)
-            .and_then(|d| d.predicate.as_ref())
-        {
-            Some(p) => Ok(Some(p)),
-            None => unsupported(
-                &format!(
-                    "a `where` clause on `{}`, which is not one of the program's own                      type declarations",
-                    decl.name
-                ),
-                line,
-            ),
-        }
+    /// RFC-0126 §8.4's `words(t)`: the slots a payload of type `t` rides in.
+    /// `Gen`'s own answer, for [`Cx::ll`]'s reason.
+    fn words(&self, ty: &Type) -> usize {
+        crate::payload_words_of(&self.sub(ty), &self.types)
+    }
+
+    /// The aggregate member index the `i`th payload of a variant starts at
+    /// (member 0 is the tag).
+    fn payload_slot(&self, payload: &[Type], i: usize) -> usize {
+        1 + payload[..i].iter().map(|p| self.words(p)).sum::<usize>()
+    }
+
+    /// The variants of the sum `ty`, in TAG order — [`crate::sum_variants_of`],
+    /// under this emitter's substitution. `Gen`'s own answer, for [`Cx::ll`]'s
+    /// reason, and what makes a release and a copy one walk per sum rather than
+    /// one per SPELLING of a sum (RFC-0126 §8.11, M4a).
+    fn sum_vs(&self, ty: &Type) -> Option<Vec<EnumVariant>> {
+        crate::sum_variants_of(&self.sub(ty), &self.types)
     }
 
     /// The PROGRAM's own body for a lambda literal at this address, or `None`
@@ -1296,6 +1644,8 @@ impl<'a> Cx<'a> {
                 name: p.name.clone(),
                 capability: p.capability,
                 ty: ftypes::substitute(&p.ty, &subst),
+                line: p.line,
+                col: p.col,
             });
         }
         sf.ret = ftypes::substitute(&f.ret, &subst);
@@ -1378,10 +1728,16 @@ impl<'a> Cx<'a> {
         }
         match self.resolve(ty) {
             Type::Record(fs) => fs.iter().find_map(|f| self.ty_gap(&f.ty, depth + 1)),
-            Type::Option(i) | Type::Array(i) | Type::ArrayN(i, _) => self.ty_gap(&i, depth + 1),
-            Type::Result(a, b) | Type::Map(a, b) => self
+            Type::Array(i) | Type::ArrayN(i, _) => self.ty_gap(&i, depth + 1),
+            Type::Map(a, b) => self
                 .ty_gap(&a, depth + 1)
                 .or_else(|| self.ty_gap(&b, depth + 1)),
+            // Every sum, one arm — the two built-in ones resolve to their
+            // variant lists since RFC-0126 §8.11's M4b.
+            Type::Enum(vs) => vs
+                .iter()
+                .flat_map(|v| v.payload.iter())
+                .find_map(|p| self.ty_gap(p, depth + 1)),
             _ => None,
         }
     }
@@ -1482,7 +1838,7 @@ enum Place {
 fn stream_step_sig(elem: &Type) -> Type {
     Type::Fn(
         vec![Type::Int, Type::Int, Type::Bool],
-        Box::new(Type::Option(Box::new(elem.clone()))),
+        Box::new(Type::option(elem.clone())),
     )
 }
 
@@ -1552,17 +1908,79 @@ impl Place {
     }
 }
 
+/// Storage an aggregate is built INTO (RFC-0125 §2.1, M1's second slice): a
+/// frame slot, or an address a wasm local holds plus an offset.
+///
+/// A record or array literal, and a call that returns an aggregate, write
+/// straight into one of these when the consumer already owns the storage. A
+/// nested literal then costs no frame of its own, which is what §1.4's
+/// per-node copy charged: every intermediate aggregate of a literal landed in
+/// the frame, and the frame was the sum of them.
+///
+/// The rule, stated once: **a value is built in place only into storage
+/// nothing can name while it is being built** — a fresh `let`'s slot, a field
+/// or element of a literal under construction, a call's result. A store into
+/// named storage (an assignment, a field or element store whose value reads
+/// the binding, module state) keeps the copy, because a field written early
+/// would be visible to a later field's initializer otherwise, and the
+/// interpreter builds the whole value first.
+#[derive(Clone, Copy)]
+enum Dest {
+    Slot(u32),
+    Addr(u32, u32),
+}
+
+impl Dest {
+    /// Push the address `off` bytes into this destination.
+    fn addr(self, b: &mut Frame, off: u32) {
+        match self {
+            Dest::Slot(base) => {
+                b.slot(base + off);
+            }
+            Dest::Addr(l, base) => {
+                b.ins(&Instruction::LocalGet(l));
+                if base + off != 0 {
+                    b.ins(&Instruction::I32Const((base + off) as i32));
+                    b.ins(&Instruction::I32Add);
+                }
+            }
+        }
+    }
+
+    /// The destination `off` bytes into this one.
+    fn at(self, off: u32) -> Dest {
+        match self {
+            Dest::Slot(base) => Dest::Slot(base + off),
+            Dest::Addr(l, base) => Dest::Addr(l, base + off),
+        }
+    }
+
+    /// A binding's place as a destination. Module state is named storage and
+    /// is never one (the rule above); a scalar local has no address.
+    fn of(p: Place) -> Option<Dest> {
+        match p {
+            Place::Slot(off) => Some(Dest::Slot(off)),
+            Place::Local(_) | Place::Static(_) => None,
+        }
+    }
+}
+/// The spelling a lifted lambda's shell is named by, followed by the name of
+/// the function that holds the literal: `@lambda main`. Reserved, so no Vyrn
+/// identifier can be it.
+const LAMBDA: &str = "@lambda";
+
 /// An empty `Function` to fill in for a lifted lambda (RFC-0023).
 ///
 /// A synthesized declaration rather than a bespoke lowering path: the captures
 /// become ordinary read parameters, so [`lower_fn`] emits it with no case of its
-/// own. The name is a reserved spelling no Vyrn identifier can be, which matters
-/// once — `Cx::droppable` is keyed by function name, and a lifted body must not
-/// inherit the enclosing function's release list (the textual backend takes the
-/// same map away for the same reason).
+/// own. [`Fn_::lift_lambda`] names it `@lambda <owner>`: the analysis records
+/// a lambda's release rows under the ENCLOSING function's name, keyed by the
+/// lambda's own nodes, and [`lower_body`] reads `Cx::releases` under the
+/// owner (RFC-0125 M3, third slice). Before that the
+/// shell owned no rows, and a row inside a lambda was placed and never run.
 fn f_shell(line: usize) -> Function {
     Function {
-        name: "@lambda".to_string(),
+        name: LAMBDA.to_string(),
         exported: false,
         module: None,
         doc: None,
@@ -1614,6 +2032,14 @@ struct Fn_<'a, 'p> {
     /// (RFC-0101 M4): a `break` reads the steps the placement put at that
     /// `break`, so no engine derives an index into its own frames any more.
     loops: Vec<(u32, u32, u32)>,
+    /// RFC-0125 M1: the header parts of every binding a `while` hoisted
+    /// (`hoist_walks`), keyed by name, live for the loop's extent.
+    walks: HashMap<String, Walk>,
+    /// RFC-0125 M1: the two locals a failed bounds check parks its message
+    /// and index in before branching to the function's one trap site — see
+    /// `bounds_check`. `None` for a frame that has no site (the globals
+    /// initializer), which keeps the call at the check.
+    trap_site: Option<(u32, u32)>,
     ret: Repr,
     ret_ty: Type,
     /// The wasm local holding the hidden aggregate-return pointer, if any.
@@ -1637,9 +2063,36 @@ struct Fn_<'a, 'p> {
     rel_slots: HashMap<usize, RelSlot>,
     /// Registrations so far, which is what a [`RelSlot::seq`] counts.
     rel_seq: u32,
+    /// The rows that still name a frame slot, each with the frame top it was
+    /// registered at — the floor below which no statement may give a slot back.
+    ///
+    /// [`Frame::alloc`]'s rule reads "a slot is a statement's unless the
+    /// statement bound a name", and the body walker tested exactly that: the
+    /// scope's length. A NAME is not the only thing that outlives a statement.
+    /// A `for` over an unnamed iterable, an `if let` over a temporary and a
+    /// `match` over one each copy that value into a slot and register a release
+    /// row for it, and WHERE that row runs is the core's answer, not this
+    /// emitter's: for a `for` over an array literal the core says the
+    /// function's exit, because `declared::type_of` names no array literal's
+    /// type and `own` therefore places nothing at the loop's own end. The
+    /// statement bound no name, so the walker gave the slot back, the next
+    /// statement built its own temporary over it, and the two rows at the exit
+    /// released the second statement's value twice — a trap at address -16 in
+    /// `free`, on two `for` loops in one body.
+    ///
+    /// A row leaves this list when it is released on a FALL-THROUGH exit — a
+    /// block's or a construct's own — because the path that carries on is the
+    /// path that no longer holds it. A release at a `return`, a `?`, a `break`
+    /// or a `continue` is on a branch, and the fall-through still holds the
+    /// value, so such a row keeps its floor. Clearing on every release instead
+    /// would give the slot back on a path that still names it; keeping every
+    /// row to the end of the body instead summed a statement's temporaries
+    /// again, and 250 `print(match parseFloat64(..) { .. })` statements in one
+    /// `main` then wanted 10,048 bytes of a frame limited to 8,192.
+    rel_pending: Vec<(usize, u32)>,
     /// RFC-0101 M4: the release steps placed at every exit of this body, keyed
     /// by the node the exit is AT. Read, never derived.
-    placed: HashMap<(ExitKind, usize), Vec<(usize, bool)>>,
+    placed: HashMap<(ExitKind, usize), Vec<(usize, Option<Vec<String>>)>>,
     /// The stream cursors a `for x in pull()` opened, innermost last, with the
     /// registration count each was opened at.
     ///
@@ -1656,9 +2109,11 @@ struct Fn_<'a, 'p> {
     /// region nests inside its caller's); this is only the part one body can see,
     /// which is exactly the part its own `br`s unwind past.
     region_depth: u32,
-    /// [`Cx::droppable`] for the function being lowered.
-    drops: HashMap<usize, DropKind>,
-    early: HashMap<usize, DropKind>,
+    /// One local per region open in this body, outermost first: the mark
+    /// [`Fn_::region_enter`] took, which [`Fn_::region_exit`] hands back to
+    /// `std/runtime`. Parallel to `region_depth`, which is its length while a
+    /// statement is being lowered.
+    region_marks: Vec<u32>,
     /// The locals holding the argument temporaries this frame releases, innermost
     /// call last. Teed where the argument is EVALUATED and handed back where its
     /// call ends — see [`Fn_::call`].
@@ -1684,11 +2139,45 @@ struct Fn_<'a, 'p> {
     /// clears, not a second one. Two copies of that rule would be two answers to
     /// "may this buffer move", and one of them a use-after-free.
     append_ok: std::collections::HashSet<String>,
+    /// Whether this body is a declared `release` (RFC-0086): the CALLER walks
+    /// the receiver's payload boxes after the call, so a `match consume self`
+    /// inside one must not free them — see [`Fn_::frees_boxes`].
+    is_release: bool,
     /// wasm local holding the accumulator's pointer → the frame slot holding its
     /// ownership flag. Keyed by local index rather than by name because the
     /// local IS the binding: two `let out`s in one body are two accumulators, and
     /// a global (a `Place::Static`) never gets an entry at all.
     str_append: HashMap<u32, u32>,
+    /// RFC-0125 M1: the storage the NEXT expression may build itself into, and
+    /// the type that storage holds. Set by a consumer that owns fresh storage
+    /// ([`Fn_::agg_into`]), taken at the top of [`Fn_::expr_inner`] so only the
+    /// immediate expression sees it; a literal or a call that uses it says so
+    /// through `dest_used`, and the consumer skips its copy.
+    dest_hint: Option<(Dest, Type)>,
+    dest_used: bool,
+    /// The hint an `Expr::Call` carried into [`Fn_::call_inner`], which takes it
+    /// before any argument is lowered so a nested call cannot claim it.
+    call_dest: Option<(Dest, Type)>,
+    /// The declared function this frame's plan rows are under: the function
+    /// itself, or for a lifted lambda the function that holds the literal
+    /// (RFC-0125 M3, third slice).
+    owner: String,
+    /// This frame's own core body, and where each of its names lives — RFC-0125
+    /// §3 M3, the interleave slice.
+    ///
+    /// The driver used to pick its walk per FUNCTION, so an AST arm could only
+    /// go when every body of the corpus went through the core. The unit is the
+    /// STATEMENT now: the two walks share this frame — its locals, its scope
+    /// and the places below — and each statement goes to whichever walk carries
+    /// it. `None` for a frame the core states no body for.
+    core: Option<std::rc::Rc<vyrn_lower::core::Body>>,
+    /// The core's rows for each source statement of this body
+    /// ([`vyrn_lower::core::Body::rows_by_statement`]).
+    core_at: HashMap<usize, Vec<St>>,
+    /// Where the core's names live, and what the operand stack is holding.
+    /// Shared by the two walks: a name the AST arm bound is found through
+    /// [`Fn_::scope`], and one this walk bound is pushed onto it.
+    core_w: Walked,
 }
 
 /// A lowering context with nothing in scope and nothing to return to: what the
@@ -1700,23 +2189,33 @@ fn top_level<'a, 'p>(cx: &'a Cx<'p>) -> Fn_<'a, 'p> {
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
+        walks: HashMap::new(),
+        trap_site: None,
         ret: Repr::Unit,
         ret_ty: Type::Unit,
         dest: None,
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         rel_seq: 0,
+        rel_pending: Vec::new(),
         placed: HashMap::new(),
         cursors: Vec::new(),
         region_depth: 0,
-        drops: HashMap::new(),
-        early: HashMap::new(),
+        region_marks: Vec::new(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
         fn_binds: HashMap::new(),
         append_ok: std::collections::HashSet::new(),
+        is_release: false,
         str_append: HashMap::new(),
+        dest_hint: None,
+        dest_used: false,
+        call_dest: None,
+        owner: String::new(),
+        core: None,
+        core_at: HashMap::new(),
+        core_w: Walked::default(),
     }
 }
 
@@ -1738,7 +2237,7 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
     for g in &program.globals {
         let (place, ty) = cx.globals[&g.name].clone();
         let r = cx.repr(&ty, g.line)?;
-        f.store_into(m, &mut b, place, &r, &g.init, &ty)?;
+        f.store_into(m, &mut b, place, &r, &g.init, &ty, false)?;
         // The accumulator's ownership word starts true for every initializer but a
         // literal, which is data-segment storage nothing allocated. Getting this
         // wrong one way abandons the initializer's buffer at the first append; the
@@ -1751,6 +2250,28 @@ fn lower_globals_init(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<
         }
         // One frame holds every initializer's temporaries, so the bound is
         // checked per global: the one that crossed it is the one to name.
+        frame_fits(&b, &g.name, g.line)?;
+    }
+    Ok(b)
+}
+
+/// The module-state teardown (RFC-0114 §25), emitted only in an audited
+/// build: every top-level `let`'s binding released at its fixed address, in
+/// reverse declaration order — the order the bindings would come off a stack.
+///
+/// It is what makes the instrument's question the PROGRAM's. Module state
+/// outlives `main` by design (RFC-0013), so without a teardown every global
+/// that owns heap is residue and the ratchet would measure the language's own
+/// rule instead of a defect. A binding whose value is a data-segment literal
+/// releases nothing: `free` refuses an address below `HEAP_BASE`.
+fn lower_globals_teardown(m: &mut Module, program: &Program, cx: &Cx<'_>) -> Result<Frame, String> {
+    let mut b = Frame::new(0, &[], 0);
+    let mut f = top_level(cx);
+    for g in program.globals.iter().rev() {
+        let (place, ty) = cx.globals[&g.name].clone();
+        if let Some(rel) = f.rel_for(&ty, g.line)? {
+            f.emit_rel(m, &mut b, place, &rel, g.line)?;
+        }
         frame_fits(&b, &g.name, g.line)?;
     }
     Ok(b)
@@ -1773,6 +2294,9 @@ fn lower_fn(
 ) -> Result<(), String> {
     let frame = lower_body(m, f, Body::Block(&f.body), sig, cx, binds)?;
     m.fill(sig.index, frame);
+    if std::env::var_os("VYRN_WASM_NAMES").is_some() {
+        m.name(sig.index, &f.name);
+    }
     Ok(())
 }
 
@@ -1800,6 +2324,13 @@ fn lower_body(
     let (params, _results) = cx.wasm_sig(&sig, f.line)?;
     let dest = sig.ret.agg().map(|_| 0u32);
     let shift = dest.map_or(0, |_| 1);
+    // A lifted lambda's rows are the enclosing function's (see `f_shell`).
+    let owner = f
+        .name
+        .strip_prefix(LAMBDA)
+        .map(|rest| rest.trim_start().to_string())
+        .filter(|o| !o.is_empty())
+        .unwrap_or_else(|| f.name.clone());
 
     let mut b = Frame::new(params.len(), &[], 0);
     let mut cx_fn = Fn_ {
@@ -1807,6 +2338,8 @@ fn lower_body(
         scope: Vec::new(),
         depth: 0,
         loops: Vec::new(),
+        walks: HashMap::new(),
+        trap_site: None,
         ret: sig.ret.clone(),
         // As DECLARED, not resolved. A function returning `Age` has to validate
         // at its `return`, and `Age` resolved to `Int64` is the flow that does
@@ -1816,17 +2349,17 @@ fn lower_body(
         scratch: HashMap::new(),
         rel_slots: HashMap::new(),
         rel_seq: 0,
+        rel_pending: Vec::new(),
         // RFC-0101 M4: the order this body releases in, decided once in
         // `own::place_body` and read here.
         placed: cx
             .releases
-            .get(&f.name)
+            .get(&owner)
             .map(|steps| vyrn_frontend::own::placed(steps))
             .unwrap_or_default(),
         cursors: Vec::new(),
         region_depth: 0,
-        drops: cx.droppable.get(&f.name).cloned().unwrap_or_default(),
-        early: cx.early.get(&f.name).cloned().unwrap_or_default(),
+        region_marks: Vec::new(),
         arg_frees: Vec::new(),
         rel_holes: Vec::new(),
         expect: Vec::new(),
@@ -1835,8 +2368,24 @@ fn lower_body(
         // grown by `x = x + ..`, which is a STATEMENT, and there is one
         // expression here.
         append_ok: stmts.map(crate::append_candidates).unwrap_or_default(),
+        is_release: cx.owned.is_release_fn(&f.name),
         str_append: HashMap::new(),
+        dest_hint: None,
+        dest_used: false,
+        call_dest: None,
+        owner,
+        core: vyrn_lower::core::body_of(&f.name).map(std::rc::Rc::new),
+        core_at: HashMap::new(),
+        core_w: Walked::default(),
     };
+    if let Some(core) = cx_fn.core.clone() {
+        cx_fn.core_at = core.rows_by_statement();
+        cx_fn.core_w = Walked {
+            at: vec![None; core.names.len()],
+            reads: core.reads(),
+            held: None,
+        };
+    }
 
     // By-value parameter semantics: an aggregate arrives as the caller's
     // address, so the prologue copies it into a slot of our own. M0 measured
@@ -1903,23 +2452,46 @@ fn lower_body(
         // the textual backend.
         if p.capability == Capability::Consume {
             let key = p as *const vyrn_frontend::ast::Param as usize;
-            if cx_fn.drops.contains_key(&key) {
+            if cx_fn.releases_whole(key) {
                 if let Some(r) = cx_fn.rel_for(&ty, f.line)? {
-                    cx_fn.register_rel(key, place, r);
+                    cx_fn.register_rel(&b, key, place, r);
                 }
             }
         }
         cx_fn.scope.push((p.name.clone(), place, ty));
+    }
+    // The core's parameters are the declaration's in order, and the prologue
+    // has just put each one where it lives, so the two walks agree about them
+    // before either runs.
+    if let Some(core) = cx_fn.core.clone() {
+        for (i, n) in core.params.iter().enumerate() {
+            if let Some((_, place, ty)) = cx_fn.scope.get(i) {
+                cx_fn.core_w.at[*n as usize] = Some((*place, ty.clone()));
+            }
+        }
     }
 
     // Audit A5.3: one frame of the language's call-depth budget. A lifted lambda
     // is skipped — it has no name to call itself by (RFC-0037), so it cannot
     // recurse without passing through a named function, and counting it here
     // would count a call the interpreter and the textual backend do not.
-    let counted = f.name != "@lambda";
+    // Nor a `std/runtime` function (PLAN-0125-runtime §6 step 1): the
+    // hand-emitted copies it replaces had no prologue, and a program that
+    // traps at the limit has to trap where it did.
+    let counted =
+        !f.name.starts_with(LAMBDA) && !f.name.starts_with(vyrn_frontend::loader::RUNTIME_PREFIX);
     if counted {
         call_depth_enter(&mut b, cx);
     }
+    // RFC-0125 M1: the trap site. A check that fails parks its trap-table ROW
+    // and the value the row names in these two locals and branches OUT of this
+    // block; the one call to `trapAt` stands after it. Seven of §2.3's eight
+    // rows reach it — the eighth is the prologue's own, which stands before
+    // the block and cannot branch into it. Measured on nbody's inner
+    // loop under Cranelift: twenty-nine checks each carrying their own call
+    // cost 3.56 s against 1.71 s with the compare kept and the call gone —
+    // the call site, not the check, was what the engine paid for.
+    cx_fn.trap_site = Some((b.local(ValType::I32), b.local(ValType::I64)));
     // The one block every `return` targets. Its result IS the function's when
     // that is a scalar; an aggregate return travels through `dest` instead, so
     // the block carries nothing.
@@ -1927,9 +2499,31 @@ fn lower_body(
         Repr::Scalar(v) => BlockType::Result(*v),
         _ => BlockType::Empty,
     }));
-    match stmts {
-        Some(blk) => cx_fn.block(m, &mut b, blk)?,
-        None => match body {
+    // Inside it, the trap block wraps the body: a failed check branches out of
+    // THIS block and lands on the trap call below, while a `return` branches
+    // out of the function block as it always did — past the call, into the
+    // epilogue and the frame's own stack pop. A body must never emit `return`
+    // (the M1 note on `Frame::ins`), and this structure is how the trap site
+    // obeys that: the first cut returned from inside and leaked the frame.
+    b.ins(&Instruction::Block(BlockType::Empty));
+    cx_fn.depth += 1;
+    // RFC-0125 §2.3: "the emitter reads the core and writes wasm". Where the
+    // core's rows carry the whole body, its statements are what this walks;
+    // everywhere else the AST dispatch below is what it always was, and it
+    // asks the core again at every statement ([`Fn_::core_took`]).
+    let from_core = cx_fn
+        .core
+        .clone()
+        .filter(|_| !core_walk_off())
+        .filter(|core| cx_fn.core_walkable(core, stmts));
+    WALKS.with(|w| {
+        let (from, all) = w.get();
+        w.set((from + usize::from(from_core.is_some()), all + 1));
+    });
+    match (from_core, stmts) {
+        (Some(core), _) => cx_fn.core_body(m, &mut b, &core)?,
+        (None, Some(blk)) => cx_fn.block(m, &mut b, blk)?,
+        (None, None) => match body {
             Body::Value(e) => cx_fn.lambda_value(m, &mut b, e)?,
             _ => unreachable!("only a lambda's expression has no statements"),
         },
@@ -1941,10 +2535,23 @@ fn lower_body(
     cx_fn.arg_frees.clear();
     // Falling off the end of a value-returning function is unreachable — the
     // checker proves every path returns — but the validator needs to be told,
-    // since it cannot see the proof.
+    // since it cannot see the proof. A unit or aggregate body that falls off
+    // its end leaves the trap block the way a `return` does, over the call.
     if matches!(sig.ret, Repr::Scalar(_)) {
         b.ins(&Instruction::Unreachable);
+    } else {
+        b.ins(&Instruction::Br(cx_fn.depth));
     }
+    b.ins(&Instruction::End);
+    cx_fn.depth -= 1;
+    if let Some((trule, tval)) = cx_fn.trap_site {
+        b.ins(&Instruction::LocalGet(trule));
+        b.ins(&Instruction::LocalGet(tval));
+        b.ins(&Instruction::I32Const(cx.rt.trap_table as i32));
+        b.ins(&Instruction::Call(cx.rt.trap_at));
+    }
+    // The helper exits the process; the validator is told so.
+    b.ins(&Instruction::Unreachable);
     b.ins(&Instruction::End);
 
     // The copy-out, once, AFTER the block every `return` branches to — which is
@@ -1981,6 +2588,11 @@ fn lower_body(
         call_depth_bump(&mut b, cx, -1);
     }
 
+    // RFC-0125 M1: `VYRN_FRAME_TRACE=1` prints every body's frame, refused or
+    // not, so the biggest frames of a program can be read off stderr.
+    if std::env::var_os("VYRN_FRAME_TRACE").is_some() {
+        eprintln!("frame	{}	{}", b.bytes(), f.name);
+    }
     frame_fits(&b, &f.name, f.line)?;
     Ok(b)
 }
@@ -1995,7 +2607,7 @@ fn lower_body(
 /// 256-byte frame reached the same trap at depth 256, while the other two
 /// engines ran the same program to 1,000 and stopped with
 /// `error: call depth exceeds 1000`. Both are one missing comparison, so both
-/// are this one — against [`vyrn_frontend::interp::FRAME_LIMIT`], which is the
+/// are this one — against [`vyrn_frontend::trap::FRAME_LIMIT`], which is the
 /// stack divided by the depth every engine allows.
 ///
 /// Naming the function and its line is the point: the size is the sum of its
@@ -2005,7 +2617,7 @@ fn lower_body(
 /// makes about a program the checker let through — the message names what is too
 /// big, and a note names the declaration.
 fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
-    let limit = vyrn_frontend::interp::FRAME_LIMIT;
+    let limit = vyrn_frontend::trap::FRAME_LIMIT;
     if b.bytes() <= limit {
         return Ok(());
     }
@@ -2017,24 +2629,39 @@ fn frame_fits(b: &Frame, name: &str, line: usize) -> Result<(), String> {
          the heap — an `Array<T>` rather than a fixed `Array<T, N>` or a record of records",
         b.bytes(),
         crate::FRAME_LIMIT_NEEDLE,
-        vyrn_frontend::interp::CALL_DEPTH_LIMIT,
+        vyrn_frontend::trap::CALL_DEPTH_LIMIT,
     ))
 }
 
-/// Take one call frame, or trap. Inline for the reason `region_enter` is: it is
-/// a dozen instructions, and a helper would be another index in a table whose
-/// numbering is load-bearing.
+/// Take one call frame, or trap.
+///
+/// This is an instruction sequence, not a runtime function, and
+/// PLAN-0125-runtime §6 step 9 priced the alternative before leaving it here:
+/// with `enter` and `leave` a `std/runtime` pair called from every counted
+/// prologue and epilogue, nbody at 25 M steps went from 2.155 s to 2.306 s
+/// under wasmtime 46 and fannkuch at n = 11 from 3.599 s to 4.014 s, medians
+/// of five, base and head interleaved — 7 and 12 percent for two calls per
+/// user call, which is step 5's four nanoseconds on the path every program
+/// takes. The counter is a load, a compare and a store at the one site that
+/// has the frame in hand, so it stays here (RFC-0125 §3 M4).
 fn call_depth_enter(b: &mut Frame, cx: &Cx<'_>) {
-    let (at, msg, trap) = (cx.rt.call_depth, cx.rt.msg_calldepth, cx.rt.trap);
+    let at = cx.rt.call_depth;
+    // The one trap-table row that cannot go through the function's trap site:
+    // the prologue stands BEFORE the block a check branches out to, so it
+    // calls `trapAt` itself (RFC-0125 §2.3, and M1's structure).
     b.ins(&Instruction::I32Const(at as i32))
         .ins(&Instruction::I32Load(word()))
         .ins(&Instruction::I32Const(
-            vyrn_frontend::interp::CALL_DEPTH_LIMIT as i32,
+            vyrn_frontend::trap::CALL_DEPTH_LIMIT as i32,
         ))
         .ins(&Instruction::I32GeU)
         .ins(&Instruction::If(BlockType::Empty))
-        .ins(&Instruction::I32Const(msg as i32))
-        .ins(&Instruction::Call(trap))
+        .ins(&Instruction::I32Const(
+            vyrn_frontend::trap::Rule::CallDepth.index() as i32,
+        ))
+        .ins(&Instruction::I64Const(0))
+        .ins(&Instruction::I32Const(cx.rt.trap_table as i32))
+        .ins(&Instruction::Call(cx.rt.trap_at))
         .ins(&Instruction::End);
     call_depth_bump(b, cx, 1);
 }
@@ -2106,6 +2733,32 @@ fn lower_fnval_copy(cx: &Cx<'_>) -> Result<Frame, String> {
     // Every other tag has no block to copy: the payload is 0 and the copy is the
     // value, exactly as a scalar's is.
     b.ins(&Instruction::LocalGet(pay));
+    Ok(b)
+}
+
+/// One shape body: `(addr) -> ()`, releasing or copying the value at `addr`.
+///
+/// The parameter IS the address, which is what an aggregate in a wasm local
+/// already is — so the body is the walk it used to be inline, reading local 0
+/// where the site read the local it had made. Every place the walk reaches is
+/// under that address, so the function needs no frame of its own; a field with
+/// a DECLARED release is the one thing that does, and it takes it exactly as any
+/// other call site does.
+fn lower_shape(
+    m: &mut Module,
+    cx: &Cx<'_>,
+    rel: bool,
+    ty: &Type,
+    holes: &[String],
+    line: usize,
+) -> Result<Frame, String> {
+    let mut b = Frame::new(1, &[], 0);
+    let mut f = top_level(cx);
+    if rel {
+        f.rel_body(m, &mut b, 0, ty, holes, line)?;
+    } else {
+        f.copy_body(m, &mut b, 0, ty, line)?;
+    }
     Ok(b)
 }
 
@@ -2229,7 +2882,7 @@ fn lower_dispatcher(
         if let Some(d) = dest {
             b.ins(&Instruction::LocalGet(d));
         }
-        let got = f.emit_call(m, &mut b, &v.target.sig, &all)?;
+        let got = f.emit_call(m, &mut b, &v.target.sig, &all, None)?;
         match (&dsig.ret, cx.repr(&got, 0)?) {
             // The target's declared result may differ from the signature's — a
             // named source's validated scalar, a wider record — so it crosses the
@@ -2293,7 +2946,7 @@ impl<'p> Fn_<'_, 'p> {
     /// scratch doc says so itself — "a nested expression evaluates to completion
     /// before the outer one touches scratch" is exactly what is false here.
     fn tee_str_temp(&mut self, b: &mut Frame, e: &Expr) -> Option<u32> {
-        if self.region_depth > 0 || !vyrn_frontend::own::str_temporary(e) {
+        if !vyrn_frontend::declared::str_temporary(e) {
             return None;
         }
         let l = b.local(ValType::I32);
@@ -2337,15 +2990,13 @@ impl<'p> Fn_<'_, 'p> {
             }
             Repr::Agg(l) => {
                 // Destination-first, at the function's own boundary: the
-                // caller's slot address is already in `dest`.
-                b.ins(&Instruction::LocalGet(self.dest.unwrap()));
+                // caller's slot address is already in `dest`. The caller
+                // handed over storage nothing names (its own fresh slot, or
+                // storage IT was handed under the same rule), so a literal
+                // is built in it directly (RFC-0125 M1).
                 let want = self.ret_ty.clone();
-                self.expr_as(m, b, e, &want)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
+                let dest = Dest::Addr(self.dest.unwrap(), 0);
+                self.agg_into(m, b, dest, l.size, e, &want, true)?;
             }
             Repr::Unit => {
                 return unsupported("a return whose value does not match the signature", line);
@@ -2387,8 +3038,28 @@ impl<'p> Fn_<'_, 'p> {
 
     fn block(&mut self, m: &mut Module, b: &mut Frame, blk: &Block) -> Result<(), String> {
         let mark = self.scope.len();
-        for s in &blk.stmts {
-            self.stmt(m, b, s)?;
+        let mut k = 0;
+        while k < blk.stmts.len() {
+            // RFC-0125 M1: a statement's temporaries are its own. A statement
+            // that bound nothing at this level gives its slots back (the rule
+            // on `Frame::alloc`); one that did — a `let`, a refutable `let` —
+            // keeps everything it took, binding and temporaries alike, because
+            // the cheap test is the scope's length and not which slot is which.
+            //
+            // A NAME is not the only thing that outlives a statement:
+            // [`Fn_::rel_pending`] is the floor the release rows that still
+            // name a slot raise, and the reset stops there.
+            let (frame, scope) = (b.mark(), self.scope.len());
+            if let Some(n) = self.elem_field_store(m, b, &blk.stmts[k..])? {
+                k += n;
+                b.reset(frame.max(self.rel_floor()));
+                continue;
+            }
+            self.stmt(m, b, &blk.stmts[k])?;
+            if self.scope.len() == scope {
+                b.reset(frame.max(self.rel_floor()));
+            }
+            k += 1;
         }
         // The fall-through exit. An early `return`/`break`/`continue` releases the
         // same frames before its branch, so this runs after a branch only in code
@@ -2396,6 +3067,191 @@ impl<'p> Fn_<'_, 'p> {
         self.emit_releases(m, b, ExitKind::Block, blk as *const Block as usize)?;
         self.scope.truncate(mark);
         Ok(())
+    }
+
+    /// `a[i].f = v` as ONE store through the element's address — RFC-0125 M1.
+    ///
+    /// The parser hands every engine the RFC-0082 idiom for this statement:
+    /// `let mut a[] = @at(a, a[]idx)`, then `a[].f = v`, then `a[a[]idx] = a[]`.
+    /// That is a copy of the whole element out, one field store, and a copy
+    /// back — two `memory.copy` per field write for a store of one scalar. In
+    /// nbody's inner loop it is 21 copies per iteration, and it is why the same
+    /// program runs 13x slower under Cranelift than under LLVM: LLVM's scalar
+    /// replacement deletes the copies and a wasm engine keeps them (§1.4).
+    ///
+    /// The three statements are recognised here by the unspellable temp and
+    /// lowered as a bounds check, an address and a store — exactly what
+    /// `Stmt::IndexSet` does for `a[i] = v`, plus a field offset. HEAPLESS
+    /// elements only: with nothing to release, the skipped `let` has no placed
+    /// release to leave behind, and the old field value owes none either. An
+    /// element that holds heap keeps the idiom, whose releases the placement
+    /// already accounted for.
+    ///
+    /// Returns how many statements were consumed, or `None` when the window is
+    /// not the idiom and the caller lowers the statement as it always did.
+    fn elem_field_store(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        stmts: &[Stmt],
+    ) -> Result<Option<usize>, String> {
+        let [Stmt::Let {
+            name: tmp,
+            mutable: true,
+            value: load,
+            ..
+        }, Stmt::SetField {
+            name: t2,
+            field,
+            value,
+            line,
+        }, Stmt::IndexSet {
+            name: parent,
+            index: Expr::Var { name: idx2, .. },
+            value: Expr::Var { name: t3, .. },
+            ..
+        }, ..] = stmts
+        else {
+            return Ok(None);
+        };
+        if !vyrn_frontend::ast::is_place_temp(tmp) || t2 != tmp || t3 != tmp {
+            return Ok(None);
+        }
+        let Expr::Call { name: at, args, .. } = load else {
+            return Ok(None);
+        };
+        if at != "@at" || args.len() != 2 {
+            return Ok(None);
+        }
+        let (Expr::Var { name: p2, .. }, Expr::Var { name: idx, .. }) = (&args[0], &args[1]) else {
+            return Ok(None);
+        };
+        if p2 != parent || idx != idx2 {
+            return Ok(None);
+        }
+        let (place, ty) = self.lookup(parent, *line)?;
+        let elem = match self.cx.resolve(&ty) {
+            Type::Array(i) | Type::ArrayN(i, _) | Type::SmallArray(i, _) => *i,
+            _ => return Ok(None),
+        };
+        if self.rel_for(&elem, *line)?.is_some() {
+            return Ok(None);
+        }
+        let (foff, fty) = self.field_of(&elem, field, *line)?;
+        let fr = self.cx.repr(&fty, *line)?;
+        if matches!(fr, Repr::Unit) || matches!(place, Place::Local(_)) {
+            return Ok(None);
+        }
+        // A heapless element owes no release, so nothing is emitted for the
+        // store decision on the idiom's own statements.
+        // From here on, code is emitted: the same prefix as `Stmt::IndexSet`.
+        let w = match self.walks.get(parent.as_str()).cloned() {
+            Some(w) => w,
+            None => {
+                place.addr(b, 0);
+                self.walk(b, &ty, *line)?
+            }
+        };
+        self.expr_as(m, b, &args[1], &Type::Int)?;
+        let i = b.local(ValType::I64);
+        b.ins(&Instruction::LocalSet(i));
+        self.bounds_check(b, &w, i, false);
+        self.elem_addr(b, &w, i);
+        if foff != 0 {
+            b.ins(&Instruction::I32Const(foff as i32));
+            b.ins(&Instruction::I32Add);
+        }
+        match &fr {
+            Repr::Scalar(_) => {
+                self.expr_as(m, b, value, &fty)?;
+                b.ins(&store_of(&self.cx.ll(&fty)));
+            }
+            Repr::Agg(l) => {
+                self.expr_as(m, b, value, &fty)?;
+                b.ins(&Instruction::I32Const(l.size as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            }
+            Repr::Unit => unreachable!("refused above"),
+        }
+        Ok(Some(3))
+    }
+
+    /// The hoisted header of `e`, when `e` names a binding a `while` hoisted.
+    fn cached_walk(&self, e: &Expr) -> Option<Walk> {
+        match e {
+            Expr::Var { name, .. } => self.walks.get(name.as_str()).cloned(),
+            _ => None,
+        }
+    }
+
+    /// The read half of RFC-0125 M1. Before a `while`, take apart every
+    /// array, fixed array, small array or String this frame binds that the
+    /// loop indexes and never moves, so the body reads `data` and `len` from
+    /// locals instead of reloading the header at every access.
+    ///
+    /// `walk` reloads because a store into linear memory may alias the
+    /// header's slot and no wasm engine can prove it does not — nbody's inner
+    /// loop paid 29 reloads per iteration for that (§1.4). The proof is made
+    /// here instead, on the syntax, and it is conservative: `header_invariant`
+    /// refuses the hoist on anything that could move the header. Module state
+    /// is never hoisted, because a callee can grow it. An element store moves
+    /// no header, so `a[i] = v` and the field-store idiom keep the hoist.
+    ///
+    /// Returns what each hoisted name held before, for `While` to put back.
+    fn hoist_walks(
+        &mut self,
+        b: &mut Frame,
+        cond: &Expr,
+        body: &Block,
+        line: usize,
+    ) -> Result<Vec<(String, Option<Walk>)>, String> {
+        let mut out = Vec::new();
+        for name in indexed_names(cond, body) {
+            if self.walks.contains_key(&name) {
+                continue;
+            }
+            let Some((place, ty)) = self
+                .scope
+                .iter()
+                .rev()
+                .find(|(n, _, _)| *n == name)
+                .map(|(_, p, t)| (*p, t.clone()))
+            else {
+                continue;
+            };
+            if matches!(place, Place::Static(_)) {
+                continue;
+            }
+            if !matches!(
+                self.cx.resolve(&ty),
+                Type::Array(_) | Type::ArrayN(..) | Type::SmallArray(..) | Type::Str
+            ) {
+                continue;
+            }
+            if !header_invariant(cond, body, &name) {
+                continue;
+            }
+            // The binding's value, the way `Expr::Var` leaves it — a local's
+            // value or a slot's address — emitted here rather than through a
+            // synthesized `Var` node: the lowered-form gate counts backend
+            // answers about nodes no instantiation holds, and a node made up
+            // here would be one.
+            match place {
+                Place::Local(l) => {
+                    b.ins(&Instruction::LocalGet(l));
+                }
+                Place::Slot(off) => {
+                    b.slot(off);
+                }
+                Place::Static(_) => continue,
+            }
+            let w = self.walk(b, &ty, line)?;
+            out.push((name.clone(), self.walks.insert(name, w)));
+        }
+        Ok(out)
     }
 
     /// Emit the releases the lowering PLACED at one exit — RFC-0101 M4.
@@ -2422,18 +3278,28 @@ impl<'p> Fn_<'_, 'p> {
             ExitKind::Return | ExitKind::Try => self.cursors.clone(),
             _ => Vec::new(),
         };
+        // A FALL-THROUGH exit ends what the row holds on the path that carries
+        // on, so the slot is the next statement's — see [`Fn_::rel_pending`].
+        // A `return`, a `?`, a `break` or a `continue` releases on a BRANCH and
+        // leaves the fall-through holding the value, so the floor stands.
+        if matches!(exit, ExitKind::Block | ExitKind::Scrutinee) {
+            self.rel_pending
+                .retain(|(k, _)| !steps.iter().any(|(step, _)| step == k));
+        }
         let mut run: Vec<(Place, Rel)> = Vec::new();
-        for (step, full) in steps {
+        for (step, holes) in steps {
             let Some(r) = self.rel_slots.get(&step) else {
                 continue;
             };
             let (place, mut rel, seq) = (r.place, r.rel.clone(), r.seq);
-            // Round fifty-two: a pre-take exit walks the WHOLE value — the
-            // hole fields included, since nothing has taken them on this
-            // path (the textual backend's twin).
-            if full {
+            // A row that carries its own hole set walks around exactly
+            // those: round fifty-two's pre-take exit walks the WHOLE value
+            // (the empty set), and the placer's row walks the rest of what
+            // the kernel saw taken at this exit (RFC-0125 M3). The textual
+            // backend's twin.
+            if let Some(h) = holes {
                 if let Rel::Deep(ty, _) = rel {
-                    rel = Rel::Deep(ty, Vec::new());
+                    rel = Rel::Deep(ty, h);
                 }
             }
             while cursors.last().is_some_and(|(_, _, at)| *at > seq) {
@@ -2451,11 +3317,29 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
+    /// The floor the rows that still name a frame slot hold — see
+    /// [`Fn_::rel_pending`].
+    fn rel_floor(&self) -> u32 {
+        self.rel_pending
+            .iter()
+            .map(|(_, at)| *at)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Say what one owned binding is released WITH. The placement already said
     /// where and in what order.
-    fn register_rel(&mut self, key: usize, place: Place, rel: Rel) {
+    fn register_rel(&mut self, b: &Frame, key: usize, place: Place, rel: Rel) {
         let seq = self.rel_seq;
         self.rel_seq += 1;
+        // The row names this slot until the exit the core placed it at, which
+        // may be past the statement that made it. So the statement cannot give
+        // the slot back: [`Fn_::rel_pending`] states the floor once, here, for
+        // every construct that registers one.
+        if matches!(place, Place::Slot(_)) {
+            self.rel_pending.retain(|(k, _)| *k != key);
+            self.rel_pending.push((key, b.mark()));
+        }
         self.rel_slots.insert(key, RelSlot { place, rel, seq });
     }
 
@@ -2473,13 +3357,6 @@ impl<'p> Fn_<'_, 'p> {
                 let elem = elem.clone();
                 self.stream_release(m, b, p, &elem, line)
             }
-            // Inside a `region` the arena owns it ([`Fn_::str_owned`]), so this
-            // stands aside exactly as [`Fn_::rel_at`]'s `Str` arm does. `own`
-            // denies the automatic block-exit row inside a region
-            // (`Fate::Leaked(Leak::Region)`), so the arm that reaches here at all
-            // is `drop s`, which mints `Fate::Dropped` and knows nothing about the
-            // arena: `region { let s = a + b  drop s }` freed the block twice.
-            Rel::Str if self.region_depth > 0 => Ok(()),
             Rel::Str => {
                 // A `String` is a scalar, so a `Place::Local` holds the pointer —
                 // the opposite of what a local holding an aggregate means, which is
@@ -2538,7 +3415,7 @@ impl<'p> Fn_<'_, 'p> {
                     name: "@rel".to_string(),
                     line,
                 }];
-                let r = self.call(m, b, f, &recv, line);
+                let r = self.call(m, b, f, &recv, &[], line);
                 self.scope.truncate(mark);
                 r?;
                 // RFC-0096: the payload boxes are the enum's own storage and the
@@ -2582,22 +3459,19 @@ impl<'p> Fn_<'_, 'p> {
         for (tag, var) in vs.iter().enumerate() {
             let mut boxed = Vec::new();
             for (j, pty) in var.payload.clone().iter().enumerate() {
-                if self.owns_heap(pty) && matches!(self.word1(pty), Word::Boxed) {
-                    boxed.push(j);
+                if self.owns_heap(pty) && matches!(self.word2(pty)?, Word::Boxed) {
+                    boxed.push(self.cx.payload_slot(&var.payload, j));
                 }
             }
             if boxed.is_empty() {
                 continue;
             }
-            b.ins(&Instruction::LocalGet(a));
-            b.ins(&Instruction::I64Load(word8()));
-            b.ins(&Instruction::I64Const(tag as i64));
-            b.ins(&Instruction::I64Eq);
+            tag_eq(b, a, tag as i64);
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
             for j in boxed {
                 b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I64Load(at(l.fields[j + 1])));
+                b.ins(&Instruction::I64Load(at(l.fields[j])));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::Call(self.cx.rt.free));
             }
@@ -2607,25 +3481,12 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
-    ///
-    /// The single rule both drop paths read — `own`'s automatic block-exit release
-    /// and an explicit `drop x` — so the two cannot free different sets. It is the
-    /// same set the textual backend's [`crate::Gen::emit_drop`] frees, minus the
-    /// `Stream`, which reaches its release through the stream lowering rather than
-    /// through `own`.
-    /// Whether releasing this `Array<T>` releases its elements too (RFC-0092
-    /// M2). `own` decides, and this asks it — the same answer the textual
-    /// backend reads, including the stop for a self-referring element.
-    fn array_releases_elems(&self, arr: &Type) -> bool {
-        matches!(self.cx.owned.release_kind(arr), Some(DropKind::Deep(_)))
-    }
-
-    /// Whether `own` gives `ty` a walking release rather than a buffer one.
-    /// [`Fn_::array_releases_elems`] under its general name, for the `Map` and
-    /// `SmallArray` rows RFC-0092 M3 adds.
+    /// Whether `own` gives `ty` a walking release rather than a buffer one:
+    /// RFC-0092 M2's element row for an `Array`, M3's for a `Map` and a
+    /// `SmallArray`. `own` decides and this asks it, including the stop for a
+    /// self-referring element, whose walk has no bottom.
     fn deep_row(&self, ty: &Type) -> bool {
-        self.array_releases_elems(ty)
+        matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_)))
     }
 
     /// The address of a `SmallArray`'s live slots: the inline block while
@@ -2655,56 +3516,124 @@ impl<'p> Fn_<'_, 'p> {
         Ok(base)
     }
 
+    /// How a value of `ty` is reclaimed, or `None` for one that owns no heap.
+    ///
+    /// [`vyrn_frontend::declared::Owned::release_kind`]'s row, and nothing
+    /// else. The row says what a release MEANS — a call the type declared, a
+    /// buffer, a walk — and this adds the byte offsets, which are `layout`'s
+    /// and which no pass above this crate can state.
+    ///
+    /// The spelling matters, and this is the one place it does. A declared row
+    /// is keyed by the type's NAME, so it is asked of `ty`. Every other row is
+    /// asked of the SUBSTITUTED type: a generic body's `Array<T>` has a
+    /// `Param` element and `own` answers `Deep` for one, because inside that
+    /// body the element is unknowable — an emitter has the instance in hand
+    /// and is owed the instance's row.
     fn rel_for(&mut self, ty: &Type, line: usize) -> Result<Option<Rel>, String> {
-        // A declared row (RFC-0086 M1) answers before any built-in shape does,
-        // and it is keyed by the type's NAME — which resolving away would lose.
         if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
             return Ok(Some(Rel::Call(f, ty.clone())));
         }
         let t = self.cx.resolve(ty);
-        Ok(match &t {
-            Type::Str => Some(Rel::Str),
-            Type::Stream(i) => Some(Rel::Stream((**i).clone())),
-            // An `Array<T>` gives back its buffer, and its ELEMENTS too where
-            // `own` says so (RFC-0092 M2, census U4). The question is asked of
-            // `own` rather than re-derived from the element, so the guards that
-            // answer live in one file — including the one that stops a
-            // self-referring element type, whose walk has no bottom. The element
-            // walk needs an address, so that answer is `Deep` and the
-            // buffer-only one stays a `Buffers`.
-            Type::Array(_) | Type::Map(..) | Type::SmallArray(..) if self.deep_row(&t) => {
-                Some(Rel::Deep(t.clone(), Vec::new()))
-            }
-            Type::Array(_) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[0]])),
-            Type::Map(..) => {
-                let l = self.layout_of(&t, line)?;
-                Some(Rel::Buffers(vec![l.fields[0], l.fields[1], l.fields[4]]))
-            }
-            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it is
-            // null until the array spills, which is exactly the case `free`
+        let bufs = |which: &[usize]| -> Result<Rel, String> {
+            let l = self.layout_of(&t, line)?;
+            Ok(Rel::Buffers(which.iter().map(|i| l.fields[*i]).collect()))
+        };
+        Ok(match self.cx.owned.release_kind(&t) {
+            Some(DropKind::Release(f, _)) => Some(Rel::Call(f, t.clone())),
+            Some(DropKind::FreeStr) => Some(Rel::Str),
+            Some(DropKind::FreeArr) => Some(bufs(&[0])?),
+            Some(DropKind::FreeMap) => Some(bufs(&[0, 1, 4])?),
+            // `{ i64 len, i64 cap, ptr data, [N x T] inline }` — field 2, and it
+            // is null until the array spills, which is exactly the case `free`
             // refuses. The inline slots need no reclamation.
-            Type::SmallArray(..) => Some(Rel::Buffers(vec![self.layout_of(&t, line)?.fields[2]])),
-            // Phase 5: an aggregate owns its places. Phase 10b: a stored `fn`
-            // value owns its capture block, which is one allocation whatever the
-            // tag — so it needs no registry to release, only to copy.
-            //
-            // RFC-0092 M3 adds the record, the user enum and the fixed
-            // `[N x T]`. Whether they go is `own`'s answer, asked rather than
-            // re-derived: it carries the stop for a type that reaches itself,
-            // whose walk has no bottom.
-            Type::Option(_) | Type::Result(..) | Type::Fn(..) if self.owns_heap(&t) => {
-                Some(Rel::Deep(t, Vec::new()))
-            }
-            Type::Record(_) | Type::Enum(_) | Type::ArrayN(..)
-                if matches!(self.cx.owned.release_kind(ty), Some(DropKind::Deep(_))) =>
-            {
-                Some(Rel::Deep(t, Vec::new()))
-            }
-            _ => None,
+            Some(DropKind::FreeSmallArr) => Some(bufs(&[2])?),
+            // The element walk needs an address, which is why this answer is a
+            // `Deep` and the buffer-only ones are a `Buffers`.
+            Some(DropKind::Deep(d)) => Some(Rel::Deep(d, Vec::new())),
+            // A `Stream<T>` is the one shape with no row: it reaches its
+            // release through the stream lowering (RFC-0075 M2b), and a row
+            // here would release it twice.
+            Some(DropKind::CloseStream) | None => match t {
+                Type::Stream(i) => Some(Rel::Stream(*i)),
+                _ => None,
+            },
         })
     }
 
-    /// Release the heap the value at `a` holds — the mirror of [`Fn_::copy_at`],
+    /// The index of the release (or the copy) of `ty`, reserving the function
+    /// and putting its body on the worklist the first time one is asked for.
+    ///
+    /// The type is SUBSTITUTED here rather than at the body, because the body is
+    /// written later — after the drain has moved on to another instance — and a
+    /// walk over `T` would then read a different `T` than the site meant.
+    fn shape_fn(&self, m: &mut Module, rel: bool, ty: &Type, line: usize) -> u32 {
+        let key: ShapeKey = (
+            rel,
+            self.cx.sub(ty),
+            if rel {
+                self.rel_holes.clone()
+            } else {
+                Vec::new()
+            },
+        );
+        let mut s = self.cx.shapes.borrow_mut();
+        if let Some((_, i)) = s.known.iter().find(|(k, _)| *k == key) {
+            return *i;
+        }
+        let index = m.reserve_func(&[ValType::I32], &[]);
+        s.known.push((key.clone(), index));
+        s.todo.push((index, key, line));
+        index
+    }
+
+    /// Release the heap the value at `a` holds: RFC-0125 §2.3's "`drop` to a
+    /// call", which is what this emits — the walk itself is the body of the
+    /// function the call names ([`Fn_::rel_body`]), written once per type.
+    ///
+    /// Two answers stay here, because neither is a call. A type that owns no
+    /// heap releases nothing. A type that DECLARED its release is already a
+    /// call, and one indirection is enough.
+    fn rel_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        // A type that declares its own release keeps it, so the walk CALLS that
+        // release rather than reaching past the declaration into its fields —
+        // which would reclaim what the declaration says it reclaims, in a
+        // different order, and without the print a user `release` may do.
+        //
+        // It used to return here and call nothing, which was right at the top of
+        // a drop (`emit_rel` has its own `Rel::Call` arm) and wrong for every
+        // place under one. An aggregate in a wasm local IS its address, so the
+        // place a walk holds is exactly what that arm parks under `@rel`.
+        // RFC-0092 M4 is where the gap is observable: a container carries its
+        // element's obligation now, so the compiler demands a discharge the
+        // discharge did not perform.
+        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
+            self.rel_holes.clear();
+            // `emit_rel`'s `Rel::Call` arm frees the payload boxes after the
+            // call (RFC-0096), so this reaches them too.
+            return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
+        }
+        if !self.owns_heap(ty) {
+            self.rel_holes.clear();
+            return Ok(());
+        }
+        let f = self.shape_fn(m, true, ty, line);
+        // RFC-0093 M2: the holes belong to the place this call is looking at.
+        // They are part of the key above, so the body is walked around exactly
+        // these, and every other reader starts empty — which is right: `own`
+        // refuses a hole under an element, a payload or a buffer.
+        self.rel_holes.clear();
+        b.ins(&Instruction::LocalGet(a)).ins(&Instruction::Call(f));
+        Ok(())
+    }
+
+    /// What releasing a value of `ty` MEANS — the mirror of [`Fn_::copy_body`],
     /// with `free` where that has `malloc`.
     ///
     /// One walk, both directions: `copy` decided what a value's own storage IS,
@@ -2719,63 +3648,34 @@ impl<'p> Fn_<'_, 'p> {
     /// back a buffer of somebody else's element words, copy them now. A `Map`
     /// and a `SmallArray` still give back their buffers alone: their element
     /// rows are M3.
-    fn rel_at(
+    fn rel_body(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         a: u32,
         ty: &Type,
+        holes: &[String],
         line: usize,
     ) -> Result<(), String> {
-        // RFC-0093 M2: the holes belong to the place this call is looking at,
-        // and only the record arm below can be told about them. Taking them here
-        // is what makes every other arm — an element, a payload, a buffer —
-        // start empty, which is right: `own` refuses a hole under any of them.
-        let holes = std::mem::take(&mut self.rel_holes);
-        // A type that declares its own release keeps it, so the walk CALLS that
-        // release rather than reaching past the declaration into its fields —
-        // which would reclaim what the declaration says it reclaims, in a
-        // different order, and without the print a user `release` may do.
-        //
-        // It used to return here and call nothing, which was right at the top of
-        // a drop (`emit_rel` has its own `Rel::Call` arm) and wrong for every
-        // place under one. An aggregate in a wasm local IS its address, so the
-        // place a walk holds is exactly what that arm parks under `@rel`.
-        // RFC-0092 M4 is where the gap is observable: a container carries its
-        // element's obligation now, so the compiler demands a discharge the
-        // discharge did not perform.
-        if let Some(DropKind::Release(f, _)) = self.cx.owned.release_kind(ty) {
-            // `emit_rel`'s `Rel::Call` arm frees the payload boxes after the
-            // call (RFC-0096), so this reaches them too.
-            return self.emit_rel(m, b, Place::Local(a), &Rel::Call(f, ty.clone()), line);
-        }
-        if !self.owns_heap(ty) {
-            return Ok(());
-        }
         match self.cx.resolve(ty) {
-            // A `String` buffer allocated inside a `region` belongs to the arena
-            // — [`Fn_::str_owned`] records it and `region_free` hands it back.
-            // `own` states the same exception one binding at a time
-            // (`Fate::Leaked(Leak::Region)` for `DropKind::FreeStr`), and it can
-            // only see the binding's OWN type: the `String` under an
-            // `Array<String>`, under a record field, under a `Map` key reached
-            // this line and was freed a second time
-            // (`rfcs/census-regions.md` defect 1). The key is the key the
-            // allocation side records by, so the two sides partition the same way
-            // at every depth — the sentence [`crate::Gen::deep_release`] states
-            // for the textual backend.
-            Type::Str if self.region_depth == 0 => {
+            // This arm asks nothing about the region: the ownership test is the
+            // block header and `free` states it once (an arena block carries a
+            // class word of 0 and is refused in silence), so the walk hands
+            // back every block it holds and the arena keeps the ones that are
+            // its. Standing aside here instead claimed for the arena every
+            // `String` a CALLEE minted at this depth, which the arena never
+            // had — `examples/matchown.vyrn` leaked four blocks a turn.
+            Type::Str => {
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word()));
                 str_hdr(b);
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
-            Type::Str => Ok(()),
             // The elements first, then the buffer they live in — the reverse of
             // the order `copy_at` builds them, and the only order in which the
             // walk may still read the buffer it is about to free.
-            Type::Array(inner) if self.array_releases_elems(&self.cx.resolve(ty)) => {
+            Type::Array(inner) if self.deep_row(&self.cx.resolve(ty)) => {
                 let l = self.layout_of(ty, line)?;
                 let stride = self.stride(&inner, line)?;
                 let (n, data) = (b.local(ValType::I32), b.local(ValType::I32));
@@ -2786,7 +3686,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I32Load(word_at(l.fields[0])));
                 b.ins(&Instruction::LocalSet(data));
-                self.rel_each(m, b, data, n, stride, &inner, line)?;
+                self.each(m, b, true, data, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(data));
                 b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
@@ -2805,7 +3705,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(n));
                 let base = self.sa_base(b, a, ty, line)?;
-                self.rel_each(m, b, base, n, stride, &inner, line)?;
+                self.each(m, b, true, base, n, stride, &inner, line)?;
                 b.ins(&Instruction::LocalGet(a))
                     .ins(&Instruction::I32Load(word_at(l.fields[2])))
                     .ins(&Instruction::Call(self.cx.rt.free));
@@ -2832,7 +3732,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Load(word_at(l.fields[i])));
                     b.ins(&Instruction::LocalSet(buf));
                     if !(ik && i == 0) {
-                        self.rel_each(m, b, buf, n, stride, &elem, line)?;
+                        self.each(m, b, true, buf, n, stride, &elem, line)?;
                     }
                     b.ins(&Instruction::LocalGet(buf))
                         .ins(&Instruction::Call(self.cx.rt.free));
@@ -2876,7 +3776,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Const(l.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
-                    self.rel_holes = vyrn_frontend::own::holes_under(&holes, &f.name);
+                    self.rel_holes = vyrn_frontend::declared::holes_under(holes, &f.name);
                     self.rel_at(m, b, p, &f.ty, line)?;
                 }
                 Ok(())
@@ -2889,52 +3789,44 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.rel_each(m, b, a, count, stride, &inner, line)
+                self.each(m, b, true, a, count, stride, &inner, line)
             }
-            Type::Option(inner) => {
-                let l = self.layout_of(ty, line)?;
-                let w = self.word2(&inner)?;
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.rel_word(m, b, a, l.fields[1], &inner, w, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Result(ok, err) => {
-                let l = self.layout_of(ty, line)?;
-                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.rel_word(m, b, a, l.fields[1], &ok, wo, line)?;
-                b.ins(&Instruction::Else);
-                self.rel_word(m, b, a, l.fields[1], &err, we, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Enum(vs) => {
+            // ANY sum: the payload slots of the live variant, and only the ones
+            // this walk has something to give back for. One walk since RFC-0126
+            // §8.11's M4a — the built-in two used to have arms of their own here,
+            // testing only tag 1 and writing a `Result` as one `if`/`else` where
+            // the enum writes one `if` per variant in tag order.
+            //
+            // A payload the emitter BOXED is one of them whatever it holds, and
+            // reading the guard as `owns_heap(payload)` alone is what skipped it.
+            // `Option<Handle<Node>>` is the witness: a `Handle` is three `Int64`
+            // fields, it owns nothing, and the sum still holds one `malloc` block
+            // per live payload — which is why `own::owns_heap` asks
+            // `types::payload_boxed` at the SUM. The two guards have to ask the
+            // same question of the payload, and this one asks the emitter's own
+            // rule ([`Fn_::word2`]) because the box is the emitter's.
+            // `rel_word`'s `Word::Boxed` arm already frees exactly the box.
+            Type::Enum(_) => {
+                let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
-                    if !var.payload.iter().any(|p| self.owns_heap(p)) {
+                    let mut live = false;
+                    for p in &var.payload {
+                        live |= self.owns_heap(p) || self.word2(p)? == Word::Boxed;
+                    }
+                    if !live {
                         continue;
                     }
-                    b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I64Load(word8()));
-                    b.ins(&Instruction::I64Const(tag as i64));
-                    b.ins(&Instruction::I64Eq);
+                    tag_eq(b, a, tag as i64);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     for (j, pty) in var.payload.clone().iter().enumerate() {
-                        if !self.owns_heap(pty) {
+                        let w = self.word2(pty)?;
+                        if !self.owns_heap(pty) && w != Word::Boxed {
                             continue;
                         }
-                        let w = self.word1(pty);
-                        self.rel_word(m, b, a, l.fields[j + 1], pty, w, line)?;
+                        let at = self.cx.payload_slot(&var.payload, j);
+                        self.rel_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -3009,13 +3901,11 @@ impl<'p> Fn_<'_, 'p> {
             // below frees only the BOX, which is `malloc`'s at every depth the way
             // an `Array` buffer is, and the `String` inside it is `rel_at`'s.
             Word::Ext(ValType::I32) if matches!(self.cx.resolve(pty), Type::Str) => {
-                if self.region_depth == 0 {
-                    b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I64Load(at(off)));
-                    b.ins(&Instruction::I32WrapI64);
-                    str_hdr(b);
-                    b.ins(&Instruction::Call(self.cx.rt.free));
-                }
+                b.ins(&Instruction::LocalGet(a));
+                b.ins(&Instruction::I64Load(at(off)));
+                b.ins(&Instruction::I32WrapI64);
+                str_hdr(b);
+                b.ins(&Instruction::Call(self.cx.rt.free));
                 Ok(())
             }
             Word::Boxed => {
@@ -3090,11 +3980,12 @@ impl<'p> Fn_<'_, 'p> {
     // `place_owns` lived here until §26 steps 3–4: the ownedness of a field
     // or element store is the plan's per-statement answer now
     // (`store_owned_at`), folded once in `own::analyze` from module-state
-    // rule 4 and the droppable rows — the same two ways to own it tested,
+    // rule 4 and the placed rows — the same two ways to own it tested,
     // read from one artifact instead of two per-binding registries. The
-    // region caveat its doc carried (a String reassigned in module state
-    // inside a `region` must not free arena memory) is the emission-side
-    // `region_depth` gate, unchanged.
+    // region caveat its doc carried — a String reassigned in module state
+    // inside a `region` must not free arena memory — is gone with the rest of
+    // the lexical region rule: `free` refuses an arena block by the class word
+    // in its header, so the store snapshots and releases at every depth.
 
     /// The address of `p` plus `off`, in a fresh local. A wasm local holding an
     /// aggregate holds its ADDRESS, which is the one case [`Place::addr`] cannot
@@ -3124,7 +4015,7 @@ impl<'p> Fn_<'_, 'p> {
     /// The snapshot is taken BEFORE the store and freed AFTER it, which is the
     /// same order as "compute the new value, then release the old" and survives an
     /// aggregate that is built destination-first. It is only ever reached where the
-    /// new value does not name the place ([`vyrn_frontend::movecheck::mentions`]),
+    /// new value does not name the place ([`vyrn_frontend::ast::mentions`]),
     /// so nothing the store computes can read the snapshot.
     fn snap_at(
         &mut self,
@@ -3140,6 +4031,85 @@ impl<'p> Fn_<'_, 'p> {
             let t = b.local(ValType::I32);
             b.ins(&Instruction::LocalSet(t));
             out.push((t, hdr));
+        }
+        // A sum's payload BOX is a buffer too, and the one [`Fn_::store_bufs`]
+        // cannot answer with an offset: which slot holds it depends on the tag,
+        // so it is read under a tag test rather than off the address. Everything
+        // else about it is the flat case — snapshot before, free after.
+        //
+        // The local is zeroed FIRST. A store inside a loop reaches this code
+        // once and runs it every turn, so a local left over from a turn whose
+        // tag matched would be freed again on a turn whose tag does not.
+        // `free` refuses a null, which is what a variant with no box leaves.
+        for (off, sty) in self.store_boxes(ty, line)? {
+            let base = self.addr_local(b, Place::Local(addr), off);
+            let vs = self.cx.sum_vs(&sty).unwrap_or_default();
+            let l = self.layout_of(&sty, line)?;
+            for (tag, var) in vs.iter().enumerate() {
+                let mut boxed = Vec::new();
+                for (j, p) in var.payload.iter().enumerate() {
+                    if self.word2(p)? == Word::Boxed {
+                        boxed.push(self.cx.payload_slot(&var.payload, j));
+                    }
+                }
+                if boxed.is_empty() {
+                    continue;
+                }
+                let locals: Vec<u32> = boxed
+                    .iter()
+                    .map(|_| {
+                        let t = b.local(ValType::I32);
+                        b.ins(&Instruction::I32Const(0))
+                            .ins(&Instruction::LocalSet(t));
+                        t
+                    })
+                    .collect();
+                tag_eq(b, base, tag as i64);
+                b.ins(&Instruction::If(BlockType::Empty));
+                self.depth += 1;
+                for (k, slot) in boxed.iter().enumerate() {
+                    b.ins(&Instruction::LocalGet(base))
+                        .ins(&Instruction::I64Load(at(l.fields[*slot])))
+                        .ins(&Instruction::I32WrapI64)
+                        .ins(&Instruction::LocalSet(locals[k]));
+                }
+                self.depth -= 1;
+                b.ins(&Instruction::End);
+                out.extend(locals.into_iter().map(|t| (t, false)));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The sums a value of `ty` holds, each as `(byte offset, the sum's type)`
+    /// — the places whose reclamation needs a tag and so cannot be one of
+    /// [`Fn_::store_bufs`]'s flat offsets.
+    ///
+    /// The same subset that function takes, walked the same way: through record
+    /// fields, and stopping at a declared `release`, whose timing is the
+    /// language's and not a store's. An `Array`, a `Map` and a `SmallArray` stop
+    /// here as they do there — a store hands back the buffer and the elements
+    /// in it leak, which is the answer this side has always given.
+    fn store_boxes(&mut self, ty: &Type, line: usize) -> Result<Vec<(u32, Type)>, String> {
+        if matches!(
+            self.cx.owned.release_kind(ty),
+            Some(DropKind::Release(..)) | None
+        ) {
+            return Ok(Vec::new());
+        }
+        let t = self.cx.resolve(ty);
+        if self.cx.sum_vs(&t).is_some() {
+            return Ok(vec![(0, t)]);
+        }
+        let Some(fields) = vyrn_frontend::types::record_fields(&t, &self.cx.types) else {
+            return Ok(Vec::new());
+        };
+        let l = self.layout_of(&t, line)?;
+        let mut out = Vec::new();
+        for (i, f) in fields.iter().enumerate() {
+            for (o, st) in self.store_boxes(&f.ty, line)? {
+                out.push((l.fields[i] + o, st));
+            }
         }
         Ok(out)
     }
@@ -3157,24 +4127,34 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// Push a region scope: trap if this would be the 65th, else bump the counter.
+    /// Push a region scope: trap if this would be the 65th, else bump the counter
+    /// and take the arena's mark into a local of its own.
     ///
     /// The bound is the LLVM prelude's fixed 64-slot region stack and the
     /// interpreter's own `region_depth >= 64`, so all three engines refuse the same
-    /// nesting with the same words. Inline rather than a runtime helper: it is
-    /// fourteen instructions at a handful of sites, and a helper would be a
-    /// thirty-sixth index in a table whose numbering is load-bearing.
+    /// nesting with the same words. The counter and its trap stay inline rather
+    /// than moving into the runtime: they are fourteen instructions at a handful
+    /// of sites, and a program that traps at the limit must trap where it did.
+    ///
+    /// The mark is `std/runtime`'s (PLAN-0125-runtime §4.3), and a fresh local
+    /// rather than a scratch slot because every region open at an exit edge
+    /// needs its own — see [`Fn_::exit_regions_above`].
     fn region_enter(&mut self, b: &mut Frame) {
-        let (sp, msg, trap) = (self.cx.rt.region_sp, self.cx.rt.msg_region, self.cx.rt.trap);
+        let sp = self.cx.rt.region_sp;
         b.ins(&Instruction::I32Const(sp as i32))
             .ins(&Instruction::I32Load(word()))
             .ins(&Instruction::I32Const(REGION_MAX as i32))
             .ins(&Instruction::I32GeU)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(msg as i32))
-            .ins(&Instruction::Call(trap))
-            .ins(&Instruction::End);
+            .ins(&Instruction::If(BlockType::Empty));
+        self.depth += 1;
+        self.trap_row(b, vyrn_frontend::trap::Rule::RegionDepth, None);
+        self.depth -= 1;
+        b.ins(&Instruction::End);
         self.region_bump(b, 1);
+        let mark = b.local(ValType::I32);
+        b.ins(&Instruction::Call(self.cx.rt.region_enter))
+            .ins(&Instruction::LocalSet(mark));
+        self.region_marks.push(mark);
     }
 
     /// Pop a region scope and free what it allocated. Stack-neutral, so it may be
@@ -3187,24 +4167,92 @@ impl<'p> Fn_<'_, 'p> {
     /// premise died at M6, when this backend got a segregated free list, and the
     /// omission then leaked every `String` a region held: one source file measured
     /// 13.4 MB native against 3,664.5 MB and `out of memory` under wasmtime (the
-    /// external audit's finding C2.1). The arena the note deferred is what
-    /// `region_keep` and `rt.region_free` are.
+    /// external audit's finding C2.1). The side vector that answered it is gone in
+    /// turn: step 8 makes the arena the bump `std/runtime` describes, and this is
+    /// one call with the mark [`Fn_::region_enter`] took.
     ///
     /// Routing is LEXICAL, as `Gen::heap_alloc` routes in the textual backend:
-    /// [`Fn_::str_owned`] records a `String` the emitter allocated while it was
-    /// inside a region. Routing on the *runtime* depth instead — inside
-    /// `rt.str_new`, which is the one funnel a wasm module has — would
-    /// arena-allocate a callee's `String` that the region escape guard never
-    /// examined, and free it under its caller. That is why the routing is written
-    /// at the emitter's allocation sites and not at the allocator.
-    fn region_exit(&mut self, b: &mut Frame) {
-        b.ins(&Instruction::Call(self.cx.rt.region_free));
+    /// [`Fn_::arena_route`] raises the runtime's flag around a `String` the
+    /// emitter allocates inside a region, and lowers it again. Reading an open
+    /// region's depth instead would arena-allocate a callee's `String` that the
+    /// region escape guard never examined, and — at `malloc` — an `Array`
+    /// buffer that `checker.rs`'s `contains_heap` says is never the arena's, so
+    /// a global array grown inside a region would die at the brace under a live
+    /// binding. That is why the routing is written at the emitter's allocation
+    /// sites and not at the allocator.
+    fn region_exit(&mut self, b: &mut Frame, mark: u32) {
+        b.ins(&Instruction::LocalGet(mark))
+            .ins(&Instruction::Call(self.cx.rt.region_exit));
+        self.region_bump(b, -1);
     }
 
-    /// The `String` on the stack is a block THIS emitter just allocated. Inside a
-    /// `region` it is the arena's, so record it; the closing brace hands it back
-    /// ([`Fn_::region_exit`]). Stack-neutral: `region_keep` takes the pointer and
-    /// gives it straight back.
+    /// Call `std/runtime`'s `strFromBytes` for the bytes at `src` — a local
+    /// holding an `Array<UInt8>` header — writing the `Result<String, String>`
+    /// it answers into the frame slot at `dest`.
+    ///
+    /// The WHOLE call, and that is the point: the destination, the data
+    /// pointer, the count, the check's answer and the two interned messages
+    /// (PLAN-0125-runtime §6 step 4). A callee's argument list is the callee's
+    /// rule, so it is stated once, here.
+    ///
+    /// The DFA table used to be the third argument. RFC-0125 §3 M6 (the third
+    /// judgment's fifth slice) replaced it with the answer of `std/text`'s
+    /// `stringFault` — the one check every engine calls — so the runtime
+    /// function builds and decides nothing. That slice made the answer the
+    /// CALLER's to push, and this call has two callers: `stringFromBytes` was
+    /// given the new argument and [`Fn_::map_tally_bytes`] was not, so
+    /// `tallyBytes` emitted five operands into a six-operand signature and
+    /// wasmtime refused the module (RFC-0125 §3 M5, the eighteenth slice).
+    /// Neither caller can be short of an argument it does not spell.
+    fn str_from_bytes(
+        &mut self,
+        b: &mut Frame,
+        dest: u32,
+        src: u32,
+        al: &Layout,
+        line: usize,
+    ) -> Result<(), String> {
+        let check = vyrn_frontend::loader::STRING_FAULT;
+        let Some(check_idx) = self.cx.sigs.get(check).map(|s| s.index) else {
+            // `std/text` is injected into any program that mentions a builtin
+            // building a `String` out of bytes, so reaching this means a
+            // program built without a std root.
+            return unsupported(
+                "`stringFromBytes` with no `std/text` in the link (its check is Vyrn)",
+                line,
+            );
+        };
+        let fault = self.scratch(b, ValType::I32, 1);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::Call(check_idx));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(fault));
+        b.slot(dest);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Load(word_at(al.fields[0])));
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I64Load(at(al.fields[1])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalGet(fault));
+        b.ins(&Instruction::I32Const(self.cx.rt.bnul as i32))
+            .ins(&Instruction::I32Const(self.cx.rt.butf8 as i32))
+            .ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+        Ok(())
+    }
+
+    /// The call about to be emitted (`on`), or just emitted (`!on`), allocates a
+    /// `String` that inside a `region` is the ARENA's. Raise `std/runtime`'s
+    /// routing flag around it and lower it again. `strNew`, the funnel every
+    /// `String` block comes through, is what reads the flag and bumps in the
+    /// region's chunks; `malloc` never reads it, so a program with no region
+    /// pays nothing (PLAN-0125-runtime §4.3).
+    ///
+    /// Stack-neutral, so it may be emitted with the call's operands already on
+    /// the stack. The window covers the whole call, so a `String` the callee
+    /// mints on the way — `strFromBytes`'s buffer under `intStr` — is the
+    /// arena's too; it is either freed inside the call (a silent refusal on an
+    /// arena block) or reclaimed by the brace, and it cannot leave, because
+    /// none of these callees runs user code.
     ///
     /// This is `Gen::heap_alloc`'s `region_depth > 0` test, and the set of call
     /// sites is `Gen::str_alloc`'s set of call sites — the two must stay equal,
@@ -3224,18 +4272,23 @@ impl<'p> Fn_<'_, 'p> {
     /// `@str` of a `Float` is in NEITHER set: both backends format it by calling
     /// `std/num`'s `f64Str`, so the block is the callee's and the arena of the
     /// caller's region never sees it.
-    fn str_owned(&mut self, b: &mut Frame) {
+    fn arena_route(&mut self, b: &mut Frame, on: bool) {
         if self.region_depth > 0 {
-            b.ins(&Instruction::Call(self.cx.rt.region_keep));
+            b.ins(&Instruction::GlobalGet(HEAP_BASE))
+                .ins(&Instruction::I32Const(ARENA_ON as i32))
+                .ins(&Instruction::I32Add)
+                .ins(&Instruction::I32Const(i32::from(on)))
+                .ins(&Instruction::I32Store(word()));
         }
     }
 
-    /// Leave a region WITHOUT freeing its blocks, for a `return` (and a `?`) that
-    /// carries one of them out. The value belongs to the caller now; the frame's
-    /// other blocks leak, which is the trade the textual `__vyrn_region_pop`
-    /// makes for the same reason.
+    /// Leave a region WITHOUT giving its blocks back, for a `return` (and a `?`)
+    /// that carries one of them out. The value belongs to the caller now; the
+    /// bump stays where it is, so the frame's other blocks leak, which is the
+    /// trade the textual `__vyrn_region_pop` makes for the same reason. Only the
+    /// nesting counter moves.
     fn region_pop(&mut self, b: &mut Frame) {
-        b.ins(&Instruction::Call(self.cx.rt.region_pop));
+        self.region_bump(b, -1);
     }
 
     fn region_bump(&mut self, b: &mut Frame, by: i32) {
@@ -3252,9 +4305,10 @@ impl<'p> Fn_<'_, 'p> {
     /// `frees` is false on the one edge that hands a block out — see
     /// [`Fn_::region_pop`].
     fn exit_regions_above(&mut self, b: &mut Frame, depth: u32, frees: bool) {
-        for _ in depth..self.region_depth {
+        for i in (depth..self.region_depth).rev() {
             if frees {
-                self.region_exit(b);
+                let mark = self.region_marks[i as usize];
+                self.region_exit(b, mark);
             } else {
                 self.region_pop(b);
             }
@@ -3287,9 +4341,16 @@ impl<'p> Fn_<'_, 'p> {
     /// the last unlowered kind, so the gap reporter that used to sit here (and the
     /// `stmt_name`/`stmt_line` pair feeding it) was dead code claiming to cover
     /// something. A statement kind added to the AST is now a compile error naming
-    /// this match, which is the same trade `Rt::slots`'s all-fields-named struct
-    /// literal makes. Expressions keep theirs — `expr_name` still has work.
+    /// this match. Expressions keep theirs — `expr_name` still has work.
     fn stmt(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<(), String> {
+        // RFC-0125 §2.3, per STATEMENT: where the core's rows carry this one,
+        // they are what is emitted and no arm below runs. The unit was the
+        // function until the interleave slice, which is why an arm could not go
+        // while one body of the corpus still needed it.
+        if self.core_took(m, b, s)? {
+            return Ok(());
+        }
+        count_in(stmt_form(s), &self.owner);
         match s {
             Stmt::Let {
                 name,
@@ -3314,8 +4375,27 @@ impl<'p> Fn_<'_, 'p> {
                     Some(t) => {
                         let r = self.cx.repr(t, *line)?;
                         let place = self.place_for(b, &r, *line)?;
-                        self.store_into(m, b, place, &r, value, t)?;
+                        self.store_into(m, b, place, &r, value, t, true)?;
                         (place, t.clone())
+                    }
+                    // Unannotated, and the initializer is a literal or a call
+                    // whose type the typer knows before it runs: the slot is
+                    // taken first and the value is built in it (RFC-0125 M1).
+                    None if matches!(
+                        value,
+                        Expr::StructLit { .. } | Expr::ArrayLit { .. } | Expr::Call { .. }
+                    ) && self
+                        .peek(value, *line)
+                        .ok()
+                        .is_some_and(|t| matches!(self.cx.repr(&t, *line), Ok(Repr::Agg(_)))) =>
+                    {
+                        let t = self.peek(value, *line)?;
+                        let Repr::Agg(l) = self.cx.repr(&t, *line)? else {
+                            unreachable!("the guard above checked the shape")
+                        };
+                        let off = b.alloc(l.size, l.align);
+                        self.agg_into(m, b, Dest::Slot(off), l.size, value, &t, true)?;
+                        (Place::Slot(off), t)
                     }
                     None => {
                         // Unannotated: the type is whatever the initializer
@@ -3359,11 +4439,10 @@ impl<'p> Fn_<'_, 'p> {
                 // is why the answer is read rather than assumed.
                 //
                 // A LITERAL initializer is somebody else's storage too: `let mut
-                // acc = ""` is droppable (`own` answers for the buffer the loop
-                // ENDS on) and its first append would otherwise grow a data
-                // segment address in place. The textual backend carries the same
-                // second half, and the module-state seed always did.
-                let owns = self.drops.contains_key(&(s as *const Stmt as usize));
+                // acc = ""` is released (a placed row answers for the buffer the
+                // loop ENDS on) and its first append would otherwise grow a data
+                // segment address in place. The module-state seed always did.
+                let owns = self.releases_whole(s as *const Stmt as usize);
                 if let Place::Local(l) = place {
                     if self.cx.resolve(&bound) == Type::Str
                         && self.append_ok.contains(name.as_str())
@@ -3377,36 +4456,9 @@ impl<'p> Fn_<'_, 'p> {
                 // the same key, so the two cannot disagree about which `let` owns
                 // what.
                 self.scope.push((name.clone(), place, bound.clone()));
-                // Round twenty-one, the textual backend's twin: a MOVED
-                // binding whose take runs later than some early exit gets a
-                // registered place so the placed rows can free it there — no
-                // Block row exists for it, so nothing runs at fall-through.
-                if !owns {
-                    if let Some(kind) = self.early.get(&(s as *const Stmt as usize)) {
-                        let r = match kind {
-                            vyrn_frontend::own::DropKind::FreeStr => Some(Rel::Str),
-                            vyrn_frontend::own::DropKind::FreeArr => Some(Rel::Buffers(vec![0])),
-                            _ => self
-                                .rel_for(&bound, *line)?
-                                .filter(|r| matches!(r, Rel::Buffers(_))),
-                        };
-                        if let Some(r) = r {
-                            self.register_rel(s as *const Stmt as usize, place, r);
-                        }
-                    }
-                }
                 if owns {
-                    if let Some(mut r) = self.rel_for(&bound, *line)? {
-                        // RFC-0093 M2: a take gave one of this binding's places
-                        // away, so the walk must not hand it back. `rel_for`
-                        // answers for the TYPE, and the hole is a fact about
-                        // this binding, so it is attached here.
-                        if let (Rel::Deep(_, holes), Some(h)) =
-                            (&mut r, self.cx.holes.get(&(s as *const Stmt as usize)))
-                        {
-                            *holes = h.clone();
-                        }
-                        self.register_rel(s as *const Stmt as usize, place, r);
+                    if let Some(r) = self.rel_for(&bound, *line)? {
+                        self.register_rel(b, s as *const Stmt as usize, place, r);
                     }
                 }
             }
@@ -3436,6 +4488,13 @@ impl<'p> Fn_<'_, 'p> {
                     Place::Static(_) => self.cx.gappend.get(name).copied().map(Place::Static),
                     Place::Slot(_) => None,
                 };
+                // The ONE thing a `region` is still asked, and it is not a
+                // question about ownership: the arena is a bump with no
+                // `realloc`, so a `String` it handed out cannot GROW in place.
+                // The take-ownership append stays refused inside a region on
+                // both backends, which is what `Fn_::arena_route`'s site table
+                // records for `Gen::emit_str_append`, and the general store
+                // below copies instead.
                 if self.region_depth == 0 {
                     if let Some(own) = shadow {
                         if let Some(parts) = crate::self_append_spine(name, value) {
@@ -3451,7 +4510,7 @@ impl<'p> Fn_<'_, 'p> {
                             // resets the flag on every reassign, so `s = a + b`
                             // then `s = s + c` abandoned the `a + b` buffer
                             // (exit-residue round sixteen).
-                            let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                            let owned_here = self.cx.store_row(s as *const Stmt as usize);
                             // Save the flag and the incoming pointer before the
                             // appends; free after them, only if the take ran
                             // (entry flag was 0) and the buffer is heap — an
@@ -3518,30 +4577,20 @@ impl<'p> Fn_<'_, 'p> {
                 // old buffer and hands it back, so freeing it would be a double
                 // free.
                 //
-                // A STRING `+` IS THE EXCEPTION, for the reason the textual
-                // backend's copy of this gives: a concat always allocates a fresh
-                // buffer and copies both operands into it, so it cannot hand back
-                // either input. The append spine above hides the common
-                // `s = s + x`; what reaches here is a PREPEND, and that leaked
-                // 9.9 GB over 50,000 calls of a 200-iteration loop.
-                let fresh_str = matches!(self.cx.resolve(&ty), Type::Str)
-                    && matches!(value, Expr::Binary { op: BinOp::Add, .. });
-                // RFC-0114 M2: ownedness is the analysis's per-statement answer,
-                // shared with the textual backend — see `fold_store_owned` and
-                // the comment there. `place_owns` stays for the OTHER stores
-                // (fields, elements), which this slice does not touch.
-                // Queried FIRST so a region-gated site still counts as
-                // considered (§26's finish check).
-                let owned_here = self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0;
-                // Round eighteen: the textual backend's twin — a mention
-                // that is only a read argument to a declared non-lender
-                // cannot hand the old value back (`store_fresh_at`).
-                let snap = if owned_here
-                    && (fresh_str
-                        || !vyrn_frontend::movecheck::mentions_place(value, name)
-                        || self.cx.plan.store_fresh_at(s as *const Stmt as usize))
-                {
+                // RFC-0125 §3 M3: the rule above, the row, and round
+                // eighteen's `store_fresh` are ONE answer, and the core
+                // states it at the store's own node (`Cx::store_fact`). What
+                // is left here is the region gate: arena memory is not this
+                // path's to free, whatever the store displaces. Where the
+                // core states nothing — a body it could not lower — the
+                // three read as they always did. The answer is taken FIRST
+                // so a region-gated site still counts as considered (§26's
+                // finish check).
+                let owned_here = self
+                    .cx
+                    .store_fact(s as *const Stmt as usize)
+                    .unwrap_or(false);
+                let snap = if owned_here {
                     match (place, &r) {
                         // A scalar local IS the pointer; it has no address.
                         (Place::Local(l), Repr::Scalar(_)) => {
@@ -3562,7 +4611,7 @@ impl<'p> Fn_<'_, 'p> {
                 } else {
                     Vec::new()
                 };
-                self.store_into(m, b, place, &r, value, &ty.clone())?;
+                self.store_into(m, b, place, &r, value, &ty.clone(), false)?;
                 self.free_snap(b, snap.as_slice());
                 // The place now holds a pointer this path did not allocate, so the
                 // next append copies rather than grows. Claiming ownership here
@@ -3592,30 +4641,40 @@ impl<'p> Fn_<'_, 'p> {
                 // per-binding registry guess (`place_owns`), queried before
                 // the region gate so an arena-owned site still counts as
                 // considered. The value-alias guard folded with it.
-                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0
-                {
+                let snap = if self.cx.store_row(s as *const Stmt as usize) {
                     let a = self.addr_local(b, place, foff);
                     self.snap_at(b, a, &fty, *line)?
                 } else {
                     Vec::new()
                 };
-                place
-                    .addr(b, foff)
-                    .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
                 match &fr {
                     Repr::Scalar(_) => {
+                        place
+                            .addr(b, foff)
+                            .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
                         self.expr_as(m, b, value, &fty)?;
                         b.ins(&store_of(&self.cx.ll(&fty)));
                     }
-                    Repr::Agg(l) => {
-                        self.expr_as(m, b, value, &fty)?;
-                        b.ins(&Instruction::I32Const(l.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                    }
+                    // RFC-0125 M1: built in the field when the value cannot
+                    // see the binding while it is made; module state is
+                    // never built in place (see `Dest`).
+                    Repr::Agg(l) => match Dest::of(place) {
+                        Some(d) => {
+                            let fresh = !observes(value, name);
+                            self.agg_into(m, b, d.at(foff), l.size, value, &fty, fresh)?;
+                        }
+                        None => {
+                            place
+                                .addr(b, foff)
+                                .ok_or_else(|| gap("a field assignment to a non-record", *line))?;
+                            self.expr_as(m, b, value, &fty)?;
+                            b.ins(&Instruction::I32Const(l.size as i32));
+                            b.ins(&Instruction::MemoryCopy {
+                                src_mem: 0,
+                                dst_mem: 0,
+                            });
+                        }
+                    },
                     Repr::Unit => return unsupported("a Unit field", *line),
                 }
                 self.free_snap(b, snap.as_slice());
@@ -3659,12 +4718,7 @@ impl<'p> Fn_<'_, 'p> {
                 // An `if` with no else-arm grows one when the implicit edge is
                 // the one that owes a release. After a diverged arm the
                 // releases are dead code, which wasm validates.
-                let ers = self
-                    .cx
-                    .plan
-                    .edge_releases_at(s as *const Stmt as usize)
-                    .cloned()
-                    .unwrap_or_default();
+                let ers = self.cx.edge_rows(s as *const Stmt as usize);
                 b.ins(&Instruction::If(BlockType::Empty));
                 self.depth += 1;
                 self.block(m, b, then_block)?;
@@ -3700,77 +4754,29 @@ impl<'p> Fn_<'_, 'p> {
                 if self.optional_if_let(m, b, pattern, scrutinee, then_block, else_block, *line)? {
                     return Ok(());
                 }
-                let st = self.expr(m, b, scrutinee)?;
-                let sum = self
-                    .sum_of(&st)
-                    .ok_or_else(|| gap(&format!("an `if let` on `{st}`"), *line))?;
-                let Repr::Agg(sl) = self.cx.repr(&st, *line)? else {
-                    return unsupported("an `if let` on a non-aggregate", *line);
-                };
-                // A local of its own rather than shared scratch: the address has to
-                // survive the test AND the binds, and an `if let` nests — an inner
-                // one's scrutinee would take the same scratch slot back.
-                let addr = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(addr));
-                // Census §14, Phase 10a: a scrutinee that is a TEMPORARY owns
-                // what it holds and has no name, so `own` gives the STATEMENT
-                // the reclamation row. A release frame of its own is what makes
-                // the release survive a `return` out of the arm — an early exit
-                // walks the frames, and this one is on the stack for the whole
-                // statement.
+                // The two-arm switch the core lowers this to (RFC-0125 §3 M5):
+                // the pattern's arm, and the `else` under the default arm a
+                // user cannot spell. `match_expr` reads that shape and writes
+                // the `if`/`else` this arm used to write itself.
+                let empty = Block { stmts: Vec::new() };
+                let other = Pattern::Other;
+                let arms = [
+                    ArmRef {
+                        pattern,
+                        body: BodyRef::Block(then_block),
+                    },
+                    ArmRef {
+                        pattern: &other,
+                        body: BodyRef::Block(else_block.as_ref().unwrap_or(&empty)),
+                    },
+                ];
                 let key = s as *const Stmt as usize;
-                if self.drops.contains_key(&key) {
-                    if let Some(r) = self.rel_for(&st, *line)? {
-                        // A slot of its own, and it has to be one. `expr` left the
-                        // aggregate wherever it built it, and the arm can build
-                        // over that — the release then read a slot the then-block
-                        // had reused and freed a pointer nobody allocated. It cost
-                        // `examples/vyxdemo.vyrn` a wrong `None` out of `slice`,
-                        // and only on the direct backend, because the textual one
-                        // copies into an `alloca` at the same point.
-                        //
-                        // The copy is by value, so the copy holds the same buffer
-                        // pointers the binders read and releasing it releases
-                        // exactly those.
-                        let own = b.alloc(sl.size, sl.align);
-                        b.slot(own);
-                        b.ins(&Instruction::LocalGet(addr));
-                        b.ins(&Instruction::I32Const(sl.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
-                        self.register_rel(key, Place::Slot(own), r);
-                    }
-                }
-                self.tag_test(b, addr, &sum, pattern, *line)?;
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                let mark = self.scope.len();
-                for (i, (n, t)) in self
-                    .pattern_binds(&sum, pattern, *line)?
-                    .into_iter()
-                    .enumerate()
-                {
-                    let place = self.bind_payload(b, addr, &sum, &sl, i, &t, *line)?;
-                    self.scope.push((n, place, t));
-                }
-                self.block(m, b, then_block)?;
-                // The binders are the then-arm's only: an `else` that could see
-                // them would be reading a payload the tag says is not there.
-                self.scope.truncate(mark);
-                if let Some(e) = else_block {
-                    b.ins(&Instruction::Else);
-                    self.block(m, b, e)?;
-                }
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                // The fall-through release, after both arms have rejoined. An arm
-                // that returned already ran it and branched, so this copy lands in
-                // code wasm has marked unreachable — the same rule `block` follows.
-                self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
+                self.match_expr(m, b, key, scrutinee, &arms, "`if let`", *line)?;
             }
             Stmt::While { cond, body, line } => {
+                // RFC-0125 M1: the headers this loop reads and never moves,
+                // taken apart once, before the loop.
+                let hoisted = self.hoist_walks(b, cond, body, *line)?;
                 // `block { loop { br_if 1 (!cond); body; br 0 } }` — the block is
                 // where `break` goes, the loop is where `continue` goes, and
                 // neither needs a relooper because both are in the AST already.
@@ -3793,6 +4799,16 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::End);
                 self.depth -= 1;
                 b.ins(&Instruction::End);
+                for (name, prev) in hoisted {
+                    match prev {
+                        Some(w) => {
+                            self.walks.insert(name, w);
+                        }
+                        None => {
+                            self.walks.remove(&name);
+                        }
+                    }
+                }
             }
             Stmt::ForIn {
                 var,
@@ -3840,17 +4856,22 @@ impl<'p> Fn_<'_, 'p> {
                 // it is pushed BEFORE the loop's boundary so `break` and
                 // `continue` leave it to the fall-through below.
                 let key = s as *const Stmt as usize;
-                if let Some(kind) = self.drops.get(&key).cloned() {
+                // Is the container this frame's to give back here? A placed
+                // row names it at an exit, or — for a consuming loop, whose
+                // release is the core's own statement and no row's — the
+                // core says so at the loop. Both are the core's answers;
+                // this emitter asked the plan's droppable table until
+                // RFC-0125 §3 M3's container slice.
+                if self.releases_whole(key) || self.cx.loop_gives_back(key) {
                     if let Some(r) = self.rel_for(&it, *line)? {
-                        // The row's KIND decides, not the type alone. A
-                        // `FreeArr` row is round sixteen's element handover:
-                        // the body took the elements out through the loop
-                        // variable, so the deep walk `rel_for` builds would
-                        // free values somebody else now owns — the trap that
-                        // turned round fourteen's blanket downgrade back. The
-                        // buffer is the triple's field 0, and it is all the
-                        // loop still owns.
-                        let r = if matches!(kind, DropKind::FreeArr) {
+                        // WHAT the release walks is the other half of the
+                        // element sentence. Where every element left through
+                        // the loop variable the deep walk `rel_for` builds
+                        // would free values somebody else now owns — the trap
+                        // that turned round fourteen's blanket downgrade back
+                        // — so the buffer, which is the triple's field 0, is
+                        // all the loop still owns.
+                        let r = if self.cx.loop_buffer_only(key) {
                             Rel::Buffers(vec![0])
                         } else {
                             r
@@ -3883,7 +4904,7 @@ impl<'p> Fn_<'_, 'p> {
                             }
                             _ => return unsupported("a `for` over a Unit value", *line),
                         }
-                        self.register_rel(key, place, r);
+                        self.register_rel(b, key, place, r);
                         b.ins(&Instruction::LocalGet(src));
                     }
                 }
@@ -3927,6 +4948,16 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 let mark = self.scope.len();
                 self.scope.push((var.clone(), place, w.elem.clone()));
+                // RFC-0125 M3: a variable the body drains a field of keeps
+                // the rest of its element, and the placer's rows for it —
+                // keyed by the variable's spelling, since it has no `let` —
+                // release that rest at every exit of the body.
+                let vkey = vyrn_frontend::own::for_var_key(var);
+                if self.releases_whole(vkey) {
+                    if let Some(r) = self.rel_for(&w.elem, *line)? {
+                        self.register_rel(b, vkey, place, r);
+                    }
+                }
 
                 let cont = self.depth;
                 b.ins(&Instruction::Block(BlockType::Empty));
@@ -3951,6 +4982,25 @@ impl<'p> Fn_<'_, 'p> {
                 // The fall-through release (RFC-0092 M5), after every exit path
                 // has rejoined. A body that returned already ran it and branched.
                 self.emit_releases(m, b, ExitKind::Scrutinee, key)?;
+                // `for x in consume xs` — the loop TOOK the container, so the
+                // loop gives it back, and the core says so with a release of
+                // its own rather than a row (RFC-0125 §3 M3, the walk's
+                // deletion). The take is what the kernel judges at the loop:
+                // it is where a consuming loop over a `read` parameter's field
+                // or over module state is refused (the census, rows 10, 11 and
+                // 29), so the core cannot leave it to an exit row — and a
+                // release only the core states is one no row names, which is
+                // why the two are exclusive here. The core says WHICH loop
+                // gives one back; this pass no longer reads `consume` off the
+                // statement to guess (RFC-0125 §3 M3, the event stream's
+                // slice).
+                if self.cx.loop_gives_back(key) && !self.releases_whole(key) {
+                    if let Some(r) = self.rel_slots.get(&key).cloned() {
+                        self.emit_rel(m, b, r.place, &r.rel, *line)?;
+                        self.rel_slots.remove(&key);
+                        self.rel_pending.retain(|(k, _)| *k != key);
+                    }
+                }
             }
             Stmt::IndexSet {
                 name,
@@ -3967,14 +5017,28 @@ impl<'p> Fn_<'_, 'p> {
                 if let Some(blk) =
                     vyrn_frontend::project::store_index(&self.cx.impls, name, index, value, &ty)?
                 {
-                    // The projection's own statements decide the release —
-                    // acknowledged for §26's finish check.
-                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                    // The projection's own statements decide the release.
+                    // RFC-0125 §3 M3, the store slice: the core judged THIS
+                    // statement and this pass walks the expansion, so the
+                    // store inside it is pointed back at the node the answer
+                    // is filed under. The expansion is memoized and leaked,
+                    // so the pair outlives every walk that reads it.
+                    if let Some(st) = vyrn_frontend::project::store_node(blk) {
+                        self.cx.plan.alias_clones(&[(
+                            st as *const Stmt as usize,
+                            s as *const Stmt as usize,
+                        )]);
+                    }
                     return self.block(m, b, blk);
                 }
-                place
-                    .addr(b, 0)
-                    .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
+                // RFC-0125 M1: a header a `while` hoisted is already in
+                // locals, and an element store moves no header.
+                let cached = self.walks.get(name.as_str()).cloned();
+                if cached.is_none() {
+                    place
+                        .addr(b, 0)
+                        .ok_or_else(|| gap("an element assignment to a non-array", *line))?;
+                }
                 // `m[k] = v` (RFC-0028) inserts or updates; it is not a bounded
                 // element store and has no index to check.
                 if let Type::Map(key_t, val) = self.cx.resolve(&ty) {
@@ -3986,16 +5050,16 @@ impl<'p> Fn_<'_, 'p> {
                     // states at its own map arm: a map owns its values outright,
                     // so who owns the MAP does not change who owns the value this
                     // store displaces. The arena and aliasing are what is asked.
-                    let drop_old = self.region_depth == 0
-                        && !vyrn_frontend::movecheck::mentions_place(value, name)
-                        && !vyrn_frontend::movecheck::mentions_place(index, name);
-                    // The entry's release is `map_set`'s own two questions —
-                    // acknowledged for §26's finish check.
-                    let _ = self.cx.plan.store_owned_at(s as *const Stmt as usize);
+                    let drop_old = !vyrn_frontend::ast::mentions_place(value, name)
+                        && !vyrn_frontend::ast::mentions_place(index, name);
+                    // The entry's release is `map_set`'s own two questions.
                     return self
                         .map_set(m, b, hdr, &l, index, value, &key_t, &val, drop_old, *line);
                 }
-                let w = self.walk(b, &ty, *line)?;
+                let w = match cached {
+                    Some(w) => w,
+                    None => self.walk(b, &ty, *line)?,
+                };
                 if w.byte {
                     return unsupported("an element assignment into a String", *line);
                 }
@@ -4008,9 +5072,7 @@ impl<'p> Fn_<'_, 'p> {
                 // Rule 4 through an element. The element address is already on the
                 // stack, so it is teed rather than recomputed; the snapshot is
                 // stack-neutral and the store finds its address where it left it.
-                let snap = if self.cx.plan.store_owned_at(s as *const Stmt as usize)
-                    && self.region_depth == 0
-                {
+                let snap = if self.cx.store_row(s as *const Stmt as usize) {
                     let ea = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(ea));
                     self.snap_at(b, ea, &elem, *line)?
@@ -4022,13 +5084,15 @@ impl<'p> Fn_<'_, 'p> {
                         self.expr_as(m, b, value, &elem)?;
                         b.ins(&store_of(&self.cx.ll(&elem)));
                     }
+                    // RFC-0125 M1: built in the element when the value cannot
+                    // see the binding while it is made. The element address
+                    // moves off the stack into a local so the fields can be
+                    // addressed from it.
                     Repr::Agg(el) => {
-                        self.expr_as(m, b, value, &elem)?;
-                        b.ins(&Instruction::I32Const(el.size as i32));
-                        b.ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        });
+                        let a = b.local(ValType::I32);
+                        b.ins(&Instruction::LocalSet(a));
+                        let fresh = !observes(value, name);
+                        self.agg_into(m, b, Dest::Addr(a, 0), el.size, value, &elem, fresh)?;
                     }
                     Repr::Unit => return unsupported("an array of Unit", *line),
                 }
@@ -4044,15 +5108,12 @@ impl<'p> Fn_<'_, 'p> {
                 let d = self.br_to(brk);
                 b.ins(&Instruction::Br(d));
             }
+            // Retired, and its flag in `FORMS` says so: the core states every
+            // `continue`, and this arm read zero over the corpus and every gated
+            // suite. The match is exhaustive, so what stands here is the answer
+            // for a `continue` the core did not state, which is a defect there.
             Stmt::Continue { line } => {
-                let &(_, cont, regions) = self
-                    .loops
-                    .last()
-                    .ok_or_else(|| gap("`continue` outside a loop", *line))?;
-                self.emit_releases(m, b, ExitKind::Continue, s as *const Stmt as usize)?;
-                self.exit_regions_above(b, regions, true);
-                let d = self.br_to(cont);
-                b.ins(&Instruction::Br(d));
+                return unsupported("a `continue` the core did not state", *line)
             }
             // `region { .. }` (RFC-0004 §4). An arena scope, and in this backend
             // that is a counter and its trap — see `region_exit` for why the arena
@@ -4067,9 +5128,11 @@ impl<'p> Fn_<'_, 'p> {
             Stmt::Region { body, .. } => {
                 self.region_enter(b);
                 self.region_depth += 1;
-                self.block(m, b, body)?;
+                let r = self.block(m, b, body);
                 self.region_depth -= 1;
-                self.region_exit(b);
+                let mark = self.region_marks.pop().expect("one mark per open region");
+                r?;
+                self.region_exit(b, mark);
             }
             Stmt::Drop { name, line } => {
                 let (place, ty) = self.lookup(name, *line)?;
@@ -4119,7 +5182,7 @@ impl<'p> Fn_<'_, 'p> {
                 let line = Expr::line(e);
                 match self.cx.repr(&ty, line)? {
                     Repr::Unit => {}
-                    _ if self.cx.plan.discarded_result(s as *const Stmt as usize) => {
+                    _ if self.cx.discarded_row(s as *const Stmt as usize) => {
                         let l = b.local(ValType::I32);
                         b.ins(&Instruction::LocalSet(l));
                         self.free_arg_temp(m, b, l, &ty, line)?;
@@ -4224,7 +5287,10 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Evaluate `value` into an existing place of known type.
+    /// Evaluate `value` into an existing place of known type. `fresh` says the
+    /// place is storage nothing can name yet (a `let`'s slot), so an aggregate
+    /// may be built in it directly — see [`Dest`].
+    #[allow(clippy::too_many_arguments)]
     fn store_into(
         &mut self,
         m: &mut Module,
@@ -4233,6 +5299,7 @@ impl<'p> Fn_<'_, 'p> {
         r: &Repr,
         value: &Expr,
         ty: &Type,
+        fresh: bool,
     ) -> Result<(), String> {
         match (place, r) {
             (Place::Local(l), _) => {
@@ -4243,21 +5310,65 @@ impl<'p> Fn_<'_, 'p> {
             // before the value is built, so an aggregate has somewhere to be
             // copied to. A `Static` destination is the same shape with a constant
             // address, which is why module state needed no new store path.
-            (Place::Slot(_) | Place::Static(_), Repr::Agg(l)) => {
-                place.addr(b, 0);
-                self.expr_as(m, b, value, ty)?;
-                b.ins(&Instruction::I32Const(l.size as i32));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
+            (Place::Slot(_) | Place::Static(_), Repr::Agg(l)) => match Dest::of(place) {
+                Some(d) => self.agg_into(m, b, d, l.size, value, ty, fresh)?,
+                None => {
+                    place.addr(b, 0);
+                    self.expr_as(m, b, value, ty)?;
+                    b.ins(&Instruction::I32Const(l.size as i32));
+                    b.ins(&Instruction::MemoryCopy {
+                        src_mem: 0,
+                        dst_mem: 0,
+                    });
+                }
+            },
             (Place::Static(_), Repr::Scalar(_)) => {
                 place.addr(b, 0);
                 self.expr_as(m, b, value, ty)?;
                 b.ins(&store_of(&self.cx.ll(ty)));
             }
             _ => return unsupported("a store of a Unit value", Expr::line(value)),
+        }
+        Ok(())
+    }
+
+    /// Evaluate the aggregate `value`, of type `ty` and `size` bytes, and leave
+    /// it at `dest` (RFC-0125 M1). With `in_place`, a literal or a call whose
+    /// type is `ty` writes there directly and the copy is skipped; anything
+    /// else — a variable, a field read, a coercion — is built where it is built
+    /// and copied. Without it, only the copy: the caller could not show the
+    /// destination is unnamed while the value is made (see [`Dest`]).
+    ///
+    /// The destination's address goes down before the value either way, the
+    /// order every other store in this file uses; when the value landed in
+    /// place, the two addresses on the stack are dropped instead of copied.
+    #[allow(clippy::too_many_arguments)]
+    fn agg_into(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        size: u32,
+        value: &Expr,
+        ty: &Type,
+        in_place: bool,
+    ) -> Result<(), String> {
+        dest.addr(b, 0);
+        self.dest_hint = in_place.then(|| (dest, ty.clone()));
+        self.dest_used = false;
+        let r = self.expr_as(m, b, value, ty);
+        self.dest_hint = None;
+        let used = std::mem::take(&mut self.dest_used);
+        r?;
+        if used {
+            b.ins(&Instruction::Drop);
+            b.ins(&Instruction::Drop);
+        } else {
+            b.ins(&Instruction::I32Const(size as i32));
+            b.ins(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            });
         }
         Ok(())
     }
@@ -4314,7 +5425,8 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// Reconcile the value on the stack, of type `from`, into `to`.
+    /// Reconcile the value on the stack, of type `from`, into `to`, by the rung
+    /// [`crate::coerce_plan`] places for the pair.
     ///
     /// **The seam** (RFC-0077 M2d). Before this the backend had no coercion
     /// concept at all: it lowered when `repr()` already agreed on both sides and
@@ -4326,13 +5438,16 @@ impl<'p> Fn_<'_, 'p> {
     /// a join arm, an enum payload. A reconciliation added here is added at all
     /// of them at once, which is the property the five separate refusals lacked.
     ///
+    /// **The decision is not here** — RFC-0125 §2.3, and §3 M6's coercion
+    /// census. This emitter used to restate the ladder, in an order the textual
+    /// emitter did not share, and the corpus gate existed to say where the two
+    /// orders came apart. The guards are gone; what is left is one arm per rung.
+    /// The order that mattered — validation before the shape shortcut, and the
+    /// integer rung before it as well, because `llt` prints `i8` for `Int8` and
+    /// `UInt8` alike — is the plan's now, and is written down there.
+    ///
     /// `expr` is the expression that produced the value, when there is one — only
     /// RFC-0020's containment proof needs it, and only for strings.
-    ///
-    /// **Validation runs FIRST**, and that order is the entire point. A refined
-    /// type has the SAME representation as its base, so the `ll`-equality
-    /// shortcut below would let `Int64 → Even` past unchecked: same bytes, no
-    /// check, wrong program, forever.
     fn coerce(
         &mut self,
         m: &mut Module,
@@ -4345,224 +5460,246 @@ impl<'p> Fn_<'_, 'p> {
         // Substituted, not resolved. M2d's rule is that a declared spelling must
         // survive to here or the boundary is not a boundary — but a `Param` is a
         // spelling that says nothing until the monomorphization fills it in, so
-        // it is the one thing that MUST be reduced before `validation_required`
-        // looks at it: a `T` where `T = Age` is an `Age` flow, and a `Param`
-        // would silently be neither `Named` nor a boundary.
+        // it is the one thing that MUST be reduced before the plan looks at it: a
+        // `T` where `T = Age` is an `Age` flow, and a `Param` would silently be
+        // neither `Named` nor a boundary.
         let (from, to) = (&self.cx.sub(from), &self.cx.sub(to));
-        // A `Never` (RFC-0079) reached this seam from a `panic`, which left
-        // nothing on the stack and ended the block in `unreachable`. There is no
-        // value to reconcile and no validation to owe — the polymorphic stack
-        // after `unreachable` satisfies `to` on its own.
-        if matches!(from, Type::Never) {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Never);
-            return Ok(());
-        }
-        if let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned() {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Validate);
-            // The value has to be in the base's representation before the
-            // predicate reads it. The recursion terminates because a base is one
-            // step nearer a builtin than the name it backs.
-            self.coerce(m, b, expr, from, &decl.base, line)?;
-            if !expr.is_some_and(|e| self.proven(e, to)) {
-                self.emit_validation(m, b, &decl, line)?;
-            }
-            return Ok(());
-        }
-        // An integer resize, and it has to come BEFORE the `ll`-equality
-        // shortcut: `llt` prints `i8` for both `Int8` and `UInt8`, so two types
-        // with the same shape can still want different bits in the carrier —
-        // an `Int8` is sign-extended where a `UInt8` is masked. That pair is
-        // exactly what the shortcut would have swallowed silently.
-        //
-        // Widening reads the SOURCE's signedness (a `UInt8` zero-extends, an
-        // `Int8` sign-extends); narrowing discards bits and renormalizes into the
-        // TARGET's. That is the interpreter's `wrap_intn` and the textual
-        // backend's `sext`/`zext`/`trunc`, and both stop being separate rules the
-        // moment [`Num`]'s invariant is written down.
-        if let (Some(f), Some(t)) = (
-            Num::of(&self.cx.resolve(from)),
-            Num::of(&self.cx.resolve(to)),
-        ) {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Resize);
-            match (f == t, f.wide(), t.wide()) {
-                (true, ..) => {}
-                (_, false, true) => widen(b, f),
-                (_, true, false) => {
-                    b.ins(&Instruction::I32WrapI64);
-                    renorm(b, t);
+        let rung = crate::coerce_plan(from, to, &self.cx.types);
+        crate::observe::note_rung(crate::observe::Site::Wasm, from, to, rung);
+        match rung {
+            // A `Never` (RFC-0079) reached this seam from a `panic`, which left
+            // nothing on the stack and ended the block in `unreachable`. There is
+            // no value to reconcile and no validation to owe — the polymorphic
+            // stack after `unreachable` satisfies `to` on its own.
+            crate::Rung::Never => Ok(()),
+            crate::Rung::Validate => {
+                let Some(decl) = crate::validation_required(from, to, &self.cx.types).cloned()
+                else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                // The value has to be in the base's representation before the
+                // predicate reads it. The recursion terminates because a base is
+                // one step nearer a builtin than the name it backs.
+                self.coerce(m, b, expr, from, &decl.base, line)?;
+                if !expr.is_some_and(|e| self.proven(e, to)) {
+                    self.emit_validation(b, &decl, line)?;
                 }
-                // Both carriers are `i64`, so only the signedness changed and the
-                // bits do not move.
-                (_, true, true) => {}
-                // Both in an `i32`: the source's representation already holds the
-                // bits, and only the target's normalization is owed.
-                (_, false, false) => renorm(b, t),
+                Ok(())
             }
-            return Ok(());
-        }
-        // Across the int/float line, and between the two float widths.
-        //
-        // `trunc_sat` rather than `trunc`: wasm's plain `i64.trunc_f64_s` TRAPS
-        // out of range, where LLVM's `fptosi` is undefined and Rust's `as`
-        // saturates — and the interpreter IS Rust's `as`, which is the answer the
-        // ladder compares against.
-        //
-        // Float → sized int goes through 64 bits FIRST and narrows after, because
-        // that is what the interpreter does (`f as i64`, then `wrap_intn`) and the
-        // two genuinely disagree: `Int8(1e10)` is 0 through an `i64` and -1
-        // through an `i32` whose saturation clamped at `i32::MAX`.
-        let (fr, tr) = (self.cx.resolve(from), self.cx.resolve(to));
-        let flt = |t: &Type| match t {
-            Type::Float => Some(true),
-            Type::Float32 => Some(false),
-            _ => None,
-        };
-        match (Num::of(&fr), flt(&fr), Num::of(&tr), flt(&tr)) {
-            (Some(f), _, _, Some(wide)) => {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::FloatCross,
-                );
-                widen(b, f);
-                b.ins(match (wide, f.signed) {
-                    (true, true) => &Instruction::F64ConvertI64S,
-                    (true, false) => &Instruction::F64ConvertI64U,
-                    (false, true) => &Instruction::F32ConvertI64S,
-                    (false, false) => &Instruction::F32ConvertI64U,
+            // An integer resize. Widening reads the SOURCE's signedness (a
+            // `UInt8` zero-extends, an `Int8` sign-extends); narrowing discards
+            // bits and renormalizes into the TARGET's. That is the interpreter's
+            // `wrap_intn` and the textual backend's `sext`/`zext`/`trunc`, and
+            // both stop being separate rules the moment [`Num`]'s invariant is
+            // written down.
+            crate::Rung::Resize => {
+                let (Some(f), Some(t)) = (
+                    Num::of(&self.cx.resolve(from)),
+                    Num::of(&self.cx.resolve(to)),
+                ) else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                match (f == t, f.wide(), t.wide()) {
+                    (true, ..) => {}
+                    (_, false, true) => widen(b, f),
+                    (_, true, false) => {
+                        b.ins(&Instruction::I32WrapI64);
+                        renorm(b, t);
+                    }
+                    // Both carriers are `i64`, so only the signedness changed and
+                    // the bits do not move.
+                    (_, true, true) => {}
+                    // Both in an `i32`: the source's representation already holds
+                    // the bits, and only the target's normalization is owed.
+                    (_, false, false) => renorm(b, t),
+                }
+                Ok(())
+            }
+            // Across the int/float line, and between the two float widths.
+            //
+            // `trunc_sat` rather than `trunc`: wasm's plain `i64.trunc_f64_s`
+            // TRAPS out of range, where LLVM's `fptosi` is undefined and Rust's
+            // `as` saturates — and the interpreter IS Rust's `as`, which is the
+            // answer this emitter is compared against.
+            //
+            // Float → sized int goes through 64 bits FIRST and narrows after,
+            // because that is what the interpreter does (`f as i64`, then
+            // `wrap_intn`) and the two genuinely disagree: `Int8(1e10)` is 0
+            // through an `i64` and -1 through an `i32` whose saturation clamped
+            // at `i32::MAX`.
+            crate::Rung::FloatCross => {
+                let (fr, tr) = (self.cx.resolve(from), self.cx.resolve(to));
+                let flt = |t: &Type| match t {
+                    Type::Float => Some(true),
+                    Type::Float32 => Some(false),
+                    _ => None,
+                };
+                match (Num::of(&fr), flt(&fr), Num::of(&tr), flt(&tr)) {
+                    (Some(f), _, _, Some(wide)) => {
+                        widen(b, f);
+                        b.ins(match (wide, f.signed) {
+                            (true, true) => &Instruction::F64ConvertI64S,
+                            (true, false) => &Instruction::F64ConvertI64U,
+                            (false, true) => &Instruction::F32ConvertI64S,
+                            (false, false) => &Instruction::F32ConvertI64U,
+                        });
+                        Ok(())
+                    }
+                    (_, Some(wide), Some(t), _) => {
+                        b.ins(match (wide, t.signed) {
+                            (true, true) => &Instruction::I64TruncSatF64S,
+                            (true, false) => &Instruction::I64TruncSatF64U,
+                            (false, true) => &Instruction::I64TruncSatF32S,
+                            (false, false) => &Instruction::I64TruncSatF32U,
+                        });
+                        if !t.wide() {
+                            b.ins(&Instruction::I32WrapI64);
+                            renorm(b, t);
+                        }
+                        Ok(())
+                    }
+                    (_, Some(f), _, Some(t)) if f != t => {
+                        b.ins(if f {
+                            &Instruction::F32DemoteF64
+                        } else {
+                            &Instruction::F64PromoteF32
+                        });
+                        Ok(())
+                    }
+                    _ => Err(crate::plan_disagrees(from, to, rung)),
+                }
+            }
+            // A function value between `fn`-typed spellings. This emitter has no
+            // instruction for it and never had a rung of its own: the structural
+            // spelling and every named alias share the `{ i64, i64 }` shape, so
+            // its shape shortcut used to answer first. It is a rung with an empty
+            // arm now, which is the same thing said once (RFC-0125 §3 M6).
+            crate::Rung::FnRetag => Ok(()),
+            // Fixed arrays whose ELEMENT type changes. The textual emitter
+            // unrolls a per-element crossing; this one has no lowering for that,
+            // and a pair whose elements share a shape needs none.
+            crate::Rung::Elementwise => {
+                if self.cx.ll(from) == self.cx.ll(to) {
+                    return Ok(());
+                }
+                unsupported(
+                    &format!("an element-wise conversion from `{from}` to `{to}`"),
+                    line,
+                )
+            }
+            // A literal is a fixed `[N x T]`; an `Array<T>` slot wants the
+            // growable triple. One conversion, so every literal position — a
+            // `let`, an argument, a `return`, a field, an element — reaches the
+            // heap the same way.
+            crate::Rung::Heapify => {
+                let Type::ArrayN(inner, n) = self.cx.resolve(from) else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                self.heapify(b, &inner, n, to, line)
+            }
+            // The same literal in a `SmallArray<T, N>` position stays OFF the
+            // heap: the elements are copied into the inline buffer and `cap` is
+            // set to `N`, which is the state discriminant (RFC-0056). The checker
+            // proved `len <= N`.
+            crate::Rung::Inline => {
+                let (Type::ArrayN(inner, len), Type::SmallArray(_, n)) =
+                    (self.cx.resolve(from), self.cx.resolve(to))
+                else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                self.sa_from_fixed(b, &inner, len, to, n, line)
+            }
+            // The bits are already right.
+            crate::Rung::Identity => Ok(()),
+            // RFC-0002's record width subtyping: a wider record used as a
+            // narrower one. A rebuild rather than a prefix, because the two field
+            // orders need not agree — the shapes are the same length only by
+            // coincidence.
+            crate::Rung::Rebuild => {
+                let (got, want) = (from, to);
+                let (Some(ff), Some(tf)) = (self.cx.fields(got), self.cx.fields(want)) else {
+                    return Err(crate::plan_disagrees(from, to, rung));
+                };
+                let src = self.scratch(b, ValType::I32, 0);
+                b.ins(&Instruction::LocalSet(src));
+                let l = self.cx.repr(want, line)?;
+                let Repr::Agg(dl) = &l else {
+                    return unsupported("a record that is not an aggregate", line);
+                };
+                let off = b.alloc(dl.size, dl.align);
+                let sl =
+                    layout::of_ll(&self.cx.ll(got)).map_err(|e| format!("direct backend: {e}"))?;
+                for (i, f) in tf.iter().enumerate() {
+                    let j = ff
+                        .iter()
+                        .position(|g| g.name == f.name)
+                        .ok_or_else(|| gap(&format!("the field `{}`", f.name), line))?;
+                    if self.cx.ll(&ff[j].ty) != self.cx.ll(&f.ty) {
+                        return unsupported(
+                            "a record conversion that changes a field's shape",
+                            line,
+                        );
+                    }
+                    match self.cx.repr(&f.ty, line)? {
+                        Repr::Scalar(_) => {
+                            b.slot(off + dl.fields[i]);
+                            b.ins(&Instruction::LocalGet(src));
+                            b.ins(&load_of(
+                                &self.cx.ll(&f.ty),
+                                sl.fields[j],
+                                self.cx.signed(&f.ty),
+                            ));
+                            b.ins(&store_of(&self.cx.ll(&f.ty)));
+                        }
+                        Repr::Agg(fl) => {
+                            b.slot(off + dl.fields[i]);
+                            b.ins(&Instruction::LocalGet(src));
+                            b.ins(&Instruction::I32Const(sl.fields[j] as i32));
+                            b.ins(&Instruction::I32Add);
+                            b.ins(&Instruction::I32Const(fl.size as i32));
+                            b.ins(&Instruction::MemoryCopy {
+                                src_mem: 0,
+                                dst_mem: 0,
+                            });
+                        }
+                        Repr::Unit => return unsupported("a Unit field", line),
+                    }
+                }
+                b.slot(off);
+                Ok(())
+            }
+            // Two shapes of one sum (RFC-0126 §8.4). The tag is at offset 0 and
+            // the slots follow it, so the bytes both shapes have are a prefix:
+            // zero the destination, then copy that prefix.
+            crate::Rung::Reshape => {
+                let src = self.scratch(b, ValType::I32, 0);
+                b.ins(&Instruction::LocalSet(src));
+                let Repr::Agg(dl) = self.cx.repr(to, line)? else {
+                    return unsupported("a sum that is not an aggregate", line);
+                };
+                let sl =
+                    layout::of_ll(&self.cx.ll(from)).map_err(|e| format!("direct backend: {e}"))?;
+                let off = b.alloc(dl.size, dl.align);
+                b.slot(off);
+                b.ins(&Instruction::I32Const(0));
+                b.ins(&Instruction::I32Const(dl.size as i32));
+                b.ins(&Instruction::MemoryFill(0));
+                b.slot(off);
+                b.ins(&Instruction::LocalGet(src));
+                b.ins(&Instruction::I32Const(dl.size.min(sl.size) as i32));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
                 });
-                return Ok(());
+                b.slot(off);
+                Ok(())
             }
-            (_, Some(wide), Some(t), _) => {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::FloatCross,
-                );
-                b.ins(match (wide, t.signed) {
-                    (true, true) => &Instruction::I64TruncSatF64S,
-                    (true, false) => &Instruction::I64TruncSatF64U,
-                    (false, true) => &Instruction::I64TruncSatF32S,
-                    (false, false) => &Instruction::I64TruncSatF32U,
-                });
-                if !t.wide() {
-                    b.ins(&Instruction::I32WrapI64);
-                    renorm(b, t);
-                }
-                return Ok(());
-            }
-            (_, Some(f), _, Some(t)) if f != t => {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::FloatCross,
-                );
-                b.ins(if f {
-                    &Instruction::F32DemoteF64
-                } else {
-                    &Instruction::F64PromoteF32
-                });
-                return Ok(());
-            }
-            _ => {}
-        }
-        if self.cx.ll(from) == self.cx.ll(to) {
-            crate::observe::note_rung(crate::observe::Site::Wasm, from, to, crate::Rung::Identity);
-            return Ok(());
-        }
-        // A literal is a fixed `[N x T]`; an `Array<T>` slot wants the growable
-        // triple. One conversion, so every literal position — a `let`, an
-        // argument, a `return`, a field, an element — reaches the heap the same
-        // way.
-        if let (Type::ArrayN(inner, n), Type::Array(el)) =
-            (self.cx.resolve(from), self.cx.resolve(to))
-        {
-            if self.cx.ll(&inner) == self.cx.ll(&el) {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::Heapify,
-                );
-                return self.heapify(b, &inner, n, to, line);
+            // The end of the ladder, and the textual emitter reaches the same one
+            // now (RFC-0101 §1.5 recorded that the two ends differed).
+            crate::Rung::Refuse => {
+                unsupported(&format!("a conversion from `{from}` to `{to}`"), line)
             }
         }
-        // The same literal in a `SmallArray<T, N>` position stays OFF the heap: the
-        // elements are copied into the inline buffer and `cap` is set to `N`, which
-        // is the state discriminant (RFC-0056). The checker proved `len <= N`.
-        if let (Type::ArrayN(inner, len), Type::SmallArray(el, n)) =
-            (self.cx.resolve(from), self.cx.resolve(to))
-        {
-            if self.cx.ll(&inner) == self.cx.ll(&el) && len <= n {
-                crate::observe::note_rung(
-                    crate::observe::Site::Wasm,
-                    from,
-                    to,
-                    crate::Rung::Inline,
-                );
-                return self.sa_from_fixed(b, &inner, len, to, n, line);
-            }
-        }
-        // RFC-0002's record width subtyping: a wider record used as a narrower
-        // one. A rebuild rather than a prefix, because the two field orders need
-        // not agree — the shapes are the same length only by coincidence.
-        let (got, want) = (from, to);
-        // THE END OF THE LADDER, and it is not the other one's: the textual
-        // emitter falls through to identity where this one refuses
-        // (RFC-0101 §1.5). A pair the plan does not refuse arriving here is a
-        // program that compiles on one target only, which is what the corpus
-        // gate's terminal rule is for.
-        let (Some(from), Some(to)) = (self.cx.fields(got), self.cx.fields(want)) else {
-            crate::observe::note_rung(crate::observe::Site::Wasm, got, want, crate::Rung::Refuse);
-            return unsupported(&format!("a conversion from `{got}` to `{want}`"), line);
-        };
-        crate::observe::note_rung(crate::observe::Site::Wasm, got, want, crate::Rung::Rebuild);
-        let src = self.scratch(b, ValType::I32, 0);
-        b.ins(&Instruction::LocalSet(src));
-        let l = self.cx.repr(want, line)?;
-        let Repr::Agg(dl) = &l else {
-            return unsupported("a record that is not an aggregate", line);
-        };
-        let off = b.alloc(dl.size, dl.align);
-        let sl = layout::of_ll(&self.cx.ll(got)).map_err(|e| format!("direct backend: {e}"))?;
-        for (i, f) in to.iter().enumerate() {
-            let j = from
-                .iter()
-                .position(|g| g.name == f.name)
-                .ok_or_else(|| gap(&format!("the field `{}`", f.name), line))?;
-            if self.cx.ll(&from[j].ty) != self.cx.ll(&f.ty) {
-                return unsupported("a record conversion that changes a field's shape", line);
-            }
-            match self.cx.repr(&f.ty, line)? {
-                Repr::Scalar(_) => {
-                    b.slot(off + dl.fields[i]);
-                    b.ins(&Instruction::LocalGet(src));
-                    b.ins(&load_of(
-                        &self.cx.ll(&f.ty),
-                        sl.fields[j],
-                        self.cx.signed(&f.ty),
-                    ));
-                    b.ins(&store_of(&self.cx.ll(&f.ty)));
-                }
-                Repr::Agg(fl) => {
-                    b.slot(off + dl.fields[i]);
-                    b.ins(&Instruction::LocalGet(src));
-                    b.ins(&Instruction::I32Const(sl.fields[j] as i32));
-                    b.ins(&Instruction::I32Add);
-                    b.ins(&Instruction::I32Const(fl.size as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
-                }
-                Repr::Unit => return unsupported("a Unit field", line),
-            }
-        }
-        b.slot(off);
-        Ok(())
     }
 
     /// RFC-0020's containment escape: a string flow the checker proved lands
@@ -4580,40 +5717,31 @@ impl<'p> Fn_<'_, 'p> {
         vyrn_frontend::finite::string_flow_proven(e, to, &self.cx.types, &resolve)
     }
 
-    /// Emit the runtime check that the value on the stack satisfies `decl`'s
-    /// `where` predicate, trapping with the canonical message if it does not.
+    /// Emit the check that the value on the stack satisfies `decl`'s `where`
+    /// predicate: a CALL to the program's own constructor for the type, which
+    /// traps with the canonical message when it does not hold.
     ///
-    /// The value is LEFT on the stack: a validation is a check on a flow, not a
-    /// step in it. But the predicate's own code would bury it — the operand stack
-    /// is not addressable — so it is parked in the place the predicate binds it
-    /// to, which for a scalar base is the same place and therefore costs no copy.
+    /// RFC-0125 §3 M6, the third judgment's fourth slice. This backend used to
+    /// lower the predicate itself — bind what [`crate::predicate_binds`] names,
+    /// walk the clause, spell the trap — and so did the LLVM emitter and the
+    /// interpreter. The predicate is generated Vyrn now
+    /// ([`vyrn_frontend::ctor`]), so the census's `where-scalar` and
+    /// `where-record` rows are one body every engine calls.
     ///
-    /// What binds is [`crate::predicate_binds`]'s call, shared with the LLVM
-    /// emitter. The lowering of the predicate itself cannot be shared, since one
-    /// prints text and this writes bytes; what is shared is the structure walked.
+    /// The value is LEFT on the stack, because a validation is a check on a
+    /// flow and not a step in it. Parked in a local first, since the call
+    /// consumes what it is given: three instructions where the old site was a
+    /// binding walk.
     fn emit_validation(
         &mut self,
-        m: &mut Module,
         b: &mut Frame,
         decl: &TypeDecl,
         line: usize,
     ) -> Result<(), String> {
-        let Some(held) = self.predicate_holds(m, b, decl, line)? else {
-            return Ok(());
-        };
-        // The message on stderr and exit 1 — `Rt::trap`, the same path the
-        // division and bounds checks take, because parity compares stderr and a
-        // wasm `unreachable` would print wasmtime's wording instead of ours.
-        let msg = self.cx.rt.intern(m, &crate::validation_message(decl));
-        let trap = self.cx.rt.trap;
-        b.ins(&Instruction::I32Eqz);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::I32Const(msg as i32));
-        b.ins(&Instruction::Call(trap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(held));
+        let name = vyrn_frontend::ctor::ctor_name(&decl.name);
+        if let Some(held) = self.call_generated(b, decl, &name, "constructor", line)? {
+            b.ins(&Instruction::LocalGet(held));
+        }
         Ok(())
     }
 
@@ -4621,97 +5749,81 @@ impl<'p> Fn_<'_, 'p> {
     /// answer (a Bool) there instead, giving the local the value was parked in —
     /// or `None`, stack untouched, for a type with no refinement.
     ///
-    /// Split out of [`Fn_::emit_validation`] because a fallible construction wants
-    /// the same answer without the trap (RFC-0077 M2k): two spellings of "run the
-    /// predicate" could disagree about what the predicate binds, and a `Age?(n)`
-    /// that read a different `value` than `Age(n)` does would be a `None` on one
-    /// backend only.
+    /// Split from [`Fn_::emit_validation`] because a fallible construction wants
+    /// the same answer without the trap (RFC-0077 M2k). It is the same generated
+    /// function the constructor calls, so `Age?(n)` and `Age(n)` cannot read a
+    /// different `value`.
+    ///
+    /// Scalar bases only, which is what the one caller allows: a record base
+    /// binds by field and has no single word to become an `Option`'s payload.
     fn predicate_holds(
         &mut self,
-        m: &mut Module,
         b: &mut Frame,
         decl: &TypeDecl,
         line: usize,
     ) -> Result<Option<u32>, String> {
-        let Some(pred) = self.cx.predicate(decl, line)? else {
+        let name = vyrn_frontend::ctor::pred_name(&decl.name);
+        self.call_generated(b, decl, &name, "predicate", line)
+    }
+
+    /// Park the value on the stack and hand it to the generated function
+    /// `name`, giving back the local it was parked in — or `None`, stack
+    /// untouched, for a type with no refinement.
+    ///
+    /// The two callers above are the same three instructions over two
+    /// `what` is the one word the two callers' refusals differ by.
+    fn call_generated(
+        &mut self,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        name: &str,
+        what: &str,
+        line: usize,
+    ) -> Result<Option<u32>, String> {
+        if decl.predicate.is_none() {
             return Ok(None);
-        };
-        let binds = crate::predicate_binds(decl);
-        let mark = self.scope.len();
-        // Whatever the value was parked in, so the flow can carry on with it.
-        let held = match (self.cx.repr(&decl.base, line)?, &decl.base) {
-            // A record base binds every field by name, so the value is parked by
-            // ADDRESS and each field copied out of it. A copy rather than a view
-            // because a predicate cannot write to what it was given, so the two
-            // can never be observed to differ.
-            (Repr::Agg(l), Type::Record(_)) => {
-                let addr = b.local(ValType::I32);
-                b.ins(&Instruction::LocalSet(addr));
-                for (name, ty, field) in &binds {
-                    let i = field.expect("a record base binds by field index");
-                    let fr = self.cx.repr(ty, line)?;
-                    let place = self.place_for(b, &fr, line)?;
-                    match (place, &fr) {
-                        (Place::Local(loc), _) => {
-                            b.ins(&Instruction::LocalGet(addr));
-                            b.ins(&load_of(&self.cx.ll(ty), l.fields[i], self.cx.signed(ty)));
-                            b.ins(&Instruction::LocalSet(loc));
-                        }
-                        (Place::Slot(off), Repr::Agg(fl)) => {
-                            b.slot(off);
-                            b.ins(&Instruction::LocalGet(addr));
-                            b.ins(&Instruction::I32Const(l.fields[i] as i32));
-                            b.ins(&Instruction::I32Add);
-                            b.ins(&Instruction::I32Const(fl.size as i32));
-                            b.ins(&Instruction::MemoryCopy {
-                                src_mem: 0,
-                                dst_mem: 0,
-                            });
-                        }
-                        _ => return unsupported("a Unit field in a `where` clause", line),
-                    }
-                    self.scope.push((name.clone(), place, ty.clone()));
-                }
-                addr
-            }
-            // Every other base binds `value`, and the parked local IS it.
-            (Repr::Scalar(v), _) => {
-                let loc = b.local(v);
-                b.ins(&Instruction::LocalSet(loc));
-                let (name, ty, _) = binds
-                    .into_iter()
-                    .next()
-                    .expect("a scalar base binds `value`");
-                self.scope.push((name, Place::Local(loc), ty));
-                loc
-            }
-            // An aggregate base that is not a record has one `value` binding, and
-            // M2d refused it because `Place` could not name where to put it. M2f's
-            // `Static` does not change that — a global's address is fixed and this
-            // one is on the operand stack — but the record arm above shows the
-            // shape that would: copy the whole value into a frame slot and bind
-            // `value` to it, needing no new variant at all. Still refused, because
-            // no example has one and an untested lowering is worse than a named
-            // gap: this is the milestone where it stopped being a Place problem.
-            _ => {
-                return unsupported(
-                    &format!(
-                        "a `where` clause over the non-record aggregate `{}`",
-                        decl.base
-                    ),
-                    line,
-                );
-            }
-        };
-        let was = crate::observe::set_ctx("pred");
-        let cond = self.expr(m, b, pred);
-        crate::observe::set_ctx(was);
-        let cond = cond?;
-        self.scope.truncate(mark);
-        if self.cx.resolve(&cond) != Type::Bool {
-            return unsupported("a `where` clause that is not a Bool", line);
         }
+        let held = self.park_for_predicate(b, decl, line)?;
+        let Some(sig) = self.cx.sigs.get(name) else {
+            return unsupported(
+                &format!(
+                    "a `where` clause on `{}` with no {what} in the link",
+                    decl.name
+                ),
+                line,
+            );
+        };
+        let index = sig.index;
+        b.ins(&Instruction::LocalGet(held));
+        b.ins(&Instruction::Call(index));
         Ok(Some(held))
+    }
+
+    /// Park the value on the stack in a local, so a generated call can be given
+    /// it and the flow can carry on with it afterwards.
+    ///
+    /// An aggregate base is on the stack as its ADDRESS, which is what a `read`
+    /// parameter of that type is passed as ([`Fn_::emit_call`]), so one local
+    /// holds either shape.
+    fn park_for_predicate(
+        &mut self,
+        b: &mut Frame,
+        decl: &TypeDecl,
+        line: usize,
+    ) -> Result<u32, String> {
+        let v = match self.cx.repr(&decl.base, line)? {
+            Repr::Scalar(v) => v,
+            Repr::Agg(_) => ValType::I32,
+            Repr::Unit => {
+                return unsupported(
+                    &format!("a `where` clause over the Unit base `{}`", decl.base),
+                    line,
+                )
+            }
+        };
+        let held = b.local(v);
+        b.ins(&Instruction::LocalSet(held));
+        Ok(held)
     }
 
     /// Evaluate `e`, leaving its value (a scalar) or its address (an aggregate)
@@ -4724,19 +5836,17 @@ impl<'p> Fn_<'_, 'p> {
     /// the call. The tee is HERE — where the argument is evaluated — rather than
     /// at the call, so the evaluation order stays the one the program wrote.
     ///
-    /// Inside a `region` it stands down, because the arena is the single owner
-    /// there — the same condition [`crate::Gen::gen_expr`] reads.
-    ///
-    /// It used to keep a SECOND fact: whether the expression allocated a `String`
-    /// while a region was open, judged by [`vyrn_frontend::own::str_temporary`].
-    /// That was the arena's routing rule, and it was a different rule from the
-    /// one the textual backend uses — that backend routes at the ALLOCATION
-    /// (`Gen::heap_alloc`), so it holds a `String` an expression's INTERIOR
-    /// allocated, which no verdict about the expression node can see. The routing
-    /// is at the allocation on both backends now: see [`Fn_::str_owned`].
+    /// It asks nothing about a `region`. It used to stand down inside one, on
+    /// the argument that the arena was the single owner there; the arena owns
+    /// what [`Fn_::arena_route`] routes into it and nothing else, and `free`
+    /// refuses one of its blocks by the class word in its header. So the
+    /// temporary is handed back at whatever depth it was made.
     fn expr(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
+        if let Some(f) = expr_form(e) {
+            count_in(f, &self.owner);
+        }
         let t = self.expr_inner(m, b, e)?;
-        if self.cx.plan.arg_drop(e as *const Expr as usize) && self.region_depth == 0 {
+        if self.cx.arg_drop_row(e as *const Expr as usize) {
             let l = b.local(ValType::I32);
             b.ins(&Instruction::LocalTee(l));
             self.arg_frees.push((l, t.clone()));
@@ -4756,6 +5866,9 @@ impl<'p> Fn_<'_, 'p> {
     /// The walk itself. Every arm leaves exactly one value (or none, for
     /// `Unit`) on the stack, which is what lets the wrapper above tee it.
     fn expr_inner(&mut self, m: &mut Module, b: &mut Frame, e: &Expr) -> Result<Type, String> {
+        // RFC-0125 M1: the consumer's storage, for THIS node only. Taken here so
+        // that a literal or a call nested anywhere below cannot claim it.
+        let hint = self.dest_hint.take();
         Ok(match e {
             // RFC-0093: a take is the load the read already emits. The `.copy()`
             // that used to follow it is what the take removes, so the emitted
@@ -4807,7 +5920,7 @@ impl<'p> Fn_<'_, 'p> {
                 if self.lookup(name, *line).is_err()
                     && (name == "None" || self.cx.variants.contains_key(name)) =>
             {
-                match self.sum_ctor(m, b, name, &[], *line)? {
+                match self.sum_ctor(m, b, name, &[], *line, hint)? {
                     Some(t) => t,
                     None => return unsupported(&format!("the name `{name}`"), *line),
                 }
@@ -4848,9 +5961,8 @@ impl<'p> Fn_<'_, 'p> {
                 // RFC-0114 R1′: an unnamed String receiver this frame owns is
                 // freed right after the header read — the pointer is teed to a
                 // local before `length_of` consumes it.
-                let rfree = self.cx.plan.receiver_free(e as *const Expr as usize)
-                    && (self.region_depth == 0
-                        || self.cx.plan.receiver_malloc_at(e as *const Expr as usize));
+                let row = self.cx.receiver_row(e as *const Expr as usize);
+                let rfree = row.is_some();
                 let tee = if rfree {
                     let l = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(l));
@@ -4883,7 +5995,15 @@ impl<'p> Fn_<'_, 'p> {
                 // the record; a heap or `lazy` one is read again later. All
                 // three stay out.
                 if let Some(l) = tee {
-                    if matches!(frepr, Repr::Scalar(_))
+                    // RFC-0125 M3: the read TOOK a heap field (`let sels =
+                    // parse(q).sels`), and the placer's row frees the rest of
+                    // the receiver around that hole.
+                    let rh = row.unwrap_or_default();
+                    if !rh.is_empty() {
+                        if let Some(Rel::Deep(t, _)) = self.rel_for(&base, *line)? {
+                            self.emit_rel(m, b, Place::Local(l), &Rel::Deep(t, rh), *line)?;
+                        }
+                    } else if matches!(frepr, Repr::Scalar(_))
                         && self.rel_for(&fty, *line)?.is_none()
                         && vyrn_frontend::types::deferred(&fty).is_none()
                     {
@@ -4940,7 +6060,12 @@ impl<'p> Fn_<'_, 'p> {
                 let Repr::Agg(l) = self.cx.repr(&ty, *line)? else {
                     return unsupported(&format!("the record literal `{name}`"), *line);
                 };
-                let off = b.alloc(l.size, l.align);
+                // RFC-0125 M1: the consumer's storage when it holds this very
+                // type, a slot of our own otherwise.
+                let (dest, used) = match hint {
+                    Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&ty) => (d, true),
+                    _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+                };
                 for (i, f) in decl.iter().enumerate() {
                     let init = fields
                         .iter()
@@ -4949,23 +6074,19 @@ impl<'p> Fn_<'_, 'p> {
                         .ok_or_else(|| gap(&format!("the missing field `{}`", f.name), *line))?;
                     match self.cx.repr(&f.ty, *line)? {
                         Repr::Scalar(_) => {
-                            b.slot(off + l.fields[i]);
+                            dest.addr(b, l.fields[i]);
                             self.expr_as(m, b, init, &f.ty)?;
                             b.ins(&store_of(&self.cx.ll(&f.ty)));
                         }
                         Repr::Agg(fl) => {
-                            b.slot(off + l.fields[i]);
-                            self.expr_as(m, b, init, &f.ty)?;
-                            b.ins(&Instruction::I32Const(fl.size as i32));
-                            b.ins(&Instruction::MemoryCopy {
-                                src_mem: 0,
-                                dst_mem: 0,
-                            });
+                            let at = dest.at(l.fields[i]);
+                            self.agg_into(m, b, at, fl.size, init, &f.ty, true)?;
                         }
                         Repr::Unit => return unsupported("a Unit field", *line),
                     }
                 }
-                b.slot(off);
+                dest.addr(b, 0);
+                self.dest_used = used;
                 // A predicated record's cross-field `where` runs on the finished
                 // literal. There is no coercion to hang it on — the literal
                 // already IS the named type, so `from == to` and
@@ -4984,7 +6105,7 @@ impl<'p> Fn_<'_, 'p> {
                         .iter()
                         .any(|(_, e)| vyrn_frontend::consteval::eval(e, &HashMap::new()).is_none());
                     if dynamic {
-                        self.emit_validation(m, b, &d, *line)?;
+                        self.emit_validation(b, &d, *line)?;
                     }
                 }
                 ty
@@ -5010,75 +6131,24 @@ impl<'p> Fn_<'_, 'p> {
             }
             Expr::Unary { op, expr, line } => {
                 let t = self.expr(m, b, expr)?;
-                let rt = self.cx.resolve(&t);
-                match (op, Num::of(&rt)) {
-                    // `x * -1`, which is also what makes the width's minimum
-                    // negate to itself — the wrapping the interpreter does, for
-                    // free. `~x` is `x ^ -1`, and both then renormalize because a
-                    // narrow carrier holds more bits than the width.
-                    (UnOp::Neg | UnOp::BitNot, Some(n)) => {
-                        if n.wide() {
-                            b.ins(&Instruction::I64Const(-1));
-                            b.ins(if *op == UnOp::Neg {
-                                &Instruction::I64Mul
-                            } else {
-                                &Instruction::I64Xor
-                            });
-                        } else {
-                            b.ins(&Instruction::I32Const(-1));
-                            b.ins(if *op == UnOp::Neg {
-                                &Instruction::I32Mul
-                            } else {
-                                &Instruction::I32Xor
-                            });
-                        }
-                        renorm(b, n);
-                    }
-                    (UnOp::Neg, None) if matches!(rt, Type::Float | Type::Float32) => {
-                        b.ins(if rt == Type::Float32 {
-                            &Instruction::F32Neg
-                        } else {
-                            &Instruction::F64Neg
-                        });
-                    }
-                    // `-v` (RFC-0083 M2) is the sign-bit flip, not a subtraction
-                    // from zero — `f32x4.neg` keeps the sign of a zero where
-                    // `splat(0.0) - v` does not.
-                    (UnOp::Neg, None) if rt == Type::F32x4 => {
-                        b.ins(&Instruction::F32x4Neg);
-                    }
-                    (UnOp::Neg, None) if rt == Type::F64x2 => {
-                        b.ins(&Instruction::F64x2Neg);
-                    }
-                    // Two's-complement negation, four lanes (RFC-0083 M3):
-                    // `-Int32.min` is `Int32.min`, the same wrap `i32.sub` from
-                    // zero has at scalar width.
-                    (UnOp::Neg, None) if rt == Type::I32x4 => {
-                        b.ins(&Instruction::I32x4Neg);
-                    }
-                    // `~m` complements all 128 bits, which is the lane-wise
-                    // complement because a mask lane is all-ones or all-zeros —
-                    // and the lane-wise complement of an `I32x4` for the simpler
-                    // reason that `v128.not` has no lane width to get wrong.
-                    (UnOp::BitNot, None)
-                        if matches!(rt, Type::Mask32x4 | Type::Mask64x2 | Type::I32x4) =>
-                    {
-                        b.ins(&Instruction::V128Not);
-                    }
-                    (UnOp::Not, _) if rt == Type::Bool => {
-                        b.ins(&Instruction::I32Eqz);
-                    }
-                    _ => return unsupported("a unary operator on this type", *line),
-                }
-                t
+                self.un_ins(b, *op, &t, *line)?
             }
-            Expr::ArrayLit { elems, line } => self.array_lit(m, b, elems, *line)?,
+            Expr::ArrayLit { elems, line } => self.array_lit(m, b, hint, elems, *line)?,
             Expr::MapLit { entries, line } => self.map_lit(m, b, entries, *line)?,
             Expr::Match {
                 scrutinee,
                 arms,
                 line,
-            } => self.match_expr(m, b, e as *const Expr as usize, scrutinee, arms, *line)?,
+                ..
+            } => self.match_expr(
+                m,
+                b,
+                e as *const Expr as usize,
+                scrutinee,
+                &ArmRef::of(arms),
+                "`match`",
+                *line,
+            )?,
             Expr::Try {
                 expr: operand,
                 line,
@@ -5087,7 +6157,15 @@ impl<'p> Fn_<'_, 'p> {
                 self.try_construct(m, b, name, args, *line)?
             }
             Expr::Binary { op, lhs, rhs, line } => self.binary(m, b, *op, lhs, rhs, *line)?,
-            Expr::Call { name, args, line } => self.call(m, b, name, args, *line)?,
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                line,
+            } => {
+                self.call_dest = hint;
+                self.call(m, b, name, args, type_args, *line)?
+            }
             Expr::Spawn { name, args, line } => self.spawn(m, b, name, args, *line)?,
             // No catch-all. The arms above cover `Expr` exhaustively, and the
             // `other => unsupported(..)` that used to sit here was dead — it
@@ -5209,70 +6287,6 @@ impl<'p> Fn_<'_, 'p> {
         )))
     }
 
-    /// Whether `t` is an instantiation with every type argument fixed, under this
-    /// body's substitution. [`crate::ty_is_concrete_app`] is the rule.
-    fn concrete_app(&self, t: &Type) -> bool {
-        crate::ty_is_concrete_app(t, &|a| self.cx.resolve(a))
-    }
-
-    /// The type a `match`'s arms agree on, without emitting anything.
-    ///
-    /// The FIRST arm answers, as it does for an `if`: [`Fn_::expr_as`] re-checks
-    /// every other arm against the answer, so a wrong guess is a compile error
-    /// rather than a miscompile. The one thing a later arm can add is a type
-    /// ARGUMENT — see [`crate::ty_is_concrete_app`] — so a non-applied answer is
-    /// upgraded by the first arm that has one, and the answer stops depending on
-    /// arm ORDER. `genericpayload.vyrn` puts the concrete arm first and the
-    /// param-free one last precisely so a first-arm-wins rule looks correct.
-    ///
-    /// A later arm `peek` cannot see forfeits the upgrade and nothing else: its own
-    /// `expr_as` refuses it later if it truly cannot be lowered. So the scan never
-    /// narrows what this backend reaches.
-    fn match_ty(&mut self, sum: &Sum, arms: &[MatchArm], line: usize) -> Result<Type, String> {
-        // Any block arm (RFC-0118) makes this a statement match: the arms
-        // yield nothing, whatever the expression arms compute is discarded,
-        // and the join carries no value.
-        if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) {
-            return Ok(Type::Unit);
-        }
-        let first = arms.first().ok_or_else(|| gap("an empty `match`", line))?;
-        let ty = self.peek_arm(first, sum, line)?;
-        if self.concrete_app(&ty) {
-            return Ok(ty);
-        }
-        // A `panic` arm (RFC-0079) is `Never` and answers nothing, so a later arm
-        // answers instead — the same fall-through the type-argument upgrade uses,
-        // which is why "the first arm answers" survives a `?? panic(..)` in one.
-        let mut ty = ty;
-        for arm in &arms[1..] {
-            if let Ok(t) = self.peek_arm(arm, sum, line) {
-                if self.concrete_app(&t) {
-                    return Ok(t);
-                }
-                if matches!(ty, Type::Never) && !matches!(t, Type::Never) {
-                    ty = t;
-                }
-            }
-        }
-        Ok(ty)
-    }
-
-    /// One arm's type, with its bindings in scope. The place is a dummy: `peek`
-    /// reads types and never emits, so a scope frame it cannot mutate is enough.
-    fn peek_arm(&mut self, arm: &MatchArm, sum: &Sum, line: usize) -> Result<Type, String> {
-        let mark = self.scope.len();
-        for (n, t) in self.pattern_binds(sum, &arm.pattern, line)? {
-            self.scope.push((n, Place::Local(u32::MAX), t));
-        }
-        let got = match &arm.body {
-            ArmBody::Expr(e) => self.peek(e, line),
-            // A block arm (RFC-0118) yields nothing.
-            ArmBody::Block(_) => Ok(Type::Unit),
-        };
-        self.scope.truncate(mark);
-        got
-    }
-
     /// Two arms meeting at one value — M0's destination-first rule.
     ///
     /// A scalar join is a `block (result T)` and needs nothing special. An
@@ -5290,22 +6304,12 @@ impl<'p> Fn_<'_, 'p> {
         else_e: &Expr,
         line: usize,
     ) -> Result<Type, String> {
-        // A `panic` then-branch (RFC-0079) names no type, so the else answers.
-        let want = match self.peek(then_e, line)? {
-            Type::Never => self.peek(else_e, line)?,
-            t => t,
-        };
-        let want = self.join_ty(want);
+        let want = self.join_ty(key, line)?;
         let r = self.cx.repr(&want, line)?;
         // RFC-0114 Rule N at an `if`-expression join. The releases are
         // stack-neutral, so in the scalar case they sit under the branch value
         // exactly as `match_expr`'s do.
-        let ers = self
-            .cx
-            .plan
-            .edge_releases_at(key)
-            .cloned()
-            .unwrap_or_default();
+        let ers = self.cx.edge_rows(key);
         self.cond(m, b, cond, line)?;
         match &r {
             Repr::Agg(l) => {
@@ -5379,7 +6383,17 @@ impl<'p> Fn_<'_, 'p> {
         }
     }
 
-    /// The type a join carries, which is not always the one its first arm names.
+    /// The type a join carries — the checker's, at the node, once.
+    ///
+    /// RFC-0125 §3 M5: a merge holds ONE value and the checker states which
+    /// type it has. This backend used to reconcile one from the ARMS, and an
+    /// arm can only report the type it happens to have PRODUCED: the same
+    /// type in whichever shape that arm built it. The textual backend fed its
+    /// `phi` the other shape for exactly that reason.
+    ///
+    /// A join whose type the record does not carry is a gap, not a guess:
+    /// `compile` asks `vyrn_lower::core::decide` for the record before it
+    /// emits a byte, so every program this reaches has one.
     ///
     /// A REFINED type decays to its base here, and only here, because a join is
     /// not a value boundary. The checker unifies `Some(a) => a` (an `Age`) with
@@ -5387,30 +6401,53 @@ impl<'p> Fn_<'_, 'p> {
     /// arm; a lowering that made `Age` the arms' target instead would send that
     /// arm through M2d's seam and validate it against a refinement the language
     /// never required, which is `error: validation failed for `Age`` here and
-    /// `-1` on the other two engines.
+    /// `-1` on the other two engines. The checker's own answer is already the
+    /// base, so this only holds the base where a substitution reintroduces a
+    /// refined alias.
     ///
     /// Found by `validate.vyrn` becoming compilable in M2k, but the hole is
     /// M2b's: a plain `match` on an `Option<Age>` had it all along, and no
     /// example held one. The boundary the value really crosses — the `let`, the
     /// `return`, the field — still validates, because that coercion is a
     /// separate one outside the join.
-    fn join_ty(&self, t: Type) -> Type {
-        match &t {
+    fn join_ty(&self, key: usize, line: usize) -> Result<Type, String> {
+        let Some(t) = vyrn_lower::core::join_ty(key) else {
+            return unsupported("a join the checker did not type", line);
+        };
+        let t = self.cx.sub(&t);
+        Ok(match &t {
             Type::Named(n) if self.cx.types.get(n).is_some_and(|d| d.predicate.is_some()) => {
                 self.cx.resolve(&t)
             }
             _ => t,
-        }
+        })
     }
 
-    /// The type an expression WILL have, without emitting anything.
+    /// The type an expression has — the checker's, read by node.
     ///
-    /// Needed only at a join, where the destination has to exist before either
-    /// arm runs. Deliberately shallow: anything it cannot see is a gap rather
-    /// than a guess, and [`Fn_::expr_as`] re-checks the answer against what the
-    /// arm actually produced, so a wrong prediction is loud rather than silent.
+    /// Needed at a join, where the destination has to exist before either arm
+    /// runs, and at every emit site that has to know an operand's type before
+    /// it emits one. It used to DERIVE the answer from the operands, in
+    /// twenty arms covering every expression kind, which is the second copy
+    /// of the checker's rule that RFC-0125 §3 M5 exists to delete.
+    ///
+    /// [`Fn_::peek_inner`] is what is left, and it answers only for the AST
+    /// this backend builds itself.
     fn peek(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
-        let t = self.peek_inner(e, line)?;
+        // Through the plan's own clone→original alias, for the trees this
+        // backend copies to specialize a higher-order call or to name an
+        // impl's method: a clone's node has no record of its own, and the
+        // node it copies has the answer. RFC-0114 §26 built that map so a
+        // release row would survive the copy; a type survives it the same way,
+        // and reading one map rather than two is why the alias is registered
+        // where the clone is made and not here.
+        let at = e as *const Expr as usize;
+        let t = match vyrn_lower::core::node_ty(at)
+            .or_else(|| vyrn_lower::core::node_ty(self.cx.plan.key_of(at)))
+        {
+            Some(t) => self.cx.sub(&t),
+            None => self.peek_inner(e, line)?,
+        };
         if crate::observe::on() {
             crate::observe::record(
                 crate::observe::Site::Peek,
@@ -5423,56 +6460,32 @@ impl<'p> Fn_<'_, 'p> {
         Ok(t)
     }
 
+    /// The stand-down: a type for AST the CHECKER never saw.
+    ///
+    /// This was twenty arms and every expression kind, which is what made it
+    /// the whole of the class RFC-0125 §3 M5 deletes — a second statement of
+    /// the rule that decides a node's type, in an emitter, able to disagree
+    /// with the first. [`Fn_::peek`] reads the checker's answer now, and what
+    /// is left here answers only for the trees this backend BUILDS at an emit
+    /// site: the `@rel` receiver of an implicit release, the index of a
+    /// desugared element read, a dispatched call it writes to reach an impl.
+    /// The checker never typed those, so nothing it says can be disagreed
+    /// with, and RFC-0101 §2.3 already assigns the class to the backend.
+    ///
+    /// Measured over `vyrn-cli`'s whole suite: 360 answers, all of them one
+    /// of a local this backend named, a field read of one, an element read it
+    /// desugared, a call it wrote, and a literal beside them. A kind that is
+    /// not one of those is a gap rather than a guess, which is the property
+    /// the twenty arms had and the reason a catch-all is safe to write now.
     fn peek_inner(&mut self, e: &Expr, line: usize) -> Result<Type, String> {
         Ok(match e {
-            Expr::Consume { place, .. } => self.peek(place, line)?,
+            // A literal the emitter minted — a length, an index, a tag.
             Expr::Int(_) | Expr::Byte(_) => Type::Int,
             Expr::Float(_) => Type::Float,
             Expr::Bool(_) => Type::Bool,
             Expr::Str(_) => Type::Str,
-            // A `fn`-typed parameter or a bare function name used as a VALUE
-            // (RFC-0023 × RFC-0037): its type is the target's signature, which is
-            // also what a generic record field solves its parameters from —
-            // `Deferred { run: run }` fixes `P` and `T` from exactly this.
-            Expr::Var { name, .. } if self.fn_binds.contains_key(name) => {
-                let t = &self.fn_binds[name].target;
-                Type::Fn(
-                    t.sig.params[t.ncaps..].to_vec(),
-                    Box::new(t.sig.ret_ty.clone()),
-                )
-            }
-            // A nullary constructor (`None`, or an enum's `Empty`) parses as a bare
-            // name, so it is only distinguishable from a local by failing to be one
-            // — the same test, in the same order, that the emitting path makes.
-            // Without this a `match` whose FIRST arm is a param-free variant could
-            // not be typed at all, which is the arm order the checker demands an
-            // annotation for.
-            Expr::Var { name, .. }
-                if self.lookup(name, line).is_err()
-                    && (name == "None" || self.cx.variants.contains_key(name)) =>
-            {
-                match (name.as_str(), self.expected_sum()) {
-                    ("None", Some(t)) => t,
-                    ("None", None) => {
-                        return unsupported("a branch yielding `None` with no expected type", line)
-                    }
-                    _ => match self.applied_variant(name, &[], line)? {
-                        Some(t) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a branch yielding the ambiguous variant `{name}`"),
-                                line,
-                            )
-                        }
-                    },
-                }
-            }
-            Expr::Var { name, .. }
-                if self.lookup(name, line).is_err() && self.cx.sigs.contains_key(name) =>
-            {
-                let sig = &self.cx.sigs[name];
-                Type::Fn(sig.params.clone(), Box::new(sig.ret_ty.clone()))
-            }
+            // A local it just created and named. The scope is the only source
+            // there could be: the name is one this backend chose.
             Expr::Var { name, .. } => self.lookup(name, line)?.1,
             Expr::Field { expr, field, .. } => {
                 let base = self.peek(expr, line)?;
@@ -5483,164 +6496,7 @@ impl<'p> Fn_<'_, 'p> {
                     None => vyrn_frontend::types::forced(&self.field_of(&base, field, line)?.1),
                 }
             }
-            Expr::StructLit { name, fields, .. } => self.applied_record(name, fields, line)?,
-            // A map literal in a branch: the position decides its value type, the
-            // same rule the emitting path uses, and an empty one has nothing else
-            // to be typed by at all.
-            Expr::MapLit { entries, .. } => match self.expect.last().map(|t| self.cx.resolve(t)) {
-                Some(t @ Type::Map(..)) => t,
-                _ => match entries.first() {
-                    Some((ke, ve)) => Type::Map(
-                        Box::new(self.peek(ke, line)?),
-                        Box::new(self.peek(ve, line)?),
-                    ),
-                    None => Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
-                },
-            },
-            // A `panic` then-branch names no type, so the else answers — the rule
-            // [`Fn_::join`] emits under.
-            Expr::IfExpr {
-                then_branch,
-                else_branch,
-                ..
-            } => match (self.peek(then_branch, line)?, else_branch) {
-                (Type::Never, Some(e)) => self.peek(e, line)?,
-                (t, _) => t,
-            },
-            // A `match` is typed by its arms — see [`Fn_::match_ty`], which is the
-            // same rule the emitting path uses.
-            Expr::Match {
-                scrutinee, arms, ..
-            } => {
-                let st = self.peek(scrutinee, line)?;
-                let sum = self
-                    .sum_of(&st)
-                    .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
-                self.match_ty(&sum, arms, line)?
-            }
-            Expr::Unary { expr, .. } => self.peek(expr, line)?,
-            Expr::Binary { op, lhs, .. } => match op {
-                BinOp::Eq
-                | BinOp::NotEq
-                | BinOp::Lt
-                | BinOp::LtEq
-                | BinOp::Gt
-                | BinOp::GtEq
-                | BinOp::And
-                | BinOp::Or
-                | BinOp::Match => {
-                    // Comparing two vectors yields a mask, not a `Bool` (RFC-0083
-                    // M2) — the one place in this table where the operator alone
-                    // does not settle the answer.
-                    match self.peek(lhs, line)? {
-                        Type::F32x4 | Type::I32x4 => Type::Mask32x4,
-                        Type::F64x2 => Type::Mask64x2,
-                        _ => Type::Bool,
-                    }
-                }
-                _ => self.peek(lhs, line)?,
-            },
-            // A literal in a branch is the fixed shape; the join's conversion
-            // heapifies it if the other arm made it an `Array<T>`. An EMPTY one
-            // has no element to be typed by, so it can only be what the position
-            // expects — the same rule the emitting path uses.
-            Expr::ArrayLit { elems, .. } if !elems.is_empty() => {
-                Type::ArrayN(Box::new(self.peek(&elems[0], line)?), elems.len())
-            }
-            Expr::ArrayLit { .. } => match self.expect.last().map(|t| self.cx.resolve(t)) {
-                Some(t @ Type::Array(_)) => t,
-                _ => return unsupported("a branch yielding an empty array literal", line),
-            },
             Expr::Call { name, args, .. } => match name.as_str() {
-                // RFC-0076 M7's generator-only builtins in a BRANCH's value rather
-                // than a statement's — `std/vyx` and `std/ui` both have arms
-                // yielding a `Code`, and `std/rpc` has one yielding a `listDir`.
-                // Every row reads the same thing the emitting path does: the entry's
-                // own signature, `gen_list_dir_ty`, or the `Code` handle.
-                n if self.gen_peek(n, args).is_some() => {
-                    self.gen_peek(n, args).expect("guarded above")
-                }
-                "panic" | vyrn_frontend::ast::PANIC_AT | "serveStream" => Type::Never,
-                "@str" | "@concat" | "jsonSchema" | "toJson" => Type::Str,
-                "floatBits" => Type::IntN {
-                    bits: 64,
-                    signed: false,
-                },
-                "floatFromBits" => Type::Float,
-                "stringFromBytes" => Type::Result(Box::new(Type::Str), Box::new(Type::Str)),
-                // RFC-0014/RFC-0044's I/O as a BRANCH's value rather than a
-                // statement's — `std/storage`'s `Ok(done) => renameFile(tmp, path)`
-                // is the shape, and nothing in the corpus had put one in an arm
-                // before, which is why M2o read `storage.vyrn` as blocked on the
-                // syscall alone. Same function the emitting path reads.
-                n if io_builtin_ty(n, args.len()).is_some() => {
-                    io_builtin_ty(n, args.len()).expect("guarded above")
-                }
-                "bytes" => Type::Array(Box::new(Type::IntN {
-                    bits: 8,
-                    signed: false,
-                })),
-                // `Some`/`Ok`/`Err`/`None` in a branch, typed by the position the
-                // same way `sum_ctor` types them when it emits: an arm yielding
-                // `Ok(v)` cannot name the error half, so the expectation has to.
-                // Without this the arm falls through to `sigs`, which has no entry
-                // for a constructor, and reads as "a branch yielding `Ok`".
-                "Some" | "Ok" | "Err" if args.len() == 1 => {
-                    match self.sum_ctor_types(name, &args[0], line)? {
-                        Some((t, _)) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a branch yielding `{name}` with no expected type"),
-                                line,
-                            )
-                        }
-                    }
-                }
-                "None" | "Some" | "Ok" | "Err" => match self.expected_sum() {
-                    Some(t) => t,
-                    None => {
-                        return unsupported(
-                            &format!("a branch yielding `{name}` with no expected type"),
-                            line,
-                        )
-                    }
-                },
-                // The two builtins whose result type is a declared one: `Schema` is
-                // the record `schema_struct_lit` names, and `Value`'s name comes off
-                // the variant table rather than being spelled here twice.
-                "schemaOf" => Type::Named("Schema".into()),
-                "value" if args.len() == 1 => {
-                    let v = self.value_variant(&args[0], line)?;
-                    match self.cx.variants.get(v).and_then(|c| c.first()) {
-                        Some((e, _, _)) => Type::Named(e.clone()),
-                        None => return unsupported("the built-in `Value` enum", line),
-                    }
-                }
-                // An arm that only prints — or only logs: the join carries nothing,
-                // which the `match` lowering already handles, it just has to be
-                // told. Suppressed or not, a log call is `Unit` (RFC-0008), so the
-                // threshold cannot change a type.
-                "print" | "trace" | "debug" | "info" | "warn" | "error" => Type::Unit,
-                "logger" => Type::Logger,
-                // RFC-0083: the vector builtins, whose result type is fixed.
-                "F32x4" | "@f32x4Splat" | "@f32x4Load" | "@f32x4Min" | "@f32x4Max"
-                | "@f32x4Sqrt" | "@f32x4Ceil" | "@f32x4Floor" | "@f32x4Trunc" | "@f32x4Nearest" => {
-                    Type::F32x4
-                }
-                "I32x4" | "@i32x4Splat" | "@i32x4Load" => Type::I32x4,
-                "F64x2" | "@f64x2Splat" | "@f64x2Load" | "@f64x2Min" | "@f64x2Max"
-                | "@f64x2Sqrt" => Type::F64x2,
-                // `replaceLane` is the one that reads its receiver: it is a value
-                // method, so the width is the receiver's rather than the name's.
-                "@replaceLane" => self.peek(&args[0], line)?,
-                "@f32x4Store" | "@i32x4Store" | "@f64x2Store" => Type::Unit,
-                "@lane" => match self.peek(&args[0], line)? {
-                    Type::Mask32x4 | Type::Mask64x2 => Type::Bool,
-                    Type::I32x4 => INT32,
-                    Type::F64x2 => Type::Float,
-                    _ => Type::Float32,
-                },
-                "@anyTrue" | "@allTrue" => Type::Bool,
                 // `@at` is `vyrn_frontend::project::AT` and `@slot` is
                 // `vyrn_frontend::project::ELEM`, both spelled out because a
                 // match pattern cannot name them through the path.
@@ -5654,7 +6510,7 @@ impl<'p> Fn_<'_, 'p> {
                         },
                         // `m[k]` is an honest lookup, so it is an `Option` where
                         // an array index is the element (RFC-0028).
-                        Type::Map(_, v) if name != "@swapRemove" => Type::Option(v),
+                        Type::Map(_, v) if name != "@swapRemove" => Type::option(*v),
                         // A user container answers with its `place at` — the
                         // same row `a[i]` resolves through (RFC-0091 M3). The
                         // DECLARED type keys it, because an impl head names the
@@ -5667,245 +6523,10 @@ impl<'p> Fn_<'_, 'p> {
                         },
                     }
                 }
-                // RFC-0075. `Stream<T>` is `Array<T>`'s three words here as
-                // everywhere, so producing one is a retype and nothing more.
-                "fromArray" if args.len() == 1 => {
-                    match self.cx.resolve(&self.peek(&args[0], line)?) {
-                        Type::Array(i) => Type::Stream(i),
-                        other => return unsupported(&format!("`fromArray` of `{other}`"), line),
-                    }
-                }
-                // The element type is the step's, not the cursor's — the cursor
-                // is always two `Int64`s (RFC-0075 M2b).
-                "fromStep" if args.len() == 3 => {
-                    match self.cx.resolve(&self.peek(&args[2], line)?) {
-                        Type::Fn(_, r) => match self.cx.resolve(&r) {
-                            Type::Option(i) => Type::Stream(i),
-                            other => {
-                                return unsupported(&format!("a step returning `{other}`"), line)
-                            }
-                        },
-                        other => return unsupported(&format!("`fromStep` of `{other}`"), line),
-                    }
-                }
-                // RFC-0090 M3. A boxed stream is an address, so `boxStream`
-                // answers an `Int64` and its two readers answer the annotation.
-                "boxStream" if args.len() == 1 => Type::Int,
-                "unboxStream" if args.len() == 1 => match self
-                    .expect
-                    .last()
-                    .map(|t| self.cx.resolve(t))
-                {
-                    Some(t @ Type::Stream(_)) => t,
-                    _ => return unsupported("an `unboxStream` with no expected Stream type", line),
-                },
-                "pullAt" if args.len() == 1 => match self.expect.last().map(|t| self.cx.resolve(t))
-                {
-                    Some(t @ Type::Option(_)) => t,
-                    _ => return unsupported("a `pullAt` with no expected Option type", line),
-                },
-                "close" => Type::Unit,
-                "@has" | "@remove" => Type::Bool,
-                "@keys" => Type::Array(Box::new(Type::Str)),
-                // `t.join()` (RFC-0025) reads the task's box, so its type is the
-                // task's payload — the same answer `call`'s `@join` arm hands
-                // back, including its defensive identity on a receiver the
-                // checker could not have admitted.
-                "@join" if args.len() == 1 => {
-                    let t = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&t) {
-                        Type::Task(inner) => *inner,
-                        _ => t,
-                    }
-                }
-                // RFC-0115: `reserve`/`append` hand back the receiver's own
-                // type — capacity is not part of it.
-                "@reserve" | "@append" | "@copyFrom" | "@tally" | "@tallyBytes"
-                    if !args.is_empty() =>
-                {
-                    self.peek(&args[0], line)?
-                }
-                "@push" | "@list" if !args.is_empty() => match self.peek(&args[0], line)? {
-                    t => match self.cx.resolve(&t) {
-                        // A `SmallArray` push yields a `SmallArray`, inline state
-                        // or spilled — it never becomes a growable Array.
-                        Type::SmallArray(..) => self.cx.resolve(&t),
-                        Type::ArrayN(i, _) => Type::Array(i),
-                        _ => t,
-                    },
-                },
-                "@pop" if args.len() == 1 => {
-                    let a = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&a) {
-                        Type::Array(i) | Type::SmallArray(i, _) => Type::Option(i),
-                        other => return unsupported(&format!("a branch popping `{other}`"), line),
-                    }
-                }
-                "@toArray" if args.len() == 1 => {
-                    let a = self.peek(&args[0], line)?;
-                    match self.cx.resolve(&a) {
-                        Type::SmallArray(i, _) | Type::Array(i) => Type::Array(i),
-                        other => return unsupported(&format!("a branch copying `{other}`"), line),
-                    }
-                }
-                // `x.copy()` (RFC-0089 M1b) has its receiver's type — or, where
-                // the type declared its own (RFC-0091 M1), whatever that says.
-                "@copy" if args.len() == 1 => {
-                    let t = self.peek(&args[0], line)?;
-                    match ftypes::copy_impl(&self.cx.impls, &t)
-                        .and_then(|f| self.cx.sigs.get(&f).map(|s| s.ret_ty.clone()))
-                    {
-                        Some(r) => r,
-                        None => t,
-                    }
-                }
-                "parse" if args.len() == 1 => Type::Option(Box::new(Type::Int)),
-                // M2l's rule: a builtin `call` types as it emits owes this a row,
-                // and these two are `call`'s newest. Both are 1-based positions, so
-                // `Int` — the checker's own answer, and the only one it could be.
-                "lineAt" | "colAt" if args.len() == 2 => Type::Int,
-                // The two builtins `call` lowers by REWRITING: peek the rewrite
-                // rather than naming its type here, so there is no second answer
-                // to keep in step with the one the emitting path will produce.
-                // `fromJson`'s rewrite bottoms out in a generated decoder whose
-                // signature `cx.sigs` already holds, so this needs no new case.
-                "fromJson" if args.len() == 2 => {
-                    let Expr::Var { name: tn, .. } = &args[0] else {
-                        return unsupported("`fromJson` without a type name", line);
-                    };
-                    let target = vyrn_frontend::ast::Type::Named(tn.clone());
-                    let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
-                    self.peek(&e, line)?
-                }
-                _ if self
-                    .cx
-                    .types
-                    .get(name)
-                    .is_some_and(|d| d.predicate.is_some()) =>
-                {
-                    Type::Named(name.clone())
-                }
-                // A numeric conversion (`Int32(n)`, `Float32(x)`) in a branch.
-                // `ftypes::numeric_conv_target` is the frontend's own table, and
-                // reading it here is why `call` reads it too: the target IS the
-                // answer, and a second list of the widths could disagree.
-                _ if args.len() == 1 && ftypes::numeric_conv_target(name).is_some() => {
-                    ftypes::numeric_conv_target(name).expect("guarded above")
-                }
-                // A protocol method (RFC-0084 M2). The receiver's own type picks
-                // the impl, so this peeks the REWRITE — the mangled call `call`
-                // will emit — rather than answering for it here. Reached by a
-                // fluent chain, where every receiver after the first is one of
-                // these, and by any `match` arm that ends in a method call.
-                _ if self.cx.protocol_methods.contains_key(name) && !args.is_empty() => {
-                    let proto = self.cx.protocol_methods[name].clone();
-                    let rty = self.cx.sub(&self.peek(&args[0], line)?);
-                    let key = ftypes::type_key(&rty)
-                        .ok_or_else(|| gap(&format!("`{name}` dispatched on `{rty}`"), line))?;
-                    let e = Expr::Call {
-                        name: ftypes::impl_method_name(&proto, &key, name),
-                        args: args.clone(),
-                        line,
-                    };
-                    self.peek(&e, line)?
-                }
-                // An `extern fn` (RFC-0012) in a branch. Its declared return type,
-                // which is the same thing `call` hands back — the declaration is
-                // the only source there is.
-                _ if self.cx.externs.contains_key(name) => self.cx.externs[name].ret.clone(),
-                // A branch yielding a call through a `fn`-typed parameter
-                // (RFC-0023). Exact rather than predicted: the target's signature
-                // is already resolved, so this asks it rather than answering for
-                // it — the property M2l's `peek` work was about.
-                _ if self.fn_binds.contains_key(name) => {
-                    self.fn_binds[name].target.sig.ret_ty.clone()
-                }
-                // A branch yielding a call through a STORED function value
-                // (RFC-0037). `runChain`'s `match m(x) { .. }` peeks its scrutinee,
-                // so this is reached by the shape the feature exists for.
-                _ if matches!(
-                    self.lookup(name, line)
-                        .ok()
-                        .map(|(_, t)| crate::normalize_fn_sig(&self.cx.sub(&t), &self.cx.types)),
-                    Some(Type::Fn(..))
-                ) =>
-                {
-                    let (_, t) = self.lookup(name, line)?;
-                    match crate::normalize_fn_sig(&self.cx.sub(&t), &self.cx.types) {
-                        Type::Fn(_, ret) => *ret,
-                        _ => unreachable!("guarded above"),
-                    }
-                }
-                // A branch yielding a call to a function with `fn`-typed parameters
-                // (RFC-0023): the same three solving passes the emitting path runs,
-                // minus the lifting and the index.
-                _ if self.cx.higher_order.contains_key(name) => {
-                    let f = self.cx.higher_order[name];
-                    self.peek_ho(f, args, line)?
-                }
-                // A generic call in a branch: the same solve the emitting path
-                // does, so the join's destination is sized for the type the arm
-                // will actually produce.
-                _ if self.cx.generics.contains_key(name) => {
-                    let f = self.cx.generics[name];
-                    let declared: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
-                    let actual = self.arg_types(&declared, args, line)?;
-                    let (subst, _) = crate::solve_type_args(&f.type_params, &declared, &actual);
-                    ftypes::substitute(&f.ret, &subst)
-                }
-                // A user enum's variant constructor in a branch (`One(a)`). The
-                // fully APPLIED type, from the same shared rule `sum_ctor` uses
-                // when it emits — the bare enum name left a generic variant's
-                // payload a `Type::Param`, and a `match` on the result then bound
-                // it. An ambiguous name — two enums with one variant spelling — is
-                // a gap rather than a guess, exactly as `sum_ctor` treats it.
-                _ if self.cx.variants.contains_key(name) => {
-                    match self.applied_variant(name, args, line)? {
-                        Some(t) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a branch yielding the ambiguous variant `{name}`"),
-                                line,
-                            )
-                        }
-                    }
-                }
-                // RFC-0123 M3: a projection call as a receiver or in a branch
-                // answers its member's RAW declared result when that result
-                // keys concretely — the chain rule the checker's `chain_ty`
-                // promised every engine keeps. A generic result has no key
-                // without a substitution, and the checker refused it upstream.
-                _ if !args.is_empty()
-                    && !self.cx.sigs.contains_key(name)
-                    && self
-                        .cx
-                        .impls
-                        .iter()
-                        .any(|i| i.places.iter().any(|p| p.name == *name)) =>
-                {
-                    let inner = self.peek(&args[0], line)?;
-                    match vyrn_frontend::project::lookup_in(&self.cx.impls, &inner, name)
-                        .or_else(|| {
-                            vyrn_frontend::project::lookup_in(
-                                &self.cx.impls,
-                                &self.cx.resolve(&inner),
-                                name,
-                            )
-                        })
-                        .and_then(|f| ftypes::type_key(&f.ret).map(|_| f.ret.clone()))
-                    {
-                        Some(t) => t,
-                        None => {
-                            return unsupported(
-                                &format!("a chain through the projection `{name}` on `{inner}`"),
-                                line,
-                            )
-                        }
-                    }
-                }
-                // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function
-                // is typed by that function's signature, exactly as `call` lowers
-                // it by routing to the same name.
+                // A call this backend WROTE: an implicitly dispatched method
+                // (RFC-0084), or a builtin whose implementation is a Vyrn
+                // function (RFC-0078 M4c). Both are answered by the callee's
+                // own signature, which is what `call` routes to when it emits.
                 _ => match vyrn_frontend::loader::routed_builtin(name)
                     .and_then(|rt| self.cx.sigs.get(rt))
                     .or_else(|| self.cx.sigs.get(name))
@@ -5914,41 +6535,12 @@ impl<'p> Fn_<'_, 'p> {
                     None => return unsupported(&format!("a branch yielding `{name}`"), line),
                 },
             },
-            // A lambda is whatever signature the position names; there is nothing
-            // else it could be typed by (RFC-0037).
-            Expr::Lambda { line, .. } => match self.expected_fn_sig() {
-                Some(t) => t,
-                None => return unsupported("a lambda with no expected function type", *line),
-            },
-            // `e?` in a branch (RFC-0005). The success half of the sum, which is
-            // what `try_` hands back. A `Fallible` receiver (RFC-0080 M3) is
-            // still a gap here: its success type is an ASSOCIATED type, and
-            // reading it needs the impl the emitting path resolves.
-            Expr::Try { expr, line } => {
-                let st = self.peek(expr, *line)?;
-                match self.sum_of(&st) {
-                    Some(Sum::Opt(t)) | Some(Sum::Res(t, _)) => t,
-                    _ => return unsupported(&format!("a branch yielding `?` on `{st}`"), *line),
-                }
+            other => {
+                return unsupported(
+                    &format!("a synthesized {}", crate::observe::kind_of(other)),
+                    line,
+                )
             }
-            // `Age?(n)` in a branch (RFC-0003) — an `Option` of the named type,
-            // the one type `try_construct` can produce.
-            Expr::TryConstruct { name, .. } => Type::Option(Box::new(Type::Named(name.clone()))),
-            // `spawn f(a)` in a branch (RFC-0025) is `f(a)`'s type in a `Task`.
-            // Peeked through the call rather than off `sigs`, so a generic or
-            // higher-order callee is solved by the rows that already solve it.
-            Expr::Spawn { name, args, line } => Type::Task(Box::new(self.peek(
-                &Expr::Call {
-                    name: name.clone(),
-                    args: args.clone(),
-                    line: *line,
-                },
-                *line,
-            )?)),
-            // No catch-all, for the reason [`Fn_::expr`] has none: the arms above
-            // now cover `Expr`, so the `other => unsupported(..)` that used to
-            // sit here is dead. It was the audit's own measure — every variant
-            // it still caught was a legal program refused only in a branch.
         })
     }
 
@@ -6037,7 +6629,9 @@ impl<'p> Fn_<'_, 'p> {
     /// consumed, on the edge where they are still this frame's. A declared
     /// `impl Owned` release is skipped — its body is user code whose timing
     /// all three engines must agree on, and the RFC refuses to put it on an
-    /// edge. Inside a `region` the memory is the arena's, as everywhere else.
+    /// edge. A `region` is not asked: the arena refuses its own blocks at
+    /// `free`, and an `Array` or a `Map` bound inside one was never the
+    /// arena's — this edge used to hand both to nobody.
     fn emit_edge_releases(
         &mut self,
         m: &mut Module,
@@ -6046,16 +6640,32 @@ impl<'p> Fn_<'_, 'p> {
         edge: u32,
         line: usize,
     ) -> Result<(), String> {
-        if self.region_depth != 0 {
-            return Ok(());
-        }
         for (name, t) in ers {
             if *t != edge {
                 continue;
             }
-            let Ok((place, ty)) = self.lookup(name, line) else {
+            // `d.line` (RFC-0125 M3): the sub-place the other edge took,
+            // released here from its address inside the binding.
+            let mut parts = name.split('.');
+            let root = parts.next().unwrap_or_default();
+            let Ok((place, mut ty)) = self.lookup(root, line) else {
                 continue;
             };
+            let mut off = 0u32;
+            let mut sub = false;
+            for f in parts {
+                let (o, fty) = self.field_of(&ty, f, line)?;
+                off += o;
+                ty = fty;
+                sub = true;
+            }
+            if sub {
+                if self.rel_for(&ty, line)?.is_some() {
+                    let a = self.addr_local(b, place, off);
+                    self.rel_at(m, b, a, &ty, line)?;
+                }
+                continue;
+            }
             match self.rel_for(&ty, line)? {
                 Some(Rel::Call(..)) | None => {}
                 Some(rel) => self.emit_rel(m, b, place, &rel, line)?,
@@ -6169,8 +6779,9 @@ impl<'p> Fn_<'_, 'p> {
             }
             if op == BinOp::Add {
                 let kr = self.tee_str_temp(b, rhs);
+                self.arena_route(b, true);
                 b.ins(&Instruction::Call(self.cx.rt.concat));
-                self.str_owned(b);
+                self.arena_route(b, false);
                 self.free_str_temp(b, kl);
                 self.free_str_temp(b, kr);
                 return Ok(Type::Str);
@@ -6197,8 +6808,151 @@ impl<'p> Fn_<'_, 'p> {
                 return Ok(l);
             }
         }
+        // The width the operator RUNS at, which may be the right operand's
+        // (`op_width`), and the left operand already on the stack moving to it
+        // through the M2d seam like any other flow.
+        let opty = match Num::of(&lt) {
+            // A LITERAL is not the sibling the rule means, and `peek` is the
+            // checker's answer for every other right operand.
+            Some(n) if n == Num::PLAIN && !matches!(rhs, Expr::Int(_) | Expr::Byte(_)) => {
+                let rt = self.peek(rhs, line).ok();
+                self.op_width(&lt, rt.as_ref())
+            }
+            _ => lt.clone(),
+        };
+        if opty != lt {
+            self.coerce(m, b, None, &lt, &opty, line)?;
+        }
+        // The RESOLVED operand type — arithmetic runs on the base
+        // representation, so `age + 1` must not validate `1` against `Age`'s
+        // predicate. It is the *assignment* that re-validates the sum, which is
+        // why the LLVM emitter returns its `numty` rather than `lty`.
+        self.expr_as(m, b, rhs, &opty)?;
+        self.bin_ins(b, op, &opty, &l, line)
+    }
+
+    /// The instruction a unary operator IS, once its operand stands on the
+    /// stack — RFC-0125 §2.3's "maps `prim` rows to wasm instructions".
+    ///
+    /// Stated once, for the two walks that reach it: [`Fn_::expr`], which
+    /// reads an `Expr::Unary`, and [`Fn_::core_prim`], which reads the
+    /// operator off [`vyrn_lower::core::Op`]. Nothing here interleaves the
+    /// operand with anything, so unlike the binary table this one has no
+    /// family left behind at its caller.
+    fn un_ins(&mut self, b: &mut Frame, op: UnOp, t: &Type, line: usize) -> Result<Type, String> {
+        let rt = self.cx.resolve(t);
+        match (op, Num::of(&rt)) {
+            // `x * -1`, which is also what makes the width's minimum
+            // negate to itself — the wrapping the interpreter does, for
+            // free. `~x` is `x ^ -1`, and both then renormalize because a
+            // narrow carrier holds more bits than the width.
+            (UnOp::Neg | UnOp::BitNot, Some(n)) => {
+                if n.wide() {
+                    b.ins(&Instruction::I64Const(-1));
+                    b.ins(if op == UnOp::Neg {
+                        &Instruction::I64Mul
+                    } else {
+                        &Instruction::I64Xor
+                    });
+                } else {
+                    b.ins(&Instruction::I32Const(-1));
+                    b.ins(if op == UnOp::Neg {
+                        &Instruction::I32Mul
+                    } else {
+                        &Instruction::I32Xor
+                    });
+                }
+                renorm(b, n);
+            }
+            (UnOp::Neg, None) if matches!(rt, Type::Float | Type::Float32) => {
+                b.ins(if rt == Type::Float32 {
+                    &Instruction::F32Neg
+                } else {
+                    &Instruction::F64Neg
+                });
+            }
+            // `-v` (RFC-0083 M2) is the sign-bit flip, not a subtraction
+            // from zero — `f32x4.neg` keeps the sign of a zero where
+            // `splat(0.0) - v` does not.
+            (UnOp::Neg, None) if rt == Type::F32x4 => {
+                b.ins(&Instruction::F32x4Neg);
+            }
+            (UnOp::Neg, None) if rt == Type::F64x2 => {
+                b.ins(&Instruction::F64x2Neg);
+            }
+            // Two's-complement negation, four lanes (RFC-0083 M3):
+            // `-Int32.min` is `Int32.min`, the same wrap `i32.sub` from
+            // zero has at scalar width.
+            (UnOp::Neg, None) if rt == Type::I32x4 => {
+                b.ins(&Instruction::I32x4Neg);
+            }
+            // `~m` complements all 128 bits, which is the lane-wise
+            // complement because a mask lane is all-ones or all-zeros —
+            // and the lane-wise complement of an `I32x4` for the simpler
+            // reason that `v128.not` has no lane width to get wrong.
+            (UnOp::BitNot, None) if matches!(rt, Type::Mask32x4 | Type::Mask64x2 | Type::I32x4) => {
+                b.ins(&Instruction::V128Not);
+            }
+            (UnOp::Not, _) if rt == Type::Bool => {
+                b.ins(&Instruction::I32Eqz);
+            }
+            _ => return unsupported("a unary operator on this type", line),
+        }
+        Ok(t.clone())
+    }
+
+    /// The width an integer operator runs at: EITHER operand's.
+    ///
+    /// A plain-`Int` operand adopts a sized sibling's width, which is the
+    /// textual backend's `numty` rule. Taking it from the left alone would
+    /// compute `0 - eight` (an `Int32`) in 64 bits — the same answer for
+    /// `+`/`-`/`*` and a different one for `/`, `>>` and every comparison.
+    ///
+    /// `rt` is the right operand's type where the right operand is a VALUE,
+    /// and `None` where it is a literal: a byte literal adapts to the position
+    /// it is in, the checker types `'A' - 'a'` `Int64`, and computing it at
+    /// eight bits makes it 224 where the other two engines say -32. The same
+    /// is true of `b >= 'a'`, a signed 64-bit comparison in all three engines
+    /// that would become an unsigned byte one here.
+    ///
+    /// Stated once for the two walks that ask it (RFC-0125 §3 M3, the driver
+    /// slice): the AST walk peeks the right operand's node, and the core walk
+    /// reads the type off the name the row carries.
+    fn op_width(&self, lt: &Type, rt: Option<&Type>) -> Type {
+        let Some(rt) = rt else { return lt.clone() };
+        let rt = self.cx.resolve(rt);
+        match Num::of(&rt) {
+            Some(rn) if rn != Num::PLAIN => rt,
+            _ => lt.clone(),
+        }
+    }
+
+    /// The instruction an operator IS, once both its operands stand on the
+    /// stack at `opty` — RFC-0125 §2.3's "maps `prim` rows to wasm
+    /// instructions".
+    ///
+    /// Stated once, for the two walks that reach it: [`Fn_::binary_inner`],
+    /// which reads an `Expr::Binary`, and [`Fn_::core_prim`], which reads the
+    /// operator off [`vyrn_lower::core::Op`] and never looks at the source.
+    /// The families NOT here are the ones that interleave the operands with
+    /// something else, so an operand-first seam cannot hold them: `&&` and
+    /// `||` branch, `=~` compiles its right operand to a DFA rather than
+    /// evaluating it, and a `String` or a `Code` operator releases what each
+    /// operand allocated between the two evaluations.
+    ///
+    /// `spell` is the left operand's type AS WRITTEN, which is what a gap's
+    /// wording names; `opty` is the resolved type the operator runs at.
+    fn bin_ins(
+        &mut self,
+        b: &mut Frame,
+        op: BinOp,
+        opty: &Type,
+        spell: &Type,
+        line: usize,
+    ) -> Result<Type, String> {
+        let lt = opty.clone();
+        let l = spell;
         if lt == Type::Bool {
-            self.expr_as(m, b, rhs, &Type::Bool)?;
             b.ins(&cmp_i32(op).ok_or_else(|| gap(&format!("`{op:?}` on booleans"), line))?);
             return Ok(Type::Bool);
         }
@@ -6218,7 +6972,6 @@ impl<'p> Fn_<'_, 'p> {
         // backend's `fcmp olt`/`fcmp une` makes, which is what RFC-0081 had to
         // correct at scalar width and is written down here for that reason.
         if lt == Type::F32x4 {
-            self.expr_as(m, b, rhs, &lt)?;
             let mask = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
             b.ins(&match op {
                 BinOp::Add => Instruction::F32x4Add,
@@ -6240,7 +6993,6 @@ impl<'p> Fn_<'_, 'p> {
         // The comparisons are wasm's ORDERED ones with `ne` unordered, the same
         // pairing the narrow width states above.
         if lt == Type::F64x2 {
-            self.expr_as(m, b, rhs, &lt)?;
             let mask = !matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div);
             b.ins(&match op {
                 BinOp::Add => Instruction::F64x2Add,
@@ -6264,7 +7016,6 @@ impl<'p> Fn_<'_, 'p> {
         // already leans on. `v128.andnot` exists and has no Vyrn spelling: `a & ~b`
         // is one instruction more and nothing measured wanted it.
         if matches!(lt, Type::Mask32x4 | Type::Mask64x2) {
-            self.expr_as(m, b, rhs, &lt)?;
             b.ins(&match op {
                 BinOp::BitAnd => Instruction::V128And,
                 BinOp::BitOr => Instruction::V128Or,
@@ -6285,7 +7036,6 @@ impl<'p> Fn_<'_, 'p> {
         // wasm has saturating adds only at i8 and i16, so there is nothing here to
         // pick wrongly.
         if lt == Type::I32x4 {
-            self.expr_as(m, b, rhs, &lt)?;
             let mask = matches!(
                 op,
                 BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq | BinOp::Eq | BinOp::NotEq
@@ -6308,7 +7058,6 @@ impl<'p> Fn_<'_, 'p> {
             return Ok(if mask { Type::Mask32x4 } else { lt });
         }
         if matches!(lt, Type::Float | Type::Float32) {
-            self.expr_as(m, b, rhs, &lt)?;
             let wide = lt == Type::Float;
             let ins = match (op, wide) {
                 (BinOp::Add, true) => Instruction::F64Add,
@@ -6341,32 +7090,9 @@ impl<'p> Fn_<'_, 'p> {
                 _ => Type::Bool,
             });
         }
-        let Some(mut n) = Num::of(&lt) else {
+        let Some(n) = Num::of(opty) else {
             return unsupported(&format!("`{op:?}` on `{l}`"), line);
         };
-        // The op width comes from EITHER operand: a plain-`Int` literal sibling
-        // adopts a sized one's width, which is the textual backend's `numty`
-        // rule. Taking it from the left alone would compute `0 - eight` (an
-        // `Int32`) in 64 bits — the same answer for `+`/`-`/`*` and a different
-        // one for `/`, `>>` and every comparison. `peek` is allowed to fail here:
-        // "not obviously sized" is the answer the left operand already gave.
-        let mut opty = lt.clone();
-        if n == Num::PLAIN {
-            if let Ok(rt) = self.peek(rhs, line) {
-                let rt = self.cx.resolve(&rt);
-                if let Some(rn) = Num::of(&rt).filter(|rn| *rn != Num::PLAIN) {
-                    // The left operand is already on the stack. It moves to the
-                    // narrower width through the M2d seam, like any other flow.
-                    self.coerce(m, b, None, &lt, &rt, line)?;
-                    (opty, n) = (rt, rn);
-                }
-            }
-        }
-        // The RESOLVED operand type — arithmetic runs on the base representation,
-        // so `age + 1` must not validate `1` against `Age`'s predicate. It is the
-        // *assignment* that re-validates the sum, which is why the LLVM emitter
-        // returns its `numty` rather than `lty`.
-        self.expr_as(m, b, rhs, &opty)?;
         // Division and the shifts are the operators with control flow in them.
         // Both operands come off the stack into scratch first, because the checks
         // have to look at them and then hand them back; and every case is checked
@@ -6375,11 +7101,10 @@ impl<'p> Fn_<'_, 'p> {
         if matches!(op, BinOp::Div | BinOp::Rem | BinOp::Shl | BinOp::Shr) {
             let c = if n.wide() { ValType::I64 } else { ValType::I32 };
             let (d, num) = (self.scratch(b, c, 0), self.scratch(b, c, 1));
-            let trap = self.cx.rt.trap;
-            let msg = match op {
-                BinOp::Div => self.cx.rt.msg_div0,
-                BinOp::Rem => self.cx.rt.msg_rem0,
-                _ => self.cx.rt.msg_shift,
+            let rule = match op {
+                BinOp::Div => vyrn_frontend::trap::Rule::DivZero,
+                BinOp::Rem => vyrn_frontend::trap::Rule::RemZero,
+                _ => vyrn_frontend::trap::Rule::ShiftRange,
             };
             b.ins(&Instruction::LocalSet(d));
             b.ins(&Instruction::LocalSet(num));
@@ -6402,8 +7127,9 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Eqz);
             }
             b.ins(&Instruction::If(BlockType::Empty));
-            b.ins(&Instruction::I32Const(msg as i32));
-            b.ins(&Instruction::Call(trap));
+            self.depth += 1;
+            self.trap_row(b, rule, None);
+            self.depth -= 1;
             b.ins(&Instruction::End);
             if op == BinOp::Div && n.signed {
                 // The width's minimum over -1 has no representable answer.
@@ -6411,7 +7137,6 @@ impl<'p> Fn_<'_, 'p> {
                 // LLVM's rewritten `srem` and the interpreter both produce. An
                 // unsigned divide is exempt because it has no minimum.)
                 let min = i64::MIN >> (64 - n.bits);
-                let ovf = self.cx.rt.msg_divovf;
                 b.ins(&Instruction::LocalGet(d));
                 if n.wide() {
                     b.ins(&Instruction::I64Const(-1)).ins(&Instruction::I64Eq);
@@ -6425,8 +7150,9 @@ impl<'p> Fn_<'_, 'p> {
                 }
                 b.ins(&Instruction::I32And);
                 b.ins(&Instruction::If(BlockType::Empty));
-                b.ins(&Instruction::I32Const(ovf as i32));
-                b.ins(&Instruction::Call(trap));
+                self.depth += 1;
+                self.trap_row(b, vyrn_frontend::trap::Rule::DivOverflow, None);
+                self.depth -= 1;
                 b.ins(&Instruction::End);
             }
             b.ins(&Instruction::LocalGet(num));
@@ -6450,7 +7176,7 @@ impl<'p> Fn_<'_, 'p> {
             | BinOp::Shl
             | BinOp::Shr => {
                 renorm(b, n);
-                opty
+                lt
             }
             _ => Type::Bool,
         })
@@ -6496,34 +7222,6 @@ impl<'p> Fn_<'_, 'p> {
         self.cx.sigs.contains_key(&e).then_some(e)
     }
 
-    /// What one of RFC-0076 M7's generator-only builtins yields, or `None` if
-    /// `name` is not one of them (or there is no generator host at all).
-    ///
-    /// [`Fn_::gen_builtin`]'s type column, read by `peek` when one of these is a
-    /// BRANCH's value — M2l's rule that a builtin `call` lowers owes `peek` a row,
-    /// because an arm's value is typed by `peek` and the join's destination is sized
-    /// from it. The three structured builtins answer with their ENTRY's signature
-    /// rather than a type spelled twice.
-    fn gen_peek(&self, name: &str, args: &[Expr]) -> Option<Type> {
-        self.cx.gen?;
-        if let Some(e) = self.gen_entry(name, args) {
-            return Some(self.cx.sigs[&e].ret_ty.clone());
-        }
-        let code = || Type::Named("Code".to_string());
-        Some(match (name, args.len()) {
-            ("@codeSplice", 2) => code(),
-            ("@codeText", 1) => code(),
-            ("raw", 1) | ("rawAt", 4) if !self.user_claims(name) => code(),
-            ("render", 1) if !self.user_claims(name) => Type::Str,
-            (crate::GEN_REFLECT, 2) => Type::Unit,
-            (crate::GEN_NEXT_INT, 0) => Type::Int,
-            (crate::GEN_NEXT_STR, 0) => Type::Str,
-            ("listDir", 1) => gen_list_dir_ty(),
-            ("listDirKinds", 1) => gen_list_dir_ty(),
-            _ => return None,
-        })
-    }
-
     /// The builtins that exist only while a generator runs (RFC-0076 M7), or `None`
     /// if `name` is not one of them.
     ///
@@ -6537,8 +7235,8 @@ impl<'p> Fn_<'_, 'p> {
     ///
     /// `readFile` and `readFileBytes` are NOT here. They have a row in the table
     /// below on every path; what differs is the runtime function behind it, and
-    /// [`gen_slurp`] is that difference — one mediated import in place of
-    /// `path_open`.
+    /// `std/runtime`'s `readFileGen` and `readFileBytesGen` are that difference
+    /// — one mediated import (`std/mem`'s `genRead`) in place of `path_open`.
     fn gen_builtin(
         &mut self,
         m: &mut Module,
@@ -6554,7 +7252,7 @@ impl<'p> Fn_<'_, 'p> {
         let code = Type::Named("Code".to_string());
         if let Some(e) = self.gen_entry(name, args) {
             let fwd: &[Expr] = if name == "contractOf" { &[] } else { args };
-            return self.call(m, b, &e, fwd, line).map(Some);
+            return self.call(m, b, &e, fwd, &[], line).map(Some);
         }
         match (name, args.len()) {
             // `raw(s)` IS `@codeText(s)` in the interpreter — one verbatim piece,
@@ -6664,38 +7362,6 @@ impl<'p> Fn_<'_, 'p> {
                 self.fetch_str(b, g);
                 Ok(Some(Type::Str))
             }
-            // `listDir` (RFC-0021) has no runtime lowering in the language and must
-            // keep having none, so it lives behind this flag rather than in the
-            // table below. The listing comes from the loader's resolver — sorted and
-            // recorded host-side, in the interpreter's own encoding.
-            ("listDir", 1) => {
-                let Some(f) = self.cx.rt.list_dir else {
-                    return unsupported("`listDir` without a generator host", line);
-                };
-                let ty = gen_list_dir_ty();
-                let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(f));
-                b.slot(off);
-                Ok(Some(ty))
-            }
-            // `listDirKinds` (RFC-0119): the same lowering against its own
-            // runtime fn, whose host mode appends `/` to directory names.
-            ("listDirKinds", 1) => {
-                let Some(f) = self.cx.rt.list_dir_kinds else {
-                    return unsupported("`listDirKinds` without a generator host", line);
-                };
-                let ty = gen_list_dir_ty();
-                let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(f));
-                b.slot(off);
-                Ok(Some(ty))
-            }
             _ => Ok(None),
         }
     }
@@ -6772,14 +7438,50 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         name: &str,
         args: &[Expr],
+        // The type arguments the caller WROTE (RFC-0125 §3 M6). Empty for
+        // every call this emitter reaches by rewriting one, and for every call
+        // whose type arguments the arguments themselves answer — which is all
+        // of them but the three reflection builtins, whose target is the whole
+        // of what they compile to.
+        type_args: &[Type],
         line: usize,
     ) -> Result<Type, String> {
+        // RFC-0114 §25: the instrument's hooks are calls only in an audited
+        // build. The arguments are locals and constants at every one of the
+        // four sites, so dropping the statement drops nothing else with it.
+        if !self.cx.audit && name.starts_with(AUDIT_PREFIX) {
+            return Ok(Type::Unit);
+        }
         let mark = self.arg_frees.len();
-        let r = self.call_inner(m, b, name, args, line);
+        let r = self.call_inner(m, b, name, args, type_args, line);
+        // RFC-0125 M3, third slice: a lending call's result points into an
+        // argument (`a[i]`, a projection). A temporary its arguments teed —
+        // the receiver `weekdayLetters()[1]` reads its element out of — must
+        // outlive the call when the result owns heap, so the call or operator
+        // that consumes the result drains it instead.
+        if let Ok(t) = &r {
+            if self.lends(name) && self.rel_for(t, line)?.is_some() {
+                return r;
+            }
+        }
         for (l, ty) in self.arg_frees.split_off(mark) {
             self.free_arg_temp(m, b, l, &ty, line)?;
         }
         r
+    }
+
+    /// Whether a call by this name lends: `a[i]` and the seeded element row
+    /// it dispatches to, a lending prelude row, the `value` box, a projection.
+    fn lends(&self, name: &str) -> bool {
+        name == vyrn_frontend::project::AT
+            || name == vyrn_frontend::project::ELEM
+            || vyrn_frontend::prelude::lends(name)
+            || name == "value"
+            || self
+                .cx
+                .impls
+                .iter()
+                .any(|i| i.places.iter().any(|p| p.name == name))
     }
 
     fn call_inner(
@@ -6788,8 +7490,18 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         name: &str,
         args: &[Expr],
+        type_args: &[Type],
         line: usize,
     ) -> Result<Type, String> {
+        // RFC-0125 M1: the consumer's storage for THIS call's result, taken
+        // before any argument is lowered.
+        let hint = self.call_dest.take();
+        // PLAN-0125-runtime §2.1: a `std/mem` primitive is one instruction,
+        // never a call. Before every other resolution, because the loader's
+        // prefix is the whole of the identity and no table below has a row.
+        if let Some(prim) = name.strip_prefix(vyrn_frontend::loader::MEM_PREFIX) {
+            return self.mem_prim(m, b, prim, args, line);
+        }
         // RFC-0078 M4c: a builtin whose implementation IS a Vyrn function needs no
         // lowering here at all — it is a call to the reserved spelling the loader
         // injected. This backend had no lowering for any of the ten (the six
@@ -6798,7 +7510,7 @@ impl<'p> Fn_<'_, 'p> {
         // to be hand-emitted become a library this backend already compiles.
         if let Some(rt) = vyrn_frontend::loader::routed_builtin(name) {
             if self.cx.sigs.contains_key(rt) {
-                return self.call(m, b, rt, args, line);
+                return self.call(m, b, rt, args, &[], line);
             }
             // Otherwise fall through to `unsupported("the call \`{name}\`")` below,
             // which is this backend's own wording for something it cannot reach.
@@ -6815,13 +7527,13 @@ impl<'p> Fn_<'_, 'p> {
                 .and_then(|t| self.show_dispatch(&t))
             {
                 if name == "@str" {
-                    return self.call(m, b, &f, args, line);
+                    return self.call(m, b, &f, args, &[], line);
                 }
                 // The textual backend's twin (round thirty-five): a printed
                 // render is freed at the print, because the synthesized call
                 // node has no plan row.
                 if name == "print" {
-                    self.call(m, b, &f, args, line)?;
+                    self.call(m, b, &f, args, &[], line)?;
                     let sv = b.local(ValType::I32);
                     b.ins(&Instruction::LocalTee(sv));
                     b.ins(&Instruction::Call(self.cx.rt.print_str));
@@ -6831,32 +7543,54 @@ impl<'p> Fn_<'_, 'p> {
                     return Ok(Type::Unit);
                 }
                 let rendered = [Expr::Call {
+                    type_args: Vec::new(),
                     name: f,
                     args: args.to_vec(),
                     line,
                 }];
-                return self.call(m, b, name, &rendered, line);
+                return self.call(m, b, name, &rendered, &[], line);
             }
         }
         // RFC-0076 M7: the builtins that exist only while a generator runs — the
-        // `Code` handle operations, M3b's atom stream, and `listDir`, none of which
-        // has a row in the table below because none of them has a runtime meaning
+        // `Code` handle operations and M3b's atom stream, none of which has a
+        // row in the table below because none of them has a runtime meaning
         // outside generation.
         if self.cx.gen.is_some() {
             if let Some(t) = self.gen_builtin(m, b, name, args, line)? {
                 return Ok(t);
             }
         }
-        // `listDir` OUTSIDE a generation reaches here on an ordinary build, and
-        // the front end cannot stop it on the way: the call is legal under `vyrn
-        // run`, where the interpreter lists the real filesystem
-        // (`list_dir_is_not_generation_only`). Only the two compiling backends
-        // lack a lowering, so each says so itself — in one sentence, from
-        // `crate::LIST_DIR_NO_LOWERING`, rather than in this file's own words
-        // about its own gaps (RFC-0096 M3's addendum: `no lowering for the call`
-        // is an emitter's note to itself, not a user's diagnostic).
-        if name == "listDir" {
-            return Err(crate::LIST_DIR_NO_LOWERING.to_string());
+        // `listDir` (RFC-0021) and `listDirKinds` (RFC-0119): one path in, a
+        // `Result<Array<String>, String>` out through a destination slot, the
+        // shape `readFile` has. Where the listing comes from is the twin the
+        // emitter calls: the generator host's resolver under a generation,
+        // told the host's list mode, and WASI's `fd_readdir` on an ordinary
+        // build (RFC-0125 §3 M5), told whether names carry kinds, so `vyrn
+        // run` lists the real filesystem.
+        if matches!(name, "listDir" | "listDirKinds") && args.len() == 1 {
+            let ty = gen_list_dir_ty();
+            let l = self.layout_of(&ty, line)?;
+            let off = b.alloc(l.size, l.align);
+            b.slot(off);
+            self.expr_as(m, b, &args[0], &Type::Str)?;
+            let rt = self.cx.rt;
+            let kinds = name == "listDirKinds";
+            let f = if self.cx.gen.is_some() {
+                b.ins(&Instruction::I32Const(if kinds {
+                    crate::GEN_MODE_LIST_KINDS
+                } else {
+                    crate::GEN_MODE_LIST
+                }));
+                rt.list_dir_gen
+            } else {
+                b.ins(&Instruction::I32Const(kinds as i32));
+                rt.list_dir
+            };
+            b.ins(&Instruction::I32Const(rt.listerr.0 as i32));
+            b.ins(&Instruction::I32Const(rt.listerr.1 as i32));
+            b.ins(&Instruction::Call(f));
+            b.slot(off);
+            return Ok(ty);
         }
         match name {
             // RFC-0079: `panic(msg)` — `error: `, the caller's message, a
@@ -6871,6 +7605,174 @@ impl<'p> Fn_<'_, 'p> {
             // fused into the constant `trap` already receives — `"\n"` becomes
             // `" (std/slots.vyrn:189)\n"` — so the code is the same three calls
             // with one different immediate, and only the data segment grows.
+            // `blackBox(v)` (RFC-0055): the value, round-tripped through a slot
+            // of linear memory that nothing else names.
+            //
+            // It WAS the identity, and the comment said why — this backend never
+            // optimizes (RFC-0125 §2.3), so there was nothing to hide the value
+            // from. That stopped being true when the native route became this
+            // module through wasm2c and clang at `-O2` (RFC-0125 §2.5): the
+            // optimizer is downstream of the emitter now. With the identity in
+            // place `examples/benching.vyrn`'s "hash to 1000" read 1 ns against
+            // the textual route's 1.35 µs, because clang folded a data-dependent
+            // loop the barrier existed to keep.
+            //
+            // A store and a load rather than a global, and a `reserve` rather
+            // than `data`: a global becomes an instance field wasm2c's C forwards
+            // through in one step, and `data` SHARES identical contents, so two
+            // barriers would be one address. Each site takes its own sixteen
+            // bytes, which is enough for a `v128` and is reserved only by a
+            // program that has a `blackBox` — every other module's bytes are
+            // unchanged.
+            "blackBox" if args.len() == 1 => {
+                let r = self.expr(m, b, &args[0])?;
+                let Some(t) = self.cx.repr(&r, line)?.val() else {
+                    return Ok(r);
+                };
+                let addr = m.reserve(16, 16) as i32;
+                let tmp = self.scratch(b, t, 9);
+                let at = |align: u32| MemArg {
+                    offset: 0,
+                    align,
+                    memory_index: 0,
+                };
+                b.ins(&Instruction::LocalSet(tmp))
+                    .ins(&Instruction::I32Const(addr))
+                    .ins(&Instruction::LocalGet(tmp));
+                match t {
+                    ValType::I32 => b.ins(&Instruction::I32Store(at(2))),
+                    ValType::I64 => b.ins(&Instruction::I64Store(at(3))),
+                    ValType::F32 => b.ins(&Instruction::F32Store(at(2))),
+                    ValType::F64 => b.ins(&Instruction::F64Store(at(3))),
+                    _ => b.ins(&Instruction::V128Store(at(4))),
+                };
+                b.ins(&Instruction::I32Const(addr));
+                match t {
+                    ValType::I32 => b.ins(&Instruction::I32Load(at(2))),
+                    ValType::I64 => b.ins(&Instruction::I64Load(at(3))),
+                    ValType::F32 => b.ins(&Instruction::F32Load(at(2))),
+                    ValType::F64 => b.ins(&Instruction::F64Load(at(3))),
+                    _ => b.ins(&Instruction::V128Load(at(4))),
+                };
+                return Ok(r);
+            }
+            // `assert(c)` (RFC-0015): the interpreter's trap, in its words. Lowered
+            // here rather than rewritten into `panic` by the CLI before the compile
+            // (RFC-0125 §3 M5), so the rule is stated once.
+            "assert" if args.len() == 1 => {
+                self.expr_as(m, b, &args[0], &Type::Bool)?;
+                let msg = self.cx.rt.intern(
+                    m,
+                    &vyrn_frontend::trap::line(&format!("assertion failed at line {line}")),
+                );
+                b.ins(&Instruction::I32Eqz)
+                    .ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(msg as i32))
+                    .ins(&Instruction::Call(self.cx.rt.trap))
+                    .ins(&Instruction::End);
+                return Ok(Type::Unit);
+            }
+            // `assertEq(a, b)` (RFC-0015): each operand evaluated once into a
+            // local, the two compared by their type — the checker allows one
+            // equatable scalar type for both — and on a mismatch rendered the way
+            // `toString` renders them, around ` != `, after the interpreter's
+            // `scalar_to_string`. The line is written in pieces the way `panic`
+            // writes its message, and `trap` writes the last piece and exits. An
+            // operand that allocated is released by [`Fn_::call`] after this
+            // returns, as every call argument is (`rfcs/census-call-arguments.md`).
+            "assertEq" if args.len() == 2 => {
+                let t = self.expr(m, b, &args[0])?;
+                let t = self.cx.resolve(&t);
+                let Some(vt) = self.cx.repr(&t, line)?.val() else {
+                    return unsupported("`assertEq` on a non-scalar", line);
+                };
+                let la = b.local(vt);
+                b.ins(&Instruction::LocalSet(la));
+                self.expr_as(m, b, &args[1], &t)?;
+                let lb = b.local(vt);
+                b.ins(&Instruction::LocalSet(lb));
+                b.ins(&Instruction::LocalGet(la))
+                    .ins(&Instruction::LocalGet(lb));
+                match &t {
+                    Type::Str => {
+                        b.ins(&Instruction::Call(self.cx.rt.strcmp))
+                            .ins(&Instruction::I32Const(0))
+                            .ins(&Instruction::I32Ne);
+                    }
+                    Type::Float => {
+                        b.ins(&Instruction::F64Ne);
+                    }
+                    Type::Float32 => {
+                        b.ins(&Instruction::F32Ne);
+                    }
+                    Type::Bool => {
+                        b.ins(&Instruction::I32Ne);
+                    }
+                    it => match Num::of(it) {
+                        Some(n) if n.wide() => {
+                            b.ins(&Instruction::I64Ne);
+                        }
+                        Some(_) => {
+                            b.ins(&Instruction::I32Ne);
+                        }
+                        None => return unsupported(&format!("`assertEq` on `{t}`"), line),
+                    },
+                }
+                let (write_all, trap, strlen) =
+                    (self.cx.rt.write_all, self.cx.rt.trap, self.cx.rt.strlen);
+                let head = format!("error: assertion failed at line {line}: ");
+                let (head_at, sep_at, nl_at) = (
+                    self.cx.rt.intern(m, &head),
+                    self.cx.rt.intern(m, " != "),
+                    self.cx.rt.intern(m, "\n"),
+                );
+                let rendered = self.scratch(b, ValType::I32, 7);
+                b.ins(&Instruction::If(BlockType::Empty))
+                    .ins(&Instruction::I32Const(2))
+                    .ins(&Instruction::I32Const(head_at as i32))
+                    .ins(&Instruction::I32Const(head.len() as i32))
+                    .ins(&Instruction::Call(write_all))
+                    .ins(&Instruction::Drop);
+                for (side, local) in [(0, la), (1, lb)] {
+                    if side == 1 {
+                        b.ins(&Instruction::I32Const(2))
+                            .ins(&Instruction::I32Const(sep_at as i32))
+                            .ins(&Instruction::I32Const(4))
+                            .ins(&Instruction::Call(write_all))
+                            .ins(&Instruction::Drop);
+                    }
+                    // The same three renderings `@str` uses, on a value that is
+                    // about to be the last thing the program prints, so nothing
+                    // rendered here is released.
+                    b.ins(&Instruction::LocalGet(local));
+                    match &t {
+                        Type::Str => {}
+                        Type::Float | Type::Float32 => self.f64_str(b, &t, line)?,
+                        Type::Bool => {
+                            b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                                .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                                .ins(&Instruction::Call(self.cx.rt.bool_str));
+                        }
+                        it => {
+                            let n = Num::of(it).expect("compared as a number above");
+                            widen(b, n);
+                            b.ins(&Instruction::I32Const(n.signed as i32));
+                            b.ins(&Instruction::Call(self.cx.rt.int_str));
+                        }
+                    }
+                    b.ins(&Instruction::LocalSet(rendered))
+                        .ins(&Instruction::I32Const(2))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::LocalGet(rendered))
+                        .ins(&Instruction::Call(strlen))
+                        .ins(&Instruction::Call(write_all))
+                        .ins(&Instruction::Drop);
+                }
+                b.ins(&Instruction::I32Const(nl_at as i32))
+                    .ins(&Instruction::Call(trap))
+                    .ins(&Instruction::End);
+                return Ok(Type::Unit);
+            }
             "panic" | vyrn_frontend::ast::PANIC_AT => {
                 if args.is_empty() || args.len() > 2 {
                     return unsupported("`panic` with other than one argument", line);
@@ -6952,7 +7854,9 @@ impl<'p> Fn_<'_, 'p> {
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
                     }
                     Type::Bool => {
-                        b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                        b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                            .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                            .ins(&Instruction::Call(self.cx.rt.bool_str));
                         b.ins(&Instruction::Call(self.cx.rt.print_str));
                     }
                     _ => return unsupported(&format!("`print` of `{t}`"), line),
@@ -6976,16 +7880,17 @@ impl<'p> Fn_<'_, 'p> {
             // emits no `write_all` at all, which is why a disabled log site costs
             // nothing on any engine. Making it a runtime comparison would turn a
             // deleted call into a branch — RFC-0078's census names that mistake.
-            // (The five spellings are RESERVED by the checker, so no user function
-            // can reach this arm — the same reason the textual backend needs no
-            // guard either.)
-            // Literal for the same reason as the interpreter's arm:
+            // (The five spellings are the parser's own, so no user function can
+            // reach this arm: `log.info(m)` carries `@info` and a module that
+            // declares `info` gets the surface word back before this.)
+            // Literal rather than [`vyrn_frontend::ast::log_internal`]:
             // `primitives.rs` greps THIS FILE for each census name to decide
-            // whether the direct backend covers it.
-            "trace" | "debug" | "info" | "warn" | "error" if args.len() == 2 => {
+            // whether the direct backend covers it, and a predicate is
+            // invisible to a text scan.
+            "@trace" | "@debug" | "@info" | "@warn" | "@error" if args.len() == 2 => {
                 self.expr_as(m, b, &args[0], &Type::Logger)?;
                 self.expr_as(m, b, &args[1], &Type::Str)?;
-                if log_level_ordinal(name).unwrap_or(0) < self.cx.log_level {
+                if log_internal(name).unwrap_or(0) < self.cx.log_level {
                     // Below the threshold: the two values are the only thing this
                     // site leaves behind, and `Unit` means nobody consumes them.
                     b.ins(&Instruction::Drop);
@@ -7013,7 +7918,7 @@ impl<'p> Fn_<'_, 'p> {
                     // `t` and `s` then released one buffer twice. The two
                     // engines now say the same thing about who owns a rendered
                     // String, which is what lets one rule
-                    // ([`vyrn_frontend::own::str_temporary`]) answer for both.
+                    // ([`vyrn_frontend::declared::str_temporary`]) answer for both.
                     Type::Str => {
                         let k = self.tee_str_temp(b, &args[0]);
                         self.str_dup(b);
@@ -7026,8 +7931,9 @@ impl<'p> Fn_<'_, 'p> {
                         let n = Num::of(it).unwrap();
                         widen(b, n);
                         b.ins(&Instruction::I32Const(n.signed as i32));
+                        self.arena_route(b, true);
                         b.ins(&Instruction::Call(self.cx.rt.int_str));
-                        self.str_owned(b);
+                        self.arena_route(b, false);
                     }
                     ref f if matches!(f, Type::Float | Type::Float32) => {
                         self.f64_str(b, f, line)?;
@@ -7045,7 +7951,9 @@ impl<'p> Fn_<'_, 'p> {
                     // splits the same way — `@.str.true` is strdup'd by `str(..)`
                     // and printed straight by `print`.
                     Type::Bool => {
-                        b.ins(&Instruction::Call(self.cx.rt.bool_str));
+                        b.ins(&Instruction::I32Const(self.cx.rt.str_true as i32))
+                            .ins(&Instruction::I32Const(self.cx.rt.str_false as i32))
+                            .ins(&Instruction::Call(self.cx.rt.bool_str));
                         self.str_dup(b);
                     }
                     _ => return unsupported(&format!("`toString` of `{t}`"), line),
@@ -7060,8 +7968,9 @@ impl<'p> Fn_<'_, 'p> {
                 let ka = self.tee_str_temp(b, &args[0]);
                 self.expr_as(m, b, &args[1], &Type::Str)?;
                 let kb = self.tee_str_temp(b, &args[1]);
+                self.arena_route(b, true);
                 b.ins(&Instruction::Call(self.cx.rt.concat));
-                self.str_owned(b);
+                self.arena_route(b, false);
                 // The interpolation spine (RFC-0096 M3): `"a\{x}b\{y}"` folds
                 // left into nested `@concat`s, so every hole's `@str` and every
                 // inner join is released by the `@concat` above it.
@@ -7075,8 +7984,8 @@ impl<'p> Fn_<'_, 'p> {
             // so neither backend has a runtime lowering to get wrong and the bytes
             // cannot disagree. `jsonSchema` is one string; `schemaOf` is a `Schema`
             // record literal that then lowers like any other.
-            "jsonSchema" | "schemaOf" if args.len() == 1 => {
-                let e = self.reflected(name, &args[0], line)?;
+            "jsonSchema" | "schemaOf" if type_args.len() == 1 => {
+                let e = self.reflected(name, &type_args[0], line)?;
                 return self.expr(m, b, &e);
             }
             // `toJson(x)` is the same shape one size up (RFC-0078 M2b): the
@@ -7104,11 +8013,8 @@ impl<'p> Fn_<'_, 'p> {
             // `std/jsonread` and the walk is generated per target, so this backend
             // gets `fromJson` without a DOM, a number parser or a message
             // assembler — the two rows RFC-0077 had left unlowered.
-            "fromJson" if args.len() == 2 => {
-                let Expr::Var { name: tn, .. } = &args[0] else {
-                    return unsupported("`fromJson` without a type name", line);
-                };
-                let target = vyrn_frontend::ast::Type::Named(tn.clone());
+            "fromJson" if type_args.len() == 1 && args.len() == 1 => {
+                let target = type_args[0].clone();
                 if !self
                     .cx
                     .sigs
@@ -7116,12 +8022,12 @@ impl<'p> Fn_<'_, 'p> {
                 {
                     return unsupported("`fromJson` without the JSON runtime linked", line);
                 }
-                let e = vyrn_frontend::jsondec::decode_expr(&target, args[1].clone(), line);
+                let e = vyrn_frontend::jsondec::decode_expr(&target, args[0].clone(), line);
                 // RFC-0114 §26: the rewrite embeds a clone of the payload
                 // argument — `toJson`'s twin, treated identically.
                 let mark = self.cx.plan.alias_scope();
                 let mut pairs = Vec::new();
-                vyrn_frontend::ast::alias_embedded(&e, &args[1], &mut pairs);
+                vyrn_frontend::ast::alias_embedded(&e, &args[0], &mut pairs);
                 self.cx.plan.alias_clones_scoped(&pairs);
                 let r = self.expr(m, b, &e);
                 self.cx.plan.alias_unwind(mark);
@@ -7133,7 +8039,7 @@ impl<'p> Fn_<'_, 'p> {
             // `IntVal(3)` would get.
             "value" if args.len() == 1 => {
                 let name = self.value_variant(&args[0], line)?;
-                return match self.sum_ctor(m, b, name, args, line)? {
+                return match self.sum_ctor(m, b, name, args, line, hint)? {
                     Some(t) => Ok(t),
                     None => unsupported("the built-in `Value` enum", line),
                 };
@@ -7163,13 +8069,19 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::F64ReinterpretI64);
                 return Ok(Type::Float);
             }
-            // `stringFromBytes(b)` (RFC-0014): the bytes copied into a fresh
-            // NUL-terminated buffer and UTF-8-validated, as a
-            // `Result<String, String>`. The result is an aggregate, so the slot is
-            // allocated here and the runtime writes through it — the same hidden
-            // destination an aggregate-returning Vyrn call gets.
+            // `stringFromBytes(b)` (RFC-0014): the bytes checked by `std/text`'s
+            // `stringFault` and then copied into a fresh NUL-terminated buffer, as
+            // a `Result<String, String>`. The result is an aggregate, so the slot
+            // is allocated here and the runtime writes through it — the same
+            // hidden destination an aggregate-returning Vyrn call gets.
+            //
+            // RFC-0125 §3 M6 (the third judgment's fifth slice): the check is the
+            // call this arm makes first, and its answer travels into
+            // `strFromBytes` where the DFA table used to go. This backend was
+            // never a carrier of the two `String` rows — it called the runtime —
+            // and now the runtime is not one either.
             "stringFromBytes" if args.len() == 1 => {
-                let ty = Type::Result(Box::new(Type::Str), Box::new(Type::Str));
+                let ty = Type::result(Type::Str, Type::Str);
                 let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
                     return unsupported("`stringFromBytes` returning a non-aggregate", line);
                 };
@@ -7185,14 +8097,8 @@ impl<'p> Fn_<'_, 'p> {
                 let src = self.scratch(b, ValType::I32, 0);
                 let al = self.layout_of(&bytes, line)?;
                 b.ins(&Instruction::LocalSet(src));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I32Load(word_at(al.fields[0])));
-                b.ins(&Instruction::LocalGet(src));
-                b.ins(&Instruction::I64Load(at(al.fields[1])));
-                b.ins(&Instruction::I32WrapI64);
                 let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                b.ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+                self.str_from_bytes(b, off, src, &al, line)?;
                 b.slot(off);
                 return Ok(ty);
             }
@@ -7231,11 +8137,6 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalSet(to));
                     // start < 0 || end < start || end > len — one unsigned
                     // compare would miss the ordering, so all three are written.
-                    let (pre, post, trap) = (
-                        self.cx.rt.msg_soob,
-                        self.cx.rt.msg_oob_end,
-                        self.cx.rt.trap_idx,
-                    );
                     b.ins(&Instruction::LocalGet(from));
                     b.ins(&Instruction::I32Const(0));
                     b.ins(&Instruction::I32LtS);
@@ -7249,9 +8150,9 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Or);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
-                    b.ins(&Instruction::I32Const(pre as i32));
                     // The offset the other two engines name: the low one when it
                     // is negative or out of order, otherwise the high one.
+                    let at = b.local(ValType::I64);
                     b.ins(&Instruction::LocalGet(from));
                     b.ins(&Instruction::I64ExtendI32S);
                     b.ins(&Instruction::LocalGet(to));
@@ -7264,9 +8165,8 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32LtS);
                     b.ins(&Instruction::I32Or);
                     b.ins(&Instruction::Select);
-                    b.ins(&Instruction::I32Const(post as i32));
-                    b.ins(&Instruction::Call(trap));
-                    b.ins(&Instruction::Unreachable);
+                    b.ins(&Instruction::LocalSet(at));
+                    self.trap_row(b, vyrn_frontend::trap::Rule::StringIndex, Some(at));
                     self.depth -= 1;
                     b.ins(&Instruction::End);
                     b.ins(&Instruction::LocalGet(to));
@@ -7328,6 +8228,7 @@ impl<'p> Fn_<'_, 'p> {
                 let l = self.layout_of(&ty, line)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
+                b.ins(&Instruction::I32Const(self.cx.rt.utf8d as i32));
                 b.ins(&Instruction::Call(self.cx.rt.read_line));
                 b.slot(off);
                 return Ok(ty);
@@ -7337,16 +8238,56 @@ impl<'p> Fn_<'_, 'p> {
             // differs only in the runtime function — which is exactly why it was
             // missed: it reads as a writer, so the arm it belonged in was the one
             // keyed on TWO arguments.
+            //
+            // The destination leads, as it does for every aggregate a
+            // `std/runtime` function answers; the path follows, then what the
+            // function needs after it. Under a generation (`Cx::gen`) the two
+            // readers are their host twins, which take the host's read mode
+            // after the path and read through the loader's resolver rather
+            // than `path_open` (RFC-0076 M7).
             "readFile" | "readFileBytes" | "fsyncFile" if args.len() == 1 => {
                 let ty = io_builtin_ty(name, 1).expect("all three are I/O builtins");
                 let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                let rt = self.cx.rt;
+                let gen = self.cx.gen.is_some();
+                let halves = |b: &mut Frame, (pre, post): (u32, u32)| {
+                    b.ins(&Instruction::I32Const(pre as i32))
+                        .ins(&Instruction::I32Const(post as i32));
+                };
                 let f = match name {
-                    "readFile" => self.cx.rt.read_file,
-                    "readFileBytes" => self.cx.rt.read_file_bytes,
-                    _ => self.cx.rt.fsync_file,
+                    "readFile" => {
+                        if gen {
+                            b.ins(&Instruction::I32Const(crate::GEN_MODE_READ));
+                        }
+                        b.ins(&Instruction::I32Const(rt.utf8d as i32));
+                        halves(b, rt.readerr);
+                        halves(b, rt.nulerr);
+                        halves(b, rt.utf8err);
+                        if gen {
+                            rt.read_file_gen
+                        } else {
+                            rt.read_file
+                        }
+                    }
+                    "readFileBytes" => {
+                        if gen {
+                            b.ins(&Instruction::I32Const(crate::GEN_MODE_READ_BYTES));
+                        }
+                        halves(b, rt.readerr);
+                        if gen {
+                            halves(b, rt.nulerr);
+                            rt.read_file_bytes_gen
+                        } else {
+                            rt.read_file_bytes
+                        }
+                    }
+                    _ => {
+                        halves(b, rt.writeerr);
+                        rt.fsync_file
+                    }
                 };
                 b.ins(&Instruction::Call(f));
                 b.slot(off);
@@ -7360,6 +8301,8 @@ impl<'p> Fn_<'_, 'p> {
             "writeFileBytes" if args.len() == 2 => {
                 let ty = io_builtin_ty(name, 2).expect("writeFileBytes is an I/O builtin");
                 let l = self.layout_of(&ty, line)?;
+                let off = b.alloc(l.size, l.align);
+                b.slot(off);
                 self.expr_as(m, b, &args[0], &Type::Str)?;
                 let bytes = Type::Array(Box::new(Type::IntN {
                     bits: 8,
@@ -7374,8 +8317,9 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(src));
                 b.ins(&Instruction::I64Load(at(al.fields[1])));
                 b.ins(&Instruction::I32WrapI64);
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
+                let (pre, post) = self.cx.rt.writeerr;
+                b.ins(&Instruction::I32Const(pre as i32));
+                b.ins(&Instruction::I32Const(post as i32));
                 b.ins(&Instruction::Call(self.cx.rt.write_file_bytes));
                 b.slot(off);
                 return Ok(ty);
@@ -7410,14 +8354,21 @@ impl<'p> Fn_<'_, 'p> {
             "writeFile" | "renameFile" if args.len() == 2 => {
                 let ty = io_builtin_ty(name, 2).expect("both writers are I/O builtins");
                 let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
-                self.expr_as(m, b, &args[1], &Type::Str)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
+                self.expr_as(m, b, &args[0], &Type::Str)?;
+                self.expr_as(m, b, &args[1], &Type::Str)?;
+                let rt = self.cx.rt;
+                b.ins(&Instruction::I32Const(rt.writeerr.0 as i32));
+                b.ins(&Instruction::I32Const(rt.writeerr.1 as i32));
+                if name == "renameFile" {
+                    b.ins(&Instruction::I32Const(rt.xdeverr.0 as i32));
+                    b.ins(&Instruction::I32Const(rt.xdeverr.1 as i32));
+                }
                 b.ins(&Instruction::Call(if name == "writeFile" {
-                    self.cx.rt.write_file
+                    rt.write_file
                 } else {
-                    self.cx.rt.rename_file
+                    rt.rename_file
                 }));
                 b.slot(off);
                 return Ok(ty);
@@ -7428,13 +8379,15 @@ impl<'p> Fn_<'_, 'p> {
             //
             // `parse` writes its `Option<Int64>` through a slot allocated here,
             // which is the same hidden destination `readLine` gets — the M2b
-            // aggregate rule rather than a case of its own.
+            // aggregate rule rather than a case of its own. `parseI64` is a
+            // `std/runtime` function returning the `Option`, so the destination
+            // leads, as it does for every aggregate result (`wasm_sig`).
             "parse" if args.len() == 1 => {
-                let ty = Type::Option(Box::new(Type::Int));
+                let ty = Type::option(Type::Int);
                 let l = self.layout_of(&ty, line)?;
-                self.expr_as(m, b, &args[0], &Type::Str)?;
                 let off = b.alloc(l.size, l.align);
                 b.slot(off);
+                self.expr_as(m, b, &args[0], &Type::Str)?;
                 b.ins(&Instruction::Call(self.cx.rt.parse_i64));
                 b.slot(off);
                 return Ok(ty);
@@ -7807,14 +8760,15 @@ impl<'p> Fn_<'_, 'p> {
                     .ok()
                     .and_then(|t| ftypes::copy_impl(&self.cx.impls, &t))
                 {
-                    return self.call(m, b, &f, args, line);
+                    return self.call(m, b, &f, args, &[], line);
                 }
                 let ty = self.expr(m, b, &args[0])?;
-                self.copy_stack(b, &ty, line)?;
+                self.copy_stack(m, b, &ty, line)?;
                 return Ok(ty);
             }
             "@push" if args.len() == 2 => return self.push(m, b, args, line),
             "@reserve" if args.len() == 2 => return self.reserve_arr(m, b, args, line),
+            "@clear" if args.len() == 1 => return self.clear_arr(m, b, args, line),
             "@append" if args.len() == 2 => return self.append_arr(m, b, args, line),
             "@copyFrom" if args.len() == 2 => return self.copy_from_arr(m, b, args, line),
             "@tally" if args.len() == 3 => return self.map_tally(m, b, args, line),
@@ -7909,7 +8863,7 @@ impl<'p> Fn_<'_, 'p> {
                 return self.fnval_call(m, b, &recv, &norm, args, line);
             }
         }
-        if let Some(t) = self.sum_ctor(m, b, name, args, line)? {
+        if let Some(t) = self.sum_ctor(m, b, name, args, line, hint.clone())? {
             return Ok(t);
         }
         // `Age(n)` — the explicit spelling of what a boundary now does by itself
@@ -7927,7 +8881,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             self.expr_as(m, b, &args[0], &d.base)?;
             if vyrn_frontend::consteval::eval(&args[0], &HashMap::new()).is_none() {
-                self.emit_validation(m, b, &d, line)?;
+                self.emit_validation(b, &d, line)?;
             }
             return Ok(Type::Named(name.to_string()));
         }
@@ -7947,7 +8901,7 @@ impl<'p> Fn_<'_, 'p> {
             let key = ftypes::type_key(&rty)
                 .ok_or_else(|| gap(&format!("`{name}` dispatched on `{rty}`"), line))?;
             let mangled = ftypes::impl_method_name(&proto, &key, name);
-            return self.call(m, b, &mangled, args, line);
+            return self.call(m, b, &mangled, args, &[], line);
         }
         // A function with `fn`-typed parameters (RFC-0023): resolve each
         // function-value argument to a direct-call target, specialize the callee
@@ -7998,7 +8952,7 @@ impl<'p> Fn_<'_, 'p> {
                 }
             }
             let sig = self.cx.instantiate(m, &f, type_args, subst)?;
-            return self.emit_call(m, b, &sig, args);
+            return self.emit_call(m, b, &sig, args, hint);
         }
         // RFC-0043's host boundary. These three are not `vyrn` host imports like
         // an ordinary RFC-0012 `extern`: the C shim defines them on every target,
@@ -8012,14 +8966,18 @@ impl<'p> Fn_<'_, 'p> {
         // `timespec_get`/`getentropy` are thin wrappers over the first two — so
         // the emitted runtime reads the same syscalls by a shorter route.
         if let Some(sym) = crate::host_boundary_extern(name) {
-            let f = match sym {
-                "__vyrn_now_millis" => self.cx.rt.now_millis,
-                "__vyrn_monotonic_nanos" => self.cx.rt.mono_nanos,
-                _ => self.cx.rt.random_seed,
+            // Each reader takes the interned name of its injected value
+            // (`VYRN_FIXED_TIME=`, `VYRN_FIXED_SEED=`), which is how the
+            // harness fixes a clock example (RFC-0043).
+            let (f, key) = match sym {
+                "__vyrn_now_millis" => (self.cx.rt.now_millis, self.cx.rt.fixed_time),
+                "__vyrn_monotonic_nanos" => (self.cx.rt.mono_nanos, self.cx.rt.fixed_time),
+                _ => (self.cx.rt.random_seed, self.cx.rt.fixed_seed),
             };
             if !args.is_empty() {
                 return unsupported(&format!("the call `{name}` at this arity"), line);
             }
+            b.ins(&Instruction::I32Const(key as i32));
             // What it returns is the declaration's business, not this file's, and
             // the boundary hands back an `i64`. Anything else spelled over one of
             // these reserved names would read the wrong bytes silently.
@@ -8108,7 +9066,156 @@ impl<'p> Fn_<'_, 'p> {
         if sig.params.len() != args.len() {
             return unsupported(&format!("the call `{name}` at this arity"), line);
         }
-        self.emit_call(m, b, &sig, args)
+        self.emit_call(m, b, &sig, args, hint)
+    }
+
+    /// One `std/mem` primitive (PLAN-0125-runtime §2.1 to §2.3) as its
+    /// instruction, or one host import as its `call`. `std/mem.vyrn` holds the
+    /// signatures and this holds the whole of their lowering; the bodies there
+    /// are never read by this emitter.
+    ///
+    /// The argument types are spelled here as well as in the module because
+    /// `expr_as` needs the target type to coerce a literal, and the row is the
+    /// one place the two lists meet. A mismatch is a checker error at the call
+    /// in `std/runtime` before it is anything here.
+    fn mem_prim(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        prim: &str,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let u = |bits: u8| Type::IntN {
+            bits,
+            signed: false,
+        };
+        let at = |align: u32| MemArg {
+            offset: 0,
+            align,
+            memory_index: 0,
+        };
+        // PLAN-0125-runtime §2.2: a host import is one `call` of the import
+        // `wasi_imports` declared, with the witx signature. The `vyrn_gen`
+        // pair exists only under a generation (`Cx::gen`); an ordinary build
+        // lowers a call to either as `unreachable`, and the runtime functions
+        // that make one (`readFileGen`, `listDirGen`) are reached by nothing
+        // there, so the sweep drops them with the branch.
+        let w = self.cx.rt.wasi;
+        let host: Option<(Option<u32>, Vec<Type>, Type)> = match prim {
+            "fdWrite" => Some((Some(w.fd_write), vec![INT32; 4], INT32)),
+            "fdRead" => Some((Some(w.fd_read), vec![INT32; 4], INT32)),
+            "fdClose" => Some((Some(w.fd_close), vec![INT32], INT32)),
+            "procExit" => Some((Some(w.proc_exit), vec![INT32], Type::Unit)),
+            "pathOpen" => Some((
+                Some(w.path_open),
+                vec![
+                    INT32,
+                    INT32,
+                    INT32,
+                    INT32,
+                    INT32,
+                    Type::Int,
+                    Type::Int,
+                    INT32,
+                    INT32,
+                ],
+                INT32,
+            )),
+            "pathRename" => Some((Some(w.path_rename), vec![INT32; 6], INT32)),
+            "fdSync" => Some((Some(w.fd_sync), vec![INT32], INT32)),
+            "fdPrestatGet" => Some((Some(w.fd_prestat_get), vec![INT32; 2], INT32)),
+            "argsSizesGet" => Some((Some(w.args_sizes_get), vec![INT32; 2], INT32)),
+            "argsGet" => Some((Some(w.args_get), vec![INT32; 2], INT32)),
+            "environSizesGet" => Some((Some(w.environ_sizes_get), vec![INT32; 2], INT32)),
+            "environGet" => Some((Some(w.environ_get), vec![INT32; 2], INT32)),
+            "clockTimeGet" => Some((Some(w.clock_time_get), vec![INT32, Type::Int, INT32], INT32)),
+            "randomGet" => Some((Some(w.random_get), vec![INT32; 2], INT32)),
+            "fdReaddir" => Some((
+                Some(w.fd_readdir),
+                vec![INT32, INT32, INT32, Type::Int, INT32],
+                INT32,
+            )),
+            "genRead" => Some((self.cx.gen.map(|g| g.read), vec![INT32, INT32], Type::Int)),
+            "genFetch" => Some((self.cx.gen.map(|g| g.fetch), vec![INT32], Type::Unit)),
+            _ => None,
+        };
+        if let Some((index, params, ret)) = host {
+            if args.len() != params.len() {
+                return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
+            }
+            for (a, p) in args.iter().zip(&params) {
+                self.expr_as(m, b, a, p)?;
+            }
+            match index {
+                Some(i) => b.ins(&Instruction::Call(i)),
+                None => b.ins(&Instruction::Unreachable),
+            };
+            return Ok(ret);
+        }
+        let (params, ret): (Vec<Type>, Type) = match prim {
+            "load8" => (vec![INT32], u(8)),
+            "load16" => (vec![INT32], u(16)),
+            "load32" => (vec![INT32], u(32)),
+            "load64" => (vec![INT32], u(64)),
+            "loadF32" => (vec![INT32], Type::Float32),
+            "loadF64" => (vec![INT32], Type::Float),
+            "store8" => (vec![INT32, u(8)], Type::Unit),
+            "store16" => (vec![INT32, u(16)], Type::Unit),
+            "store32" => (vec![INT32, u(32)], Type::Unit),
+            "store64" => (vec![INT32, u(64)], Type::Unit),
+            "storeF32" => (vec![INT32, Type::Float32], Type::Unit),
+            "storeF64" => (vec![INT32, Type::Float], Type::Unit),
+            "copy" => (vec![INT32, INT32, INT32], Type::Unit),
+            "fill" => (vec![INT32, u(8), INT32], Type::Unit),
+            "memorySize" => (vec![], INT32),
+            "grow" => (vec![INT32], INT32),
+            "heapBase" => (vec![], INT32),
+            "trap" => (vec![INT32, INT32], Type::Unit),
+            _ => return unsupported(&format!("the `std/mem` primitive `{prim}`"), line),
+        };
+        if args.len() != params.len() {
+            return unsupported(&format!("`std/mem.{prim}` at this arity"), line);
+        }
+        if prim == "trap" {
+            // The descriptor, under the message and its length.
+            b.ins(&Instruction::I32Const(2));
+        }
+        for (a, p) in args.iter().zip(&params) {
+            self.expr_as(m, b, a, p)?;
+        }
+        match prim {
+            "load8" => b.ins(&Instruction::I32Load8U(at(0))),
+            "load16" => b.ins(&Instruction::I32Load16U(at(1))),
+            "load32" => b.ins(&Instruction::I32Load(at(2))),
+            "load64" => b.ins(&Instruction::I64Load(at(3))),
+            "loadF32" => b.ins(&Instruction::F32Load(at(2))),
+            "loadF64" => b.ins(&Instruction::F64Load(at(3))),
+            "store8" => b.ins(&Instruction::I32Store8(at(0))),
+            "store16" => b.ins(&Instruction::I32Store16(at(1))),
+            "store32" => b.ins(&Instruction::I32Store(at(2))),
+            "store64" => b.ins(&Instruction::I64Store(at(3))),
+            "storeF32" => b.ins(&Instruction::F32Store(at(2))),
+            "storeF64" => b.ins(&Instruction::F64Store(at(3))),
+            "copy" => b.ins(&Instruction::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            }),
+            "fill" => b.ins(&Instruction::MemoryFill(0)),
+            "memorySize" => b.ins(&Instruction::MemorySize(0)),
+            "grow" => b.ins(&Instruction::MemoryGrow(0)),
+            "heapBase" => b.ins(&Instruction::GlobalGet(HEAP_BASE)),
+            // `write_all` first, so the stdout buffer is flushed ahead of the
+            // message — the order `trap` keeps.
+            "trap" => b
+                .ins(&Instruction::Call(self.cx.rt.write_all))
+                .ins(&Instruction::Drop)
+                .ins(&Instruction::I32Const(1))
+                .ins(&Instruction::Call(self.cx.rt.proc_exit))
+                .ins(&Instruction::Unreachable),
+            _ => unreachable!("matched above"),
+        };
+        Ok(ret)
     }
 
     /// One log line: `[LEVEL] name: message\n`, to the configured descriptor.
@@ -8137,7 +9244,7 @@ impl<'p> Fn_<'_, 'p> {
         // Interned AT the use site, the way M2m interns a DFA table: `Module::data`
         // shares identical contents, so five sites at one level get one string
         // without anything having gone looking for them.
-        let prefix = format!("[{}] ", level.to_uppercase());
+        let prefix = format!("[{}] ", level.trim_start_matches('@').to_uppercase());
         let (at, plen) = (self.cx.rt.intern(m, &prefix), prefix.len() as i32);
         let colon = self.cx.rt.intern(m, ": ");
         let nl = self.cx.rt.intern(m, "\n");
@@ -8192,15 +9299,16 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// The expression `jsonSchema(T)` / `schemaOf(T)` stands for.
+    /// The expression `jsonSchema<T>()` / `schemaOf<T>()` stands for.
     ///
-    /// Both are compile-time reflection over a *declaration*, so the argument is a
-    /// type name rather than a value — which is also why this is a rewrite rather
-    /// than a call: there is nothing to evaluate at runtime.
-    fn reflected(&self, which: &str, arg: &Expr, line: usize) -> Result<Expr, String> {
-        let Expr::Var { name: tn, .. } = arg else {
+    /// Both are compile-time reflection over a *declaration*, so the target is a
+    /// type ARGUMENT rather than a value — which is also why this is a rewrite
+    /// rather than a call: there is nothing to evaluate at runtime. The target
+    /// was an `Expr::Var` in argument position until RFC-0125 §3 M6.
+    fn reflected(&self, which: &str, target: &Type, line: usize) -> Result<Expr, String> {
+        let (Type::Named(tn) | Type::App(tn, _)) = target else {
             return unsupported(
-                &format!("`{which}` of something other than a type name"),
+                &format!("`{which}` of `{target}`, which names no declaration"),
                 line,
             );
         };
@@ -8287,18 +9395,23 @@ impl<'p> Fn_<'_, 'p> {
         b: &mut Frame,
         sig: &Sig,
         args: &[Expr],
+        hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
         // An aggregate result is written through a hidden leading pointer into a
         // slot of ours, so the destination goes on the stack before the
-        // arguments and is pushed again afterwards as the value.
+        // arguments and is pushed again afterwards as the value. RFC-0125 M1:
+        // the consumer's own storage when it holds this very type, so the
+        // callee's `return` lands there and no slot is taken here.
         let dest = match sig.ret.agg() {
-            Some(l) => {
-                let off = b.alloc(l.size, l.align);
-                b.slot(off);
-                Some(off)
-            }
+            Some(l) => Some(match hint {
+                Some((d, t)) if self.cx.ll(&t) == self.cx.ll(&sig.ret_ty) => (d, true),
+                _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+            }),
             None => None,
         };
+        if let Some((d, _)) = dest {
+            d.addr(b, 0);
+        }
         // A `modify` argument is the caller's binding by ADDRESS. Reloads are the
         // one case that needs a fixup after the call: a scalar in a wasm local has
         // no address at all, so it is spilled to a slot for the callee to write
@@ -8343,8 +9456,9 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&load_of(ll, 0, *signed));
             b.ins(&Instruction::LocalSet(*l));
         }
-        if let Some(off) = dest {
-            b.slot(off);
+        if let Some((d, used)) = dest {
+            d.addr(b, 0);
+            self.dest_used = used;
         }
         // The DECLARED return type, not its structural form. Resolving here threw
         // away exactly the information a caller needs to solve a further generic:
@@ -8481,6 +9595,8 @@ impl<'p> Fn_<'_, 'p> {
                     name: p.name.clone(),
                     capability: p.capability,
                     ty: ftypes::substitute(&p.ty, &subst),
+                    line: p.line,
+                    col: p.col,
                 });
                 call_args.push(args[i].clone());
                 let mut v = Vec::new();
@@ -8498,6 +9614,8 @@ impl<'p> Fn_<'_, 'p> {
                     name: n.clone(),
                     capability: Capability::Read,
                     ty: t.clone(),
+                    line: 0,
+                    col: 0,
                 });
                 srcs.push(n);
             }
@@ -8537,7 +9655,7 @@ impl<'p> Fn_<'_, 'p> {
             subst,
             binds,
         )?;
-        let r = self.emit_call(m, b, &sig, &call_args);
+        let r = self.emit_call(m, b, &sig, &call_args, None);
         // The clones die with this frame; their aliases must die first, or a
         // later node at a recycled address would resolve to somebody's row.
         self.cx.plan.alias_unwind(mark);
@@ -8588,7 +9706,7 @@ impl<'p> Fn_<'_, 'p> {
             }
             self.cx.plan.alias_clones_scoped(&pairs);
         }
-        let r = self.emit_call(m, b, &bnd.target.sig, &all);
+        let r = self.emit_call(m, b, &bnd.target.sig, &all, None);
         self.cx.plan.alias_unwind(mark);
         r
     }
@@ -8717,7 +9835,7 @@ impl<'p> Fn_<'_, 'p> {
     /// type the arm does not produce.
     fn lambda_ret(
         &mut self,
-        params: &[String],
+        params: &[Binder],
         body: &LambdaBody,
         ptys: &[Type],
         expected_ret: &Type,
@@ -8728,7 +9846,7 @@ impl<'p> Fn_<'_, 'p> {
                 let mark = self.scope.len();
                 for (pn, pt) in params.iter().zip(ptys) {
                     self.scope
-                        .push((pn.clone(), Place::Local(u32::MAX), pt.clone()));
+                        .push((pn.name.clone(), Place::Local(u32::MAX), pt.clone()));
                 }
                 let got = self.peek(e, line);
                 self.scope.truncate(mark);
@@ -8737,95 +9855,6 @@ impl<'p> Fn_<'_, 'p> {
             (Type::Param(_), LambdaBody::Block(_)) => Type::Unit,
             (t, _) => t.clone(),
         })
-    }
-
-    /// The return type of a call to a function with `fn`-typed parameters, WITHOUT
-    /// resolving its targets — which is what makes it usable from [`Fn_::peek`],
-    /// where nothing may be emitted and no index may be handed out.
-    ///
-    /// It runs the same three solving passes [`Fn_::ho_call`] does, in the same
-    /// order, and reads a target's return from the same two places
-    /// ([`Fn_::fn_arg_ret`]); what it skips is lifting and enqueueing. A wrong
-    /// answer here is a compile error rather than a miscompile, because `expr_as`
-    /// re-checks what the arm actually produced (M2b).
-    fn peek_ho(&mut self, f: &Function, args: &[Expr], line: usize) -> Result<Type, String> {
-        if f.params.len() != args.len() {
-            return unsupported(&format!("the call `{}` at this arity", f.name), line);
-        }
-        let generic = !f.type_params.is_empty();
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        for (i, p) in f.params.iter().enumerate() {
-            if matches!(p.ty, Type::Fn(..)) {
-                continue;
-            }
-            self.expect.push(p.ty.clone());
-            let t = self.peek(&args[i], line);
-            self.expect.pop();
-            let aty = self.cx.sub(&t?);
-            if generic {
-                crate::solve_param(&p.ty, &aty, &mut subst);
-            }
-        }
-        if generic {
-            for (i, p) in f.params.iter().enumerate() {
-                let Type::Fn(dptys, _) = &p.ty else { continue };
-                if let Some(tptys) = self.fn_arg_param_types(&args[i], line) {
-                    for (d, t) in dptys.iter().zip(&tptys) {
-                        crate::solve_param(d, t, &mut subst);
-                    }
-                }
-            }
-            for (i, p) in f.params.iter().enumerate() {
-                let Type::Fn(dptys, dret) = &p.ty else {
-                    continue;
-                };
-                let ptys: Vec<Type> = dptys
-                    .iter()
-                    .map(|t| ftypes::substitute(t, &subst))
-                    .collect();
-                let want = ftypes::substitute(dret, &subst);
-                let got = self.fn_arg_ret(&args[i], &ptys, &want, line)?;
-                crate::solve_param(dret, &got, &mut subst);
-            }
-        }
-        Ok(ftypes::substitute(&f.ret, &subst))
-    }
-
-    /// What a `fn`-typed argument's target returns, read rather than resolved.
-    fn fn_arg_ret(
-        &mut self,
-        arg: &Expr,
-        ptys: &[Type],
-        expected_ret: &Type,
-        line: usize,
-    ) -> Result<Type, String> {
-        match arg {
-            Expr::Lambda { params, body, line } => {
-                self.lambda_ret(params, body, ptys, expected_ret, *line)
-            }
-            Expr::Var { name, .. } => {
-                if let Some(bnd) = self.fn_binds.get(name) {
-                    return Ok(bnd.target.sig.ret_ty.clone());
-                }
-                if let Ok((_, ty)) = self.lookup(name, line) {
-                    return match crate::normalize_fn_sig(&self.cx.sub(&ty), &self.cx.types) {
-                        Type::Fn(_, ret) => Ok(*ret),
-                        _ => unsupported(&format!("`{name}` as a function value"), line),
-                    };
-                }
-                match self.cx.sigs.get(name) {
-                    Some(sig) => Ok(sig.ret_ty.clone()),
-                    None => unsupported(&format!("`{name}` as a function value"), line),
-                }
-            }
-            other => match self.fn_expr_sig(other, line)? {
-                Type::Fn(_, ret) => Ok(*ret),
-                _ => unsupported(
-                    &format!("a `fn`-typed argument that is {}", expr_name(other)),
-                    Expr::line(other),
-                ),
-            },
-        }
     }
 
     /// The DECLARED parameter types of a `fn`-typed argument's target, when the
@@ -8874,7 +9903,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         at: &Expr,
-        params: &[String],
+        params: &[Binder],
         body: &LambdaBody,
         ptys: &[Type],
         expected_ret: &Type,
@@ -8887,9 +9916,11 @@ impl<'p> Fn_<'_, 'p> {
         // because a capture list is part of the lifted function's signature and two
         // backends disagreeing about its length would emit calls with the wrong
         // number of arguments.
-        let cap_names = crate::lambda_captures(body, params.iter().cloned().collect(), &|n| {
-            self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n)
-        });
+        let cap_names = crate::lambda_captures(
+            body,
+            params.iter().map(|p| p.name.clone()).collect(),
+            &|n| self.scope.iter().any(|(s, _, _)| s == n) || self.fn_binds.contains_key(n),
+        );
         let mut cap_tys = Vec::new();
         for cn in &cap_names {
             // A `fn`-typed PARAMETER captured by the lambda has no slot: inside a
@@ -8930,6 +9961,7 @@ impl<'p> Fn_<'_, 'p> {
             None => Body::Shell,
         };
         let mut sf = f_shell(line);
+        sf.name = format!("{LAMBDA} {}", self.owner);
         sf.params = cap_names
             .iter()
             .zip(&cap_tys)
@@ -8937,11 +9969,15 @@ impl<'p> Fn_<'_, 'p> {
                 name: n.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
+                line: 0,
+                col: 0,
             })
             .chain(params.iter().zip(ptys).map(|(n, t)| Param {
-                name: n.clone(),
+                name: n.name.clone(),
                 capability: Capability::Read,
                 ty: t.clone(),
+                line: n.line,
+                col: n.col,
             }))
             .collect();
         sf.ret = ret.clone();
@@ -9127,7 +10163,7 @@ impl<'p> Fn_<'_, 'p> {
                 match self.cx.repr(ty, line)? {
                     Repr::Scalar(_) => {
                         if self.owns_heap(ty) {
-                            self.copy_stack(b, ty, line)?;
+                            self.copy_stack(m, b, ty, line)?;
                         }
                         b.ins(&store_of(&self.cx.ll(ty)));
                     }
@@ -9145,7 +10181,7 @@ impl<'p> Fn_<'_, 'p> {
                                 b.ins(&Instruction::I32Add);
                             }
                             b.ins(&Instruction::LocalSet(a));
-                            self.copy_at(b, a, ty, line)?;
+                            self.copy_at(m, b, a, ty, line)?;
                         }
                     }
                     Repr::Unit => return unsupported("a captured Unit value", line),
@@ -9322,7 +10358,7 @@ impl<'p> Fn_<'_, 'p> {
         let dsig = self.dispatcher(m, sig_ty, line)?;
         let mut all = vec![recv.clone()];
         all.extend(args.iter().cloned());
-        self.emit_call(m, b, &dsig, &all)
+        self.emit_call(m, b, &dsig, &all, None)
     }
 
     /// `.length` / `.byteLength`, neither of which is a field: the receiver's
@@ -9380,8 +10416,8 @@ impl<'p> Fn_<'_, 'p> {
     /// corpus and concluded "there IS a function table, and it is `spawn`". All
     /// nine are the *textual* emitter's `call @__vyrn_spawn(ptr @__vyrn_task_*,
     /// ptr)`, and the half of that finding which is about wasm is wrong. Read what
-    /// the shim does with the pointer on this target (`toolchain::RUNTIME_SHIM`,
-    /// `#if defined(__wasi__)`): wasm has no threads, so `__vyrn_spawn` calls
+    /// the retired C shim did with the pointer on this target: wasm has no
+    /// threads, so its `__vyrn_spawn` called
     /// `thunk(frame)` **inline** and returns a `VTask` holding the frame. The
     /// pointer is formed and consumed in one C statement, and it exists only
     /// because the LLVM path routes an eager call through a C function that cannot
@@ -9429,7 +10465,7 @@ impl<'p> Fn_<'_, 'p> {
         // Everything a call needs — argument coercion, generic instantiation, the
         // hidden destination for an aggregate return — is `call`'s, so a spawned
         // call and a plain one cannot diverge in how they pass arguments.
-        let ret = self.call(m, b, name, args, line)?;
+        let ret = self.call(m, b, name, args, &[], line)?;
         let boxed = b.local(ValType::I32);
         match self.cx.repr(&ret, line)? {
             Repr::Scalar(v) => {
@@ -9479,6 +10515,7 @@ impl<'p> Fn_<'_, 'p> {
 /// them out of an SSA aggregate, and the reason a `for` that grows its own array
 /// keeps walking the buffer it started on rather than following a `realloc` to a
 /// new one. Both backends agree with the interpreter, which iterates a copy.
+#[derive(Clone)]
 struct Walk {
     /// `i32` local: the address of element 0.
     data: u32,
@@ -9592,16 +10629,21 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(fv));
         let sig = self.cx.resolve(&fty);
         let elem = match &sig {
-            Type::Fn(_, r) => match self.cx.resolve(r) {
-                Type::Option(i) => *i,
-                other => return unsupported(&format!("a step returning `{other}`"), line),
-            },
+            Type::Fn(_, r) => {
+                let rr = self.cx.resolve(r);
+                match ftypes::option_payload(&rr) {
+                    Some(i) => i.clone(),
+                    None => return unsupported(&format!("a step returning `{rr}`"), line),
+                }
+            }
             other => return unsupported(&format!("`fromStep` of `{other}`"), line),
         };
         // The loop reconstructs this signature from the element type alone, so a
         // step registered under any other spelling would dispatch through a
         // table it is not in. Refuse rather than miscompile.
-        if sig != stream_step_sig(&elem) {
+        if crate::normalize_fn_sig(&sig, &self.cx.types)
+            != crate::normalize_fn_sig(&stream_step_sig(&elem), &self.cx.types)
+        {
             return unsupported(&format!("a step of type `{sig}`"), line);
         }
         let Repr::Agg(fl) = self.cx.repr(&sig, line)? else {
@@ -9759,11 +10801,12 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let elem = match self.expect.last().map(|t| self.cx.resolve(t)) {
-            Some(Type::Option(i)) => *i,
-            _ => return unsupported("a `pullAt` with no expected Option type", line),
+        let want = self.expect.last().map(|t| self.cx.resolve(t));
+        let elem = match want.as_ref().and_then(ftypes::option_payload) {
+            Some(i) => i.clone(),
+            None => return unsupported("a `pullAt` with no expected Option type", line),
         };
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
@@ -9781,9 +10824,10 @@ impl<'p> Fn_<'_, 'p> {
         let ooff = b.alloc(ol.size, ol.align);
         b.slot(ooff);
         b.ins(&Instruction::LocalGet(has));
-        b.ins(&Instruction::I32Store8(byte()));
-        for a in [ooff + ol.fields[1], ooff + ol.fields[2]] {
-            b.slot(a);
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::I64Store(word8()));
+        for f in &ol.fields[1..] {
+            b.slot(ooff + f);
             b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
         }
@@ -9914,11 +10958,16 @@ impl<'p> Fn_<'_, 'p> {
         self.depth -= 1;
         b.ins(&Instruction::Else);
         self.depth += 1;
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        let dsig = self.dispatcher(m, &stream_step_sig(elem), line)?;
+        // Normalized, as every other dispatcher key is: a step's tag is
+        // registered under `normalize_fn_sig`, and since RFC-0126 §8.11's M4b
+        // that turns the `Option<T>` return into its variant list. A raw key
+        // looked the tag up in a table it was not in.
+        let step = crate::normalize_fn_sig(&stream_step_sig(elem), &self.cx.types);
+        let dsig = self.dispatcher(m, &step, line)?;
         let ooff = b.alloc(ol.size, ol.align);
         b.slot(ooff);
         b.ins(&Instruction::LocalGet(a));
@@ -10032,11 +11081,16 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(at(sl.fields[1])));
         b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let Repr::Agg(ol) = self.cx.repr(&opt, line)? else {
             return unsupported("an Option that is not an aggregate", line);
         };
-        let dsig = self.dispatcher(m, &stream_step_sig(elem), line)?;
+        // Normalized, as every other dispatcher key is: a step's tag is
+        // registered under `normalize_fn_sig`, and since RFC-0126 §8.11's M4b
+        // that turns the `Option<T>` return into its variant list. A raw key
+        // looked the tag up in a table it was not in.
+        let step = crate::normalize_fn_sig(&stream_step_sig(elem), &self.cx.types);
+        let dsig = self.dispatcher(m, &step, line)?;
         let ooff = b.alloc(ol.size, ol.align);
         b.slot(ooff);
         b.ins(&Instruction::LocalGet(s));
@@ -10051,10 +11105,20 @@ impl<'p> Fn_<'_, 'p> {
         let oaddr = b.local(ValType::I32);
         b.slot(ooff);
         b.ins(&Instruction::LocalSet(oaddr));
-        let sum = Sum::Opt(elem.clone());
-        self.tag_test(b, oaddr, &sum, &Pattern::Some(String::new()), line)?;
+        let sum = crate::sum_variants_of(&opt, &self.cx.types).unwrap_or_default();
+        let some = Pattern::Variant("Some".into(), vec![Binder::synthetic("")]);
+        self.tag_test(b, oaddr, &sum, &some, line)?;
         b.ins(&Instruction::If(BlockType::Empty));
-        let got = self.bind_payload(b, oaddr, &sum, &ol, 0, elem, line)?;
+        let got = self.bind_payload(
+            b,
+            oaddr,
+            &ol,
+            std::slice::from_ref(elem),
+            0,
+            elem,
+            line,
+            false,
+        )?;
         match (place, got, &r) {
             (Place::Local(d), Place::Local(v), _) => {
                 b.ins(&Instruction::LocalGet(v));
@@ -10257,30 +11321,61 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Add);
     }
 
+    /// Take a trap-table row — RFC-0125 §2.3, and the one way this backend
+    /// refuses at any of the eight rows the census of §3 M6 gives the emitter.
+    ///
+    /// The site pushes the row's NUMBER and the value the row names; the
+    /// wording is the table's, which `std/runtime`'s `trapAt` reads. Before
+    /// this, each site pushed its own interned sentence and the two index rows
+    /// pushed three pieces through a second helper.
+    ///
+    /// A function with a trap site (M1) parks the pair and branches OUT to it,
+    /// so a check costs a compare and a branch rather than a call — the 3.56 s
+    /// against 1.71 s the prologue's note records. The caller has already
+    /// counted its own `if` in `depth`, so the trap block is `depth - 1`, one
+    /// label inside the function block a `return` targets.
+    ///
+    /// `val` names the row's value as an `i64` local; a row without one passes
+    /// zero, which `trapAt` never reads.
+    fn trap_row(&mut self, b: &mut Frame, rule: vyrn_frontend::trap::Rule, val: Option<u32>) {
+        let push_val = |b: &mut Frame| {
+            match val {
+                Some(v) => b.ins(&Instruction::LocalGet(v)),
+                None => b.ins(&Instruction::I64Const(0)),
+            };
+        };
+        match self.trap_site {
+            Some((trule, tval)) => {
+                b.ins(&Instruction::I32Const(rule.index() as i32));
+                b.ins(&Instruction::LocalSet(trule));
+                push_val(b);
+                b.ins(&Instruction::LocalSet(tval));
+                b.ins(&Instruction::Br(self.depth - 1));
+            }
+            None => {
+                b.ins(&Instruction::I32Const(rule.index() as i32));
+                push_val(b);
+                b.ins(&Instruction::I32Const(self.cx.rt.trap_table as i32));
+                b.ins(&Instruction::Call(self.cx.rt.trap_at));
+            }
+        }
+    }
+
     /// Trap unless `idx` is in `0..len`.
     ///
-    /// The index is in the message, so it cannot be one interned string — hence
-    /// `trap_idx(prefix, i, suffix)` rather than the plain `trap` the arithmetic
-    /// checks use. Unsigned, so a negative index is caught by the same compare.
+    /// Unsigned, so a negative index is caught by the same compare.
     fn bounds_check(&mut self, b: &mut Frame, w: &Walk, idx: u32, string: bool) {
-        let (pre, post, trap) = (
-            if string {
-                self.cx.rt.msg_soob
-            } else {
-                self.cx.rt.msg_aoob
-            },
-            self.cx.rt.msg_oob_end,
-            self.cx.rt.trap_idx,
-        );
+        let rule = if string {
+            vyrn_frontend::trap::Rule::StringIndex
+        } else {
+            vyrn_frontend::trap::Rule::ArrayIndex
+        };
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(w.len));
         b.ins(&Instruction::I64GeU);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        b.ins(&Instruction::I32Const(pre as i32));
-        b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::I32Const(post as i32));
-        b.ins(&Instruction::Call(trap));
+        self.trap_row(b, rule, Some(idx));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -10297,11 +11392,6 @@ impl<'p> Fn_<'_, 'p> {
     /// span: `idx + span` wraps for a huge `idx` and would let the access through,
     /// while `len - span` cannot wrap because `len >= 0`.
     fn bounds_check_span(&mut self, b: &mut Frame, w: &Walk, idx: u32, span: i64) {
-        let (pre, post, trap) = (
-            self.cx.rt.msg_aoob,
-            self.cx.rt.msg_oob_end,
-            self.cx.rt.trap_idx,
-        );
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
@@ -10313,11 +11403,12 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Or);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
-        b.ins(&Instruction::I32Const(pre as i32));
         // The first lane of `idx..idx+span-1` actually out of range: `idx` when it
         // is negative, `idx + span - 1` when the tail overruns. Reporting `idx`
         // alone would name an in-range element in the common case, and this is the
-        // cold path.
+        // cold path. A local rather than the stack, because the row's value is
+        // what the trap site parks.
+        let at = b.local(ValType::I64);
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I64Const(span - 1));
@@ -10326,8 +11417,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Const(0));
         b.ins(&Instruction::I64LtS);
         b.ins(&Instruction::Select);
-        b.ins(&Instruction::I32Const(post as i32));
-        b.ins(&Instruction::Call(trap));
+        b.ins(&Instruction::LocalSet(at));
+        self.trap_row(b, vyrn_frontend::trap::Rule::ArrayIndex, Some(at));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -10363,6 +11454,7 @@ impl<'p> Fn_<'_, 'p> {
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        hint: Option<(Dest, Type)>,
         elems: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
@@ -10373,6 +11465,36 @@ impl<'p> Fn_<'_, 'p> {
             }
             _ => None,
         };
+        // RFC-0125 M1: in an `Array<T>` position the elements are built straight
+        // into the heap buffer and the triple is written where the consumer
+        // wants it — its own storage when it handed one over, a slot the size
+        // of the triple otherwise — so the fixed form, a frame extent the size
+        // of the whole literal copied once more by `heapify`, never exists. In
+        // a fixed position of the literal's own length the elements land in
+        // the consumer's storage.
+        if let Some((dest, hty)) = hint {
+            match self.cx.resolve(&hty) {
+                Type::Array(inner) if !matches!(*inner, Type::Param(_)) => {
+                    return self.array_lit_heap(m, b, dest, &inner, elems, line, true);
+                }
+                Type::ArrayN(inner, n)
+                    if n == elems.len() && n > 0 && !matches!(*inner, Type::Param(_)) =>
+                {
+                    self.fixed_elems(m, b, dest, &inner, elems, line)?;
+                    dest.addr(b, 0);
+                    self.dest_used = true;
+                    return Ok(Type::ArrayN(inner, n));
+                }
+                _ => {}
+            }
+        }
+        if let Some(Type::Array(inner)) = &want {
+            if !matches!(**inner, Type::Param(_)) {
+                let l = self.layout_of(&Type::Array(inner.clone()), line)?;
+                let dest = Dest::Slot(b.alloc(l.size, l.align));
+                return self.array_lit_heap(m, b, dest, inner, elems, line, false);
+            }
+        }
         // An empty `[]` in a `SmallArray<T, N>` position is the inline empty state,
         // not the empty triple: `len` 0, `cap` N, `data` null (RFC-0056). Built here
         // rather than through the `ArrayN` conversion because there is no fixed
@@ -10413,29 +11535,83 @@ impl<'p> Fn_<'_, 'p> {
             Some(t) => t,
             None => self.peek(&elems[0], line)?,
         };
-        let stride = self.stride(&elem, line)?;
         let el = self.layout_of(&elem, line)?;
         let off = b.alloc(self.extent(&elem, elems.len(), line)?, el.align);
-        let r = self.cx.repr(&elem, line)?;
+        self.fixed_elems(m, b, Dest::Slot(off), &elem, elems, line)?;
+        b.slot(off);
+        Ok(Type::ArrayN(Box::new(elem), elems.len()))
+    }
+
+    /// The elements of a literal, one after another from `dest` (RFC-0125 M1).
+    /// An aggregate element is built in its own place, so a nested literal
+    /// costs no frame.
+    fn fixed_elems(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        elem: &Type,
+        elems: &[Expr],
+        line: usize,
+    ) -> Result<(), String> {
+        let stride = self.stride(elem, line)?;
+        let r = self.cx.repr(elem, line)?;
         for (i, e) in elems.iter().enumerate() {
-            b.slot(off + stride * i as u32);
-            self.expr_as(m, b, e, &elem)?;
+            let at = stride * i as u32;
             match &r {
                 Repr::Scalar(_) => {
-                    b.ins(&store_of(&self.cx.ll(&elem)));
+                    dest.addr(b, at);
+                    self.expr_as(m, b, e, elem)?;
+                    b.ins(&store_of(&self.cx.ll(elem)));
                 }
-                Repr::Agg(_) => {
-                    b.ins(&Instruction::I32Const(stride as i32));
-                    b.ins(&Instruction::MemoryCopy {
-                        src_mem: 0,
-                        dst_mem: 0,
-                    });
-                }
+                Repr::Agg(_) => self.agg_into(m, b, dest.at(at), stride, e, elem, true)?,
                 Repr::Unit => return unsupported("an array of Unit", line),
             }
         }
-        b.slot(off);
-        Ok(Type::ArrayN(Box::new(elem), elems.len()))
+        Ok(())
+    }
+
+    /// `[a, b, c]` in an `Array<T>` position, built on the heap at once
+    /// (RFC-0125 M1): the buffer is taken first, the elements are built in it,
+    /// and the `{ptr, len, cap}` triple is written at `dest`. `len` and `cap`
+    /// are both N, the schedule [`Fn_::heapify`] gives a literal. The empty
+    /// literal is the empty triple, `data` null, as it always was.
+    #[allow(clippy::too_many_arguments)]
+    fn array_lit_heap(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        dest: Dest,
+        inner: &Type,
+        elems: &[Expr],
+        line: usize,
+        used: bool,
+    ) -> Result<Type, String> {
+        let ty = Type::Array(Box::new(inner.clone()));
+        let l = self.layout_of(&ty, line)?;
+        let n = elems.len();
+        let buf = b.local(ValType::I32);
+        if n == 0 {
+            b.ins(&Instruction::I32Const(0));
+            b.ins(&Instruction::LocalSet(buf));
+        } else {
+            let bytes = self.extent(inner, n, line)? as i32;
+            b.ins(&Instruction::I64Const(bytes.max(1) as i64));
+            b.ins(&Instruction::Call(self.cx.rt.malloc));
+            b.ins(&Instruction::LocalSet(buf));
+            self.fixed_elems(m, b, Dest::Addr(buf, 0), inner, elems, line)?;
+        }
+        dest.addr(b, l.fields[0]);
+        b.ins(&Instruction::LocalGet(buf));
+        b.ins(&Instruction::I32Store(word()));
+        for f in [l.fields[1], l.fields[2]] {
+            dest.addr(b, f);
+            b.ins(&Instruction::I64Const(n as i64));
+            b.ins(&Instruction::I64Store(word8()));
+        }
+        dest.addr(b, 0);
+        self.dest_used = used;
+        Ok(ty)
     }
 
     /// `[N x T]` → the growable `{ptr, len, cap}` triple: a heap buffer with a
@@ -10481,12 +11657,51 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `xs.push(v)` — the value, and a NEW triple describing the array with it
-    /// in. The parser turns the statement into `xs = @push(xs, v)`, so the
-    /// write-back is an ordinary assignment and this never touches the binding.
-    /// `xs.reserve(n)` (RFC-0115): one allocation for `n` more elements. The
-    /// growth is malloc + copy + free, exactly the shape [`Fn_::push`] grows
-    /// by, so the two backends cost the same heap.
+    /// The receiver of an array operation `std/runtime` rebuilds
+    /// (PLAN-0125-runtime §6 step 6): the element type, the header layout, the
+    /// element stride, the receiver's address parked in a local, and a fresh
+    /// slot the runtime writes the result triple into. `xs.push(v)` is
+    /// `xs = @push(xs, v)`, so the result is a NEW triple and the write-back is
+    /// an ordinary assignment; `reserve`, `clear`, `append` and `copyFrom`
+    /// (RFC-0115) rebuild the same way.
+    fn arr_recv(
+        &mut self,
+        b: &mut Frame,
+        aty: &Type,
+        verb: &str,
+        line: usize,
+    ) -> Result<(Type, Layout, i32, u32, u32), String> {
+        let Type::Array(elem) = self.cx.resolve(aty) else {
+            return unsupported(&format!("`{verb}` on `{aty}`"), line);
+        };
+        let l = self.layout_of(aty, line)?;
+        let stride = self.stride(&elem, line)? as i32;
+        let src = b.local(ValType::I32);
+        b.ins(&Instruction::LocalSet(src));
+        let off = b.alloc(l.size, l.align);
+        Ok((*elem, l, stride, src, off))
+    }
+
+    /// `xs.clear()` (RFC-0115 addendum): `std/runtime`'s `arrClear`.
+    fn clear_arr(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        line: usize,
+    ) -> Result<Type, String> {
+        let aty = self.expr(m, b, &args[0])?;
+        let (_, _, _, src, off) = self.arr_recv(b, &aty, "clear", line)?;
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::Call(self.cx.rt.arr_clear));
+        b.slot(off);
+        Ok(aty)
+    }
+
+    /// `xs.reserve(n)` (RFC-0115): `std/runtime`'s `arrReserve`. The count is
+    /// evaluated into a local first, so no operand of the call is on the stack
+    /// while a user expression runs.
     fn reserve_arr(
         &mut self,
         m: &mut Module,
@@ -10494,83 +11709,23 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let _ = m;
         let aty = self.expr(m, b, &args[0])?;
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`reserve` on `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, len, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(len));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-        let need = b.local(ValType::I64);
+        let (elem, _, stride, src, off) = self.arr_recv(b, &aty, "reserve", line)?;
+        let n = b.local(ValType::I64);
         self.expr_as(m, b, &args[1], &Type::Int)?;
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I64Add);
-        b.ins(&Instruction::LocalSet(need));
-        // need > cap: grow to exactly `need`.
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64GtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        let grown = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalTee(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(n));
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalSet(cap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::LocalGet(n));
+        b.ins(&Instruction::Call(self.cx.rt.arr_reserve));
         b.slot(off);
         Ok(Type::Array(Box::new(elem)))
     }
 
-    /// `xs.append(ys)` (RFC-0115): grow once to `max(need, cap * 2)`, then one
-    /// `memory.copy` of the source's elements — the checker held the element
-    /// type to heapless ones, so bytes ARE the elements. A self-append reads
-    /// the source out of the grown buffer (the old one is freed), chosen by a
-    /// `select` on the old data pointer.
+    /// `xs.append(ys)` and `dst.copyFrom(src)` (RFC-0115): `std/runtime`'s
+    /// `arrAppend` and `arrCopyFrom`. The checker held the element type to
+    /// heapless ones, so the runtime moves bytes and is handed no type.
     fn append_arr(
         &mut self,
         m: &mut Module,
@@ -10578,131 +11733,9 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`append` on `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, len, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(len));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-        let (xsrc, xdata, xlen) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-        );
-        self.expr_as(m, b, &args[1], &aty)?;
-        b.ins(&Instruction::LocalSet(xsrc));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(xdata));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(xlen));
-        let need = b.local(ValType::I64);
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I64Add);
-        b.ins(&Instruction::LocalSet(need));
-        // need > cap: grow to max(need, cap * 2), copy, free the old buffer —
-        // AFTER retargeting a self-append's source at the copy just made.
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64GtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        let nc = b.local(ValType::I64);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Const(2));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::LocalTee(nc));
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::I64LtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::LocalSet(nc));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        let grown = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(nc));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalTee(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        // A self-append's source moved with the copy.
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Eq);
-        b.ins(&Instruction::Select);
-        b.ins(&Instruction::LocalSet(xdata));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(nc));
-        b.ins(&Instruction::LocalSet(cap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        // dst = data + len * stride; memory.copy xlen * stride bytes.
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(need));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off);
-        Ok(Type::Array(Box::new(elem)))
+        self.arr_bulk(m, b, args, "append", line)
     }
 
-    /// `dst.copyFrom(src)` (RFC-0115): the receiver's buffer, the source's
-    /// elements, one `memory.copy`. Grows only when the source is longer; a
-    /// self-copy moves zero bytes.
     fn copy_from_arr(
         &mut self,
         m: &mut Module,
@@ -10710,90 +11743,46 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
+        self.arr_bulk(m, b, args, "copyFrom", line)
+    }
+
+    fn arr_bulk(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        args: &[Expr],
+        verb: &str,
+        line: usize,
+    ) -> Result<Type, String> {
         let aty = self.expr(m, b, &args[0])?;
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`copyFrom` on `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-        let (xsrc, xdata, xlen) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-        );
+        let (elem, _, stride, src, off) = self.arr_recv(b, &aty, verb, line)?;
+        let xs = b.local(ValType::I32);
         self.expr_as(m, b, &args[1], &aty)?;
-        b.ins(&Instruction::LocalSet(xsrc));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        b.ins(&Instruction::LocalSet(xdata));
-        b.ins(&Instruction::LocalGet(xsrc));
-        b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(xlen));
-        // xlen > cap: grow to exactly xlen. The old contents are dead, so this
-        // is malloc + free with NO copy of them.
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64GtS);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        let grown = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalSet(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::LocalSet(cap));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        // memory.copy, unless the pointers were one — then zero bytes.
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::LocalSet(xs));
+        b.slot(off);
+        b.ins(&Instruction::LocalGet(src));
         b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::LocalGet(xdata));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Eq);
-        b.ins(&Instruction::Select);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(xlen));
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
+        b.ins(&Instruction::LocalGet(xs));
+        b.ins(&Instruction::Call(if verb == "append" {
+            self.cx.rt.arr_append
+        } else {
+            self.cx.rt.arr_copy_from
+        }));
         b.slot(off);
         Ok(Type::Array(Box::new(elem)))
     }
 
+    /// `xs.push(v)`: `std/runtime`'s `arrPush` grows and writes the new triple
+    /// with `len + 1`; the element is stored here, because the runtime knows
+    /// the stride and not the type.
+    ///
+    /// The old buffer comes back from the call and is released only after the
+    /// element is stored, and that is not tidiness. The value expression is
+    /// evaluated BELOW, and it may read the array being pushed onto —
+    /// `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in `std/hash` does, through the
+    /// caller's header, which still names the OLD buffer. Freeing at the
+    /// growth made that a read of a block already on a free list, and SHA-1
+    /// came out wrong from the seventeenth word.
     fn push(
         &mut self,
         m: &mut Module,
@@ -10806,98 +11795,31 @@ impl<'p> Fn_<'_, 'p> {
             let ty = self.cx.resolve(&aty);
             return self.sa_push(m, b, &ty, &inner, n, &args[1], line);
         }
-        let Type::Array(elem) = self.cx.resolve(&aty) else {
-            return unsupported(&format!("`push` onto `{aty}`"), line);
-        };
-        let elem = *elem;
-        let l = self.layout_of(&aty, line)?;
-        let stride = self.stride(&elem, line)? as i32;
-        let (src, data, len, cap) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I64),
-            b.local(ValType::I64),
-        );
-        b.ins(&Instruction::LocalSet(src));
+        let (elem, l, stride, src, off) = self.arr_recv(b, &aty, "push", line)?;
+        let stale = b.local(ValType::I32);
+        b.slot(off);
         b.ins(&Instruction::LocalGet(src));
+        b.ins(&Instruction::I32Const(stride));
+        b.ins(&Instruction::Call(self.cx.rt.arr_push));
+        b.ins(&Instruction::LocalSet(stale));
+        // The element goes at the old length, which the new triple holds plus one.
+        let (data, last) = (b.local(ValType::I32), b.local(ValType::I64));
+        b.slot(off);
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalSet(data));
-        b.ins(&Instruction::LocalGet(src));
+        b.slot(off);
         b.ins(&Instruction::I64Load(at(l.fields[1])));
-        b.ins(&Instruction::LocalSet(len));
-        b.ins(&Instruction::LocalGet(src));
-        b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::LocalSet(cap));
-
-        // Full: 0 → 4, else double. Allocate, copy, and hand the old buffer back —
-        // which is what `realloc` does for the textual backend, so growth costs the
-        // two the same heap (M6).
-        //
-        // The release waits until the element is stored, and that is not tidiness.
-        // The value expression is evaluated BELOW, and it may read the array being
-        // pushed onto — `w.push(rot1(w[t - 3] ^ w[t - 8] …))` in `std/hash` does,
-        // through a header this `push` has not written back yet, so it reads the
-        // OLD buffer. Freeing at the growth made that a read of a block already on
-        // a free list, and SHA-1 came out wrong from the seventeenth word.
-        //
-        // `stale` is cleared first because a `push` in a loop is ONE emitted site:
-        // an iteration that grew would otherwise leave the local set and the next
-        // iteration, growing nothing, would free that block a second time.
-        let stale = b.local(ValType::I32);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::LocalSet(stale));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Eq);
-        b.ins(&Instruction::If(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Eqz);
-        b.ins(&Instruction::If(BlockType::Result(ValType::I64)));
-        self.depth += 1;
-        b.ins(&Instruction::I64Const(4));
-        b.ins(&Instruction::Else);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Const(2));
-        b.ins(&Instruction::I64Mul);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        b.ins(&Instruction::LocalSet(cap));
-        let grown = b.local(ValType::I32);
-        // `cap * stride` in 64 bits, which is the width `cap` already is. Wrapping
-        // first is what made this the worst of the truncations: doubling a 2 GiB
-        // buffer asks for 4 GiB, wrapped to 0, and the copy below is `len *
-        // stride` — the OLD size, which does NOT wrap and does fit — so 2 GiB
-        // went into a zero-byte allocation without tripping a bounds check.
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Const(stride as i64));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalTee(grown));
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(stride));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::MemoryCopy {
-            src_mem: 0,
-            dst_mem: 0,
-        });
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::LocalSet(stale));
-        b.ins(&Instruction::LocalGet(grown));
-        b.ins(&Instruction::LocalSet(data));
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Sub);
+        b.ins(&Instruction::LocalSet(last));
         let w = Walk {
             data,
-            len,
+            len: last,
             stride: stride as u32,
             elem: elem.clone(),
             byte: false,
         };
-        self.elem_addr(b, &w, len);
+        self.elem_addr(b, &w, last);
         let r = self.cx.repr(&elem, line)?;
         self.expr_as(m, b, &args[1], &elem)?;
         match &r {
@@ -10916,18 +11838,6 @@ impl<'p> Fn_<'_, 'p> {
         // Now nothing can read the old buffer through the caller's header.
         b.ins(&Instruction::LocalGet(stale));
         b.ins(&Instruction::Call(self.cx.rt.free));
-        let off = b.alloc(l.size, l.align);
-        b.slot(off + l.fields[0]);
-        b.ins(&Instruction::LocalGet(data));
-        b.ins(&Instruction::I32Store(word()));
-        b.slot(off + l.fields[1]);
-        b.ins(&Instruction::LocalGet(len));
-        b.ins(&Instruction::I64Const(1));
-        b.ins(&Instruction::I64Add);
-        b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::LocalGet(cap));
-        b.ins(&Instruction::I64Store(word8()));
         b.slot(off);
         Ok(Type::Array(Box::new(elem)))
     }
@@ -10994,16 +11904,26 @@ impl<'p> Fn_<'_, 'p> {
         args: &[Expr],
         line: usize,
     ) -> Result<Type, String> {
-        let aty = self.expr(m, b, &args[0])?;
-        // A Map is not walkable and must not be reached as one: its length is
-        // field 2 where an Array's is field 1, so a `Walk` over it would index off
-        // the value pointer (M2c's refusal, now a branch instead).
-        if let Type::Map(_, val) = self.cx.resolve(&aty) {
-            let mty = self.cx.resolve(&aty);
-            return self.map_at(m, b, &mty, &val, &args[1], line);
-        }
-        let string = self.cx.resolve(&aty) == Type::Str;
-        let w = self.walk(b, &aty, line)?;
+        // RFC-0125 M1: a header a `while` hoisted is already in locals.
+        let (w, string) = match self.cached_walk(&args[0]) {
+            Some(w) => {
+                let string = w.byte;
+                (w, string)
+            }
+            None => {
+                let aty = self.expr(m, b, &args[0])?;
+                // A Map is not walkable and must not be reached as one: its
+                // length is field 2 where an Array's is field 1, so a `Walk`
+                // over it would index off the value pointer (M2c's refusal,
+                // now a branch instead).
+                if let Type::Map(_, val) = self.cx.resolve(&aty) {
+                    let mty = self.cx.resolve(&aty);
+                    return self.map_at(m, b, &mty, &val, &args[1], line);
+                }
+                let string = self.cx.resolve(&aty) == Type::Str;
+                (self.walk(b, &aty, line)?, string)
+            }
+        };
         self.expr_as(m, b, &args[1], &Type::Int)?;
         let idx = b.local(ValType::I64);
         b.ins(&Instruction::LocalSet(idx));
@@ -11041,16 +11961,16 @@ impl<'p> Fn_<'_, 'p> {
         };
         let elem = *elem;
         let al = self.layout_of(&aty, line)?;
-        let opt = Type::Option(Box::new(elem.clone()));
+        let opt = Type::option(elem.clone());
         let ol = self.layout_of(&opt, line)?;
         let out = b.alloc(ol.size, ol.align);
         // `None` first, then the `Some` arm overwrites the tag and the payload:
         // one destination, filled in place, which is destination-first with the
         // trivial arm pre-applied.
         b.slot(out + ol.fields[0]);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::I32Store8(byte()));
-        for f in [ol.fields[1], ol.fields[2]] {
+        b.ins(&Instruction::I64Const(0));
+        b.ins(&Instruction::I64Store(word8()));
+        for f in &ol.fields[1..] {
             b.slot(out + f);
             b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
@@ -11072,8 +11992,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalTee(last));
         b.ins(&Instruction::I64Store(word8()));
         b.slot(out + ol.fields[0]);
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Store8(byte()));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Store(word8()));
         b.slot(out + ol.fields[1]);
         self.elem_addr(b, &w, last);
         self.load_elem(b, &w, line)?;
@@ -11207,10 +12127,24 @@ impl<'p> Fn_<'_, 'p> {
 /// `{ i64 tag, i64 p0, .. }` with one word per payload slot of its widest
 /// variant. Inheriting them is not politeness — parity compares this backend's
 /// output against a build that uses the other one.
-enum Sum {
-    Opt(Type),
-    Res(Type, Type),
-    Enum(Vec<EnumVariant>),
+type Sum = Vec<EnumVariant>;
+
+/// The tag an arm tests, or `None` for the arm that tests nothing — RFC-0121's
+/// `Pattern::Other`, which a user cannot spell and which the switch's shape is
+/// read off ([`crate::two_way`]).
+fn tag_of(sum: &Sum, pat: &Pattern, line: usize) -> Result<Option<usize>, String> {
+    Ok(match pat {
+        Pattern::Other => None,
+        Pattern::Variant(name, _) => Some(
+            sum.iter()
+                .position(|v| v.name == *name)
+                .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
+        ),
+        // `??`'s pair (RFC-0079) names a TAG and not a variant: the desugar
+        // runs in the parser, where there is no type to name one. Tag 1 is the
+        // success side of every built-in sum (RFC-0126 §8.1).
+        _ => Some(usize::from(matches!(pat, Pattern::Success(_)))),
+    })
 }
 
 /// How one payload travels inside a sum's `i64` word.
@@ -11251,7 +12185,7 @@ impl<'p> Fn_<'_, 'p> {
     /// Whether a value of `ty` transitively owns heap — the frontend's own
     /// predicate, so this backend copies exactly what the textual one does.
     fn owns_heap(&self, ty: &Type) -> bool {
-        vyrn_frontend::own::owns_heap(&self.cx.sub(ty), &self.cx.types)
+        vyrn_frontend::declared::owns_heap(&self.cx.sub(ty), &self.cx.types)
     }
 
     /// `x.copy()`: the receiver's value is on the stack; replace it with one
@@ -11260,7 +12194,13 @@ impl<'p> Fn_<'_, 'p> {
     /// A `String` is the only owning value this backend keeps in a wasm local;
     /// everything else is an aggregate in the frame, so the copy is a byte copy
     /// of the shape followed by [`Fn_::copy_at`] over what the bytes point at.
-    fn copy_stack(&mut self, b: &mut Frame, ty: &Type, line: usize) -> Result<(), String> {
+    fn copy_stack(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         if !self.owns_heap(ty) {
             return Ok(());
         }
@@ -11283,7 +12223,7 @@ impl<'p> Fn_<'_, 'p> {
                 let a = b.local(ValType::I32);
                 b.slot(off);
                 b.ins(&Instruction::LocalSet(a));
-                self.copy_at(b, a, ty, line)?;
+                self.copy_at(m, b, a, ty, line)?;
                 b.ins(&Instruction::LocalGet(a));
                 Ok(())
             }
@@ -11313,7 +12253,9 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::LocalSet(n));
         b.ins(&Instruction::LocalGet(n));
         b.ins(&Instruction::LocalGet(n));
+        self.arena_route(b, true);
         b.ins(&Instruction::Call(self.cx.rt.str_new));
+        self.arena_route(b, false);
         b.ins(&Instruction::LocalSet(d));
         b.ins(&Instruction::LocalGet(d));
         b.ins(&Instruction::LocalGet(s));
@@ -11323,7 +12265,6 @@ impl<'p> Fn_<'_, 'p> {
             dst_mem: 0,
         });
         b.ins(&Instruction::LocalGet(d));
-        self.str_owned(b);
     }
 
     /// A fresh heap block of `bytes` holding a copy of `live` bytes from `src`,
@@ -11347,24 +12288,33 @@ impl<'p> Fn_<'_, 'p> {
         nb
     }
 
-    /// Release each of the first `count` elements of `buf` — the mirror of
-    /// [`Fn_::copy_each`], and RFC-0092 M2's half of census U4.
+    /// Walk the first `count` elements of `buf`, releasing each or giving each
+    /// a copy of its own — one loop, both directions, the way
+    /// [`Fn_::rel_body`] and [`Fn_::copy_body`] are one walk per type.
     ///
-    /// The gate is the element's own release ROW, not whether it reaches heap. A
-    /// record reaches two Strings and has no row until M3, and walking into one
-    /// here would free fields no rule says the array owns. A row is the proof;
-    /// `owns_heap` is only a reachability question.
-    fn rel_each(
+    /// The two gates are different questions and neither contains the other. A
+    /// release is gated on the element's own release ROW, which is `own`'s
+    /// proof that the container owns the element; walking into an element with
+    /// no row would free places no rule says the array owns. A copy is gated on
+    /// reachability, because a copy of a value that reaches heap has to
+    /// duplicate what it reaches whether or not anything releases it.
+    fn each(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
+        rel: bool,
         buf: u32,
         count: u32,
         stride: u32,
         elem: &Type,
         line: usize,
     ) -> Result<(), String> {
-        if self.cx.owned.release_kind(elem).is_none() {
+        let walks = if rel {
+            self.cx.owned.release_kind(elem).is_some()
+        } else {
+            self.owns_heap(elem)
+        };
+        if !walks {
             return Ok(());
         }
         let i = b.local(ValType::I32);
@@ -11390,58 +12340,11 @@ impl<'p> Fn_<'_, 'p> {
         }
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalSet(p));
-        self.rel_at(m, b, p, elem, line)?;
-        b.ins(&Instruction::LocalGet(i));
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalSet(i));
-        let back = self.br_to(again);
-        b.ins(&Instruction::Br(back));
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
-        self.depth -= 1;
-        Ok(())
-    }
-
-    /// Replace each of the first `count` elements of `buf` with a deep copy of
-    /// itself. No loop is emitted at all when the element owns no heap.
-    fn copy_each(
-        &mut self,
-        b: &mut Frame,
-        buf: u32,
-        count: u32,
-        stride: u32,
-        elem: &Type,
-        line: usize,
-    ) -> Result<(), String> {
-        if !self.owns_heap(elem) {
-            return Ok(());
+        if rel {
+            self.rel_at(m, b, p, elem, line)?;
+        } else {
+            self.copy_at(m, b, p, elem, line)?;
         }
-        let i = b.local(ValType::I32);
-        let p = b.local(ValType::I32);
-        b.ins(&Instruction::I32Const(0));
-        b.ins(&Instruction::LocalSet(i));
-        let out = self.depth;
-        b.ins(&Instruction::Block(BlockType::Empty));
-        self.depth += 1;
-        let again = self.depth;
-        b.ins(&Instruction::Loop(BlockType::Empty));
-        self.depth += 1;
-        b.ins(&Instruction::LocalGet(i));
-        b.ins(&Instruction::LocalGet(count));
-        b.ins(&Instruction::I32GeU);
-        let leave = self.br_to(out);
-        b.ins(&Instruction::BrIf(leave));
-        b.ins(&Instruction::LocalGet(buf));
-        b.ins(&Instruction::LocalGet(i));
-        if stride != 1 {
-            b.ins(&Instruction::I32Const(stride as i32));
-            b.ins(&Instruction::I32Mul);
-        }
-        b.ins(&Instruction::I32Add);
-        b.ins(&Instruction::LocalSet(p));
-        self.copy_at(b, p, elem, line)?;
         b.ins(&Instruction::LocalGet(i));
         b.ins(&Instruction::I32Const(1));
         b.ins(&Instruction::I32Add);
@@ -11456,11 +12359,33 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// The bytes at `a` already hold a copy of a value of `ty`. Give that copy
-    /// its own heap.
-    fn copy_at(&mut self, b: &mut Frame, a: u32, ty: &Type, line: usize) -> Result<(), String> {
+    /// its own heap — as a CALL, the same shape a release takes
+    /// ([`Fn_::rel_at`]). The walk is [`Fn_::copy_body`], written once per type.
+    fn copy_at(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         if !self.owns_heap(ty) {
             return Ok(());
         }
+        let f = self.shape_fn(m, false, ty, line);
+        b.ins(&Instruction::LocalGet(a)).ins(&Instruction::Call(f));
+        Ok(())
+    }
+
+    /// What copying a value of `ty` MEANS: the storage it owns, duplicated.
+    fn copy_body(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        a: u32,
+        ty: &Type,
+        line: usize,
+    ) -> Result<(), String> {
         match self.cx.resolve(ty) {
             Type::Str => {
                 b.ins(&Instruction::LocalGet(a));
@@ -11495,7 +12420,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::I64Load(at(l.fields[1])));
                 b.ins(&Instruction::I64Store(at(l.fields[2])));
-                self.copy_each(b, nb, n, stride, &inner, line)
+                self.each(m, b, false, nb, n, stride, &inner, line)
             }
             // A `SmallArray<T, N>` that has not spilled owns no buffer, so the
             // header copy is the whole copy of its storage.
@@ -11541,7 +12466,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalSet(base));
                 self.depth -= 1;
                 b.ins(&Instruction::End);
-                self.copy_each(b, base, n, stride, &inner, line)
+                self.each(m, b, false, base, n, stride, &inner, line)
             }
             Type::Map(kt, vt) => {
                 // String keys are dup'd per entry; Int64 keys copy with the
@@ -11584,7 +12509,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::LocalGet(nb));
                     b.ins(&Instruction::I32Store(word_at(l.fields[i])));
                     if !(ik && i == 0) {
-                        self.copy_each(b, nb, n, stride, &elem, line)?;
+                        self.each(m, b, false, nb, n, stride, &elem, line)?;
                     }
                 }
                 // The index is copied rather than rebuilt: it holds POSITIONS,
@@ -11620,7 +12545,7 @@ impl<'p> Fn_<'_, 'p> {
                     b.ins(&Instruction::I32Const(l.fields[i] as i32));
                     b.ins(&Instruction::I32Add);
                     b.ins(&Instruction::LocalSet(p));
-                    self.copy_at(b, p, &f.ty, line)?;
+                    self.copy_at(m, b, p, &f.ty, line)?;
                 }
                 Ok(())
             }
@@ -11629,55 +12554,29 @@ impl<'p> Fn_<'_, 'p> {
                 let count = b.local(ValType::I32);
                 b.ins(&Instruction::I32Const(n as i32));
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(b, a, count, stride, &inner, line)
+                self.each(m, b, false, a, count, stride, &inner, line)
             }
-            Type::Option(inner) => {
-                let l = self.layout_of(ty, line)?;
-                let w = self.word2(&inner)?;
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.copy_word(b, a, l.fields[1], &inner, w, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            Type::Result(ok, err) => {
-                let l = self.layout_of(ty, line)?;
-                let (wo, we) = (self.word2(&ok)?, self.word2(&err)?);
-                b.ins(&Instruction::LocalGet(a));
-                b.ins(&Instruction::I32Load8U(byte()));
-                b.ins(&Instruction::If(BlockType::Empty));
-                self.depth += 1;
-                self.copy_word(b, a, l.fields[1], &ok, wo, line)?;
-                b.ins(&Instruction::Else);
-                self.copy_word(b, a, l.fields[1], &err, we, line)?;
-                self.depth -= 1;
-                b.ins(&Instruction::End);
-                Ok(())
-            }
-            // A user enum: the payload slots of the live variant, and only the
-            // ones whose declared type owns something. The tag is the variant's
-            // position, exactly as `match` reads it.
-            Type::Enum(vs) => {
+            // ANY sum: the payload slots of the live variant, and only the ones
+            // whose declared type owns something. The tag is the variant's
+            // position, exactly as `match` reads it. The mirror of `rel_at`'s own
+            // arm, and one walk for the same reason (RFC-0126 §8.11, M4a).
+            Type::Enum(_) => {
+                let vs = self.cx.sum_vs(ty).unwrap_or_default();
                 let l = self.layout_of(ty, line)?;
                 for (tag, var) in vs.iter().enumerate() {
                     if !var.payload.iter().any(|p| self.owns_heap(p)) {
                         continue;
                     }
-                    b.ins(&Instruction::LocalGet(a));
-                    b.ins(&Instruction::I64Load(word8()));
-                    b.ins(&Instruction::I64Const(tag as i64));
-                    b.ins(&Instruction::I64Eq);
+                    tag_eq(b, a, tag as i64);
                     b.ins(&Instruction::If(BlockType::Empty));
                     self.depth += 1;
                     for (j, pty) in var.payload.clone().iter().enumerate() {
                         if !self.owns_heap(pty) {
                             continue;
                         }
-                        let w = self.word1(pty);
-                        self.copy_word(b, a, l.fields[j + 1], pty, w, line)?;
+                        let at = self.cx.payload_slot(&var.payload, j);
+                        let w = self.word2(pty)?;
+                        self.copy_word(m, b, a, l.fields[at], pty, w, line)?;
                     }
                     self.depth -= 1;
                     b.ins(&Instruction::End);
@@ -11713,6 +12612,7 @@ impl<'p> Fn_<'_, 'p> {
     /// and everything wider is a pointer to a block this copies and then walks.
     fn copy_word(
         &mut self,
+        m: &mut Module,
         b: &mut Frame,
         a: u32,
         off: u32,
@@ -11741,7 +12641,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Const(size as i32));
                 b.ins(&Instruction::LocalSet(bytes));
                 let nb = self.dup_buf(b, src, bytes, bytes);
-                self.copy_at(b, nb, pty, line)?;
+                self.copy_at(m, b, nb, pty, line)?;
                 b.ins(&Instruction::LocalGet(a));
                 b.ins(&Instruction::LocalGet(nb));
                 b.ins(&Instruction::I64ExtendI32U);
@@ -11753,12 +12653,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     fn sum_of(&self, ty: &Type) -> Option<Sum> {
-        match self.cx.resolve(ty) {
-            Type::Option(t) => Some(Sum::Opt(*t)),
-            Type::Result(a, b) => Some(Sum::Res(*a, *b)),
-            Type::Enum(vs) => Some(Sum::Enum(vs)),
-            _ => None,
-        }
+        self.cx.sum_vs(ty)
     }
 
     /// How an `Option`/`Result` payload of type `t` fills its two words.
@@ -11775,19 +12670,14 @@ impl<'p> Fn_<'_, 'p> {
             // `Word::Float` was added for.
             Repr::Scalar(ValType::V128) => Word::Boxed,
             Repr::Scalar(v) => Word::Ext(v),
-            Repr::Agg(_) if self.cx.ll(t) == "{ i64, i64 }" => Word::Inline2,
+            // `words(t) == 2` and not the shape STRING: since RFC-0126 §8.4 a
+            // one-slot sum prints `{ i64, i64 }` too, and a payload that is
+            // itself a sum rides in one slot, boxed. Reading the string here
+            // gave a nested `Option` two slots where the shape gave it one, and
+            // the second word was read as the payload.
+            Repr::Agg(_) if self.cx.words(t) == 2 => Word::Inline2,
             _ => Word::Boxed,
         })
-    }
-
-    /// How a user-enum payload of type `t` fills its ONE word: an `i64` is the
-    /// word, and everything else is a pointer to itself.
-    fn word1(&self, t: &Type) -> Word {
-        if self.cx.ll(t) == "i64" {
-            Word::Direct
-        } else {
-            Word::Boxed
-        }
     }
 
     /// Copy the value on the stack (a scalar, or an aggregate's address) onto
@@ -11838,6 +12728,7 @@ impl<'p> Fn_<'_, 'p> {
     }
 
     /// Build an `Option`/`Result` value: the tag, then the two payload words.
+    #[allow(clippy::too_many_arguments)]
     fn build_sum2(
         &mut self,
         m: &mut Module,
@@ -11846,84 +12737,72 @@ impl<'p> Fn_<'_, 'p> {
         tag: i32,
         payload: Option<(&Expr, Type)>,
         line: usize,
+        hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
-        let Repr::Agg(l) = self.cx.repr(ty, line)? else {
-            return unsupported("a sum that is not an aggregate", line);
-        };
-        let off = b.alloc(l.size, l.align);
-        b.slot(off);
-        b.ins(&Instruction::I32Const(tag));
-        b.ins(&Instruction::I32Store8(byte()));
-        let (w0, w1) = (off + l.fields[1], off + l.fields[2]);
-        match payload {
-            None => {
-                for a in [w0, w1] {
-                    b.slot(a);
-                    b.ins(&Instruction::I64Const(0));
-                    b.ins(&Instruction::I64Store(word8()));
-                }
-            }
-            Some((e, t)) if self.word2(&t)? == Word::Inline2 => {
-                // Two words already side by side: one copy, no encoding.
-                b.slot(w0);
-                self.expr_as(m, b, e, &t)?;
-                b.ins(&Instruction::I32Const(16));
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
-            Some((e, t)) => {
-                b.slot(w0);
-                self.expr_as(m, b, e, &t)?;
-                match self.word2(&t)? {
-                    Word::Direct => {}
-                    Word::Ext(_) => {
-                        b.ins(&Instruction::I64ExtendI32U);
-                    }
-                    Word::Float(v) => float_into_word(b, v),
-                    _ => self.box_value(b, &t, line)?,
-                }
-                b.ins(&Instruction::I64Store(word8()));
-                b.slot(w1);
-                b.ins(&Instruction::I64Const(0));
-                b.ins(&Instruction::I64Store(word8()));
-            }
-        }
-        b.slot(off);
-        Ok(ty.clone())
+        let args: Vec<&Expr> = payload.iter().map(|(e, _)| *e).collect();
+        let tys: Vec<Type> = payload.iter().map(|(_, t)| t.clone()).collect();
+        self.build_variant(m, b, ty, tag as u64, &args, &tys, line, hint)
     }
 
-    /// Build a user-enum value: the tag, then one word per payload.
-    fn build_enum(
+    /// Build a sum value: the tag, then the live variant's payloads in the slots
+    /// they occupy. ONE builder since M2 — a built-in sum and a declared enum
+    /// have one tag width and one payload encoding (RFC-0126 §8.4), so the two
+    /// that stood here differed only in which one they refused.
+    #[allow(clippy::too_many_arguments)]
+    fn build_variant(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         ty: &Type,
         tag: u64,
-        args: &[Expr],
+        args: &[&Expr],
         payload: &[Type],
         line: usize,
+        hint: Option<(Dest, Type)>,
     ) -> Result<Type, String> {
         if args.len() != payload.len() {
             return unsupported("an enum variant at this arity", line);
         }
         let Repr::Agg(l) = self.cx.repr(ty, line)? else {
-            return unsupported("an enum that is not an aggregate", line);
+            return unsupported("a sum that is not an aggregate", line);
         };
-        let off = b.alloc(l.size, l.align);
-        b.slot(off);
+        // RFC-0125 M1: the consumer's storage when it holds this very type.
+        let (dest, used) = match hint {
+            Some((d, t)) if self.cx.ll(&t) == self.cx.ll(ty) => (d, true),
+            _ => (Dest::Slot(b.alloc(l.size, l.align)), false),
+        };
+        dest.addr(b, 0);
         b.ins(&Instruction::I64Const(tag as i64));
         b.ins(&Instruction::I64Store(word8()));
+        // Every slot this variant does not fill is zeroed: a `None` and a
+        // narrower variant must not leave the widest one's words behind.
+        let mut filled = 1;
         for (i, (a, t)) in args.iter().zip(payload).enumerate() {
-            b.slot(off + l.fields[1 + i]);
-            self.expr_as(m, b, a, t)?;
-            if self.word1(t) == Word::Boxed {
-                self.box_value(b, t, line)?;
+            let at = self.cx.payload_slot(payload, i);
+            if self.word2(t)? == Word::Inline2 {
+                // Two words already side by side: one copy, no encoding.
+                dest.addr(b, l.fields[at]);
+                self.expr_as(m, b, a, t)?;
+                b.ins(&Instruction::I32Const(16));
+                b.ins(&Instruction::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                });
+            } else {
+                dest.addr(b, l.fields[at]);
+                self.expr_as(m, b, a, t)?;
+                self.encode_word2(b, t, line)?;
+                b.ins(&Instruction::I64Store(word8()));
             }
+            filled = at + self.cx.words(t);
+        }
+        for slot in filled..l.fields.len() {
+            dest.addr(b, l.fields[slot]);
+            b.ins(&Instruction::I64Const(0));
             b.ins(&Instruction::I64Store(word8()));
         }
-        b.slot(off);
+        dest.addr(b, 0);
+        self.dest_used = used;
         Ok(ty.clone())
     }
 
@@ -11960,15 +12839,23 @@ impl<'p> Fn_<'_, 'p> {
             .as_ref()
             .and_then(|t| self.sum_of(t).map(|s| (t.clone(), s)));
         let (ty, payload) = match picked {
-            Some((t, Sum::Opt(p))) if name == "Some" => (t, p),
-            Some((t, Sum::Res(ok, er))) if name != "Some" => {
-                (t, if name == "Ok" { ok } else { er })
+            // The position's sum names the payload the constructor carries: the
+            // variant with that name, in the variant list `sum_of` answers for
+            // every sum since RFC-0126 §8.11's M4b.
+            Some((t, vs)) if vs.iter().any(|v| v.name == name && v.payload.len() == 1) => {
+                let p = vs
+                    .iter()
+                    .find(|v| v.name == name)
+                    .expect("the guard just found it")
+                    .payload[0]
+                    .clone();
+                (t, p)
             }
             // An unexpected `Some` still types itself from its payload;
             // `Ok`/`Err` cannot, because the other half is unknowable.
             _ if name == "Some" => {
                 let p = self.peek(arg, line)?;
-                return Ok(Some((Type::Option(Box::new(p.clone())), p)));
+                return Ok(Some((Type::option(p.clone()), p)));
             }
             _ => return Ok(None),
         };
@@ -11993,12 +12880,13 @@ impl<'p> Fn_<'_, 'p> {
         name: &str,
         args: &[Expr],
         line: usize,
+        hint: Option<(Dest, Type)>,
     ) -> Result<Option<Type>, String> {
         let want = self.expected_sum();
         match name {
             "None" => {
                 let ty = want.ok_or_else(|| gap("a `None` with no expected Option type", line))?;
-                return self.build_sum2(m, b, &ty, 0, None, line).map(Some);
+                return self.build_sum2(m, b, &ty, 0, None, line, hint).map(Some);
             }
             "Some" | "Ok" | "Err" => {
                 if args.len() != 1 {
@@ -12011,7 +12899,7 @@ impl<'p> Fn_<'_, 'p> {
                 };
                 let tag = i32::from(name != "Err");
                 return self
-                    .build_sum2(m, b, &ty, tag, Some((&args[0], payload)), line)
+                    .build_sum2(m, b, &ty, tag, Some((&args[0], payload)), line, hint)
                     .map(Some);
             }
             _ => {}
@@ -12054,7 +12942,8 @@ impl<'p> Fn_<'_, 'p> {
                 (ty, tag, payload)
             }
         };
-        self.build_enum(m, b, &ty, tag, args, &payload, line)
+        let refs: Vec<&Expr> = args.iter().collect();
+        self.build_variant(m, b, &ty, tag, &refs, &payload, line, hint)
             .map(Some)
     }
 
@@ -12066,37 +12955,45 @@ impl<'p> Fn_<'_, 'p> {
         pat: &Pattern,
         line: usize,
     ) -> Result<Vec<(String, Type)>, String> {
-        Ok(match (sum, pat) {
-            (Sum::Opt(t), Pattern::Some(n)) => vec![(n.clone(), t.clone())],
-            (Sum::Opt(_), Pattern::None) => vec![],
-            (Sum::Res(t, _), Pattern::Ok(n)) => vec![(n.clone(), t.clone())],
-            (Sum::Res(_, e), Pattern::Err(n)) => vec![(n.clone(), e.clone())],
-            // `??`'s type-agnostic pair (RFC-0079) — the sum decides which side
-            // each names, which is the same thing `try_` does one screen down.
-            (Sum::Opt(t), Pattern::Success(n)) | (Sum::Res(t, _), Pattern::Success(n)) => {
-                vec![(n.clone(), t.clone())]
-            }
-            (Sum::Opt(_), Pattern::Failure(_)) => vec![],
-            (Sum::Res(_, e), Pattern::Failure(n)) => vec![(n.clone(), e.clone())],
+        // The variant the pattern names, in the list `sum_of` answers for every
+        // sum since RFC-0126 §8.11's M4b. `??`'s pair (RFC-0079) names a TAG
+        // rather than a variant — variant 1 succeeds, variant 0 fails — which is
+        // the one thing the parser could not do; a sum wider than two has no
+        // success side as a pattern.
+        let (at, binds): (usize, &[Binder]) = match pat {
             // The refutable-`let` desugar's default arm (RFC-0121): any
             // variant, nothing bound.
-            (_, Pattern::Other) => vec![],
-            (Sum::Enum(vs), Pattern::Variant(name, binds)) => {
-                let v = vs
-                    .iter()
-                    .find(|v| v.name == *name)
-                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
-                if v.payload.len() != binds.len() {
-                    return unsupported(&format!("the variant `{name}` at this arity"), line);
-                }
-                binds
-                    .iter()
-                    .cloned()
-                    .zip(v.payload.iter().cloned())
-                    .collect()
-            }
+            Pattern::Other => return Ok(Vec::new()),
+            Pattern::Variant(name, binds) => (
+                sum.iter()
+                    .position(|v| v.name == *name)
+                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?,
+                binds,
+            ),
+            Pattern::Success(n) | Pattern::Failure(n) if sum.len() == 2 => (
+                usize::from(matches!(pat, Pattern::Success(_))),
+                std::slice::from_ref(n),
+            ),
             _ => return unsupported("a pattern of the wrong shape for its scrutinee", line),
-        })
+        };
+        let v = &sum[at];
+        // A `Failure` over a nullary variant binds nothing — an `Option`'s tag 0
+        // has no payload, and that is exactly what this per-arm seam is for.
+        if matches!(pat, Pattern::Success(_) | Pattern::Failure(_)) {
+            return Ok(v
+                .payload
+                .first()
+                .map(|t| vec![(binds[0].name.clone(), t.clone())])
+                .unwrap_or_default());
+        }
+        if v.payload.len() != binds.len() {
+            return unsupported(&format!("the variant `{}` at this arity", v.name), line);
+        }
+        Ok(binds
+            .iter()
+            .map(|b| b.name.clone())
+            .zip(v.payload.iter().cloned())
+            .collect())
     }
 
     /// `match` — the n-way join M0 warned about, lowered destination-first.
@@ -12106,23 +13003,40 @@ impl<'p> Fn_<'_, 'p> {
     /// copied into a slot allocated BEFORE the first test. Nothing here counts
     /// arms, which is the property that makes 46 four-to-seven-way joins cost
     /// exactly what 103 diamonds cost.
+    #[allow(clippy::too_many_arguments)]
     fn match_expr(
         &mut self,
         m: &mut Module,
         b: &mut Frame,
         key: usize,
         scrutinee: &Expr,
-        arms: &[MatchArm],
+        arms: &[ArmRef],
+        form: &str,
         line: usize,
     ) -> Result<Type, String> {
         let st = self.expr(m, b, scrutinee)?;
         let sum = self
             .sum_of(&st)
-            .ok_or_else(|| gap(&format!("a `match` on `{st}`"), line))?;
+            .ok_or_else(|| gap(&format!("a {form} on `{st}`"), line))?;
+        // The shape, asked once, before anything is emitted: two arms, one
+        // tag and a default is a two-way branch, and every other shape is the
+        // chain (RFC-0125 §3 M5, and [`crate::two_way`]).
+        let tags: Vec<Option<usize>> = arms
+            .iter()
+            .map(|a| tag_of(&sum, a.pattern, line))
+            .collect::<Result<_, _>>()?;
+        let two = crate::two_way(&tags);
+        // One scratch slot for every switch. `if let` took a local of its
+        // own, on the argument that "an inner one's scrutinee would take the
+        // same scratch slot back" — which the emitted order says is not so:
+        // nothing reads the address after the arm's binds, and an inner
+        // construct is inside an arm. So the two forms share the slot, and a
+        // function that writes both now declares one local where it declared
+        // two.
         let addr = self.scratch(b, ValType::I32, 3);
         b.ins(&Instruction::LocalSet(addr));
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
-            return unsupported("a `match` on a non-aggregate", line);
+            return unsupported(&format!("a {form} on a non-aggregate"), line);
         };
         // The scrutinee's release, where `own` says this match is its last owner
         // — the `if let` release above, at the construct that also carries a
@@ -12133,7 +13047,12 @@ impl<'p> Fn_<'_, 'p> {
         // `if let` states: an arm that returns walks the frames, and an arm may
         // build over the scratch the scrutinee was left in.
 
-        if self.drops.contains_key(&key) {
+        // A ROW, and no per-binding table: a construct that TOOK its scrutinee
+        // has no row, and a slot registered for a release nobody emits is a
+        // slot no later statement can reuse — the frame then grows once per
+        // construct, and one generated `main` of 316 matches went past the
+        // 8 KB limit (RFC-0125 §3 M3, the walk's deletion).
+        if self.releases_whole(key) {
             if let Some(r) = self.rel_for(&st, line)? {
                 let own = b.alloc(sl.size, sl.align);
                 b.slot(own);
@@ -12143,52 +13062,109 @@ impl<'p> Fn_<'_, 'p> {
                     src_mem: 0,
                     dst_mem: 0,
                 });
-                self.register_rel(key, Place::Slot(own), r);
+                self.register_rel(b, key, Place::Slot(own), r);
             }
         }
-        // The arms' common type — [`Fn_::match_ty`], the same answer `peek` gives a
-        // `match` in a branch. `expr_as` re-checks every arm against it, so a wrong
-        // guess here is a compile error rather than a miscompile.
-        let want = self.match_ty(&sum, arms, line)?;
-        let want = self.join_ty(want);
+        // A block arm (RFC-0118) makes this a STATEMENT match: the merge
+        // carries nothing, whatever the expression arms beside it compute is
+        // dropped, and the checker's answer for the node is about a value the
+        // construct does not hand out. Every other match is one value, and the
+        // checker said which type it has — `expr_as` then coerces each arm's
+        // own shape into it.
+        let want = if arms.iter().any(ArmRef::is_block) {
+            Type::Unit
+        } else {
+            self.join_ty(key, line)?
+        };
         let r = self.cx.repr(&want, line)?;
 
         let dest = match &r {
             Repr::Agg(l) => Some((b.alloc(l.size, l.align), l.size)),
             _ => None,
         };
-        let out = self.depth;
-        b.ins(&Instruction::Block(match &r {
+        // A two-way branch is an `if`/`else` and joins where it ends, so it
+        // needs no block to leave and no `br` to leave it by. Every other
+        // shape is a chain of `if`s inside one block, and each arm branches
+        // out of it.
+        let bt = match &r {
             Repr::Scalar(v) => BlockType::Result(*v),
             _ => BlockType::Empty,
-        }));
-        self.depth += 1;
+        };
+        let out = self.depth;
+        if two.is_none() {
+            b.ins(&Instruction::Block(bt));
+            self.depth += 1;
+        }
 
         // RFC-0114 Rule N at a match join, keyed by this expression's address.
-        let ers = self
-            .cx
-            .plan
-            .edge_releases_at(key)
-            .cloned()
-            .unwrap_or_default();
-        for (arm_ix, arm) in arms.iter().enumerate() {
-            self.tag_test(b, addr, &sum, &arm.pattern, line)?;
-            b.ins(&Instruction::If(BlockType::Empty));
-            self.depth += 1;
+        let ers = self.cx.edge_rows(key);
+        let free_box = self.frees_boxes(scrutinee, key);
+        // The tagged arm goes first in a two-way branch, whichever side the
+        // source wrote it on: the `if` tests a tag and the `else` is what is
+        // left.
+        let order: Vec<usize> = match two {
+            Some((at, _)) => vec![at, 1 - at],
+            None => (0..arms.len()).collect(),
+        };
+        // Where the `else` went, so an arm that writes nothing can take it
+        // back — `if let` with no `else` is the whole of that case.
+        let mut els = None;
+        for (slot, arm_ix) in order.into_iter().enumerate() {
+            let arm = &arms[arm_ix];
+            match two {
+                Some(_) if slot == 1 => {
+                    els = Some(b.here());
+                    b.ins(&Instruction::Else);
+                }
+                Some(_) => {
+                    self.tag_test(b, addr, &sum, arm.pattern, line)?;
+                    b.ins(&Instruction::If(bt));
+                    self.depth += 1;
+                }
+                None => {
+                    self.tag_test(b, addr, &sum, arm.pattern, line)?;
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                }
+            }
 
             let mark = self.scope.len();
-            let binds = self.pattern_binds(&sum, &arm.pattern, line)?;
-            let single = binds.len() == 1;
-            let mut bound: Option<(Place, Type)> = None;
-            for (i, (n, t)) in binds.into_iter().enumerate() {
-                let place = self.bind_payload(b, addr, &sum, &sl, i, &t, line)?;
-                if single {
-                    bound = Some((place.clone(), t.clone()));
+            let binds = self.pattern_binds(&sum, arm.pattern, line)?;
+            let ptys: Vec<Type> = binds.iter().map(|(_, t)| t.clone()).collect();
+            let mut bound: Vec<(String, Place, Type)> = Vec::new();
+            // The binders' own plan keys, taken off the pattern the reader
+            // wrote — the same address the core keys them by
+            // ([`vyrn_frontend::own::binder_key`]). A synthetic pattern this
+            // backend builds has none in the plan and registers nothing.
+            let keys: Vec<usize> = match arm.pattern {
+                Pattern::Variant(_, ns) => ns
+                    .iter()
+                    .map(|n| vyrn_frontend::own::binder_key(n))
+                    .collect(),
+                Pattern::Success(n) | Pattern::Failure(n) => {
+                    vec![vyrn_frontend::own::binder_key(n)]
                 }
+                Pattern::Other => Vec::new(),
+            };
+            for (i, (n, t)) in binds.into_iter().enumerate() {
+                let place = self.bind_payload(b, addr, &sl, &ptys, i, &t, line, free_box)?;
+                // A binder the arm owns is released at every exit INSIDE the
+                // arm, and the placer's row names it there (RFC-0125 §3 M3,
+                // the walk's deletion). The arm's END is the other half and
+                // `arm_row` below states it; the two are exclusive, since a
+                // binder handed out or already freed is held at neither.
+                if let Some(key) = keys.get(i).copied() {
+                    if self.releases_whole(key) {
+                        if let Some(rel) = self.rel_for(&t, line)? {
+                            self.register_rel(b, key, place.clone(), rel);
+                        }
+                    }
+                }
+                bound.push((n.clone(), place.clone(), t.clone()));
                 self.scope.push((n, place, t));
             }
             match (&arm.body, dest) {
-                (ArmBody::Expr(body), Some((off, size))) => {
+                (BodyRef::Expr(body), Some((off, size))) => {
                     b.slot(off);
                     self.expr_as(m, b, body, &want)?;
                     b.ins(&Instruction::I32Const(size as i32));
@@ -12201,39 +13177,74 @@ impl<'p> Fn_<'_, 'p> {
                 // an expression arm beside one computes and drops — `want` is
                 // Unit whenever any arm is a block, so a dest never exists on
                 // this path.
-                (ArmBody::Expr(body), None) if matches!(want, Type::Unit) => {
+                (BodyRef::Expr(body), None) if matches!(want, Type::Unit) => {
                     let got = self.expr(m, b, body)?;
                     if !matches!(self.cx.repr(&got, line)?, Repr::Unit) {
                         b.ins(&Instruction::Drop);
                     }
                 }
-                (ArmBody::Expr(body), None) => self.expr_as(m, b, body, &want)?,
-                (ArmBody::Block(blk), _) => self.block(m, b, blk)?,
+                (BodyRef::Expr(body), None) => self.expr_as(m, b, body, &want)?,
+                (BodyRef::Block(blk), _) => self.block(m, b, blk)?,
             }
-            // Round forty: the unmoved payload binder — the textual
-            // backend's `gen_arm_body` twin.
-            if self.cx.plan.arm_payload_free(key, arm_ix as u32).is_some() && self.region_depth == 0
-            {
-                if let Some((place, ty)) = &bound {
+            // Round forty: the unmoved payload binders the row names — the
+            // textual backend's `gen_arm_body` twin.
+            let owed = self.cx.arm_row(key, arm_ix as u32);
+            if let Some(rows) = owed {
+                for (n, place, ty) in &bound {
+                    let Some((_, holes)) = rows.iter().find(|(r, _)| r == n) else {
+                        continue;
+                    };
                     let (place, ty) = (place.clone(), ty.clone());
-                    if let Some(rel) = self.rel_for(&ty, line)? {
+                    if let Some(mut rel) = self.rel_for(&ty, line)? {
+                        // RFC-0125 M3: the arm handed part of the binder out.
+                        if let Rel::Deep(t, _) = rel {
+                            rel = Rel::Deep(t, holes.clone());
+                        }
                         self.emit_rel(m, b, place, &rel, line)?;
                     }
                 }
             }
+            // A binder's scope is its arm, and so is the row that names it:
+            // no exit past this point can reach one. Un-pinning the slot here
+            // is what keeps the frame the size it was — a row held to the
+            // function's `return` would hold its slot with it, and one
+            // generated `main` grew past the 8 KB frame limit
+            // (`numbers.rs`'s differential parser).
+            for key in &keys {
+                self.rel_slots.remove(key);
+                self.rel_pending.retain(|(k, _)| k != key);
+            }
             self.scope.truncate(mark);
             self.emit_edge_releases(m, b, &ers, arm_ix as u32, line)?;
-            let d = self.br_to(out);
-            b.ins(&Instruction::Br(d));
-
+            match two {
+                Some(_) if slot == 0 => {}
+                Some(_) => {
+                    // An `else` that wrote nothing is no `else` at all. A
+                    // branch that carries a value always writes one, so only
+                    // an empty-result `if` can lose it.
+                    if let Some(at) =
+                        els.filter(|at| b.here() == at + 1 && matches!(bt, BlockType::Empty))
+                    {
+                        b.rewind(at);
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                None => {
+                    let d = self.br_to(out);
+                    b.ins(&Instruction::Br(d));
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+            }
+        }
+        if two.is_none() {
+            // The checker proves the arms exhaustive; the validator cannot see
+            // the proof, so it is told instead.
+            b.ins(&Instruction::Unreachable);
             self.depth -= 1;
             b.ins(&Instruction::End);
         }
-        // The checker proves the arms exhaustive; the validator cannot see the
-        // proof, so it is told instead.
-        b.ins(&Instruction::Unreachable);
-        self.depth -= 1;
-        b.ins(&Instruction::End);
         // The fall-through release, after the arms have rejoined and before the
         // aggregate result's address is pushed. A scalar result is already on
         // the stack here and the release is stack-neutral, so it sits under it.
@@ -12255,8 +13266,7 @@ impl<'p> Fn_<'_, 'p> {
     /// AFTER the block every exit branches to. So this writes the sum through
     /// `dest` exactly as [`Stmt::Return`] does and takes the same `br` to the same
     /// block — which is why `?` needs no reclamation of its own and cannot leak a
-    /// frame or skip a copy-back. (`drop` is a no-op in this backend, so the
-    /// textual emitter's `emit_all_drops` before its `ret` has nothing to answer.)
+    /// frame or skip a copy-back.
     ///
     /// The success path is the FALL-THROUGH, not an arm: the failing side branches
     /// away, so there is nothing to join and no `peek` to get wrong. The `if` is
@@ -12272,23 +13282,37 @@ impl<'p> Fn_<'_, 'p> {
         at: usize,
     ) -> Result<Type, String> {
         let st = self.expr(m, b, e)?;
-        // The success pattern's binder name is unread — `tag_test` and
-        // `bind_payload` both take the type from `sum`, not from the pattern — so
-        // it is spelled empty rather than invented.
-        let (sum, ok_ty, ok_pat) = match self.sum_of(&st) {
-            Some(Sum::Opt(t)) => (Sum::Opt(t.clone()), t, Pattern::Some(String::new())),
-            Some(Sum::Res(t, err)) => (Sum::Res(t.clone(), err), t, Pattern::Ok(String::new())),
-            // Anything else asks `Fallible` (RFC-0080 M3) instead of the tag.
+        // Tag 1 is the success side of the two BUILT-IN sums (§8.1); every other
+        // sum asks `Fallible` (RFC-0080 M3) instead of the tag. The test is the
+        // variant NAMES, not the arity: a declared `| Full(T) | Gone(String)`
+        // has two variants and is not a `Result` (RFC-0126 §8.16).
+        let (sum, ok_ty) = match self.sum_of(&st) {
+            Some(vs) if ftypes::is_builtin_sum(&vs) && vs[1].payload.len() == 1 => {
+                let ok_ty = vs[1].payload[0].clone();
+                (vs, ok_ty)
+            }
             _ => return self.try_fallible(m, b, &st, line, at),
         };
+        // "Tag 1 succeeds" is [`Pattern::Success`], which `ast.rs` says was added
+        // for exactly this — "the same trick `Expr::Try` plays for `?`, moved
+        // into `Pattern`". A `Variant` rebuilt here from `vs[1].name` said it a
+        // second time. The binder is unread either way: `tag_test` takes the tag
+        // from the pattern and `bind_payload` the type from the sum.
+        let ok_pat = Pattern::Success(Binder::synthetic(""));
         let Repr::Agg(sl) = self.cx.repr(&st, line)? else {
             return unsupported("`?` on a non-aggregate sum", line);
         };
         // The propagated value is the WHOLE sum, byte for byte, which is only
-        // sound if the two are the same shape — `{ i1, i64, i64 }` on both sides,
-        // differing at most in a payload half the failing tag says is not there.
-        // The textual backend gets this for free (`ret { i1, i64, i64 } %agg`); a
-        // memcpy has a width, so the width is checked rather than assumed.
+        // sound if the two are the same shape. Since RFC-0126 §8.4 a sum's slot
+        // count follows its widest payload, so the two really can differ, and a
+        // memcpy has a width — so the width is checked rather than assumed.
+        //
+        // The checker's rule does not guarantee it: `check_try`'s `Option` arm
+        // reads the return as `Some(_)` and never compares the payloads, because
+        // only the FAILING variant travels. So `Option<fn(Int64, Int64) -> Int64>`
+        // unwrapped in a function returning `Option<Int64>` types, and arrives
+        // here two words wide against one. A width is a LAYOUT, so it is refused
+        // as a gap rather than diagnosed (RFC-0125 §3 M3, the `?` census).
         let ret_ty = self.ret_ty.clone();
         if self.sum_of(&ret_ty).is_none() || self.cx.ll(&ret_ty) != self.cx.ll(&st) {
             return unsupported(
@@ -12327,7 +13351,23 @@ impl<'p> Fn_<'_, 'p> {
         // Reusing `bind_payload` costs one local or slot that nothing else reads,
         // and buys the four payload shapes (direct, extended, inline pair, boxed)
         // already being right here because they are right in `match`.
-        let place = self.bind_payload(b, addr, &sum, &sl, 0, &ok_ty, line)?;
+        //
+        // The box question is `match`'s, so it is asked in `match`'s words: a
+        // `?` IS a switch, the core lowers it as one, and the success arm reads
+        // the payload out of the box exactly as an arm binder does. Passing
+        // `false` here was the whole of the `?` residue — every successful
+        // `parseJson` left the box its `Ok` payload came in.
+        let free_box = self.frees_boxes(e, at);
+        let place = self.bind_payload(
+            b,
+            addr,
+            &sl,
+            std::slice::from_ref(&ok_ty),
+            0,
+            &ok_ty,
+            line,
+            free_box,
+        )?;
         match place {
             Place::Local(l) => {
                 b.ins(&Instruction::LocalGet(l));
@@ -12400,6 +13440,7 @@ impl<'p> Fn_<'_, 'p> {
             b,
             &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "isSuccess"),
             &recv,
+            &[],
             line,
         )?;
         b.ins(&Instruction::I32Eqz);
@@ -12426,6 +13467,7 @@ impl<'p> Fn_<'_, 'p> {
             b,
             &ftypes::impl_method_name(ftypes::FALLIBLE, &key, "success"),
             &recv,
+            &[],
             line,
         );
         self.scope.truncate(mark);
@@ -12438,9 +13480,11 @@ impl<'p> Fn_<'_, 'p> {
     /// This is the one flow that deliberately steps AROUND the M2d coercion seam,
     /// and the reason is the whole point of the form: `expr_as(n, Age)` would emit
     /// the validation that aborts. So the argument is evaluated at the refinement's
-    /// BASE type and the predicate's own answer becomes the tag — the same thing
-    /// the textual backend's `gen_try_construct` does, and it has to be the same
-    /// thing, because a value the two disagree about is a diverging `None`.
+    /// BASE type and the predicate's own answer becomes the tag. The predicate
+    /// itself is stated once, in `predicate_holds`, and this is the one caller
+    /// that reads its answer as a value instead of letting it trap — a form the
+    /// interpreter runs from the same declaration, because a value the two
+    /// disagree about is a diverging `None`.
     fn try_construct(
         &mut self,
         m: &mut Module,
@@ -12458,7 +13502,7 @@ impl<'p> Fn_<'_, 'p> {
         if args.len() != 1 {
             return unsupported(&format!("`{name}?` at this arity"), line);
         }
-        let ty = Type::Option(Box::new(Type::Named(name.to_string())));
+        let ty = Type::option(Type::Named(name.to_string()));
         let Repr::Agg(l) = self.cx.repr(&ty, line)? else {
             return unsupported("a fallible construction of a non-aggregate Option", line);
         };
@@ -12467,7 +13511,7 @@ impl<'p> Fn_<'_, 'p> {
         // `predicate_holds` parks the value where the `where` clause binds it, so
         // both halves of the answer are in locals before either store.
         let (held, base_v) = match self.cx.repr(&base, line)? {
-            Repr::Scalar(v) => (self.predicate_holds(m, b, &decl, line)?, v),
+            Repr::Scalar(v) => (self.predicate_holds(b, &decl, line)?, v),
             // Only the record arm of `emit_validation` binds an aggregate base, and
             // it binds by field — there is no single local to become the payload
             // word. No corpus has one, and a guess here would be a silent `None`.
@@ -12494,14 +13538,17 @@ impl<'p> Fn_<'_, 'p> {
         let off = b.alloc(l.size, l.align);
         b.slot(off + l.fields[0]);
         b.ins(&Instruction::LocalGet(tag));
-        b.ins(&Instruction::I32Store8(byte()));
+        b.ins(&Instruction::I64ExtendI32U);
+        b.ins(&Instruction::I64Store(word8()));
         b.slot(off + l.fields[1]);
         b.ins(&Instruction::LocalGet(held));
         self.encode_word2(b, &base, line)?;
         b.ins(&Instruction::I64Store(word8()));
-        b.slot(off + l.fields[2]);
-        b.ins(&Instruction::I64Const(0));
-        b.ins(&Instruction::I64Store(word8()));
+        for f in &l.fields[2..] {
+            b.slot(off + f);
+            b.ins(&Instruction::I64Const(0));
+            b.ins(&Instruction::I64Store(word8()));
+        }
         b.slot(off);
         Ok(ty)
     }
@@ -12564,13 +13611,15 @@ impl<'p> Fn_<'_, 'p> {
         for s in &p.hit {
             self.stmt(m, b, s)?;
         }
-        if let Pattern::Some(bind) = pattern {
+        if let Pattern::Variant(_, binds) = pattern {
+            let bind = &binds[0];
             let synth = Stmt::Let {
-                name: bind.clone(),
+                name: bind.name.clone(),
                 mutable: false,
                 ty: None,
                 value: p.place.clone(),
                 line,
+                col: bind.col,
             };
             self.stmt(m, b, &synth)?;
         }
@@ -12597,51 +13646,41 @@ impl<'p> Fn_<'_, 'p> {
         line: usize,
     ) -> Result<(), String> {
         b.ins(&Instruction::LocalGet(addr));
-        match (sum, pat) {
-            (Sum::Enum(vs), Pattern::Variant(name, _)) => {
-                let tag = vs
-                    .iter()
-                    .position(|v| v.name == *name)
-                    .ok_or_else(|| gap(&format!("the variant `{name}`"), line))?;
-                b.ins(&Instruction::I64Load(word8()));
-                b.ins(&Instruction::I64Const(tag as i64));
-                b.ins(&Instruction::I64Eq);
-            }
-            // The refutable-`let` desugar's default arm (RFC-0121): the probe
-            // is constant truth — the address read above is discarded, and the
-            // one `i32` every caller expects is pushed in its place.
-            (_, Pattern::Other) => {
-                b.ins(&Instruction::Drop);
-                b.ins(&Instruction::I32Const(1));
-            }
-            (_, p) => {
-                let one = matches!(p, Pattern::Some(_) | Pattern::Ok(_) | Pattern::Success(_));
-                b.ins(&Instruction::I32Load8U(byte()));
-                b.ins(&Instruction::I32Const(i32::from(one)));
-                b.ins(&Instruction::I32Eq);
-            }
-        }
+        // The refutable-`let` desugar's default arm (RFC-0121): the probe is
+        // constant truth — the address read above is discarded, and the one
+        // `i32` every caller expects is pushed in its place.
+        let Some(tag) = tag_of(sum, pat, line)? else {
+            b.ins(&Instruction::Drop);
+            b.ins(&Instruction::I32Const(1));
+            return Ok(());
+        };
+        // One tag read for every sum since RFC-0126 §8.11's M4b, where the two
+        // built-in ones stopped having a variant list of their own. A second
+        // spelling of this probe would be a second chance to read the tag at the
+        // wrong width, which is silent rather than loud.
+        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Const(tag as i64));
+        b.ins(&Instruction::I64Eq);
         Ok(())
     }
 
     /// Bind payload `i` of the matched variant out of the sum at `addr`.
+    /// `ptys` is the whole variant's payload list, because a payload's slot is
+    /// the width of the ones before it (RFC-0126 §8.4).
+    #[allow(clippy::too_many_arguments)]
     fn bind_payload(
         &mut self,
         b: &mut Frame,
         addr: u32,
-        sum: &Sum,
         sl: &Layout,
+        ptys: &[Type],
         i: usize,
         t: &Type,
         line: usize,
+        free_box: bool,
     ) -> Result<Place, String> {
-        let is_enum = matches!(sum, Sum::Enum(_));
-        let off = sl.fields[1 + if is_enum { i } else { 0 }];
-        let kind = if is_enum {
-            self.word1(t)
-        } else {
-            self.word2(t)?
-        };
+        let off = sl.fields[self.cx.payload_slot(ptys, i)];
+        let kind = self.word2(t)?;
         let ll = self.cx.ll(t);
         Ok(match kind {
             Word::Direct => {
@@ -12694,7 +13733,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Load(at(off)));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(p));
-                match self.cx.repr(t, line)? {
+                let place = match self.cx.repr(t, line)? {
                     Repr::Scalar(v) => {
                         let l = b.local(v);
                         b.ins(&Instruction::LocalGet(p));
@@ -12714,9 +13753,60 @@ impl<'p> Fn_<'_, 'p> {
                         Place::Slot(slot)
                     }
                     Repr::Unit => return unsupported("a Unit payload", line),
+                };
+                // The value is out; a consumed scrutinee's box is this
+                // construct's to give back (the textual backend's
+                // `free_boxes`, RFC-0125 M3 for this backend). It used to be
+                // the safe leak every boxed payload was here.
+                if free_box {
+                    b.ins(&Instruction::LocalGet(p));
+                    b.ins(&Instruction::Call(self.cx.rt.free));
                 }
+                place
             }
         })
+    }
+
+    /// Whether a `match`, an `if let` or a `?` at `key` frees the boxes its
+    /// binders were read out of: the construct owns the value it switches on,
+    /// no drop row walks that value whole after it, the memory is not an
+    /// arena's, and this is not a declared `release` destructuring its own
+    /// receiver, whose caller walks the boxes.
+    ///
+    /// The first clause is the CORE's, whole ([`Cx::owns_scrutinee`]). It was
+    /// four clauses here — a `consume`, a scrutinee naming no place, a `Map`
+    /// lookup, and the core's own take — and the first three read the SOURCE
+    /// beside a core row that answered the fourth. The core states all four
+    /// as one row now (`St::Switch`'s `owns`), which is why this backend has
+    /// no `Expr` left to look at (RFC-0125 §3 M3, the box slice).
+    fn frees_boxes(&self, scrutinee: &Expr, key: usize) -> bool {
+        use vyrn_frontend::ast::place_path;
+        let consumed = self.cx.owns_scrutinee(key);
+        let own_receiver = self.is_release
+            && match scrutinee {
+                Expr::Consume { place, .. } => {
+                    place_path(place).is_none_or(|(root, _)| root == "self")
+                }
+                _ => true,
+            };
+        consumed && !self.releases_whole(key) && !own_receiver
+    }
+
+    /// Whether a placed row releases the value at `key` WHOLE — the question
+    /// [`Fn_::frees_boxes`] used to ask of the plan's own per-binding table
+    /// (RFC-0125 §3 M3, the walk's deletion).
+    ///
+    /// The two are not the same question. The table says the type of the
+    /// value has a release; a ROW says one runs here. While the walk placed a
+    /// row at every frame exit the two agreed, and once the take is the
+    /// core's own answer they part: a construct that TOOK its scrutinee has
+    /// no row, and the boxes its binders came out of are then its to give
+    /// back. `releaseacrossexit`'s `overIfLet` is the reading — its `Option`
+    /// box outlived the arm that took the payload.
+    fn releases_whole(&self, key: usize) -> bool {
+        self.placed
+            .values()
+            .any(|rows| rows.iter().any(|(binding, _)| *binding == key))
     }
 }
 
@@ -12787,7 +13877,7 @@ impl<'p> Fn_<'_, 'p> {
         // `["usd": 1, "eur": 2, "usd": 3]` is length 2 with `usd` first.
         // A repeated key updates in place, so the value it shadows has no owner
         // left — `["usd": 1, "usd": 3]`. Inside a `region` the arena owns it.
-        let drop_old = self.region_depth == 0;
+        let drop_old = true;
         for (ke, ve) in entries {
             self.map_set(m, b, hdr, &l, ke, ve, &key_t, &val, drop_old, line)?;
         }
@@ -12803,7 +13893,7 @@ impl<'p> Fn_<'_, 'p> {
     /// bytes this frees. The map takes the value as well as the key, so a hit
     /// that only stored over the old value leaked it.
     /// `m.tallyBytes(w, n)` (RFC-0116): the byte-keyed probe, on this backend
-    /// too. `map_find_bytes` compares the window where it lies, so a hit — the
+    /// too. `mapFind`'s kind 3 compares the window where it lies, so a hit — the
     /// hot path in a counting loop — builds no String, validates nothing, and
     /// allocates nothing. Only a miss goes through `str_from_bytes` (whose Err
     /// is the trap) and the insert path, where the fresh key is stored, not
@@ -12841,21 +13931,24 @@ impl<'p> Fn_<'_, 'p> {
         let n = b.local(ValType::I64);
         self.expr_as(m, b, &args[2], &Type::Int)?;
         b.ins(&Instruction::LocalSet(n));
-        // One probe, before any key exists.
+        // One probe, before any key exists: kind 3, the window's length as
+        // `klen`, the window's address as the key.
         let idx = b.local(ValType::I32);
+        b.ins(&Instruction::I32Const(3));
+        b.ins(&Instruction::LocalGet(wlen));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalGet(wdata));
-        b.ins(&Instruction::LocalGet(wlen));
+        b.ins(&Instruction::I64ExtendI32U);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[3])));
         b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::Call(self.cx.rt.map_find_bytes));
+        b.ins(&Instruction::Call(self.cx.rt.map_find));
         b.ins(&Instruction::LocalSet(idx));
         b.ins(&Instruction::LocalGet(idx));
         b.ins(&Instruction::I32Const(0));
@@ -12863,19 +13956,13 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         // miss: NOW the key exists — str_from_bytes, whose Err is the trap.
-        let rl = layout::of_ll("{ i1, i64, i64 }").expect("the Result shape");
+        let rty = Type::result(Type::Str, Type::Str);
+        let rl = layout::of_ll(&self.cx.ll(&rty)).expect("the Result shape");
         let dest = b.alloc(rl.size, rl.align);
-        b.ins(&Instruction::LocalGet(wdata));
-        b.ins(&Instruction::LocalGet(wlen));
-        b.slot(dest);
-        b.ins(&Instruction::Call(self.cx.rt.str_from_bytes));
+        self.str_from_bytes(b, dest, wsrc, &al, line)?;
         b.slot(dest + rl.fields[0]);
-        b.ins(&Instruction::I32Load8U(MemArg {
-            offset: 0,
-            align: 0,
-            memory_index: 0,
-        }));
-        b.ins(&Instruction::I32Eqz);
+        b.ins(&Instruction::I64Load(word8()));
+        b.ins(&Instruction::I64Eqz);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         let msg = self.cx.rt.intern(
@@ -12906,11 +13993,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Add);
         b.ins(&Instruction::LocalGet(k));
         b.ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        self.map_index(b, hdr, &l);
-        b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(self.cx.rt.map_put));
+        self.map_put(b, hdr, &l, idx, MapKey::Str);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -12995,11 +14078,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(idx));
-        b.ins(&Instruction::I32Const(match mk {
-            MapKey::I64 => 8,
-            MapKey::Pack(n) => n as i32,
-            MapKey::Str => 4,
-        }));
+        b.ins(&Instruction::I32Const(mk.stride()));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
         match mk {
@@ -13021,18 +14100,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I32Store(word()));
             }
         }
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        if let MapKey::Pack(stride) = mk {
-            b.ins(&Instruction::I32Const(stride as i32));
-        }
-        self.map_index(b, hdr, &l);
-        b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(match mk {
-            MapKey::I64 => self.cx.rt.map_put_i64,
-            MapKey::Pack(_) => self.cx.rt.map_put_pack,
-            MapKey::Str => self.cx.rt.map_put,
-        }));
+        self.map_put(b, hdr, &l, idx, mk);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -13123,11 +14191,7 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalTee(idx));
-        b.ins(&Instruction::I32Const(match mk {
-            MapKey::I64 => 8,
-            MapKey::Pack(n) => n as i32,
-            MapKey::Str => 4,
-        }));
+        b.ins(&Instruction::I32Const(mk.stride()));
         b.ins(&Instruction::I32Mul);
         b.ins(&Instruction::I32Add);
         match mk {
@@ -13151,18 +14215,7 @@ impl<'p> Fn_<'_, 'p> {
         // The key is in its slot, so the index can record where. `map_reserve`
         // above grew the bucket array and rebuilt it, so this is the only entry it
         // is missing — and the reason the append stays O(1).
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        if let MapKey::Pack(stride) = mk {
-            b.ins(&Instruction::I32Const(stride as i32));
-        }
-        self.map_index(b, hdr, l);
-        b.ins(&Instruction::LocalGet(idx));
-        b.ins(&Instruction::Call(match mk {
-            MapKey::I64 => self.cx.rt.map_put_i64,
-            MapKey::Pack(_) => self.cx.rt.map_put_pack,
-            MapKey::Str => self.cx.rt.map_put,
-        }));
+        self.map_put(b, hdr, l, idx, mk);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
@@ -13186,7 +14239,7 @@ impl<'p> Fn_<'_, 'p> {
         // back at the exit — freeing it here would give one block two owners.
         // The same partition `rel_at` draws for a `String`, drawn here too. An
         // Int64 key owns nothing, so it has no surplus to return (RFC-0117).
-        if mk == MapKey::Str && self.region_depth == 0 {
+        if mk == MapKey::Str {
             b.ins(&Instruction::LocalGet(k));
             str_hdr(b);
             b.ins(&Instruction::Call(self.cx.rt.free));
@@ -13213,31 +14266,49 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// `map_find(keys, len, k, idx, cap)` into `idx` — or the `_i64` twin when
-    /// the map is Int64-keyed (`k` is then an I64 local; RFC-0117).
+    /// `mapFind(kind, klen, keys, len, key, idx, cap)` into `idx`. `k` is the
+    /// local the key travels in: an `i64` for an Int64-keyed map, else an
+    /// `i32` address (a String, or a packed key's slot; RFC-0117), which the
+    /// runtime takes as an `i64` too.
     fn map_scan(&mut self, b: &mut Frame, hdr: u32, l: &Layout, k: u32, idx: u32, mk: MapKey) {
+        let (kind, klen) = mk.kind();
+        b.ins(&Instruction::I32Const(kind));
+        b.ins(&Instruction::I32Const(klen));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[0])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
         b.ins(&Instruction::I32WrapI64);
         b.ins(&Instruction::LocalGet(k));
-        // A packed key's probe takes the stride between the key pointer and
-        // the index (RFC-0117 M2).
-        if let MapKey::Pack(stride) = mk {
-            b.ins(&Instruction::I32Const(stride as i32));
+        if mk != MapKey::I64 {
+            b.ins(&Instruction::I64ExtendI32U);
         }
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I32Load(word_at(l.fields[4])));
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[3])));
         b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::Call(match mk {
-            MapKey::I64 => self.cx.rt.map_find_i64,
-            MapKey::Pack(_) => self.cx.rt.map_find_pack,
-            MapKey::Str => self.cx.rt.map_find,
-        }));
+        b.ins(&Instruction::Call(self.cx.rt.map_find));
         b.ins(&Instruction::LocalSet(idx));
+    }
+
+    /// `mapPut(kind, klen, keys, idx, cap * 2, i)`: record the entry at
+    /// position `idx`, whose key is already in the column.
+    fn map_put(&mut self, b: &mut Frame, hdr: u32, l: &Layout, idx: u32, mk: MapKey) {
+        let (kind, klen) = mk.kind();
+        b.ins(&Instruction::I32Const(kind));
+        b.ins(&Instruction::I32Const(klen));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I32Load(word_at(l.fields[4])));
+        b.ins(&Instruction::LocalGet(hdr));
+        b.ins(&Instruction::I64Load(at(l.fields[3])));
+        b.ins(&Instruction::I32WrapI64);
+        b.ins(&Instruction::I32Const(2));
+        b.ins(&Instruction::I32Mul);
+        b.ins(&Instruction::LocalGet(idx));
+        b.ins(&Instruction::Call(self.cx.rt.map_put));
     }
 
     /// Which key family a map runs on (RFC-0117): `String` pointers, `Int64`
@@ -13312,18 +14383,6 @@ impl<'p> Fn_<'_, 'p> {
         Ok(())
     }
 
-    /// The index's bucket array and its bucket count (`cap * 2`), pushed in that
-    /// order — the two arguments `map_put` and `map_reindex` share.
-    fn map_index(&mut self, b: &mut Frame, hdr: u32, l: &Layout) {
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(2));
-        b.ins(&Instruction::I32Mul);
-    }
-
     /// The address of entry `idx`'s value.
     fn map_val_addr(&mut self, b: &mut Frame, hdr: u32, l: &Layout, idx: u32, esz: i32) {
         b.ins(&Instruction::LocalGet(hdr));
@@ -13334,108 +14393,27 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::I32Add);
     }
 
-    /// Room for one more entry: 0 to 4, else double, growing BOTH buffers.
-    ///
-    /// Allocate, copy, free the old — the shape `push` grows in, and what
-    /// `__vyrn_map_reserve`'s `realloc` does for the textual backend.
+    /// `mapReserve(kind, klen, hdr, esz)`: room for one more entry — 0 to 4,
+    /// else double, both columns and the index (PLAN-0125-runtime §6 step 5;
+    /// the runtime's comment has the shape). The `len + 1 > cap` test stays
+    /// here, so an insert that fits pays no call: k-nucleotide is that insert
+    /// five million times.
     fn map_reserve(&mut self, b: &mut Frame, hdr: u32, l: &Layout, esz: i32, mk: MapKey) {
-        let (nc, nk, nv) = (
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-            b.local(ValType::I32),
-        );
-        let len = b.local(ValType::I32);
-        let old = b.local(ValType::I32);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[2])));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::LocalTee(len));
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Add);
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Add);
         b.ins(&Instruction::LocalGet(hdr));
         b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32GtS);
+        b.ins(&Instruction::I64GtS);
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
+        let (kind, klen) = mk.kind();
+        b.ins(&Instruction::I32Const(kind));
+        b.ins(&Instruction::I32Const(klen));
         b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I64Eqz);
-        b.ins(&Instruction::If(BlockType::Result(ValType::I32)));
-        b.ins(&Instruction::I32Const(4));
-        b.ins(&Instruction::Else);
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I64Load(at(l.fields[3])));
-        b.ins(&Instruction::I32WrapI64);
-        b.ins(&Instruction::I32Const(2));
-        b.ins(&Instruction::I32Mul);
-        b.ins(&Instruction::End);
-        b.ins(&Instruction::LocalSet(nc));
-        let kstride = match mk {
-            MapKey::I64 => 8i32,
-            MapKey::Pack(n) => n as i32,
-            MapKey::Str => 4i32,
-        };
-        for (field, stride, into) in [(l.fields[0], kstride, nk), (l.fields[1], esz, nv)] {
-            // The count is safe in 32 bits — an entry costs at least twelve bytes,
-            // so a wasm32 memory holds well under 2^31 of them — but `nc * stride`
-            // is not, so the product is 64-bit and `malloc` decides.
-            b.ins(&Instruction::LocalGet(nc));
-            b.ins(&Instruction::I64ExtendI32U);
-            b.ins(&Instruction::I64Const(stride as i64));
-            b.ins(&Instruction::I64Mul);
-            b.ins(&Instruction::Call(self.cx.rt.malloc));
-            b.ins(&Instruction::LocalTee(into));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I32Load(word_at(field)));
-            b.ins(&Instruction::LocalTee(old));
-            b.ins(&Instruction::LocalGet(len));
-            b.ins(&Instruction::I32Const(stride));
-            b.ins(&Instruction::I32Mul);
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
-            b.ins(&Instruction::LocalGet(old));
-            b.ins(&Instruction::Call(self.cx.rt.free));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::LocalGet(into));
-            b.ins(&Instruction::I32Store(word_at(field)));
-        }
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::LocalGet(nc));
-        b.ins(&Instruction::I64ExtendI32U);
-        b.ins(&Instruction::I64Store(at(l.fields[3])));
-        // The index last, because its bucket count is a function of the capacity
-        // just stored. It is rebuilt rather than copied: the buckets are keyed by
-        // `hash & (nb - 1)` and `nb` has just doubled, so every one of them moved.
-        // A fresh block and a fill, since nothing of the old is read.
-        let ni = b.local(ValType::I32);
-        b.ins(&Instruction::LocalGet(nc));
-        b.ins(&Instruction::I64ExtendI32U);
-        b.ins(&Instruction::I64Const(16));
-        b.ins(&Instruction::I64Mul);
-        b.ins(&Instruction::Call(self.cx.rt.malloc));
-        b.ins(&Instruction::LocalSet(ni));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I32Load(word_at(l.fields[4])));
-        b.ins(&Instruction::Call(self.cx.rt.free));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::LocalGet(ni));
-        b.ins(&Instruction::I32Store(word_at(l.fields[4])));
-        b.ins(&Instruction::LocalGet(hdr));
-        b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-        // `map_reindex_pack` takes the stride between the keys and the length.
-        if let MapKey::Pack(stride) = mk {
-            b.ins(&Instruction::I32Const(stride as i32));
-        }
-        b.ins(&Instruction::LocalGet(len));
-        self.map_index(b, hdr, l);
-        b.ins(&Instruction::Call(match mk {
-            MapKey::I64 => self.cx.rt.map_reindex_i64,
-            MapKey::Pack(_) => self.cx.rt.map_reindex_pack,
-            MapKey::Str => self.cx.rt.map_reindex,
-        }));
+        b.ins(&Instruction::I32Const(esz));
+        b.ins(&Instruction::Call(self.cx.rt.map_reserve));
         self.depth -= 1;
         b.ins(&Instruction::End);
     }
@@ -13484,7 +14462,7 @@ impl<'p> Fn_<'_, 'p> {
         let idx = b.local(ValType::I32);
         self.map_scan(b, hdr, &l, k, idx, mk);
 
-        let oty = Type::Option(Box::new(val.clone()));
+        let oty = Type::option(val.clone());
         let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
             return unsupported("an `Option` that is not an aggregate", line);
         };
@@ -13501,8 +14479,8 @@ impl<'p> Fn_<'_, 'p> {
         b.ins(&Instruction::If(BlockType::Empty));
         self.depth += 1;
         b.slot(off + ol.fields[0]);
-        b.ins(&Instruction::I32Const(1));
-        b.ins(&Instruction::I32Store8(byte()));
+        b.ins(&Instruction::I64Const(1));
+        b.ins(&Instruction::I64Store(word8()));
         match self.word2(val)? {
             // Two words already side by side in the value buffer: one copy, and
             // nothing to encode. A `Ref`, or a stored `fn` (RFC-0037).
@@ -13556,10 +14534,11 @@ impl<'p> Fn_<'_, 'p> {
                 .ok_or_else(|| gap("`remove` on a non-map binding", line))?;
             b.ins(&Instruction::LocalSet(hdr));
             // An entry a `remove` drops is unreachable afterwards whoever owns
-            // the map, and nothing aliases it (RFC-0092 M2 made `keys()` copy),
-            // so only the arena is asked: inside a `region` it owns the block.
-            let owns = self.region_depth == 0;
-            (hdr, ty, owns)
+            // the map, and nothing aliases it (RFC-0092 M2 made `keys()` copy).
+            // A `region` is not asked here either: a `String` key routed into
+            // the arena comes back refused, and a `Map<String, Array<Int>>`
+            // built inside one holds buffers the arena never had.
+            (hdr, ty, true)
         } else {
             let ty = self.expr(m, b, &args[0])?;
             let hdr = b.local(ValType::I32);
@@ -13571,11 +14550,6 @@ impl<'p> Fn_<'_, 'p> {
             _ => return unsupported(&format!("`{name}` on `{mty}`"), line),
         };
         let mk = self.map_key(&key_t, line)?;
-        let kstride = match mk {
-            MapKey::I64 => 8i32,
-            MapKey::Pack(n) => n as i32,
-            MapKey::Str => 4i32,
-        };
         let l = self.layout_of(&mty, line)?;
 
         if name == "@keys" {
@@ -13590,27 +14564,15 @@ impl<'p> Fn_<'_, 'p> {
             b.ins(&Instruction::LocalGet(hdr));
             b.ins(&Instruction::I64Load(at(l.fields[2])));
             b.ins(&Instruction::I32WrapI64);
-            b.ins(&Instruction::LocalTee(len));
-            // An empty map still gets a buffer, so the triple's pointer is never
-            // null — the same rule `bytes` follows, for the same `push`.
-            b.ins(&Instruction::I32Const(1));
-            b.ins(&Instruction::I32Add);
-            b.ins(&Instruction::I32Const(kstride));
-            b.ins(&Instruction::I32Mul);
-            b.ins(&Instruction::I64ExtendI32U);
-            b.ins(&Instruction::Call(self.cx.rt.malloc));
-            b.ins(&Instruction::LocalTee(buf));
+            b.ins(&Instruction::LocalSet(len));
+            let (kind, klen) = mk.kind();
+            b.ins(&Instruction::I32Const(kind));
+            b.ins(&Instruction::I32Const(klen));
             b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-            b.ins(&Instruction::LocalGet(len));
-            b.ins(&Instruction::I32Const(kstride));
-            b.ins(&Instruction::I32Mul);
-            b.ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            });
+            b.ins(&Instruction::Call(self.cx.rt.map_keys_copy));
+            b.ins(&Instruction::LocalSet(buf));
             if mk == MapKey::Str {
-                self.copy_each(b, buf, len, 4, &Type::Str, line)?;
+                self.each(m, b, false, buf, len, 4, &Type::Str, line)?;
             }
             let off = b.alloc(al.size, al.align);
             b.slot(off + al.fields[0]);
@@ -13657,7 +14619,6 @@ impl<'p> Fn_<'_, 'p> {
             // Shift the survivors down, so first-insertion order survives a
             // removal — which is why a remove-then-insert moves a key to the end.
             let esz = self.stride(&val, line)? as i32;
-            let rest = b.local(ValType::I32);
             b.ins(&Instruction::LocalGet(found));
             b.ins(&Instruction::If(BlockType::Empty));
             self.depth += 1;
@@ -13683,58 +14644,17 @@ impl<'p> Fn_<'_, 'p> {
                     self.rel_entry(m, b, a, &ety, line)?;
                 }
             }
+            // `mapRemoveAt(kind, klen, hdr, esz, i)`: the shift of both
+            // columns, the length, and the index rebuilt — every survivor
+            // after the hole moved down a slot, so every bucket naming one
+            // was off by one.
+            let (kind, klen) = mk.kind();
+            b.ins(&Instruction::I32Const(kind));
+            b.ins(&Instruction::I32Const(klen));
             b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I64Load(at(l.fields[2])));
-            b.ins(&Instruction::I32WrapI64);
+            b.ins(&Instruction::I32Const(esz));
             b.ins(&Instruction::LocalGet(idx));
-            b.ins(&Instruction::I32Sub);
-            b.ins(&Instruction::I32Const(1));
-            b.ins(&Instruction::I32Sub);
-            b.ins(&Instruction::LocalSet(rest));
-            for (field, stride) in [(l.fields[0], kstride), (l.fields[1], esz)] {
-                let base = b.local(ValType::I32);
-                b.ins(&Instruction::LocalGet(hdr));
-                b.ins(&Instruction::I32Load(word_at(field)));
-                b.ins(&Instruction::LocalGet(idx));
-                b.ins(&Instruction::I32Const(stride));
-                b.ins(&Instruction::I32Mul);
-                b.ins(&Instruction::I32Add);
-                b.ins(&Instruction::LocalTee(base));
-                b.ins(&Instruction::LocalGet(base));
-                b.ins(&Instruction::I32Const(stride));
-                b.ins(&Instruction::I32Add);
-                b.ins(&Instruction::LocalGet(rest));
-                b.ins(&Instruction::I32Const(stride));
-                b.ins(&Instruction::I32Mul);
-                b.ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            }
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I64Load(at(l.fields[2])));
-            b.ins(&Instruction::I64Const(1));
-            b.ins(&Instruction::I64Sub);
-            b.ins(&Instruction::I64Store(at(l.fields[2])));
-            // Every survivor after the hole moved down a slot, so every bucket
-            // naming one is now off by one — the index is rebuilt rather than
-            // patched. The shift above is already O(len), so this costs `remove`
-            // nothing it was not paying.
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I32Load(word_at(l.fields[0])));
-            if let MapKey::Pack(stride) = mk {
-                b.ins(&Instruction::I32Const(stride as i32));
-            }
-            b.ins(&Instruction::LocalGet(hdr));
-            b.ins(&Instruction::I64Load(at(l.fields[2])));
-            b.ins(&Instruction::I32WrapI64);
-            self.map_index(b, hdr, &l);
-            b.ins(&Instruction::Call(match mk {
-                MapKey::I64 => self.cx.rt.map_reindex_i64,
-                MapKey::Pack(_) => self.cx.rt.map_reindex_pack,
-                MapKey::Str => self.cx.rt.map_reindex,
-            }));
+            b.ins(&Instruction::Call(self.cx.rt.map_remove_at));
             self.depth -= 1;
             b.ins(&Instruction::End);
         }
@@ -14025,7 +14945,7 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::LocalGet(len));
                 b.ins(&Instruction::I32WrapI64);
                 b.ins(&Instruction::LocalSet(count));
-                self.copy_each(b, buf, count, stride, inner, line)?;
+                self.each(m, b, false, buf, count, stride, inner, line)?;
                 let off = b.alloc(al.size, al.align);
                 b.slot(off + al.fields[0]);
                 b.ins(&Instruction::LocalGet(buf));
@@ -14041,7 +14961,7 @@ impl<'p> Fn_<'_, 'p> {
             // `Option<T>`: `None` on empty, else the last element with the header
             // shrunk. Never un-spills, exactly like the LLVM path.
             "@pop" => {
-                let oty = Type::Option(Box::new(inner.clone()));
+                let oty = Type::option(inner.clone());
                 let Repr::Agg(ol) = self.cx.repr(&oty, line)? else {
                     return unsupported("an `Option` that is not an aggregate", line);
                 };
@@ -14061,8 +14981,8 @@ impl<'p> Fn_<'_, 'p> {
                 b.ins(&Instruction::I64Sub);
                 b.ins(&Instruction::LocalSet(last));
                 b.slot(off + ol.fields[0]);
-                b.ins(&Instruction::I32Const(1));
-                b.ins(&Instruction::I32Store8(byte()));
+                b.ins(&Instruction::I64Const(1));
+                b.ins(&Instruction::I64Store(word8()));
                 b.slot(off + ol.fields[1]);
                 self.elem_addr(b, &w, last);
                 match self.word2(inner)? {
@@ -14191,15 +15111,12 @@ impl Num {
 
     /// The integer type `ty` *is*, or `None` for anything that is not one. Takes
     /// a RESOLVED type, so a validated name has already become its base.
+    ///
+    /// `vyrn_frontend::validate::width` is the answer, not a second copy of it:
+    /// "which types are integers, and how wide" is the fact the `int-narrowing`
+    /// row rests on, and the interpreter reads the same one (RFC-0125 §3 M6).
     fn of(ty: &Type) -> Option<Num> {
-        match ty {
-            Type::Int => Some(Num::PLAIN),
-            Type::IntN { bits, signed } => Some(Num {
-                bits: *bits,
-                signed: *signed,
-            }),
-            _ => None,
-        }
+        vyrn_frontend::validate::width(ty).map(|(bits, signed)| Num { bits, signed })
     }
 
     /// Whether the carrier is an `i64`. Everything 32 bits and under rides an
@@ -14372,6 +15289,152 @@ fn load_of(ll: &str, off: u32, signed: bool) -> Instruction<'static> {
     }
 }
 
+vyrn_frontend::body_scope_descent!(HoistVisit, hoist_block, hoist_stmt, hoist_expr);
+
+/// The one line the hoist writes at a node: hand it to `fe` or `fs`, and stop
+/// at a lambda. Nothing here asks what is in scope.
+struct Hoist<'e, 's> {
+    fe: &'e mut dyn FnMut(&Expr),
+    fs: &'s mut dyn FnMut(&Stmt),
+}
+
+impl HoistVisit<'_> for Hoist<'_, '_> {
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+        (self.fs)(s)
+    }
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        (self.fe)(e);
+        // A lambda is a leaf: its body is lowered as its own function, so
+        // nothing inside it is this loop's to hoist, and `header_invariant`
+        // refuses a lambda that so much as mentions the binding.
+        !matches!(e, Expr::Lambda { .. })
+    }
+}
+
+/// Every expression under `e`, pre-order, `e` itself first, and every
+/// statement under it through `fs` — `ast::body_scope_descent!`'s descent
+/// since RFC-0125 §3 M6, where this file wrote the arms out itself.
+fn each_expr(e: &Expr, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
+    hoist_expr(e, &std::collections::HashSet::new(), &mut Hoist { fe, fs });
+}
+
+fn each_block(blk: &Block, fe: &mut dyn FnMut(&Expr), fs: &mut dyn FnMut(&Stmt)) {
+    hoist_block(
+        blk,
+        &mut std::collections::HashSet::new(),
+        &mut Hoist { fe, fs },
+    );
+}
+
+/// Could evaluating `e` read the binding `name`, or run code that might
+/// (RFC-0125 M1's rule on [`Dest`])? A mention of the binding, or any call —
+/// a callee can reach module state, and a `modify` argument is the binding
+/// itself. A lambda literal counts as a call: it captures now.
+fn observes(e: &Expr, name: &str) -> bool {
+    let mut hit = vyrn_frontend::ast::mentions_place(e, name);
+    each_expr(
+        e,
+        &mut |x| {
+            if matches!(
+                x,
+                Expr::Call { .. } | Expr::Spawn { .. } | Expr::Lambda { .. } | Expr::Try { .. }
+            ) {
+                hit = true;
+            }
+        },
+        &mut |_| {},
+    );
+    hit
+}
+
+fn is_var(e: &Expr, name: &str) -> bool {
+    matches!(e, Expr::Var { name: n, .. } if n == name)
+}
+
+/// Does `p` bind `name`? A binder inside the loop would shadow the hoisted
+/// binding, so the hoist is refused.
+fn binds(p: &Pattern, name: &str) -> bool {
+    p.bindings().contains(&name)
+}
+
+/// The names a `while` indexes: every `@at(name, _)` in its condition or body.
+fn indexed_names(cond: &Expr, body: &Block) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut fe = |e: &Expr| {
+        if let Expr::Call { name, args, .. } = e {
+            if name == "@at" && args.len() == 2 {
+                if let Expr::Var { name: n, .. } = &args[0] {
+                    names.push(n.clone());
+                }
+            }
+        }
+    };
+    each_expr(cond, &mut fe, &mut |_| {});
+    each_block(body, &mut fe, &mut |_| {});
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Can nothing in `cond` or `body` move `name`'s header? Conservative, on the
+/// syntax alone: an assignment to it, a `let` or a pattern that shadows it, a
+/// `drop`, a `consume`, a `for .. in consume` over it, the binding handed
+/// whole to any call other than `@at` (a `push` is an assignment; a `pop` and
+/// a user method are such calls), or a lambda that mentions it — each refuses.
+/// An `@at` read, a `.length` read and an element store are the only things
+/// the hoist admits.
+fn header_invariant(cond: &Expr, body: &Block, name: &str) -> bool {
+    let ok = std::cell::Cell::new(true);
+    let mut fe = |e: &Expr| {
+        if !ok.get() {
+            return;
+        }
+        let fine = match e {
+            Expr::Call { name: f, args, .. }
+                if f == "@at" && args.len() == 2 && is_var(&args[0], name) =>
+            {
+                true
+            }
+            Expr::Call { args, .. }
+            | Expr::Spawn { args, .. }
+            | Expr::TryConstruct { args, .. } => !args.iter().any(|a| {
+                is_var(a, name) || matches!(a, Expr::Consume { place, .. } if is_var(place, name))
+            }),
+            Expr::Consume { place, .. } => !is_var(place, name),
+            Expr::Lambda { .. } => !vyrn_frontend::ast::mentions_place(e, name),
+            Expr::Match { arms, .. } => !arms.iter().any(|a| binds(&a.pattern, name)),
+            _ => true,
+        };
+        ok.set(fine);
+    };
+    let mut fs = |s: &Stmt| {
+        if !ok.get() {
+            return;
+        }
+        let fine = match s {
+            Stmt::Let { name: n, .. }
+            | Stmt::Assign { name: n, .. }
+            | Stmt::SetField { name: n, .. }
+            | Stmt::Drop { name: n, .. } => n != name,
+            Stmt::IfLet { pattern, .. } => !binds(pattern, name),
+            Stmt::ForIn {
+                var,
+                iter,
+                consuming,
+                ..
+            } => var != name && !(*consuming && is_var(iter, name)),
+            _ => true,
+        };
+        ok.set(fine);
+    };
+    each_expr(cond, &mut fe, &mut fs);
+    each_block(body, &mut fe, &mut fs);
+    ok.get()
+}
+
 fn store_of(ll: &str) -> Instruction<'static> {
     let m = |align| MemArg {
         offset: 0,
@@ -14401,93 +15464,333 @@ fn store_of(ll: &str) -> Instruction<'static> {
 /// beside it, so these are emitted. All forty of them, whether the program reaches one or not —
 /// and then [`wasm::Module::sweep`] (M2p) drops the ones no export reaches, which
 /// is why the whole table costs `fib.wasm` 290 bytes of code rather than 4,420.
-/// The data each interned on its way past is NOT swept.
+/// The data each interned on its way past is swept with them (RFC-0125 §3 M4).
+/// The runtime functions written in Vyrn (`std/runtime`, PLAN-0125-runtime §6
+/// steps 1 and 2): each by the name the module declares it under, with the
+/// wasm signature this emitter calls it with.
+///
+/// The index is reserved before the hand-emitted runtime is written, because
+/// that runtime calls these (`trap` calls `strLen`, `env_get` calls `starts`,
+/// the fixed-clock preamble calls `strI64`). The body arrives when the
+/// module's function is lowered like any other user function, and
+/// [`VyrnRt::take`] is where the declared signature and the one spelled here
+/// have to agree. [`VyrnRt::check`] refuses a program whose link has no
+/// `std/runtime` — a resolver serving a partial std tree — rather than letting
+/// `Module::sweep` panic on an unfilled body.
+const VYRN_RUNTIME: &[(&str, &[ValType], &[ValType])] = &[
+    // Step 2: the allocator. The request is an `i64` for the reason the
+    // module's own comment gives (`push` once wrapped `cap * stride` at an
+    // `i32` call site), and it is the signature `__vyrn_malloc` exports.
+    ("malloc", &[ValType::I64], &[ValType::I32]),
+    ("free", &[ValType::I32], &[]),
+    // Step 4: the allocating strings. `strFromBytes` returns a
+    // `Result<Int64, Int64>`, an aggregate, so the hidden destination leads;
+    // the check's answer and the two interned messages are its last three
+    // arguments (RFC-0125 §3 M6, the third judgment's fifth slice — the DFA
+    // table used to be the first of those).
+    ("strNew", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("strConcat", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    (
+        "strAppend",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    ("strFromBytes", &[ValType::I32; 6], &[]),
+    ("strLen", &[ValType::I32], &[ValType::I32]),
+    ("strCmp", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("starts", &[ValType::I32, ValType::I32], &[ValType::I32]),
+    ("intStr", &[ValType::I64, ValType::I32], &[ValType::I32]),
+    // `Option<Int64>` is an aggregate result: the hidden destination leads.
+    ("parseI64", &[ValType::I32, ValType::I32], &[]),
+    ("strI64", &[ValType::I32], &[ValType::I64]),
+    (
+        "utf8Valid",
+        &[ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    (
+        "lineAt",
+        &[ValType::I32, ValType::I64, ValType::I64],
+        &[ValType::I64],
+    ),
+    (
+        "colAt",
+        &[ValType::I32, ValType::I64, ValType::I64],
+        &[ValType::I64],
+    ),
+    (
+        "regexRun",
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+        &[ValType::I32],
+    ),
+    // Step 5: the maps. `kind` and `klen` lead (see [`MapKey::kind`]); the key
+    // of `mapFind` is an `i64` whatever the layout, the value itself for an
+    // `Int64` key and an address zero-extended for the rest.
+    (
+        "mapFind",
+        &[
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I32,
+            ValType::I64,
+            ValType::I32,
+            ValType::I32,
+        ],
+        &[ValType::I32],
+    ),
+    ("mapPut", &[ValType::I32; 6], &[]),
+    ("mapReserve", &[ValType::I32; 4], &[]),
+    ("mapRemoveAt", &[ValType::I32; 5], &[]),
+    ("mapKeysCopy", &[ValType::I32; 3], &[ValType::I32]),
+    // Step 6: the arrays. `dst` and `src` are header addresses and `stride` the
+    // element size; `arrPush` answers the buffer a growth left behind, which
+    // the emitter frees after the element is stored.
+    ("arrPush", &[ValType::I32; 3], &[ValType::I32]),
+    (
+        "arrReserve",
+        &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
+        &[],
+    ),
+    ("arrAppend", &[ValType::I32; 4], &[]),
+    ("arrCopyFrom", &[ValType::I32; 4], &[]),
+    ("arrClear", &[ValType::I32; 2], &[]),
+    // Step 7: the I/O family. A `dest` leads where the result is an
+    // aggregate (an `Option`, a `Result`, the `args` triple); the interned
+    // message halves, the DFA table and the fixed-clock keys trail, as
+    // `strFromBytes`'s tail does. The generator-host twins take the host's
+    // read mode after the path.
+    ("writeAll", &[ValType::I32; 3], &[ValType::I32]),
+    ("printStr", &[ValType::I32], &[]),
+    ("nowMillis", &[ValType::I32], &[ValType::I64]),
+    ("monoNanos", &[ValType::I32], &[ValType::I64]),
+    ("randomSeedV", &[ValType::I32], &[ValType::I64]),
+    ("argsV", &[ValType::I32], &[]),
+    ("readLineV", &[ValType::I32; 2], &[]),
+    (
+        "openAt",
+        &[ValType::I32, ValType::I32, ValType::I64],
+        &[ValType::I32],
+    ),
+    ("readFileV", &[ValType::I32; 9], &[]),
+    ("readFileGen", &[ValType::I32; 10], &[]),
+    ("readFileBytesV", &[ValType::I32; 4], &[]),
+    ("readFileBytesGen", &[ValType::I32; 7], &[]),
+    ("writeFileBytesV", &[ValType::I32; 6], &[]),
+    ("writeFileV", &[ValType::I32; 5], &[]),
+    ("renameFileV", &[ValType::I32; 7], &[]),
+    ("fsyncFileV", &[ValType::I32; 4], &[]),
+    ("listDirV", &[ValType::I32; 5], &[]),
+    ("listDirGen", &[ValType::I32; 5], &[]),
+    // Step 9: the two traps and the two renderers. `boolStr` is handed the
+    // two interned literals, as `strFromBytes` is handed its two wordings;
+    // `trapAt`'s table is `trap::Rule`'s, laid out by `runtime` below.
+    ("trapV", &[ValType::I32], &[]),
+    ("trapAt", &[ValType::I32, ValType::I64, ValType::I32], &[]),
+    ("printI64", &[ValType::I64, ValType::I32], &[]),
+    ("boolStr", &[ValType::I32; 3], &[ValType::I32]),
+    // Step 8: the region arena. `regionEnter` answers the bump top and
+    // `regionExit` puts it back; the nesting counter and its trap stay inline
+    // (see [`Fn_::region_enter`]).
+    ("regionEnter", &[], &[ValType::I32]),
+    ("regionExit", &[ValType::I32], &[]),
+];
+
+struct VyrnRt {
+    index: HashMap<&'static str, u32>,
+    filled: std::collections::HashSet<&'static str>,
+}
+
+impl VyrnRt {
+    fn reserve(m: &mut Module) -> Self {
+        let index = VYRN_RUNTIME
+            .iter()
+            .map(|(name, params, results)| (*name, m.reserve_func(params, results)))
+            .collect();
+        VyrnRt {
+            index,
+            filled: Default::default(),
+        }
+    }
+
+    fn get(&self, name: &str) -> u32 {
+        self.index[name]
+    }
+
+    /// The reserved index for `name` when it is one of the table's, after checking
+    /// the signature the module declares against the one the emitter calls.
+    fn take(
+        &mut self,
+        name: &str,
+        params: &[ValType],
+        results: &[ValType],
+        line: usize,
+    ) -> Result<Option<u32>, String> {
+        let Some(short) = name.strip_prefix(vyrn_frontend::loader::RUNTIME_PREFIX) else {
+            return Ok(None);
+        };
+        let Some((key, want_p, want_r)) = VYRN_RUNTIME.iter().find(|(k, ..)| *k == short) else {
+            return Ok(None);
+        };
+        if params != *want_p || results != *want_r {
+            return Err(format!(
+                "std/runtime.{short} (line {line}) is declared as {params:?} -> {results:?}; \
+                 the emitter calls it as {want_p:?} -> {want_r:?}"
+            ));
+        }
+        self.filled.insert(key);
+        Ok(Some(self.index[key]))
+    }
+
+    fn check(&self) -> Result<(), String> {
+        let missing: Vec<&str> = VYRN_RUNTIME
+            .iter()
+            .map(|(k, ..)| *k)
+            .filter(|k| !self.filled.contains(k))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "direct backend: `std/runtime` is not linked (no body for {}); the loader \
+             injects it from the std root, so the std tree this program was loaded \
+             against is missing it",
+            missing.join(", ")
+        ))
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Rt {
+    /// `wasi_snapshot_preview1.proc_exit`, kept here so a lowering outside
+    /// `runtime` can end the process: `std/mem`'s `trap` primitive
+    /// (PLAN-0125-runtime §2.3) is the write to descriptor 2 and this call.
+    proc_exit: u32,
+    /// The host-import table, carried so `Fn_::mem_prim` can lower a
+    /// `std/mem` import declaration to its `call` (PLAN-0125-runtime §2.2).
+    wasi: Wasi,
+    /// `std/runtime`'s `writeAll` (PLAN-0125-runtime §6 step 7): the ONE
+    /// place bytes leave a program, with the stdout buffer behind it.
     write_all: u32,
+    /// The allocator, written in Vyrn since PLAN-0125-runtime §6 step 2: a
+    /// segregated free list whose heads and bump offset live in the heap's
+    /// first 480 bytes. Reserved by [`VyrnRt`] like the strings below.
     malloc: u32,
-    /// Hand a block back to its size class (RFC-0077 M6). Paired with `malloc` in
-    /// the table because the two share the header format and nothing else does.
     free: u32,
     /// Allocate a `String` buffer: its `{ len, cap }` header, `cap` bytes of
     /// room, and the NUL (RFC-0089 M1a). Returns the address of the BYTES, so
     /// everything downstream still holds an ordinary NUL-terminated pointer.
+    /// Vyrn since PLAN-0125-runtime §6 step 4, with `concat`, `str_append`
+    /// and `str_from_bytes` below.
     str_new: u32,
+    /// Of the ten functions `std/runtime` supplies (PLAN-0125-runtime §6 step
+    /// 1), the seven this emitter calls: `strlen`, `strcmp`, `int_str`,
+    /// `regex_run`, `parse_i64`, `line_at`, `col_at`. `utf8Valid`, `starts` and
+    /// `strI64` are the other three, and no field carries them, because nothing
+    /// here calls them: `starts` and `strI64` were reached by the hand-emitted
+    /// runtime that §6 deleted, and `utf8Valid` is reached from inside
+    /// `std/runtime`. They keep their [`VYRN_RUNTIME`] rows, which is what
+    /// reserves their indices; a Vyrn caller finds them through `sigs` like any
+    /// other function. Not slots of this table — [`VyrnRt`] reserves them before
+    /// `runtime` runs and `runtime` copies the indices in, so every call site
+    /// reads one field whichever side wrote the body.
     strlen: u32,
     strcmp: u32,
+    /// The address of the UTF-8 DFA table `utf8Valid` walks, interned by
+    /// `runtime`; every caller passes it as the third argument.
+    utf8d: u32,
+    /// `std/runtime`'s `trapV` (PLAN-0125-runtime §6 step 9): the canonical
+    /// line on descriptor 2 and exit 1, called from every refusal this
+    /// backend emits.
     trap: u32,
     print_str: u32,
     print_i64: u32,
     int_str: u32,
+    /// `std/runtime`'s `boolStr`; the two interned literals below go in as its
+    /// last two arguments, so the module holds no wording of its own.
     bool_str: u32,
+    str_true: u32,
+    str_false: u32,
     concat: u32,
-    /// Grow a `String` accumulator in place (RFC-0081). A function rather than an
-    /// inline sequence at every `s = s + …`: the body is forty instructions with
-    /// two `if`s in it, and `std/json` alone has six append sites.
+    /// Grow a `String` accumulator in place (RFC-0081): `std/runtime`'s
+    /// `strAppend`, called at every `s = s + …`; `std/json` alone has six.
     str_append: u32,
-    trap_idx: u32,
-    utf8valid: u32,
+    /// `std/runtime`'s `trapAt` and the trap table it indexes (RFC-0125 §2.3):
+    /// eight rows of two interned addresses, laid out by `runtime` from
+    /// `trap::Rule`. Every check the EMITTER inserts pushes its row's number
+    /// and calls this; the module spells none of the eight wordings.
+    trap_at: u32,
+    trap_table: u32,
+    /// `std/runtime`'s `strFromBytes`; its two failure messages, interned by
+    /// `runtime` from `io_message`, go in as its last two arguments so the
+    /// wording stays `trap.rs`'s. What DECIDES between them is `std/text`'s
+    /// `stringFault`, called at the site and passed in (RFC-0125 §3 M6).
     str_from_bytes: u32,
-    // RFC-0014 input I/O and RFC-0043's host boundary, served straight from WASI
-    // (M2j) rather than through the shim — a standalone module has no shim, and
-    // `clock_time_get`/`random_get`/`args_get`/`fd_read`/`path_open` are the same
-    // syscalls wasi-libc would have reached for us.
-    starts: u32,
-    env_get: u32,
-    str_i64: u32,
+    bnul: u32,
+    butf8: u32,
+    // RFC-0014's input I/O and RFC-0043's host boundary, `std/runtime`'s since
+    // PLAN-0125-runtime §6 step 7, over the host imports `std/mem` declares
+    // (M2j served them straight from WASI rather than through the shim — a
+    // standalone module has no shim — and the module keeps that route). Each
+    // takes what it needs as arguments: the fixed-clock keys, the DFA table,
+    // the interned message halves.
     now_millis: u32,
     mono_nanos: u32,
     random_seed: u32,
     args: u32,
-    getbyte: u32,
     read_line: u32,
     open_at: u32,
-    read_all: u32,
-    err3: u32,
     read_file: u32,
     read_file_bytes: u32,
     write_file: u32,
     write_file_bytes: u32,
     rename_file: u32,
     fsync_file: u32,
-    /// `listDir` (RFC-0021), on the generator path ONLY — the language gives it no
-    /// runtime lowering at all, so the slot is handed out only when there is a
-    /// `vyrn_gen.read` to serve it (RFC-0076 M7). An `Option` rather than an index
-    /// that is sometimes a lie: the one call site has to be unreachable without it.
-    ///
-    /// It sits mid-table beside the other readers because the numbering is
-    /// COMPUTED — `slot` appends — so an absent entry shifts the ones after it and
-    /// nothing outside one compile depends on where they land.
-    list_dir: Option<u32>,
-    /// `listDirKinds` (RFC-0119): `list_dir`'s twin against the mode whose
-    /// directory names carry a trailing `/`.
-    list_dir_kinds: Option<u32>,
-    /// RFC-0028's `Map<String, V>` lookup (M2l), and the three helpers the hash
-    /// index put under it. `reserve`, `remove_at` and `keys_copy` are each reached
-    /// from a single site and are a `malloc` plus a copy, so they are emitted
-    /// there; these four are shared, and `map_slot` is shared twice over — a
-    /// lookup and an insert probe for the same bucket and differ only in what they
-    /// do when they find it.
+    /// `listDir` and `listDirKinds` (RFC-0021, RFC-0119): one function, told
+    /// which by a constant, over WASI's `fd_readdir` (RFC-0125 §3 M5).
+    list_dir: u32,
+    /// The three readers under a generation (RFC-0076 M7): the listing and the
+    /// bytes come from the loader's resolver through `vyrn_gen.read`, so the
+    /// emitter calls the twin when `Cx::gen` is set.
+    read_file_gen: u32,
+    read_file_bytes_gen: u32,
+    list_dir_gen: u32,
+    /// RFC-0043's injected clock and seed, `VYRN_FIXED_TIME=` and
+    /// `VYRN_FIXED_SEED=`: the env NAME carries its own `=`, so a lookup is one
+    /// prefix test. Interned here and handed to the three readers.
+    fixed_time: u32,
+    fixed_seed: u32,
+    /// The canonical I/O wordings (RFC-0014, RFC-0044), each in the two halves
+    /// `io_message_parts` splits around the path, interned from `trap.rs`'s
+    /// one table and handed to the runtime functions as arguments so the
+    /// module never spells one.
+    readerr: (u32, u32),
+    utf8err: (u32, u32),
+    nulerr: (u32, u32),
+    writeerr: (u32, u32),
+    xdeverr: (u32, u32),
+    listerr: (u32, u32),
+    /// The `Map` runtime (RFC-0028, RFC-0116, RFC-0117), Vyrn since
+    /// PLAN-0125-runtime §6 step 5: one body over the three key layouts, told
+    /// which by a `kind` and a `klen` the emitter passes as constants
+    /// ([`MapKey::kind`]). `reserve`, `remove_at` and `keys_copy` were inline
+    /// at their single sites and are runtime functions now, because the header
+    /// is one fixed 32-byte shape the module can read.
     map_find: u32,
-    map_find_bytes: u32,
-    map_hash: u32,
-    map_slot: u32,
     map_put: u32,
-    map_reindex: u32,
-    /// The Int64-keyed chain (RFC-0117 M1): the same four shapes over an
-    /// 8-byte key column, the hash SplitMix64's finalizer, equality the bits.
-    map_find_i64: u32,
-    map_slot_i64: u32,
-    map_put_i64: u32,
-    map_reindex_i64: u32,
-    /// The user-keyed chain (RFC-0117 M2): the same four shapes over a
-    /// fixed-stride column of CANONICALLY PACKED keys — the hash FNV-1a over
-    /// the pack, equality a byte compare that IS field-wise equality because
-    /// the pack zeroed the padding.
-    map_find_pack: u32,
-    map_slot_pack: u32,
-    map_put_pack: u32,
-    map_reindex_pack: u32,
+    map_reserve: u32,
+    map_remove_at: u32,
+    map_keys_copy: u32,
+    /// The array family (RFC-0011, RFC-0115), Vyrn since PLAN-0125-runtime §6
+    /// step 6 and functions for the first time in any engine: each reads the
+    /// receiver's triple and writes the rebuilt one into a fresh slot, told
+    /// the element stride as a constant. `a[i]` is not among them; the plan's
+    /// results block for step 6 has the measurement that keeps it inline.
+    arr_push: u32,
+    arr_reserve: u32,
+    arr_append: u32,
+    arr_copy_from: u32,
+    arr_clear: u32,
     /// RFC-0046's `=~` (M2m): walk a complete DFA over a NUL-terminated string.
     /// One helper for every pattern in the module, because the pattern is entirely
     /// in the table it is handed — which is the same split the textual backend's
@@ -14509,228 +15812,27 @@ struct Rt {
     parse_i64: u32,
     line_at: u32,
     col_at: u32,
-    /// `region_keep(bytes) -> bytes` — record a `String` block in the innermost
-    /// region's arena. See [`Fn_::region_exit`].
-    region_keep: u32,
-    /// `region_free()` — free every block the innermost region recorded, then its
-    /// vector, then pop. The exit a fall-through, a `break` and a `continue` take.
-    region_free: u32,
-    /// `region_pop()` — free the vector and pop, leaving the blocks alone. The
-    /// exit a `return` (and `?`) takes, because the value it carries out is one of
-    /// them and belongs to the caller now.
-    region_pop: u32,
-    count: u32,
-    msg_div0: u32,
-    msg_rem0: u32,
-    msg_divovf: u32,
-    msg_shift: u32,
-    msg_aoob: u32,
-    msg_soob: u32,
-    msg_oob_end: u32,
-    msg_region: u32,
+    /// `regionEnter() -> mark` and `regionExit(mark)` — the bump arena of
+    /// PLAN-0125-runtime §4.3, in `std/runtime`. A `return` out of a region
+    /// calls NEITHER: the value it carries out is a block the arena bumped and
+    /// belongs to the caller now, so the bump stays where it is.
+    region_enter: u32,
+    region_exit: u32,
     /// RFC-0004 §4's region nesting counter: four reserved bytes, because the
     /// depth is dynamic (a `region` in a callee nests inside its caller's) and
     /// entering a 65th is a trap the interpreter also takes. Storage rather than a
     /// wasm global for M2f's reason — module state showed that one mechanism in
     /// memory beats two, and `reserve` is that mechanism.
     region_sp: u32,
-    msg_calldepth: u32,
     /// The call-depth counter (audit A5.3): four reserved bytes holding how many
     /// Vyrn calls are in flight, in the same storage and for the same reason
     /// `region_sp` is. Every named function's prologue bumps it and its one exit
-    /// gives it back; past [`vyrn_frontend::interp::CALL_DEPTH_LIMIT`] it traps
+    /// gives it back; past [`vyrn_frontend::trap::CALL_DEPTH_LIMIT`] it traps
     /// with the words the interpreter and the native binary use.
     call_depth: u32,
-    /// The arena's own bookkeeping, one word per open region: the address of a
-    /// vector of block pointers, how many it holds, and how many it has room for.
-    /// 64 of each, the depth the counter above bounds.
-    ///
-    /// A side vector rather than a link inside each block, for the reason the
-    /// textual backend's `REGION_RUNTIME` gives at length: a block the arena hands
-    /// out has to be exactly what `malloc` returned, or the `free` that a `return`
-    /// out of a region leaves to the caller is handed a pointer into the middle of
-    /// one.
-    region_vec: u32,
-    region_len: u32,
-    region_cap: u32,
-    /// The free list head of each size class (RFC-0077 M6), `MAX_CLASS -
-    /// MIN_CLASS + 1` words. Zero-filled by `reserve`, which is what an empty
-    /// list is.
-    heads: u32,
-    /// The standard input read-ahead buffer, and how far into it reading has
-    /// got. [`STDIN_BUF`] bytes, then two words: the count `fd_read` returned
-    /// and the offset of the next byte. Both start at zero, which `reserve`
-    /// gives for free and which reads as "the buffer is spent" — so the first
-    /// `getbyte` fills it.
-    stdin_buf: u32,
-    stdin_len: u32,
-    stdin_pos: u32,
-    /// The standard output write-behind buffer, and how much of it is filled.
-    /// [`STDIN_BUF`] bytes again. `write_all` is the one place bytes leave this
-    /// module, so it is the one place they can be gathered: one `fd_write` per
-    /// printed line is one syscall per printed line, and fasta prints five
-    /// million of them.
-    stdout_buf: u32,
-    stdout_pos: u32,
 }
 
-/// How much standard input one `fd_read` asks for.
-///
-/// `readLine` is the only reader of fd 0 in a Vyrn program — `readFileBytes`
-/// takes a path — so there is no second consumer whose position this buffer
-/// could get wrong. Without it every byte cost a WASI syscall: reverse
-/// complement over a 40 MB sequence made 40.7 million of them, and the read path
-/// was 19.56 s of that leg's 20.45 s.
-const STDIN_BUF: u32 = 4096;
-
-/// The bytes in front of every heap block, holding its size class.
-///
-/// See `malloc` for why there is a header at all — one of the six things `own`
-/// releases cannot recover its own size.
-const HDR: u32 = 8;
-/// The smallest class index: `shift = 0, sub = 3`, which is eight bytes — the
-/// width of the list link `free` writes into a released payload.
-const MIN_CLASS: u32 = 3;
-/// The largest: `shift = 28, sub = 3`, which is 2 GiB. Past it a block plus its
-/// header cannot fit a wasm32 memory at all.
-const MAX_CLASS: u32 = 115;
-
 impl Rt {
-    /// Hand out the index of every runtime function, in the order the bodies are
-    /// emitted below.
-    ///
-    /// The numbering has to precede the emission, because a body calls helpers
-    /// that do not exist yet — `print_str` calls `strlen`, `concat` calls
-    /// `malloc`. What it does NOT have to do is name numbers: `slot` appends and
-    /// gives back what it appended, so a new helper is one line here beside the
-    /// place its body is emitted, `count` is however many were handed out, and the
-    /// two cannot disagree. The hand-numbered version could: an entry inserted
-    /// mid-table renumbered every entry after it, and a `call` that came out
-    /// pointing at the wrong function only failed loudly where the two signatures
-    /// differed. Two helpers with the same wasm signature swapped silently, and
-    /// there are several such sets here: `read_file` and `read_file_bytes` are both
-    /// `(i32, i32) -> ()`, and `strlen` and `utf8valid` are both `(i32) -> i32`.
-    ///
-    /// The hazard was paid off rather than argued about: retiring `charcount`
-    /// (RFC-0078's census) is the first REMOVAL this table has seen, and it was one
-    /// deleted line here and one deleted body below, with nothing to renumber.
-    ///
-    /// The returned table is that record: name beside index, which is what the
-    /// consistency test checks and what a reader wanting the emission order reads.
-    fn slots(base: u32, gen_host: bool) -> (Rt, Vec<(&'static str, u32)>) {
-        let mut table: Vec<(&'static str, u32)> = Vec::new();
-        let mut slot = |name: &'static str| {
-            let i = base + table.len() as u32;
-            table.push((name, i));
-            i
-        };
-        // Every field is named, so a field added to `Rt` and forgotten here is a
-        // compile error rather than an index of zero pointing at `write_all`.
-        let mut rt = Rt {
-            write_all: slot("write_all"),
-            malloc: slot("malloc"),
-            free: slot("free"),
-            str_new: slot("str_new"),
-            strlen: slot("strlen"),
-            strcmp: slot("strcmp"),
-            trap: slot("trap"),
-            print_str: slot("print_str"),
-            print_i64: slot("print_i64"),
-            int_str: slot("int_str"),
-            bool_str: slot("bool_str"),
-            concat: slot("concat"),
-            str_append: slot("str_append"),
-            trap_idx: slot("trap_idx"),
-            utf8valid: slot("utf8valid"),
-            str_from_bytes: slot("str_from_bytes"),
-            starts: slot("starts"),
-            env_get: slot("env_get"),
-            str_i64: slot("str_i64"),
-            now_millis: slot("now_millis"),
-            mono_nanos: slot("mono_nanos"),
-            random_seed: slot("random_seed"),
-            args: slot("args"),
-            getbyte: slot("getbyte"),
-            read_line: slot("read_line"),
-            open_at: slot("open_at"),
-            read_all: slot("read_all"),
-            err3: slot("err3"),
-            read_file: slot("read_file"),
-            read_file_bytes: slot("read_file_bytes"),
-            // Declared in EMISSION order: the bytes writer is the real one
-            // and `write_file` is the wrapper that calls it, so it is
-            // emitted second and must be declared second (RFC-0111).
-            write_file_bytes: slot("write_file_bytes"),
-            write_file: slot("write_file"),
-            rename_file: slot("rename_file"),
-            fsync_file: slot("fsync_file"),
-            list_dir: gen_host.then(|| slot("list_dir")),
-            list_dir_kinds: gen_host.then(|| slot("list_dir_kinds")),
-            map_find: slot("map_find"),
-            map_find_bytes: slot("map_find_bytes"),
-            map_hash: slot("map_hash"),
-            map_slot: slot("map_slot"),
-            map_put: slot("map_put"),
-            map_reindex: slot("map_reindex"),
-            map_find_i64: slot("map_find_i64"),
-            map_slot_i64: slot("map_slot_i64"),
-            map_put_i64: slot("map_put_i64"),
-            map_reindex_i64: slot("map_reindex_i64"),
-            map_slot_pack: slot("map_slot_pack"),
-            map_find_pack: slot("map_find_pack"),
-            map_put_pack: slot("map_put_pack"),
-            map_reindex_pack: slot("map_reindex_pack"),
-            regex_run: slot("regex_run"),
-            parse_i64: slot("parse_i64"),
-            line_at: slot("line_at"),
-            col_at: slot("col_at"),
-            region_keep: slot("region_keep"),
-            region_free: slot("region_free"),
-            region_pop: slot("region_pop"),
-            // Derived, not declared. The data segment addresses are filled in by
-            // `runtime` as it interns them.
-            count: 0,
-            msg_div0: 0,
-            msg_rem0: 0,
-            msg_divovf: 0,
-            msg_shift: 0,
-            msg_aoob: 0,
-            msg_soob: 0,
-            msg_oob_end: 0,
-            msg_region: 0,
-            region_sp: 0,
-            msg_calldepth: 0,
-            call_depth: 0,
-            region_vec: 0,
-            region_len: 0,
-            region_cap: 0,
-            heads: 0,
-            stdin_buf: 0,
-            stdin_len: 0,
-            stdin_pos: 0,
-            stdout_buf: 0,
-            stdout_pos: 0,
-        };
-        rt.count = table.len() as u32;
-        (rt, table)
-    }
-
-    /// Assert that the function about to be emitted is the one `want` reserved.
-    ///
-    /// The declared order and the emission order are two lists, and a `call`
-    /// carries an index — so this is the seam where they have to agree, and it is
-    /// checked at every helper rather than once at the end because a swap WITHIN
-    /// the runtime leaves the count right. That is the silent case: `read_file` and
-    /// `read_file_bytes` have the same wasm signature, so a module with the two
-    /// exchanged still validates and then reads the wrong thing.
-    fn next_is(&self, m: &Module, want: u32) {
-        assert_eq!(
-            m.next_func(),
-            want,
-            "a runtime helper was emitted out of declared order"
-        );
-    }
-
     /// A string literal's address in the data segment: its `{ len, cap }` header
     /// (RFC-0089 M1a), then the bytes, then the NUL. The address handed back is
     /// the BYTES, so a literal is an ordinary `String` pointer and every C-shaped
@@ -14769,13 +15871,21 @@ impl Rt {
 const SHDR: u32 = 8;
 
 /// How many `region` scopes may be open at once — the language's number, not
-/// this backend's ([`vyrn_frontend::interp::REGION_MAX`]).
+/// this backend's ([`vyrn_frontend::trap::REGION_MAX`]).
 ///
 /// It was declared here as well, with the same value, and then not used by the
 /// comparison a few thousand lines up, which spelled `64` again. Re-exported
 /// rather than deleted because the reservations below read better with a short
 /// name.
-use vyrn_frontend::interp::REGION_MAX;
+use vyrn_frontend::trap::REGION_MAX;
+
+/// `std/runtime`'s region routing flag, at this offset from `heapBase()`. The
+/// only address the module and the emitter both name: the module owns the
+/// heap's first 480 bytes (the class heads, the bump offset, and the arena's
+/// three words at 468, 472 and 476), and the emitter writes just this one, to
+/// say that the `String` it is about to allocate belongs to the open region's
+/// arena. See [`Fn_::arena_route`] and `std/runtime.vyrn`, step 8.
+const ARENA_ON: u32 = 476;
 
 /// Replace a `String` pointer on the stack with the address of its header.
 /// [`word`] then reads `len` and [`cap_at`] reads `cap`.
@@ -14798,6 +15908,17 @@ fn byte() -> MemArg {
     }
 }
 
+/// Push `1` when the sum at address local `a` carries variant `tag`, `0`
+/// otherwise — the condition an `If` over a sum's tag takes. Since M2 every
+/// sum's tag is the enum's `i64` (RFC-0126 §8.4), so this is one test for the
+/// built-in sums and the declared ones alike.
+fn tag_eq(b: &mut Frame, a: u32, tag: i64) {
+    b.ins(&Instruction::LocalGet(a));
+    b.ins(&Instruction::I64Load(word8()));
+    b.ins(&Instruction::I64Const(tag));
+    b.ins(&Instruction::I64Eq);
+}
+
 fn word() -> MemArg {
     MemArg {
         offset: 0,
@@ -14817,4305 +15938,157 @@ fn cap_at() -> MemArg {
     }
 }
 
-fn runtime(m: &mut Module, wasi: &Wasi, gen: Option<&Gen>) -> Rt {
-    let (fd_write, proc_exit) = (wasi.fd_write, wasi.proc_exit);
-    let base = m.n_imports();
-    let (mut rt, _table) = Rt::slots(base, gen.is_some());
-    let nl = rt.intern(m, "\n");
-    let t = rt.intern(m, "true");
-    let f = rt.intern(m, "false");
-    rt.msg_div0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_ZERO));
-    rt.msg_rem0 = rt.intern(m, &vyrn_frontend::trap::line(vyrn_frontend::trap::REM_ZERO));
-    rt.msg_divovf = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(vyrn_frontend::trap::DIV_OVERFLOW),
-    );
-    rt.msg_shift = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(vyrn_frontend::trap::SHIFT_RANGE),
-    );
+fn runtime(m: &mut Module, wasi: &Wasi, v: &VyrnRt) -> Rt {
+    let proc_exit = wasi.proc_exit;
+    // Every field is an index [`VyrnRt`] already reserved, or an address the
+    // interning below hands back. This function emits no wasm function of its
+    // own, so there is no order to keep and nothing to number.
+    let mut rt = Rt::default();
+    rt.proc_exit = proc_exit;
+    rt.malloc = v.get("malloc");
+    rt.free = v.get("free");
+    rt.str_new = v.get("strNew");
+    rt.concat = v.get("strConcat");
+    rt.str_append = v.get("strAppend");
+    rt.str_from_bytes = v.get("strFromBytes");
+    rt.strlen = v.get("strLen");
+    rt.strcmp = v.get("strCmp");
+    rt.int_str = v.get("intStr");
+    rt.parse_i64 = v.get("parseI64");
+    rt.line_at = v.get("lineAt");
+    rt.col_at = v.get("colAt");
+    rt.regex_run = v.get("regexRun");
+    rt.map_find = v.get("mapFind");
+    rt.map_put = v.get("mapPut");
+    rt.map_reserve = v.get("mapReserve");
+    rt.map_remove_at = v.get("mapRemoveAt");
+    rt.map_keys_copy = v.get("mapKeysCopy");
+    rt.arr_push = v.get("arrPush");
+    rt.arr_reserve = v.get("arrReserve");
+    rt.arr_append = v.get("arrAppend");
+    rt.arr_copy_from = v.get("arrCopyFrom");
+    rt.arr_clear = v.get("arrClear");
+    rt.trap = v.get("trapV");
+    rt.trap_at = v.get("trapAt");
+    rt.print_i64 = v.get("printI64");
+    rt.bool_str = v.get("boolStr");
+    rt.wasi = *wasi;
+    rt.write_all = v.get("writeAll");
+    rt.print_str = v.get("printStr");
+    rt.now_millis = v.get("nowMillis");
+    rt.mono_nanos = v.get("monoNanos");
+    rt.random_seed = v.get("randomSeedV");
+    rt.args = v.get("argsV");
+    rt.read_line = v.get("readLineV");
+    rt.open_at = v.get("openAt");
+    rt.read_file = v.get("readFileV");
+    rt.read_file_gen = v.get("readFileGen");
+    rt.read_file_bytes = v.get("readFileBytesV");
+    rt.read_file_bytes_gen = v.get("readFileBytesGen");
+    rt.write_file_bytes = v.get("writeFileBytesV");
+    rt.write_file = v.get("writeFileV");
+    rt.rename_file = v.get("renameFileV");
+    rt.fsync_file = v.get("fsyncFileV");
+    rt.list_dir = v.get("listDirV");
+    rt.list_dir_gen = v.get("listDirGen");
+    rt.fixed_time = rt.intern(m, "VYRN_FIXED_TIME=");
+    rt.fixed_seed = rt.intern(m, "VYRN_FIXED_SEED=");
+    // The two halves of each canonical I/O message come from
+    // `io_message_parts`, i.e. from the same format string the textual backend
+    // hands `__vyrn_snprintf`, so there is no second wording to keep in step.
+    let msg = |m: &mut Module, rt: &Rt, which: &str| {
+        let (pre, post) = crate::io_message_parts(which);
+        (rt.intern(m, pre), rt.intern(m, post))
+    };
+    rt.readerr = msg(m, &rt, "readerr");
+    rt.utf8err = msg(m, &rt, "utf8err");
+    rt.nulerr = msg(m, &rt, "nulerr");
+    rt.writeerr = msg(m, &rt, "writeerr");
+    rt.xdeverr = msg(m, &rt, "xdeverr");
+    rt.listerr = msg(m, &rt, "listerr");
+    rt.region_enter = v.get("regionEnter");
+    rt.region_exit = v.get("regionExit");
+    rt.str_true = rt.intern(m, "true");
+    rt.str_false = rt.intern(m, "false");
     // (The three spellings `{:.6}` gives a non-finite double were interned here
     // for `float_str`. `std/num`'s `f64Str` builds them out of bytes, in Vyrn —
     // RFC-0081 M2.)
-    // The bounds message has the offending index in the MIDDLE, so it is three
-    // pieces rather than one interned string — see `trap_idx` below.
-    rt.msg_aoob = rt.intern(
-        m,
-        &format!(
-            "{}{}",
-            vyrn_frontend::trap::PREFIX,
-            vyrn_frontend::trap::ARRAY_INDEX.0
-        ),
-    );
-    rt.msg_soob = rt.intern(
-        m,
-        &format!(
-            "{}{}",
-            vyrn_frontend::trap::PREFIX,
-            vyrn_frontend::trap::STRING_INDEX.0
-        ),
-    );
-    rt.msg_oob_end = rt.intern(m, &format!("{}\n", vyrn_frontend::trap::ARRAY_INDEX.1));
+    // The trap table — RFC-0125 §2.3, and the eight rows the census of §3 M6
+    // sorts into "a check the emitter inserts". Each row is the two halves
+    // `trap::Rule` states, interned, and the table is those addresses in row
+    // order: the wording before the value, and the wording after it, or zero
+    // where the row has no value. Every trap site pushes a row NUMBER now, so
+    // the eight `msg_*` fields this replaced are gone and the emitter knows no
+    // sentence. `trapAt` reads the row.
+    let mut table = Vec::with_capacity(8 * 8);
+    for r in vyrn_frontend::trap::Rule::ALL {
+        let (pre, post) = r.parts();
+        let pre = rt.intern(m, &pre);
+        let post = post.map_or(0, |p| rt.intern(m, &p));
+        table.extend_from_slice(&pre.to_le_bytes());
+        table.extend_from_slice(&post.to_le_bytes());
+    }
+    rt.trap_table = m.data(&table, 4);
     // RFC-0004 §4. The 64 is the LLVM prelude's fixed region stack, and the
     // interpreter traps at the same depth with the same words precisely so the
-    // three engines agree about it.
-    rt.msg_region = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(&vyrn_frontend::trap::region_depth()),
-    );
+    // three engines agree about it; the depth counter itself stays inline (see
+    // [`Fn_::region_enter`]).
     rt.region_sp = m.reserve(4, 4);
-    // Audit A5.3. Interned from the constant, so the number in the message and
-    // the number the prologue compares against cannot drift apart.
-    rt.msg_calldepth = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(&vyrn_frontend::trap::call_depth()),
-    );
+    // Audit A5.3. The row is built from the constant the prologue compares
+    // against, so the number in the message and the number enforced cannot
+    // drift apart.
     rt.call_depth = m.reserve(4, 4);
-    rt.region_vec = m.reserve(4 * REGION_MAX, 4);
-    rt.region_len = m.reserve(4 * REGION_MAX, 4);
-    rt.region_cap = m.reserve(4 * REGION_MAX, 4);
-    rt.stdin_buf = m.reserve(STDIN_BUF, 4);
-    rt.stdin_len = m.reserve(4, 4);
-    rt.stdin_pos = m.reserve(4, 4);
-    rt.stdout_buf = m.reserve(STDIN_BUF, 4);
-    rt.stdout_pos = m.reserve(4, 4);
 
-    // write_all(fd, ptr, len) -> status — the ONE place bytes leave this module.
-    // Zero when every byte arrived, non-zero when the loop gave up.
-    //
-    // A `fd_write` is allowed to write fewer bytes than it was given and say so
-    // in `nwritten`; a caller that drops that number prints a prefix and calls it
-    // a day. This backend found that out the direct way — two iovecs, only the
-    // first of which arrived — so the retry is here rather than at three call
-    // sites that would each have to remember it.
-    //
-    // The two ways out that are NOT "all of it went" — a non-zero errno, and a
-    // write that moved nothing while bytes were still owed — used to leave by the
-    // same edge as success and say nothing, so `writeFile` on a full disk or a
-    // closed pipe reported `Ok(true)`. The status is what tells them apart; the
-    // native shim has checked `wrote != n` since it was written
-    // (`__vyrn_write_file`, `toolchain.rs`). Every caller that only prints drops
-    // it, exactly as they drop `fd_close`'s errno.
-    //
-    // Standard output is GATHERED here, the mirror of standard input being
-    // scattered in `getbyte`: one `fd_write` per printed line is one syscall per
-    // printed line, and fasta prints five million of them. A write to fd 1 that
-    // fits is copied into the buffer and nothing leaves. Anything else -- a
-    // different descriptor, a write too long to buffer, a buffer with no room --
-    // flushes what is waiting FIRST, so order holds against standard error and
-    // against a file. Both trap paths write to fd 2 before they exit, which
-    // flushes on the way out; the ordinary exit flushes in `_start`.
-    let (nw, st, sfd, sptr, slen, buffered) = (4, 5, 6, 7, 8, 9);
-    let (obuf, opos) = (rt.stdout_buf, rt.stdout_pos);
-    // The retry loop, emitted twice: once over the pending buffer and once over
-    // the bytes the caller brought. A helper would need an index in the runtime
-    // table and a call, for twenty instructions.
-    let drain = |b: &mut Frame| {
-        b.ins(&Instruction::Block(BlockType::Empty))
-            .ins(&Instruction::Loop(BlockType::Empty));
-        // Nothing left to write: `st` is still the zero a local starts at.
-        b.ins(&Instruction::LocalGet(2))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::BrIf(1));
-        b.slot(0)
-            .ins(&Instruction::LocalGet(1))
-            .ins(&Instruction::I32Store(word()));
-        b.slot(4)
-            .ins(&Instruction::LocalGet(2))
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::LocalGet(0));
-        b.slot(0);
-        b.ins(&Instruction::I32Const(1));
-        b.slot(8);
-        // A non-zero errno, or a zero-length write, would spin forever.
-        b.ins(&Instruction::Call(fd_write))
-            .ins(&Instruction::LocalTee(st))
-            .ins(&Instruction::BrIf(1));
-        b.slot(8)
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalTee(nw))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::LocalSet(st))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End);
-        b.ins(&Instruction::LocalGet(1))
-            .ins(&Instruction::LocalGet(nw))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(1));
-        b.ins(&Instruction::LocalGet(2))
-            .ins(&Instruction::LocalGet(nw))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::LocalSet(2));
-        b.ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-    };
-    rt.next_is(m, rt.write_all);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        12,
-        |b| {
-            // `drain` rewrites locals 0..2, so the request is kept whole first.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalSet(sfd));
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalSet(sptr));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalSet(slen));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Const(STDIN_BUF as i32))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalSet(buffered));
-            // Flush when bytes are waiting AND this write cannot join them.
-            b.ins(&Instruction::I32Const(opos as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::I32Eqz);
-            b.ins(&Instruction::LocalGet(buffered))
-                .ins(&Instruction::I32Eqz);
-            b.ins(&Instruction::I32Const(opos as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalGet(slen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(STDIN_BUF as i32))
-                .ins(&Instruction::I32GtU)
-                .ins(&Instruction::I32Or)
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::If(BlockType::Empty));
-            b.ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(0));
-            b.ins(&Instruction::I32Const(obuf as i32))
-                .ins(&Instruction::LocalSet(1));
-            b.ins(&Instruction::I32Const(opos as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalSet(2));
-            b.ins(&Instruction::I32Const(opos as i32))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store(word()));
-            drain(b);
-            b.ins(&Instruction::End);
-            // Either copy the bytes in, or write them through.
-            b.ins(&Instruction::LocalGet(buffered))
-                .ins(&Instruction::If(BlockType::Empty));
-            b.ins(&Instruction::I32Const(obuf as i32))
-                .ins(&Instruction::I32Const(opos as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(sptr))
-                .ins(&Instruction::LocalGet(slen))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            b.ins(&Instruction::I32Const(opos as i32))
-                .ins(&Instruction::I32Const(opos as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalGet(slen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::Else);
-            b.ins(&Instruction::LocalGet(sfd))
-                .ins(&Instruction::LocalSet(0));
-            b.ins(&Instruction::LocalGet(sptr))
-                .ins(&Instruction::LocalSet(1));
-            b.ins(&Instruction::LocalGet(slen))
-                .ins(&Instruction::LocalSet(2));
-            drain(b);
-            b.ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(st));
-        },
-    );
-
-    // malloc(n) — a bump pointer over `HEAP`.
-    //
-    // `n` is an `i64`, not the `i32` a wasm32 pointer is, and that is the native
-    // shim's signature (`__vyrn_malloc(unsigned long long)`, `toolchain.rs`) for
-    // the native shim's stated reason. Every interesting caller computes
-    // `count * stride` out of a Vyrn length, which IS an `i64`; taking an `i32`
-    // put the truncation at the call site where nothing could see it. `push`
-    // doubling a 2 GiB buffer wrapped `cap * stride` to a handful of bytes,
-    // allocated those, and then copied 2 GiB into them — heap corruption out of
-    // an allocation that reported success.
-    //
-    // It frees since M6, and the shape is a segregated free list over size classes
-    // with an eight-byte header holding the class index.
-    //
-    // The header was not the first choice. A compile-time ownership model knows
-    // the size at the release as well as at the allocation, so it can size-class
-    // with no header at all — and for four of `own`'s six kinds it does: an array,
-    // a map and a `SmallArray` all carry their `cap` in the aggregate, and a cell
-    // payload's type is a compile-time fact. The fifth breaks it. A `String` is a
-    // bare NUL-terminated pointer, so a drop site can recover its LENGTH with
-    // `strlen` and cannot recover its CAPACITY — and RFC-0081's `str_append`
-    // exists precisely to allocate capacity beyond length. Sizing a headerless
-    // free from `strlen` would file a 1024-byte block on the 128-byte list and
-    // hand out overlapping memory later. Eight bytes per live block, in one
-    // function each way, is cheaper than threading a capacity to every drop.
-    //
-    // The classes are four steps per power of two — `(4 + sub) << shift` for
-    // `sub` in 0..3 — and that is not decoration either. Plain powers of two were
-    // written first and measured: they doubled `vyrnView`'s never-freed leak from
-    // 24 MB per 500 calls to 48 MB, because rounding a payload UP is a cost every
-    // block pays and only a REUSED block earns back. Four steps cap the round-up
-    // at 25%. The header sits outside the class for the same reason: a block is
-    // `8 + size`, so an 8192-byte array buffer is not pushed into the next class
-    // by its own header.
-    let (p, end, cls, h) = (2, 3, 4, 5);
-    let (want, shift, sub, sz) = (6, 7, 8, 9);
-    let trap = rt.trap;
-    let oom = rt.intern(
-        m,
-        &vyrn_frontend::trap::line(vyrn_frontend::trap::OUT_OF_MEMORY),
-    );
-    // One head per class, indexed by the class directly — the three below
-    // `MIN_CLASS` are unreachable and cost twelve bytes, against a subtraction at
-    // both ends. In reserved memory rather than in globals for M2f's reason:
-    // module state showed that one mechanism in memory beats two.
-    rt.heads = m.reserve(4 * (MAX_CLASS + 1), 4);
-    let heads = rt.heads;
-    rt.next_is(m, rt.malloc);
-    m.func(
-        &[ValType::I64],
-        &[ValType::I32],
-        &[
-            ValType::I32,
-            ValType::I64,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        0,
-        |b| {
-            // The width check, BEFORE the rounding — the native shim puts it
-            // before the `(size_t)` cast for the same reason, and here `n + 7` is
-            // the cast: a request of 2^64-1 rounds to 0 and would bump the heap by
-            // nothing, handing back a pointer for sixteen exabytes.
-            //
-            // The ceiling is 2 GiB rather than 4, because the class rounds UP and
-            // the largest class is 2 GiB. A request between them could never have
-            // been served anyway: the block would have to be its own class plus
-            // the header, past where a wasm32 memory ends.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(0x8000_0000))
-                .ins(&Instruction::I64GtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(oom as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End);
-            // `t = max(round8(n), 8) - 1`. The floor of 8 is what makes a freed
-            // block wide enough to hold the list link `free` writes into it, and
-            // it also puts `t >= 7`, so the `shift` below cannot go negative.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(7))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::I64Const(-8))
-                .ins(&Instruction::I64And)
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::LocalTee(want))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::LocalSet(want))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(want))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalSet(want));
-            // `shift = floor_log2(t) - 2`, i.e. `29 - clz(t)`, and `sub` is the
-            // two bits under the leading one. Then `cls = shift * 4 + sub` and
-            // `size = (sub + 5) << shift` — the class covers
-            // `((sub + 4) << shift, (sub + 5) << shift]`, so every size is a
-            // multiple of 8 and the smallest is 8.
-            b.ins(&Instruction::I32Const(29))
-                .ins(&Instruction::LocalGet(want))
-                .ins(&Instruction::I32Clz)
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalSet(shift));
-            b.ins(&Instruction::LocalGet(want))
-                .ins(&Instruction::LocalGet(shift))
-                .ins(&Instruction::I32ShrU)
-                .ins(&Instruction::I32Const(3))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalSet(sub));
-            b.ins(&Instruction::LocalGet(shift))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalGet(sub))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(cls));
-            b.ins(&Instruction::LocalGet(sub))
-                .ins(&Instruction::I32Const(5))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(shift))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalSet(sz));
-            // `h = &heads[cls]`, then the class's first block if it has one. A
-            // recycled block already carries the right header, so the reuse path
-            // writes only the list.
-            b.ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Const(heads as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(h))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(h))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::Else);
-            // The bump itself, in 64 bits so the SUM cannot wrap either: a 3 GiB
-            // heap plus a 2 GiB request is 5 GiB, which as an `i32` was a small
-            // pointer that then passed the `memory.size` test below. A wasm32
-            // memory stops at 4 GiB, so a top past it is a request that can never
-            // be served — reported with the words `memory.grow` failing reports,
-            // since it is the same failure reached one step earlier.
-            b.ins(&Instruction::GlobalGet(HEAP))
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::LocalGet(sz))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Const(HDR as i64))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalTee(end))
-                .ins(&Instruction::I64Const(0xFFFF_FFFF))
-                .ins(&Instruction::I64GtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(oom as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(end))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::GlobalSet(HEAP))
-                .ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::GlobalGet(HEAP))
-                .ins(&Instruction::MemorySize(0))
-                .ins(&Instruction::I32Const(16))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32LeU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::MemoryGrow(0))
-                // A grow that fails returns -1 and leaves `memory.size` where it
-                // was, so dropping the result re-tests the same condition and grows
-                // again — forever, with no output. Not academic: a browser
-                // `WebAssembly.Memory` is routinely constructed with a `maximum`,
-                // and the browser is a first-class target, so the capped memory is
-                // the normal case and the hang is what a user would see. Uncapped
-                // it was masked, badly: growth ran to the 4 GiB ceiling and the
-                // wrapped bump pointer trapped out of bounds instead.
-                //
-                // The wording is the native shim's `__vyrn_alloc_check`
-                // (`toolchain.rs`), not new words, because parity compares stderr
-                // byte for byte across the three engines.
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(oom as i32))
-                .ins(&Instruction::Call(trap))
-                .ins(&Instruction::End)
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            // Header, then hand back the payload past it.
-            b.ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Const(HDR as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(p));
-        },
-    );
-
-    // free(p) — push the block back on its class's list.
-    //
-    // Everything it refuses, it refuses SILENTLY, and that is the design: a wrong
-    // free is worse than no free, and this backend has no ASan behind it. A
-    // pointer below `HEAP_BASE` never came out of `malloc` — `drop s` on a
-    // `String` bound to a literal hands over a data-segment address, and null is
-    // the `SmallArray` that never spilled and the `Map` that never grew. A header
-    // outside the class range is memory this allocator did not write. Both leak
-    // rather than corrupt.
-    rt.next_is(m, rt.free);
-    m.func(
-        &[ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            let (cls, h) = (2, 3);
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::GlobalGet(HEAP_BASE))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(0));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(HDR as i32))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(cls))
-                .ins(&Instruction::I32Const(MIN_CLASS as i32))
-                .ins(&Instruction::I32LtS)
-                .ins(&Instruction::BrIf(0));
-            b.ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Const(MAX_CLASS as i32))
-                .ins(&Instruction::I32GtS)
-                .ins(&Instruction::BrIf(0));
-            // `*p = heads[cls]; heads[cls] = p` — the link lives in the payload, which
-            // the `MIN_CLASS` floor guarantees is wide enough to hold it.
-            b.ins(&Instruction::LocalGet(cls))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Const(heads as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(h))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(h))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::End);
-        },
-    );
-
-    // str_new(len, cap) — one heap block holding the `{ len, cap }` header, `cap`
-    // bytes of room and the NUL, and the address of the bytes (RFC-0089 M1a).
-    // Every String this module allocates comes from here, which is what makes
-    // "the eight bytes in front of a String are its header" true rather than
-    // hoped: a pointer that reached a Vyrn `String` binding without passing this
-    // function is a boundary that has to materialize one, and there are five.
-    rt.next_is(m, rt.str_new);
-    let malloc0 = rt.malloc;
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32],
-        0,
-        |b| {
-            let (base, malloc) = (2, malloc0);
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const((SHDR + 1) as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::LocalTee(base));
-            // header: len, then cap
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(base))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Store(cap_at()));
-            // the terminator at `len`
-            b.ins(&Instruction::LocalGet(base))
-                .ins(&Instruction::I32Const(SHDR as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(base))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()));
-            b.ins(&Instruction::LocalGet(base));
-        },
-    );
-
-    // strlen(s)
-    rt.next_is(m, rt.strlen);
-    m.func(&[ValType::I32], &[ValType::I32], &[ValType::I32], 0, |b| {
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalSet(p))
-            .ins(&Instruction::Block(BlockType::Empty))
-            .ins(&Instruction::Loop(BlockType::Empty))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::BrIf(1))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(p))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End)
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Sub);
-    });
-
-    // strcmp(a, b) — byte order, unsigned, which is what a Vyrn `String`
-    // comparison is (RFC-0022) since a String is UTF-8 bytes.
-    let (ca, cb) = (3, 4);
-    rt.next_is(m, rt.strcmp);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(ca))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(cb))
-                .ins(&Instruction::I32Ne)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(ca))
-                .ins(&Instruction::LocalGet(cb))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(ca))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(1))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::Unreachable)
-                .ins(&Instruction::End);
-        },
-    );
-
-    // trap(msg) — the message on stderr and exit 1, which is what the
-    // interpreter and the native build both do. Not a wasm `unreachable`: that
-    // would print wasmtime's wording, and parity compares stderr.
-    let strlen = rt.strlen;
-    let write_all = rt.write_all;
-    rt.next_is(m, rt.trap);
-    m.func(&[ValType::I32], &[], &[], 0, |b| {
-        b.ins(&Instruction::I32Const(2))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::Call(strlen))
-            .ins(&Instruction::Call(write_all))
-            .ins(&Instruction::Drop)
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::Call(proc_exit));
-    });
-
-    // print_str(s) — the bytes, then the newline.
-    rt.next_is(m, rt.print_str);
-    m.func(&[ValType::I32], &[], &[], 0, |b| {
-        b.ins(&Instruction::I32Const(1))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalGet(0));
-        str_len(b);
-        b.ins(&Instruction::Call(write_all))
-            .ins(&Instruction::Drop)
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Const(nl as i32))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::Call(write_all))
-            .ins(&Instruction::Drop);
-    });
-
-    rt.next_is(m, rt.print_i64);
-    print_i64(m, write_all);
-
-    // int_str(v, signed) — the same digit loop as `print_i64`, into a fresh
-    // 24-byte String. The digits are written backwards from the end, then moved
-    // to the front: a String pointer is the start of its own buffer, because its
-    // header is the eight bytes before it (RFC-0089 M1a).
-    let (pp, neg, buf0) = (3, 4, 5);
-    let str_new = rt.str_new;
-    rt.next_is(m, rt.int_str);
-    m.func(
-        &[ValType::I64, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Const(24))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalTee(buf0))
-                .ins(&Instruction::I32Const(24))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(pp))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64LtS)
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalTee(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(pp))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64RemU)
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64DivU)
-                .ins(&Instruction::LocalTee(0))
-                .ins(&Instruction::I64Eqz)
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(0))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(pp))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::End);
-            // The digits ended somewhere inside the room, and a String pointer
-            // has to be the start of its own buffer or its header is not in
-            // front of it. Move them down and publish the length.
-            b.ins(&Instruction::LocalGet(buf0))
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::LocalGet(buf0))
-                .ins(&Instruction::I32Const(25))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            b.ins(&Instruction::LocalGet(buf0));
-            str_hdr(b);
-            b.ins(&Instruction::LocalGet(buf0))
-                .ins(&Instruction::I32Const(24))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(pp))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(buf0));
-        },
-    );
-
-    // bool_str(v) — the interned literal itself, not a copy of it. `print` wants
-    // exactly that and frees nothing; `@str` copies at its own call site, because
-    // a rendered value owns its storage and a data-segment pointer cannot.
-    rt.next_is(m, rt.bool_str);
-    m.func(&[ValType::I32], &[ValType::I32], &[], 0, |b| {
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-            .ins(&Instruction::I32Const(t as i32))
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(f as i32))
-            .ins(&Instruction::End);
-    });
-
-    // concat(a, b)
-    let (la, lb, r) = (3, 4, 5);
-    rt.next_is(m, rt.concat);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |bb| {
-            // Both lengths are header loads since RFC-0089 M1a — `a + b` used to
-            // scan both operands before it could size the result.
-            bb.ins(&Instruction::LocalGet(0));
-            str_len(bb);
-            bb.ins(&Instruction::LocalSet(la))
-                .ins(&Instruction::LocalGet(1));
-            str_len(bb);
-            bb.ins(&Instruction::LocalSet(lb))
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::LocalGet(lb))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::LocalGet(lb))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalSet(r))
-                .ins(&Instruction::LocalGet(r))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                })
-                .ins(&Instruction::LocalGet(r))
-                .ins(&Instruction::LocalGet(la))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(lb))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                })
-                .ins(&Instruction::LocalGet(r));
-        },
-    );
-
-    // str_append(own, p, v) -> p' — append `v` to the accumulator `p`, in place,
-    // growing geometrically. The new pointer comes back as the result because a
-    // wasm local has no address to write through (RFC-0081).
-    //
-    // `own` addresses ONE word in the caller's frame: did this path allocate the
-    // buffer `p` holds? Until RFC-0089 M1a that word was a `(len, cap)` pair,
-    // because a String carried neither. Both now live in the String's header, and
-    // what is left is the ownership question — which the conventions answer
-    // (RFC-0089 M2), and this word retires with them. A `concat` result has a real
-    // capacity and is still not ours to grow, because `s = t` may alias it.
-    //
-    // The grow is `str_new`, copy and `free`, not a `realloc`: this allocator has
-    // no in-place extend, because the block after an accumulator belongs to
-    // whatever the writer allocated between two appends. Doubling is what makes N
-    // appends copy O(N) bytes in total, where `concat` per element copied O(N²) —
-    // which is why 40k `Int64` did not merely take 1.4 s, it walked the heap past
-    // 4 GiB and trapped out of bounds on 229 KB of JSON.
-    let (own, p, v) = (0, 1, 2);
-    let (vlen, cap, len, need, nc, nb) = (4, 5, 6, 7, 8, 9);
-    let free = rt.free;
-    let str_new = rt.str_new;
-    rt.next_is(m, rt.str_append);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32; 6],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(v));
-            str_len(b);
-            b.ins(&Instruction::LocalSet(vlen));
-            b.ins(&Instruction::LocalGet(p));
-            str_len(b);
-            b.ins(&Instruction::LocalSet(len));
-            // Not ours: copy into a buffer that is. 32 bytes minimum, matching
-            // the textual backend's floor so the two grow in step.
-            b.ins(&Instruction::LocalGet(own))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::I32Const(32))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(32))
-                .ins(&Instruction::LocalSet(cap))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalTee(nb))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                })
-                .ins(&Instruction::LocalGet(nb))
-                .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::LocalGet(own))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::Else);
-            b.ins(&Instruction::LocalGet(p));
-            str_hdr(b);
-            b.ins(&Instruction::I32Load(cap_at()))
-                .ins(&Instruction::LocalSet(cap))
-                .ins(&Instruction::End);
-            // Reserve `len + vlen` content bytes, doubling so N appends are O(N).
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(need))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32GtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalTee(nc))
-                .ins(&Instruction::LocalGet(need))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(need))
-                .ins(&Instruction::LocalSet(nc))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(nc))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalTee(nb))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            // Only this branch frees. The flag is what says the buffer is ours;
-            // the branch above copies a pointer that is not.
-            b.ins(&Instruction::LocalGet(p));
-            str_hdr(b);
-            b.ins(&Instruction::Call(free))
-                .ins(&Instruction::LocalGet(nb))
-                .ins(&Instruction::LocalSet(p))
-                .ins(&Instruction::End);
-            // Copy the operand's bytes AND its NUL over the old terminator, then
-            // publish the new length in the header.
-            b.ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::LocalGet(vlen))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            b.ins(&Instruction::LocalGet(p));
-            str_hdr(b);
-            b.ins(&Instruction::LocalGet(need))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::LocalGet(p));
-        },
-    );
-
-    // trap_idx(pre, i, post) — `error: array index 7 out of bounds`, which the
-    // interpreter and the native build both print with the index interpolated.
-    // Three writes rather than a `printf`: varargs are M3, and this is the only
-    // runtime message with a number in it.
-    let int_str = rt.int_str;
-    rt.next_is(m, rt.trap_idx);
-    m.func(
-        &[ValType::I32, ValType::I64, ValType::I32],
-        &[],
-        &[ValType::I32],
-        0,
-        |b| {
-            let s = 4; // params 0..2, the frame base 3, then ours
-            let put = |b: &mut Frame, p: u32| {
-                b.ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::LocalGet(p))
-                    .ins(&Instruction::LocalGet(p))
-                    .ins(&Instruction::Call(strlen))
-                    .ins(&Instruction::Call(write_all))
-                    .ins(&Instruction::Drop);
-            };
-            put(b, 0);
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Call(int_str))
-                .ins(&Instruction::LocalSet(s));
-            put(b, s);
-            put(b, 2);
-            b.ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Call(proc_exit));
-        },
-    );
+    // Every runtime FUNCTION this backend once wrote is now `std/runtime`'s
+    // (PLAN-0125-runtime §6): the allocator at step 2, the strings at steps 1
+    // and 4, the maps at 5, the arrays at 6, the I/O family at 7, and at step
+    // 9 the last four — `trapV`, `trapAt`, `printI64` and `boolStr`. The call
+    // sites reach them through the indices `VyrnRt` reserved. What is left in
+    // this file is instruction sequences at their one site each, listed in
+    // step 9's results: the prologue's depth counter, the trap site of
+    // RFC-0125 M1, the `a[i]` check, the `SmallArray` push and `_start`.
 
     // (`charcount(s)` was here — ~30 lines of scan for the bytes that are not UTF-8
     // continuation bytes. RFC-0078's census found `charCount` the one builtin with
     // no justification for being one, and `std/text`'s `charCountV` is the same scan
     // written in Vyrn, so this backend has a row it no longer has to lower. It is
-    // the first runtime function this table has LOST, which is what made the
-    // self-registering `next_is` worth doing in 5d6a857.)
+    // the first runtime function this table has LOST.)
 
-    // utf8valid(s, len) — Björn Höhrmann's DFA, over the SAME table the textual
-    // backend emits (`crate::utf8d_table`). Sharing the bytes is the point: two
-    // tables would be two answers to "is this valid UTF-8", free to drift by one
-    // entry, and the thing they decide is whether a program traps.
-    //
-    // 256 byte-class entries, then 9 states × 12 classes of transitions. State 0
-    // accepts, 12 rejects, and every rejecting transition stays at 12 — so the
-    // loop never needs an early exit.
+    // Björn Höhrmann's UTF-8 DFA, the SAME table the textual backend emits
+    // (`crate::utf8d_table`). Sharing the bytes is the point: two tables would
+    // be two answers to "is this valid UTF-8", free to drift by one entry, and
+    // the thing they decide is whether a program traps. The walk over it is
+    // `std/runtime`'s `utf8Valid` (PLAN-0125-runtime §6 step 1), which takes
+    // the table's address as its third argument; every call below passes it.
     let utf8d = m.data(&crate::utf8d_table(), 1);
-    let (i, st) = (3, 4);
-    rt.next_is(m, rt.utf8valid);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::BrIf(1))
-                // st = utf8d[256 + st + utf8d[s[i]]]
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(utf8d as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const((utf8d + 256) as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalSet(st))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Eqz);
-        },
-    );
-
-    // str_from_bytes(data, len, dest) — RFC-0014's `stringFromBytes`, writing a
-    // whole `Result<String, String>` through `dest`.
-    //
-    // A runtime function rather than inline lowering because the two failures are
-    // where the semantics live, and both are canonical wording parity compares:
-    // an embedded NUL is rejected BEFORE the UTF-8 check (a Vyrn `String` is
-    // NUL-terminated, so it could not carry one), and the DFA decides the rest.
-    // An `Err` payload is the interned message itself rather than a heap copy of
-    // it — the textual backend copies only so that every I/O error payload is
-    // owned storage, and nothing here ever frees a message.
-    //
-    // The BUFFER is a different question, and it was answered wrong: it is
-    // allocated before the scan and both failures left by the side door without
-    // it, so `stringFromBytes` over invalid input in a loop lost one block a turn
-    // on this backend alone. One free at the join covers both exits. The block is
-    // not the region's on any path — `Fn_::expr` records a `String` in the arena
-    // only for the `str_temporary` shapes, and this call's type is a `Result` —
-    // so there is no second owner to take it from.
-    let bnul = rt.intern(m, crate::io_message("bnul"));
-    let butf8 = rt.intern(m, crate::io_message("butf8"));
-    let res = layout::of_ll("{ i1, i64, i64 }").expect("the Result<String, String> shape");
-    // params 0..2, the frame base 3, then ours — `i` is NOT `utf8valid`'s `i`
-    // above, whose 3 is this function's base.
-    let (buf, err, c, at_i) = (4, 5, 6, 7);
-    let (utf8valid, str_new) = (rt.utf8valid, rt.str_new);
-    rt.next_is(m, rt.str_from_bytes);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalSet(buf));
-            b.ins(&Instruction::Block(BlockType::Empty)) // fin
-                .ins(&Instruction::Block(BlockType::Empty)) // copied
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(bnul as i32))
-                .ins(&Instruction::LocalSet(err))
-                .ins(&Instruction::Br(3))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(at_i))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(at_i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(utf8valid))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(butf8 as i32))
-                .ins(&Instruction::LocalSet(err))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End); // fin
-                                         // A failure hands back a message, so the buffer built for the bytes
-                                         // has no owner left. Both exits arrive here.
-            b.ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(buf));
-            str_hdr(b);
-            b.ins(&Instruction::Call(free)).ins(&Instruction::End);
-            // The tag is `no error`, and the word is whichever pointer that named.
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::I32Store8(MemArg {
-                    offset: res.fields[0] as u64,
-                    align: 0,
-                    memory_index: 0,
-                }));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::LocalGet(err))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::End)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Store(at(res.fields[1])));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64Store(at(res.fields[2])));
-        },
-    );
+    rt.utf8d = utf8d;
+    // `str_from_bytes` is `std/runtime`'s `strFromBytes` (PLAN-0125-runtime §6
+    // step 4). Its two failure wordings are parity's: an embedded NUL is
+    // refused before the UTF-8 check, and both are `io_message`'s. Interned here
+    // and handed to every call as arguments, so the module never spells them.
+    rt.bnul = rt.intern(m, crate::io_message("bnul"));
+    rt.butf8 = rt.intern(m, crate::io_message("butf8"));
 
     // (`slice` was emitted here — 60 instructions: a signed three-clause bounds
     // test, a continuation-byte probe at each cut point, two interned trap strings
     // and a `memory.copy`. RFC-0079 M3 deleted it along with the interpreter's arm
     // and the textual emitter's branch; `std/strpred`'s `sliceV` is the one range
-    // check now. Removing a slot is a one-line deletion in `slots` because the
-    // table hands indices out in field order — the second removal it has seen,
-    // after `charcount`.)
+    // check now — the second removal this table has seen, after `charcount`.)
 
     // (`float_str` was emitted here — see the note where its 511 lines stood.
-    // RFC-0081 M2 routed `%f` to `std/num`'s `f64Str`; removing its slot is a
-    // one-line deletion in `slots` because the table hands indices out in field
-    // order — the third removal it has seen, after `charcount` and `slice`.)
+    // RFC-0081 M2 routed `%f` to `std/num`'s `f64Str` — the third removal this
+    // table has seen, after `charcount` and `slice`.)
 
-    io_runtime(m, &rt, wasi, gen);
-
-    // map_find(keys, len, key, idx, cap) -> the entry's index, or -1.
-    //
-    // The hash index (RFC-0104's k-nucleotide row) — one probe, not the linear
-    // `strcmp` scan this was until the whole map was O(keys) per lookup and every
-    // program with distinct keys was quadratic in them. `idx` is `cap * 2` buckets
-    // of i64 holding an entry's position PLUS ONE, so 0 is the empty bucket; it
-    // indexes the insertion-ordered storage and never reorders it, which is how
-    // RFC-0028's locked order survives a hash living underneath it.
-    //
-    // An empty map has no index yet and a map with a `cap` has one — that pair is
-    // `map_reserve`'s to keep, so a null `idx` under a non-zero `cap` is a bug
-    // here rather than a case to fall back on. Written without a `return`: M1's
-    // rule is that a body reaches its epilogue, so the empty answer branches out
-    // of a block carrying the value.
-    let bkt = 6;
-    rt.next_is(m, rt.map_find);
-    let (map_slot, map_hash) = (rt.map_slot, rt.map_hash);
-    m.func(
-        &[
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        &[ValType::I32],
-        &[ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32LeS)
-                .ins(&Instruction::LocalGet(4))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32LeS)
-                .ins(&Instruction::I32Or)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End);
-            // The bucket the key belongs in, then the entry it names: a zero is
-            // the empty bucket, so the key is not here.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::LocalGet(4))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::Call(map_slot))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64Load(word8()))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::LocalSet(bkt));
-            b.ins(&Instruction::LocalGet(bkt))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(bkt))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::End);
-        },
-    );
-
-    // map_find_bytes(keys, len, p, blen, idx, cap) -> the entry index, or -1
-    // (RFC-0116). The byte-keyed probe: FNV-1a over exactly `blen` bytes —
-    // which equals `map_hash` of the equal key, since a stored key has no
-    // interior NUL — then a length-aware compare with the terminator checked.
-    // The shim's `__vyrn_map_find_bytes`, instruction for instruction in
-    // effect, and the reason the wasm leg's `tallyBytes` hit path builds no
-    // String either.
-    {
-        // Params 0..5, the builder's frame base at 6, then ours.
-        let (h, i, bb, ent, kk, res, eq, mask) = (7, 8, 9, 10, 11, 12, 13, 14);
-        rt.next_is(m, rt.map_find_bytes);
-        m.func(
-            &[
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-            ],
-            &[ValType::I32],
-            &[
-                ValType::I64,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-            ],
-            0,
-            |b| {
-                b.ins(&Instruction::I32Const(-1))
-                    .ins(&Instruction::LocalSet(res));
-                b.ins(&Instruction::Block(BlockType::Empty));
-                // An empty map, or one with no index yet: not here.
-                b.ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::LocalGet(5))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::I32Or)
-                    .ins(&Instruction::BrIf(0));
-                // FNV-1a over p[0..blen).
-                b.ins(&Instruction::I64Const(14695981039346656037u64 as i64))
-                    .ins(&Instruction::LocalSet(h));
-                b.ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalSet(i));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32GeS)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I64ExtendI32U)
-                    .ins(&Instruction::I64Xor)
-                    .ins(&Instruction::I64Const(1099511628211))
-                    .ins(&Instruction::I64Mul)
-                    .ins(&Instruction::LocalSet(h));
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(i))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                // mask = cap*2 - 1; bb = h & mask.
-                b.ins(&Instruction::LocalGet(5))
-                    .ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::LocalSet(mask));
-                b.ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalGet(mask))
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::LocalSet(bb));
-                // The probe walk. `len <= cap` keeps the table at most half
-                // full, so an empty bucket is always reached.
-                b.ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::LocalGet(bb))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I64Load(word8()))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalTee(ent))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(ent))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::I32Const(4))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load(word()))
-                    .ins(&Instruction::LocalSet(kk));
-                // Length-aware compare: eq stays 1 only if every byte matches.
-                b.ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::LocalSet(eq));
-                b.ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalSet(i));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32GeS)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(kk))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I32Ne)
-                    .ins(&Instruction::If(BlockType::Empty));
-                b.ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalSet(eq))
-                    .ins(&Instruction::Br(2));
-                b.ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(i))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                // A hit needs the terminator too: keys carry no interior NUL,
-                // so kk[blen] == 0 is exactly length equality.
-                b.ins(&Instruction::LocalGet(eq))
-                    .ins(&Instruction::LocalGet(kk))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::If(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(ent))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::LocalSet(res))
-                    .ins(&Instruction::Br(2));
-                b.ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(bb))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalGet(mask))
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::LocalSet(bb))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(res));
-            },
-        );
-    }
-
-    // map_hash(key) -> FNV-1a over the key's bytes, to the NUL.
-    //
-    // The hash is never observable — no two backends have to agree on it, only on
-    // the insertion order — so this is the cheap one rather than a shared one. To
-    // the NUL, which is exactly the equality `strcmp` decides by.
-    let (h, c) = (2, 3);
-    rt.next_is(m, rt.map_hash);
-    m.func(
-        &[ValType::I32],
-        &[ValType::I64],
-        &[ValType::I64, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::I64Const(14695981039346656037u64 as i64))
-                .ins(&Instruction::LocalSet(h));
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(h))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Xor)
-                .ins(&Instruction::I64Const(1099511628211))
-                .ins(&Instruction::I64Mul)
-                .ins(&Instruction::LocalSet(h));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(h));
-        },
-    );
-
-    // map_slot(keys, idx, nb, key) -> the bucket `key` belongs in: the one that
-    // holds it, or the first empty one after where it hashes.
-    //
-    // One probe serves both readers — a lookup asks whether the bucket it lands on
-    // is occupied, an insert writes into it. `len <= cap` means the table is at
-    // most half full, so the walk always reaches an empty bucket and needs no
-    // bound of its own; `nb` is a power of two, so the wrap is a mask.
-    let (slot_b, mask, ent) = (5, 6, 7);
-    rt.next_is(m, rt.map_slot);
-    let strcmp = rt.strcmp;
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalSet(mask));
-            b.ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::Call(map_hash))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::LocalGet(mask))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalSet(slot_b));
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(slot_b))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64Load(word8()))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::LocalTee(ent))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(ent))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::Call(strcmp))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(slot_b))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(mask))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalSet(slot_b))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(slot_b));
-        },
-    );
-
-    // map_put(keys, idx, nb, i) — record the entry at position `i`, whose key is
-    // already in `keys[i]`. The bucket probe is `map_slot`'s; this is the write.
-    rt.next_is(m, rt.map_put);
-    let map_slot_f = rt.map_slot;
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        &[],
-        &[],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(1));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::Call(map_slot_f))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Add);
-            b.ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::I64Store(word8()));
-        },
-    );
-
-    // map_reindex(keys, len, idx, nb) — rebuild the whole index from the entries.
-    //
-    // Called where positions move: a grow (the bucket count changed) and a remove
-    // (the survivors shifted down). Both are already O(len) for their own reasons,
-    // so this adds no order of growth to either.
-    let ri = 5;
-    rt.next_is(m, rt.map_reindex);
-    let map_put = rt.map_put;
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::Block(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32LeS)
-                .ins(&Instruction::BrIf(0));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::MemoryFill(0));
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(ri))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32GeS)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::LocalGet(ri))
-                .ins(&Instruction::Call(map_put));
-            b.ins(&Instruction::LocalGet(ri))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(ri))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::End);
-        },
-    );
-
-    // ---- the Int64-keyed chain (RFC-0117 M1) -------------------------------
-    // The same four shapes over an 8-byte key column: the hash is SplitMix64's
-    // finalizer (the function std/hash's `impl Hashable for Int64` spells, and
-    // the shim's `map_hash_i64`), equality is the bits, and nothing about a
-    // key is ever dup'd or freed.
-
-    // map_find_i64(keys, len, key: i64, idx, cap) -> the entry's index, or -1.
-    {
-        // Params 0..4 (2 is the i64 key), the builder's frame base at 5, ours
-        // from 6.
-        let bkt = 6;
-        rt.next_is(m, rt.map_find_i64);
-        let map_slot_i64 = rt.map_slot_i64;
-        m.func(
-            &[
-                ValType::I32,
-                ValType::I32,
-                ValType::I64,
-                ValType::I32,
-                ValType::I32,
-            ],
-            &[ValType::I32],
-            &[ValType::I32],
-            0,
-            |b| {
-                b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
-                b.ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::I32Or)
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::I32Const(-1))
-                    .ins(&Instruction::Br(1))
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::Call(map_slot_i64))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I64Load(word8()))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalSet(bkt));
-                b.ins(&Instruction::LocalGet(bkt))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                    .ins(&Instruction::I32Const(-1))
-                    .ins(&Instruction::Else)
-                    .ins(&Instruction::LocalGet(bkt))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::End);
-            },
-        );
-    }
-
-    // map_slot_i64(keys, idx, nb, key: i64) -> the bucket `key` belongs in.
-    {
-        // Params 0..3 (3 is the i64 key), frame base at 4, ours from 5.
-        let (slot_b, mask, ent, h) = (5, 6, 7, 8);
-        rt.next_is(m, rt.map_slot_i64);
-        m.func(
-            &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
-            &[ValType::I32],
-            &[ValType::I32, ValType::I32, ValType::I32, ValType::I64],
-            0,
-            |b| {
-                b.ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::LocalSet(mask));
-                // SplitMix64's finalizer, inline: three xor-shift-multiply
-                // rounds over the key's bits.
-                b.ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I64Const(30))
-                    .ins(&Instruction::I64ShrU)
-                    .ins(&Instruction::I64Xor)
-                    .ins(&Instruction::I64Const(0xBF58476D1CE4E5B9u64 as i64))
-                    .ins(&Instruction::I64Mul)
-                    .ins(&Instruction::LocalSet(h));
-                b.ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::I64Const(27))
-                    .ins(&Instruction::I64ShrU)
-                    .ins(&Instruction::I64Xor)
-                    .ins(&Instruction::I64Const(0x94D049BB133111EBu64 as i64))
-                    .ins(&Instruction::I64Mul)
-                    .ins(&Instruction::LocalSet(h));
-                b.ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::I64Const(31))
-                    .ins(&Instruction::I64ShrU)
-                    .ins(&Instruction::I64Xor)
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalGet(mask))
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::LocalSet(slot_b));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::LocalGet(slot_b))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I64Load(word8()))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalTee(ent))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(ent))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I64Load(word8()))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I64Eq)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(slot_b))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalGet(mask))
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::LocalSet(slot_b))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(slot_b));
-            },
-        );
-    }
-
-    // map_put_i64(keys, idx, nb, i) — record the entry at position `i`, whose
-    // key is already in `keys[i]`.
-    {
-        rt.next_is(m, rt.map_put_i64);
-        let map_slot_i64 = rt.map_slot_i64;
-        m.func(
-            &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-            &[],
-            &[],
-            0,
-            |b| {
-                b.ins(&Instruction::LocalGet(1));
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I64Load(word8()))
-                    .ins(&Instruction::Call(map_slot_i64))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add);
-                b.ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I64ExtendI32U)
-                    .ins(&Instruction::I64Const(1))
-                    .ins(&Instruction::I64Add)
-                    .ins(&Instruction::I64Store(word8()));
-            },
-        );
-    }
-
-    // map_reindex_i64(keys, len, idx, nb) — rebuild the whole index.
-    {
-        let ri = 5;
-        rt.next_is(m, rt.map_reindex_i64);
-        let map_put_i64 = rt.map_put_i64;
-        m.func(
-            &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-            &[],
-            &[ValType::I32],
-            0,
-            |b| {
-                b.ins(&Instruction::Block(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::BrIf(0));
-                b.ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::MemoryFill(0));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(ri))
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32GeS)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::LocalGet(ri))
-                    .ins(&Instruction::Call(map_put_i64));
-                b.ins(&Instruction::LocalGet(ri))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(ri))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::End);
-            },
-        );
-    }
-
-    // map_slot_pack(keys, stride, idx, nb, keyp) -> the bucket the packed key
-    // at `keyp` belongs in (RFC-0117 M2). The hash is FNV-1a over the key's
-    // `stride` canonical bytes — the map's own, exactly as the string map's
-    // FNV and the i64 map's SplitMix are its own — and equality is a byte
-    // compare over the stride, which IS field-wise equality because codegen
-    // zeroed the padding before packing the fields.
-    {
-        // Params 0..4, frame base at 5, ours from 6.
-        let (slot_b, mask, ent, h, i) = (6, 7, 8, 9, 10);
-        rt.next_is(m, rt.map_slot_pack);
-        m.func(
-            &[
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-            ],
-            &[ValType::I32],
-            &[
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I64,
-                ValType::I32,
-            ],
-            0,
-            |b| {
-                b.ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::LocalSet(mask));
-                // FNV-1a over keyp[0..stride).
-                b.ins(&Instruction::I64Const(0xCBF29CE484222325u64 as i64))
-                    .ins(&Instruction::LocalSet(h));
-                b.ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalSet(i));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32GeS)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I64ExtendI32U)
-                    .ins(&Instruction::I64Xor)
-                    .ins(&Instruction::I64Const(1099511628211))
-                    .ins(&Instruction::I64Mul)
-                    .ins(&Instruction::LocalSet(h));
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(i))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(h))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalGet(mask))
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::LocalSet(slot_b));
-                // The walk: an empty bucket or an equal key ends it.
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::LocalGet(slot_b))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I64Load(word8()))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalTee(ent))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::BrIf(1));
-                // Byte compare keys + (ent-1)*stride against keyp: equal exits
-                // the whole walk (depth 3), a differing byte exits the inner
-                // block (depth 1) into the advance.
-                b.ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalSet(i));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32GeS)
-                    .ins(&Instruction::BrIf(3));
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(ent))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I32Ne)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(i))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(slot_b))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalGet(mask))
-                    .ins(&Instruction::I32And)
-                    .ins(&Instruction::LocalSet(slot_b))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(slot_b));
-            },
-        );
-    }
-
-    // map_find_pack(keys, len, keyp, stride, idx, cap) -> the entry's index,
-    // or -1 (RFC-0117 M2).
-    {
-        let bkt = 7;
-        rt.next_is(m, rt.map_find_pack);
-        let map_slot_pack = rt.map_slot_pack;
-        m.func(
-            &[
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-            ],
-            &[ValType::I32],
-            &[ValType::I32],
-            0,
-            |b| {
-                b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
-                b.ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::LocalGet(5))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::I32Or)
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::I32Const(-1))
-                    .ins(&Instruction::Br(1))
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::LocalGet(5))
-                    .ins(&Instruction::I32Const(2))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::Call(map_slot_pack))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I64Load(word8()))
-                    .ins(&Instruction::I32WrapI64)
-                    .ins(&Instruction::LocalSet(bkt));
-                b.ins(&Instruction::LocalGet(bkt))
-                    .ins(&Instruction::I32Eqz)
-                    .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                    .ins(&Instruction::I32Const(-1))
-                    .ins(&Instruction::Else)
-                    .ins(&Instruction::LocalGet(bkt))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Sub)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::End);
-            },
-        );
-    }
-
-    // map_put_pack(keys, stride, idx, nb, i) — record the entry at position
-    // `i`, whose packed key is already in `keys + i*stride`.
-    {
-        rt.next_is(m, rt.map_put_pack);
-        let map_slot_pack = rt.map_slot_pack;
-        m.func(
-            &[
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-            ],
-            &[],
-            &[],
-            0,
-            |b| {
-                b.ins(&Instruction::LocalGet(2));
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::Call(map_slot_pack))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add);
-                b.ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::I64ExtendI32U)
-                    .ins(&Instruction::I64Const(1))
-                    .ins(&Instruction::I64Add)
-                    .ins(&Instruction::I64Store(word8()));
-            },
-        );
-    }
-
-    // map_reindex_pack(keys, stride, len, idx, nb) — rebuild the whole index.
-    {
-        let ri = 6;
-        rt.next_is(m, rt.map_reindex_pack);
-        let map_put_pack = rt.map_put_pack;
-        m.func(
-            &[
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-                ValType::I32,
-            ],
-            &[],
-            &[ValType::I32],
-            0,
-            |b| {
-                b.ins(&Instruction::Block(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::I32LeS)
-                    .ins(&Instruction::BrIf(0));
-                b.ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::I32Const(8))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::MemoryFill(0));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty));
-                b.ins(&Instruction::LocalGet(ri))
-                    .ins(&Instruction::LocalGet(2))
-                    .ins(&Instruction::I32GeS)
-                    .ins(&Instruction::BrIf(1));
-                b.ins(&Instruction::LocalGet(0))
-                    .ins(&Instruction::LocalGet(1))
-                    .ins(&Instruction::LocalGet(3))
-                    .ins(&Instruction::LocalGet(4))
-                    .ins(&Instruction::LocalGet(ri))
-                    .ins(&Instruction::Call(map_put_pack));
-                b.ins(&Instruction::LocalGet(ri))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(ri))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-                b.ins(&Instruction::End);
-            },
-        );
-    }
-
-    // regex_run(s, table, start, accept) -> whether `s` matches in full.
-    //
-    // RFC-0046 compiles a `=~` pattern to a COMPLETE DFA — every state has all 256
-    // transitions and a dead state absorbs a non-match — so the walk has no
-    // conditional but the end of the string, and no anchoring to check: a full
-    // match is "the state the last byte left us in accepts". The pattern is
-    // entirely in the table, which is why one helper serves every pattern in the
-    // module, and why this reads the same as `@__vyrn_regex_run` in the textual
-    // backend and `Dfa::matches` in the interpreter. Three spellings of one walk is
-    // two too many, but the other two already existed; what matters is that the
-    // TABLE has one source (`vyrn_frontend::regex::compile`), so a disagreement
-    // would have to be in the walk rather than in the language.
-    let (st, ch) = (5, 6);
-    rt.next_is(m, rt.regex_run);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::LocalSet(st));
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(0))
-                // UNSIGNED, and the whole corpus is ASCII so nothing here says so:
-                // a signed load turns a UTF-8 continuation byte into a negative
-                // table index, which reads memory below the table and answers
-                // wrongly rather than trapping. `the_dfa_walk_...` is the test.
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(ch))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            // table[st * 256 + ch], four bytes per entry: `st << 10` is the row.
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Const(10))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(ch))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalSet(st));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Ne);
-        },
-    );
-
-    text_runtime(m, &rt);
-
-    // And the total: `count` is derived from the declarations, so this is the one
-    // place it meets the emission.
-    assert_eq!(m.next_func(), base + rt.count, "runtime function count");
     rt
 }
 
-/// `parse`, `lineAt` and `colAt` — the three loops RFC-0078 deliberately left as
-/// builtins, and therefore the three this backend owes a lowering.
-///
-/// They are together because they are refused for the same *kind* of reason and
-/// not the same reason. `parse` is a semantics refusal: `std/num`'s `parseInt64`
-/// is the same digit loop and DECLINES where this one wraps, so routing `parse`
-/// through it would change what every existing caller does with
-/// `parse("18446744073709551615")` — which is `Some(-1)` here and on the other two
-/// engines. `lineAt`/`colAt` are a cache refusal: the loop is four lines of Vyrn,
-/// but it is O(offset) and a scanner asks once per node, so the interpreter
-/// memoizes a line-start table per buffer that a generator — barred from module
-/// state by comptime purity — could not hold.
-///
-/// **No cache here, and that is a decision.** The native shim does not memoize
-/// either (`__vyrn_line_at` counts from byte 0 on every call), so counting
-/// directly makes this backend agree with the engine it is closest to rather than
-/// inventing a third behaviour; and the 122 ms RFC-0078 M4b(2) measured is a
-/// GENERATION-time cost, paid by whichever engine runs the generator. A module
-/// emitted by this backend reaches these only where compiled code calls them at
-/// run time, which in the corpus is `textbytes.vyrn` comparing the builtin against
-/// `std/text` over twelve short buffers. A cache would be per-buffer state in
-/// linear memory keyed on an address the bump allocator can recycle — the
-/// interpreter avoids that by holding the `Rc` — so it is not a small change, and
-/// nothing measured wants it yet.
-fn text_runtime(m: &mut Module, rt: &Rt) {
-    let sum2 = layout::of_ll("{ i1, i64, i64 }").expect("the Option/Result shape");
-
-    // parse_i64(s, dest) — RFC-0014's `parse` as an `Option<Int64>` written
-    // through `dest`: an optional `-`, then digits, ALL of them consumed.
-    //
-    // Every decline is the same decline (`None`), and there are three ways to
-    // reach it: nothing after the sign (`""` and `"-"`), a byte that is not a
-    // digit anywhere in the rest (`"+1"`, `" 1"`, `"1 "`, `"1.5"`, `"abc"`,
-    // `"12a"`, `"--1"`), and that is all — there is no third category, in
-    // particular NOT overflow. `acc * 10 + d` in wrapping `i64` is the
-    // interpreter's `wrapping_mul`/`wrapping_add` instruction for instruction, so
-    // `"9223372036854775808"` is `Int64.min` and `"18446744073709551615"` is `-1`
-    // on all three engines. `examples/numbytes.vyrn` pins every row of that table.
-    //
-    // Deliberately NOT `str_i64` next door, which reads `+` and stops at the first
-    // byte that is not a digit — that is `strtoll`'s contract for an injected
-    // `VYRN_FIXED_TIME`, and it is the opposite of this one's on exactly the inputs
-    // `numbytes` prints.
-    let (acc, neg, c) = (3, 4, 5); // params 0..1, the frame base 2, then ours
-    rt.next_is(m, rt.parse_i64);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I64, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                .ins(&Instruction::Block(BlockType::Empty)); // 0: none
-                                                             // The sign, and then the first byte AFTER it — which is the byte the
-                                                             // emptiness test is about.
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(neg))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalSet(c))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(0));
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: the digits ran out
-                .ins(&Instruction::Loop(BlockType::Empty)); // 0
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1));
-            // Not a digit: out of the `none` block, which is two levels further
-            // out than the loop's own exit.
-            b.ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(2))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'9' as i32))
-                .ins(&Instruction::I32GtU)
-                .ins(&Instruction::BrIf(2));
-            b.ins(&Instruction::LocalGet(acc))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64Mul)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Const(b'0' as i64))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(acc))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            // `Some(±acc)`. Negated in place so the three stores below have no
-            // branch in the middle of them; `wrapping_neg` of `Int64.min` is
-            // `Int64.min`, which is `i64.sub` from zero and needs no note.
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(acc))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::LocalSet(acc))
-                .ins(&Instruction::End);
-            // The same three stores `sum2_write_to` makes, at the same
-            // `layout::of_ll ∘ llt` offsets — spelled out only because the payload
-            // is already an `i64` rather than a word to zero-extend.
-            b.ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Store8(MemArg {
-                    offset: sum2.fields[0] as u64,
-                    align: 0,
-                    memory_index: 0,
-                }))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(acc))
-                .ins(&Instruction::I64Store(at(sum2.fields[1])))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64Store(at(sum2.fields[2])));
-            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
-            sum2_write_to(b, 1, &sum2, 0, None);
-            b.ins(&Instruction::End); // fin
-        },
-    );
-
-    // line_at(d, len, off) / col_at(d, len, off) — the 1-based line and column of
-    // a byte offset, and a column counts BYTES.
-    //
-    // That last part is measured rather than assumed (RFC-0078 M4b(2)): the
-    // interpreter computes `off - lineStart + 1` over a byte table and the shim
-    // walks bytes backwards, so the `x` in `éx` is column 3. `std/vyx.vyrn`'s
-    // wrapper documents it as "chars since the last LF", which is wrong for any
-    // line with non-ASCII in it, and RFC-0033's `#line` directives want the byte
-    // column anyway.
-    //
-    // Both clamp `off` to `len` and neither clamps it below zero, because a
-    // negative `off` falls out of the loop conditions being SIGNED: `0 >= off`
-    // ends the forward count before it starts and `off <= 0` ends the backward
-    // walk, which is 1 either way and is what the interpreter's `.max(0)` and the
-    // shim's `i < off` / `i > 0` both give.
-    let (i, out) = (4, 5); // params 0..2, the frame base 3, then ours
-    rt.next_is(m, rt.line_at);
-    m.func(
-        &[ValType::I32, ValType::I64, ValType::I64],
-        &[ValType::I64],
-        &[ValType::I64, ValType::I64],
-        0,
-        |b| {
-            b.ins(&Instruction::I64Const(1))
-                .ins(&Instruction::LocalSet(out));
-            clamp_off(b);
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64GeS)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(b'\n' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(out))
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(out))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(out));
-        },
-    );
-
-    rt.next_is(m, rt.col_at);
-    m.func(
-        &[ValType::I32, ValType::I64, ValType::I64],
-        &[ValType::I64],
-        &[ValType::I64],
-        0,
-        |b| {
-            let out = 4;
-            b.ins(&Instruction::I64Const(1))
-                .ins(&Instruction::LocalSet(out));
-            clamp_off(b);
-            // `off` IS the cursor, walked down to the byte after the previous LF.
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64LeS)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(b'\n' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(out))
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(out))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64Const(-1))
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(2))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(out));
-        },
-    );
-
-    // region_keep(bytes) -> bytes — the arena's record of one `String` block.
-    //
-    // RFC-0004 §4's arena, on this backend at last. What it stores is
-    // `bytes - SHDR`, which is exactly what `malloc` handed `str_new`, so
-    // `region_free` below gives `free` a pointer `malloc` produced — the same
-    // invariant the textual `REGION_RUNTIME` states, and the reason the record
-    // lives in a side vector instead of in front of the block.
-    //
-    // Outside every region it does nothing and hands the pointer straight back.
-    // The emitter only calls it inside one, so that arm is a safety net, not a
-    // path: it is one compare, and the alternative is trusting a depth counted in
-    // two places to agree.
-    let (sp0, vec0, len0, cap0) = (rt.region_sp, rt.region_vec, rt.region_len, rt.region_cap);
-    let (malloc0, free0) = (rt.malloc, rt.free);
-    rt.next_is(m, rt.region_keep);
-    m.func(
-        &[ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32; 4],
-        0,
-        |b| {
-            let (off, len, cap, nv) = (2, 3, 4, 5);
-            // `sp == 0` → not in a region; hand it back untouched.
-            b.ins(&Instruction::I32Const(sp0 as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::Return)
-                .ins(&Instruction::End);
-            // `off = (sp - 1) * 4` — the byte offset of this frame's three words.
-            b.ins(&Instruction::I32Const(sp0 as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::LocalSet(off));
-            let at = |b: &mut Frame, base: u32| {
-                b.ins(&Instruction::I32Const(base as i32))
-                    .ins(&Instruction::LocalGet(off))
-                    .ins(&Instruction::I32Add);
-            };
-            at(b, len0);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalSet(len));
-            at(b, cap0);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalSet(cap));
-            // Full: 16 the first time, else double. Allocate, copy, hand the old
-            // vector back — `malloc` has no in-place extend, exactly as `push` and
-            // `str_append` find.
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::I32Const(16))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalSet(cap));
-            b.ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc0))
-                .ins(&Instruction::LocalTee(nv));
-            at(b, vec0);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            at(b, vec0);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::Call(free0));
-            at(b, vec0);
-            b.ins(&Instruction::LocalGet(nv))
-                .ins(&Instruction::I32Store(word()));
-            at(b, cap0);
-            b.ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::End);
-            // `vec[len] = bytes - SHDR; len += 1`
-            at(b, vec0);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(SHDR as i32))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Store(word()));
-            at(b, len0);
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(0));
-        },
-    );
-
-    // region_free() and region_pop() — the two ways out of a region, and the
-    // difference is the blocks. A fall-through, a `break` and a `continue` free
-    // them; a `return` does not, because the value it carries out is one of them
-    // and its caller owns it now. The frame's other blocks leak on that path,
-    // which is what the textual backend's `__vyrn_region_pop` also chooses.
-    for (idx, blocks) in [(rt.region_free, true), (rt.region_pop, false)] {
-        rt.next_is(m, idx);
-        m.func(&[], &[], &[ValType::I32; 4], 0, |b| {
-            let (off, vec, n, i) = (1, 2, 3, 4);
-            b.ins(&Instruction::I32Const(sp0 as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::Return)
-                .ins(&Instruction::End);
-            // Pop first: `sp - 1` is this frame, and nothing below reads `sp`.
-            b.ins(&Instruction::I32Const(sp0 as i32))
-                .ins(&Instruction::I32Const(sp0 as i32))
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(off))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(off))
-                .ins(&Instruction::I32Const(4))
-                .ins(&Instruction::I32Mul)
-                .ins(&Instruction::LocalSet(off));
-            let at = |b: &mut Frame, base: u32| {
-                b.ins(&Instruction::I32Const(base as i32))
-                    .ins(&Instruction::LocalGet(off))
-                    .ins(&Instruction::I32Add);
-            };
-            at(b, vec0);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalSet(vec));
-            if blocks {
-                at(b, len0);
-                b.ins(&Instruction::I32Load(word()))
-                    .ins(&Instruction::LocalSet(n));
-                b.ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalSet(i));
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::LocalGet(n))
-                    .ins(&Instruction::I32GeU)
-                    .ins(&Instruction::BrIf(1))
-                    .ins(&Instruction::LocalGet(vec))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(4))
-                    .ins(&Instruction::I32Mul)
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load(word()))
-                    .ins(&Instruction::Call(free0))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(i))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End);
-            }
-            // The vector is the arena's own, on both paths.
-            b.ins(&Instruction::LocalGet(vec))
-                .ins(&Instruction::Call(free0));
-            at(b, vec0);
-            b.ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store(word()));
-            at(b, len0);
-            b.ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store(word()));
-            at(b, cap0);
-            b.ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store(word()));
-        });
-    }
-}
-
-/// `if (off > len) off = len`, over parameters 1 and 2 of a `line_at`-shaped
-/// signature. One place, because the two helpers must clamp identically or they
-/// disagree past the end of the buffer — the offset RFC-0078's oracle sweeps to
-/// `len + 3` precisely to catch.
-fn clamp_off(b: &mut Frame) {
-    b.ins(&Instruction::LocalGet(2))
-        .ins(&Instruction::LocalGet(1))
-        .ins(&Instruction::I64GtS)
-        .ins(&Instruction::If(BlockType::Empty))
-        .ins(&Instruction::LocalGet(1))
-        .ins(&Instruction::LocalSet(2))
-        .ins(&Instruction::End);
-}
-
-/// Rights and flags from the `wasi_snapshot_preview1` witx, named rather than
-/// spelled at the call: a wrong bit in `path_open` is an `ENOTCAPABLE` that reads
-/// exactly like a missing file, i.e. a canonical `Err` for the wrong reason.
-const RIGHT_FD_READ: i64 = 1 << 1;
+/// The two `path_open` arguments `_start` opens a `file(..)` log sink with
+/// (RFC-0008), from the `wasi_snapshot_preview1` witx: `oflags::creat |
+/// trunc` is `fopen(path, "w")`, and `right::fd_write` is what the sink needs.
+/// Every other right and flag is spelled at its one use in `std/runtime`
+/// (PLAN-0125-runtime §6 step 7).
 const RIGHT_FD_WRITE: i64 = 1 << 6;
-/// `right::fd_sync`, asked for beside the write right by `fsync_file`: a
-/// descriptor opened without it may refuse the sync with `ENOTCAPABLE`.
-const RIGHT_FD_SYNC: i64 = 1 << 4;
 const OFLAGS_CREAT_TRUNC: i32 = 1 | 8;
-/// `lookupflags`: follow a symlink, which is what `fopen` does.
-const LOOKUP_SYMLINK_FOLLOW: i32 = 1;
-/// `errno::xdev`, the last of preview1's alphabetical errno list — and NOT POSIX's
-/// `EXDEV`, which is 18 and is `errno::dom` here. RFC-0044's cross-device rename
-/// is the one place this backend has to read a WASI errno by value rather than
-/// just testing it against zero.
-const ERRNO_XDEV: i32 = 75;
-
-/// RFC-0014's input I/O and RFC-0043's host boundary, over raw WASI.
-///
-/// M2i established that reaching the shared shim can never be the default — M5
-/// requires `vyrn build --target wasm` to need no clang — so "the shim defines
-/// these on every target" stopped being an answer for the standalone shape. WASI
-/// has `clock_time_get`, `random_get`, `args_get`, `fd_read` and `path_open`, and
-/// wasi-libc's own `timespec_get`/`getentropy`/`fopen` are thin wrappers over
-/// exactly those, so this is the same syscall by a shorter route.
-///
-/// The three semantics that are parity-critical rather than mechanical, all
-/// RFC-0014:
-///
-/// - **The canonical wording is single-sourced.** Every message comes from
-///   [`crate::io_message_parts`], split on the `%s` the textual backend hands to
-///   `__vyrn_snprintf`. A backend that spelled `cannot read` itself would be a
-///   second wording of one fact, and parity compares these bytes.
-/// - **The NUL rule.** A file (or a line) containing a NUL byte is rejected
-///   BEFORE the UTF-8 check and with its own message, because a Vyrn `String` is
-///   NUL-terminated and could not carry one.
-/// - **`readLine` is `None` at EOF**, and also for a NUL or invalid UTF-8 —
-///   exactly where the interpreter's `String::from_utf8` fails.
-///
-/// The functions are added in the order [`Rt`] hands out their indices; a body
-/// added out of turn would renumber every call to it and the module would still
-/// validate (M2e's finding, in a different place).
-fn io_runtime(m: &mut Module, rt: &Rt, wasi: &Wasi, gen: Option<&Gen>) {
-    let (malloc, strlen, utf8valid, concat) = (rt.malloc, rt.strlen, rt.utf8valid, rt.concat);
-    let triple = layout::of_ll("{ ptr, i64, i64 }").expect("the growable-array triple");
-    let sum2 = layout::of_ll("{ i1, i64, i64 }").expect("the Option/Result shape");
-    // RFC-0043's injected clock and seed. The env NAME carries its own `=`, so a
-    // lookup is one prefix test and the value is whatever follows — no separate
-    // check that the separator is where it should be.
-    let fixed_time = rt.intern(m, "VYRN_FIXED_TIME=");
-    let fixed_seed = rt.intern(m, "VYRN_FIXED_SEED=");
-    // The monotonic counter under a fixed clock: a static, because successive
-    // calls have to differ and the interpreter's own base/step is `1e9 + n·1e6`.
-    let mono_ctr = m.reserve(8, 8);
-
-    // starts(a, b) — whether NUL-terminated `a` begins with NUL-terminated `b`.
-    rt.next_is(m, rt.starts);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32],
-        0,
-        |b| {
-            let c = 3; // params 0..1, the frame base 2, then ours
-            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Ne)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(1))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::Unreachable)
-                .ins(&Instruction::End);
-        },
-    );
-
-    // env_get(key) — the value of the environment entry `key` names (`key`
-    // includes its `=`), or 0. WASI hands the whole environment over in one go,
-    // so this is `environ_get` plus a prefix scan; nothing caches it, because a
-    // clock program makes a handful of calls and the bump allocator's cost for
-    // them is a few hundred bytes that nothing can observe.
-    //
-    // AUDIT DEFERRAL (F2-001, env_get leak): the audit flagged the per-call
-    // ptr-array + blob leak here and a cached-pair rewrite was attempted, but
-    // every hand-restructured variant of this body failed wasmtime validation
-    // with a stray trailing byte the encoder could not explain. Reverted to
-    // this known-good form; the leak is bounded by the two fixed-preamble call
-    // sites (VYRN_FIXED_TIME / VYRN_FIXED_SEED parsing), which run once per
-    // process in practice. Redo against `tests/wasm_runs.rs` with a dedicated
-    // validation harness before touching again.
-    let (env_sizes, env_get_i) = (wasi.environ_sizes_get, wasi.environ_get);
-    let starts = rt.starts;
-    rt.next_is(m, rt.env_get);
-    m.func(
-        &[ValType::I32],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        8,
-        |b| {
-            let (cnt, ptrs, i, e) = (2, 3, 4, 5); // param 0, base 1, then ours
-            b.ins(&Instruction::Block(BlockType::Result(ValType::I32)));
-            // Zeroed first: a failing `environ_sizes_get` leaves the frame slots
-            // holding whatever the last call put there, and a garbage count is a
-            // scan over garbage pointers rather than an empty environment.
-            b.slot(0)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store(word()));
-            b.slot(4)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store(word()));
-            b.slot(0);
-            b.slot(4);
-            b.ins(&Instruction::Call(env_sizes))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End);
-            b.slot(0)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(cnt));
-            b.ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32Const(8))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::LocalSet(ptrs))
-                .ins(&Instruction::LocalGet(ptrs));
-            b.slot(4)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::Call(env_get_i))
-                .ins(&Instruction::Drop);
-            b.ins(&Instruction::I32Const(0))
-                .ins(&Instruction::LocalSet(i));
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalGet(cnt))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::BrIf(1));
-            b.ins(&Instruction::LocalGet(ptrs))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(e))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::Call(starts))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(e))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::Br(3))
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::I32Const(0)).ins(&Instruction::End);
-        },
-    );
-
-    // str_i64(p) — `strtoll(p, 0, 10)` for everything an injected value can be:
-    // an optional sign then decimal digits, stopping at the first byte that is not
-    // one.
-    //
-    // ponytail: no leading-whitespace skip and no overflow clamp to
-    // `LLONG_MAX`/`MIN`. Both are `strtoll` behaviours nothing reaches — the only
-    // callers are `VYRN_FIXED_TIME` and `VYRN_FIXED_SEED`, which the harness writes
-    // as bare decimals. A program that could pass arbitrary text here would need
-    // the real thing.
-    rt.next_is(m, rt.str_i64);
-    m.func(
-        &[ValType::I32],
-        &[ValType::I64],
-        &[ValType::I64, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            let (v, neg, c) = (2, 3, 4);
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(neg))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'+' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32LtU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'9' as i32))
-                .ins(&Instruction::I32GtU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64Mul)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Const(b'0' as i64))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::I64Add)
-                .ins(&Instruction::LocalSet(v))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(0))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Result(ValType::I64)))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::Else)
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::End);
-        },
-    );
-
-    // The injected-value preamble every one of the three host readings starts
-    // with: `if (e && e[0]) return str_i64(e)`, which is the C shim's own guard —
-    // an env var set to the empty string falls through to the real host.
-    let (env_get, str_i64) = (rt.env_get, rt.str_i64);
-    let fixed = move |b: &mut Frame, key: u32, out: u32| {
-        b.ins(&Instruction::I32Const(key as i32))
-            .ins(&Instruction::Call(env_get))
-            .ins(&Instruction::LocalTee(out))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(out))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(out))
-            .ins(&Instruction::Call(str_i64))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-    };
-
-    // now_millis() — epoch millis. `clock_time_get(REALTIME)` is nanoseconds, and
-    // the native shim's `tv_sec*1000 + tv_nsec/1e6` is the same floor division.
-    // A failing clock reads 0, which is what `timespec_get` returning 0 gives.
-    let clock_time_get = wasi.clock_time_get;
-    rt.next_is(m, rt.now_millis);
-    m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
-        let p = 1; // no params, the frame base 0, then ours
-        b.ins(&Instruction::Block(BlockType::Result(ValType::I64)));
-        fixed(b, fixed_time, p);
-        b.ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I64Const(1_000_000));
-        b.slot(0);
-        b.ins(&Instruction::Call(clock_time_get))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I64Const(0))
-            .ins(&Instruction::Br(1))
-            .ins(&Instruction::End);
-        b.slot(0);
-        b.ins(&Instruction::I64Load(word8()))
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64DivU)
-            .ins(&Instruction::End);
-    });
-
-    // mono_nanos() — monotonic nanoseconds. Under a fixed clock the interpreter's
-    // own base and step, so successive calls are byte-identical across backends;
-    // otherwise `clock_time_get(MONOTONIC)`.
-    rt.next_is(m, rt.mono_nanos);
-    m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
-        let p = 1;
-        b.ins(&Instruction::Block(BlockType::Result(ValType::I64)))
-            .ins(&Instruction::I32Const(fixed_time as i32))
-            .ins(&Instruction::Call(env_get))
-            .ins(&Instruction::LocalTee(p))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::LocalGet(p))
-            .ins(&Instruction::I32Load8U(byte()))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(mono_ctr as i32))
-            .ins(&Instruction::I64Load(word8()))
-            .ins(&Instruction::I64Const(1_000_000))
-            .ins(&Instruction::I64Mul)
-            .ins(&Instruction::I64Const(1_000_000_000))
-            .ins(&Instruction::I64Add)
-            .ins(&Instruction::I32Const(mono_ctr as i32))
-            .ins(&Instruction::I32Const(mono_ctr as i32))
-            .ins(&Instruction::I64Load(word8()))
-            .ins(&Instruction::I64Const(1))
-            .ins(&Instruction::I64Add)
-            .ins(&Instruction::I64Store(word8()))
-            .ins(&Instruction::Br(2))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I64Const(1_000));
-        b.slot(0);
-        b.ins(&Instruction::Call(clock_time_get))
-            .ins(&Instruction::Drop);
-        b.slot(0);
-        b.ins(&Instruction::I64Load(word8())).ins(&Instruction::End);
-    });
-
-    // random_seed() — eight CSPRNG bytes as an `Int64`, which is what the native
-    // shim's `getentropy(&v, sizeof v)` reads. Zeroing first is not tidiness: the
-    // C leaves `v = 0` when `getentropy` fails, so pre-zeroing IS the error path
-    // and there is no errno to check.
-    let random_get = wasi.random_get;
-    rt.next_is(m, rt.random_seed);
-    m.func(&[], &[ValType::I64], &[ValType::I32], 8, |b| {
-        let p = 1;
-        b.ins(&Instruction::Block(BlockType::Result(ValType::I64)));
-        fixed(b, fixed_seed, p);
-        b.slot(0);
-        b.ins(&Instruction::I64Const(0))
-            .ins(&Instruction::I64Store(word8()));
-        b.slot(0);
-        b.ins(&Instruction::I32Const(8))
-            .ins(&Instruction::Call(random_get))
-            .ins(&Instruction::Drop);
-        b.slot(0);
-        b.ins(&Instruction::I64Load(word8())).ins(&Instruction::End);
-    });
-
-    // args(dest) — `argv[1..]` as an `Array<String>` triple written through `dest`.
-    //
-    // WASI writes the pointers as a contiguous array of wasm32 pointers, which is
-    // exactly the buffer an `Array<String>` wants — the element stride IS
-    // `of_ll("ptr")`.
-    //
-    // Dropping the program name used to be `+ 4` rather than a copy, and that made
-    // the array's data pointer an address four bytes past an allocation instead of
-    // an allocation itself. `free` reads the class word at `p - HDR`, which for
-    // `ptrs + 4` is the block's own header slack: always zero, below `MIN_CLASS`,
-    // so the free was silently refused and `drop xs` leaked the whole array on
-    // this backend alone (native `__vyrn_args` hands back a fresh `malloc`).
-    // Copying `argv[1..]` down into slot 0 as it goes buys back an ordinary
-    // allocation base, and skips the copy of the program name that the same `+ 4`
-    // left stranded.
-    let (args_sizes_get, args_get) = (wasi.args_sizes_get, wasi.args_get);
-    let str_new = rt.str_new;
-    let strlen = rt.strlen;
-    let free = rt.free;
-    rt.next_is(m, rt.args);
-    m.func(&[ValType::I32], &[], &[ValType::I32; 8], 8, |b| {
-        let (cnt, ptrs) = (2, 3);
-        let (i, at_p, e, n, c, blob) = (4, 5, 6, 7, 8, 9);
-        b.slot(0)
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32Store(word()));
-        b.slot(4)
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32Store(word()));
-        b.slot(0);
-        b.slot(4);
-        b.ins(&Instruction::Call(args_sizes_get))
-            .ins(&Instruction::Drop);
-        b.slot(0);
-        b.ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalTee(cnt))
-            .ins(&Instruction::I32Const(2))
-            .ins(&Instruction::I32Shl)
-            // Two words of slack, so an argv of one name alone still asks for a
-            // block rather than for nothing.
-            .ins(&Instruction::I32Const(8))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I64ExtendI32U)
-            .ins(&Instruction::Call(malloc))
-            .ins(&Instruction::LocalSet(ptrs))
-            .ins(&Instruction::LocalGet(ptrs));
-        b.slot(4);
-        b.ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I64ExtendI32U)
-            .ins(&Instruction::Call(malloc))
-            .ins(&Instruction::LocalTee(blob))
-            .ins(&Instruction::Call(args_get))
-            .ins(&Instruction::Drop);
-        // The host wrote one blob and pointers into it, so no element has a
-        // String header in front of it. Copy each one into a String that does
-        // (RFC-0089 M1a). The copies outlive the program, which is what `args()`
-        // always did — RFC-0011's array-element rule.
-        //
-        // Ascending, from `argv[1]` into slot 0: the program name is not copied at
-        // all (`__vyrn_args_count` drops it natively, so a copy of it here was a
-        // String a turn nobody could reach), and the read of slot `i` always
-        // precedes the write of slot `i - 1`.
-        b.ins(&Instruction::I32Const(1))
-            .ins(&Instruction::LocalSet(i));
-        b.ins(&Instruction::Block(BlockType::Empty))
-            .ins(&Instruction::Loop(BlockType::Empty))
-            .ins(&Instruction::LocalGet(i))
-            .ins(&Instruction::LocalGet(cnt))
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::BrIf(1))
-            .ins(&Instruction::LocalGet(ptrs))
-            .ins(&Instruction::LocalGet(i))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::I32Const(2))
-            .ins(&Instruction::I32Shl)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(at_p))
-            .ins(&Instruction::LocalGet(ptrs))
-            .ins(&Instruction::LocalGet(i))
-            .ins(&Instruction::I32Const(2))
-            .ins(&Instruction::I32Shl)
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalTee(e))
-            .ins(&Instruction::Call(strlen))
-            .ins(&Instruction::LocalTee(n))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::Call(str_new))
-            .ins(&Instruction::LocalTee(c))
-            .ins(&Instruction::LocalGet(e))
-            .ins(&Instruction::LocalGet(n))
-            .ins(&Instruction::MemoryCopy {
-                src_mem: 0,
-                dst_mem: 0,
-            })
-            .ins(&Instruction::LocalGet(at_p))
-            .ins(&Instruction::LocalGet(c))
-            .ins(&Instruction::I32Store(word()))
-            .ins(&Instruction::LocalGet(i))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::LocalSet(i))
-            .ins(&Instruction::Br(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::End);
-        // The blob was the host's staging buffer and every byte of it has been
-        // copied. Native has no blob at all — `main` stashes the argv it was
-        // handed — so holding this one was a block a call that nothing could name.
-        b.ins(&Instruction::LocalGet(blob))
-            .ins(&Instruction::Call(free));
-        b.ins(&Instruction::LocalGet(cnt))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32GtU)
-            .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-            .ins(&Instruction::LocalGet(cnt))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Sub)
-            .ins(&Instruction::Else)
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::End)
-            .ins(&Instruction::LocalSet(cnt));
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::LocalGet(ptrs))
-            .ins(&Instruction::I32Store(word_at(triple.fields[0])));
-        for f in [triple.fields[1], triple.fields[2]] {
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(cnt))
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::I64Store(at(f)));
-        }
-    });
-
-    // getbyte() — one byte from stdin, or -1 at EOF (and on any error, which is
-    // what `getchar` returning `EOF` covers too).
-    //
-    // Buffered, the way C's `getchar` is. `fd_read` refills [`STDIN_BUF`] bytes
-    // when the buffer is spent and every other call is two loads and a store.
-    // One syscall per byte is what this cost before, which reverse complement
-    // paid 40.7 million times.
-    let fd_read = wasi.fd_read;
-    let (sbuf, slen, spos) = (rt.stdin_buf, rt.stdin_len, rt.stdin_pos);
-    rt.next_is(m, rt.getbyte);
-    m.func(&[], &[ValType::I32], &[], 16, |b| {
-        // Spent? `pos >= len` covers the initial zero-zero state, which is what
-        // `reserve` leaves and what makes the first call a fill.
-        b.ins(&Instruction::I32Const(spos as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(slen as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32GeU)
-            .ins(&Instruction::If(BlockType::Empty));
-        // One iovec { buf, len } in the frame, and the count written back.
-        b.slot(0)
-            .ins(&Instruction::I32Const(sbuf as i32))
-            .ins(&Instruction::I32Store(word()));
-        b.slot(4)
-            .ins(&Instruction::I32Const(STDIN_BUF as i32))
-            .ins(&Instruction::I32Store(word()));
-        b.slot(8)
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::I32Const(0));
-        b.slot(0);
-        b.ins(&Instruction::I32Const(1));
-        b.slot(8);
-        // An error and a zero-length read are the same answer to the caller,
-        // and neither may leave the buffer looking full.
-        b.ins(&Instruction::Call(fd_read))
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(-1))
-            .ins(&Instruction::Return)
-            .ins(&Instruction::End);
-        b.slot(8);
-        b.ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(-1))
-            .ins(&Instruction::Return)
-            .ins(&Instruction::End);
-        b.ins(&Instruction::I32Const(slen as i32));
-        b.slot(8);
-        b.ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Store(word()));
-        b.ins(&Instruction::I32Const(spos as i32))
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32Store(word()))
-            .ins(&Instruction::End);
-        // buf[pos], then pos + 1.
-        b.ins(&Instruction::I32Const(sbuf as i32))
-            .ins(&Instruction::I32Const(spos as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Load8U(byte()));
-        b.ins(&Instruction::I32Const(spos as i32))
-            .ins(&Instruction::I32Const(spos as i32))
-            .ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::I32Const(1))
-            .ins(&Instruction::I32Add)
-            .ins(&Instruction::I32Store(word()));
-    });
-
-    // read_line(dest) — RFC-0014's `readLine()` as an `Option<String>` written
-    // through `dest`. `None` at EOF, for a line carrying a NUL byte (which a
-    // NUL-terminated `String` could not hold), and for one that is not UTF-8 —
-    // the last of those is where the interpreter's `String::from_utf8` fails, so
-    // the DFA decides it here rather than the caller.
-    let getbyte = rt.getbyte;
-    let str_new = rt.str_new;
-    let free = rt.free;
-    rt.next_is(m, rt.read_line);
-    m.func(
-        &[ValType::I32],
-        &[],
-        &[
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        0,
-        |b| {
-            let (buf, cap, len, c, nul, nb) = (2, 3, 4, 5, 6, 7);
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                .ins(&Instruction::Block(BlockType::Empty)) // 0: none
-                .ins(&Instruction::Call(getbyte))
-                .ins(&Instruction::LocalTee(c))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32LtS)
-                .ins(&Instruction::BrIf(0))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Const(64))
-                .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalSet(buf))
-                .ins(&Instruction::Block(BlockType::Empty)) // 0: eol
-                .ins(&Instruction::Loop(BlockType::Empty)) // 0: rd
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32LtS)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Const(b'\n' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(nul))
-                .ins(&Instruction::End)
-                // Grow at len+2 rather than len+1: the terminator goes on after
-                // the loop and must not need a reallocation of its own.
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Const(2))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::Call(str_new))
-                .ins(&Instruction::LocalTee(nb))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                });
-            // Only this branch frees: the block `buf` names is ours, and the
-            // copy above has already moved its bytes. `str_new` answered the
-            // bytes, SHDR past the base, which is what `str_hdr` recovers.
-            b.ins(&Instruction::LocalGet(buf));
-            str_hdr(b);
-            b.ins(&Instruction::Call(free))
-                .ins(&Instruction::LocalGet(nb))
-                .ins(&Instruction::LocalSet(buf))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(c))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(len))
-                .ins(&Instruction::Call(getbyte))
-                .ins(&Instruction::LocalSet(c))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            // A trailing `\r` goes with the `\n`, so a Windows pipe and a POSIX
-            // one read identically.
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Const(b'\r' as i32))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(len))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()));
-            // Publish the length in the header, now the CR trim is done.
-            b.ins(&Instruction::LocalGet(buf));
-            str_hdr(b);
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(nul))
-                .ins(&Instruction::BrIf(0))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::Call(utf8valid))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(0));
-            sum2_write(b, &sum2, 1, Some(buf));
-            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // none
-                                                               // Both ways of answering None land here, and both leave the line
-                                                               // buffer with no owner. The EOF exit at the top lands here too,
-                                                               // before any buffer exists — `buf` is then still 0, and the load
-                                                               // inside `str_hdr` would read at `0 - SHDR`, far out of bounds,
-                                                               // before `free` could refuse anything. Free only a real buffer;
-                                                               // an empty line never reaches this arm (the `\n` case answers
-                                                               // Some above), so nothing owned is skipped.
-            b.ins(&Instruction::LocalGet(buf));
-            b.ins(&Instruction::If(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(buf));
-            str_hdr(b);
-            b.ins(&Instruction::Call(free));
-            b.ins(&Instruction::End);
-            sum2_write(b, &sum2, 0, None);
-            b.ins(&Instruction::End); // fin
-        },
-    );
-
-    // open_at(path, oflags, rights) — a file descriptor, or -1.
-    //
-    // WASI has no `open` relative to a working directory: every path is resolved
-    // under a preopened directory, and the host decides which ones exist. So the
-    // preopens are walked from fd 3 (the first one WASI can hand out) until
-    // `fd_prestat_get` says there are no more, and the first that resolves the
-    // path wins — which is `--dir .` giving exactly one, and no preopens at all
-    // (a browser) giving -1 for every path, i.e. RFC-0014's canonical `Err`.
-    //
-    // ponytail: no prefix matching against the preopens' own names, so an
-    // ABSOLUTE guest path only opens under a preopen mounted at `/`. wasi-libc
-    // does the matching for the textual backend; nothing in the corpus has an
-    // absolute path, and adding it means a string-prefix walk over
-    // `fd_prestat_dir_name` for a case no example has.
-    let (path_open, fd_prestat_get) = (wasi.path_open, wasi.fd_prestat_get);
-    rt.next_is(m, rt.open_at);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I64],
-        &[ValType::I32],
-        &[ValType::I32, ValType::I32],
-        16,
-        |b| {
-            let (fd, plen) = (4, 5); // params 0..2, the frame base 3, then ours
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(plen))
-                .ins(&Instruction::I32Const(3))
-                .ins(&Instruction::LocalSet(fd))
-                .ins(&Instruction::Block(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(fd));
-            b.slot(0);
-            b.ins(&Instruction::Call(fd_prestat_get))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(-1))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::I32Const(LOOKUP_SYMLINK_FOLLOW))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(plen))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I32Const(0));
-            b.slot(8);
-            b.ins(&Instruction::Call(path_open))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty));
-            b.slot(8);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(fd))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::Unreachable)
-                .ins(&Instruction::End);
-        },
-    );
-
-    // read_all(fd, outlen, hdr) — the whole descriptor into one NUL-terminated
-    // buffer, with its byte length through `outlen`; 0 on a read error.
-    //
-    // A read loop rather than a stat-and-slurp, for the reason the C shim gives:
-    // it is the same code for a regular file and for a pipe. The terminator is
-    // there so a `String` result needs no second copy, and it is past `outlen`
-    // bytes so a bytes result simply ignores it.
-    //
-    // `hdr` is how many bytes to leave in FRONT of the returned pointer. It is
-    // `SHDR` for `readFile`, whose answer is a `String` and therefore needs its
-    // header there, and 0 for `readFileBytes`, whose answer is an
-    // `Array<UInt8>` whose buffer is freed at its own base (RFC-0089 M1a). One
-    // reader, two shapes, and no second copy of the read loop.
-    rt.next_is(m, rt.read_all);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        16,
-        |b| {
-            let (buf, cap, len, nb, got) = (4, 5, 6, 7, 8);
-            b.ins(&Instruction::I32Const(1024))
-                .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(buf))
-                .ins(&Instruction::Block(BlockType::Empty))
-                .ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Shl)
-                .ins(&Instruction::LocalTee(cap))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I64ExtendI32U)
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalTee(nb))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::MemoryCopy {
-                    src_mem: 0,
-                    dst_mem: 0,
-                })
-                // Only this branch frees: the block `buf` names is ours, and
-                // the copy above has already moved its bytes. The base sits
-                // `hdr` in front of the bytes, exactly as both mallocs wrote it.
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::Call(free))
-                .ins(&Instruction::LocalGet(nb))
-                .ins(&Instruction::LocalSet(buf))
-                .ins(&Instruction::End);
-            b.slot(0);
-            b.ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Store(word()));
-            b.slot(4);
-            b.ins(&Instruction::LocalGet(cap))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::I32Store(word()));
-            b.slot(8);
-            b.ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(0));
-            b.slot(0);
-            b.ins(&Instruction::I32Const(1));
-            b.slot(8);
-            b.ins(&Instruction::Call(fd_read))
-                .ins(&Instruction::If(BlockType::Empty))
-                // A failed read hands back 0, so the buffer built for the
-                // bytes has no owner left. The base is `hdr` below the bytes.
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::Call(free))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::LocalSet(buf))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End);
-            b.slot(8);
-            b.ins(&Instruction::I32Load(word()))
-                .ins(&Instruction::LocalTee(got))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::LocalGet(got))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(len))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Store(word()))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(buf));
-        },
-    );
-
-    // err3(pre, mid, post) — one canonical I/O message with the path in it.
-    //
-    // The two halves come from `io_message_parts`, i.e. from the same format
-    // string the textual backend hands `__vyrn_snprintf`, so there is no second
-    // wording to keep in step. Nothing frees, so the pieces are the interned
-    // constants themselves.
-    rt.next_is(m, rt.err3);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[ValType::I32],
-        &[],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(concat))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::Call(concat));
-        },
-    );
-
-    let msg = |m: &mut Module, which: &str| {
-        let (pre, post) = crate::io_message_parts(which);
-        (rt.intern(m, pre), rt.intern(m, post))
-    };
-    let (readpre, readpost) = msg(m, "readerr");
-    let (utf8pre, utf8post) = msg(m, "utf8err");
-    let (nulpre, nulpost) = msg(m, "nulerr");
-    let (writepre, writepost) = msg(m, "writeerr");
-
-    let (open_at, read_all, err3) = (rt.open_at, rt.read_all, rt.err3);
-    let fd_close = wasi.fd_close;
-    let gen = gen.copied();
-    // The open-and-slurp both readers start with, leaving the buffer in `buf`, the
-    // length in `len`, and branching to `err` (a depth) with the read message set
-    // when either step fails.
-    //
-    // `mode` is RFC-0076's read mode, and it is the only thing the two shapes do
-    // not share. A GENERATOR does not open files: it reads through the loader's
-    // resolver, which in the LSP serves unsaved buffers, so opening one here would
-    // read different bytes than the interpreter does. On that path the whole open
-    // is one mediated import and the status comes back in the alphabet the error
-    // rendering below already speaks (0 ok / 1 io / 3 embedded NUL) — which is why
-    // the wording needed no new agreement when M2 introduced it and needs none now.
-    let slurp = move |b: &mut Frame,
-                      base_off: u32,
-                      fd: u32,
-                      buf: u32,
-                      len: u32,
-                      err_msg: u32,
-                      err_depth: u32,
-                      mode: i32| {
-        // `readFile` answers a `String`, so its buffer needs the header room in
-        // front of it; `readFileBytes` answers an `Array<UInt8>`, whose buffer is
-        // freed at its own base and must not have one (RFC-0089 M1a).
-        let hdr = if mode == crate::GEN_MODE_READ {
-            SHDR
-        } else {
-            0
-        };
-        if let Some(g) = gen {
-            gen_slurp(
-                b,
-                &g,
-                (malloc, str_new, err3),
-                [readpre, readpost, nulpre, nulpost],
-                (buf, len, err_msg, err_depth),
-                mode,
-            );
-            return;
-        }
-        b.ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I64Const(RIGHT_FD_READ))
-            .ins(&Instruction::Call(open_at))
-            .ins(&Instruction::LocalTee(fd))
-            .ins(&Instruction::I32Const(0))
-            .ins(&Instruction::I32LtS)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(readpre as i32))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Const(readpost as i32))
-            .ins(&Instruction::Call(err3))
-            .ins(&Instruction::LocalSet(err_msg))
-            .ins(&Instruction::Br(err_depth + 1))
-            .ins(&Instruction::End)
-            .ins(&Instruction::LocalGet(fd));
-        b.slot(base_off);
-        b.ins(&Instruction::I32Const(hdr as i32))
-            .ins(&Instruction::Call(read_all))
-            .ins(&Instruction::LocalSet(buf))
-            .ins(&Instruction::LocalGet(fd))
-            .ins(&Instruction::Call(fd_close))
-            .ins(&Instruction::Drop)
-            .ins(&Instruction::LocalGet(buf))
-            .ins(&Instruction::I32Eqz)
-            .ins(&Instruction::If(BlockType::Empty))
-            .ins(&Instruction::I32Const(readpre as i32))
-            .ins(&Instruction::LocalGet(0))
-            .ins(&Instruction::I32Const(readpost as i32))
-            .ins(&Instruction::Call(err3))
-            .ins(&Instruction::LocalSet(err_msg))
-            .ins(&Instruction::Br(err_depth + 1))
-            .ins(&Instruction::End);
-        b.slot(base_off);
-        b.ins(&Instruction::I32Load(word()))
-            .ins(&Instruction::LocalSet(len));
-        // The `String` answer needs its header filled in: `read_all` left the
-        // room but only this side knows the length. `cap == len` — the buffer is
-        // never grown again, only read and freed (RFC-0089 M1a).
-        if hdr != 0 {
-            b.ins(&Instruction::LocalGet(buf));
-            str_hdr(b);
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Store(word()));
-            b.ins(&Instruction::LocalGet(buf));
-            str_hdr(b);
-            b.ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32Store(cap_at()));
-        }
-    };
-
-    // read_file(path, dest) — RFC-0014's `readFile` as a `Result<String, String>`.
-    //
-    // The NUL scan comes BEFORE the UTF-8 check and carries its own wording,
-    // because a `String` is NUL-terminated: a file with one in it is not
-    // representable rather than badly encoded, and the two messages differ.
-    rt.next_is(m, rt.read_file);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[],
-        &[
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        8,
-        |b| {
-            let (fd, buf, len, emsg, i) = (3, 4, 5, 6, 7);
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                .ins(&Instruction::Block(BlockType::Empty)); // 0: err
-            slurp(b, 0, fd, buf, len, emsg, 0, crate::GEN_MODE_READ);
-            b.ins(&Instruction::Block(BlockType::Empty)) // 0: scanned
-                .ins(&Instruction::Loop(BlockType::Empty)) // 0: sl
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::I32GeU)
-                .ins(&Instruction::BrIf(1))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Load8U(byte()))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(nulpre as i32))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(nulpost as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::LocalSet(emsg))
-                // out of the `if`, the scan loop and its block, landing where the
-                // `err` block's own exit lands.
-                .ins(&Instruction::Br(3))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(i))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(i))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End)
-                .ins(&Instruction::End);
-            b.ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::LocalGet(len))
-                .ins(&Instruction::Call(utf8valid))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(utf8pre as i32))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(utf8post as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::LocalSet(emsg))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End);
-            sum2_write_to(b, 1, &sum2, 1, Some(buf));
-            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
-            sum2_write_to(b, 1, &sum2, 0, Some(emsg));
-            b.ins(&Instruction::End); // fin
-        },
-    );
-
-    // read_file_bytes(path, dest) — the same open-and-slurp with no NUL or UTF-8
-    // rule at all, which is the whole point of a byte read, as a
-    // `Result<Array<UInt8>, String>`.
-    //
-    // The `Ok` payload is three words, so it does not fit the sum's two: it is
-    // boxed, exactly as `Fn_::box_value` would box it, and the box IS the triple
-    // rather than a copy of one built elsewhere.
-    rt.next_is(m, rt.read_file_bytes);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[],
-        &[
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-            ValType::I32,
-        ],
-        8,
-        |b| {
-            let (fd, buf, len, emsg, boxed) = (3, 4, 5, 6, 7);
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                .ins(&Instruction::Block(BlockType::Empty)); // 0: err
-            slurp(b, 0, fd, buf, len, emsg, 0, crate::GEN_MODE_READ_BYTES);
-            b.ins(&Instruction::I64Const(triple.size as i64))
-                .ins(&Instruction::Call(malloc))
-                .ins(&Instruction::LocalTee(boxed))
-                .ins(&Instruction::LocalGet(buf))
-                .ins(&Instruction::I32Store(word_at(triple.fields[0])));
-            for f in [triple.fields[1], triple.fields[2]] {
-                b.ins(&Instruction::LocalGet(boxed))
-                    .ins(&Instruction::LocalGet(len))
-                    .ins(&Instruction::I64ExtendI32U)
-                    .ins(&Instruction::I64Store(at(f)));
-            }
-            sum2_write_to(b, 1, &sum2, 1, Some(boxed));
-            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
-            sum2_write_to(b, 1, &sum2, 0, Some(emsg));
-            b.ins(&Instruction::End); // fin
-        },
-    );
-
-    // write_file(path, contents, dest) — create-or-truncate and write every byte,
-    // as a `Result<Bool, String>` whose `Ok` is `true`.
-    //
-    // A Vyrn `String` never contains a NUL (the readers above are why), so
-    // `strlen` is its full length and there is no separate length to pass.
-    //
-    // Three ways to fail, one message: the open, the write, and the close. The
-    // open was the only one caught until the audit — a full filesystem, a
-    // read-only mount or a closed pipe all wrote nothing and reported `Ok(true)`,
-    // where the native shim has failed all three since it was written (it checks
-    // `wrote != n` AND `fclose`). The fd is closed on every path, as `fclose` is
-    // reached on every path there; the close's own errno joins the write's,
-    // because a buffered write that only fails at the close failed.
-    let write_all = rt.write_all;
-    // write_file_bytes(path, ptr, len, dest) — RFC-0111.
-    //
-    // THE ONLY FILE WRITER IN THIS BACKEND. `writeFile` and `writeFileBytes`
-    // differ by exactly one `strlen`, so `write_file` below measures its String
-    // and calls this; nothing else duplicates the open/write/close/errno
-    // sequence, which is where a second spelling would have drifted.
-    rt.next_is(m, rt.write_file_bytes);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            let (fd, emsg, wst) = (5, 6, 7); // params 0..3, the frame base 4, then ours
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                .ins(&Instruction::Block(BlockType::Empty)) // 0: err
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(OFLAGS_CREAT_TRUNC))
-                .ins(&Instruction::I64Const(RIGHT_FD_WRITE))
-                .ins(&Instruction::Call(open_at))
-                .ins(&Instruction::LocalTee(fd))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32LtS)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(writepre as i32))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(writepost as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::LocalSet(emsg))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::Call(write_all))
-                .ins(&Instruction::LocalSet(wst))
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::Call(fd_close))
-                .ins(&Instruction::LocalGet(wst))
-                .ins(&Instruction::I32Or)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(writepre as i32))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(writepost as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::LocalSet(emsg))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End);
-            // `Ok(true)`: the payload is a `Bool`, zero-extended into the word,
-            // which is the encoding `build_sum2`'s `Word::Ext` arm produces.
-            b.ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Store8(MemArg {
-                    offset: sum2.fields[0] as u64,
-                    align: 0,
-                    memory_index: 0,
-                }))
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I64Const(1))
-                .ins(&Instruction::I64Store(at(sum2.fields[1])))
-                .ins(&Instruction::LocalGet(3))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64Store(at(sum2.fields[2])))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End); // err
-            sum2_write_to(b, 3, &sum2, 0, Some(emsg));
-            b.ins(&Instruction::End); // fin
-        },
-    );
-
-    // write_file(path, contents, dest) — the String face of the writer above.
-    // A Vyrn String never holds a NUL, so `strlen` is its whole length; that one
-    // call is the entire difference between the two builtins.
-    let write_file_bytes = rt.write_file_bytes;
-    rt.next_is(m, rt.write_file);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[],
-        &[],
-        0,
-        |b| {
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalGet(2))
-                .ins(&Instruction::Call(write_file_bytes));
-        },
-    );
-
-    // rename_file(from, to, dest) — RFC-0044's atomic overwrite, as a
-    // `Result<Bool, String>` whose `Ok` is `true`.
-    //
-    // `path_rename` needs a directory fd for each side, so this is `open_at`'s
-    // preopen walk without the open: the first preopen under which the rename
-    // resolves wins. Both paths go through the SAME fd, which is also why the
-    // cross-device arm is nearly unreachable here — a preopen is one mount.
-    //
-    // Two failure classes, because RFC-0044 has two: `EXDEV` is
-    // `@.io.xdeverr` and everything else is `@.io.writeerr`, both about the
-    // TARGET path. The interpreter picks between the same two on
-    // `is_cross_device`, and this reads the same words out of `IO_MESSAGES`
-    // rather than spelling either.
-    let (xdevpre, xdevpost) = msg(m, "xdeverr");
-    let path_rename = wasi.path_rename;
-    rt.next_is(m, rt.rename_file);
-    m.func(
-        &[ValType::I32, ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I32; 7],
-        8,
-        |b| {
-            // params 0..2, the frame base 3, then ours.
-            let (fd, flen, tlen, xdev, st, e, emsg) = (4, 5, 6, 7, 8, 9, 10);
-            b.ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(flen))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::Call(strlen))
-                .ins(&Instruction::LocalSet(tlen))
-                .ins(&Instruction::I32Const(3))
-                .ins(&Instruction::LocalSet(fd))
-                // Nothing resolved yet: an io failure until a preopen says
-                // otherwise, which is also the answer a browser gets.
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(st))
-                .ins(&Instruction::Block(BlockType::Empty)) // 1: decided
-                .ins(&Instruction::Loop(BlockType::Empty)) // 0: next preopen
-                .ins(&Instruction::LocalGet(fd));
-            b.slot(0);
-            b.ins(&Instruction::Call(fd_prestat_get))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::LocalGet(flen))
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::LocalGet(tlen))
-                .ins(&Instruction::Call(path_rename))
-                .ins(&Instruction::LocalTee(e))
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::LocalSet(st))
-                .ins(&Instruction::Br(2))
-                .ins(&Instruction::End)
-                // Remembered rather than returned: a later preopen may still
-                // resolve the pair, and only if none does is WHY the last one
-                // failed the answer.
-                .ins(&Instruction::LocalGet(e))
-                .ins(&Instruction::I32Const(ERRNO_XDEV))
-                .ins(&Instruction::I32Eq)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(xdev))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::LocalSet(fd))
-                .ins(&Instruction::Br(0))
-                .ins(&Instruction::End) // loop
-                .ins(&Instruction::End); // decided
-            b.ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::If(BlockType::Empty));
-            b.ins(&Instruction::LocalGet(xdev))
-                .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                .ins(&Instruction::I32Const(xdevpre as i32))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(xdevpost as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::Else)
-                .ins(&Instruction::I32Const(writepre as i32))
-                .ins(&Instruction::LocalGet(1))
-                .ins(&Instruction::I32Const(writepost as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::End)
-                .ins(&Instruction::LocalSet(emsg));
-            sum2_write_to(b, 2, &sum2, 0, Some(emsg));
-            b.ins(&Instruction::Else);
-            // `Ok(true)`: a `Bool` payload is the word zero-extended, which is
-            // what `sum2_write_to` does with a local — so the `1` needs one.
-            b.ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(e));
-            sum2_write_to(b, 2, &sum2, 1, Some(e));
-            b.ins(&Instruction::End);
-        },
-    );
-
-    // fsync_file(path, dest) — RFC-0044's durability step, as a
-    // `Result<Bool, String>` whose `Ok` is `true`.
-    //
-    // Open, sync, close: the same three steps `__vyrn_fsync_file` takes in
-    // `toolchain.rs` and `OpenOptions::write(true).open(..).sync_all()` takes in
-    // the interpreter. The open asks for WRITE (not READ) and passes no oflags, so
-    // a missing file is NOT created and an existing one is NOT truncated — the
-    // `"rb+"` the C shim opens with.
-    //
-    // Both failures are `@.io.writeerr` about the path, which is what the other two
-    // engines answer: fsync is a durability step of writing, so it has no wording
-    // of its own.
-    let fd_sync = wasi.fd_sync;
-    rt.next_is(m, rt.fsync_file);
-    m.func(
-        &[ValType::I32, ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32, ValType::I32],
-        0,
-        |b| {
-            let (fd, emsg, st) = (3, 4, 5); // params 0..1, the frame base 2, then ours
-            b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                .ins(&Instruction::Block(BlockType::Empty)) // 0: err
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I64Const(RIGHT_FD_WRITE | RIGHT_FD_SYNC))
-                .ins(&Instruction::Call(open_at))
-                .ins(&Instruction::LocalTee(fd))
-                .ins(&Instruction::I32Const(0))
-                .ins(&Instruction::I32LtS)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(writepre as i32))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(writepost as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::LocalSet(emsg))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End)
-                // The close joins the sync, as it does in `write_file`: the fd is
-                // closed on every path, and a sync that only fails at the close
-                // failed.
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::Call(fd_sync))
-                .ins(&Instruction::LocalSet(st))
-                .ins(&Instruction::LocalGet(fd))
-                .ins(&Instruction::Call(fd_close))
-                .ins(&Instruction::LocalGet(st))
-                .ins(&Instruction::I32Or)
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I32Const(writepre as i32))
-                .ins(&Instruction::LocalGet(0))
-                .ins(&Instruction::I32Const(writepost as i32))
-                .ins(&Instruction::Call(err3))
-                .ins(&Instruction::LocalSet(emsg))
-                .ins(&Instruction::Br(1))
-                .ins(&Instruction::End);
-            // `Ok(true)`: a `Bool` payload is the word zero-extended, which is what
-            // `sum2_write_to` does with a local — so the `1` needs one.
-            b.ins(&Instruction::I32Const(1))
-                .ins(&Instruction::LocalSet(st));
-            sum2_write_to(b, 1, &sum2, 1, Some(st));
-            b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
-            sum2_write_to(b, 1, &sum2, 0, Some(emsg));
-            b.ins(&Instruction::End); // fin
-        },
-    );
-
-    // list_dir(path, dest) — `listDir` as a `Result<Array<String>, String>`, on the
-    // generator path only (RFC-0021 gives it no runtime meaning at all, and an
-    // ordinary build still refuses it by name).
-    //
-    // The host sorts the entries and joins them with `\n` — the interpreter's own
-    // recording encoding, so a directory whose contents change invalidates the same
-    // cache entry under either engine — and this splits them in place. That is what
-    // the C shim's `__vyrn_gen_list_dir` does, and it is safe for the same reason:
-    // an entry name cannot contain a newline, so the join is invertible.
-    //
-    // The `Ok` payload is the `Array<String>` triple, which is three words where a
-    // sum's payload is two, so it is BOXED — the same `Word::Boxed` encoding at the
-    // same `layout::of_ll ∘ llt` offsets `read_file_bytes` uses.
-    // Emitted once per mode: `listDirKinds` (RFC-0119) is the same split over
-    // the same `\n`-joined blob — the host appends the `/` to directory names
-    // before joining, so the guest's splitter never learns kinds exist.
-    for (slot, mode) in [
-        (rt.list_dir, crate::GEN_MODE_LIST),
-        (rt.list_dir_kinds, crate::GEN_MODE_LIST_KINDS),
-    ] {
-        let (Some(list_dir), Some(g)) = (slot, gen) else {
-            continue;
-        };
-        let (listpre, listpost) = msg(m, "listerr");
-        // A `String` element is a `ptr`, so the names buffer is a `char**` — the
-        // stride comes off the layout engine rather than off a 4 written here.
-        let stride = layout::of_ll("ptr").expect("a pointer has a layout").size as i32;
-        rt.next_is(m, list_dir);
-        m.func(
-            &[ValType::I32, ValType::I32],
-            &[],
-            &[ValType::I32; 12],
-            0,
-            |b| {
-                // params 0..1, the frame base 2, then ours.
-                let (buf, len, n, i, names, start, k, emsg, boxed) = (3, 4, 5, 6, 7, 8, 9, 10, 11);
-                let (endp, seg, own) = (12, 13, 14);
-                b.ins(&Instruction::Block(BlockType::Empty)) // 1: fin
-                    .ins(&Instruction::Block(BlockType::Empty)); // 0: err
-                gen_slurp(
-                    b,
-                    &g,
-                    (malloc, str_new, err3),
-                    [listpre, listpost, listpre, listpost],
-                    (buf, len, emsg, 0),
-                    mode,
-                );
-                // One pass to count separators, because the pointer array has to be
-                // allocated before the second pass can fill it.
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::LocalGet(len))
-                    .ins(&Instruction::I32GeU)
-                    .ins(&Instruction::BrIf(1))
-                    .ins(&Instruction::LocalGet(buf))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I32Const(b'\n' as i32))
-                    .ins(&Instruction::I32Eq)
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(n))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(n))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(i))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End)
-                    // A non-empty listing has one more name than it has separators; an
-                    // EMPTY one is zero names rather than one empty name, which is the
-                    // difference between `[]` and `[""]`.
-                    .ins(&Instruction::LocalGet(len))
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(n))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(n))
-                    .ins(&Instruction::End)
-                    // A zero-length array still gets a buffer, so the triple's pointer
-                    // is never null — `push` reallocs from it either way.
-                    .ins(&Instruction::LocalGet(n))
-                    .ins(&Instruction::If(BlockType::Result(ValType::I32)))
-                    .ins(&Instruction::LocalGet(n))
-                    .ins(&Instruction::Else)
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::I64ExtendI32U)
-                    .ins(&Instruction::I64Const(stride as i64))
-                    .ins(&Instruction::I64Mul)
-                    .ins(&Instruction::Call(malloc))
-                    .ins(&Instruction::LocalSet(names))
-                    .ins(&Instruction::LocalGet(buf))
-                    .ins(&Instruction::LocalSet(start))
-                    .ins(&Instruction::I32Const(0))
-                    .ins(&Instruction::LocalSet(i));
-                // Each name is COPIED out of the blob. The split used to be in
-                // place, which a `String` header ends: a name's header has to sit in
-                // front of the name, and inside one shared buffer there is no room
-                // (RFC-0089 M1a). `endp` is where this name stops.
-                let elem = |b: &mut Frame| {
-                    b.ins(&Instruction::LocalGet(names))
-                        .ins(&Instruction::LocalGet(k))
-                        .ins(&Instruction::I32Const(stride))
-                        .ins(&Instruction::I32Mul)
-                        .ins(&Instruction::I32Add)
-                        .ins(&Instruction::LocalGet(endp))
-                        .ins(&Instruction::LocalGet(start))
-                        .ins(&Instruction::I32Sub)
-                        .ins(&Instruction::LocalTee(seg))
-                        .ins(&Instruction::LocalGet(seg))
-                        .ins(&Instruction::Call(str_new))
-                        .ins(&Instruction::LocalTee(own))
-                        .ins(&Instruction::LocalGet(start))
-                        .ins(&Instruction::LocalGet(seg))
-                        .ins(&Instruction::MemoryCopy {
-                            src_mem: 0,
-                            dst_mem: 0,
-                        })
-                        .ins(&Instruction::LocalGet(own))
-                        .ins(&Instruction::I32Store(word()));
-                };
-                b.ins(&Instruction::Block(BlockType::Empty))
-                    .ins(&Instruction::Loop(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::LocalGet(len))
-                    .ins(&Instruction::I32GeU)
-                    .ins(&Instruction::BrIf(1))
-                    .ins(&Instruction::LocalGet(buf))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Load8U(byte()))
-                    .ins(&Instruction::I32Const(b'\n' as i32))
-                    .ins(&Instruction::I32Eq)
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(buf))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(endp));
-                elem(b);
-                b.ins(&Instruction::LocalGet(k))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(k))
-                    .ins(&Instruction::LocalGet(buf))
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(start))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::LocalGet(i))
-                    .ins(&Instruction::I32Const(1))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(i))
-                    .ins(&Instruction::Br(0))
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::End)
-                    .ins(&Instruction::LocalGet(len))
-                    .ins(&Instruction::If(BlockType::Empty))
-                    .ins(&Instruction::LocalGet(buf))
-                    .ins(&Instruction::LocalGet(len))
-                    .ins(&Instruction::I32Add)
-                    .ins(&Instruction::LocalSet(endp));
-                elem(b);
-                b.ins(&Instruction::End)
-                    // Every name is now a copy of its own; the blob was only
-                    // ever something to split, so this is where its ownership
-                    // ends. The error exit above needs nothing: `gen_slurp`
-                    // branches before the malloc, so there `buf` is still 0.
-                    .ins(&Instruction::LocalGet(buf))
-                    .ins(&Instruction::Call(free))
-                    .ins(&Instruction::I64Const(triple.size as i64))
-                    .ins(&Instruction::Call(malloc))
-                    .ins(&Instruction::LocalTee(boxed))
-                    .ins(&Instruction::LocalGet(names))
-                    .ins(&Instruction::I32Store(word_at(triple.fields[0])));
-                for f in [triple.fields[1], triple.fields[2]] {
-                    b.ins(&Instruction::LocalGet(boxed))
-                        .ins(&Instruction::LocalGet(n))
-                        .ins(&Instruction::I64ExtendI32U)
-                        .ins(&Instruction::I64Store(at(f)));
-                }
-                sum2_write_to(b, 1, &sum2, 1, Some(boxed));
-                b.ins(&Instruction::Br(1)).ins(&Instruction::End); // err
-                sum2_write_to(b, 1, &sum2, 0, Some(emsg));
-                b.ins(&Instruction::End); // fin
-            },
-        );
-    }
-}
-
-/// RFC-0076's mediated read, in place of `open_at` + `read_all`: the whole
-/// resource in one import, into a buffer the GUEST allocates.
-///
-/// Two calls rather than one because the host must not allocate inside guest
-/// memory — `read` resolves the path, mediates it against the generator's allowed
-/// roots, reads it, RECORDS it (which is what the on-disk generation cache
-/// validates against) and stashes the bytes, returning `(status << 32) | len`;
-/// `fetch` copies the stash into what the guest just malloc'd. Byte for byte the
-/// protocol `__vyrn_gen_slurp` in the C shim implements, because the host serving
-/// it is the same host.
-///
-/// The status alphabet is the shim's: 0 ok, 1 io, 3 an embedded NUL, which the
-/// HOST checks (mode 0 only) because it is holding the bytes. So this picks
-/// between two canonical messages, and both halves of each come out of
-/// `IO_MESSAGES` — a rejected path and a NUL differ in their prefix AND their
-/// suffix, so selecting only one of the two would say `cannot read \`x\` contains
-/// a NUL byte`.
-///
-/// A scoping violation is not in the alphabet at all: it unwinds out of the guest
-/// as a host error, so a generator can never observe one as a value.
-fn gen_slurp(
-    b: &mut Frame,
-    g: &Gen,
-    (malloc, str_new, err3): (u32, u32, u32),
-    [readpre, readpost, nulpre, nulpost]: [u32; 4],
-    (buf, len, err_msg, err_depth): (u32, u32, u32, u32),
-    mode: i32,
-) {
-    let packed = b.local(ValType::I64);
-    let st = b.local(ValType::I32);
-    let pick = |b: &mut Frame, nul: u32, other: u32| {
-        b.ins(&Instruction::I32Const(nul as i32))
-            .ins(&Instruction::I32Const(other as i32))
-            .ins(&Instruction::LocalGet(st))
-            .ins(&Instruction::I32Const(3))
-            .ins(&Instruction::I32Eq)
-            .ins(&Instruction::Select);
-    };
-    b.ins(&Instruction::LocalGet(0))
-        .ins(&Instruction::I32Const(mode))
-        .ins(&Instruction::Call(g.read))
-        .ins(&Instruction::LocalTee(packed))
-        .ins(&Instruction::I64Const(32))
-        .ins(&Instruction::I64ShrU)
-        .ins(&Instruction::I32WrapI64)
-        .ins(&Instruction::LocalTee(st))
-        .ins(&Instruction::If(BlockType::Empty));
-    pick(b, nulpre, readpre);
-    b.ins(&Instruction::LocalGet(0));
-    pick(b, nulpost, readpost);
-    b.ins(&Instruction::Call(err3))
-        .ins(&Instruction::LocalSet(err_msg))
-        .ins(&Instruction::Br(err_depth + 1))
-        .ins(&Instruction::End)
-        // The low half is the length; `i32.wrap` IS the mask. The NUL is added
-        // back in 64 bits, so a host answering 4 GiB minus one gets an out of
-        // memory rather than a one-byte buffer.
-        .ins(&Instruction::LocalGet(packed))
-        .ins(&Instruction::I32WrapI64)
-        .ins(&Instruction::LocalSet(len));
-    // `readFile` answers a `String`, so its buffer gets a header and its
-    // terminator from `str_new` (RFC-0089 M1a). The byte read and the directory
-    // listing answer buffers that are not Strings, so they get neither.
-    if mode == crate::GEN_MODE_READ {
-        b.ins(&Instruction::LocalGet(len))
-            .ins(&Instruction::LocalGet(len))
-            .ins(&Instruction::Call(str_new))
-            .ins(&Instruction::LocalTee(buf))
-            .ins(&Instruction::Call(g.fetch));
-        return;
-    }
-    b.ins(&Instruction::LocalGet(len))
-        .ins(&Instruction::I64ExtendI32U)
-        .ins(&Instruction::I64Const(1))
-        .ins(&Instruction::I64Add)
-        .ins(&Instruction::Call(malloc))
-        .ins(&Instruction::LocalTee(buf))
-        .ins(&Instruction::Call(g.fetch))
-        // NUL-terminated, because the listing is scanned for the zero.
-        .ins(&Instruction::LocalGet(buf))
-        .ins(&Instruction::LocalGet(len))
-        .ins(&Instruction::I32Add)
-        .ins(&Instruction::I32Const(0))
-        .ins(&Instruction::I32Store8(byte()));
-}
-
-/// Write an `Option`/`Result` through the destination in parameter 0: the tag,
-/// then a one-word payload out of `word` (a pointer or a zero-extended scalar),
-/// then the unused second word.
-///
-/// The same three stores `Fn_::build_sum2` emits, at the same
-/// `layout::of_ll ∘ llt` offsets — a runtime function that spelled 0/8/16 could
-/// disagree with the lowering about where the tag is.
-fn sum2_write(b: &mut Frame, l: &Layout, tag: i32, word: Option<u32>) {
-    sum2_write_to(b, 0, l, tag, word)
-}
-
-fn sum2_write_to(b: &mut Frame, dest: u32, l: &Layout, tag: i32, word: Option<u32>) {
-    b.ins(&Instruction::LocalGet(dest))
-        .ins(&Instruction::I32Const(tag))
-        .ins(&Instruction::I32Store8(MemArg {
-            offset: l.fields[0] as u64,
-            align: 0,
-            memory_index: 0,
-        }))
-        .ins(&Instruction::LocalGet(dest));
-    match word {
-        Some(w) => {
-            b.ins(&Instruction::LocalGet(w))
-                .ins(&Instruction::I64ExtendI32U);
-        }
-        None => {
-            b.ins(&Instruction::I64Const(0));
-        }
-    }
-    b.ins(&Instruction::I64Store(at(l.fields[1])))
-        .ins(&Instruction::LocalGet(dest))
-        .ins(&Instruction::I64Const(0))
-        .ins(&Instruction::I64Store(at(l.fields[2])));
-}
 
 // (`float_str` — 511 lines — stood here: `%f`'s six decimal places computed
 // exactly, in base-10^6 limbs, because wasm has no `printf` to defer to. It was
@@ -19125,90 +16098,6 @@ fn sum2_write_to(b: &mut Frame, dest: u32, l: &Layout, tag: i32, word: Option<u3
 // the oracle a differential test compares it against. The measurement that
 // bought it: 330 ns hand-written here against 721 ns compiled, and no difference
 // a program could observe.)
-
-/// `print(n: Int64)`: the decimal digits and a newline, straight to fd 1.
-///
-/// Written as wasm rather than deferred to the shim because `print` is
-/// `printf("%lld\n")` today and varargs are M3 — and because it is the one place
-/// this backend touches the shadow stack without an aggregate being involved.
-/// Digits go in backwards from the end of the frame's buffer, which is why the
-/// pointer handed to `write_all` is computed rather than fixed.
-///
-/// Unsigned division throughout, so `Int64.min` — whose negation is itself —
-/// prints its digits rather than wrapping to nothing.
-fn print_i64(m: &mut Module, write_all: u32) -> u32 {
-    // A 32-byte buffer at the bottom of the frame; 20 digits and a sign is the
-    // widest an i64 gets.
-    const BUF_END: u32 = 32;
-    let (v, sgn, p, neg) = (0, 1, 3, 4); // params 0 and 1, base is 2, then our two
-    m.func(
-        &[ValType::I64, ValType::I32],
-        &[],
-        &[ValType::I32, ValType::I32],
-        BUF_END,
-        |b| {
-            // neg = signed && v < 0; v = |v| as unsigned. An unsigned type prints its
-            // magnitude — the interpreter's `*v as u64` — so the caller says which,
-            // rather than there being a second digit loop to keep in step with this
-            // one.
-            b.ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::I64LtS)
-                .ins(&Instruction::LocalGet(sgn))
-                .ins(&Instruction::I32And)
-                .ins(&Instruction::LocalTee(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::I64Const(0))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Sub)
-                .ins(&Instruction::LocalSet(v))
-                .ins(&Instruction::End);
-            // p = base + BUF_END - 1; *p = the newline
-            b.slot(BUF_END - 1)
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::I32Const(10)) // newline
-                .ins(&Instruction::I32Store8(byte()));
-            // do { *--p = '0' + v % 10; v /= 10 } while (v)
-            b.ins(&Instruction::Loop(BlockType::Empty))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64RemU)
-                .ins(&Instruction::I32WrapI64)
-                .ins(&Instruction::I32Const(b'0' as i32))
-                .ins(&Instruction::I32Add)
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::LocalGet(v))
-                .ins(&Instruction::I64Const(10))
-                .ins(&Instruction::I64DivU)
-                .ins(&Instruction::LocalTee(v))
-                .ins(&Instruction::I64Eqz)
-                .ins(&Instruction::I32Eqz)
-                .ins(&Instruction::BrIf(0))
-                .ins(&Instruction::End);
-            // if (neg) *--p = '-'
-            b.ins(&Instruction::LocalGet(neg))
-                .ins(&Instruction::If(BlockType::Empty))
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Const(1))
-                .ins(&Instruction::I32Sub)
-                .ins(&Instruction::LocalTee(p))
-                .ins(&Instruction::I32Const(b'-' as i32))
-                .ins(&Instruction::I32Store8(byte()))
-                .ins(&Instruction::End);
-            // write_all(1, p, (base + BUF_END) - p)
-            b.ins(&Instruction::I32Const(1));
-            b.ins(&Instruction::LocalGet(p));
-            b.slot(BUF_END)
-                .ins(&Instruction::LocalGet(p))
-                .ins(&Instruction::I32Sub);
-            b.ins(&Instruction::Call(write_all)).ins(&Instruction::Drop);
-        },
-    )
-}
 
 /// The result type of an RFC-0014/RFC-0044 I/O builtin, or `None` if the name is
 /// not one.
@@ -19223,10 +16112,7 @@ fn print_i64(m: &mut Module, write_all: u32) -> u32 {
 /// cannot size a destination slot differently from the value written into it —
 /// M2l's rule, and the shape `io_builtin_ty` exists for on the other builtins.
 fn gen_list_dir_ty() -> Type {
-    Type::Result(
-        Box::new(Type::Array(Box::new(Type::Str))),
-        Box::new(Type::Str),
-    )
+    Type::result(Type::Array(Box::new(Type::Str)), Type::Str)
 }
 
 /// The receivers that have a `.length` or a `.byteLength`, in ONE list.
@@ -19252,10 +16138,10 @@ fn length_ty(field: &str, base: &Type) -> Option<Type> {
 }
 
 fn io_builtin_ty(name: &str, argc: usize) -> Option<Type> {
-    let str_err = |ok| Type::Result(Box::new(ok), Box::new(Type::Str));
+    let str_err = |ok| Type::result(ok, Type::Str);
     Some(match (name, argc) {
         ("args", 0) => Type::Array(Box::new(Type::Str)),
-        ("readLine", 0) => Type::Option(Box::new(Type::Str)),
+        ("readLine", 0) => Type::option(Type::Str),
         ("readFile", 1) => str_err(Type::Str),
         ("readFileBytes", 1) => str_err(Type::Array(Box::new(Type::IntN {
             bits: 8,
@@ -19281,9 +16167,1196 @@ fn expr_name(e: &Expr) -> String {
     .to_string()
 }
 
+/// The forms of the AST dispatch whose arm the per-statement unit could retire
+/// — RFC-0125 §3 M3, the interleave slice.
+///
+/// An arm goes when nothing reaches it. Against each name the count below says
+/// how many occurrences the ARM emitted and how many the core's rows did, so a
+/// form whose first number is zero over the whole corpus is one whose arm has
+/// no reader left.
+///
+/// The flag beside each name says whether the AST dispatch still EMITS that
+/// form. It is `false` for a form the core states and the dispatch only
+/// refuses, and it is the retirement schedule's one home: `VYRN_NO_CORE_WALK`
+/// reads it, because the walk that switch takes back is the arms that still
+/// exist and not the emitter before the driver.
+pub const FORMS: [(&str, bool); 20] = [
+    ("Stmt::Let", true),
+    ("Stmt::Assign", true),
+    ("Stmt::Return", true),
+    ("Stmt::If", true),
+    ("Stmt::Expr", true),
+    ("Stmt::While", true),
+    ("Stmt::ForIn", true),
+    ("Stmt::Break", true),
+    ("Stmt::Continue", false),
+    ("Stmt::IfLet", true),
+    ("Stmt::Drop", true),
+    ("a statement of another form", true),
+    ("Expr::Int", true),
+    ("Expr::Byte", true),
+    ("Expr::Bool", true),
+    ("Expr::Float", true),
+    ("Expr::Str", true),
+    ("Expr::Var", true),
+    ("Expr::Unary", true),
+    ("Expr::Binary", true),
+];
+
+thread_local! {
+    /// Per [`FORMS`] entry: how many occurrences the AST arm emitted, and how
+    /// many the core's rows did.
+    static COUNTS: std::cell::RefCell<[(usize, usize); FORMS.len()]> =
+        const { std::cell::RefCell::new([(0, 0); FORMS.len()]) };
+}
+
+/// How many occurrences of each of [`FORMS`] the AST arm emitted, and how many
+/// the core's rows did, since [`forget_walks`].
+pub fn forms() -> [(usize, usize); FORMS.len()] {
+    COUNTS.with(|c| *c.borrow())
+}
+
+fn count(form: usize, carried: bool) {
+    COUNTS.with(|c| {
+        let mut c = c.borrow_mut();
+        if carried {
+            c[form].1 += 1;
+        } else {
+            c[form].0 += 1;
+        }
+    });
+}
+
+/// Which of [`FORMS`] a statement is.
+fn stmt_form(s: &Stmt) -> usize {
+    match s {
+        Stmt::Let { .. } => 0,
+        Stmt::Assign { .. } => 1,
+        Stmt::Return { .. } => 2,
+        Stmt::If { .. } => 3,
+        Stmt::Expr(_) => 4,
+        Stmt::While { .. } => 5,
+        Stmt::ForIn { .. } => 6,
+        Stmt::Break { .. } => 7,
+        Stmt::Continue { .. } => 8,
+        Stmt::IfLet { .. } => 9,
+        Stmt::Drop { .. } => 10,
+        _ => 11,
+    }
+}
+
+/// Which of [`FORMS`] an expression is, for the eight the driver reads.
+fn expr_form(e: &Expr) -> Option<usize> {
+    Some(match e {
+        Expr::Int(_) => 12,
+        Expr::Byte(_) => 13,
+        Expr::Bool(_) => 14,
+        Expr::Float(_) => 15,
+        Expr::Str(_) => 16,
+        Expr::Var { .. } => 17,
+        Expr::Unary { .. } => 18,
+        Expr::Binary { .. } => 19,
+        _ => return None,
+    })
+}
+
+/// Where the arm tally is appended, or `None` when nothing asked for one.
+///
+/// Read once. The AST dispatch asks per statement, and an environment lookup
+/// there is one system call for every statement the process emits.
+fn tally_at() -> Option<&'static std::path::Path> {
+    static AT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    AT.get_or_init(|| std::env::var_os("VYRN_FORM_TALLY").map(std::path::PathBuf::from))
+        .as_deref()
+}
+
+thread_local! {
+    /// Per form and owner, how many occurrences the AST arm emitted since the
+    /// last flush — RFC-0125 §3 M3, the occurrence slice.
+    ///
+    /// [`COUNTS`] is one run of one process. This one names the FUNCTION each
+    /// occurrence is in and goes to a file, so "which gate reaches this arm" is
+    /// answered over the whole gate list and not over one suite.
+    static WHO: std::cell::RefCell<std::collections::BTreeMap<(usize, String), usize>> =
+        std::cell::RefCell::new(std::collections::BTreeMap::new());
+}
+
+/// Count one occurrence of `form` that the AST arm emitted, in `owner`.
+fn count_in(form: usize, owner: &str) {
+    count(form, false);
+    if tally_at().is_some() {
+        let owner = if owner.is_empty() {
+            "(the globals initializer)"
+        } else {
+            owner
+        };
+        WHO.with(|w| *w.borrow_mut().entry((form, owner.to_string())).or_default() += 1);
+    }
+}
+
+/// Appends what the AST arms emitted while it lived: the form, the owner, the
+/// count, and the command that ran, one line each.
+///
+/// A guard rather than a call at the end of [`compile_inner`], because a
+/// compile that fails emits arms too and its `?` leaves by another door.
+struct Tally;
+
+impl Drop for Tally {
+    fn drop(&mut self) {
+        let Some(at) = tally_at() else { return };
+        let who = WHO.with(|w| std::mem::take(&mut *w.borrow_mut()));
+        if who.is_empty() {
+            return;
+        }
+        static ARGV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let argv = ARGV.get_or_init(|| std::env::args().collect::<Vec<_>>().join(" "));
+        // A compile with the core turned off is the licence's own second walk
+        // and not a reader of the arm, so the tally says which it was.
+        let walk = if core_walk_off() {
+            "no-core-walk"
+        } else {
+            "core"
+        };
+        let mut out = String::new();
+        for ((form, owner), n) in who {
+            out.push_str(&format!(
+                "{}\t{owner}\t{n}\t{walk}\t{argv}\n",
+                FORMS[form].0
+            ));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(at)
+        {
+            use std::io::Write;
+            let _ = f.write_all(out.as_bytes());
+        }
+    }
+}
+
+/// Whether the AST walk is asked for even where the core's rows carry the body
+/// — RFC-0125 §3 M3, the driver slice.
+///
+/// The two walks are compared by emitting the same corpus twice, so the switch
+/// exists for the comparison and for nothing else: a build that sets it gets
+/// the emission it had before the driver landed.
+fn core_walk_off() -> bool {
+    std::env::var_os("VYRN_NO_CORE_WALK").is_some()
+}
+
+thread_local! {
+    /// How many bodies this thread emitted from the core's statements, and how
+    /// many it emitted at all — RFC-0125 §3 M3, the driver slice's own count.
+    ///
+    /// The count is the measurement §2.3 is judged by: it rises as the core
+    /// carries more rows, and every body it does not hold is a line of the
+    /// residue table with the row it waits on.
+    static WALKS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// How many bodies came from the core, and how many were emitted, since
+/// [`forget_walks`].
+pub fn walks() -> (usize, usize) {
+    WALKS.with(std::cell::Cell::get)
+}
+
+/// Start the count again.
+pub fn forget_walks() {
+    WALKS.with(|w| w.set((0, 0)));
+    COUNTS.with(|c| *c.borrow_mut() = [(0, 0); FORMS.len()]);
+}
+
+/// Where the core's names live while one body is walked, and what the wasm
+/// operand stack is holding — RFC-0125 §3 M3, the driver slice.
+///
+/// The core names EVERY value (§2.1) and wasm has an operand stack, so a walk
+/// that gave each name a local would emit a `local.set`/`local.get` pair the
+/// AST walk does not. `held` is the one name the stack is carrying: a value
+/// bound by the statement just walked and read by this one. Where a name is
+/// not stack-shaped it gets a local, in the order the AST walk allocates one.
+#[derive(Default)]
+struct Walked {
+    /// The wasm place of each of the core's names, by [`vyrn_lower::core::Name`].
+    at: Vec<Option<(Place, Type)>>,
+    /// How many times each name is READ over the whole body.
+    reads: Vec<u32>,
+    /// The name the operand stack is holding, if any.
+    held: Option<vyrn_lower::core::Name>,
+}
+
+impl<'p> Fn_<'_, 'p> {
+    /// One function body, emitted from the core's own statements — RFC-0125
+    /// §2.3: "the emitter reads the core and writes wasm ... it decides
+    /// nothing".
+    ///
+    /// This is the walk the AST dispatch (`Fn_::stmt`, `Fn_::expr`) is beside.
+    /// It reads [`vyrn_lower::core::Body`] and nothing else: a statement is a
+    /// [`St`], what it computes is the [`Op`], the [`Ctor`] and the [`Lit`] the
+    /// operation slice put on the rows, and the type of every operand is the
+    /// checker's, carried on [`vyrn_lower::core::NameInfo`].
+    ///
+    /// It runs only where [`Fn_::core_walkable`] says the rows carry the whole
+    /// body. What that leaves out is the ranked list in §3 M3 and not a
+    /// judgement of this walk's: each form it stands down at names the row the
+    /// core still lacks.
+    fn core_body(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+    ) -> Result<(), String> {
+        if body.params.len() > self.scope.len() {
+            return unsupported("a core body whose parameters are not the frame's", 0);
+        }
+        let mut w = std::mem::take(&mut self.core_w);
+        let r = self.core_stmts(m, b, body, &mut w, &body.stmts);
+        self.core_w = w;
+        r
+    }
+
+    /// One SOURCE statement, emitted from the core's rows where they carry it —
+    /// RFC-0125 §3 M3, the interleave slice.
+    ///
+    /// [`Fn_::core_body`] picks its walk per FUNCTION, so an arm of the AST
+    /// dispatch could only go when every body of the corpus went through the
+    /// core. This is the same walk asked one statement at a time: where the
+    /// rows carry the statement it is emitted from them, and where they do not
+    /// the arm below emits it, into the same frame with the same locals and
+    /// the same scope. An arm goes when no occurrence of its form reaches it.
+    ///
+    /// Returns whether the statement was emitted. The screen
+    /// ([`Fn_::core_run`]) stands before the first instruction, so a `false`
+    /// costs nothing and the arm emits exactly what it always did.
+    fn core_took(&mut self, m: &mut Module, b: &mut Frame, s: &Stmt) -> Result<bool, String> {
+        let Some(body) = self.core.clone() else {
+            return Ok(false);
+        };
+        let form = stmt_form(s);
+        // `VYRN_NO_CORE_WALK=1` takes the AST walk back, and what it can take
+        // back is the arms that still exist: a retired form has none, so the
+        // rows emit it either way and the comparison stays byte for byte over
+        // every program (`compiler/vyrn-cli/tests/coredrive.rs`).
+        if core_walk_off() && FORMS[form].1 {
+            return Ok(false);
+        }
+        let Some(run) = self.core_run(&body, s) else {
+            return Ok(false);
+        };
+        let mut w = std::mem::take(&mut self.core_w);
+        let r = self.core_stmts(m, b, &body, &mut w, &run);
+        self.core_w = w;
+        count(form, true);
+        r.map(|()| true)
+    }
+
+    /// The core's rows for one source statement, where this walk reads all of
+    /// them — RFC-0125 §3 M3, the interleave slice's screen.
+    ///
+    /// Three clauses, and each one is a line of the record. The FRAME clause: a
+    /// placed release and an aggregate destination are emissions the rows do
+    /// not carry. The SCALAR clause, per statement rather than per body: every
+    /// name the run names is one this walk reads. The STATEMENT screen:
+    /// [`Fn_::core_readable`], unchanged.
+    fn core_run(&self, body: &vyrn_lower::core::Body, s: &Stmt) -> Option<Vec<St>> {
+        // A node is an ADDRESS, and `project::iterate_loop`'s copy of a loop
+        // body gives a statement a second one. `key_of` is the mapping back,
+        // and ten other readers of the plan in this file ask through it.
+        let at = self.cx.plan.key_of(s as *const Stmt as usize);
+        let run = self.core_at.get(&at)?;
+        // THE FRAME CLAUSE, per statement. It was per BODY until the release
+        // half of it moved here, and then it refused any statement the
+        // placement keyed a release AT — 8,362 of them per body, and the `if`s
+        // of every frame that placed one. Since the release slice it names the
+        // three exits this walk gives back at itself: a `break`, a `continue`
+        // and a `return` each run the same [`Fn_::emit_releases`] the arm runs,
+        // keyed by the row's own site. A block's fall-through release and a
+        // scrutinee's stay the arm's, and their rows are what
+        // [`Fn_::core_readable`] refuses, so no run reaches this walk holding
+        // one.
+        if self
+            .placed
+            .keys()
+            .any(|(kind, node)| *node == at && !CORE_EXITS.contains(kind))
+        {
+            return None;
+        }
+        // An aggregate result travels through `dest` and a stream cursor is a
+        // release at a function exit that no plan row names, so both belong to
+        // a `return` and to nothing else: `streamlazy.vyrn` lost 51 bytes of a
+        // cursor when the rows took its `return`. The clause is about the RUN
+        // rather than about the form, because a subtree carries the `return` of
+        // every branch under it.
+        if (self.dest.is_some() || !self.cursors.is_empty()) && run.iter().any(core_returns) {
+            return None;
+        }
+        // A node is an ADDRESS. The row's FORM and the name it binds are
+        // checked against the statement's, so a row is never read as a
+        // statement it did not come from.
+        let named =
+            |n: &vyrn_lower::core::Name, name: &String| &body.names[*n as usize].source == name;
+        let mut annotated = None;
+        match (s, run.last()?) {
+            (Stmt::Let { name, ty, .. }, St::Let(n, _)) if named(n, name) => {
+                // The arm binds the ANNOTATION where the reader wrote one and
+                // the recorded type of the initializer otherwise, and the two
+                // walks have to bind the same type or they pick different
+                // instructions for it: `simd.vyrn`'s `a / b` on two `Float32`
+                // widens to `Float64` in the arm and stays single in the row.
+                if let Some(t) = ty {
+                    // As WRITTEN, not resolved: `let a: Age = 25` is a `where`
+                    // type, the arm parks the value in a temporary and calls
+                    // its check, and `Age` resolved to `Int64` is the flow that
+                    // does not (M2d). The row states no check.
+                    if !core_scalar(t)
+                        || self.cx.resolve(t) != self.cx.resolve(&body.names[*n as usize].ty)
+                    {
+                        return None;
+                    }
+                    annotated = Some(*n);
+                }
+            }
+            (
+                Stmt::Assign { name, .. },
+                St::Store {
+                    place: vyrn_lower::core::Place::Name(n),
+                    ..
+                },
+            ) if named(n, name) => {}
+            // The DECLARED return type, for the same reason: a function
+            // returning `Age` validates at its `return` and the row does not.
+            (Stmt::Return { line, .. }, St::Return { line: at, .. })
+                if line == at && core_scalar(&self.ret_ty) => {}
+            // RFC-0114 Rule N's edge releases are the plan's rows at the JOIN,
+            // and the core states them as drops inside the branch — which the
+            // statement screen refuses. An `if` that owes one is the arm's.
+            (Stmt::If { .. }, St::If { .. }) if self.cx.edge_rows(at).is_empty() => {}
+            // The four forms the site slice took off the floor. Each names its
+            // own node on the row now, so the FORM is the whole of the
+            // agreement: no binding to check and no type the arm would bind.
+            // What each still waits on is the statement screen below — a `for`
+            // reads its element through a place row, an `if let` is a switch,
+            // and the tag on `Arm` is the list's row 6.
+            (Stmt::Expr(_), St::Do { .. }) => {}
+            (Stmt::Break { .. }, St::Break { .. }) => {}
+            (Stmt::Continue { .. }, St::Continue { .. }) => {}
+            (Stmt::While { .. } | Stmt::ForIn { .. }, St::Loop { .. }) => {}
+            (Stmt::IfLet { .. }, St::Switch { .. }) => {}
+            _ => return None,
+        }
+        // Every OTHER binding of the run: the row types it by its destination
+        // and the arm by what it evaluated, and the two are not always the
+        // same. `simd.vyrn`'s `let neg = 0.0 - o` is `Float32` to the checker
+        // and to the row, and `Float64` to the arm, which reads the literal's
+        // own width and promotes `o` to meet it — so the row divides single
+        // where the arm promotes and divides double. Where the two disagree
+        // the rows do not carry the statement, and the disagreement is a
+        // finding of its own.
+        let mut lets = Vec::new();
+        for st in run {
+            core_lets(st, &mut lets);
+        }
+        for (n, rhs) in &lets {
+            if Some(*n) == annotated {
+                continue;
+            }
+            let info = &body.names[*n as usize];
+            let want = self.core_arm_ty(body, rhs)?;
+            if !core_scalar(&want) {
+                return None;
+            }
+            let got = self.cx.resolve(&info.ty);
+            // A truth value is the one result an operator states and its
+            // operands do not.
+            if got != self.cx.resolve(&want) && got != Type::Bool {
+                return None;
+            }
+        }
+        let mut names = Vec::new();
+        for st in run {
+            // A release row names a binding the PLACEMENT holds, and the
+            // emitter reads its place off `rel_slots` rather than off this
+            // walk's own table. So the name is not one this walk has to read,
+            // and the scalar clause below is not asked about it — a released
+            // name is a String or an array by definition, and asking would
+            // refuse every run that carries one.
+            if matches!(st, St::Row { .. }) {
+                continue;
+            }
+            vyrn_lower::core::names_in(st, &mut names);
+        }
+        for n in &names {
+            let info = &body.names[*n as usize];
+            if !core_scalar(&info.ty) {
+                return None;
+            }
+        }
+        // Every name the run READS has to have a place before the first
+        // instruction is written: one this walk bound, one the arm below bound
+        // (a local of the scope), or a parameter. What the run binds is the
+        // same walk the type clause above already did, branches and loop bodies
+        // included — a top-level reading of it left every name a `while` binds
+        // inside its own body with no place, which is why that form stood at
+        // zero until the site slice asked the question once.
+        for n in &names {
+            if lets.iter().any(|(b, _)| b == n) {
+                continue;
+            }
+            let (_, ty) = self.core_place(&self.core_w, body, *n)?;
+            // And the two walks have to agree about the type of a name they
+            // share: `stringops.vyrn` compared two bytes at byte width from the
+            // row and at `Int64` from the frame, for the same source. The
+            // frame's answer is as DECLARED, so a `where` type is refused here
+            // as it is at a `let`.
+            if !core_scalar(&ty)
+                || self.cx.resolve(&ty) != self.cx.resolve(&body.names[*n as usize].ty)
+            {
+                return None;
+            }
+        }
+        self.core_readable(body, run, &self.core_w.reads)
+            .then(|| run.clone())
+    }
+
+    /// Where one of the core's names lives: the place this walk bound it at, or
+    /// the one the AST arm bound it at, which is the scope's.
+    fn core_place(
+        &self,
+        w: &Walked,
+        body: &vyrn_lower::core::Body,
+        n: vyrn_lower::core::Name,
+    ) -> Option<(Place, Type)> {
+        if let Some(p) = w.at[n as usize].clone() {
+            return Some(p);
+        }
+        let info = &body.names[n as usize];
+        // `@t3` is the naming pass's own spelling for a temporary, and no
+        // reader wrote one — so a name that starts with it is this walk's or
+        // nobody's.
+        if info.source.starts_with('@') {
+            return None;
+        }
+        let p = self.lookup(&info.source, info.line).ok()?;
+        matches!(p.0, Place::Local(_)).then_some(p)
+    }
+
+    fn core_stmts(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        ss: &[St],
+    ) -> Result<(), String> {
+        for (i, s) in ss.iter().enumerate() {
+            match s {
+                St::Let(n, rhs) => {
+                    let info = &body.names[*n as usize];
+                    let line = info.line;
+                    self.core_rhs(m, b, body, w, rhs, &info.ty, line)?;
+                    // A value the next statement reads once, first, and
+                    // nothing else reads: wasm's operand stack is where it
+                    // lives, and no local is taken for it. Every other name
+                    // gets one, in the order the AST walk takes them.
+                    if info.binding.is_none()
+                        && w.reads[*n as usize] == 1
+                        && ss.get(i + 1).and_then(first_read) == Some(*n)
+                    {
+                        w.held = Some(*n);
+                        continue;
+                    }
+                    let r = self.cx.repr(&info.ty, line)?;
+                    let place = self.place_for(b, &r, line)?;
+                    let Place::Local(l) = place else {
+                        return unsupported("a core `let` of an aggregate", line);
+                    };
+                    b.ins(&Instruction::LocalSet(l));
+                    w.at[*n as usize] = Some((place, info.ty.clone()));
+                    // A binding a `Stmt::Let` wrote goes on the scope too, so
+                    // a statement the AST arm emits after this one finds it
+                    // exactly where that arm would have put it (RFC-0125 §3
+                    // M3, the interleave slice). The question is the ROW's —
+                    // [`vyrn_lower::core::NameInfo::binding`] is the node the
+                    // plan keys the binding by, and a temporary this pass
+                    // minted has none. The spelling is not the question: a
+                    // projection inlined at its access site renames its own
+                    // bindings to `@b<tag>.<name>`, and the statements after
+                    // them still name them.
+                    if info.binding.is_some() {
+                        self.scope
+                            .push((info.source.clone(), place, info.ty.clone()));
+                    }
+                }
+                St::Store {
+                    place: vyrn_lower::core::Place::Name(n),
+                    value,
+                    line,
+                    ..
+                } => {
+                    let Some((Place::Local(l), ty)) = self.core_place(w, body, *n) else {
+                        return unsupported("a core store into a place with no local", *line);
+                    };
+                    self.core_val(m, b, body, w, value, &ty, *line)?;
+                    b.ins(&Instruction::LocalSet(l));
+                }
+                // A LOOP'S EXIT, which the core states and wasm has one
+                // instruction for. The pass makes up exactly one `break`
+                // (`site: 0`, "a break this pass made up") and puts it in the
+                // else arm of a two-way branch it also made up, at the head
+                // of the loop it desugared: that row is a conditional branch
+                // out of the loop's block and nothing else. The reader's own
+                // `if c { break }` carries the reader's site and is emitted
+                // as the two-way branch it is, so this reads the row rather
+                // than recognizing a shape.
+                St::If {
+                    cond,
+                    then,
+                    els,
+                    site: 0,
+                } if then.is_empty()
+                    && matches!(els.as_slice(), [St::Break { site: 0 }])
+                    && !self.loops.is_empty() =>
+                {
+                    self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
+                    b.ins(&Instruction::I32Eqz);
+                    let brk = self.loops.last().expect("a loop is open").0;
+                    let out = self.br_to(brk);
+                    b.ins(&Instruction::BrIf(out));
+                }
+                // `block { loop { .. br 0 } }` — the block is where a `break`
+                // goes and the loop is where a `continue` goes, which is the
+                // pair `St::Break` and `St::Continue` name. `St::Loop` is the
+                // infinite loop the row states, so the back edge is this
+                // walk's and unconditional.
+                St::Loop { body: inner, .. } => {
+                    let brk = self.depth;
+                    b.ins(&Instruction::Block(BlockType::Empty));
+                    self.depth += 1;
+                    let cont = self.depth;
+                    b.ins(&Instruction::Loop(BlockType::Empty));
+                    self.depth += 1;
+                    self.loops.push((brk, cont, self.region_depth));
+                    let scope = self.scope.len();
+                    let r = self.core_stmts(m, b, body, w, inner);
+                    self.scope.truncate(scope);
+                    self.loops.pop();
+                    r?;
+                    let back = self.br_to(cont);
+                    b.ins(&Instruction::Br(back));
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                St::Break { site } | St::Continue { site } => {
+                    let Some(&(brk, cont, regions)) = self.loops.last() else {
+                        return unsupported("a core exit outside a loop", 0);
+                    };
+                    let kind = match s {
+                        St::Break { .. } => ExitKind::Break,
+                        _ => ExitKind::Continue,
+                    };
+                    // Every frame the loop body opened, before the branch, as
+                    // the AST arm does.
+                    self.emit_releases(m, b, kind, *site)?;
+                    self.exit_regions_above(b, regions, true);
+                    let to = match s {
+                        St::Break { .. } => brk,
+                        _ => cont,
+                    };
+                    let d = self.br_to(to);
+                    b.ins(&Instruction::Br(d));
+                }
+                St::If {
+                    cond, then, els, ..
+                } => {
+                    self.core_val(m, b, body, w, cond, &Type::Bool, 0)?;
+                    b.ins(&Instruction::If(BlockType::Empty));
+                    self.depth += 1;
+                    let mark = self.scope.len();
+                    self.core_stmts(m, b, body, w, then)?;
+                    self.scope.truncate(mark);
+                    if !els.is_empty() {
+                        b.ins(&Instruction::Else);
+                        self.core_stmts(m, b, body, w, els)?;
+                        self.scope.truncate(mark);
+                    }
+                    self.depth -= 1;
+                    b.ins(&Instruction::End);
+                }
+                // `region { .. }` (RFC-0004 §4) is the same block with an arena
+                // scope around it, which is the row the driver slice added:
+                // this walk emitted neither the mark nor the hand-back while
+                // the two blocks were one row, and 65 nested regions ran
+                // without reaching their limit. The DEPTH is still counted
+                // here, because it is a fact about the code being written.
+                St::Block {
+                    body: inner,
+                    region,
+                    ..
+                } => {
+                    let scope = self.scope.len();
+                    if *region {
+                        self.region_enter(b);
+                        self.region_depth += 1;
+                        let r = self.core_stmts(m, b, body, w, inner);
+                        self.region_depth -= 1;
+                        let mark = self.region_marks.pop().expect("one mark per open region");
+                        r?;
+                        self.region_exit(b, mark);
+                    } else {
+                        self.core_stmts(m, b, body, w, inner)?;
+                    }
+                    self.scope.truncate(scope);
+                }
+                St::Return {
+                    value, line, site, ..
+                } => {
+                    match value {
+                        Some(v) => {
+                            let want = self.ret_ty.clone();
+                            self.core_val(m, b, body, w, v, &want, *line)?;
+                        }
+                        None if matches!(self.ret, Repr::Unit) => {}
+                        None => {
+                            return unsupported(
+                                "a return whose value does not match the signature",
+                                *line,
+                            )
+                        }
+                    }
+                    // Every open frame, before the branch, as the AST arm
+                    // does: the value is on the operand stack already and a
+                    // release does not disturb it.
+                    self.emit_releases(m, b, ExitKind::Return, *site)?;
+                    // Every region scope this return leaves, as the AST arm
+                    // does: a returned value built inside a region points into
+                    // the arena and its caller owns it, so the scope POPS
+                    // rather than frees.
+                    self.exit_regions_above(b, 0, false);
+                    b.ins(&Instruction::Br(self.depth));
+                }
+                // A placed release, one row per step. The exit row below asks
+                // [`Fn_::emit_releases`] for the whole group in the placement's
+                // own order — the same walk over `rel_slots` the AST arm makes
+                // at the same exit — so a step of its own emits nothing here.
+                // §2.3 leaves the PLACEMENT to the emitter; what the row adds
+                // is which exit, and which node the plan keys it by.
+                St::Row { exit, .. } if CORE_EXITS.contains(exit) => {}
+                St::Trap => {
+                    b.ins(&Instruction::Unreachable);
+                }
+                // An expression for its effect. What it leaves on the stack
+                // is dropped, or the enclosing block's type will not check —
+                // the same sentence the AST walk's statement arm writes, on
+                // the row rather than on the node.
+                St::Do { rhs, line, .. } => {
+                    let got = self.core_rhs_ty(rhs, *line)?;
+                    self.core_rhs(m, b, body, w, rhs, &got, *line)?;
+                    if self.cx.repr(&got, *line)? != Repr::Unit {
+                        b.ins(&Instruction::Drop);
+                    }
+                }
+                _ => return unsupported("a core statement this walk does not read", 0),
+            }
+        }
+        Ok(())
+    }
+
+    /// What produced the value a `let` binds, in `want`.
+    fn core_rhs(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        rhs: &Rhs,
+        want: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        match rhs {
+            Rhs::Val(v) => self.core_val(m, b, body, w, v, want, line),
+            Rhs::Prim(op, vs, ret) => {
+                let got = self.core_prim(m, b, body, w, *op, vs, line)?;
+                let got = ret.clone().unwrap_or(got);
+                self.coerce(m, b, None, &got, want, line)
+            }
+            Rhs::Call {
+                callee, args, kind, ..
+            } => {
+                let got = self.core_call(m, b, body, w, callee, *kind, args, line)?;
+                self.coerce(m, b, None, &got, want, line)
+            }
+            _ => unsupported("a core right-hand side this walk does not read", line),
+        }
+    }
+
+    /// What a right-hand side the driver reads PRODUCES, without emitting it —
+    /// which a `St::Do` needs and a `St::Let` does not, because a `let` has a
+    /// name and a name has the checker's type on it.
+    fn core_rhs_ty(&self, rhs: &Rhs, line: usize) -> Result<Type, String> {
+        match rhs {
+            Rhs::Call { callee, kind, .. } => match self.core_sig(callee, *kind) {
+                Some(s) => Ok(s.ret_ty),
+                None => unsupported("a core call this walk does not read", line),
+            },
+            _ => unsupported("a discarded value the row does not type", line),
+        }
+    }
+
+    /// One call, its callee read off the row — RFC-0125 §3 M3, the callee
+    /// slice.
+    ///
+    /// The ABI is the DECLARATION's and the emitter reads it there: which
+    /// wasm index the callee is, what each parameter's type is, whether one
+    /// crosses by address. What the row states is WHO the callee is
+    /// ([`Callee`]), which is the fourteen-rung ladder [`Fn_::call_inner`]
+    /// walks over the source at every site and this walk does not walk at
+    /// all.
+    fn core_call(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        callee: &str,
+        kind: Callee,
+        args: &[(Val, vyrn_frontend::ast::Capability)],
+        line: usize,
+    ) -> Result<Type, String> {
+        let Some(sig) = self.core_sig(callee, kind) else {
+            return unsupported("a core call this walk does not read", line);
+        };
+        for ((v, _), p) in args.iter().zip(&sig.params) {
+            self.core_val(m, b, body, w, v, p, line)?;
+        }
+        b.ins(&Instruction::Call(sig.index));
+        Ok(sig.ret_ty)
+    }
+
+    /// The signature this walk calls a [`Callee::Fn`] through, and `None` for
+    /// every callee whose emission is more than a `call`.
+    ///
+    /// `Cx::sigs` holds exactly the functions this module DEFINES: a generic,
+    /// a higher-order shell and a `std/mem` declaration are all skipped
+    /// before it is filled, so a hit is the last rung of the ladder and a
+    /// miss is one of the thirteen above it. The audited instrument is the
+    /// one name that hits and must not be called — an unaudited build drops
+    /// its four hooks rather than emitting them.
+    fn core_sig(&self, callee: &str, kind: Callee) -> Option<Sig> {
+        if kind != Callee::Fn || (!self.cx.audit && callee.starts_with(AUDIT_PREFIX)) {
+            return None;
+        }
+        let sig = self.cx.sigs.get(callee)?;
+        // A `modify` parameter crosses as the address of the caller's binding
+        // and an aggregate result through a hidden leading pointer. Both are
+        // placements, which is where §2.3 draws the emitter's own line, and
+        // neither is reachable from a body of scalars.
+        (!sig.modify.iter().any(|m| *m) && sig.ret.agg().is_none()).then(|| sig.clone())
+    }
+
+    /// An operator, its operands read off the row — RFC-0125 §3 M3, the
+    /// operation slice's own reader.
+    ///
+    /// The instruction is [`Fn_::bin_ins`]'s and [`Fn_::un_ins`]'s: the same
+    /// table the AST walk maps to, asked once. What this adds is where the
+    /// operands come from — a name the core carries a type for, or a literal
+    /// the row names.
+    fn core_prim(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        op: Op,
+        vs: &[Val],
+        line: usize,
+    ) -> Result<Type, String> {
+        match (op, vs) {
+            (Op::Un(u), [v]) => {
+                let t = self.core_ty(body, v, &Type::Int);
+                self.core_val(m, b, body, w, v, &t, line)?;
+                self.un_ins(b, u, &t, line)
+            }
+            // `&&` and `||` short-circuit, and the row states them as prims
+            // that read both operands — the linear judgment is the same either
+            // way and the operator is what tells a reader the second read may
+            // not happen (the operation slice's first finding). An honest row
+            // is control flow, which is `St::If` over a temporary and moves
+            // bytes; until it exists this walk stands down rather than
+            // evaluating an operand the AST walk does not.
+            (Op::Bin(BinOp::And | BinOp::Or), _) => unsupported(
+                "`&&` or `||` from the core's row, which states no branch",
+                line,
+            ),
+            (Op::Bin(o), [l, r]) => {
+                let lt = self.core_ty(body, l, &Type::Int);
+                let lt = self.cx.resolve(&lt);
+                self.core_val(m, b, body, w, l, &lt, line)?;
+                let opty = match Num::of(&lt) {
+                    Some(n) if n == Num::PLAIN && matches!(r, Val::Name(_)) => {
+                        let rt = self.core_ty(body, r, &lt);
+                        self.op_width(&lt, Some(&rt))
+                    }
+                    _ => lt.clone(),
+                };
+                if opty != lt {
+                    self.coerce(m, b, None, &lt, &opty, line)?;
+                }
+                self.core_val(m, b, body, w, r, &opty, line)?;
+                self.bin_ins(b, o, &opty, &lt, line)
+            }
+            _ => unsupported("an operator of this arity", line),
+        }
+    }
+
+    /// One value: the name's own place, or the literal the row names.
+    fn core_val(
+        &mut self,
+        m: &mut Module,
+        b: &mut Frame,
+        body: &vyrn_lower::core::Body,
+        w: &mut Walked,
+        v: &Val,
+        want: &Type,
+        line: usize,
+    ) -> Result<(), String> {
+        let got = match v {
+            Val::Name(n) => {
+                // Not a place: the stack is already holding it.
+                if w.held == Some(*n) {
+                    w.held = None;
+                    let ty = body.names[*n as usize].ty.clone();
+                    return self.coerce(m, b, None, &ty, want, line);
+                }
+                // The place is this walk's, or — since the interleave slice —
+                // the one the AST arm bound the name at, which is the scope's.
+                let Some((place, ty)) = self.core_place(w, body, *n) else {
+                    return unsupported("a core name with no place", line);
+                };
+                let Place::Local(l) = place else {
+                    return unsupported("a core name that is not a local", line);
+                };
+                b.ins(&Instruction::LocalGet(l));
+                ty
+            }
+            // A literal is emitted at the type the AST walk gives one and
+            // reconciled by the same seam: an integer literal is an `Int64`
+            // that its destination narrows (RFC-0058), not a constant this
+            // walk sizes itself.
+            Val::Lit(l) => match l {
+                Lit::Int(n) => {
+                    b.ins(&Instruction::I64Const(*n));
+                    Type::Int
+                }
+                Lit::Byte(n) => {
+                    b.ins(&Instruction::I64Const(i64::from(*n)));
+                    Type::Int
+                }
+                Lit::Bool(v) => {
+                    b.ins(&Instruction::I32Const(i32::from(*v)));
+                    Type::Bool
+                }
+                Lit::Float(f) => {
+                    b.ins(&Instruction::F64Const((*f).into()));
+                    Type::Float
+                }
+                Lit::Str(s) => {
+                    let at = self.cx.rt.intern(m, s);
+                    b.ins(&Instruction::I32Const(at as i32));
+                    Type::Str
+                }
+                Lit::Opaque => return unsupported("a value the row does not name", line),
+            },
+        };
+        self.coerce(m, b, None, &got, want, line)
+    }
+
+    /// What the AST arm would bind for one row — the screen's type clause.
+    ///
+    /// It is not the operator table stated twice: what it asks is which VALUE
+    /// the arm evaluates, whose type is the arm's answer for the binding. An
+    /// operator's is its first operand's, because that is the one the width
+    /// rule ([`Fn_::op_width`]) adopts from.
+    fn core_arm_ty(&self, body: &vyrn_lower::core::Body, rhs: &Rhs) -> Option<Type> {
+        Some(match rhs {
+            Rhs::Val(Val::Lit(l)) => match l {
+                Lit::Int(_) | Lit::Byte(_) => Type::Int,
+                Lit::Float(_) => Type::Float,
+                Lit::Bool(_) => Type::Bool,
+                Lit::Str(_) => Type::Str,
+                Lit::Opaque => return None,
+            },
+            Rhs::Val(Val::Name(m)) => body.names[*m as usize].ty.clone(),
+            Rhs::Call { callee, kind, .. } => self.core_sig(callee, *kind)?.ret_ty,
+            Rhs::Prim(_, vs, _) => self.core_ty(body, vs.first()?, &Type::Int),
+            _ => return None,
+        })
+    }
+
+    /// The type of one value: the checker's, off the name the row carries.
+    fn core_ty(&self, body: &vyrn_lower::core::Body, v: &Val, lit: &Type) -> Type {
+        match v {
+            Val::Name(n) => body.names[*n as usize].ty.clone(),
+            Val::Lit(Lit::Bool(_)) => Type::Bool,
+            Val::Lit(Lit::Float(_)) => Type::Float,
+            Val::Lit(Lit::Str(_)) => Type::Str,
+            Val::Lit(_) => lit.clone(),
+        }
+    }
+
+    /// Whether the core's rows carry this whole body, so the walk above may
+    /// have it — RFC-0125 §3 M3, the driver slice.
+    ///
+    /// Everything this refuses is a row the core lacks or a shape the two
+    /// walks do not agree on yet, and §3 M3's residue table names each one
+    /// with what it waits on. It is a screen and not a judgement: a body it
+    /// stands down at is emitted from the AST exactly as before.
+    fn core_walkable(&self, body: &vyrn_lower::core::Body, stmts: Option<&Block>) -> bool {
+        // A frame with a release row, a region, an aggregate return or a
+        // hoisted walk is one whose emission is more than its statements.
+        if !self.placed.is_empty() || self.dest.is_some() || !body.lambdas.is_empty() {
+            return false;
+        }
+        if !matches!(self.ret, Repr::Scalar(_) | Repr::Unit) {
+            return false;
+        }
+        for info in &body.names {
+            // A scalar of a type that needs no validation: a `where` type
+            // (RFC-0079) is a `check` row the core does not carry, which is
+            // the census's row 7.
+            if !core_scalar(&info.ty) {
+                return false;
+            }
+        }
+        // The type the READER wrote, which the clause above cannot see: the
+        // core names a `let` by the type of its VALUE (`core::Builder`'s `let`
+        // arm), so `let a: Age = 20` reads `Int64` there and the check the
+        // annotation asks for goes unrefused. The AST arm validates at the
+        // `let` and at every later store into the binding, and the row states
+        // neither. [`Fn_::core_run`] asks the same question per statement.
+        if stmts.is_some_and(|blk| self.annotates_a_check(blk)) {
+            return false;
+        }
+        let reads = body.reads();
+        self.core_readable(body, &body.stmts, &reads)
+    }
+
+    /// Whether any `let` of `blk` is annotated with a type that carries a
+    /// `where` clause (RFC-0079).
+    fn annotates_a_check(&self, blk: &Block) -> bool {
+        let mut found = false;
+        each_block(blk, &mut |_| {}, &mut |s| {
+            if let Stmt::Let { ty: Some(t), .. } = s {
+                found |= self.checks(t);
+            }
+        });
+        found
+    }
+
+    /// Whether a value of `t` is checked where it is made or stored: `t` names
+    /// a declaration with a `where` clause, under this instance's type
+    /// arguments.
+    fn checks(&self, t: &Type) -> bool {
+        matches!(self.cx.sub(t), Type::Named(n)
+            if self.cx.types.get(&n).is_some_and(|d| d.predicate.is_some()))
+    }
+
+    /// Whether every statement of `ss` is one [`Fn_::core_stmts`] reads.
+    fn core_readable(&self, body: &vyrn_lower::core::Body, ss: &[St], reads: &[u32]) -> bool {
+        ss.iter().enumerate().all(|(i, s)| match s {
+            St::Let(n, rhs) => {
+                let held = body.names[*n as usize].binding.is_none()
+                    && reads[*n as usize] == 1
+                    && ss.get(i + 1).and_then(first_read) == Some(*n);
+                // A temporary the stack cannot carry needs a local the AST walk
+                // never takes, so the two would emit different locals.
+                (held || body.names[*n as usize].binding.is_some()) && self.core_rhs_readable(rhs)
+            }
+            // A store's destination has to have a place before the store runs,
+            // and this walk gives one to a temporary only where it BINDS it.
+            // The temporary an `if` expression joins through is stored into by
+            // each branch and bound by the `let` after them (RFC-0030), so it
+            // has none: `let x = if c { 10 } else { 20 }` reached the store
+            // with nowhere to put the value. A name the reader wrote is the
+            // AST arm's local and is always placed.
+            St::Store { place, value, .. } => {
+                matches!(place, vyrn_lower::core::Place::Name(n)
+                    if !body.names[*n as usize].source.starts_with('@'))
+                    && core_val_readable(value)
+            }
+            St::If {
+                cond, then, els, ..
+            } => {
+                core_val_readable(cond)
+                    && self.core_readable(body, then, reads)
+                    && self.core_readable(body, els, reads)
+            }
+            St::Block { body: inner, .. } => self.core_readable(body, inner, reads),
+            St::Loop { body: inner, .. } => self.core_readable(body, inner, reads),
+            St::Break { .. } | St::Continue { .. } => true,
+            // A placed release runs at an exit. At the three exits this walk
+            // takes itself, the exit's own row asks [`Fn_::emit_releases`] for
+            // the whole group, so the steps before it are already accounted
+            // for. A block's fall-through release and a scrutinee's are the
+            // arm's, and they are refused.
+            St::Row { exit, .. } => CORE_EXITS.contains(exit),
+            St::Return { value, .. } => value.as_ref().is_none_or(core_val_readable),
+            // A discarded value is dropped at the type the ROW produces, and
+            // only a call row states one — a `St::Do` of anything else would
+            // reach [`Fn_::core_rhs_ty`] and fail there rather than stand down.
+            St::Do { rhs, line, .. } => {
+                self.core_rhs_readable(rhs) && self.core_rhs_ty(rhs, *line).is_ok()
+            }
+            St::Trap => true,
+            _ => false,
+        })
+    }
+
+    fn core_rhs_readable(&self, rhs: &Rhs) -> bool {
+        match rhs {
+            Rhs::Val(v) => core_val_readable(v),
+            // `&&` and `||` are stated as prims and emit a branch; the row states
+            // no branch, so the walk stands down at them.
+            Rhs::Prim(Op::Bin(BinOp::And | BinOp::Or), ..) | Rhs::Prim(Op::Closure, ..) => false,
+            Rhs::Prim(_, vs, _) => vs.iter().all(core_val_readable),
+            // A `spawn` runs the call as a task and a write-back stores the
+            // receiver the call handed back; both are more than a `call`.
+            Rhs::Call {
+                callee,
+                args,
+                spawn,
+                write_back,
+                kind,
+                ..
+            } => {
+                !spawn
+                    && !write_back
+                    && args.iter().all(|(v, _)| core_val_readable(v))
+                    && self
+                        .core_sig(callee, *kind)
+                        .is_some_and(|s| s.params.len() == args.len())
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The first name a statement READS, which is the only one the operand stack
+/// can be carrying for it.
+fn first_read(s: &St) -> Option<vyrn_lower::core::Name> {
+    let name = |v: &Val| match v {
+        Val::Name(n) => Some(*n),
+        Val::Lit(_) => None,
+    };
+    match s {
+        St::Let(_, Rhs::Val(v)) | St::Store { value: v, .. } => name(v),
+        St::Let(_, Rhs::Prim(_, vs, _)) => vs.first().and_then(name),
+        // A call pushes its arguments in order, so only the FIRST of them can
+        // be the value the stack is already carrying.
+        St::Let(_, Rhs::Call { args, .. })
+        | St::Do {
+            rhs: Rhs::Call { args, .. },
+            ..
+        } => args.first().and_then(|(v, _)| name(v)),
+        St::Return { value: Some(v), .. } | St::If { cond: v, .. } => name(v),
+        _ => None,
+    }
+}
+
+fn core_val_readable(v: &Val) -> bool {
+    // A NAME is screened by its recorded type ([`core_scalar`], in
+    // `Fn_::core_run` and `Fn_::core_walkable`). A literal has no name and
+    // carries its type in its own variant, so the same screen has to be spelled
+    // here or it is not asked: a `Lit::Str` is a String, which this walk emits
+    // no operation on. `"a" < "b"` reached `Op::Lt` with two of them and not one
+    // name for the other screen to refuse.
+    !matches!(v, Val::Lit(Lit::Opaque | Lit::Str(_)))
+}
+
+/// Every `let` a statement's rows bind, itself and everything under it.
+fn core_lets<'r>(s: &'r St, out: &mut Vec<(vyrn_lower::core::Name, &'r Rhs)>) {
+    match s {
+        St::Let(n, rhs) => out.push((*n, rhs)),
+        St::If { then, els, .. } => {
+            then.iter().for_each(|s| core_lets(s, out));
+            els.iter().for_each(|s| core_lets(s, out));
+        }
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+            inner.iter().for_each(|s| core_lets(s, out));
+        }
+        St::Switch { arms, .. } => {
+            for a in arms {
+                a.body.iter().for_each(|s| core_lets(s, out));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The exits this walk gives back at itself — RFC-0125 §3 M3, the release
+/// slice. A `break`, a `continue` and a `return` each carry the node the plan
+/// keys their releases by, so the walk asks [`Fn_::emit_releases`] for the
+/// group there. A block's fall-through release and a scrutinee's are keyed by
+/// the block and by the construct, which no statement of a run names.
+const CORE_EXITS: [ExitKind; 3] = [ExitKind::Break, ExitKind::Continue, ExitKind::Return];
+
+/// Whether a run leaves the FUNCTION anywhere under it — the exit clause of
+/// [`Fn_::core_run`]'s screen, which a subtree carries for every branch.
+fn core_returns(s: &St) -> bool {
+    match s {
+        St::Return { .. } => true,
+        St::If { then, els, .. } => then.iter().any(core_returns) || els.iter().any(core_returns),
+        St::Loop { body: inner, .. } | St::Block { body: inner, .. } => {
+            inner.iter().any(core_returns)
+        }
+        St::Switch { arms, .. } => arms.iter().any(|a| a.body.iter().any(core_returns)),
+        _ => false,
+    }
+}
+
+/// A type this walk reads a name of: a scalar that needs no validation. A
+/// `where` type (RFC-0079) is a `check` row the core does not carry.
+fn core_scalar(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Int | Type::IntN { .. } | Type::Float | Type::Float32 | Type::Bool
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single-source program with the runtime linked. Since PLAN-0125-runtime
+    /// §6 step 1 the string family is `std/runtime`, which the loader injects
+    /// into every program, so a test that compiles anything loads the way the
+    /// CLI does rather than through the bare `vyrn_frontend::check`.
+    fn linked(src: &str) -> Result<Program, String> {
+        let files = vyrn_frontend::loader::MapResolver(
+            [
+                ("main.vyrn", src),
+                (
+                    "std/runtime.vyrn",
+                    include_str!("../../../std/runtime.vyrn"),
+                ),
+                ("std/mem.vyrn", include_str!("../../../std/mem.vyrn")),
+                // RFC-0125 §3 M6 (the third judgment's fifth slice): the runtime's
+                // own `intStr` makes a `String` from bytes, and that check is
+                // `std/text`'s now, so every linked program needs the module.
+                ("std/text.vyrn", include_str!("../../../std/text.vyrn")),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        );
+        let opts = vyrn_frontend::loader::LoadOptions {
+            std_root: Some("std".into()),
+            ..Default::default()
+        };
+        vyrn_frontend::load(src, "main.vyrn", &opts, &files)
+            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))
+    }
 
     /// The gap message is the ladder's grouping key, so its shape is pinned:
     /// one construct, one line, no site-specific text in between.
@@ -19296,38 +17369,27 @@ mod tests {
         );
     }
 
-    /// The runtime table's invariant, checked rather than maintained by care:
-    /// one index per helper, all distinct, dense from `base`, and `count` equal to
-    /// however many were handed out. `runtime` asserts the other half — that the
-    /// bodies arrive at the indices declared here.
+    /// The runtime table's invariant, now that every runtime FUNCTION is
+    /// `std/runtime`'s (`PLAN-0125-runtime.md` §6): a name is declared once, so
+    /// [`VyrnRt::reserve`] hands out one index per row and [`VyrnRt::take`] can
+    /// find the row a body belongs to. The other half — that every row gets a
+    /// body — is [`VyrnRt::check`], which refuses the link rather than asserting.
     #[test]
-    fn every_runtime_helper_gets_its_own_index() {
-        let base = 7; // any offset; the imports are not always the same count
-                      // Both shapes: the generator path hands out one more (`list_dir`), and the
-                      // invariant is that adding it neither duplicates a name nor leaves a hole.
-        for gen_host in [false, true] {
-            let (rt, table) = Rt::slots(base, gen_host);
-            assert_eq!(
-                table.len() as u32,
-                rt.count,
-                "count is the number of slots handed out"
-            );
-            let names: std::collections::HashSet<&str> = table.iter().map(|(n, _)| *n).collect();
-            assert_eq!(names.len(), table.len(), "a name is registered twice");
-            let idx: Vec<u32> = table.iter().map(|(_, i)| *i).collect();
-            assert_eq!(
-                idx,
-                (base..base + rt.count).collect::<Vec<_>>(),
-                "indices are dense and distinct"
-            );
-        }
+    fn every_runtime_helper_is_declared_once() {
+        let names: std::collections::HashSet<&str> =
+            VYRN_RUNTIME.iter().map(|(n, ..)| *n).collect();
+        assert_eq!(
+            names.len(),
+            VYRN_RUNTIME.len(),
+            "a runtime function is declared twice"
+        );
     }
 
     fn cx() -> Cx<'static> {
         Cx {
             plan: Default::default(),
+            facts: None,
             types: HashMap::new(),
-            decls: &[],
             lambdas: HashMap::new(),
             impls: Vec::new(),
             sigs: HashMap::new(),
@@ -19337,22 +17399,21 @@ mod tests {
             higher_order: HashMap::new(),
             protocol_methods: HashMap::new(),
             owned: Default::default(),
-            holes: HashMap::new(),
             subst: HashMap::new(),
             mono: RefCell::new(Mono::default()),
             fnvals: RefCell::new(Vec::new()),
             fnval_copy: 0,
             dispatch: RefCell::new(Dispatch::default()),
+            shapes: RefCell::new(Shapes::default()),
             globals: HashMap::new(),
             gappend: HashMap::new(),
-            early: HashMap::new(),
             externs: HashMap::new(),
-            droppable: HashMap::new(),
             releases: HashMap::new(),
             // RFC-0008's defaults, which are `Program`'s: nothing here logs.
             log_level: DEFAULT_LOG_LEVEL,
             log_sink: LogSink::Stderr,
             log_fd: None,
+            audit: false,
             // Every index 0: a `Cx` for a type-level test never emits a call, and
             // a field per runtime function would have to be edited for each new
             // one.
@@ -19396,7 +17457,7 @@ mod tests {
             })
         );
         assert_eq!(
-            c.repr(&Type::Option(Box::new(Type::Int)), 0).unwrap().val(),
+            c.repr(&Type::option(Type::Int), 0).unwrap().val(),
             Some(ValType::I32)
         );
     }
@@ -19430,7 +17491,7 @@ mod tests {
         // every `T` but its element STRIDE is not: the substitution has to reach
         // inside the shape, not just past the outermost one.
         assert_eq!(c.ll(&Type::ArrayN(Box::new(t.clone()), 3)), "[3 x i64]");
-        assert_eq!(c.ll(&Type::Option(Box::new(t))), "{ i1, i64, i64 }");
+        assert_eq!(c.ll(&Type::option(t)), "{ i64, i64 }");
     }
 
     /// A validated type has the SAME representation as its base, so a lowering
@@ -19461,23 +17522,28 @@ mod tests {
                       fn f(n: Int64) -> Int64 { let u = U { age: n } return u.age }
                       fn main() -> Int64 { return f(20) }";
         for (what, src) in [("bare", bare), ("in a record", hidden)] {
-            let p = vyrn_frontend::check(src).expect(what);
+            let p = linked(src).expect(what);
             let bytes = compile(&p).expect(what);
             assert!(
                 bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
                 "{what}: no `where` check was emitted"
             );
         }
-        // And the negative, so the assertion above is about a check being emitted
-        // and not about the word "Age" reaching the module some other way: the
-        // same declaration, with nothing flowing into it.
-        let unreached = "type Age = Int64 where value >= 18 \
-                         fn main() -> Int64 { return 20 }";
-        let p = vyrn_frontend::check(unreached).unwrap();
-        let bytes = compile(&p).unwrap();
+        // And the negative. Since RFC-0125 §3 M6's fourth slice the message is
+        // the CONSTRUCTOR's own `panic` string, so a module that declares the
+        // type carries it whether or not anything crosses into it — the word is
+        // no longer evidence of a check, and the check is the CALL. The same
+        // program with a constant the checker proved emits no call, so the
+        // reached module is the larger of the two.
+        let proved = "type Age = Int64 where value >= 18                       fn f(n: Int64) -> Int64 { let a = Age(20) return a }
+                      fn main() -> Int64 { return f(20) }";
+        let small = compile(&linked(proved).unwrap()).unwrap();
+        let big = compile(&linked(bare).unwrap()).unwrap();
         assert!(
-            !bytes.windows(msg.len()).any(|w| w == msg.as_bytes()),
-            "an unreached refinement emitted a check"
+            big.len() > small.len(),
+            "a proven constant emitted a check: {} against {}",
+            big.len(),
+            small.len()
         );
     }
 
@@ -19498,7 +17564,7 @@ mod tests {
                        } } \
                    fn main() -> Int64 { \
                        return match f(bytes(\"hi\")) { Ok(s) => s.byteLength, Err(e) => 0 - 1 } }";
-        let p = vyrn_frontend::check(src).unwrap();
+        let p = linked(src).unwrap();
         assert!(compile(&p).is_ok());
     }
 
@@ -19524,7 +17590,7 @@ mod tests {
                      let o: Option<Int64> = Some(1) \
                      return match o {{ Some(n) => v.{field}, None => 0 }} }}"
             );
-            let p = vyrn_frontend::check(&src).expect(what);
+            let p = linked(&src).expect(what);
             assert!(
                 compile(&p).is_ok(),
                 "{what}: {:?}",
@@ -19579,7 +17645,7 @@ mod tests {
             ),
         ];
         for (what, src) in cases {
-            let p = vyrn_frontend::check(src).expect(what);
+            let p = linked(src).expect(what);
             assert!(compile(&p).is_ok(), "{what}: {}", compile(&p).unwrap_err());
         }
     }

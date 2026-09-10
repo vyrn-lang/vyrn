@@ -1,0 +1,10 @@
+// RFC-0013 at a call: nothing may take ownership of module state.
+let mut names: Array<String> = ["a"]
+
+fn take(xs: consume Array<String>) -> Int64 { return xs.length }
+
+fn main() -> Int64 {
+    let n = take(names)
+    print(n)
+    return 0
+}

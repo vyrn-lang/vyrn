@@ -2,7 +2,7 @@
 //
 // A TextMate grammar is a second copy of a fact the compiler already holds, and
 // a second copy drifts. This one had: `from` and `logging` were coloured as
-// keywords while `keyword_or_ident` in the lexer holds neither, so `let from =
+// keywords while the lexer's `keywords!` table holds neither, so `let from =
 // 1` and `let logging = 2` — both ordinary bindings the parser accepts — read as
 // reserved words in the editor.
 //
@@ -12,9 +12,12 @@
 // reserved fails here too.
 //
 // CONTEXTUAL WORDS ARE NOT KEYWORDS and are deliberately not compared. `as`,
-// `gen`, `extern`, `lazy`, `place`, `read`, `modify`, `yield`, `test`, `bench`,
-// `from` and `logging` are identifiers the parser recognises by position; the
-// grammar matches each with its own lookahead in `#contextual-keywords`.
+// `gen`, `extern`, `lazy`, `place`, `read`, `modify`, `test`, `bench`, `from`
+// and `logging` are identifiers the parser recognises by position; the grammar
+// matches each with its own lookahead in `#contextual-keywords`. `yield` was
+// among them and is gone: RFC-0120 retired `place`/`yield`, the parser kept one
+// mention of `place` for the migration refusal and none of `yield`, and
+// RFC-0127 §6.2 is the census that measured the difference.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -24,14 +27,14 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "..", "..", "..");
 
-/** Every word `keyword_or_ident` maps to a keyword token. */
+/** Every word the lexer's `keywords!` table maps to a keyword token. */
 async function lexerKeywords() {
   const src = await readFile(
     path.join(repo, "compiler", "vyrn-frontend", "src", "lexer.rs"),
     "utf8",
   );
-  const at = src.indexOf("fn keyword_or_ident(");
-  assert.ok(at > 0, "keyword_or_ident is gone from lexer.rs — this test needs a new anchor");
+  const at = src.indexOf("keywords! {");
+  assert.ok(at > 0, "the keywords! table is gone from lexer.rs — this test needs a new anchor");
   const body = src.slice(at, src.indexOf("\n}", at));
   // `"fn" => Tok::Fn,` — the arms that name a token, not the `_ => Ident` fallback.
   const words = [...body.matchAll(/"([a-z]+)"\s*=>\s*Tok::/g)].map((m) => m[1]);

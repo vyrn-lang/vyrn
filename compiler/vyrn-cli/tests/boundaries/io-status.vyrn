@@ -1,0 +1,10 @@
+/// Row `io-status` — RFC-0014. A host status becomes CANONICAL Vyrn wording
+/// and never OS text, so the `Err` payload is the same bytes everywhere.
+
+fn main() -> Int64 {
+    print(match readFile("no_such_file_here.txt") {
+        Ok(_) => "ok",
+        Err(e) => "err: \{e}",
+    })
+    return 0
+}

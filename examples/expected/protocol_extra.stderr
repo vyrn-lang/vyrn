@@ -1,0 +1,2 @@
+protocol_extra.vyrn:36:8: `impl Shape for Sq` provides `fn aera(self) -> Int64`, which protocol `Shape` does not declare — dispatch knows only a protocol's own method names, so this one is reachable from nowhere; did you mean `area`?
+protocol_extra.vyrn:40:8: `impl Shape for Sq` provides `fn perimeter(self) -> Int64`, which protocol `Shape` does not declare — dispatch knows only a protocol's own method names, so this one is reachable from nowhere; Vyrn has no inherent methods, so a helper is a plain `fn perimeter(x: Sq, ..)` at the top level — `x.perimeter(..)` calls that

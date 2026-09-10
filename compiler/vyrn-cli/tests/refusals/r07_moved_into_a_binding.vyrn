@@ -1,0 +1,7 @@
+// RFC-0089 rule 1: a move into a binding, and a use of the source afterwards.
+fn main() -> Int64 {
+    let s = "hello".copy()
+    let t = s
+    print(s.byteLength + t.byteLength)
+    return 0
+}

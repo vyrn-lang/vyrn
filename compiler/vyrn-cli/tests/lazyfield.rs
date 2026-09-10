@@ -133,7 +133,7 @@ fn a_lazy_field_encodes_but_does_not_decode() {
     let out = check(
         "decode",
         "type B = { title: String, body: lazy String }\n\
-         fn main() -> Int64 { let r = fromJson(B, \"{}\")\n return 0 }\n",
+         fn main() -> Int64 { let r = fromJson<B>(\"{}\")\n return 0 }\n",
     );
     assert!(out.contains("cannot decode into `B`"), "{out}");
 
@@ -155,7 +155,7 @@ fn the_schema_shows_the_forced_type() {
     let stdout = run(
         "schema",
         "type B = { title: String, body: lazy Int64 }\n\
-         fn main() -> Int64 { print(jsonSchema(B))\n return 0 }\n",
+         fn main() -> Int64 { print(jsonSchema<B>())\n return 0 }\n",
     );
     assert!(
         stdout.contains("\"body\":{\"type\":\"integer\"}"),
@@ -194,8 +194,18 @@ fn lazy_is_still_an_ordinary_identifier_everywhere_else() {
 /// form needs and the implicit one does not.
 #[test]
 fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
-    let deferred = write(
-        "ir_lazy",
+    let wat_of = |name: &str, src: &str| -> String {
+        let path = write(name, src);
+        let out = vyrn()
+            .arg("emit-wat")
+            .arg(&path)
+            .output()
+            .expect("vyrn emit-wat");
+        assert!(out.status.success(), "{name}: {}", norm(&out.stderr));
+        norm(&out.stdout)
+    };
+    let deferred = wat_of(
+        "wat_lazy",
         "type B = { tag: String, body: lazy String }\n\
          fn make(n: Int64) -> B {\n\
          \x20   let pre = \"prefix-\\{n}\"\n\
@@ -207,8 +217,8 @@ fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
          \x20   return 0\n\
          }\n",
     );
-    let explicit = write(
-        "ir_fnfield",
+    let explicit = wat_of(
+        "wat_fnfield",
         "type B = { tag: String, body: fn() -> String }\n\
          fn make(n: Int64) -> B {\n\
          \x20   let pre = \"prefix-\\{n}\"\n\
@@ -221,45 +231,19 @@ fn a_lazy_field_lowers_exactly_as_the_stored_closure_it_is() {
          \x20   return 0\n\
          }\n",
     );
-    // `vyrn_main` is the user's `main`; everything else is the shared surface —
-    // the record's aggregate, `vyrn_make`, and the dispatcher.
-    const READER: &str = "define i64 @vyrn_main() {";
-    let split = |p: &PathBuf| -> (String, String) {
-        let out = vyrn().arg("emit-ir").arg(p).output().unwrap();
-        assert!(
-            out.status.success(),
-            "emit-ir failed: {}",
-            norm(&out.stderr)
-        );
-        let text = norm(&out.stdout);
-        let start = text.find(READER).expect("the user's main");
-        let end = text[start..].find("\n}\n").expect("its end") + start + 3;
-        (
-            format!("{}{}", &text[..start], &text[end..]),
-            text[start..end].to_string(),
-        )
-    };
-    let (rest_lazy, main_lazy) = split(&deferred);
-    let (rest_fn, main_fn) = split(&explicit);
-    assert_eq!(rest_lazy, rest_fn, "the deferral changed a shape");
-
-    // The same dispatcher, called the same way — the whole force.
-    let call = main_fn
-        .lines()
-        .find(|l| l.contains("call ptr @__vyrn_fndispatch_"))
-        .expect("the explicit call goes through a dispatcher");
-    let sym = call.split_once("@__vyrn_fndispatch_").unwrap().1;
-    let sym = &sym[..sym.find('(').unwrap()];
+    // Byte for byte, and that is the claim in its strongest form: the two
+    // programs differ in one token — whether the field is declared `lazy` or
+    // `fn() -> String` — and in whether the reader names the closure before
+    // calling it. Neither difference reaches the module. A deferral that built
+    // anything of its own, or a read that forced through a second path, would
+    // show here as one function that differs.
+    //
+    // It used to be a diff of `vyrn emit-ir` with the user's `main` cut out,
+    // because the textual route's `main` DID differ by the binding the implicit
+    // read does not need. The route went (RFC-0125 §2.5), the binding costs
+    // nothing in the one emitter, and the assertion got shorter.
     assert_eq!(
-        main_lazy
-            .matches(&format!("call ptr @__vyrn_fndispatch_{sym}("))
-            .count(),
-        1,
-        "{main_lazy}"
-    );
-    // Shorter by exactly the binding the implicit read does not need.
-    assert!(
-        main_lazy.lines().count() < main_fn.lines().count(),
-        "{main_lazy}"
+        deferred, explicit,
+        "a lazy field must lower as the stored closure it is, and nothing else"
     );
 }

@@ -1,21 +1,21 @@
 //! `vyrn` — the Vyrn driver.
 //!
 //! Usage:
-//!   vyrn run     [file.vyrn]            Type-check and interpret; process exits with main's value.
+//!   vyrn run     [file.vyrn]            Type-check, compile and run; process exits with main's value.
 //!   vyrn check   [file.vyrn]            Type-check only; print "ok" or every diagnostic.
-//!   vyrn emit-ir [file.vyrn]            Print textual LLVM IR to stdout.
-//!   vyrn emit-wat [file.vyrn]           Print the direct wasm backend's module as WAT to stdout.
+//!   vyrn emit-wat [file.vyrn]           Print the emitter's module as WAT to stdout.
 //!   vyrn emit-lowered [file.vyrn]       Print the lowered form of the root module (RFC-0101).
 //!   vyrn emit-gen [file.vyrn] [--maps]  Print every synthesized generator module (RFC-0021),
 //!                                       or its RFC-0073 symbol map as JSON.
 //!   vyrn build   [file.vyrn] [-o out] [--target wasm]
-//!                                        Compile to a native executable (or wasm) via clang.
+//!                                        Compile to a native executable — the module through
+//!                                        wasm2c and clang (RFC-0125 §2.5) — or to the module.
 //!   vyrn test    [file.vyrn] [--name <substring>]
-//!                                        Run the root file's `test` blocks under the interpreter.
+//!                                        Run the root file's `test` blocks, each as compiled wasm.
 //!   vyrn bench   [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]
 //!                                        Compile the root file's `bench` blocks NATIVE and time them
-//!                                        (divan-simplified). `--check` runs each once under the
-//!                                        interpreter (deterministic, no timing) — the CI face.
+//!                                        (divan-simplified). `--check` runs each once, compiled
+//!                                        (deterministic, no timing) — the CI face.
 //!                                        `--json` emits the machine-readable report (RFC-0063).
 //!                                        `--compare` runs, then flags regressions vs a baseline
 //!                                        (min > baselineMin * threshold, default 1.5; exit 1 on any).
@@ -64,13 +64,15 @@ use std::process::{Command, ExitCode};
 // builtins lookups are still there, but this driver no longer needs them to
 // BUILD: after RFC-0077 M5 nothing here compiles C for wasm — the generator
 // engine does. `vyrn deps` reads all four to REPORT them (RFC-0102 M3).
-use vyrn_codegen::toolchain::{extern_trap_stubs, find_clang, runtime_shim};
+use vyrn_codegen::toolchain::find_clang;
 
-/// RFC-0076: generators compiled to wasm instead of interpreted. Behind a
-/// feature so the default build keeps its zero external dependencies.
 mod remote;
+// RFC-0125 M5: the WASI host `run` runs a program's wasm under. It
+// lives in this crate's LIBRARY target, because `vyrn-frontend`'s tests run
+// their programs through it as well (RFC-0125 §3 M5, the `library-run` row).
+use vyrn_cli::wasmrun;
 
-const USAGE: &str = "usage: vyrn <run|check|fix|emit-ir|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the interpreted run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once under the interpreter; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
+const USAGE: &str = "usage: vyrn <run|check|fix|emit-wat|emit-lowered|emit-gen|build|test|bench|serve|fmt> [file.vyrn] [-o out] [--target wasm] [--native-target v1|v2|v3|v4|native] [--offline] [--deny-warnings]\n       vyrn build [file.vyrn] [-o out]   (RFC-0125 §2.5: the same wasm `--target wasm` writes, through wasm2c and clang to a native executable; needs wabt and simde under tools/, or $VYRN_WASM2C and $VYRN_SIMDE)\n       vyrn run [file.vyrn] [args...]   (trailing args reach the program's args())\n       vyrn run --profile [file.vyrn] [args...]   (where the run spent its time, to stderr; the flag counts only BEFORE the file, so a program can have one of its own. Rows are the phases of the compile and the run, with the operations the guest executed)\n       vyrn check --profile [file.vyrn]   (the same, for generation alone: `check` runs every `gen fn` and stops. Needs a cold generator cache to mean anything)\n       vyrn test [file.vyrn] [--name <substring>]\n       vyrn bench [file.vyrn] [--name <substring>] [--check | --json | --compare <baseline.json> [--threshold <factor>]]   (native timing; --check runs each once, compiled; --json machine-readable; --compare flags regressions)\n       vyrn serve [file.vyrn] [--port N] [--workers N]   (HTTP host; needs `fn handle(req: Request) -> Response`)\n       vyrn dev [--port N] [--workers N]   (fullstack: build client to wasm + serve server root, static, runtimes)\n       vyrn fmt [file.vyrn ...] [--check]   (canonical formatter; no files = project main + local imports)\n       vyrn fmt --from-json <file.json> [--as <Type>] [--from <module>]   (print the JSON file as VON; RFC-0097)\n       vyrn doc [file|dir] [-o <dir>] [--std] [--verify]   (Markdown API docs; default docs/api/; --verify is the drift gate)\n       vyrn fix [file.vyrn]   (apply the `.copy()` a move diagnostic names, in the file given; every other fix on the menu is a decision and is refused)
        vyrn why <file>   (a module's audience, the path segment that decided it, and every import chain that reaches it)\n       vyrn why --contract <file>   (which module contract governs a file, and every export's status against it)\n       vyrn why --memory <file>   (per binding: whether it is reclaimed, how, and the reason when it is not)\n       vyrn why --capability <fs|stdin|args|extern> <entry-or-artifact-name>   (every import chain that pulls that capability into the artifact's closure)\n       vyrn routes [file.vyrn] [--json]   (the resolved wire table: every derived, pinned, hand-written and page path the router mounts, with its source; --json attaches each route's declaration from the RFC-0073 symbol map)\n       vyrn emit-gen [file.vyrn] [--maps]   (--maps prints each generated module's RFC-0073 symbol map as JSON, one per line)\n\
        vyrn new <name> | vyrn add <specifier> [--name alias] | vyrn update [--locked] [alias] | vyrn vendor [--check] | vyrn deps [artifact]   (deps: every declared artifact's module graph, then the toolchain)\n       vyrn --version   (also -V)";
 
@@ -242,30 +244,24 @@ fn native_target_for(root: &str) -> Result<NativeTarget, String> {
 ///   twice, so it is *more* accurate and therefore a different number from the
 ///   one the tree-walking interpreter computes. Byte-identical output across
 ///   interpreter, native and wasm is this project's whole invariant, so the
-///   more accurate answer is still the wrong answer. Today it is belt and
-///   braces: our input is textual IR carrying no `contract` fast-math flags and
-///   the C shim does no float arithmetic at all, so nothing fuses even at
-///   `-march=native` (verified: zero `vfmadd` in the emitted assembly at every
-///   level). The flag is what keeps that true if either of those changes.
+///   more accurate answer is still the wrong answer. It matters more on the
+///   route than it did on the textual one: the C wasm2c writes spells the
+///   module's `f64.mul` and `f64.add` as separate C operators, which is exactly
+///   the shape `-ffp-contract=on` fuses.
 ///   It costs nothing measurable — at v2 the emitted assembly is byte-identical
 ///   with and without it — and it is passed unconditionally rather than only
 ///   above v2, because aarch64's *baseline* has FMA and there is no `-march`
 ///   there to hang the condition on.
-/// - `-Wno-override-module`: our IR carries no target triple; clang supplies
-///   the target's, and we don't want the warning.
 /// - `-pthread`: worker threads (RFC-0025). Win32 threads need no flag.
 /// - `-lm`: RFC-0083's roundings. Below SSE4.1,
 ///   `llvm.ceil/floor/trunc/rint.v4f32` scalarize to `ceilf`/`floorf`/`truncf`/
 ///   `rintf`, which live in libm on Unix and in the UCRT — linked by default —
 ///   on Windows. A Windows-only check structurally cannot see this missing.
 fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
-    cmd.arg("-O2")
-        .arg("-ffp-contract=off")
-        .arg("-Wno-override-module");
-    // VYRN_DEBUG_SYMBOLS=1: keep debug info so `llvm-symbolizer --obj=<exe>`
-    // can name the rva offsets `VYRN_LEAK_CHECK=3` prints — the leak triage
-    // instrument (exit-residue round thirty-one). Off by default; -g changes
-    // no codegen under -O2, only the artifact's size.
+    cmd.arg("-O2").arg("-ffp-contract=off");
+    // VYRN_DEBUG_SYMBOLS=1: keep debug info so a symbolizer can name what a
+    // stack trace out of the route's binary points at. Off by default; -g
+    // changes no codegen under -O2, only the artifact's size.
     if std::env::var_os("VYRN_DEBUG_SYMBOLS").is_some() {
         cmd.arg("-g");
     }
@@ -279,15 +275,21 @@ fn add_native_clang_flags(cmd: &mut Command, target: NativeTarget) {
 }
 
 fn main() -> ExitCode {
-    // The loader runs generators (RFC-0021) by invoking the tree-walking
-    // interpreter recursively, nested deep inside the load/parse/check call
-    // chain. On Windows the default ~1 MB main-thread stack overflows on a
-    // realistic generator (e.g. std/i18n compiling ICU messages). Run the whole
-    // CLI on a worker thread with the interpreter's own reserve, so generation
-    // has the same headroom a run does.
+    // The loader, the checker and the backends all recurse over the syntax of a
+    // file, nested deep inside the load/parse/check call chain. On Windows the
+    // default ~1 MB main-thread stack overflows on a realistic program (e.g.
+    // std/i18n compiling ICU messages). Run the whole CLI on a worker thread
+    // with the compiler's own reserve instead.
     std::thread::Builder::new()
-        .stack_size(vyrn_frontend::interp::INTERP_STACK_BYTES)
-        .spawn(real_main)
+        .stack_size(vyrn_frontend::trap::DEEP_STACK_BYTES)
+        .spawn(|| {
+            let code = real_main();
+            // RFC-0125 §3 M4: the build-phase table, on the worker thread that
+            // did the build — the phases are thread-local for the reason the
+            // run profile's rows are. Stderr, so a piped stdout is unchanged.
+            eprint!("{}", vyrn_frontend::prof::phase_table());
+            code
+        })
         .expect("failed to spawn the vyrn worker thread")
         .join()
         .unwrap_or(ExitCode::FAILURE)
@@ -295,11 +297,16 @@ fn main() -> ExitCode {
 
 fn real_main() -> ExitCode {
     // RFC-0076. Installed before anything can load a module, since generation
-    // happens deep inside the load. `VYRN_NO_WASM_GEN=1` forces the
-    // interpreter — the configuration the acceptance criteria compare against.
-    #[cfg(feature = "wasm-gen")]
-    if std::env::var("VYRN_NO_WASM_GEN").is_err() {
-        vyrn_genwasm::install();
+    // happens deep inside the load. There is no way to turn it off: it is the
+    // only generation engine there is (RFC-0125 §3 M5), and a binary without it
+    // could not run a `gen fn` at all.
+    vyrn_genwasm::install();
+    // RFC-0125 M3: the placer over the named core, into every plan this
+    // process makes. `VYRN_NO_PLACER=1` compiles with the plan as the
+    // ownership analysis alone leaves it — the configuration the probes
+    // under `rfcs/probes-0125/` were measured against.
+    if std::env::var("VYRN_NO_PLACER").is_err() {
+        vyrn_lower::install();
     }
     let mut args: Vec<String> = std::env::args().collect();
     let is_offline = offline(&args);
@@ -352,6 +359,16 @@ fn real_main() -> ExitCode {
     // Removed once, so a program's own `--profile` further along survives.
     if let Some(i) = at {
         args.remove(i + 2);
+    }
+    // WHAT `--profile` REPORTS is the phases, on every command but `run`
+    // (RFC-0125 §3 M5). It used to report the tree-walker's per-function rows,
+    // and there is no tree-walker to charge them: `check` and `test` are a load
+    // and a compile now, and the phases are what a load and a compile are made
+    // of. `main` prints the table on the way out. `run` is the exception and
+    // stays one, because `run_wasm` has the guest's own operation count to
+    // report beside the phases and prints its own table.
+    if want_profile && args.get(1).map(String::as_str) != Some("run") {
+        std::env::set_var("VYRN_BUILD_PROFILE", "1");
     }
     // `--version` / `-V`, before the usage screen: the published alpha printed
     // usage and exited 2 for both, which is what a package manager reads as a
@@ -434,18 +451,7 @@ fn real_main() -> ExitCode {
         return build(&path, rest);
     }
     if cmd == "test" {
-        // Armed before the load for the reason `run` and `check` are: a `gen fn`
-        // executes while the program loads, and a `test` block is the third
-        // thing in this project that only ever runs interpreted.
-        if want_profile {
-            vyrn_frontend::prof::start();
-        }
-        let code = test_cmd(&path, rest);
-        if want_profile {
-            let rows = vyrn_frontend::prof::take();
-            eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
-        }
-        return code;
+        return test_cmd(&path, rest);
     }
     if cmd == "bench" {
         return bench_cmd(&path, rest);
@@ -470,31 +476,15 @@ fn real_main() -> ExitCode {
         }
     };
 
-    // `check` profiles too, and it is the more useful of the two on a program
-    // whose weight is generators: `check` runs every `gen fn` and then stops,
-    // so what it reports is generation and nothing else. The gen cache has to be
-    // cold for that to mean anything — a warm one makes generation free, which
-    // is the point of it.
-    if want_profile && cmd == "check" {
-        vyrn_frontend::prof::start();
-    }
-    let profile_now = |code: ExitCode| -> ExitCode {
-        if want_profile {
-            let rows = vyrn_frontend::prof::take();
-            eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
-        }
-        code
-    };
-
     match cmd {
         "fix" => fix_cmd(path, &source),
         // `check` has to predict `build` about the one thing `build` can fail to
         // FINISH (audit A5.2). Monomorphization is only visible while emitting,
         // so `check` emits and throws the code away, and reports the depth
         // refusal alone — every other codegen error stays `build`'s.
-        "check" => profile_now(match load_program(path, &source) {
-            Ok(program) => {
-                let _memo = shared_desugars();
+        "check" => match loaded(path, &source) {
+            Ok((program, _dsg)) => {
+                let _memo = shared_desugars(&program);
                 match vyrn_codegen::check_instantiations(&program) {
                     Ok(()) => {
                         println!("ok");
@@ -507,67 +497,39 @@ fn real_main() -> ExitCode {
                 }
             }
             Err(code) => code,
-        }),
+        },
         "run" => {
-            // Armed BEFORE the load, because the load is where generators run.
-            // A `gen fn` is ordinary Vyrn executed by this same interpreter at
-            // compile time, and on a generator-heavy program it is most of the
-            // work — profiling only what happens after `load_program` would miss
-            // it and say nothing was slow.
-            if want_profile {
-                vyrn_frontend::prof::start();
-            }
-            let program = match load_program(path, &source) {
+            // The load is where generators run, and it is most of the work on a
+            // generator-heavy program — so it is TIMED, and it is the first row
+            // of the table `run_wasm` prints (RFC-0125 §3 M5, the `run-profile`
+            // row).
+            let clock = std::time::Instant::now();
+            let (program, _dsg) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars();
-            let out = vyrn_frontend::interp::run_with_args(&program, &prog_args);
-            // The table goes to STDERR, and on the failing path too. A profile is
-            // not the program's output — a run whose stdout is piped somewhere
-            // must pipe the same bytes with the flag as without it — and the run
-            // worth profiling is often the one that traps.
-            if want_profile {
-                let rows = vyrn_frontend::prof::take();
-                eprint!("{}", vyrn_frontend::prof::table(&rows, 25));
+            let load = clock.elapsed();
+            let _memo = shared_desugars(&program);
+            // What `check` refuses, `run` refuses: a polymorphic recursion has
+            // no finite set of instances, and running it anyway (audit A5.2) was
+            // one program with two answers (RFC-0125 §3 M5). The sentence is
+            // `check`'s. `run_wasm` asks the kernel on its own route.
+            if let Err(e) = vyrn_codegen::check_instantiations(&program) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
             }
-            match out {
-                Ok(code) => {
-                    // main's return value becomes the process exit code (0..=255).
-                    ExitCode::from((code & 0xff) as u8)
-                }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    ExitCode::FAILURE
-                }
-            }
+            run_wasm(path, &program, &prog_args, want_profile.then_some(load))
         }
-        "emit-ir" => {
-            let program = match load_program(path, &source) {
-                Ok(p) => p,
-                Err(code) => return code,
-            };
-            let _memo = shared_desugars();
-            match vyrn_codegen::emit(&program) {
-                Ok(ir) => {
-                    print!("{ir}");
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        // The other compiled backend's text form (RFC-0077). `emit-ir` prints
-        // what `build` hands clang; this prints what `build --target wasm`
-        // writes, so a property no program output can show is readable on both.
+        // The one emitter's text form (RFC-0077; RFC-0125 §2.5). It prints what
+        // `build --target wasm` writes, which since the textual route went is
+        // also what `build` hands wasm2c, so a property no program output can
+        // show is readable on either.
         "emit-wat" => {
-            let program = match load_program(path, &source) {
+            let (program, _dsg) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars();
+            let _memo = shared_desugars(&program);
             match vyrn_codegen::direct::wat(&program) {
                 Ok(wat) => {
                     print!("{wat}");
@@ -579,24 +541,24 @@ fn real_main() -> ExitCode {
                 }
             }
         }
-        // The form BOTH compiled backends will read (RFC-0101). `emit-ir` and
-        // `emit-wat` print what one engine made of a program; this prints what
-        // was decided before either of them saw it, for the root module only —
+        // The form the emitter reads (RFC-0101). `emit-wat` prints what the
+        // engine made of a program; this prints what
+        // was decided before it saw it, for the root module only —
         // `why --memory`'s rule, because a linked program's imports are another
         // file's answer.
         "emit-lowered" => {
-            let program = match load_program(path, &source) {
+            let (program, _dsg) = match loaded(path, &source) {
                 Ok(p) => p,
                 Err(code) => return code,
             };
-            let _memo = shared_desugars();
+            let _memo = shared_desugars(&program);
             let lowered = vyrn_lower::lower(&program);
             print!("{}", vyrn_lower::render(&lowered, path));
             ExitCode::SUCCESS
         }
         "emit-gen" => emit_gen(path, &source, want_maps),
         other => {
-            eprintln!("unknown command `{other}` (expected run, check, fix, emit-ir, emit-wat, emit-lowered, emit-gen, build, test, bench, or serve)");
+            eprintln!("unknown command `{other}` (expected run, check, fix, emit-wat, emit-lowered, emit-gen, build, test, bench, or serve)");
             ExitCode::from(2)
         }
     }
@@ -614,7 +576,7 @@ fn real_main() -> ExitCode {
 /// no second artifact to invalidate: the map is an export of the module, so this
 /// prints what the generator cache already holds.
 fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(path);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     let result = vyrn_frontend::loader::generated_modules(source, &root_key, &opts, &resolver);
@@ -654,39 +616,20 @@ fn emit_gen(path: &str, source: &str, maps: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(diags) => {
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                if let Some(note) = &d.note {
-                    eprintln!("  note: {note}");
-                }
-            }
+            print_diagnostics(&diags, &root_key, "");
             ExitCode::FAILURE
         }
     }
 }
 
-/// Filesystem module resolver for multi-file programs (RFC-0010): resolved
+/// The filesystem module resolver for multi-file programs (RFC-0010): resolved
 /// specifiers are normalized slash-paths relative to the root file.
-struct FsResolver;
-
-impl vyrn_frontend::loader::ModuleResolver for FsResolver {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        remote::list_dir(resolved)
-    }
-    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        remote::list_dir_kinds(resolved)
-    }
-    fn gen_cache_get(&self, key: &str) -> Option<String> {
-        remote::gen_cache_get(key)
-    }
-    fn gen_cache_put(&self, key: &str, value: &str) {
-        remote::gen_cache_put(key, value)
-    }
-}
+///
+/// It is `vyrn_frontend::loader`'s, beside the trait it implements. The driver
+/// wrote it out, and so did seven test suites, the frontend's own move-check
+/// tests, its `lspbench` example and its contracts test — eleven statements of
+/// "read a file, list a directory, use the generation cache".
+use vyrn_frontend::loader::DiskResolver;
 
 /// The project context — the manifest, the lock, the caches, and the two roots a
 /// toolchain binary walks up to find — is [`vyrn_frontend::manifest`]. It used
@@ -694,7 +637,9 @@ impl vyrn_frontend::loader::ModuleResolver for FsResolver {
 /// binary crate is not linkable. The copy drifted: it served a cached module
 /// without verifying its hash, and it accepted a `vyrn.lock` this reader
 /// refuses. There is one reader now, and both programs are consumers.
-use vyrn_frontend::manifest::{find as find_manifest, real_path, std_root, web_root, Manifest};
+use vyrn_frontend::manifest::{
+    dos_to_slash, find as find_manifest, real_path, std_root, web_root, Manifest,
+};
 
 /// [`find_manifest`], with the CLI's answer to an unreadable one: say which file
 /// and why, and stop. Every command reads the manifest, and none of them can do
@@ -846,10 +791,7 @@ fn why_cmd(args: &[String]) -> ExitCode {
         return why_audience(&file);
     }
     let path = match Path::new(&file).canonicalize() {
-        Ok(p) => p
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/"),
+        Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
             return ExitCode::from(2);
@@ -868,18 +810,13 @@ fn why_cmd(args: &[String]) -> ExitCode {
         .as_ref()
         .map(|m| PathBuf::from(&m.dir))
         .unwrap_or_else(|| dir.clone());
-    let roots = contract_roots(&app_dir, manifest.as_ref());
-    // The declared roles come from the manifest this command already read, not
-    // from a second read of the same file: two readers of one file are two
-    // policies whenever one of them fails.
-    let roles = match manifest
-        .as_ref()
-        .map(|m| vyrn_frontend::contracts::roles_from_manifest(&m.doc))
-        .filter(|r| !r.is_empty())
-    {
-        Some(declared) => declared,
-        None => vyrn_frontend::contracts::discovered_roles(&roots, &opts, &FsResolver),
-    };
+    // The roots and the declared-else-discovered rule are the frontend's, and
+    // the language server asks the same two functions. What stays HERE is the
+    // manifest this command already read: it is passed in, never re-read, because
+    // two readers of one file are two policies whenever one of them fails.
+    let doc = manifest.as_ref().map(|m| &m.doc);
+    let roots = vyrn_frontend::manifest::role_roots(&app_dir, doc);
+    let roles = vyrn_frontend::contracts::roles_for_project(doc, &roots, &opts, &DiskResolver);
     let Some(role) = vyrn_frontend::contracts::role_for(&path, &roles) else {
         println!("{path}");
         println!("  no contract: this file is in no role");
@@ -898,12 +835,9 @@ fn why_cmd(args: &[String]) -> ExitCode {
         }
         return ExitCode::FAILURE;
     };
-    let manifest = app_dir
-        .join("vyrn.json")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let manifest = dos_to_slash(&app_dir.join("vyrn.json").to_string_lossy());
     let Some(view) =
-        vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &FsResolver)
+        vyrn_frontend::contracts::load_role_contract(role, &manifest, &opts, &DiskResolver)
     else {
         eprintln!(
             "error: cannot resolve contract `{}:{}`",
@@ -1028,9 +962,8 @@ fn why_cmd(args: &[String]) -> ExitCode {
 /// not derived, so the generator that mounts the derived surface never sees them
 /// — the table printed three of `examples/bin`'s eight wire rows and called
 /// itself "every". They are read from the values themselves, by evaluating the
-/// arguments of the program's `mount(..)` call — see
-/// [`vyrn_frontend::interp::mounted_routes`] for why that is the arguments and
-/// not a naming convention, and what it costs.
+/// arguments of the program's `mount(..)` call — see [`mounted_routes_wasm`] for
+/// why that is the arguments and not a naming convention, and what it costs.
 ///
 /// The one-producer property SURVIVES: no channel re-derives a path. The first
 /// two read what a generator wrote while mounting; the third reads the values
@@ -1056,7 +989,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(&path);
     let source = match std::fs::read_to_string(&root_key) {
         Ok(s) => s,
         Err(e) => {
@@ -1075,10 +1008,7 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     let mods = match result {
         Ok(m) => m,
         Err(diags) => {
-            for d in &diags {
-                let f = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", f, d.line, d.col, d.message);
-            }
+            print_diagnostics(&diags, &root_key, "");
             return ExitCode::FAILURE;
         }
     };
@@ -1119,16 +1049,11 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
     // beats one that needs the program to start.
     match vyrn_frontend::load(&source, &root_key, &opts, &resolver)
         .map_err(|d| d.first().map(|d| d.message.clone()).unwrap_or_default())
-        .and_then(|p| vyrn_frontend::interp::mounted_routes(&p))
+        .and_then(|p| mounted_routes_wasm(&root_key, &p))
     {
         Ok(mounted) => {
-            for r in mounted {
-                // A `surface(..)` stands for a whole subsystem; the directives
-                // above already list its members, one row each.
-                if r.prefix {
-                    continue;
-                }
-                let row = (r.method, r.path, r.procedure, "explicit".to_string());
+            for (method, path, procedure) in mounted {
+                let row = (method, path, procedure, "explicit".to_string());
                 if !rows.iter().any(|x| x.0 == row.0 && x.1 == row.1) {
                     rows.push(row);
                 }
@@ -1174,6 +1099,122 @@ fn routes_cmd(file: Option<&str>, json: bool) -> ExitCode {
         println!("{method:w0$}  {path:w1$}  {proc:w2$}  {src}");
     }
     ExitCode::SUCCESS
+}
+
+/// `vyrn routes`'s hand-written channel, on the compiled route (RFC-0125 §3 M5,
+/// the `mounted-routes` row) — the arguments of every `mount(..)` the program
+/// holds, read by RUNNING them.
+///
+/// The program itself never runs, and no request is served. A copy of it loses
+/// its `main` and gains one that hands each `mount(..)`'s three route lists to
+/// `std/http`'s `mountedRows` and prints what comes back; the copy compiles
+/// through the direct backend and runs in the embedded engine with its standard
+/// output captured. What a row MEANS lives beside `mount`, in Vyrn, so nothing
+/// here re-derives a path — this reads text.
+///
+/// A row is `kind derived`, and the two words after the kind are the method and
+/// the path every constructor writes first. A `Route`'s third word is the
+/// procedure the generator seeded it with; a stream or a socket has none. A
+/// `surface(..)` stands for a whole subsystem and is dropped here, because the
+/// directive channel already lists its members one row each.
+///
+/// The limits are the channel's own: an argument that names a local
+/// of its enclosing function cannot be lifted into the new `main`, and a
+/// `mount` that is not `std/http`'s four-argument one is not found. Either way
+/// the caller prints its note and keeps the derived rows.
+fn mounted_routes_wasm(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+) -> Result<Vec<(String, String, String)>, String> {
+    use vyrn_frontend::ast::{Block, Expr, Stmt, Type};
+    let mut prog = program.clone();
+    let mut calls: Vec<Vec<Expr>> = Vec::new();
+    for f in &mut prog.functions {
+        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+            // Top-level names are unique across a linked program, so `mount` is
+            // `std/http`'s or the program has none. Argument 0 is the request;
+            // the route lists are everything after it.
+            if let Expr::Call { name, args, .. } = e {
+                if name == "mount" && args.len() == 4 {
+                    calls.push(args[1..].to_vec());
+                }
+            }
+        });
+    }
+    if calls.is_empty() {
+        return Ok(Vec::new());
+    }
+    prog.functions
+        .retain(|f| !(f.name == "main" && f.module.is_none()));
+    prog.tests.clear();
+    prog.benches.clear();
+    let mut stmts: Vec<Stmt> = calls
+        .into_iter()
+        .map(|args| {
+            Stmt::Expr(Expr::Call {
+                type_args: Vec::new(),
+                name: "print".to_string(),
+                args: vec![Expr::Call {
+                    type_args: Vec::new(),
+                    name: "mountedRows".to_string(),
+                    args,
+                    line: 0,
+                }],
+                line: 0,
+            })
+        })
+        .collect();
+    stmts.push(Stmt::Return {
+        value: Some(Expr::Int(0)),
+        line: 0,
+    });
+    prog.functions.push(synth_fn(
+        "main".to_string(),
+        Block { stmts },
+        Type::Int,
+        0,
+        false,
+    ));
+    let bytes = vyrn_codegen::direct::compile(&prog)?;
+    let out = wasmrun::run(
+        &bytes,
+        wasmrun::Run {
+            argv: vec![path.to_string()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: true,
+            capture_stderr: true,
+            meter: false,
+        },
+    )?;
+    if out.code != 0 {
+        let text = String::from_utf8_lossy(&out.stderr).into_owned();
+        let line = text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_start_matches("error: ");
+        return Err(if line.is_empty() {
+            format!("the mounted router exited {}", out.code)
+        } else {
+            line.to_string()
+        });
+    }
+    let mut rows = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut words = line.split_whitespace();
+        let (Some(method), Some(route)) = (words.next(), words.next()) else {
+            continue;
+        };
+        if method == "*" {
+            continue;
+        }
+        let procedure = match method {
+            "SSE" | "WS" => "-",
+            _ => words.next().unwrap_or("-"),
+        };
+        rows.push((method.to_string(), route.to_string(), procedure.to_string()));
+    }
+    Ok(rows)
 }
 
 /// `vyrn routes --json` (RFC-0073 M4) — the merged wire table for external
@@ -1250,22 +1291,24 @@ fn routes_json(
     ExitCode::SUCCESS
 }
 
-/// A JSON string literal. Paths reach here as the loader keyed them, which on
-/// Windows can still hold a backslash, so escaping is not optional.
+/// A JSON string literal, quotes included — for `vyrn routes --json` and for
+/// every manifest [`json_pretty`] rewrites.
+///
+/// Escaping is not optional in either place. A route path reaches here as the
+/// loader keyed it, which on Windows can still hold a backslash; and Rust's
+/// `Debug` escapes (`\u{1}`) are NOT valid JSON, so a manifest written with
+/// them would be unreadable to every later command.
+///
+/// The escape is `vyrn_frontend::codec::escape_into` — RFC-0018's canonical
+/// table, which both wasm backends must produce byte for byte. This driver
+/// carried two copies of that table until the census of RFC-0125 §3 M5 found
+/// them — one here and one under `vyrn add`'s manifest writer, differing only
+/// in whether a backspace came out `\b` or `\u0008`. `vyrn-play` carries a
+/// third, which its own crate has to answer for.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
+    vyrn_frontend::codec::escape_into(s, &mut out);
     out.push('"');
     out
 }
@@ -1277,17 +1320,16 @@ fn json_str(s: &str) -> String {
 /// source says which is which. The compiler holds the exact answer and shows it
 /// to nobody. This is that answer at the shell.
 ///
-/// It is a **printer**. Every word comes out of `own::Ownership`, recorded by
-/// the walker that decided — never re-derived here. A second walk over the tree
-/// could disagree with the first, and the census records that defect three times.
+/// It is a **printer**. Every word comes out of `own::Ownership::memory`,
+/// which the CORE writes through the placer slot — never re-derived here, and
+/// no longer worded by a second walk of the tree either (RFC-0125 §3 M3, the
+/// report slice). Two walks could disagree, and the census records that defect
+/// three times.
 ///
 /// It reports; it does not gate. Exit 0 whenever it could answer.
 fn why_memory(file: &str) -> ExitCode {
     let path = match Path::new(file).canonicalize() {
-        Ok(p) => p
-            .to_string_lossy()
-            .trim_start_matches(r"\\?\")
-            .replace('\\', "/"),
+        Ok(p) => dos_to_slash(&p.to_string_lossy()),
         Err(e) => {
             eprintln!("error: cannot read {file}: {e}");
             return ExitCode::from(2);
@@ -1339,8 +1381,11 @@ fn why_memory(file: &str) -> ExitCode {
             .collect();
         println!();
         println!("  fn {}({}) -> {}", f.name, params.join(", "), f.ret);
-        match own.owned_fns.get(&f.name) {
-            Some(kind) => println!(
+        // Rule 3: a return is owned, so the return TYPE is the whole answer,
+        // and the report asks the type table the automatic path asks
+        // (RFC-0125 §3 M3, the ownership-file slice).
+        match own.proto.release_kind(&f.ret) {
+            Some(ref kind) => println!(
                 "    transfers: yes — the caller owns the result, and releases it by {}",
                 kind.words()
             ),
@@ -1348,7 +1393,7 @@ fn why_memory(file: &str) -> ExitCode {
             // transfers, so the only other answer is that the type owns nothing.
             None => println!("    transfers: no — the return type {} owns no heap", f.ret),
         }
-        let notes = match own.notes.get(&f.name) {
+        let notes = match own.memory.get(&f.name) {
             Some(n) if !n.is_empty() => n,
             _ => {
                 println!("    (no bindings)");
@@ -1356,23 +1401,22 @@ fn why_memory(file: &str) -> ExitCode {
             }
         };
         for n in notes {
-            use vyrn_frontend::own::Fate;
+            use vyrn_frontend::own::Bucket;
             bindings += 1;
-            match &n.fate {
-                Fate::Reclaimed(..) => reclaimed += 1,
-                Fate::Moved { .. } => moved += 1,
-                Fate::Dropped { .. } => dropped += 1,
-                Fate::Static => statics += 1,
-                Fate::Discharged(_) => discharged += 1,
-                Fate::Leaked(reason) => {
-                    let key = reason.kind();
-                    match leaked.iter_mut().find(|(k, _)| *k == key) {
+            match n.bucket {
+                Bucket::Reclaimed => reclaimed += 1,
+                Bucket::Moved => moved += 1,
+                Bucket::Dropped => dropped += 1,
+                Bucket::Static => statics += 1,
+                Bucket::Discharged => discharged += 1,
+                Bucket::Leaked { reason, .. } => {
+                    match leaked.iter_mut().find(|(k, _)| *k == reason) {
                         Some((_, c)) => *c += 1,
-                        None => leaked.push((key, 1)),
+                        None => leaked.push((reason, 1)),
                     }
                 }
             }
-            println!("    line {:<5} {:<16} {}", n.line, n.name, n.fate.words());
+            println!("    line {:<5} {:<16} {}", n.line, n.name, n.text);
         }
     }
 
@@ -1414,16 +1458,36 @@ fn why_audience(file: &str) -> ExitCode {
         .as_ref()
         .map(|m| PathBuf::from(&m.dir))
         .unwrap_or_else(|| dir.clone());
-    let app_slash = app_dir.to_string_lossy().replace('\\', "/");
+    let app_slash = dos_to_slash(&app_dir.to_string_lossy());
     let map = manifest.as_ref().and_then(|m| m.audience.clone());
 
     println!("{path}");
-    match &map {
-        Some(map) => {
+    // PLAN-0125-runtime §3.2: the two modules whose audience the compiler
+    // declares. Decided by path identity against the std root, the way the
+    // loader's fence decides it, and before the manifest is consulted because
+    // no manifest has a say.
+    let fenced = std_root().and_then(|root| {
+        use vyrn_frontend::loader::{MEM_SPEC, RUNTIME_SPEC};
+        let is = |spec: &str| {
+            real_path(&format!("{root}/{}.vyrn", &spec["std/".len()..])).as_deref() == Some(&*path)
+        };
+        if is(MEM_SPEC) {
+            Some(format!(
+                "`{RUNTIME_SPEC}`, declared by the compiler (RFC-0125 §2.4)"
+            ))
+        } else if is(RUNTIME_SPEC) {
+            Some("the compiler, which links it into every program (RFC-0125 §2.4)".to_string())
+        } else {
+            None
+        }
+    });
+    match (&fenced, &map) {
+        (Some(who), _) => println!("  audience: {who}"),
+        (None, Some(map)) => {
             let v = vyrn_frontend::audience::audience_of(&path, map);
             println!("  audience: {} — {}", v.audience.phrase(), v.because());
         }
-        None => {
+        (None, None) => {
             println!(
                 "  audience: universal — this project declares no `audience` in vyrn.json, \
                  so every module is universal and no import is rejected"
@@ -1543,22 +1607,25 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (graph, root_key) =
-        match vyrn_frontend::loader::capability_graph(&source, &artifact.entry, &opts, &FsResolver)
-        {
-            Ok(g) => g,
-            Err(diags) => {
-                eprintln!("error: cannot link artifact `{}`", artifact.name);
-                for d in diags.iter().take(3) {
-                    eprintln!(
-                        "  {}: {}",
-                        d.file.as_deref().unwrap_or(&artifact.entry),
-                        d.message
-                    );
-                }
-                return ExitCode::from(2);
+    let (graph, root_key) = match vyrn_frontend::loader::capability_graph(
+        &source,
+        &artifact.entry,
+        &opts,
+        &DiskResolver,
+    ) {
+        Ok(g) => g,
+        Err(diags) => {
+            eprintln!("error: cannot link artifact `{}`", artifact.name);
+            for d in diags.iter().take(3) {
+                eprintln!(
+                    "  {}: {}",
+                    d.file.as_deref().unwrap_or(&artifact.entry),
+                    d.message
+                );
             }
-        };
+            return ExitCode::from(2);
+        }
+    };
     let edges: Vec<(String, String)> = graph
         .iter()
         .flat_map(|(k, imports, _)| imports.iter().map(|t| (k.clone(), t.clone())))
@@ -1604,15 +1671,15 @@ fn why_capability(cap: &str, name: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// What either import walk answers with: an exhaustive enumeration of an
+/// interesting graph does not return, and a report that hangs is worse than one
+/// that stops at two dozen answers.
+const MAX_CHAINS: usize = 24;
+const MAX_DEPTH: usize = 12;
+
 /// Every simple path forward from `entry` to `target` in the import graph, the
 /// entry first. Empty when `target` is not in the artifact's closure at all.
-///
-/// Bounded the way [`import_chains`] is bounded, and for the same reason: an
-/// exhaustive enumeration of an interesting graph does not return, and a report
-/// that hangs is worse than one that stops at two dozen answers.
 fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
-    const MAX_CHAINS: usize = 24;
-    const MAX_DEPTH: usize = 12;
     fn walk(
         node: &str,
         target: &str,
@@ -1620,7 +1687,7 @@ fn chains_from(entry: &str, target: &str, edges: &[(String, String)]) -> Vec<Vec
         seen: &mut Vec<String>,
         out: &mut Vec<Vec<String>>,
     ) {
-        if out.len() >= MAX_CHAINS || seen.len() > MAX_DEPTH {
+        if out.len() >= MAX_CHAINS || seen.len() >= MAX_DEPTH {
             return;
         }
         if node == target {
@@ -1738,7 +1805,11 @@ fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_string();
             if p.is_dir() {
-                if name.starts_with('.') || name == "vendor" || name == "node_modules" {
+                if name.starts_with('.')
+                    || name == "target"
+                    || name == "vendor"
+                    || name == "node_modules"
+                {
                     continue;
                 }
                 walk(&p, out);
@@ -1747,8 +1818,7 @@ fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
                 Some("vyrn") | Some("vyx")
             ) {
                 if let Ok(text) = std::fs::read_to_string(&p) {
-                    let key = p.to_string_lossy().replace('\\', "/");
-                    let key = key.trim_start_matches("//?/").to_string();
+                    let key = dos_to_slash(&p.to_string_lossy());
                     out.push((key, text));
                 }
             }
@@ -1764,8 +1834,6 @@ fn project_sources(app_dir: &Path) -> Vec<(String, String)> {
 /// imports (a composition root). Walks the edges BACKWARD from the target, so
 /// the answer is "how does anything get here", not "what does this reach".
 fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
-    const MAX_CHAINS: usize = 24;
-    const MAX_DEPTH: usize = 12;
     let mut out: Vec<Vec<String>> = Vec::new();
     // Depth-first backward walk, carrying the path built so far (target-last).
     fn back(
@@ -1801,40 +1869,6 @@ fn import_chains(target: &str, edges: &[(String, String)]) -> Vec<Vec<String>> {
     // not an answer to "imported by".
     out.retain(|c| c.len() > 1);
     out
-}
-
-/// The `.vyrn` modules role discovery reads: the manifest's entry points plus
-/// every `.vyrn` directly in the app directory. Generator imports live in an
-/// app's ROOT modules by construction, so this stays a shallow scan.
-fn contract_roots(app_dir: &Path, manifest: Option<&Manifest>) -> Vec<(String, String)> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    // The manifest the caller already read. Re-reading and re-parsing it here is
-    // how a second reader silently answers "this project declares no entry
-    // points" to a file the first reader refused.
-    if let Some(m) = manifest {
-        for key in ["main", "server", "client"] {
-            if let Some(vyrn_frontend::schema::Json::Str(p)) = m.doc.get(key) {
-                paths.push(app_dir.join(p));
-            }
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(app_dir) {
-        for e in entries.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("vyrn") {
-                paths.push(p);
-            }
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-        .into_iter()
-        .filter_map(|p| {
-            let src = std::fs::read_to_string(&p).ok()?;
-            Some((p.to_string_lossy().replace('\\', "/"), src))
-        })
-        .collect()
 }
 
 /// The `<script> … </script>` body of a `.vyx`, which is ordinary Vyrn. The
@@ -1897,11 +1931,9 @@ fn tool_row(
     }
 }
 
-/// A path as this repository writes paths: forward slashes, on every host.
+/// The same rule as [`normalize_slashes`], from a `Path`.
 fn show_path(p: &Path) -> String {
-    p.to_string_lossy()
-        .trim_start_matches(r"\\?\")
-        .replace('\\', "/")
+    dos_to_slash(&p.to_string_lossy())
 }
 
 /// The `toolchain:` section of `vyrn deps` (RFC-0102 M3): one row per tool, with
@@ -1954,6 +1986,26 @@ fn print_toolchain(start: &Path) {
         vyrn_codegen::toolchain::wasi_builtins_from(start, &sysroot_path),
         pin("wasi-builtins").as_deref(),
         "$WASI_BUILTINS, beside the sysroot",
+    ));
+    // The native route's two tools (RFC-0125 §2.5). Both are pinned, under the
+    // names the lock file uses — `wabt` ships the `wasm2c` binary — so both rows
+    // read their version off the pin. wasm2c's is the exception the other way:
+    // the binary answers `--version`, and that probe runs whether or not a pin
+    // named it, so its row prints what the binary said.
+    rows.push(match vyrn_codegen::toolchain::wasm2c_from(start) {
+        Ok(Some(t)) => ("wasm2c".into(), show_path(&t.exe), t.version, t.why.into()),
+        other => tool_row(
+            "wasm2c",
+            other.map(|o| o.map(|t| (t.exe, t.why))),
+            pin("wabt").as_deref(),
+            "$VYRN_WASM2C, tools/",
+        ),
+    });
+    rows.push(tool_row(
+        "simde",
+        Ok(vyrn_codegen::toolchain::simde_from(start)),
+        pin("simde").as_deref(),
+        "$VYRN_SIMDE, tools/",
     ));
 
     // The name and path columns are padded; the version column is not. A clang
@@ -2068,7 +2120,7 @@ fn deps(name: Option<&str>) -> ExitCode {
             }
         };
         let opts = load_options(root_key);
-        match vyrn_frontend::loader::module_graph(&source, root_key, &opts, &FsResolver) {
+        match vyrn_frontend::loader::module_graph(&source, root_key, &opts, &DiskResolver) {
             Ok(graph) => {
                 for (module, imports) in graph {
                     println!("{module}");
@@ -2078,13 +2130,7 @@ fn deps(name: Option<&str>) -> ExitCode {
                 }
             }
             Err(diags) => {
-                for d in &diags {
-                    let file = d.file.as_deref().unwrap_or(root_key);
-                    eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                    if let Some(note) = &d.note {
-                        eprintln!("  note: {note}");
-                    }
-                }
+                print_diagnostics(&diags, root_key, "");
                 failed = true;
             }
         }
@@ -2285,7 +2331,7 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
     };
     // A key beside the input file, so `std/` resolves the same way it would for
     // a program written there. Nothing reads it: the source is the constant above.
-    let norm = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let norm = normalize_slashes(path);
     let key = match norm.rfind('/') {
         Some(i) => format!("{}/from-json.vyrn", &norm[..i]),
         None => "from-json.vyrn".to_string(),
@@ -2294,22 +2340,50 @@ fn from_json_cmd(path: &str, type_name: &str, module: &str) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let args = vec![json, type_name.to_string(), module.to_string()];
-    match vyrn_frontend::interp::run_with_args(&program, &args) {
-        Ok(code) => ExitCode::from((code & 0xff) as u8),
+    // The compiled route (RFC-0125 §3 M5, the `from-json` row): the converter is
+    // one constant program, so it compiles once per invocation through the direct
+    // backend and runs in the embedded wasmtime. Nothing about it is a user's
+    // choice, so there is no engine flag — this IS the engine. Standard output
+    // passes through; standard error is captured because the wording below
+    // rewrites it.
+    let bytes = match vyrn_codegen::direct::compile(&program) {
+        Ok(b) => b,
         Err(e) => {
-            // The trap carries the position of the `panic` in the converter
-            // above — a module the user never wrote and cannot open. The message
-            // is the whole answer, so the internal location is dropped and the
-            // INPUT file's name takes its place.
-            let msg = e
-                .split_once(" (from-json.vyrn:")
-                .map(|(m, _)| m)
-                .unwrap_or(e.as_str());
-            eprintln!("error: {path}: {msg}");
-            ExitCode::FAILURE
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
         }
+    };
+    let run = wasmrun::Run {
+        argv: vec![key.clone(), json, type_name.to_string(), module.to_string()],
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        capture_stderr: true,
+        meter: false,
+    };
+    let out = match wasmrun::run(&bytes, run) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if out.code == 0 {
+        return ExitCode::SUCCESS;
     }
+    // The trap carries the position of the `panic` in the converter above — a
+    // module the user never wrote and cannot open. The message is the whole
+    // answer, so the internal location is dropped and the INPUT file's name
+    // takes its place.
+    let text = String::from_utf8_lossy(&out.stderr).into_owned();
+    let msg = text
+        .trim_end_matches(['\n', '\r'])
+        .trim_start_matches("error: ");
+    let msg = msg
+        .split_once(" (from-json.vyrn:")
+        .map(|(m, _)| m)
+        .unwrap_or(msg);
+    eprintln!("error: {path}: {msg}");
+    ExitCode::from((out.code & 0xff) as u8)
 }
 
 /// The project's `main` plus its local (non-remote) imports, as file paths — the
@@ -2326,7 +2400,7 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
             return Err(ExitCode::FAILURE);
         }
     };
-    let root_key = main.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(&main);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     match vyrn_frontend::loader::module_graph(&source, &root_key, &opts, &resolver) {
@@ -2348,13 +2422,7 @@ fn fmt_project_files() -> Result<Vec<String>, ExitCode> {
         Err(diags) => {
             // A graph error (e.g. an unresolvable import) — fall back to just the
             // main file so `fmt` is still useful on a partly-broken project.
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                if let Some(note) = &d.note {
-                    eprintln!("  note: {note}");
-                }
-            }
+            print_diagnostics(&diags, &root_key, "");
             Ok(vec![root_key])
         }
     }
@@ -2467,6 +2535,10 @@ fn scan_doc_dir(dir: &str, prefix: &str) -> Result<Vec<DocModule>, ExitCode> {
     let mut out = Vec::new();
     for p in paths {
         let rel = rel_name(&p, &base);
+        // A fenced module has no reader outside the compiler (RFC-0125 §2.4).
+        if vyrn_frontend::loader::is_fenced(&format!("{prefix}{rel}")) {
+            continue;
+        }
         let source = match std::fs::read_to_string(&p) {
             Ok(s) => s,
             Err(e) => {
@@ -2536,10 +2608,7 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
     let graph = match result {
         Ok(g) => g,
         Err(diags) => {
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-            }
+            print_diagnostics(&diags, &root_key, "");
             return Err(ExitCode::FAILURE);
         }
     };
@@ -2577,9 +2646,12 @@ fn closure_doc_modules(root_file: &str, with_std: bool) -> Result<Vec<DocModule>
     Ok(out)
 }
 
-/// A slash-normalized path with the Windows verbatim prefix stripped.
+/// A path as this toolchain spells it, from a string. The rule is
+/// `manifest::dos_to_slash`'s, which is the one `real_path` answers with — so a
+/// path this driver keys on and a path a module key carries are the same string
+/// (RFC-0125 §3 M5; seven copies of it here got UNC wrong).
 fn normalize_slashes(p: &str) -> String {
-    p.trim_start_matches(r"\\?\").replace('\\', "/")
+    dos_to_slash(p)
 }
 
 /// A module path relative to `base`, without its `.vyrn` extension — the module
@@ -2810,7 +2882,7 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// (with their originating file) on failure and WARNINGS on success.
 ///
 /// This is the toolchain's single load site — every command that *builds a
-/// program* arrives here (`check`, `run`, `emit-ir`, `build`, `test`, `bench`,
+/// program* arrives here (`check`, `run`, `build`, `test`, `bench`,
 /// `serve`, `dev`), so warnings need exactly one print site to reach all of
 /// them. The three that do not are the three that never call `load`: `fmt` is a
 /// token-stream rewriter, `doc` renders `module_doc` over sources, and
@@ -2855,7 +2927,7 @@ fn save_lock(resolver: &remote::RemoteResolver) -> Result<(), ExitCode> {
 /// line, re-loads, and keeps the result only if the diagnostic count went down.
 /// The tool therefore cannot leave a file that compiles worse than it found it.
 fn fix_cmd(path: &str, source: &str) -> ExitCode {
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(path);
     let mut text = source.to_string();
     let mut rounds = 0usize;
     let mut applied: Vec<String> = Vec::new();
@@ -2960,6 +3032,12 @@ fn fix_cmd(path: &str, source: &str) -> ExitCode {
 }
 
 /// Load `text` as `root_key` and return every diagnostic, printing nothing.
+///
+/// The load states every ownership refusal a program earns, the checker's and
+/// the kernel's, as one list (`vyrn_frontend::movecheck::refusals`, RFC-0125 §3
+/// M3, the accumulation slice), so a rule that has left `movecheck.rs` reaches
+/// `vyrn fix` with its menu — including in a file that breaks another rule as
+/// well, which is what the second list used to be blind to.
 fn fix_diagnostics(root_key: &str, text: &str) -> Vec<vyrn_frontend::diagnostics::Diagnostic> {
     let opts = load_options(root_key);
     let resolver = make_resolver(root_key);
@@ -3047,10 +3125,44 @@ fn insert_copy(text: &str, line: usize, path: &str) -> Result<String, String> {
     }
 }
 
+/// A function this driver synthesizes: no parameters, no type parameters, no
+/// doc, in the root module, at column 0.
+///
+/// Four sites build one and each wrote out all fifteen fields — `vyrn routes`'s
+/// printer over `mountedRows`, `vyrn bench`'s lifted bodies, its harness `main`,
+/// and the doors `vyrn test` and `vyrn bench --check` knock on. `door` makes it
+/// an export, which is what the host knocks on AND what makes the body a sweep
+/// root, the same two facts `vyrn serve`'s doors rest on.
+fn synth_fn(
+    name: String,
+    body: vyrn_frontend::ast::Block,
+    ret: vyrn_frontend::ast::Type,
+    line: usize,
+    door: bool,
+) -> vyrn_frontend::ast::Function {
+    vyrn_frontend::ast::Function {
+        name,
+        exported: false,
+        module: None,
+        doc: None,
+        type_params: Vec::new(),
+        type_bounds: Default::default(),
+        params: Vec::new(),
+        ret,
+        body,
+        line,
+        col: 0,
+        is_extern: false,
+        is_export_extern: door,
+        is_gen: false,
+        is_mut: false,
+    }
+}
+
 fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program, ExitCode> {
     // Strip Windows' verbatim prefix (`\\?\C:\..`) — it survives neither the
     // slash normalization nor readable diagnostics.
-    let root_key = path.trim_start_matches(r"\\?\").replace('\\', "/");
+    let root_key = normalize_slashes(path);
     let opts = load_options(&root_key);
     let resolver = make_resolver(&root_key);
     let (result, warnings) = vyrn_frontend::load_warned(source, &root_key, &opts, &resolver);
@@ -3064,40 +3176,68 @@ fn load_program(path: &str, source: &str) -> Result<vyrn_frontend::ast::Program,
             Ok(p)
         }
         Err(diags) => {
-            for d in &diags {
-                let file = d.file.as_deref().unwrap_or(&root_key);
-                eprintln!("{}:{}:{}: {}", file, d.line, d.col, d.message);
-                if let Some(note) = &d.note {
-                    eprintln!("  note: {note}");
-                }
-            }
+            print_diagnostics(&diags, &root_key, "");
             Err(ExitCode::FAILURE)
         }
     }
 }
 
-/// Share every projection expansion for the rest of this command
-/// ([`vyrn_frontend::project::Memo`], RFC-0101 M2d).
+/// [`load_program`] with the projection memo opened FIRST, so the load and the
+/// command share one expansion per site.
 ///
-/// `a[i]` and `for x in c` over a user container inline a `place at` / `place
-/// nth` AT the access site, so the nodes an engine walks there are nodes the
-/// source does not contain. Without this every engine expands for itself: the
-/// lowering, the interpreter and each backend land on three sets of addresses,
-/// and a side table keyed by address — `own`'s rows, `movecheck`'s, the
-/// lowering's own — cannot reach any but its own. With it there is one tree per
-/// site, typed by the checker `vyrn_lower::lower` runs, and every engine reads
-/// the same answers. Until RFC-0101 M6's second phase this was opened by the
-/// corpus gate only, so every residue number the RFC records was measured under
-/// a sharing a released compiler did not do.
+/// The pair is the whole of RFC-0125 §3 M3's one analysis: the load judges the
+/// program, and the guard the caller opens next
+/// ([`vyrn_frontend::own::Memo`]) adopts that judgment instead of recomputing
+/// it. Adoption is sound only if both readings walk the same nodes, and a
+/// projection's nodes are minted by the inline — so the memo has to be open
+/// before the load, not after it.
+fn loaded(
+    path: &str,
+    source: &str,
+) -> Result<(vyrn_frontend::ast::Program, vyrn_frontend::project::Memo), ExitCode> {
+    let memo = vyrn_frontend::project::Memo::open();
+    Ok((load_program(path, source)?, memo))
+}
+
+/// Hold this command's ONE ownership analysis of `program`
+/// ([`vyrn_frontend::own::Memo`], RFC-0125 §3 M3).
 ///
-/// **After the load, deliberately.** The loader runs generators (RFC-0021) by
-/// loading and checking whole programs of their own and throwing them away, and
-/// a memo keyed by node address over a program that dies is the leak the
-/// `Memo` doc warns about — with the verification bill still attached. What
-/// this covers is the one program the command is about, from the point it is
-/// linked to the point it has been lowered and emitted.
-fn shared_desugars() -> vyrn_frontend::project::Memo {
-    vyrn_frontend::project::Memo::open()
+/// The load already judged the program, and this guard adopts that judgment.
+/// The projection memo it used to open beside itself is [`loaded`]'s, because a
+/// site inlined after the load is not the site the load judged.
+///
+/// Why the projection memo matters to this one: `a[i]` and `for x in c` over a
+/// user container inline a `place at` / `place nth` AT the access site, so the
+/// nodes an engine walks there are nodes the source does not contain. Without
+/// the memo every engine expands for itself: the lowering and each backend land
+/// on their own sets of addresses, and a side table keyed by address — `own`'s
+/// rows, `movecheck`'s, the lowering's own — cannot reach any but its own. With
+/// it there is one tree per site, typed by the checker `vyrn_lower::lower`
+/// runs, and every engine reads the same answers.
+fn shared_desugars(program: &vyrn_frontend::ast::Program) -> vyrn_frontend::own::Memo<'_> {
+    vyrn_frontend::own::Memo::open(program)
+}
+
+/// How this driver prints a diagnostic: `file:line:col: message`, the file being
+/// the diagnostic's own or the root key when it names none, and the note under
+/// it when it carries one.
+///
+/// Seven sites wrote this out and two of them dropped the note, so `vyrn routes`
+/// and `vyrn doc` silently threw away the half of a load error that says what to
+/// do about it (RFC-0125 §3 M5). `marker` is the empty string for an error and
+/// `"warning: "` for a warning; nothing else uses it.
+fn print_diagnostics(
+    diags: &[vyrn_frontend::diagnostics::Diagnostic],
+    root_key: &str,
+    marker: &str,
+) {
+    for d in diags {
+        let file = d.file.as_deref().unwrap_or(root_key);
+        eprintln!("{}:{}:{}: {}{}", file, d.line, d.col, marker, d.message);
+        if let Some(note) = &d.note {
+            eprintln!("  note: {note}");
+        }
+    }
 }
 
 /// Print a load's warnings to stderr, in the same `file:line:col:` shape errors
@@ -3107,13 +3247,7 @@ fn print_warnings(warnings: &[vyrn_frontend::diagnostics::Diagnostic], root_key:
     if warnings.is_empty() {
         return false;
     }
-    for d in warnings {
-        let file = d.file.as_deref().unwrap_or(root_key);
-        eprintln!("{}:{}:{}: warning: {}", file, d.line, d.col, d.message);
-        if let Some(note) = &d.note {
-            eprintln!("  note: {note}");
-        }
-    }
+    print_diagnostics(warnings, root_key, "warning: ");
     if deny_warnings() {
         eprintln!(
             "error: {} warning(s) — refused by --deny-warnings",
@@ -3488,33 +3622,6 @@ fn vendor(check: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `s` as a JSON string literal, quotes included.
-///
-/// Rust's `Debug` escapes (`\u{1}`) are NOT valid JSON — `\u` must be followed
-/// by exactly four hex digits — so a manifest rewritten through [`json_pretty`]
-/// with Debug escapes would be unreadable to every later command. Short forms
-/// where JSON defines one, `\u00xx` for every other control character, and
-/// nothing else escaped: any codepoint above `0x1F` may stand as itself.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// Pretty-print a Json value (4-space indent, stable key order).
 fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
     use vyrn_frontend::schema::Json;
@@ -3530,7 +3637,7 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
                 format!("{n}")
             }
         }
-        Json::Str(s) => json_string(s),
+        Json::Str(s) => json_str(s),
         Json::Arr(items) => {
             if items.is_empty() {
                 return "[]".into();
@@ -3547,18 +3654,16 @@ fn json_pretty(j: &vyrn_frontend::schema::Json, depth: usize) -> String {
             }
             let inner: Vec<String> = fields
                 .iter()
-                .map(|(k, v)| format!("{pad}{}: {}", json_string(k), json_pretty(v, depth + 1)))
+                .map(|(k, v)| format!("{pad}{}: {}", json_str(k), json_pretty(v, depth + 1)))
                 .collect();
             format!("{{\n{}\n{close}}}", inner.join(",\n"))
         }
     }
 }
 
-/// `vyrn build <file.vyrn> [-o out] [--target wasm]` — a native executable via
-/// textual IR and clang, or a `wasm32-wasi` module emitted directly (RFC-0077 M5:
-/// no clang, no wasi sysroot, no builtins archive).
 /// `vyrn test [file] [--name <substring>]` (RFC-0015) — load + check the root
-/// file, then run its `test` blocks under the interpreter in declaration order.
+/// file, then run its `test` blocks in declaration order, each as a door into
+/// one compiled module (RFC-0125 §3 M5).
 /// Prints `test "name" ... ok` / `... FAILED: <message>` per test and a
 /// `N passed, M failed` summary; exits 1 if any test failed. A file with no
 /// tests prints `no tests` and exits 0.
@@ -3583,47 +3688,28 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match load_program(path, &source) {
+    let (program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
     // A file with no root-module tests: nothing to run.
     let has_tests = program.tests.iter().any(|t| t.module.is_none());
     if !has_tests {
         println!("no tests");
         return ExitCode::SUCCESS;
     }
-
-    use std::io::Write;
-    // The result line prints AFTER the body runs, so any `print` output the test
-    // produced has already streamed to stdout (RFC-0015 "print passes through").
-    let on_result = |name: &str, result: &Result<(), String>| {
-        let mut stdout = std::io::stdout();
-        match result {
-            Ok(()) => {
-                let _ = writeln!(stdout, "test {name:?} ... ok");
-            }
-            Err(msg) => {
-                let _ = writeln!(stdout, "test {name:?} ... FAILED: {msg}");
-            }
-        }
-        let _ = stdout.flush();
-    };
-    match vyrn_frontend::interp::run_tests(&program, filter.as_deref(), on_result) {
-        Ok((passed, failed)) => {
-            println!("\n{passed} passed, {failed} failed");
-            if failed > 0 {
-                ExitCode::FAILURE
-            } else {
-                ExitCode::SUCCESS
-            }
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
+    let bodies: Vec<Body> = program
+        .tests
+        .iter()
+        .filter(|t| t.module.is_none() && filter.as_deref().is_none_or(|s| t.name.contains(s)))
+        .map(|t| Body {
+            name: t.name.clone(),
+            body: t.body.clone(),
+            line: t.line,
+        })
+        .collect();
+    bodies_wasm(path, &program, "test", &bodies)
 }
 
 /// `vyrn bench [file] [--name <substring>] [--check | --json | --compare <b> [--threshold <f>]]`
@@ -3633,9 +3719,10 @@ fn test_cmd(path: &str, rest: &[String]) -> ExitCode {
 ///   an ordinary function and synthesizes a `main` harness (warmup / auto-scale /
 ///   sample / stats / print — plain Vyrn over `std/bench` + `std/time`), then
 ///   compiles it NATIVE via clang (same discovery/errors as `vyrn build`) and runs
-///   it. Timing the interpreter would be a lie; divan-class numbers mean optimized
-///   machine code. Report is min/median/mean per iteration with human units.
-/// - **`--check`:** run each selected body ONCE under the interpreter and print
+///   it. Timing anything but optimized machine code would be a lie; divan-class
+///   numbers mean this route. Report is min/median/mean per iteration with human
+///   units.
+/// - **`--check`:** compile each selected body and run it ONCE, printing
 ///   `bench "name" ... ok` / a trap message — deterministic, byte-pinnable, no
 ///   timing. Exit 1 if any trapped. This is the CI face.
 /// - **`--json`** (RFC-0063): the machine-readable report, built by the Vyrn
@@ -3701,11 +3788,11 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match load_program(path, &source) {
+    let (program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
 
     // Root-file benches only (RFC-0055), in declaration order, name-filtered.
     let matches = |name: &str| filter.as_deref().is_none_or(|sub| name.contains(sub));
@@ -3719,7 +3806,17 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
     }
 
     if check {
-        return bench_check(&program, filter.as_deref());
+        let bodies: Vec<Body> = program
+            .benches
+            .iter()
+            .filter(|b| b.module.is_none() && matches(&b.name))
+            .map(|b| Body {
+                name: b.name.clone(),
+                body: b.body.clone(),
+                line: b.line,
+            })
+            .collect();
+        return bodies_wasm(path, &program, "bench", &bodies);
     }
     if let Some(baseline) = compare {
         return bench_compare(
@@ -3736,38 +3833,6 @@ fn bench_cmd(path: &str, rest: &[String]) -> ExitCode {
     code
 }
 
-/// `--check`: run each selected bench body once under the interpreter and pin the
-/// output byte-for-byte (declaration order, trap continuation, exit codes).
-fn bench_check(program: &vyrn_frontend::ast::Program, filter: Option<&str>) -> ExitCode {
-    use std::io::Write;
-    let on_result = |name: &str, result: &Result<(), String>| {
-        let mut stdout = std::io::stdout();
-        match result {
-            Ok(()) => {
-                let _ = writeln!(stdout, "bench {name:?} ... ok");
-            }
-            Err(msg) => {
-                let _ = writeln!(stdout, "bench {name:?} ... FAILED: {msg}");
-            }
-        }
-        let _ = stdout.flush();
-    };
-    match vyrn_frontend::interp::run_benches(program, filter, on_result) {
-        Ok((ok, failed)) => {
-            println!("\n{ok} ok, {failed} failed");
-            if failed > 0 {
-                ExitCode::FAILURE
-            } else {
-                ExitCode::SUCCESS
-            }
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 /// Default mode: transform the loaded program (lift bench bodies to ordinary
 /// functions + synthesize the harness `main`, linking `std/bench`), compile it
 /// NATIVE via clang, and run it so it prints real timings.
@@ -3777,7 +3842,7 @@ fn bench_native(
     json: bool,
     capture: bool,
 ) -> (ExitCode, Option<String>) {
-    use vyrn_frontend::ast::{Block, Expr, Function, Stmt, Type};
+    use vyrn_frontend::ast::{Block, Expr, Stmt, Type};
 
     // 1. Pull in the harness runtime (`std/bench` + its transitive `std/time`
     //    and `std/json`) by re-reading the user's source with the import
@@ -3819,7 +3884,7 @@ import {{ benchOne }} from \"std/bench\"
     //    `__vyrn_bench_body_<slot>` (declaration order). `blackBox` inside is fine:
     //    the program is already checked, and codegen — which we go to next without
     //    re-checking — lowers `blackBox` directly.
-    let selected: Vec<vyrn_frontend::ast::BenchDecl> = program
+    let selected: Vec<vyrn_frontend::ast::NamedBlock> = program
         .benches
         .iter()
         .filter(|b| b.module.is_none() && filter.is_none_or(|sub| b.name.contains(sub)))
@@ -3838,35 +3903,27 @@ import {{ benchOne }} from \"std/bench\"
     // in parallel with the human `benchOne(...)` statements.
     let mut measure_calls: Vec<Expr> = Vec::new();
     for (slot, b) in selected.iter().enumerate() {
-        program.functions.push(Function {
-            name: format!("__vyrn_bench_body_{slot}"),
-            exported: false,
-            module: None,
-            doc: None,
-            type_params: Vec::new(),
-            type_bounds: Default::default(),
-            params: Vec::new(),
-            ret: Type::Unit,
-            body: b.body.clone(),
-            line: b.line,
-            col: 0,
-            is_extern: false,
-            is_export_extern: false,
-            is_gen: false,
-            is_mut: false,
-        });
+        program.functions.push(synth_fn(
+            format!("__vyrn_bench_body_{slot}"),
+            b.body.clone(),
+            Type::Unit,
+            b.line,
+            false,
+        ));
         let body_ref = Expr::Var {
             name: format!("__vyrn_bench_body_{slot}"),
             line: 0,
         };
         if json {
             measure_calls.push(Expr::Call {
+                type_args: Vec::new(),
                 name: "benchMeasure".to_string(),
                 args: vec![Expr::Str(b.name.clone()), body_ref],
                 line: 0,
             });
         } else {
             harness_stmts.push(Stmt::Expr(Expr::Call {
+                type_args: Vec::new(),
                 name: "benchOne".to_string(),
                 args: vec![Expr::Str(b.name.clone()), Expr::Int(width), body_ref],
                 line: 0,
@@ -3879,8 +3936,10 @@ import {{ benchOne }} from \"std/bench\"
         // The array literal coerces to `Array<BenchResult>` from `benchJson`'s
         // parameter type; declaration order is preserved.
         harness_stmts.push(Stmt::Expr(Expr::Call {
+            type_args: Vec::new(),
             name: "print".to_string(),
             args: vec![Expr::Call {
+                type_args: Vec::new(),
                 name: "benchJson".to_string(),
                 args: vec![
                     Expr::ArrayLit {
@@ -3897,11 +3956,13 @@ import {{ benchOne }} from \"std/bench\"
     } else {
         // Footer: a blank line, then the count (mirrors `vyrn test`'s summary shape).
         harness_stmts.push(Stmt::Expr(Expr::Call {
+            type_args: Vec::new(),
             name: "print".to_string(),
             args: vec![Expr::Str(String::new())],
             line: 0,
         }));
         harness_stmts.push(Stmt::Expr(Expr::Call {
+            type_args: Vec::new(),
             name: "print".to_string(),
             args: vec![Expr::Str(format!("{} benches", selected.len()))],
             line: 0,
@@ -3914,42 +3975,26 @@ import {{ benchOne }} from \"std/bench\"
 
     // 3. Replace the user's `main` (bench mode ignores it) with the harness.
     program.functions.retain(|f| f.name != "main");
-    program.functions.push(Function {
-        name: "main".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        type_bounds: Default::default(),
-        params: Vec::new(),
-        ret: Type::Int,
-        body: Block {
+    program.functions.push(synth_fn(
+        "main".to_string(),
+        Block {
             stmts: harness_stmts,
         },
-        line: 0,
-        col: 0,
-        is_extern: false,
-        is_export_extern: false,
-        is_gen: false,
-        is_mut: false,
-    });
+        Type::Int,
+        0,
+        false,
+    ));
     // Benches/tests are now either lifted or irrelevant — drop them so nothing
     // downstream mistakes them for live code.
     program.benches.clear();
     program.tests.clear();
 
-    // 4. Emit IR + shim, compile native via clang into a temp dir, and run it.
-    //    The same target `vyrn build` would ship, or the measurement stops
-    //    describing the artifact — the bug `-O2` just was.
+    // 4. Build the harness on the native route into a temp dir, and run it.
+    //    The same route and the same target `vyrn build` would ship, or the
+    //    measurement stops describing the artifact — the bug `-O2` just was,
+    //    and the reason the route's flip brings the timing with it.
     let target = match native_target_for(path) {
         Ok(t) => t,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return (ExitCode::FAILURE, None);
-        }
-    };
-    let ir = match vyrn_codegen::emit(&program) {
-        Ok(ir) => ir,
         Err(e) => {
             eprintln!("error: {e}");
             return (ExitCode::FAILURE, None);
@@ -3977,51 +4022,16 @@ import {{ benchOne }} from \"std/bench\"
         stem.to_string()
     };
     let out_path = dir.join(&exe_name);
-    let ll_path = out_path.with_extension("ll");
-    let shim_path = out_path.with_extension("shim.c");
-    if let Err(e) = std::fs::write(&ll_path, ir) {
-        eprintln!("error: cannot write {}: {e}", ll_path.display());
+    // The route, not a second copy of it: `vyrn bench` times the binary `vyrn
+    // build` would ship, through the same wasm2c and the same clang flags.
+    if build_wasm2c(path, &program, &out_path.to_string_lossy(), target).is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
-    }
-    let mut shim = runtime_shim();
-    shim.push_str(&extern_trap_stubs(&program));
-    if let Err(e) = std::fs::write(&shim_path, &shim) {
-        eprintln!("error: cannot write {}: {e}", shim_path.display());
-        let _ = std::fs::remove_dir_all(&dir);
-        return (ExitCode::FAILURE, None);
-    }
-    let clang = match find_clang() {
-        Some(c) => c,
-        None => {
-            eprintln!(
-                "error: could not find `clang`. Install LLVM and put clang on PATH, \
-                 or set the CLANG environment variable to its full path."
-            );
-            let _ = std::fs::remove_dir_all(&dir);
-            return (ExitCode::FAILURE, None);
-        }
-    };
-    let mut cmd = Command::new(&clang);
-    cmd.arg(&ll_path).arg(&shim_path).arg("-o").arg(&out_path);
-    add_native_clang_flags(&mut cmd, target);
-    match cmd.status() {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            eprintln!("error: clang exited with {s}");
-            let _ = std::fs::remove_dir_all(&dir);
-            return (ExitCode::FAILURE, None);
-        }
-        Err(e) => {
-            eprintln!("error: failed to run clang ({}): {e}", clang.display());
-            let _ = std::fs::remove_dir_all(&dir);
-            return (ExitCode::FAILURE, None);
-        }
     }
     // Run the compiled harness. When `capture` is set (`--compare`), grab its
     // stdout as the JSON report to feed the comparator; otherwise let stdout and
     // stderr stream straight through (the `--json` and human paths both print live).
-    // VYRN_BENCH_KEEP: leave the temp dir (the .ll, the shim, the binary) for
+    // VYRN_BENCH_KEEP: leave the temp dir (the wasm, the C, the binary) for
     // a debugger — a bench binary that heap-faults dies before its report
     // line, and the artifacts are all there is to read (round fifty-eight).
     let keep = std::env::var_os("VYRN_BENCH_KEEP").is_some();
@@ -4350,10 +4360,352 @@ fn bench_verdicts(
     (out, regressed)
 }
 
+// ---- the serving protocol (RFC-0016, RFC-0074 M3a) -------------------------
+//
+// These four types are the DRIVER's, and they are declared here because this is
+// where the wire is. They were declared in `vyrn-frontend`'s tree-walker for as
+// long as the tree-walker was the thing behind `call_handle`; RFC-0125 §3 M5
+// deleted it, and the types moved rather than went — the accept loop, the
+// request parser and the response writer below all speak them, and none of them
+// is an engine.
+
+/// One HTTP request handed to a served `handle` (RFC-0016). The host fills these
+/// from the wire; the engine turns each into a `Request` record before calling
+/// `handle`.
+pub struct ServeRequest {
+    pub method: String,
+    pub path: String,
+    /// The request's header block, in wire order, with names ALREADY LOWERCASED
+    /// (RFC-0072 M4). Case folding happens here, at the edge, so the `Map` the
+    /// program sees has one spelling per header and an exact lookup is correct.
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+/// The fields a served `handle` returned — read back out of the `Response`
+/// record and handed to the host to write on the wire.
+pub struct ServeResponse {
+    pub status: i64,
+    pub content_type: String,
+    pub body: String,
+    /// The `Vary` header to write, or `""` for none (RFC-0072 M4).
+    pub vary: String,
+    /// Every other response header, in the order the program inserted them
+    /// (RFC-0074 M2). Written verbatim; an empty map writes nothing.
+    pub headers: Vec<(String, String)>,
+}
+
+/// What the host asks the engine for (RFC-0074 M3a). Until M3a there was one
+/// question and it needed no name; a streaming answer adds two more, because the
+/// stream it opens is pulled AFTER the call that opened it returned.
+pub enum ServeCall {
+    /// One request off the wire.
+    Handle(ServeRequest),
+    /// The next frame of the stream the last [`ServeAnswer::Live`] opened.
+    Next,
+    /// Release that stream. The host sends this the first time a write fails —
+    /// which is how it learns the client is gone — and when the stream ends.
+    Close,
+}
+
+/// What the engine answers. `Buffered` is the only shape that existed before M3a
+/// and it is unchanged: a response that exists all at once, with the `Vary`
+/// header and the conditional-request machinery that only make sense for one. A
+/// streaming answer is a SECOND shape rather than a flag on the first.
+pub enum ServeAnswer {
+    /// A complete response. The answer to a `Handle` that opened no stream.
+    Buffered(ServeResponse),
+    /// A stream's header block: status, content type and headers, plus a `body`
+    /// the host writes once as the stream's prologue (SSE's `retry:` line).
+    /// Frames follow, one `Next` at a time.
+    Live(ServeResponse),
+    /// The answer to `Next`: one frame, or `None` when the producer ended.
+    Frame(Option<String>),
+    /// The answer to `Close`.
+    Released,
+}
+
+/// The doors `vyrn serve` knocks on, and the parked producer they
+/// pull (RFC-0125 §3 M6). The CLI appends this block to the served root before
+/// it loads it, so the checker, the move checker and the release planner judge
+/// every line of it exactly as they judge the program it serves.
+///
+/// Three things the compiled route lacked are here, and each is ordinary Vyrn
+/// rather than a new rule in an emitter:
+///
+/// - **A door for `handle`.** The direct backend exports `_start` and RFC-0012's
+///   `export extern fn` names and nothing else, so `handle` gets a wrapper that
+///   IS one. It is the shape `vyrn routes` already uses for `mountedRows`: a
+///   function the CLI writes, compiled with the program.
+/// - **Marshalling for `Request` and `Response`.** Neither crosses. Their FIELDS
+///   cross, one `export extern fn` call each, under RFC-0012's String ABI — so
+///   there is no encoding to agree on, no text to parse on the guest side, and
+///   no JSON reader linked into a served program to read a header map.
+/// - **A compiled `serveStream`.** It traps at the site in both emitters, and
+///   correctly: a compiled build has no accept loop. A SERVED build has one, so
+///   the CLI rewrites the call to `vyrnServePark` below, which boxes the
+///   producer into module state (RFC-0090 M3's `boxStream`) where the host can
+///   pull it a frame at a time (`pullAt`) and release it (`unboxStream`,
+///   `close`). Nothing about `vyrn run` or `vyrn build` changes.
+const SERVE_SHIM: &str = r#"
+// ---- `vyrn serve` (RFC-0125 §3 M6), appended by the CLI -------
+
+let mut vyrnServeMethod: String = ""
+let mut vyrnServePath: String = ""
+let mut vyrnServeInKeys: Array<String> = []
+let mut vyrnServeInVals: Array<String> = []
+let mut vyrnServeInBody: String = ""
+let mut vyrnServeStatus: Int64 = 0
+let mut vyrnServeType: String = ""
+let mut vyrnServeBody: String = ""
+let mut vyrnServeVary: String = ""
+let mut vyrnServeOutKeys: Array<String> = []
+let mut vyrnServeOutVals: Array<String> = []
+let mut vyrnServeLive: Int64 = 0
+let mut vyrnServeFrame: String = ""
+
+/// What `serveStream` becomes on the served route. The producer goes into one
+/// box and its address into module state, which is the only place a `Stream<T>`
+/// may rest: RFC-0075's linearity forbids a field, and `boxStream` is the door
+/// RFC-0090 M3 opened for exactly this.
+fn vyrnServePark(s: consume Stream<String>) {
+    if vyrnServeLive != 0 {
+        panic("serveStream: this request already opened a stream")
+    }
+    vyrnServeLive = boxStream(s)
+}
+
+/// One request's fields, one call each.
+export extern fn vyrnServeBegin() {
+    vyrnServeMethod = ""
+    vyrnServePath = ""
+    vyrnServeInKeys = []
+    vyrnServeInVals = []
+    vyrnServeInBody = ""
+}
+
+export extern fn vyrnServeMethodIs(s: String) {
+    vyrnServeMethod = s.copy()
+}
+
+export extern fn vyrnServePathIs(s: String) {
+    vyrnServePath = s.copy()
+}
+
+export extern fn vyrnServeHeaderIs(k: String, v: String) {
+    vyrnServeInKeys.push(k.copy())
+    vyrnServeInVals.push(v.copy())
+}
+
+export extern fn vyrnServeBodyIs(s: String) {
+    vyrnServeInBody = s.copy()
+}
+
+/// Call `handle` on the fields collected above and keep what it answered. The
+/// result says whether a producer is parked behind the response, which is what
+/// makes it a live answer rather than a buffered one (RFC-0074 M3a).
+export extern fn vyrnServeHandle() -> Bool {
+    let mut hs: Map<String, String> = [:]
+    let mut i = 0
+    while i < vyrnServeInKeys.length {
+        let k = vyrnServeInKeys[i].copy()
+        let v = vyrnServeInVals[i].copy()
+        hs[k] = v
+        i = i + 1
+    }
+    let req = Request {
+        method: vyrnServeMethod.copy(),
+        path: vyrnServePath.copy(),
+        headers: hs,
+        body: vyrnServeInBody.copy(),
+    }
+    let r = handle(req)
+    vyrnServeStatus = r.status
+    vyrnServeType = r.contentType.copy()
+    vyrnServeBody = r.body.copy()
+    vyrnServeVary = r.vary.copy()
+    vyrnServeOutKeys = []
+    vyrnServeOutVals = []
+    for k in r.headers.keys() {
+        if let Some(v) = r.headers[k] {
+            vyrnServeOutKeys.push(k.copy())
+            vyrnServeOutVals.push(v.copy())
+        }
+    }
+    return vyrnServeLive != 0
+}
+
+export extern fn vyrnServeStatusOf() -> Int64 {
+    return vyrnServeStatus
+}
+
+export extern fn vyrnServeTypeOf() -> String {
+    return vyrnServeType.copy()
+}
+
+export extern fn vyrnServeBodyOf() -> String {
+    return vyrnServeBody.copy()
+}
+
+export extern fn vyrnServeVaryOf() -> String {
+    return vyrnServeVary.copy()
+}
+
+export extern fn vyrnServeHeaderCount() -> Int64 {
+    return vyrnServeOutKeys.length
+}
+
+export extern fn vyrnServeHeaderKey(i: Int64) -> String {
+    return vyrnServeOutKeys[i].copy()
+}
+
+export extern fn vyrnServeHeaderValue(i: Int64) -> String {
+    return vyrnServeOutVals[i].copy()
+}
+
+/// One frame off the parked producer. `false` is the end of the stream, and the
+/// host answers it by closing. The box comes out of module state for the pull
+/// and goes back after it, because the step is ordinary Vyrn and may reach
+/// `serveStream` itself — the newest producer wins.
+export extern fn vyrnServeNext() -> Bool {
+    vyrnServeFrame = ""
+    if vyrnServeLive == 0 {
+        return false
+    }
+    let at = vyrnServeLive
+    vyrnServeLive = 0
+    let got: Option<String> = pullAt(at)
+    if vyrnServeLive == 0 {
+        vyrnServeLive = at
+    } else {
+        let old: Stream<String> = unboxStream(at)
+        close(old)
+    }
+    if let Some(f) = got {
+        vyrnServeFrame = f.copy()
+        return true
+    }
+    return false
+}
+
+export extern fn vyrnServeFrameOf() -> String {
+    return vyrnServeFrame.copy()
+}
+
+/// Release the producer. The host sends this when the stream ends and the first
+/// time a write to the client fails, which is how it learns the client is gone.
+export extern fn vyrnServeClose() {
+    if vyrnServeLive != 0 {
+        let at = vyrnServeLive
+        vyrnServeLive = 0
+        let s: Stream<String> = unboxStream(at)
+        close(s)
+    }
+}
+
+/// The entry point a served file need not have (RFC-0016). The CLI renames this
+/// to `main` when the program declares none, because the direct backend has no
+/// `_start` without one — and `_start` is what initializes module state.
+fn vyrnServeMain() -> Int64 {
+    return 0
+}
+"#;
+
+/// Turn a loaded program into the one the serving host runs: every `serveStream`
+/// call becomes `vyrnServePark`, and `vyrnServeMain` becomes `main` when the
+/// program has none of its own.
+///
+/// Both edits are name substitutions on the checked tree, which is why they are
+/// safe to make after the check: `vyrnServePark` declares the signature
+/// `serveStream` declares (`consume Stream<String>` to `Unit`), so every
+/// judgment that ran over the call — the move checker's, the release planner's —
+/// answers the same question about the same shape.
+fn serve_rewrite(program: &mut vyrn_frontend::ast::Program) {
+    use vyrn_frontend::ast::Expr;
+    // The load judged the program this rewrites, and a renamed function and a
+    // renamed call are not in that judgment. Nothing here changes `own::ident`,
+    // so the guard the caller opens next would adopt an answer about a program
+    // that no longer exists (RFC-0125 §3 M3, the one analysis).
+    vyrn_frontend::own::forget_loaded();
+    let has_main = program
+        .functions
+        .iter()
+        .any(|f| f.name == "main" && f.module.is_none());
+    for f in &mut program.functions {
+        if !has_main && f.name == "vyrnServeMain" {
+            f.name = "main".to_string();
+        }
+        vyrn_frontend::project::walk_block(&mut f.body, &mut |e| {
+            if let Expr::Call { name, args, .. } = e {
+                if name == "serveStream" && args.len() == 1 {
+                    *name = "vyrnServePark".to_string();
+                }
+            }
+        });
+    }
+}
+
+/// One request, one stream frame, or one release, answered by a resident
+/// instance (RFC-0125 §3 M6). It is what [`serve_loop`] puts behind
+/// `call_handle`, on both of its routes.
+fn serve_wasm_call(res: &mut wasmrun::Resident, call: ServeCall) -> Result<ServeAnswer, String> {
+    match call {
+        ServeCall::Handle(req) => {
+            res.tell("vyrnServeBegin", &[])?;
+            res.tell("vyrnServeMethodIs", &[&req.method])?;
+            res.tell("vyrnServePathIs", &[&req.path])?;
+            for (k, v) in &req.headers {
+                res.tell("vyrnServeHeaderIs", &[k, v])?;
+            }
+            res.tell("vyrnServeBodyIs", &[&req.body])?;
+            let live = res.ask_bool("vyrnServeHandle")?;
+            let n = res.ask_int("vyrnServeHeaderCount")?;
+            let mut headers = Vec::with_capacity(n.max(0) as usize);
+            for i in 0..n {
+                headers.push((
+                    res.ask_text("vyrnServeHeaderKey", Some(i))?,
+                    res.ask_text("vyrnServeHeaderValue", Some(i))?,
+                ));
+            }
+            let resp = ServeResponse {
+                status: res.ask_int("vyrnServeStatusOf")?,
+                content_type: res.ask_text("vyrnServeTypeOf", None)?,
+                body: res.ask_text("vyrnServeBodyOf", None)?,
+                vary: res.ask_text("vyrnServeVaryOf", None)?,
+                headers,
+            };
+            Ok(if live {
+                ServeAnswer::Live(resp)
+            } else {
+                ServeAnswer::Buffered(resp)
+            })
+        }
+        ServeCall::Next => {
+            if res.ask_bool("vyrnServeNext")? {
+                Ok(ServeAnswer::Frame(Some(
+                    res.ask_text("vyrnServeFrameOf", None)?,
+                )))
+            } else {
+                Ok(ServeAnswer::Frame(None))
+            }
+        }
+        ServeCall::Close => {
+            res.tell("vyrnServeClose", &[])?;
+            Ok(ServeAnswer::Released)
+        }
+    }
+}
+
 /// `vyrn serve [file] [--port N]` (RFC-0016) — a hand-rolled HTTP/1.1 host on
-/// `std::net` (no crates), running the file's `handle` under the interpreter.
-/// Sequential accept loop, one request at a time: module state is race-free by
-/// construction. Default port 8080.
+/// `std::net` (no crates), running the file's `handle`. Sequential accept loop,
+/// one request at a time: module state is race-free by construction. Default
+/// port 8080.
+///
+/// `serve` (RFC-0125 §3 M6) serves the same file from the program's own
+/// wasm instead, on ONE resident instance: `_start` runs `main` and the module's
+/// initializers once, `proc_exit` unwinds the call and not the store, and every
+/// later request is a call through a door into a guest that still remembers what
+/// `main` wrote. Everything from `parse_request` outward is shared.
 fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     // Optional `--port N` (default 8080).
     let mut port: u16 = 8080;
@@ -4391,23 +4743,20 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let program = match load_program(path, &source) {
+    // The doors go in BEFORE the load, so nothing about them skips a judgment:
+    // appended text is the root module's own, and the checker reads it with the
+    // rest. Appending also leaves every line of the program where it was, so a
+    // diagnostic still points where the author looks.
+    let source = format!("{source}\n{SERVE_SHIM}");
+    let (mut program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    serve_rewrite(&mut program);
+    let program = program;
+    let _memo = shared_desugars(&program);
 
-    // `vyrn serve` requires `fn handle(req: Request) -> Response` (exactly this
-    // signature — the checker's no-`main` exemption uses the same rule).
-    use vyrn_frontend::ast::Type;
-    let has_handle = program.functions.iter().any(|f| {
-        f.name == "handle"
-            && !f.is_extern
-            && f.params.len() == 1
-            && f.params[0].ty == Type::Named("Request".to_string())
-            && f.ret == Type::Named("Response".to_string())
-    });
-    if !has_handle {
+    if !has_served_handle(&program) {
         eprintln!("error: `vyrn serve` needs `fn handle(req: Request) -> Response` in {path}");
         return ExitCode::FAILURE;
     }
@@ -4424,46 +4773,96 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
     let file_label = path.to_string();
 
-    // `--workers N` (RFC-0025): N worker threads, each owning an independent
-    // interpreter, gated on the isolation analysis — refused (with the call
-    // path) when `handle` touches module state.
+    serve_loop(
+        &program,
+        vec![path.to_string()],
+        listener,
+        workers,
+        None,
+        "serve",
+        move |n| {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            match n {
+                Some(n) => eprintln!(
+                    "serving {file_label} on http://localhost:{actual_port} with {n} workers"
+                ),
+                None => eprintln!("serving {file_label} on http://localhost:{actual_port}"),
+            }
+        },
+    )
+}
+
+/// The signature a served root must have (RFC-0016): `fn handle(req: Request) ->
+/// Response`, exactly.
+///
+/// `vyrn serve` and `vyrn dev` both require it and each used to write the
+/// predicate out. The checker states it a THIRD time, over its own signature
+/// table, and that one stays where it is: `sigs` holds one entry per name, so a
+/// program with two `handle`s has already been refused by the time it is asked,
+/// and a walk over `program.functions` would answer about a program the checker
+/// never sees.
+fn has_served_handle(program: &vyrn_frontend::ast::Program) -> bool {
+    use vyrn_frontend::ast::Type;
+    program.functions.iter().any(|f| {
+        f.name == "handle"
+            && !f.is_extern
+            && f.params.len() == 1
+            && f.params[0].ty == Type::Named("Request".to_string())
+            && f.ret == Type::Named("Response".to_string())
+    })
+}
+
+/// The serving loop, which is one loop: `vyrn serve` and `vyrn dev` differ in
+/// what they say and what they put in front of the doors, not in how they serve.
+///
+/// Without `--workers`, one resident instance answers every request: `_start`
+/// initializes module state and runs `main`, and the store stays open behind it
+/// so the doors read what `main` wrote (RFC-0125 §3 M6). With it, RFC-0025's
+/// pool of N instances answers, behind [`refuse_workers_if_stateful`].
+///
+/// `banner` is the command's own greeting, printed once the port is bound and
+/// `main` has run, and it is handed the worker count so a pooled run can say so.
+/// `assets` is `vyrn dev`'s static tree; `vyrn serve` has none.
+fn serve_loop(
+    program: &vyrn_frontend::ast::Program,
+    argv: Vec<String>,
+    listener: std::net::TcpListener,
+    workers: Option<usize>,
+    assets: Option<&DevAssets>,
+    what: &str,
+    banner: impl Fn(Option<usize>) + Send,
+) -> ExitCode {
     if let Some(n) = workers {
-        if let Some(exit) = refuse_workers_if_stateful(&program) {
+        if let Some(exit) = refuse_workers_if_stateful(program) {
             return exit;
         }
         let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
         let rx = std::sync::Mutex::new(rx);
-        let result = vyrn_frontend::interp::serve_pool(
-            &program,
-            n,
-            |_i, call_handle| loop {
+        let each =
+            |_i: usize, call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>| loop {
                 // spmc over std: each idle worker takes the next connection.
                 let stream = rx.lock().unwrap().recv();
                 match stream {
-                    Ok(mut s) => serve_one(&mut s, call_handle),
+                    Ok(mut s) => serve_one(&mut s, assets, call_handle),
                     Err(_) => break, // accept loop gone; drain out
                 }
-            },
-            move || {
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                eprintln!(
-                    "serving {file_label} on http://localhost:{actual_port} with {n} workers"
-                );
-                for stream in listener.incoming() {
-                    match stream {
-                        Ok(s) => {
-                            if tx.send(s).is_err() {
-                                break;
-                            }
+            };
+        let listen = move || {
+            banner(Some(n));
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        if tx.send(s).is_err() {
+                            break;
                         }
-                        Err(_) => continue,
                     }
+                    Err(_) => continue,
                 }
-                Ok(())
-            },
-        );
-        return match result {
+            }
+            Ok(())
+        };
+        return match serve_pool_wasm(program, argv, n, each, listen) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e}");
@@ -4471,31 +4870,134 @@ fn serve_cmd(path: &str, rest: &[String]) -> ExitCode {
             }
         };
     }
-
-    // The interpreter thread owns one live `Interp` (module state persists); it
-    // runs `main` once, then invokes this accept loop with a per-request handler.
-    let result = vyrn_frontend::interp::serve(&program, move |call_handle| {
-        use std::io::Write;
-        // `main` (if any) has already run; flush its stdout so its startup
-        // output precedes the serving banner regardless of buffering mode.
-        let _ = std::io::stdout().flush();
-        eprintln!("serving {file_label} on http://localhost:{actual_port}");
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut s) => serve_one(&mut s, call_handle),
-                Err(_) => continue,
-            }
-        }
-        Ok(())
-    });
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
+    let bytes = match vyrn_codegen::direct::compile(program) {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
+        }
+    };
+    let run = wasmrun::Run {
+        argv,
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        // The guest's own standard error is read per call: a trap inside a door
+        // writes its wording there and the serving loop logs THAT, rather than a
+        // wasm backtrace.
+        capture_stderr: true,
+        meter: false,
+    };
+    let mut res = match wasmrun::start(&bytes, &run, None) {
+        Ok((res, 0)) => res,
+        Ok((mut res, code)) => {
+            eprint!("{}", res.drain_err());
+            eprintln!("error: main returned {code}, aborting {what}");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    eprint!("{}", res.drain_err());
+    banner(None);
+    let mut call_handle = |call| serve_wasm_call(&mut res, call);
+    for stream in listener.incoming() {
+        match stream {
+            Ok(mut s) => serve_one(&mut s, assets, &mut call_handle),
+            Err(_) => continue,
         }
     }
+    ExitCode::SUCCESS
 }
+
+/// RFC-0025's pool on the compiled route: N resident instances, one per worker
+/// thread, over one Cranelift compile.
+///
+/// [`serve_loop`] owns the accept loop, the request handler and the spmc channel
+/// above it; what this owns is the compile and the instances.
+///
+/// `main` runs ONCE, on a setup instance that is then dropped. The workers run a
+/// program whose `main`
+/// returns 0 and does nothing else, so each instance still initializes its own
+/// module state (RFC-0013) and no worker repeats `main`'s effects. That is sound
+/// here and nowhere else: [`refuse_workers_if_stateful`] has already proved
+/// `handle` reads and writes no module state, so what `main` left in one is
+/// unreachable from a request.
+fn serve_pool_wasm<W, A>(
+    program: &vyrn_frontend::ast::Program,
+    argv: Vec<String>,
+    workers: usize,
+    worker: W,
+    accept: A,
+) -> Result<(), String>
+where
+    W: Fn(usize, &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>) + Send + Sync,
+    A: FnOnce() -> Result<(), String> + Send,
+{
+    use vyrn_frontend::ast::{Block, Expr, Stmt};
+    let run = wasmrun::Run {
+        argv,
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        capture_stderr: true,
+        meter: false,
+    };
+    // Setup: module state + `main`, once, before any worker exists.
+    let bytes = vyrn_codegen::direct::compile(program)?;
+    let (mut setup, code) = wasmrun::start(&bytes, &run, None)?;
+    eprint!("{}", setup.drain_err());
+    if code != 0 {
+        return Err(format!("main returned {code}, aborting serve"));
+    }
+    drop(setup);
+
+    let mut quiet = program.clone();
+    if let Some(main) = quiet
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "main" && f.module.is_none())
+    {
+        main.body = Block {
+            stmts: vec![Stmt::Return {
+                value: Some(Expr::Int(0)),
+                line: main.line,
+            }],
+        };
+    }
+    let module = wasmrun::compile(&vyrn_codegen::direct::compile(&quiet)?, false)?;
+
+    std::thread::scope(|s| {
+        let (worker, module, run) = (&worker, &module, &run);
+        for i in 0..workers {
+            std::thread::Builder::new()
+                // Cranelift-compiled code runs on this stack, and a served
+                // program may recurse as deeply as any other.
+                .stack_size(WORKER_STACK_BYTES)
+                .spawn_scoped(s, move || {
+                    let mut res = match wasmrun::start_on(module, run, None) {
+                        Ok((res, 0)) => res,
+                        Ok((_, code)) => {
+                            eprintln!("error: worker {i}: main returned {code}");
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("error: worker {i}: {e}");
+                            return;
+                        }
+                    };
+                    let mut handler = |call| serve_wasm_call(&mut res, call);
+                    worker(i, &mut handler);
+                })
+                .expect("failed to spawn a worker thread");
+        }
+        accept()
+    })
+}
+
+/// One worker thread's stack: room for the guest's own recursion under
+/// Cranelift, which a served program has as much of as any other.
+const WORKER_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 /// The RFC-0025 worker gate: `--workers` requires a module-state-free `handle`
 /// (transitively — the existing isolation analysis answers the question).
@@ -4623,20 +5125,18 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let program = match load_program(&server_path, &source) {
+    let source = format!(
+        "{source}
+{SERVE_SHIM}"
+    );
+    let (mut program, _dsg) = match loaded(&server_path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
-    use vyrn_frontend::ast::Type;
-    let has_handle = program.functions.iter().any(|f| {
-        f.name == "handle"
-            && !f.is_extern
-            && f.params.len() == 1
-            && f.params[0].ty == Type::Named("Request".to_string())
-            && f.ret == Type::Named("Response".to_string())
-    });
-    if !has_handle {
+    serve_rewrite(&mut program);
+    let program = program;
+    let _memo = shared_desugars(&program);
+    if !has_served_handle(&program) {
         eprintln!(
             "error: the server root `{server_rel}` needs `fn handle(req: Request) -> Response`"
         );
@@ -4657,79 +5157,30 @@ fn dev_cmd(rest: &[String]) -> ExitCode {
         wasm: wasm_out,
     };
 
-    let banner = move |assets: &DevAssets| {
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
-        eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
-        eprintln!("dev:   /client.wasm   -> built from {client_rel}");
-        eprintln!(
-            "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
-        );
-        eprintln!("dev:   /              -> {}/", assets.public_dir.display());
-    };
+    let public_shown = assets.public_dir.display().to_string();
 
-    // `--workers N` passes through to the same RFC-0025 pool as `vyrn serve`,
-    // behind the same module-state gate.
-    if let Some(n) = workers {
-        if let Some(exit) = refuse_workers_if_stateful(&program) {
-            return exit;
-        }
-        let (tx, rx) = std::sync::mpsc::channel::<std::net::TcpStream>();
-        let rx = std::sync::Mutex::new(rx);
-        let assets = &assets;
-        let result = vyrn_frontend::interp::serve_pool(
-            &program,
-            n,
-            |_i, call_handle| loop {
-                let stream = rx.lock().unwrap().recv();
-                match stream {
-                    Ok(mut s) => dev_serve_one(&mut s, assets, call_handle),
-                    Err(_) => break,
-                }
-            },
-            move || {
-                banner(assets);
+    serve_loop(
+        &program,
+        vec![server_path.clone()],
+        listener,
+        workers,
+        Some(&assets),
+        "dev",
+        move |n| {
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            eprintln!("dev: serving {server_rel} on http://localhost:{actual_port}");
+            eprintln!("dev:   /rpc/*         -> server `handle` (rpcHandle + your pages)");
+            eprintln!("dev:   /client.wasm   -> built from {client_rel}");
+            eprintln!(
+                "dev:   /vyrn-runtime/ -> web runtimes (wasi-min.js, vyrn-rpc.js, vyrn-query.js)"
+            );
+            eprintln!("dev:   /              -> {public_shown}/");
+            if let Some(n) = n {
                 eprintln!("dev:   workers        -> {n}");
-                for stream in listener.incoming() {
-                    match stream {
-                        Ok(s) => {
-                            if tx.send(s).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => continue,
-                    }
-                }
-                Ok(())
-            },
-        );
-        return match result {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
             }
-        };
-    }
-
-    let result = vyrn_frontend::interp::serve(&program, move |call_handle| {
-        banner(&assets);
-        for stream in listener.incoming() {
-            match stream {
-                Ok(mut s) => dev_serve_one(&mut s, &assets, call_handle),
-                Err(_) => continue,
-            }
-        }
-        Ok(())
-    });
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
-        }
-    }
+        },
+    )
 }
 
 /// Static asset roots for `vyrn dev`.
@@ -4810,98 +5261,6 @@ fn dev_content_type(path: &Path) -> &'static str {
     }
 }
 
-/// One `vyrn dev` connection: static-first for a matching GET, otherwise the
-/// server's `handle` (all POSTs, `/rpc/*`, and non-file GETs).
-fn dev_serve_one(
-    stream: &mut std::net::TcpStream,
-    assets: &DevAssets,
-    call_handle: &mut dyn FnMut(
-        vyrn_frontend::interp::ServeCall,
-    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
-) {
-    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
-    let req = match parse_request(stream) {
-        Ok(r) => r,
-        Err(ParseError::Chunked { method, path }) => {
-            eprintln!("{method} {path} -> 501");
-            write_response(
-                stream,
-                501,
-                "text/plain",
-                b"chunked transfer-encoding not supported",
-            );
-            return;
-        }
-        Err(ParseError::TooLarge { method, path }) => {
-            eprintln!("{method} {path} -> 413");
-            write_response(stream, 413, "text/plain", b"request body too large");
-            return;
-        }
-        Err(ParseError::Bad) => {
-            eprintln!("- - -> 400");
-            write_response(stream, 400, "text/plain", b"bad request");
-            return;
-        }
-    };
-    // The browser-origin gate runs before anything else — static assets
-    // included: a cross-site page gets nothing from this server at all.
-    if let Some(body) = cross_origin_body(&req) {
-        write_cross_origin_refusal(stream, &req.method, &req.path, &body);
-        return;
-    }
-    // Static assets: GET (or HEAD) only, so nothing shadows a POST /rpc/*.
-    if req.method == "GET" || req.method == "HEAD" {
-        if let Some(file) = dev_static_path(&req.path, assets) {
-            match std::fs::read(&file) {
-                Ok(bytes) => {
-                    eprintln!("{} {} -> 200 (static)", req.method, req.path);
-                    if req.method == "HEAD" {
-                        // RFC 9110 §9.3.2: HEAD sends the headers GET would,
-                        // true Content-Length included, and no body.
-                        write_head_response(stream, 200, dev_content_type(&file), bytes.len());
-                    } else {
-                        write_response(stream, 200, dev_content_type(&file), &bytes);
-                    }
-                }
-                Err(_) => {
-                    eprintln!("{} {} -> 500", req.method, req.path);
-                    write_response(stream, 500, "text/plain", b"cannot read asset");
-                }
-            }
-            return;
-        }
-    }
-    // Otherwise: into Vyrn's `handle` (rpcHandle + the app's own routes).
-    let method = req.method.clone();
-    let path = req.path.clone();
-    match call_handle(ServeCall::Handle(req)) {
-        Ok(ServeAnswer::Live(head)) => {
-            eprintln!("{method} {path} -> {} (stream)", head.status);
-            pump_stream(stream, &head, call_handle);
-        }
-        Ok(ServeAnswer::Buffered(resp)) => {
-            eprintln!("{method} {path} -> {}", resp.status);
-            write_response_vary(
-                stream,
-                resp.status,
-                &resp.content_type,
-                &resp.vary,
-                &resp.headers,
-                resp.body.as_bytes(),
-            );
-        }
-        Ok(_) => {
-            eprintln!("{method} {path} -> 500");
-            write_response(stream, 500, "text/plain", b"internal error");
-        }
-        Err(msg) => {
-            eprintln!("error: {msg}");
-            eprintln!("{method} {path} -> 500");
-            write_response(stream, 500, "text/plain", b"internal error");
-        }
-    }
-}
-
 /// The value of a lowercased request-header name.
 fn request_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
     headers
@@ -4956,7 +5315,7 @@ fn origin_is_host(origin: &str, host: &str) -> bool {
 ///   has no site to be cross of, so it passes, upgrade or not.
 ///
 /// The `Some` answer is the refusal body.
-fn cross_origin_body(req: &vyrn_frontend::interp::ServeRequest) -> Option<String> {
+fn cross_origin_body(req: &ServeRequest) -> Option<String> {
     let Some(host) = request_header(&req.headers, "host") else {
         return Some("request without a Host header".to_string());
     };
@@ -5015,51 +5374,25 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 /// response, close. Malformed input answers 400 without reaching Vyrn; a chunked
 /// body answers 501; a Vyrn trap is logged and answered 500 (the server keeps
 /// running — one bad request must not kill it).
+///
+/// `assets` is what `vyrn dev` adds and `vyrn serve` does not have: a GET or a
+/// HEAD whose path names a file under the public dir, the built client wasm or a
+/// runtime is answered off the disk, and everything else — every POST, every
+/// `/rpc/*`, every GET that is no file — goes to `handle` exactly as it does
+/// without it. `None` is `serve`.
+///
+/// The two used to be two functions, `serve_one` and `dev_serve_one`, and 89 of
+/// `dev`'s 274 lines were this one's, restated. They had already drifted apart
+/// in shape — one wrote the parse refusals as early returns and the other as
+/// match arms — and a drift in shape is how a drift in ANSWER arrives next. The
+/// static block is the whole difference, so the whole difference is an argument.
 fn serve_one(
     stream: &mut std::net::TcpStream,
-    call_handle: &mut dyn FnMut(
-        vyrn_frontend::interp::ServeCall,
-    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+    assets: Option<&DevAssets>,
+    call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
 ) {
-    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
-    match parse_request(stream) {
-        Ok(req) => {
-            // The same browser-origin gate `dev` answers through, ahead of
-            // `handle` — the 101 upgrade path included.
-            if let Some(body) = cross_origin_body(&req) {
-                write_cross_origin_refusal(stream, &req.method, &req.path, &body);
-                return;
-            }
-            let method = req.method.clone();
-            let path = req.path.clone();
-            match call_handle(ServeCall::Handle(req)) {
-                Ok(ServeAnswer::Live(head)) => {
-                    eprintln!("{method} {path} -> {} (stream)", head.status);
-                    pump_stream(stream, &head, call_handle);
-                }
-                Ok(ServeAnswer::Buffered(resp)) => {
-                    eprintln!("{method} {path} -> {}", resp.status);
-                    write_response_vary(
-                        stream,
-                        resp.status,
-                        &resp.content_type,
-                        &resp.vary,
-                        &resp.headers,
-                        resp.body.as_bytes(),
-                    );
-                }
-                Ok(_) => {
-                    eprintln!("{method} {path} -> 500");
-                    write_response(stream, 500, "text/plain", b"internal error");
-                }
-                Err(msg) => {
-                    // Canonical trap wording to stderr, then a generic 500.
-                    eprintln!("error: {msg}");
-                    eprintln!("{method} {path} -> 500");
-                    write_response(stream, 500, "text/plain", b"internal error");
-                }
-            }
-        }
+    let req = match parse_request(stream) {
+        Ok(r) => r,
         Err(ParseError::Chunked { method, path }) => {
             eprintln!("{method} {path} -> 501");
             write_response(
@@ -5068,14 +5401,78 @@ fn serve_one(
                 "text/plain",
                 b"chunked transfer-encoding not supported",
             );
+            return;
         }
         Err(ParseError::TooLarge { method, path }) => {
             eprintln!("{method} {path} -> 413");
             write_response(stream, 413, "text/plain", b"request body too large");
+            return;
         }
         Err(ParseError::Bad) => {
             eprintln!("- - -> 400");
             write_response(stream, 400, "text/plain", b"bad request");
+            return;
+        }
+    };
+    // The browser-origin gate runs before anything else — static assets
+    // included: a cross-site page gets nothing from this server at all. The 101
+    // upgrade path is covered by being ahead of `handle`.
+    if let Some(body) = cross_origin_body(&req) {
+        write_cross_origin_refusal(stream, &req.method, &req.path, &body);
+        return;
+    }
+    // Static assets: GET (or HEAD) only, so nothing shadows a POST /rpc/*.
+    if let Some(assets) = assets {
+        if req.method == "GET" || req.method == "HEAD" {
+            if let Some(file) = dev_static_path(&req.path, assets) {
+                match std::fs::read(&file) {
+                    Ok(bytes) => {
+                        eprintln!("{} {} -> 200 (static)", req.method, req.path);
+                        if req.method == "HEAD" {
+                            // RFC 9110 §9.3.2: HEAD sends the headers GET would,
+                            // true Content-Length included, and no body.
+                            write_head_response(stream, 200, dev_content_type(&file), bytes.len());
+                        } else {
+                            write_response(stream, 200, dev_content_type(&file), &bytes);
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("{} {} -> 500", req.method, req.path);
+                        write_response(stream, 500, "text/plain", b"cannot read asset");
+                    }
+                }
+                return;
+            }
+        }
+    }
+    // Otherwise: into Vyrn's `handle` (rpcHandle + the app's own routes).
+    let method = req.method.clone();
+    let path = req.path.clone();
+    match call_handle(ServeCall::Handle(req)) {
+        Ok(ServeAnswer::Live(head)) => {
+            eprintln!("{method} {path} -> {} (stream)", head.status);
+            pump_stream(stream, &head, call_handle);
+        }
+        Ok(ServeAnswer::Buffered(resp)) => {
+            eprintln!("{method} {path} -> {}", resp.status);
+            write_response_vary(
+                stream,
+                resp.status,
+                &resp.content_type,
+                &resp.vary,
+                &resp.headers,
+                resp.body.as_bytes(),
+            );
+        }
+        Ok(_) => {
+            eprintln!("{method} {path} -> 500");
+            write_response(stream, 500, "text/plain", b"internal error");
+        }
+        Err(msg) => {
+            // Canonical trap wording to stderr, then a generic 500.
+            eprintln!("error: {msg}");
+            eprintln!("{method} {path} -> 500");
+            write_response(stream, 500, "text/plain", b"internal error");
         }
     }
 }
@@ -5090,9 +5487,7 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Parse one HTTP/1.1 request off the wire: request line, headers (case-
 /// insensitive) up to CRLF CRLF, then exactly `Content-Length` body bytes.
-fn parse_request(
-    stream: &mut std::net::TcpStream,
-) -> Result<vyrn_frontend::interp::ServeRequest, ParseError> {
+fn parse_request(stream: &mut std::net::TcpStream) -> Result<ServeRequest, ParseError> {
     use std::io::Read;
     // Read until the header terminator (CRLF CRLF), guarding header size.
     let mut buf: Vec<u8> = Vec::new();
@@ -5193,7 +5588,7 @@ fn parse_request(
     // decoding would silently corrupt it).
     let body = String::from_utf8(body).map_err(|_| ParseError::Bad)?;
 
-    Ok(vyrn_frontend::interp::ServeRequest {
+    Ok(ServeRequest {
         method,
         path: target,
         headers,
@@ -5257,13 +5652,11 @@ fn reason_phrase(status: i64) -> &'static str {
 /// infinite reconnect loop — the client comes back once, is told 204, and stops.
 fn pump_stream(
     stream: &mut std::net::TcpStream,
-    head: &vyrn_frontend::interp::ServeResponse,
-    call_handle: &mut dyn FnMut(
-        vyrn_frontend::interp::ServeCall,
-    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+    head: &ServeResponse,
+    call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
 ) {
     use std::io::Write;
-    use vyrn_frontend::interp::ServeCall;
+    use ServeCall;
 
     // A `101` is `ws` (RFC-0074 M3b). The status is the discriminator because the
     // protocol already made it one: a WebSocket handshake IS a 101, so nothing had
@@ -5321,11 +5714,8 @@ fn pump_stream(
 /// running. Shared by both adapters, which is most of what "the signal
 /// generalises" means in code.
 fn pull_frame(
-    call_handle: &mut dyn FnMut(
-        vyrn_frontend::interp::ServeCall,
-    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+    call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
 ) -> Option<String> {
-    use vyrn_frontend::interp::{ServeAnswer, ServeCall};
     match call_handle(ServeCall::Next) {
         Ok(ServeAnswer::Frame(f)) => f,
         Ok(_) => None,
@@ -5357,13 +5747,11 @@ fn pull_frame(
 /// is nothing in this RFC that would say what one looks like.
 fn pump_socket(
     stream: &mut std::net::TcpStream,
-    head: &vyrn_frontend::interp::ServeResponse,
-    call_handle: &mut dyn FnMut(
-        vyrn_frontend::interp::ServeCall,
-    ) -> Result<vyrn_frontend::interp::ServeAnswer, String>,
+    head: &ServeResponse,
+    call_handle: &mut dyn FnMut(ServeCall) -> Result<ServeAnswer, String>,
 ) {
     use std::io::Write;
-    use vyrn_frontend::interp::ServeCall;
+    use ServeCall;
 
     // `closeCode` and `maxFrame`, in the slot SSE uses for its prologue.
     let mut nums = head.body.split_whitespace();
@@ -5629,6 +6017,230 @@ fn write_response_vary(
     let _ = stream.flush();
 }
 
+/// `vyrn run` (RFC-0125 M5): the program compiled by the direct
+/// backend and run in the embedded wasmtime, with the arguments, streams and
+/// exit code `vyrn run` gives the interpreter. The kernel's refusals apply as
+/// they do to `build`, since this is the same route.
+///
+/// `profile` carries the time the LOAD took, and asks for the rest: it is
+/// `Some` for `vyrn run --profile` (RFC-0125 §3 M5, the
+/// `run-profile` row), which reports phases and a count where the interpreter
+/// reports per-function rows. See [`wasm_profile`].
+fn run_wasm(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+    prog_args: &[String],
+    profile: Option<std::time::Duration>,
+) -> ExitCode {
+    let clock = std::time::Instant::now();
+    let bytes = match vyrn_codegen::direct::compile(program) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let compile = clock.elapsed();
+    let mut argv = vec![path.to_string()];
+    argv.extend(prog_args.iter().cloned());
+    let run = wasmrun::Run {
+        argv,
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        capture_stderr: false,
+        meter: profile.is_some(),
+    };
+    match wasmrun::run(&bytes, run) {
+        Ok(out) => {
+            if let (Some(load), Some(meter)) = (profile, out.meter.as_ref()) {
+                wasm_profile(load, compile, meter);
+            }
+            ExitCode::from((out.code & 0xff) as u8)
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The profile of a compiled run, to standard error (RFC-0125 §3 M5, the
+/// `run-profile` row).
+///
+/// `--profile` under the interpreter names functions, because the tree-walker
+/// funnels every Vyrn call through one place and can charge a span there. The
+/// compiled route has no such place: the program is machine code, and a
+/// per-function table would need the emitter to instrument bytes no user runs.
+/// So this reports what is true instead of what the other engine reports — the
+/// four phases, and the operations the guest executed.
+///
+/// The count is wasmtime's fuel, read rather than spent: the store is given a
+/// budget nothing exhausts and the balance is the answer. It counts operations
+/// rather than timing them, so unlike every row above it, it is the same number
+/// on a loaded machine as on an idle one, and the same on someone else's.
+///
+/// The phase table is `vyrn_frontend::prof`'s, the one `VYRN_BUILD_PROFILE=1`
+/// prints (RFC-0125 §3 M4), because a phase of a run and a phase of a build are
+/// the same kind of row and the wording exists.
+fn wasm_profile(load: std::time::Duration, compile: std::time::Duration, meter: &wasmrun::Meter) {
+    vyrn_frontend::prof::charge("load", load);
+    vyrn_frontend::prof::charge("compile", compile);
+    vyrn_frontend::prof::charge("translate", meter.translate);
+    vyrn_frontend::prof::charge("instantiate", meter.instantiate);
+    vyrn_frontend::prof::charge("run", meter.run);
+    eprint!("{}", vyrn_frontend::prof::phase_table());
+    eprintln!(
+        "
+{} operation(s) executed",
+        meter.fuel
+    );
+}
+
+/// One `test` or `bench` body, as [`bodies_wasm`] runs it.
+struct Body {
+    name: String,
+    body: vyrn_frontend::ast::Block,
+    line: usize,
+}
+
+/// `vyrn test` and `vyrn bench --check` (RFC-0125
+/// M5): the selected bodies, each run once as compiled wasm, with the lines
+/// the interpreter prints.
+///
+/// One module, ONE instance, one door per body. Each body is lifted into an
+/// RFC-0012 `export extern fn __vyrn_body_<k>`, `_start` runs the module's
+/// initializers and a `main` that does nothing else, and the store stays open
+/// behind it — so body `k+1` reads what body `k` wrote, which is RFC-0029's
+/// locked rule (one instance per process, state lives for the process) and
+/// what a `test` block has always meant. The ninth slice of RFC-0125 §3 M5
+/// decided it, when the tree-walker was still there to disagree.
+///
+/// A trap inside a door writes `error: <message>` on fd 2 and exits the call
+/// and not the store, so the host turns the message into the `FAILED:` line
+/// and knocks on the next door. `assert`, `assertEq` and `blackBox` are
+/// lowered by the direct backend like every other builtin; nothing is
+/// rewritten here.
+fn bodies_wasm(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+    kind: &str,
+    bodies: &[Body],
+) -> ExitCode {
+    use vyrn_frontend::ast::{Block, Expr, Stmt, Type};
+    if bodies.is_empty() {
+        // `test` said `no tests` before the filter; `bench` says it after.
+        println!("no {kind}es");
+        return ExitCode::SUCCESS;
+    }
+    let mut prog = program.clone();
+    // The root's `main` is not run by `test` or `bench`; the harness is `main`.
+    prog.functions
+        .retain(|f| !(f.name == "main" && f.module.is_none()));
+    prog.tests.clear();
+    prog.benches.clear();
+    for (k, b) in bodies.iter().enumerate() {
+        prog.functions.push(synth_fn(
+            format!("__vyrn_body_{k}"),
+            b.body.clone(),
+            Type::Unit,
+            b.line,
+            true,
+        ));
+    }
+    // `_start` is what initializes the module's state, and it reaches it through
+    // `main`. This `main` does nothing else: the bodies are doors, not a
+    // dispatch, so nothing has to tell the guest which one to run.
+    let main = Block {
+        stmts: vec![Stmt::Return {
+            value: Some(Expr::Int(0)),
+            line: 0,
+        }],
+    };
+    prog.functions
+        .push(synth_fn("main".to_string(), main, Type::Int, 0, false));
+
+    // RFC-0125 §3 M5: a door that reaches a `gen fn` is generation code, so the
+    // whole module is compiled as a GENERATOR HOST — the same preparation and the
+    // same emitter RFC-0076's engine uses to run a generator anywhere else. A
+    // file whose doors reach no generator is untouched, which is why an ordinary
+    // `test` file pays for none of the `vyrn_gen` imports.
+    // RFC-0125 §3 M5, the one-reader slice: the doors above ARE the `test` and
+    // `bench` bodies, so the checker is told that before it types them. Without
+    // it every `assert`, `assertEq` and `blackBox` in a lifted body is refused
+    // as ordinary code and the record loses the arguments under it — which is
+    // where the emitters read a join's type from.
+    vyrn_frontend::checker::set_test_host(true);
+    let reach = vyrn_codegen::direct::gen_reach(&prog);
+    let generation = (0..bodies.len()).any(|k| reach.contains(&format!("__vyrn_body_{k}")));
+    let compiled = if generation {
+        vyrn_genwasm::prepare(&mut prog)
+            .ok_or_else(|| "a `test` block calls a generator this route cannot compile".to_string())
+            .and_then(|()| vyrn_codegen::direct::compile_gen_host(&prog))
+    } else {
+        vyrn_codegen::direct::compile(&prog)
+    };
+    vyrn_frontend::checker::set_test_host(false);
+    let bytes = match compiled {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let run = wasmrun::Run {
+        argv: vec![path.to_string()],
+        stdin_prefix: Vec::new(),
+        capture_stdout: false,
+        // Read per body: a trap inside a door writes its wording there, and
+        // that line is the `FAILED:` message.
+        capture_stderr: true,
+        meter: false,
+    };
+    let gen = generation.then(|| vyrn_genwasm::GenState::new(&prog));
+    let mut res = match wasmrun::start(&bytes, &run, gen) {
+        Ok((res, _)) => res,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    use std::io::Write;
+    let (mut ok, mut failed) = (0usize, 0usize);
+    {
+        // Whatever the module's initializers wrote, before the first body's
+        // line.
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(res.drain_err().as_bytes());
+        let _ = stderr.flush();
+    }
+    for (k, b) in bodies.iter().enumerate() {
+        let (rest, message) = res.call_body(&format!("__vyrn_body_{k}"));
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(rest.as_bytes());
+        let _ = stderr.flush();
+        let mut stdout = std::io::stdout().lock();
+        match message {
+            None => {
+                ok += 1;
+                let _ = writeln!(stdout, "{kind} {:?} ... ok", b.name);
+            }
+            Some(msg) => {
+                failed += 1;
+                let _ = writeln!(stdout, "{kind} {:?} ... FAILED: {msg}", b.name);
+            }
+        }
+        let _ = stdout.flush();
+    }
+    let verdict = if kind == "test" { "passed" } else { "ok" };
+    println!("\n{ok} {verdict}, {failed} failed");
+    if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
 fn build(path: &str, rest: &[String]) -> ExitCode {
     // parse optional `-o <out>` / `--target wasm`
     let mut out: Option<String> = None;
@@ -5677,11 +6289,11 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     };
 
-    let program = match load_program(path, &source) {
+    let (program, _dsg) = match loaded(path, &source) {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let _memo = shared_desugars();
+    let _memo = shared_desugars(&program);
     // default output name: <stem> (+ .exe on Windows, .wasm for wasm)
     let stem = Path::new(path)
         .file_stem()
@@ -5697,16 +6309,15 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         }
     });
 
-    // `--target wasm` is the direct backend (RFC-0077 M5), unconditionally. No
-    // clang, no wasi sysroot, no builtins archive, no `.ll` and no `.shim.c` — the
-    // module is written straight out.
+    // `--target wasm` is the emitter's own output (RFC-0077 M5). No clang, no
+    // wasm2c, no host: the module is written straight out.
     //
     // There is no switch here on purpose. The LLVM wasm path was kept beside this
     // one behind `VYRN_WASM_BACKEND` for the length of M2, and the flag was given a
     // deletion milestone at the same time it was introduced, because this repo has
     // already watched an ungated second backend rot to unbuildable in twelve days
-    // (`vyrn-codegen-llvm`, b1eef04). Native keeps the textual-IR route below, with
-    // its own parity column; wasm has this one, with its own.
+    // (`vyrn-codegen-llvm`, b1eef04). The native route below now starts from these
+    // same bytes (RFC-0125 §2.5), so there is one emitter and one thing to check.
     if wasm {
         return match vyrn_codegen::direct::compile(&program) {
             Ok(bytes) => match std::fs::write(&out_path, bytes) {
@@ -5726,33 +6337,66 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
         };
     }
 
-    let ir = match vyrn_codegen::emit(&program) {
-        Ok(ir) => ir,
+    match build_wasm2c(
+        path,
+        &program,
+        &out_path,
+        native_target.unwrap_or(DEFAULT_NATIVE_TARGET),
+    ) {
+        Ok(()) => {
+            println!("wrote {out_path}");
+            ExitCode::SUCCESS
+        }
+        Err(()) => ExitCode::FAILURE,
+    }
+}
+
+/// `vyrn build` (RFC-0125 §2.5; PLAN-0125-runtime §6 step 3): the program's
+/// wasm — the bytes `--target wasm` writes — through wasm2c to C, compiled with
+/// the WASI host of `wasi_host.c` and wabt's wasm-rt by clang at the native
+/// route's own flags, into a native executable.
+///
+/// It is THE native route since the flip. It was `--route wasm2c` beside a
+/// textual-IR route for four days, which is how long it took the measurement in
+/// RFC-0125 §3 M4 to decide it.
+///
+/// The intermediate files stay beside the output the way the textual route's
+/// `.ll` and `.shim.c` did, so a failure is inspectable: `<out>.wasm`,
+/// `<out>.w2c.c`, `<out>.w2c.h`, `<out>.host.c`.
+fn build_wasm2c(
+    path: &str,
+    program: &vyrn_frontend::ast::Program,
+    out_path: &str,
+    native_target: NativeTarget,
+) -> Result<(), ()> {
+    let start = Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let w2c = match vyrn_codegen::toolchain::wasm2c_from(&start) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            eprintln!(
+                "error: could not find `wasm2c`. Unpack a wabt release under tools/ \
+                 (tools/wabt-<version>/bin/wasm2c) or set VYRN_WASM2C to the executable."
+            );
+            return Err(());
+        }
         Err(e) => {
             eprintln!("error: {e}");
-            return ExitCode::FAILURE;
+            return Err(());
         }
     };
-
-    // write IR + the portable stream shim next to the output so failures are
-    // inspectable
-    let ll_path = PathBuf::from(&out_path).with_extension("ll");
-    if let Err(e) = std::fs::write(&ll_path, ir) {
-        eprintln!("error: cannot write {}: {e}", ll_path.display());
-        return ExitCode::FAILURE;
-    }
-    // The portable shim, plus a trap stub per `extern` import (RFC-0012). Native
-    // has no host to supply one, so the stub satisfies the symbol by printing the
-    // canonical "not available on this target" message and exiting — the same
-    // wording the interpreter traps with. On wasm an `extern` resolves to the host
-    // page's `vyrn` import namespace, which the direct backend declares itself.
-    let shim = runtime_shim() + &extern_trap_stubs(&program);
-    let shim_path = PathBuf::from(&out_path).with_extension("shim.c");
-    if let Err(e) = std::fs::write(&shim_path, &shim) {
-        eprintln!("error: cannot write {}: {e}", shim_path.display());
-        return ExitCode::FAILURE;
-    }
-
+    let Some((simde, _)) = vyrn_codegen::toolchain::simde_from(&start) else {
+        eprintln!(
+            "error: could not find simde. Unpack a simde release under tools/ \
+             (tools/simde/simde/wasm/simd128.h) or set VYRN_SIMDE to the directory that \
+             holds `simde/`."
+        );
+        return Err(());
+    };
     let clang = match find_clang() {
         Some(c) => c,
         None => {
@@ -5760,27 +6404,116 @@ fn build(path: &str, rest: &[String]) -> ExitCode {
                 "error: could not find `clang`. Install LLVM and put clang on PATH, \
                  or set the CLANG environment variable to its full path."
             );
-            return ExitCode::FAILURE;
+            return Err(());
         }
     };
 
-    let mut cmd = Command::new(&clang);
-    cmd.arg(&ll_path).arg(&shim_path).arg("-o").arg(&out_path);
-    // Resolved at the top of `build`; the wasm path never reaches this line.
-    add_native_clang_flags(&mut cmd, native_target.unwrap_or(DEFAULT_NATIVE_TARGET));
-    let status = cmd.status();
-    match status {
-        Ok(s) if s.success() => {
-            println!("wrote {out_path}");
-            ExitCode::SUCCESS
+    let bytes = match vyrn_codegen::direct::compile(program) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Err(());
         }
+    };
+    let out = PathBuf::from(out_path);
+    let wasm_path = out.with_extension("wasm");
+    let c_path = out.with_extension("w2c.c");
+    let host_path = out.with_extension("host.c");
+    let write = |p: &Path, data: &[u8]| -> bool {
+        if let Err(e) = std::fs::write(p, data) {
+            eprintln!("error: cannot write {}: {e}", p.display());
+            return false;
+        }
+        true
+    };
+    if !write(&wasm_path, &bytes) {
+        return Err(());
+    }
+    // The module name fixes the C names the host calls (`w2c_prog`,
+    // `wasm2c_prog_instantiate`, `w2c_prog_0x5Fstart`); wasm2c would otherwise
+    // take it from the output file's name.
+    let st = Command::new(&w2c.exe)
+        .arg("-n")
+        .arg("prog")
+        .arg(&wasm_path)
+        .arg("-o")
+        .arg(&c_path)
+        .status();
+    match st {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("error: wasm2c exited with {s}");
+            return Err(());
+        }
+        Err(e) => {
+            eprintln!("error: failed to run wasm2c ({}): {e}", w2c.exe.display());
+            return Err(());
+        }
+    }
+    // The host is written from the header wasm2c just wrote, because RFC-0012's
+    // `vyrn` namespace is per-program: one trap stub per import, at the arity
+    // the module declares. See `toolchain::wasi_host_c`.
+    let h_path = out.with_extension("w2c.h");
+    let header = match std::fs::read_to_string(&h_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", h_path.display());
+            return Err(());
+        }
+    };
+    if !write(
+        &host_path,
+        vyrn_codegen::toolchain::wasi_host_c(&header).as_bytes(),
+    ) {
+        return Err(());
+    }
+
+    // The header is included by its bare name: the host sits beside it, and a
+    // full path would put backslashes into a C string literal.
+    let h_name = h_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // `show_path`: a tool found under a canonicalized start carries Windows's
+    // verbatim `\\?\` prefix, which clang's `#include <simde/..>` search does
+    // not take.
+    let mut cmd = Command::new(&clang);
+    cmd.arg(&c_path)
+        .arg(&host_path)
+        .arg(show_path(&w2c.runtime.join("wasm-rt-impl.c")))
+        .arg(show_path(&w2c.runtime.join("wasm-rt-mem-impl.c")))
+        .arg("-o")
+        .arg(&out)
+        .arg(format!("-I{}", show_path(&w2c.include)))
+        .arg(format!("-I{}", show_path(&w2c.runtime)))
+        .arg(format!("-I{}", show_path(&simde)))
+        .arg(format!("-DVYRN_W2C_HEADER=\"{h_name}\""))
+        // wasm-rt counts call depth where it has no guard page (Windows), at
+        // 500 frames by default. Vyrn's own counter traps at
+        // `CALL_DEPTH_LIMIT` (1,000) user frames, and the runtime's frames
+        // (RFC-0125 M4 step 1) are not counted by it, so the host's limit sits
+        // above the program's with room for those; `error: call depth exceeds
+        // 1000` stays the program's wording, as under the engine.
+        .arg(format!(
+            "-DWASM_RT_MAX_CALL_STACK_DEPTH={}",
+            4 * vyrn_frontend::trap::CALL_DEPTH_LIMIT
+        ));
+    // The same `-O2 -ffp-contract=off -march=..` the text-IR route ships, so
+    // the two routes' numbers differ by the route and nothing else.
+    add_native_clang_flags(&mut cmd, native_target);
+    if cfg!(windows) {
+        // `random_get` is `BCryptGenRandom`, as in `wasmrun.rs`.
+        cmd.arg("-lbcrypt");
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => Ok(()),
         Ok(s) => {
             eprintln!("error: clang exited with {s}");
-            ExitCode::FAILURE
+            Err(())
         }
         Err(e) => {
             eprintln!("error: failed to run clang ({}): {e}", clang.display());
-            ExitCode::FAILURE
+            Err(())
         }
     }
 }
@@ -6136,7 +6869,7 @@ another bench   # trailing reason
     fn cross_origin_gate_refuses_foreign_pages_and_rebound_hosts() {
         // F2-071: a loopback bind does not stop another site's page from
         // driving the visitor's browser at this server.
-        let req = |headers: &[(&str, &str)]| vyrn_frontend::interp::ServeRequest {
+        let req = |headers: &[(&str, &str)]| ServeRequest {
             method: "GET".to_string(),
             path: "/rpc/x".to_string(),
             headers: headers
@@ -6191,7 +6924,7 @@ another bench   # trailing reason
         let port = listener.local_addr().expect("addr").port();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            serve_one(&mut stream, &mut |_call| {
+            serve_one(&mut stream, None, &mut |_call| {
                 panic!("the request reached `handle` — the cap did not hold");
             });
         });
@@ -6229,5 +6962,119 @@ another bench   # trailing reason
         for foreign in ["", ":8080", "evil.example", "evil.example:8080", "[::1"] {
             assert!(!loopback_host(foreign), "{foreign}");
         }
+    }
+
+    /// The doors, in process, on ONE resident instance (RFC-0125 §3 M6).
+    ///
+    /// The three suites that spawn a real server prove this over TCP; this proves
+    /// it without one, which is what makes a failure readable — a `Handle` that
+    /// answers wrong here names the door rather than a 500 on a socket. It pins
+    /// the three things the compiled route lacked: `handle` has a door, a
+    /// `Request` and a `Response` cross it field by field, and a `serveStream`
+    /// parks a producer the host pulls afterwards.
+    ///
+    /// It also prints what one answer costs, with `--nocapture`. A number rather
+    /// than an assertion about time, because the machine carries other gates.
+    #[test]
+    fn the_serve_doors_answer_on_one_resident_instance() {
+        const SRC: &str = r#"
+let mut hits: Int64 = 0
+
+fn main() -> Int64 {
+    hits = 100
+    return 0
+}
+
+fn handle(req: Request) -> Response {
+    hits = hits + 1
+    if req.path == "/live" {
+        let xs: Array<String> = ["a", "b"]
+        serveStream(fromArray(xs))
+        return Response { status: 200, contentType: "text/event-stream", body: "p", vary: "", headers: [:] }
+    }
+    return Response { status: 200, contentType: "text/plain", body: "\{hits}", vary: "v", headers: ["X-Echo": req.method.copy()] }
+}
+"#;
+        let dir = std::env::temp_dir().join("vyrn-serve-doors");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(format!("doors-{}.vyrn", std::process::id()));
+        let source = format!("{SRC}\n{SERVE_SHIM}");
+        std::fs::write(&file, &source).unwrap();
+        let key = file.to_string_lossy().replace('\\', "/");
+        let mut program = load_program(&key, &source).expect("the doors load and check");
+        serve_rewrite(&mut program);
+        let bytes = vyrn_codegen::direct::compile(&program).expect("the doors compile");
+        let run = wasmrun::Run {
+            argv: vec![key.clone()],
+            stdin_prefix: Vec::new(),
+            capture_stdout: true,
+            capture_stderr: true,
+            meter: false,
+        };
+        let (mut res, code) = wasmrun::start(&bytes, &run, None).expect("start");
+        assert_eq!(code, 0, "main exits 0");
+
+        let ask = |path: &str| ServeRequest {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            headers: vec![("host".to_string(), "localhost".to_string())],
+            body: String::new(),
+        };
+
+        // `main` wrote 100 and the store outlived its exit, so the first answer
+        // is 101 and the second 102 — the property one fresh instance per
+        // request cannot have.
+        for want in ["101", "102"] {
+            match serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))) {
+                Ok(ServeAnswer::Buffered(r)) => {
+                    assert_eq!(r.status, 200);
+                    assert_eq!(r.content_type, "text/plain");
+                    assert_eq!(r.body, want);
+                    assert_eq!(r.vary, "v");
+                    assert_eq!(r.headers, vec![("X-Echo".to_string(), "GET".to_string())]);
+                }
+                other => panic!("expected a buffered answer, got {:?}", other.map(|_| ())),
+            }
+        }
+
+        // A parked producer: the answer is a header block, and the frames come
+        // one `Next` at a time until the producer ends.
+        match serve_wasm_call(&mut res, ServeCall::Handle(ask("/live"))) {
+            Ok(ServeAnswer::Live(r)) => {
+                assert_eq!(r.status, 200);
+                assert_eq!(r.body, "p", "the prologue crosses with the header block");
+            }
+            other => panic!("expected a live answer, got {:?}", other.map(|_| ())),
+        }
+        for want in [Some("a"), Some("b"), None] {
+            match serve_wasm_call(&mut res, ServeCall::Next) {
+                Ok(ServeAnswer::Frame(got)) => assert_eq!(got.as_deref(), want),
+                other => panic!("expected a frame, got {:?}", other.map(|_| ())),
+            }
+        }
+        match serve_wasm_call(&mut res, ServeCall::Close) {
+            Ok(ServeAnswer::Released) => {}
+            other => panic!("expected a release, got {:?}", other.map(|_| ())),
+        }
+        // And the instance keeps serving after a stream closed.
+        match serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))) {
+            Ok(ServeAnswer::Buffered(r)) => assert_eq!(r.body, "104"),
+            other => panic!("expected a buffered answer, got {:?}", other.map(|_| ())),
+        }
+
+        // What one answer costs. This used to be the two engines interleaved,
+        // and the second column went with the tree-walker (RFC-0125 §3 M5).
+        // Printed rather than asserted: it is a cost, not a rule.
+        let n = 200;
+        let mut wasm = std::time::Duration::ZERO;
+        for _ in 0..3 {
+            let clock = std::time::Instant::now();
+            for _ in 0..n {
+                serve_wasm_call(&mut res, ServeCall::Handle(ask("/x"))).expect("answer");
+            }
+            wasm += clock.elapsed();
+        }
+        eprintln!("one answer: {:?} through the doors", wasm / (3 * n));
+        let _ = std::fs::remove_file(&file);
     }
 }

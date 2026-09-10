@@ -1,0 +1,12 @@
+Empty
+Ints len 4 sum 10 first 1
+Words len 3 first red last blue
+Points len 2 p0 (1,2) p1.y 4
+Tagged 9 len 3 sum 60
+Ints len 3 sum 18 first 5
+Ok len 3 sum 600
+Err no data
+Some len 3 mid b
+None
+{"Words":["x","y"]}
+Ints len 2 sum 17 first 8

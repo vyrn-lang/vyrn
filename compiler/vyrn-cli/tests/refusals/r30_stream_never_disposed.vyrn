@@ -1,0 +1,8 @@
+// RFC-0075 M1: a stream carries an obligation — it is consumed, forwarded, or
+// closed, on every path.
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    let s = fromArray(a)
+    print(1)
+    return 0
+}

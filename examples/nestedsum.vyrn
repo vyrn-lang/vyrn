@@ -1,0 +1,148 @@
+/// A sum inside a sum — RFC-0126 §8. `Option<Option<T>>`, `Option<Result<..>>`
+/// and `Result<Option<..>, ..>` were refused by the checker until this slice,
+/// and the refusal was conservatism rather than a limit: all three engines
+/// already boxed a wide payload, and a user enum with the same shape
+/// (`examples/enumarray.vyrn`'s `Bag`) has always been accepted.
+///
+/// The rule was also not enforced. `Map<K, Option<V>>.at(k)` answers
+/// `Option<Option<V>>` and always compiled, so the ban blocked the SPELLING
+/// `Some(x)` and let the same type in through a builtin — which is the
+/// asymmetry the census set out to price.
+///
+/// The wire is a separate question and keeps its own refusal: a nested
+/// `Option` has two readings of `null`, so `codec::wire` still declines it and
+/// `toJson` still reports "not a codable type".
+///
+/// Every feature RFC-0126 §5.5 lists as typed on the built-in sums is met here
+/// with a nested payload: `?`, `??`, `if let`, and `match` on both engines.
+
+/// The outer layer holds an inner layer that may itself be absent. A `String`
+/// payload so the drop path is exercised, not only the tag.
+fn wrapOpt(x: consume Option<String>) -> Option<Option<String>> {
+    return Some(x)
+}
+
+/// A `Result` whose success payload is itself optional.
+fn wrapRes(x: consume Option<String>) -> Result<Option<String>, String> {
+    return Ok(x)
+}
+
+/// The other order: an optional result. RFC-0024 already gave this one a wire
+/// form, because a payload enum never encodes as `null`.
+fn optOfRes(x: consume Result<String, String>) -> Option<Result<String, String>> {
+    return Some(x)
+}
+
+/// Two matches, one per layer — the shape a single `match` cannot flatten.
+fn show(o: consume Option<Option<String>>) {
+    match o {
+        Some(inner) => {
+            match inner {
+                Some(s) => print("some some \{s}"),
+                None => print("some none"),
+            }
+        }
+        None => print("none"),
+    }
+}
+
+/// `?` over a nested sum: the propagation is the OUTER layer's, and the value
+/// it hands back is still an `Option<Int64>`.
+fn peel(o: consume Option<Option<Int64>>) -> Option<Int64> {
+    let v = o?
+    return v
+}
+
+fn main() -> Int64 {
+    show(wrapOpt(Some("alpha")))
+    let absent: Option<String> = None
+    show(wrapOpt(absent))
+    let outerAbsent: Option<Option<String>> = None
+    show(outerAbsent)
+
+    match wrapRes(Some("beta")) {
+        Ok(inner) => {
+            match inner {
+                Some(s) => print("ok some \{s}"),
+                None => print("ok none"),
+            }
+        }
+        Err(e) => print("err \{e}"),
+    }
+
+    match optOfRes(Err("boom")) {
+        Some(inner) => {
+            match inner {
+                Ok(s) => print("some ok \{s}"),
+                Err(e) => print("some err \{e}"),
+            }
+        }
+        None => print("none"),
+    }
+
+    // An array of nested sums: the element stride is the outer aggregate and
+    // the inner one rides in its payload word, boxed.
+    let innerAbsent: Option<Int64> = None
+    let bothAbsent: Option<Option<Int64>> = None
+    let xs: Array<Option<Option<Int64>>> = [Some(Some(1)), Some(innerAbsent), bothAbsent]
+    let mut n = 0
+    for x in xs {
+        match x {
+            Some(inner) => {
+                match inner {
+                    Some(v) => { n = n + v }
+                    None => { n = n + 10 }
+                }
+            }
+            None => { n = n + 100 }
+        }
+    }
+    print("array \{n}")
+
+    // `?` propagates the outer layer.
+    match peel(Some(Some(4))) {
+        Some(v) => print("peel \{v}"),
+        None => print("peel none"),
+    }
+    let noOuter: Option<Option<Int64>> = None
+    match peel(noOuter) {
+        Some(v) => print("peel \{v}"),
+        None => print("peel propagated"),
+    }
+
+    // `if let` (RFC-0060) binds the outer payload, which is itself a sum.
+    if let Some(x) = Some(Some(5)) {
+        match x {
+            Some(v) => print("iflet \{v}"),
+            None => print("iflet empty"),
+        }
+    }
+
+    // `??` (RFC-0079) picks the outer layer's success or the fallback, and the
+    // fallback is the inner type.
+    let fallback: Option<Int64> = None
+    let picked = Some(Some(6)) ?? fallback
+    match picked {
+        Some(v) => print("nullish \{v}"),
+        None => print("nullish fallback"),
+    }
+
+    // The shape the ban never actually blocked: a map of optional values, whose
+    // lookup is a nested Option.
+    let mut m: Map<String, Option<Int64>> = [:]
+    m["a"] = Some(1)
+    m["b"] = None
+    let keys: Array<String> = ["a", "b", "c"]
+    for k in keys {
+        match m.at(k) {
+            Some(inner) => {
+                match inner {
+                    Some(v) => print("map \{k} = \{v}"),
+                    None => print("map \{k} present, empty"),
+                }
+            }
+            None => print("map \{k} absent"),
+        }
+    }
+    return 0
+}

@@ -186,12 +186,12 @@ fn the_same_source_emits_the_same_ir_in_every_process() {
     let outs: Vec<Vec<u8>> = (0..RUNS)
         .map(|_| {
             let o = vyrn()
-                .args(["emit-ir", &src.display().to_string()])
+                .args(["emit-wat", &src.display().to_string()])
                 .output()
-                .expect("vyrn emit-ir");
+                .expect("vyrn emit-wat");
             assert!(
                 o.status.success(),
-                "emit-ir failed:\n{}",
+                "emit-wat failed:\n{}",
                 String::from_utf8_lossy(&o.stderr)
             );
             o.stdout

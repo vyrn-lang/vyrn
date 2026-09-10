@@ -83,18 +83,65 @@ struct LspClient {
     seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+/// Whether a server under test takes part in the generator cache (RFC-0021).
+///
+/// A correctness test says `Off`: its fixtures are written and rewritten under
+/// the same paths, and a synthesized module from another run would answer for
+/// the one this run wrote.
+///
+/// A MEASUREMENT says `Private`. An editor's cache is on — that is the whole
+/// reason the server participates in it — so a keystroke on a file whose
+/// imports reach a generator pays a cache LOOKUP and not a generation. With it
+/// off, `site/app/docs.vyrn` re-ran `apiDocs` over the whole of `std` on every
+/// keystroke, and the measurement read 250 ms nobody's editor spends. It is a
+/// directory of its own rather than the user's `~/.vyrn/cache/gen`, so a test
+/// run neither reads nor writes what a build left there.
+enum GenCache {
+    Off,
+    Private,
+}
+
+/// The measurement's own generator cache. Under the system temp directory,
+/// which the gate sets per run, so two worktrees measuring at once do not
+/// share one.
+fn gen_cache_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("vyrn-lsp-keystroke-gen")
+}
+
 impl LspClient {
     fn spawn() -> std::io::Result<Self> {
+        Self::spawn_with(GenCache::Off)
+    }
+
+    /// A server with a generator cache of its OWN — RFC-0125 §3 M3, the
+    /// residue slice. See [`GenCache`].
+    fn spawn_cached() -> std::io::Result<Self> {
+        Self::spawn_with(GenCache::Private)
+    }
+
+    fn spawn_with(cache: GenCache) -> std::io::Result<Self> {
         // `CARGO_BIN_EXE_vyrn-lsp` points at the built server binary (the
         // `[[bin]] name = "vyrn-lsp"` in Cargo.toml).
         let bin = env!("CARGO_BIN_EXE_vyrn-lsp");
-        let mut child = Command::new(bin)
-            // Disable the shared generator cache so RFC-0033 fixtures never hit a
-            // stale synthesized module from another run.
-            .env("VYRN_NO_GEN_CACHE", "1")
+        let mut cmd = Command::new(bin);
+        match cache {
+            GenCache::Off => {
+                cmd.env("VYRN_NO_GEN_CACHE", "1");
+            }
+            GenCache::Private => {
+                cmd.env("VYRN_GEN_CACHE_DIR", gen_cache_dir());
+            }
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // `VYRN_BUILD_PROFILE=1` makes the server print a phase table per
+            // analysis, and a table nobody can read measures nothing.
+            .stderr(if std::env::var("VYRN_BUILD_PROFILE").is_ok() {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            })
             .spawn()?;
         let mut stdout = child.stdout.take().expect("stdout piped");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1092,7 +1139,15 @@ fn rfc33_scratch(tag: &str, vyx_body: &str) -> std::path::PathBuf {
 
 /// Spawn + initialize + initialized, ready for didOpen.
 fn rfc33_client() -> LspClient {
-    let mut client = LspClient::spawn().expect("spawn vyrn-lsp");
+    handshake(LspClient::spawn().expect("spawn vyrn-lsp"))
+}
+
+/// The same client with a generator cache of its own — see [`GenCache`].
+fn cached_client() -> LspClient {
+    handshake(LspClient::spawn_cached().expect("spawn vyrn-lsp"))
+}
+
+fn handshake(mut client: LspClient) -> LspClient {
     let init_id = serde_json::json!(1);
     client.send(&serde_json::json!({
         "jsonrpc": "2.0", "id": init_id, "method": "initialize",
@@ -5458,4 +5513,94 @@ fn a_pin_the_build_refuses_is_refused_in_the_editor() {
         "a lock the build refuses must not analyze clean: {text}"
     );
     let _ = client.child.kill();
+}
+
+// ===========================================================================
+// The editor asks the kernel — RFC-0125 §3 M3, the accumulation slice.
+// ===========================================================================
+
+/// A rule that has LEFT `movecheck.rs` is still shown in the editor, in the
+/// same words `vyrn check` uses.
+///
+/// Seven rules are stated by the kernel alone. `vyrn-lsp` depended only on
+/// `vyrn-frontend`, and the kernel lives in `vyrn-lower`, so every one of them
+/// went silent here the day it left: the editor accepted a program the build
+/// refuses. Row 12 of the refusals census is the pin — module state handed to
+/// a `consume` parameter — and the assertion is the TEXT, because a sentence
+/// that reaches the editor in other words is a second rule.
+#[test]
+fn a_rule_that_left_the_checker_is_still_shown_in_the_editor() {
+    let path = std::path::Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../vyrn-cli/tests/unlicensed/u12_module_state_to_a_consume_parameter_heapless.vyrn"
+    ));
+    let src = std::fs::read_to_string(path).expect("row 12's program should exist");
+
+    let mut client = rfc33_client();
+    did_open(&mut client, &file_uri(&path), "vyrn", &src);
+    let diags = read_diags_for(&mut client, "u12_module_state");
+    let list = diags["params"]["diagnostics"].as_array().unwrap();
+    let said: Vec<&str> = list.iter().filter_map(|d| d["message"].as_str()).collect();
+    assert_eq!(
+        said,
+        vec![
+            "module state `g` may not be passed to a `consume` parameter via `take(..)` \
+             — nothing may take ownership of module state (it lives for the whole module \
+             and is never dropped)"
+        ],
+        "the editor says what `vyrn check` says"
+    );
+    assert_eq!(list[0]["range"]["start"]["line"].as_u64(), Some(10));
+    let _ = client.child.kill();
+}
+
+/// What one keystroke costs on the site's own modules.
+///
+/// The driver asks the kernel of every program the core can lower, and the
+/// editor re-checks on every edit, so the measurement that matters is a
+/// `didChange` to `publishDiagnostics` round trip on a real file. The budget is
+/// the 97 ms one (RFC-0084).
+///
+/// The generator cache is ON here and off in every other test in this file
+/// ([`GenCache`]): an editor's is on, and with it off `docs.vyrn` re-ran
+/// `apiDocs` over the whole of `std` between one keystroke and the next.
+///
+/// `VYRN_NO_PLACER=1` stands the kernel aside and `VYRN_NO_MEMO=1` its memory,
+/// which are the two columns this one is read against.
+///
+/// `#[ignore]`d: it is a measurement, not an assertion.
+/// `cargo test --manifest-path compiler/vyrn-lsp/Cargo.toml --release --
+/// --ignored --nocapture keystroke_cost`
+#[test]
+#[ignore]
+fn keystroke_cost_on_the_sites_own_modules() {
+    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+    for name in ["bench.vyrn", "guide.vyrn", "chart.vyrn", "docs.vyrn"] {
+        let path = root.join("site/app").join(name);
+        let src = std::fs::read_to_string(&path).expect("a site module");
+        let uri = file_uri(&path);
+        let mut client = cached_client();
+        did_open(&mut client, &uri, "vyrn", &src);
+        let _ = read_diags_for(&mut client, name);
+
+        let n = 10;
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let text = format!("{src}\n// {i}\n");
+            client.send(&serde_json::json!({
+                "jsonrpc": "2.0", "method": "textDocument/didChange",
+                "params": {
+                    "textDocument": { "uri": uri, "version": 2 + i },
+                    "contentChanges": [ { "text": text } ]
+                }
+            }));
+            let _ = read_diags_for(&mut client, name);
+        }
+        let per = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        println!(
+            "keystroke {name}: {per:.1} ms over {} lines",
+            src.lines().count()
+        );
+        let _ = client.child.kill();
+    }
 }

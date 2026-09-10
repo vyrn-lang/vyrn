@@ -1,0 +1,18 @@
+Serve a directory over HTTP.
+
+Usage: serve [options] [<files>...]
+
+Options:
+  -p, --port <value>  The TCP port to listen on. (1 to 65535)
+  -r, --root <value>  The directory to serve. Must not be empty. (at least 1 byte long)
+      --host <value>
+  -v, --verbose
+  -h, --help          Show this help.
+
+----
+port=8080
+root=/srv/www
+host=example.com
+verbose=true
+file=a.txt
+file=b.txt

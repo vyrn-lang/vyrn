@@ -19,33 +19,33 @@ import { el, text, cls, attr, on, keyed, empty, toHtmlString, document, Html, At
 /// A small keyed list — the shape the M2 keyed differ reorders.
 fn itemRow(id: Int64, label: consume String) -> Html {
     return keyed("\{id}", el("li", [cls("row"), attr("data-id", "\{id}")], [
-                el("span", [cls("label")], [text(label)]),
-                el("button", [on("click", "removeItem", "\{id}")], [text("remove")]),
-            ]))
+        el("span", [cls("label")], [text(label)]),
+        el("button", [on("click", "removeItem", "\{id}")], [text("remove")]),
+    ]))
 }
 
 /// The page body: a heading, an escaping torture line, void elements, a form
 /// input with an `input` handler, a raw-markup island, and a keyed list.
 fn cartBody() -> Html {
     return el("main", [Id("app")], [
-            el("h1", [], [text("Cart & <friends>")]),
-            el("p", [attr("title", "a \"quoted\" & <angled> hint")], [
-                    text("5 < 6 and 6 > 5, always."),
-                ]),
-            el("hr", [], []),
-            // a void element takes no children — giving it any is refused:
-            el("img", [attr("src", "/logo.png"), attr("alt", "logo & mark")], []),
-            el("form", [], [
-                    el("input", [attr("name", "q"), on("input", "onQuery", "")], []),
-                ]),
-            Raw("<aside class=\"promo\">raw <b>markup</b> passes through</aside>"),
-            el("ul", [cls("items")], [
-                    itemRow(1, "Widget"),
-                    itemRow(2, "Gadget & Co"),
-                    empty(),
-                    itemRow(3, "Sprocket"),
-                ]),
-        ])
+        el("h1", [], [text("Cart & <friends>")]),
+        el("p", [attr("title", "a \"quoted\" & <angled> hint")], [
+            text("5 < 6 and 6 > 5, always."),
+        ]),
+        el("hr", [], []),
+        // a void element takes no children — giving it any is refused:
+        el("img", [attr("src", "/logo.png"), attr("alt", "logo & mark")], []),
+        el("form", [], [
+            el("input", [attr("name", "q"), on("input", "onQuery", "")], []),
+        ]),
+        Raw("<aside class=\"promo\">raw <b>markup</b> passes through</aside>"),
+        el("ul", [cls("items")], [
+            itemRow(1, "Widget"),
+            itemRow(2, "Gadget & Co"),
+            empty(),
+            itemRow(3, "Sprocket"),
+        ]),
+    ])
 }
 
 /// A self-referring type declares its copy AND its release — `impl Copy for Html`
@@ -68,8 +68,8 @@ fn main() -> Int64 {
     print("----")
     // A full document wrapper (SSR shell). The <title> is escaped as text.
     print(document("Cart & Checkout", [
-                el("meta", [attr("name", "viewport"), attr("content", "width=device-width")], []),
-            ], cartBody()))
+        el("meta", [attr("name", "viewport"), attr("content", "width=device-width")], []),
+    ], cartBody()))
     return 0
 }
 

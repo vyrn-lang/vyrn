@@ -686,11 +686,11 @@ test "reports line and column across newlines" {
 
 test "round-trip law: parse(emit(j)) is structurally j" {
     let j = JObj([
-            JsonField { key: "name", value: JStr("vyrn") },
-            JsonField { key: "nums", value: JArr([JNum("1"), JNum("-2.5"), JNum("3e4")]) },
-            JsonField { key: "nested", value: JObj([JsonField { key: "ok", value: JBool(true) }]) },
-            JsonField { key: "nothing", value: JNull },
-        ])
+        JsonField { key: "name", value: JStr("vyrn") },
+        JsonField { key: "nums", value: JArr([JNum("1"), JNum("-2.5"), JNum("3e4")]) },
+        JsonField { key: "nested", value: JObj([JsonField { key: "ok", value: JBool(true) }]) },
+        JsonField { key: "nothing", value: JNull },
+    ])
     let round = match parseJson(emit(j)) {
         Ok(v) => v,
         Err(e) => JStr("ERR:" + e),
@@ -710,19 +710,19 @@ test "the round-trip law holds for the awkward keys and values too" {
         Err(e) => "",
     }
     let j = JObj([
-            JsonField { key: "a\"quoted\": {key}, [here]", value: JStr("}\",") },
-            JsonField { key: "back\\slash", value: JStr("\\") },
-            JsonField { key: ctrl, value: JStr("\n\t") },
-            JsonField { key: "Case", value: JNum("0") },
-            JsonField { key: "case", value: JNum("-0") },
-            JsonField { key: "𝄞 above the BMP", value: JStr("𝄞") },
-            JsonField { key: "", value: JArr([]) },
-            JsonField { key: "empty", value: JObj([]) },
-            JsonField {
-                key: "nums",
-                value: JArr([JNum("1e-9"), JNum("-2.5"), JNum("1E+30"), JNum("9007199254740993")]),
-            },
-        ])
+        JsonField { key: "a\"quoted\": {key}, [here]", value: JStr("}\",") },
+        JsonField { key: "back\\slash", value: JStr("\\") },
+        JsonField { key: ctrl, value: JStr("\n\t") },
+        JsonField { key: "Case", value: JNum("0") },
+        JsonField { key: "case", value: JNum("-0") },
+        JsonField { key: "𝄞 above the BMP", value: JStr("𝄞") },
+        JsonField { key: "", value: JArr([]) },
+        JsonField { key: "empty", value: JObj([]) },
+        JsonField {
+            key: "nums",
+            value: JArr([JNum("1e-9"), JNum("-2.5"), JNum("1E+30"), JNum("9007199254740993")]),
+        },
+    ])
     let round = match parseJson(emit(j)) {
         Ok(v) => v,
         Err(e) => JStr("ERR:" + e),

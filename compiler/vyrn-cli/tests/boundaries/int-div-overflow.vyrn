@@ -1,0 +1,11 @@
+/// Row `int-div-overflow` — RFC-0002. `Int64.MIN / -1` has no Int64 quotient.
+
+fn minusOne(n: Int64) -> Int64 {
+    return 0 - n
+}
+
+fn main() -> Int64 {
+    let lo: Int64 = -9223372036854775807 - 1
+    print(lo / minusOne(1))
+    return 0
+}

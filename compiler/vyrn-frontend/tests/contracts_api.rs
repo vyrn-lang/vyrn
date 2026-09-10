@@ -7,12 +7,14 @@
 //! these functions, so a behaviour that is wrong here is wrong in the editor and
 //! a behaviour that is right here only has wiring left to get wrong.
 
+mod common;
+
 use vyrn_frontend::contracts::{
     contract_completions, contract_fixes, contract_member_hover, contract_status, discovered_roles,
     edit_distance, load_contract, role_for, roles_from_manifest, synthesized_members, MemberStatus,
     RoleScope,
 };
-use vyrn_frontend::loader::{LoadOptions, ModuleResolver};
+use vyrn_frontend::loader::{DiskResolver, LoadOptions};
 
 fn repo(rel: &str) -> String {
     let p = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
@@ -20,39 +22,6 @@ fn repo(rel: &str) -> String {
         .canonicalize()
         .unwrap_or_else(|e| panic!("{rel}: {e}"));
     p.to_string_lossy().replace('\\', "/").replace("//?/", "")
-}
-
-/// A plain read-only resolver — the editor's, minus the caches.
-struct Disk;
-impl ModuleResolver for Disk {
-    fn read(&self, resolved: &str) -> Result<String, String> {
-        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
-    }
-    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let mut names: Vec<String> = std::fs::read_dir(resolved)
-            .map_err(|e| e.to_string())?
-            .filter_map(|e| e.ok())
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if e.file_type().is_ok_and(|t| t.is_dir()) {
-                    format!("{name}/")
-                } else {
-                    name
-                }
-            })
-            .collect();
-        names.sort();
-        Ok(names)
-    }
-    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-        let mut names: Vec<String> = std::fs::read_dir(resolved)
-            .map_err(|e| e.to_string())?
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        Ok(names)
-    }
 }
 
 fn opts() -> LoadOptions {
@@ -69,7 +38,7 @@ fn page() -> vyrn_frontend::contracts::ContractView {
         "Page",
         &repo("examples/bin/server.vyrn"),
         &opts(),
-        &Disk,
+        &DiskResolver,
     )
     .expect("std/ui declares contract Page")
 }
@@ -147,7 +116,7 @@ fn resolves_the_open_component_contract() {
         "Component",
         &repo("examples/bin/server.vyrn"),
         &opts(),
-        &Disk,
+        &DiskResolver,
     )
     .expect("std/vyx declares contract Component");
     assert!(v.members.is_empty(), "an open contract names nothing");
@@ -299,7 +268,7 @@ fn roles_fall_back_to_the_generator_call_site() {
                 (path, src)
             })
             .collect();
-    let roles = discovered_roles(&roots, &opts(), &Disk);
+    let roles = discovered_roles(&roots, &opts(), &DiskResolver);
     assert!(
         roles
             .iter()
@@ -405,7 +374,7 @@ fn required_members_sort_first() {
          fn zero() -> Int64 { return 0 }\n",
     );
     let root = dir.join("c.vyrn").to_string_lossy().replace('\\', "/");
-    let v = load_contract("./c", "Both", &root, &opts(), &Disk).expect("the contract");
+    let v = load_contract("./c", "Both", &root, &opts(), &DiskResolver).expect("the contract");
     let items = contract_completions(&v, &[]);
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
     assert_eq!(
@@ -518,10 +487,9 @@ fn edit_distance_matches_the_vyrn_one() {
     let root = dir.join("m.vyrn");
     write(&root, &body);
     let path = root.to_string_lossy().replace('\\', "/");
-    let program = vyrn_frontend::load(&body, &path, &opts(), &Disk)
+    let program = vyrn_frontend::load(&body, &path, &opts(), &DiskResolver)
         .unwrap_or_else(|d| panic!("the cross-check program must compile: {d:?}"));
-    let disagreements =
-        vyrn_frontend::interp::run(&program).expect("the cross-check program must run");
+    let disagreements = common::run_compiled(&program).expect("the cross-check program must run");
     assert_eq!(
         disagreements, 0,
         "std/strings:editDistance and contracts::edit_distance disagree on {disagreements} of {} pairs",
@@ -587,7 +555,7 @@ fn a_component_vyx_has_no_members_to_synthesize() {
         "Component",
         &repo("examples/bin/server.vyrn"),
         &opts(),
-        &Disk,
+        &DiskResolver,
     )
     .unwrap();
     let path = repo("examples/bin/app/widgets/CreateForm.vyx");
@@ -664,7 +632,7 @@ fn status_checks_the_open_rule() {
         "Component",
         &repo("examples/bin/server.vyrn"),
         &opts(),
-        &Disk,
+        &DiskResolver,
     )
     .unwrap();
     let st = contract_status(

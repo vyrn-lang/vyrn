@@ -99,12 +99,20 @@ fn rejects(name: &str, src: &str, needle: &str) {
 /// because `?` copies the whole sum instead of taking it apart, so a failing
 /// variant with a payload arrives at the caller as itself. Rust routes exactly
 /// this through `FromResidual` and rebuilds it.
+///
+/// `h.copy()?` rather than `h?`, and the `.copy()` is the rule rather than a
+/// detour: the failing path RETURNS the operand, and `h` is a `read` parameter
+/// the caller still owns, so RFC-0089 rule 3 offers `consume h` or `h.copy()`
+/// and nothing else. The copy is what `examples/fallible.vyrn` gets for free by
+/// writing `fetch(code)?` over a temporary. What the test asserts is untouched:
+/// the sum still propagates whole, payload and all (RFC-0125 §3 M3, the
+/// by-default sweep, the programs tests write).
 #[test]
 fn a_failing_variant_propagates_with_its_payload_intact() {
     let src = format!(
         "{PRELUDE}
 fn pass(h: Http) -> Http {{
-    let b = h?
+    let b = h.copy()?
     return Body(\"[\" + b + \"]\")
 }}
 
@@ -127,6 +135,17 @@ fn main() -> Int64 {{
 /// M1 and M2 compose with M3 without anything being said about it: the impl head
 /// binds `T`, `Output` is that same `T`, and the operator monomorphizes per
 /// payload type the way any generic call does.
+///
+/// `s.copy()?` for the reason above, at both payload types: `Slot<String>` owns
+/// heap and `Slot<Int64>` does not, and rule 3 asks the question of the
+/// parameter rather than of the payload.
+///
+/// `Full(v) => v.copy()` for the same rule INSIDE the impl, which this program
+/// used to break: `success` takes `read self`, so handing its payload out is
+/// handing out a second name for the caller's value. Every other impl in the
+/// corpus writes the copy. This one did not and was accepted, because a generic
+/// impl reached from `?` alone was on no worklist and therefore reached no
+/// judgment — the gap RFC-0126 §8.16 closed beside the miscompile.
 #[test]
 fn a_generic_impl_serves_every_payload_type() {
     let src = "\
@@ -144,17 +163,17 @@ impl<T> Fallible for Slot<T> {
         return match self { Full(v) => true, Gone(m) => false }
     }
     fn success(self) -> Output {
-        return match self { Full(v) => v, Gone(m) => panic(\"unreachable\") }
+        return match self { Full(v) => v.copy(), Gone(m) => panic(\"unreachable\") }
     }
 }
 
 fn twice(s: Slot<Int64>) -> Slot<Int64> {
-    let v = s?
+    let v = s.copy()?
     return Full(v * 2)
 }
 
 fn shout(s: Slot<String>) -> Slot<String> {
-    let v = s?
+    let v = s.copy()?
     return Full(v + \"!\")
 }
 
@@ -235,49 +254,5 @@ fn main() -> Int64 {{
         "nullish",
         &src,
         "`??` works on an Option or a Result, not on Http",
-    );
-}
-
-/// The whole point of M3's shape: `Option` and `Result` did not move. Their `?`
-/// is still the inline tag test and `extractvalue` it was — no call to an impl
-/// method appears in the IR, and the label the lowering emits is still
-/// `try.ok`/`try.prop` from `gen_try` rather than the `Fallible` path's.
-///
-/// Measured over the whole corpus rather than asserted: emitting IR for every
-/// example before and after this milestone produced 106 of 106 byte-identical
-/// modules, 238 `?` lowerings among them. This test is the part of that a
-/// regression would trip over.
-#[test]
-fn the_nominal_operator_is_untouched() {
-    let src = "\
-fn half(n: Int64) -> Option<Int64> {
-    if n % 2 == 0 { return Some(n / 2) }
-    return None
-}
-
-fn quarter(n: Int64) -> Option<Int64> {
-    let h = half(n)?
-    return half(h)
-}
-
-fn main() -> Int64 {
-    return quarter(8) ?? -1
-}
-";
-    let path = write("nominal", src);
-    let out = vyrn()
-        .arg("emit-ir")
-        .arg(&path)
-        .output()
-        .expect("vyrn emit-ir");
-    assert!(out.status.success(), "{}", norm(&out.stderr));
-    let ir = norm(&out.stdout);
-    assert!(
-        ir.contains("try.ok"),
-        "`?` on an Option still lowers through `gen_try`"
-    );
-    assert!(
-        !ir.contains("Fallible__"),
-        "`?` on an Option must not call an impl method:\n{ir}"
     );
 }

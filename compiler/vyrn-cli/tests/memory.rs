@@ -83,20 +83,15 @@
 //! — a `Task<String>` carrying ~900 bytes, dropped rather than joined, where the
 //! old row leaked 8 bytes a call and hid inside a page.
 //!
-//! **The handle is native-only, and it is the part that matters.** Bytes are a
-//! leak a program can live with; one operating-system handle per spawn is a
-//! server that meets a per-process ceiling and stops.
-//! [`the_spawn_handles_go_back_natively`] is that measurement, beside this table
-//! rather than in it, because it needs clang and a real process.
-//!
-//! **Audit finding C2.3 is native-only too, and for the opposite reason.** An
-//! empty String built at run time was never freed, because `cap == 0` named both
-//! "static literal" and "empty heap buffer" and the native `free` could not tell
-//! them apart. The wasm `free` discriminates on the ADDRESS, so this table would
-//! have read the row steady before the fix and steady after it, and seen
-//! nothing. [`an_empty_string_built_at_run_time_goes_back_natively`] is that
-//! measurement — the same relation, against a one-byte control instead of
-//! against a larger N.
+//! **What this table cannot see, and what used to see it.** Four measurements
+//! here ran the TEXTUAL route's binary under `VYRN_FREE_AUDIT`, which was the C
+//! shim's allocator counting its own live pointers: the operating-system handle
+//! a `spawn` takes, the empty String whose `cap == 0` named both "static
+//! literal" and "empty heap buffer" natively, a `match` scrutinee and a map
+//! entry. The instrument was the shim and went with it when the native route
+//! became this module through wasm2c (RFC-0125 §2.5); the wasm allocator has no
+//! audit of its own, and building one is its own slice. Three of the four rows
+//! are steady in this table anyway. The handle is not, and nothing sees it now.
 //!
 //! Two rows carry a finding the census did not have:
 //!
@@ -305,6 +300,8 @@ fn main() -> Int64 {
     let ticket = mint(1)
     let second = ticket
     let held = a + b
+    let joined = a + b
+    let picked = if c { joined } else { a + b }
     let sent = a + b
     let job = spawn takes(sent)
     let doubled = job.join()
@@ -317,6 +314,7 @@ fn main() -> Int64 {
     print(grown)
     print(branch)
     print(alias)
+    print(picked)
     print(given)
     return n + second.id + f(1) + doubled
 }
@@ -357,16 +355,34 @@ fn why_memory_names_the_reason_each_binding_is_not_reclaimed() {
     has("branch           reclaimed at block exit — freeing the String buffer");
     has("given            reclaimed at block exit — freeing the String buffer");
     has("alias            reclaimed at block exit — freeing the String buffer");
+    // A `region` is no longer one of the reasons. The core answered "the arena
+    // owns it" for a dynamic String bound inside one, which claimed for the
+    // arena every block the frame minted at that depth, a callee's
+    // included; the ownership test is the block header and `free` states it
+    // once, so the walk asks for this binding like any other and the arena
+    // refuses the ones that are its (RFC-0125 §3 M4, the region triage).
+    has("arena            reclaimed at block exit — freeing the String buffer");
     // Every reason the printer can still name.
-    has("arena            NOT reclaimed — it is inside a `region`");
     has("c                NOT reclaimed — the type Bool owns no heap");
     // Round fifty-seven: a LAMBDA's capture is a deep snapshot, so the
-    // captured binding reclaims; only a `spawn`'s capture stays a leak.
+    // captured binding reclaims. RFC-0125 §3 M3, the report slice: a SPAWN's
+    // capture reclaims too, because the core owns the binding and the kernel
+    // places its release — the walk that worded this report used to say
+    // "`sent` NOT reclaimed — a lambda or a spawn captures it at line 55"
+    // about a row the placer had already placed.
     has("held             reclaimed at block exit — freeing the String buffer");
-    has("sent             NOT reclaimed — a lambda or a spawn captures it at line");
+    has("sent             reclaimed at block exit — freeing the String buffer");
     has("named            NOT reclaimed — it is a borrow of somebody else's value");
-    has("ticket           NOT reclaimed — another binding aliases it at line");
-    has("second           NOT reclaimed — it is a second name for a value it did not take");
+    // The same slice: `let second = ticket` TAKES the value, so the report
+    // names the two halves of one move. It used to say "`ticket` NOT
+    // reclaimed — another binding aliases it" and "`second` NOT reclaimed —
+    // it is a second name for a value it did not take", which is nobody
+    // reclaiming a value the emitters release.
+    has("ticket           moved at line 52 into the binding `second`");
+    has("second           reclaimed at block exit — calling `Owned__Ticket__release`");
+    // An alias is what a JOIN makes: one edge hands the binding's value on
+    // and the other does not, so the frame stops answering for it.
+    has("joined           NOT reclaimed — another binding aliases it at line");
     // Not leaks, and the report must not call them leaks.
     has("a                static data");
     has("gone             reclaimed by `drop` at line");
@@ -422,7 +438,6 @@ fn why_memory_counts_the_whole_file() {
         "{text}"
     );
     assert!(text.contains("aliased by another binding"), "{text}");
-    assert!(text.contains("captured by a lambda or a spawn"), "{text}");
     assert!(text.contains("it names somebody else's value"), "{text}");
 }
 
@@ -793,8 +808,8 @@ const ROWS: &[Row] = &[
               500 calls. It is a `Task<String>` now, dropped rather than joined, so a \
               missed release is ~900 bytes a call and the row moves. What this harness \
               still cannot see is the OPERATING-SYSTEM HANDLE, which is the part of §10 \
-              that matters and exists only natively — \
-              `the_spawn_handles_go_back_natively` below is the measurement beside it",
+              that matters and exists only natively. Nothing sees it since the shim's \
+              free audit went with the textual route (RFC-0125 §2.5)",
     },
     Row {
         export: "selfReferring",
@@ -846,9 +861,10 @@ const ROWS: &[Row] = &[
               and the in-place append each free an operand the expression itself \
               allocated. Safe because all four COPY out of their operands, and because \
               `@str` and `@concat` cannot be shadowed — the lexer produces no leading \
-              `@`, which is the argument `ban_append_expr` already stands on. Inside a \
-              `region` the buffer is the arena's and this stands aside, the way the \
-              block-exit release does. En route it settled a DIVERGENCE: `@str` of a \
+              `@`, which is the argument `ban_append_expr` already stands on. It stood \
+              aside inside a `region` until the region triage; the arena refuses its own \
+              blocks at `free`, so the operand is handed back at every depth. En route it \
+              settled a DIVERGENCE: `@str` of a \
               String was the identity on the direct backend and a strdup on the textual \
               one, so a lone hole — `let t = \"\\{s}\"`, no literal piece and therefore \
               no `@concat` above it — released one buffer twice on wasm and copied on \
@@ -907,20 +923,22 @@ const ROWS: &[Row] = &[
         export: "regionArena",
         census: "RFC-0004 §4",
         today: Shape::Steady,
-        why: "the arena. `own` answers `Leak::Region` for every dynamic String bound inside a \
-              `region`, on every backend, because the arena is supposed to own it — and this \
-              backend had no arena. `region_exit` bumped a counter and reclaimed nothing, on \
+        why: "the arena. Every dynamic String bound inside a `region` is the arena's to \
+              reclaim, and this backend had no arena. `region_exit` bumped a counter and reclaimed nothing, on \
               the recorded argument that `malloc` here never freed either, which stopped \
               being true at M6. So the one construct built for bounded memory was the one \
               construct that made this target unbounded: an audit measured 13.4 MB native \
               against 3,664.5 MB and `out of memory` under wasmtime, for 20,000 turns of a \
               concatenation loop inside a region — and after the arena, 27.7 MB and a clean \
-              exit. `region_keep` records what a lexically-inside-a-region expression \
-              allocated, `rt.region_free` hands the frame's blocks back at the closing brace, \
+              exit. `arena_route` routes what a lexically-inside-a-region allocation asks \
+              for, `rt.region_free` hands the frame's blocks back at the closing brace, \
               and `rt.region_pop` leaves them alone on the one edge that carries one out. \
               Lexical routing, like the textual backend's: routing on the RUNTIME depth would \
               put a callee's String in a caller's arena, where the escape guard never looked. \
-              Take `region_keep` out and this row leaks",
+              The release side asks nothing about the depth since RFC-0125 §3 M4's region \
+              triage — `free` refuses an arena block by the class word in its header — so \
+              this row measures the arena and nothing else. Take `arena_route` out and this \
+              row leaks",
     },
     Row {
         export: "regionCopy",
@@ -932,26 +950,27 @@ const ROWS: &[Row] = &[
               this one routed at the EXPRESSION, keeping the value of a node `own::str_temporary` \
               said yes to. A `copy` is not one of those nodes and its buffer is not the node's \
               value, it is one level down, so `let t = s.copy()` inside a region was the arena's \
-              natively and nobody's here: `own` answers `Leak::Region` for `t`, so the walk \
-              stands off, and nothing recorded it. 400,000 turns read 17.5 MB against native's \
-              3.6 MB. The routing is at the allocation on both backends now (`Fn_::str_owned`, \
-              at the sites `Gen::str_alloc` is called from), and the same key partitions the \
-              release side (`Fn_::rel_at`'s `Str` arm), so a block under a container is the \
-              arena's at every depth rather than the arena's and the walk's at once",
+              natively and nobody's here: the walk stood off inside a region and nothing \
+              recorded it. 400,000 turns read 17.5 MB against native's 3.6 MB. The routing is \
+              at the allocation on both backends now (`Fn_::arena_route`, at the sites \
+              `Gen::str_alloc` is called from), and the walk asks for every block it holds — \
+              so a block under a container has one owner, and it is the one the block header \
+              names",
     },
     Row {
         export: "regionRebind",
         census: "RFC-0004 §4, the routing's price",
-        today: Shape::Leaks,
-        why: "the other half of the row above, and the one place this rule is deliberately \
-              inexact. A store inside a region takes no snapshot at all — it cannot, because \
-              a `String` the place holds is the arena's and the snapshot would free it a \
-              second time — but an `Array` buffer is never the arena's, so a container \
-              reassigned inside a region hands its old buffer to nobody. BOTH backends leak \
-              it identically, which is the point: a leak both engines share is a parity \
-              citizen, and it was the trade for a double free. Making it exact means \
-              filtering the `String` entry out of `Fn_::store_bufs` rather than refusing the \
-              snapshot, on both backends at once; do that and this row flips to Steady",
+        today: Shape::Steady,
+        why: "the other half of the row above, and it was the one place this rule was \
+              deliberately inexact. A store inside a region took no snapshot at all, on the \
+              argument that a `String` the place holds is the arena's and the snapshot would \
+              free it a second time — so a container reassigned inside a region handed its \
+              old buffer to nobody, on both backends alike. The argument was wrong about who \
+              owns the block: `free` refuses an arena block by its class word, so a snapshot \
+              may ask for every buffer and the arena keeps the ones that are its. The row's \
+              own note said what to do — make it exact and this flips to Steady — and \
+              RFC-0125 §3 M4's region triage did, by deleting the region gate at the store \
+              rather than by filtering `Fn_::store_bufs`",
     },
     Row {
         export: "consumingLoop",
@@ -981,9 +1000,10 @@ const ROWS: &[Row] = &[
               scrutinee the arms did not keep, and releasing it is what closes the row. \
               `match makeResult(i) { Ok(s) => s.byteLength, .. }` leaked one `Option`'s heap \
               per turn on both compiling backends and the identical `if let` did not — \
-              measured native at 3,000,000 turns, 141.7 MB before and 3.6 MB after. Inside a \
-              `region` the row is not written at all: the arena owns what the region \
-              allocated and the exit hands it back",
+              measured native at 3,000,000 turns, 141.7 MB before and 3.6 MB after. The row \
+              was not written at all inside a `region` until the region triage; the match \
+              releases its temporary at every depth now, and `free` refuses the block if the \
+              arena minted it",
     },
     Row {
         export: "keptForever",
@@ -1316,10 +1336,10 @@ export extern fn consumingLoop() {{
 }}
 
 /// RFC-0004 §4. Three ~900-byte Strings a call, all of them the arena's: the
-/// binding's own row says `Leak::Region`, so the closing brace is the only thing
-/// that can free them. It did not, on this backend, until `region_keep` and
-/// `rt.region_free` — and the numbers that measured the difference are on the
-/// `regionArena` row above.
+/// closing brace is what reclaims them, and the release walk that asks for them
+/// too is refused by the class word in their headers. The brace reclaimed
+/// nothing on this backend until `arena_route` and `rt.region_free` — and the
+/// numbers that measured the difference are on the `regionArena` row above.
 export extern fn regionArena() {{
     region {{
         let a = tag() + "a"
@@ -1330,10 +1350,9 @@ export extern fn regionArena() {{
 }}
 
 /// The same arena, asked about the block a `copy` makes rather than the one a
-/// `+` makes. `own` answers `Leak::Region` for both bindings, so the walk frees
-/// neither and the arena is the only owner either can have — which means a
-/// routing rule that misses the copy is a leak, not a second owner. It missed
-/// it: the expression-level rule read the NODE, and a copy allocates one level
+/// `+` makes. A routing rule that misses the copy leaks it: the block is the
+/// frame's then, and the frame's walk is where it comes back. The rule did miss
+/// it — the expression-level rule read the NODE, and a copy allocates one level
 /// under its node.
 export extern fn regionCopy() {{
     region {{
@@ -1343,15 +1362,13 @@ export extern fn regionCopy() {{
     }}
 }}
 
-/// The price of the same routing, paid in the other direction. Inside a region
-/// `Fn_::place_owns` and `Gen::slot_owns` refuse the store snapshot outright,
-/// because a `String` block is the arena's and the snapshot would free it twice.
-/// The refusal is blunt: an `Array` buffer is NEVER the arena's
-/// (`Gen::array_n_to_heap`), so reassigning a container inside a region hands
-/// its old buffer to nobody. Both backends leak it, which is why this row is a
-/// parity citizen rather than a divergence — and it is measured here so that the
-/// day someone makes the refusal exact, by filtering `Fn_::store_bufs`'s `String`
-/// entry instead of dropping the whole snapshot, this row flips and says so.
+/// The price of the same routing, paid in the other direction. The store
+/// snapshot inside a region was refused outright, because a `String` block was
+/// read as the arena's and the snapshot would free it twice. The refusal was
+/// blunt: an `Array` buffer is NEVER the arena's (`Gen::array_n_to_heap`), so
+/// reassigning a container inside a region handed its old buffer to nobody. The
+/// snapshot asks for every buffer now and `free` refuses the arena's, which is
+/// what this row measures.
 export extern fn regionRebind() {{
     region {{
         let mut xs: Array<Int64> = []
@@ -1808,490 +1825,16 @@ fn the_census_shapes_hold_their_measured_baseline() {
 }
 
 // ---------------------------------------------------------------------------
-// RFC-0095 M1 / census §10 — the native half, which is where the handle lives.
-// ---------------------------------------------------------------------------
-
-// How many handles a live process holds, and how much memory one ever held. The
-// two Win32 calls this file makes, because each names the resource its census
-// row is about — §10 is handles, and C2.3 is bytes.
-//
-// `K32GetProcessMemoryInfo` answers for a process that has already exited, as
-// long as the handle is still open: `Child` holds it until it is dropped. So the
-// String row needs no park and no polling — run it, wait, read the peak.
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetProcessHandleCount(process: *mut std::ffi::c_void, count: *mut u32) -> i32;
-    fn K32GetProcessMemoryInfo(
-        process: *mut std::ffi::c_void,
-        counters: *mut ProcessMemoryCounters,
-        cb: u32,
-    ) -> i32;
-}
-
-/// `PROCESS_MEMORY_COUNTERS`, in declaration order. Only `peak_working_set` is
-/// read; the rest are here because the struct's size is the argument.
-#[cfg(windows)]
-#[repr(C)]
-#[derive(Default)]
-struct ProcessMemoryCounters {
-    cb: u32,
-    page_fault_count: u32,
-    peak_working_set: usize,
-    working_set: usize,
-    quota_peak_paged_pool: usize,
-    quota_paged_pool: usize,
-    quota_peak_nonpaged_pool: usize,
-    quota_nonpaged_pool: usize,
-    pagefile: usize,
-    peak_pagefile: usize,
-}
-
-/// One program that parks TWICE: after `first` spawns, and again once `total`
-/// have run. Both handle counts are then read from ONE process, so everything
-/// the count holds that is not a task — the standard streams, the loader's, the
-/// machine's virus scanner reading a freshly built image — is the same number
-/// on both sides of the comparison and cancels out of it. Two processes cannot
-/// promise that: 30 launches of this very program, sampled 40 times each,
-/// answered a rock-steady 68 for a warm image and 74 for a cold one — six
-/// handles of difference that has nothing to do with a task.
-///
-/// Each park announces itself by WRITING A FILE rather than by printing: a
-/// piped stdout is block-buffered, so a line printed before the park does not
-/// arrive until the process ends, and waiting for it would deadlock against the
-/// process waiting for stdin. A line on stdin releases each park.
-#[cfg(windows)]
-fn spawn_loop_source(first: usize, total: usize, park_a: &str, park_b: &str) -> String {
-    format!(
-        r#"fn work(n: Int64) -> Int64 {{
-    return n + 1
-}}
-
-fn park(path: String, acc: Int64) -> Int64 {{
-    let parked = match writeFile(path, "spawned \{{acc}}") {{
-        Ok(b) => b,
-        Err(e) => false,
-    }}
-    if parked {{
-        if let Some(line) = readLine() {{
-            print(line)
-        }}
-    }}
-    return 0
-}}
-
-fn main() -> Int64 {{
-    let mut i = 0
-    let mut acc = 0
-    while i < {first} {{
-        let t = spawn work(i)
-        acc = acc + t.join()
-        i = i + 1
-    }}
-    acc = acc + park("{park_a}", acc)
-    while i < {total} {{
-        let t = spawn work(i)
-        acc = acc + t.join()
-        i = i + 1
-    }}
-    acc = acc + park("{park_b}", acc)
-    return 0
-}}
-"#
-    )
-}
-
-/// The handles a parked process holds STEADILY.
-///
-/// A transient only ever ADDS a handle — the marker file the runtime has
-/// created and not yet closed, a worker thread the last `join` released that
-/// the operating system has not finished tearing down — so the smallest count
-/// over a short window is the steady state, and the poll that spots the marker
-/// cannot race the write that made it.
-#[cfg(windows)]
-fn steady_handle_count(child: &std::process::Child) -> u32 {
-    use std::os::windows::io::AsRawHandle;
-    (0..10)
-        .map(|k| {
-            if k > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let mut n: u32 = 0;
-            let ok = unsafe { GetProcessHandleCount(child.as_raw_handle(), &mut n) };
-            assert_ne!(ok, 0, "GetProcessHandleCount failed");
-            n
-        })
-        .min()
-        .expect("ten samples")
-}
-
-/// The measurement the table above cannot make (RFC-0095 M1).
-///
-/// A task owns three things: a frame, a task record, and an operating-system
-/// handle — a Win32 event object, or a pthread mutex and condition variable. On
-/// wasm the first is all there is, so `spawnFrame` measures that one. Here the
-/// handle is measured, and it is the reason the milestone was worth building:
-/// RFC-0087 §10 recorded 81 bytes AND one handle per spawn, and bytes are a leak
-/// a program can live with while a per-process handle ceiling is a server that
-/// stops.
-///
-/// **A relation, not a number**, exactly as the table above asserts one: the
-/// handle count does not scale with the spawn count. Before M1 it was 20,076
-/// handles at 20,000 spawns and 200,076 at 200,000 — one per spawn, on the
-/// nose.
-///
-/// The two counts come from ONE process, at two parks 18,000 spawns apart. That
-/// is what makes the relation measurable rather than merely tolerable: the
-/// ambient half of the count — the standard streams, the loader's handles, a
-/// virus scanner's read of a freshly built image — is one number here, and it
-/// subtracts. The row used to run two processes and demand their counts be
-/// EQUAL, which is more precision than two launches can give: it flaked at a
-/// difference of one, four times in a week, and taught its readers to re-run a
-/// red gate. Against a signal of 18,000 that precision bought nothing.
-///
-/// Skips, loudly, without clang — the same posture this file takes for node —
-/// and compiles only on Windows, because `GetProcessHandleCount` is what names
-/// the resource. A pthread task leaks a mutex and a condition variable, which
-/// are memory rather than a handle, and the wasm row sees the shape of that.
-#[cfg(windows)]
-#[test]
-fn the_spawn_handles_go_back_natively() {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — RFC-0095 M1's handle release is unverified on this machine");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("vyrn-spawn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 2,000 spawns, then 18,000 more. An order of magnitude between the two
-    // parks, and the whole program still runs in about two seconds.
-    let (first, total) = (2000usize, 20_000usize);
-    let parks = [dir.join("park1.txt"), dir.join("park2.txt")];
-    let at = |p: &std::path::Path| p.display().to_string().replace('\\', "/");
-    let src = dir.join("spawn.vyrn");
-    std::fs::write(
-        &src,
-        spawn_loop_source(first, total, &at(&parks[0]), &at(&parks[1])),
-    )
-    .unwrap();
-    let exe = dir.join("spawn.exe");
-    let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-        .arg("build")
-        .arg(&src)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("vyrn build");
-    assert!(
-        build.status.success(),
-        "native build failed:\n{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-
-    let mut child = Command::new(&exe)
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("run the spawn loop");
-    let mut counts = Vec::new();
-    for (k, marker) in parks.iter().enumerate() {
-        // Wait for the park. Sixty seconds is a ceiling, not a timing
-        // assumption: 20,000 spawns take about two.
-        let start = std::time::Instant::now();
-        while !marker.exists() {
-            assert!(
-                start.elapsed() < std::time::Duration::from_secs(60),
-                "the spawn loop never reached park {}",
-                k + 1
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        counts.push(steady_handle_count(&child));
-        if k == 0 {
-            // Release the first park; the second is released by closing stdin.
-            let stdin = child.stdin.as_mut().expect("piped stdin");
-            stdin.write_all(b"go\n").expect("release the first park");
-            stdin.flush().expect("flush");
-        }
-    }
-    drop(child.stdin.take());
-    let status = child.wait().expect("wait");
-    assert!(status.success(), "the spawn loop exited {status}");
-
-    // The tolerance, and the argument for the number. The defect is one handle
-    // per spawn — census §10 measured 200,076 at 200,000 — so between the two
-    // parks, 18,000 spawns apart, that leak shows a difference of 18,000. This
-    // gate fires at 16, which is a leak of one handle per 1,125 spawns: it
-    // still catches a defect a thousand times smaller than the one it was
-    // built for. And it is far above the noise it must ignore, because the
-    // ambient count is shared by the two samples and cancels — 40 runs across
-    // both profiles, under parallel load, moved this difference by 0 every
-    // time. A wider window would weaken the gate; the single process is what
-    // removed the jitter, not the 16.
-    let slack = 16;
-    assert!(
-        counts[1] <= counts[0] + slack,
-        "the handle count grew with the spawn count: {} handles at the {first}-spawn park and \
-         {} at {total}, {} more for {} further spawns. A task owns an operating-system handle, \
-         and RFC-0095 M1 gives it back at the one join or at the `drop` — one per spawn is \
-         census §10, which measured 200,076 handles at 200,000 spawns.",
-        counts[0],
-        counts[1],
-        counts[1] - counts[0],
-        total - first
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-// ---------------------------------------------------------------------------
 // Audit C2.3 — the native half again, and for the same reason: the wasm free
 // discriminates on the ADDRESS, so this row is steady there whatever the header
 // says, and only the textual backend reads a capacity to answer the question.
 // ---------------------------------------------------------------------------
-
-#[cfg(windows)]
-fn empty_string_loop_source(turns: usize, len: usize) -> String {
-    let bytes = "y".repeat(len);
-    format!(
-        r#"fn blank() -> String {{
-    return "{bytes}"
-}}
-
-fn main() -> Int64 {{
-    let mut i = 0
-    while i < {turns} {{
-        let a = blank()
-        let b = blank()
-        let c = a + b
-        i = i + 1
-    }}
-    return 0
-}}
-"#
-    )
-}
-
-/// The peak working set a finished process ever held.
-#[cfg(windows)]
-fn peak_bytes(child: &std::process::Child) -> usize {
-    use std::os::windows::io::AsRawHandle;
-    let size = std::mem::size_of::<ProcessMemoryCounters>() as u32;
-    let mut c = ProcessMemoryCounters {
-        cb: size,
-        ..Default::default()
-    };
-    let ok = unsafe { K32GetProcessMemoryInfo(child.as_raw_handle(), &mut c, size) };
-    assert_ne!(ok, 0, "K32GetProcessMemoryInfo failed");
-    c.peak_working_set
-}
-
-/// An empty String built at run time is given back (audit finding C2.3).
-///
-/// `cap == 0` was the header's word for "static literal, never free me", and it
-/// is also the capacity every empty String gets from `@__vyrn_str_new(0, 0)` —
-/// an empty `join`, a `slice` to nothing, a concat of two empties. So `free`
-/// read every one of them as a literal and returned. Three million empty concats
-/// peaked at 88.4 MB where the same program with one-byte strings peaked at 3.2.
-/// The sentinel is all ones now, which no allocation can return.
-///
-/// **A relation, not a number**, as every row in this file is: the loop with
-/// EMPTY strings must peak where the same loop with one-byte strings peaks. That
-/// is the comparison the audit made, and it is what makes the row negative — put
-/// the `0` back in `static_str_global` and the empty column grows by tens of
-/// megabytes while the control column does not move.
-///
-/// A second pair at four times the turns says it the other way: a leak scales
-/// with the turn count and a steady state does not.
-///
-/// Windows-only and clang-only, the same posture as the handle row above. It
-/// needs a real process, and `K32GetProcessMemoryInfo` is what names the bytes.
-#[cfg(windows)]
-#[test]
-fn an_empty_string_built_at_run_time_goes_back_natively() {
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — audit C2.3's empty-String release is unverified here");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("vyrn-emptystr-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 250,000 and 1,000,000. The leak was 17 bytes plus allocator overhead per
-    // turn, so the smaller run already shows megabytes and neither takes a
-    // second. `len` 0 is the shape under test; `len` 1 is the control, and the
-    // only difference between the two programs.
-    let mut peaks = Vec::new();
-    for turns in [250_000usize, 1_000_000] {
-        for len in [0usize, 1] {
-            let stem = format!("s{turns}_{len}");
-            let src = dir.join(format!("{stem}.vyrn"));
-            std::fs::write(&src, empty_string_loop_source(turns, len)).unwrap();
-            let exe = dir.join(format!("{stem}.exe"));
-            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-                .arg("build")
-                .arg(&src)
-                .arg("-o")
-                .arg(&exe)
-                .output()
-                .expect("vyrn build");
-            assert!(
-                build.status.success(),
-                "native build failed:\n{}",
-                String::from_utf8_lossy(&build.stderr)
-            );
-            let mut child = Command::new(&exe).spawn().expect("run the concat loop");
-            let status = child.wait().expect("wait");
-            assert!(status.success(), "the concat loop exited {status}");
-            peaks.push(peak_bytes(&child));
-        }
-    }
-    let (empty_small, one_small, empty_big, one_big) = (peaks[0], peaks[1], peaks[2], peaks[3]);
-
-    // A megabyte of slack over the control: the two programs differ by one byte
-    // of string literal, so anything larger is storage that was not handed back.
-    let slack = 1 << 20;
-    for (turns, empty, one) in [
-        (250_000, empty_small, one_small),
-        (1_000_000, empty_big, one_big),
-    ] {
-        assert!(
-            empty <= one + slack,
-            "an empty String is not being freed: {turns} turns peaked at {empty} bytes with \
-             `\"\"` and {one} with `\"y\"`. `cap == 0` meant `static literal` AND `empty heap \
-             buffer`, and `@__vyrn_str_free` read the second as the first — audit C2.3, which \
-             measured 88.4 MB against 3.2 MB at three million turns."
-        );
-    }
-    assert!(
-        empty_big <= empty_small + slack,
-        "the empty-String peak grew with the turn count: {empty_small} bytes at 250,000 turns \
-         and {empty_big} at 1,000,000. A steady state does not scale with the loop."
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
 
 // ---------------------------------------------------------------------------
 // Census §14 at a `match` — the textual backend's half of the `matchTemporary`
 // row above, for the reason every native row here exists: the two backends emit
 // their own release, and one of them being right proves nothing about the other.
 // ---------------------------------------------------------------------------
-
-/// A loop whose body is a statement-position `match` over a heap temporary, or
-/// the identical `if let` — the control, because the `if let` has had the row
-/// since Phase 10a and the `match` had none.
-#[cfg(windows)]
-fn match_loop_source(turns: usize, if_let: bool) -> String {
-    let body = if if_let {
-        "        if let Ok(s) = makeResult(i) {\n            c = c + Int64(s.byteLength)\n        }\n"
-    } else {
-        "        let d = match makeResult(i) {\n            Ok(s) => s.byteLength,\n            \
-         Err(e) => e.byteLength,\n        }\n        c = c + Int64(d)\n"
-    };
-    format!(
-        r#"fn makeResult(n: Int64) -> Result<String, String> {{
-    if n % 2 == 0 {{
-        return Ok("ok-\{{n}}")
-    }}
-    return Err("er-\{{n}}")
-}}
-
-fn main() -> Int64 {{
-    let mut i = 0
-    let mut c = 0
-    while i < {turns} {{
-{body}        i = i + 1
-    }}
-    print(c)
-    return 0
-}}
-"#
-    )
-}
-
-/// A `match` whose scrutinee is a temporary releases it (census §14, at the
-/// third construct that walks one).
-///
-/// `own` wrote a statement row for `Stmt::IfLet` and for `Stmt::ForIn` and none
-/// for `Expr::Match`, because a match is an EXPRESSION and there was no
-/// statement to key on. So the two spellings of one loop had two verdicts: the
-/// `if let` form freed its scrutinee every turn and the `match` form freed it
-/// never. The row is keyed by the match expression's own node address now, and
-/// both compiling backends release it where nothing else took it.
-///
-/// **A relation, not a number**, as every row in this file is — twice over. The
-/// peak at four times the turns must be the peak at N, and the `match` peak must
-/// be the `if let` peak, which is the comparison that names the defect. Measured
-/// at 3,000,000 turns before the fix: 141.7 MB for the `match` against 3.4 MB
-/// for the `if let`.
-///
-/// Windows-only and clang-only, the same posture as the rows above.
-#[cfg(windows)]
-#[test]
-fn a_match_over_a_temporary_gives_the_scrutinee_back_natively() {
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — census §14's `match` release is unverified on this machine");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("vyrn-matchloop-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
-    // 250,000 and 1,000,000. The leak was one `Result<String, String>`'s heap
-    // per turn, so the smaller run already shows tens of megabytes.
-    let slack = 1 << 20;
-    let mut peaks = Vec::new();
-    for if_let in [false, true] {
-        for turns in [250_000usize, 1_000_000] {
-            let stem = format!("ml{turns}_{if_let}");
-            let src = dir.join(format!("{stem}.vyrn"));
-            std::fs::write(&src, match_loop_source(turns, if_let)).unwrap();
-            let exe = dir.join(format!("{stem}.exe"));
-            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-                .arg("build")
-                .arg(&src)
-                .arg("-o")
-                .arg(&exe)
-                .output()
-                .expect("vyrn build");
-            assert!(
-                build.status.success(),
-                "native build failed:\n{}",
-                String::from_utf8_lossy(&build.stderr)
-            );
-            let mut child = Command::new(&exe)
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .expect("run the match loop");
-            let status = child.wait().expect("wait");
-            assert!(status.success(), "the match loop exited {status}");
-            peaks.push(peak_bytes(&child));
-        }
-    }
-    let (m_small, m_big, i_small, i_big) = (peaks[0], peaks[1], peaks[2], peaks[3]);
-
-    assert!(
-        m_big <= m_small + slack,
-        "the `match` peak grew with the turn count: {m_small} bytes at 250,000 turns and \
-         {m_big} at 1,000,000. A `match` over a temporary is that value's last owner, so it \
-         releases it — a steady state does not scale with the loop."
-    );
-    assert!(
-        m_small <= i_small + slack,
-        "the `match` form peaked at {m_small} bytes where the identical `if let` form peaked \
-         at {i_small}. One loop, two spellings, and only one of them freed its scrutinee — \
-         census §14, which `own` answered for `Stmt::IfLet` and `Stmt::ForIn` and not for \
-         `Expr::Match`."
-    );
-    assert!(
-        i_big <= i_small + slack,
-        "the `if let` control itself grew: {i_small} bytes at 250,000 turns and {i_big} at \
-         1,000,000. The control is what makes the comparison above mean anything."
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
 
 // ---------------------------------------------------------------------------
 // RFC-0028 — a map entry the map gives up, on the textual backend. The wasm
@@ -2300,105 +1843,275 @@ fn a_match_over_a_temporary_gives_the_scrutinee_back_natively() {
 // release and one of them being right proves nothing about the other.
 // ---------------------------------------------------------------------------
 
-/// A loop that replaces the value under ONE key, and optionally removes the
-/// entry each turn. The key is built rather than written (`"k" + "ey"` is a heap
-/// String; a literal lives in the data segment and is never freed), so the entry
-/// this map gives up owns two buffers, not one.
-#[cfg(windows)]
-fn map_churn_source(turns: usize, remove: bool) -> String {
-    let pad = "z".repeat(200);
-    let rm = if remove {
-        "        m.remove(\"key\")\n"
-    } else {
-        ""
-    };
-    format!(
-        r#"fn main() -> Int64 {{
-    let mut m: Map<String, String> = [:]
-    let mut i = 0
-    while i < {turns} {{
-        m["k" + "ey"] = "{pad}\{{i}}"
-{rm}        i = i + 1
-    }}
-    print(m.length)
-    return 0
-}}
-"#
+/// `a ?? b` is a `match` the parser spells, so the reporter had no recorded
+/// type for its result and called a String "unknown … owns no heap"
+/// (RFC-0126 §8.8). The declared reading answers it as it answers `?`.
+#[test]
+fn why_memory_types_a_nullish_result_as_its_payload() {
+    let dir = std::env::temp_dir().join(format!("vyrn-why-nullish-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("n.vyrn");
+    std::fs::write(
+        &file,
+        r#"fn pick(o: Option<Int64>) -> Int64 {
+    let v = o ?? 0
+    return v
+}
+
+fn main() -> Int64 {
+    let s: Option<String> = Some("x")
+    let t = s.copy() ?? "y"
+    print("{t}
+")
+    return pick(Some(3))
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["why", "--memory"])
+        .arg(&file)
+        .output()
+        .expect("vyrn why --memory");
+    let _ = std::fs::remove_dir_all(&dir);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}");
+    assert!(
+        !text.contains("unknown"),
+        "a `??` result has a type:
+{text}"
+    );
+    assert!(
+        text.contains("v                NOT reclaimed — the type Int64 owns no heap"),
+        "{text}"
+    );
+    assert!(
+        text.contains("t                reclaimed at block exit — freeing the String buffer"),
+        "{text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0125 §3 M3, the safety strand: a join arm hands out a name bound outside
+// an enclosing loop.
+//
+// Two core rules meet at a back edge. An arm that yields an outer name stands
+// that name down (`core::Builder::alias_out`), because the join's result is
+// what releases the value now; and a `let` owns what the core lowered into it
+// (`core::Builder::owned_binding`), so the result is released at its block's
+// exit. Inside a loop that block is the body, so the release repeats and the
+// outer name's buffer is freed once per turn. `examples/loopalias.vyrn` is the
+// program, and it exited 134 under `VYRN_LEAK_CHECK=1`.
+//
+// The kernel refuses it now. These rows pin the sentence, at both join forms,
+// and pin the two shapes that are NOT it: the `.copy()` the menu offers, and a
+// rebind, which binds nothing and so releases nothing per turn.
+// ---------------------------------------------------------------------------
+
+/// `vyrn check` over one source, as its whole standard error.
+fn check_text(stem: &str, source: &str) -> (bool, String) {
+    let dir = std::env::temp_dir().join(format!("vyrn-loopalias-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join(format!("{stem}.vyrn"));
+    std::fs::write(&file, source).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .arg("check")
+        .arg(&file)
+        .output()
+        .expect("vyrn check");
+    let _ = std::fs::remove_file(&file);
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).to_string(),
     )
 }
 
-/// A map hands back the entry it gives up — the value a store replaces, and the
-/// key AND the value a `remove` drops (RFC-0028).
-///
-/// Two defects, one shape. `m[k] = v` over a key the map already holds stored
-/// the new value over the old one and released nothing: the key half of that
-/// rule was fixed one line below and the value half was missed, so
-/// `Map<String, String>` leaked the previous String on every repeat.
-/// `m.remove(k)` released neither half — `__vyrn_map_remove_at` is handed two
-/// strides and no types, so it can only shift pointers, and the call site never
-/// picked the obligation up.
-///
-/// **A relation, not a number**, as every row in this file is: the peak at
-/// 800,000 turns must be the peak at 200,000. Both loops keep exactly one entry
-/// (or none), so nothing about them scales except what is not handed back.
-///
-/// The measured numbers at 200,000 turns, before and after: 12.99 MB → 3.26 MB
-/// for the store, 19.48 MB → 3.26 MB for the store-and-remove. Unbounded either
-/// way — a histogram loop and a cache eviction loop are both this program.
-///
-/// Windows-only and clang-only, the same posture as the two rows above.
-#[cfg(windows)]
-#[test]
-fn a_map_entry_the_map_gives_up_goes_back_natively() {
-    if vyrn_codegen::toolchain::find_clang().is_none() {
-        eprintln!("NOTE: no clang — RFC-0028's entry release is unverified on this machine");
-        return;
+const LOOP_ALIAS_IF: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        let picked = if i > 0 { names } else { ["z"] }
+        n = n + picked.length
+        i = i + 1
     }
-    let dir = std::env::temp_dir().join(format!("vyrn-mapchurn-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    print("\{n}")
+    return 0
+}
+"#;
 
-    // 200,000 and 800,000. The leak was one ~200-byte value per turn (plus the
-    // key on the remove path), so the smaller run already shows megabytes and
-    // neither takes a second.
-    let slack = 1 << 20;
-    for (what, remove) in [("a store over an existing key", false), ("a remove", true)] {
-        let mut peaks = Vec::new();
-        for turns in [200_000usize, 800_000] {
-            let stem = format!("m{turns}_{remove}");
-            let src = dir.join(format!("{stem}.vyrn"));
-            std::fs::write(&src, map_churn_source(turns, remove)).unwrap();
-            let exe = dir.join(format!("{stem}.exe"));
-            let build = Command::new(env!("CARGO_BIN_EXE_vyrn"))
-                .arg("build")
-                .arg(&src)
-                .arg("-o")
-                .arg(&exe)
-                .output()
-                .expect("vyrn build");
-            assert!(
-                build.status.success(),
-                "native build failed:\n{}",
-                String::from_utf8_lossy(&build.stderr)
-            );
-            let mut child = Command::new(&exe)
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .expect("run the map churn loop");
-            let status = child.wait().expect("wait");
-            assert!(status.success(), "the map churn loop exited {status}");
-            peaks.push(peak_bytes(&child));
-        }
+const LOOP_ALIAS_MATCH: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let opts: Array<Option<Int64>> = [None, Some(1), Some(2)]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        let picked: Array<String> = match opts[i] { None => ["z"], Some(_) => names }
+        n = n + picked.length
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+/// The `for` spelling of the same loop, so the refusal does not depend on which
+/// statement wrote the back edge. The loop VARIABLE is minted inside the mark,
+/// so each turn's element is its own and only the container is refused.
+const LOOP_ALIAS_FOR: &str = r#"fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    for c in [1, 2, 3] {
+        let picked = if c > 1 { names } else { ["z"] }
+        n = n + picked.length
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+/// The second door: an argument position binds no name a reader wrote, and the
+/// unnamed temporary owns and releases the join's result just the same. The
+/// store into `n` is a rebind, and a rebind's flag answers for that expression
+/// and no expression inside it.
+const LOOP_ALIAS_ARGUMENT: &str = r#"fn size(xs: Array<String>) -> Int64 {
+    return xs.length
+}
+
+fn main() -> Int64 {
+    let names: Array<String> = ["a", "b"]
+    let mut n = 0
+    let mut i = 0
+    while i < 3 {
+        n = n + size(if i > 0 { names } else { ["z"] })
+        i = i + 1
+    }
+    print("\{n}")
+    return 0
+}
+"#;
+
+#[test]
+fn a_join_arm_may_not_hand_an_outer_name_out_of_a_loop() {
+    let sentence = "`names` may not be handed out of an arm inside a loop — the result is \
+                    released on every turn, and `names` is bound outside the loop";
+    for (stem, src) in [
+        ("if", LOOP_ALIAS_IF),
+        ("match", LOOP_ALIAS_MATCH),
+        ("for", LOOP_ALIAS_FOR),
+        ("argument", LOOP_ALIAS_ARGUMENT),
+    ] {
+        let (ok, err) = check_text(stem, src);
+        assert!(!ok, "the {stem} form was accepted; it double-frees:\n{err}");
+        assert!(err.contains(sentence), "the {stem} form said:\n{err}");
         assert!(
-            peaks[1] <= peaks[0] + slack,
-            "the peak of {what} grew with the turn count: {} bytes at 200,000 turns and {} at \
-             800,000. The map takes the key and the value, so the map hands both back when it \
-             gives the entry up — a store releases the value it replaces and a `remove` \
-             releases the key and the value it drops. A steady state does not scale with the \
-             loop; this one held one entry throughout.",
-            peaks[0],
-            peaks[1]
+            err.contains("fix: `names.copy()` if the arm should hand out a value of its own"),
+            "the {stem} form's menu:\n{err}"
         );
     }
+}
+
+#[test]
+fn the_copy_the_menu_offers_is_accepted_and_a_rebind_is_untouched() {
+    let (ok, err) = check_text(
+        "copied",
+        &LOOP_ALIAS_IF.replace("{ names }", "{ names.copy() }"),
+    );
+    assert!(ok, "the fix the menu names was refused:\n{err}");
+
+    // A rebind releases once, at the name's own block exit, however many turns
+    // wrote it. `std/html.vyrn`'s `attrKey` is the shape, and it must stay
+    // lowered as it was.
+    let (ok, err) = check_text(
+        "rebound",
+        r#"fn main() -> Int64 {
+    let mut names: Array<String> = ["a", "b"]
+    let mut i = 0
+    while i < 3 {
+        names = if i > 0 { names } else { ["z"] }
+        i = i + 1
+    }
+    print("\{names.length}")
+    return 0
+}
+"#,
+    );
+    assert!(ok, "a rebind is not a second owner:\n{err}");
+}
+
+// ---------------------------------------------------------------------------
+// RFC-0125 §3 M3 — a placed row is a release, whatever table it goes in.
+//
+// `place_frames` files a whole-value row under four keys: the exit, a join's
+// EDGE, an arm's binder, and a store. The report counted the first alone, so a
+// name held at both arms of a RETURNED `match` — which the kernel files as one
+// edge row per arm, because an exit row inside an arm would be emitted on the
+// arm beside it — was printed "NOT reclaimed — nothing in this frame releases
+// it" about a value the free audit sees come back.
+//
+// Two halves, and the second is why the first is a printer's defect and not a
+// leak: the report says the value is reclaimed, and the accounting allocator
+// says the same thing about the same program.
+// ---------------------------------------------------------------------------
+
+const RETURNED_MATCH: &str = r#"type R = { id: Int64 }
+type Pack = { j: String }
+
+fn mk() -> Pack {
+    return Pack { j: "x" + "y" }
+}
+
+fn go() -> Int64 {
+    let arg = mk()
+    return match fromJson<R>(arg.j) {
+        Valid(v) => v.id,
+        Invalid(i) => 0,
+    }
+}
+
+fn main() -> Int64 {
+    print("\{go()}")
+    return 0
+}
+"#;
+
+#[test]
+fn a_name_held_at_a_returned_match_is_reported_reclaimed_and_is() {
+    let dir = std::env::temp_dir().join(format!("vyrn-retmatch-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("m.vyrn");
+    std::fs::write(&file, RETURNED_MATCH).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .args(["why", "--memory"])
+        .arg(&file)
+        .output()
+        .expect("vyrn why --memory");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains(
+            "arg              reclaimed at block exit — releasing what the { j: String } holds"
+        ),
+        "the row the edge table carries:\n{text}"
+    );
+
+    // The same program under the accounting allocator: every block the
+    // allocator handed out comes back, so the row above is the truth and not a
+    // second opinion.
+    let run = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+        .env("VYRN_LEAK_CHECK", "1")
+        .arg("run")
+        .arg(&file)
+        .output()
+        .expect("vyrn run");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(
+        run.status.code(),
+        Some(0),
+        "the free audit: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }

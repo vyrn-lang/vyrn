@@ -1,0 +1,1 @@
+error: substring: byte offset 2 is inside a multi-byte UTF-8 character (std/strings.vyrn:94)

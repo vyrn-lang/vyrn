@@ -1,0 +1,17 @@
+// RFC-0125 M2 probe: a `push` in expression position on a local the plan
+// releases at return. If the returned array shares the local's buffer, the
+// release frees what the caller receives.
+fn grow(j: Int64, take: Bool) -> Array<Int64> {
+    let mut out: Array<Int64> = [1, 2, 3]
+    return if take { out.push(j) } else { [] }
+}
+
+fn main() -> Int64 {
+    let a = grow(4, true)
+    print(a.length)
+    print(a[0])
+    print(a[1])
+    print(a[2])
+    print(a[3])
+    return 0
+}

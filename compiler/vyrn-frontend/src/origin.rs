@@ -49,8 +49,9 @@ pub struct Context<'a> {
     /// The project directory. RFC-0033 maps generated source to USER source, so
     /// a directive that names a file outside the project is not a map — it is
     /// refused as malformed and the diagnostic keeps its generated location.
-    /// Empty when no manifest was found; the directive is then bounded by
-    /// `importer_dir`'s own root only.
+    /// The loader passes the manifest's directory, or the entry file's own
+    /// directory when there is no manifest. Empty only in unit tests; the
+    /// directive is then bounded by `importer_dir`'s own root only.
     pub project: &'a str,
     /// The lines on which the lexer says a `//` comment BEGINS — the only lines
     /// a directive may be read from. `None` when the text does not lex: the

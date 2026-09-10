@@ -299,7 +299,7 @@ export gen fn openapi(contract: String) -> String {
     out = out + "    let mut schemas: Array<JsonField> = []\n"
     let names = oaSorted(oaTypeNames(iface))
     for name in names {
-        out = out + "    schemas.push(JsonField { key: \"" + name + "\", value: oaSchema(\"" + name + "\", jsonSchema(" + name + ")) })\n"
+        out = out + "    schemas.push(JsonField { key: \"" + name + "\", value: oaSchema(\"" + name + "\", jsonSchema<" + name + ">()) })\n"
     }
     // The document envelope, assembled as a tree and pretty-printed.
     out = out + "    let doc = JObj([\n"

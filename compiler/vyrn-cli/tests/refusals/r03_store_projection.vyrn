@@ -1,0 +1,10 @@
+// RFC-0092: a projection is a borrow of its root, whatever the root is.
+type Doc = { title: String, id: Int64 }
+
+fn main() -> Int64 {
+    let d = Doc { title: "t", id: 1 }
+    let mut out: Array<String> = []
+    out.push(d.title)
+    print(out.length + d.id)
+    return 0
+}

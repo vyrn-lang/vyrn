@@ -1,0 +1,32 @@
+/// RFC-0125 §3 M5: a heap field taken out of a `read` parameter.
+///
+/// `let mut mt = h.meta` binds a field of a borrowed record. The push then
+/// rebuilds `mt` in place, so the buffer the caller's `titled` still owns is
+/// released by the callee too. The interpreter copies on write and prints
+/// `2`, `1`, `a`; the compiled routes share the buffer and release it twice
+/// (native exits `0xC0000374`, wasm traps in `free`). RFC-0089 rule 2
+/// refuses the take at the binding; the fix it names is `h.meta.copy()`.
+
+type M = { name: String }
+type H = { title: Option<String>, meta: Array<M> }
+
+fn empty() -> H { return H { title: None, meta: [M { name: "a" }] } }
+
+fn withT(h: H, t: String) -> H {
+    return H { title: Some(t.copy()), meta: h.meta.copy() }
+}
+
+fn withM(h: H, name: String) -> H {
+    let mut mt = h.meta
+    mt.push(M { name: name.copy() })
+    return H { title: h.title.copy(), meta: mt.copy() }
+}
+
+fn main() -> Int64 {
+    let titled = withT(empty(), "T")
+    let sized = withM(titled, "v")
+    print(sized.meta.length)
+    print(titled.meta.length)
+    print(titled.meta[0].name)
+    return 0
+}

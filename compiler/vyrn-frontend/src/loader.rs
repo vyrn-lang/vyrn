@@ -94,6 +94,20 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Lower the two generator guardrails on THIS thread, for a test that wants to
+/// reach one in a second rather than in an hour. `None` restores the default.
+///
+/// It is a function rather than two private thread-locals because the tests that
+/// use it moved out of this file: running a `gen fn` needs a generation engine,
+/// the engine is the driver's to install (RFC-0125 §3 M5), and a unit test in
+/// this crate that reaches for one compiles a second copy of this crate. So the
+/// two budget tests are integration tests now, in `tests/loader_run.rs`, and the
+/// knob they turn has to be reachable from outside.
+pub fn set_gen_budgets_for_test(fuel: Option<u64>, max_output: Option<usize>) {
+    GEN_FUEL_OVERRIDE.with(|c| c.set(fuel));
+    GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(max_output));
+}
+
 /// A resolver over an in-memory map — used by tests and always available.
 pub struct MapResolver(pub HashMap<String, String>);
 
@@ -162,6 +176,62 @@ impl ModuleResolver for MapResolver {
         }
         Ok(out)
     }
+}
+
+/// A resolver over the filesystem — the one every program that loads a project
+/// off a disk uses.
+///
+/// It lived in the driver, and ten other files carried a copy of it: seven test
+/// suites, this crate's own move-check tests, its `lspbench` example and its
+/// contracts test. Each copy answered `read`, and three of them also answered
+/// `list` — with three spellings of one `read_dir` walk. A copy of a resolver is
+/// how a suite loads a corpus the driver would have refused, so it lives here,
+/// beside the trait it implements and the [`MapResolver`] tests use instead.
+///
+/// The listings sort, because a generator that walks a directory must produce
+/// the same module on two machines (RFC-0021). An entry whose type cannot be
+/// read is reported as a file — the caller's walk then surfaces the real error
+/// at the entry itself instead of this listing guessing.
+pub struct DiskResolver;
+
+impl ModuleResolver for DiskResolver {
+    fn read(&self, resolved: &str) -> Result<String, String> {
+        std::fs::read_to_string(resolved).map_err(|e| e.to_string())
+    }
+    fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
+        let mut names = read_dir_names(resolved, false)?;
+        names.sort();
+        Ok(names)
+    }
+    fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
+        let mut names = read_dir_names(resolved, true)?;
+        names.sort();
+        Ok(names)
+    }
+    fn gen_cache_get(&self, key: &str) -> Option<String> {
+        crate::manifest::gen_cache_get(key)
+    }
+    fn gen_cache_put(&self, key: &str, value: &str) {
+        crate::manifest::gen_cache_put(key, value)
+    }
+}
+
+/// The entry names directly under `dir`, unsorted; with `kinds`, a directory's
+/// name carries the trailing `/` RFC-0119 reads. The error is the project's own
+/// `listerr` wording, never the operating system's.
+fn read_dir_names(dir: &str, kinds: bool) -> Result<Vec<String>, String> {
+    let entries = std::fs::read_dir(dir).map_err(|_| crate::trap::io_at("listerr", dir))?;
+    Ok(entries
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if kinds && e.file_type().is_ok_and(|t| t.is_dir()) {
+                format!("{name}/")
+            } else {
+                name
+            }
+        })
+        .collect())
 }
 
 /// A resolver that forwards every call to an inner resolver while recording each
@@ -327,7 +397,13 @@ fn site_file(key: &str, root_key: &str, std_root: Option<&str>) -> String {
 /// which is where the list of those bodies lives.
 fn stamp_panic_sites(program: &mut Program, file: &str) {
     let mut stamp = |e: &mut Expr| {
-        if let Expr::Call { name, args, line } = e {
+        if let Expr::Call {
+            name,
+            args,
+            line,
+            type_args: _,
+        } = e
+        {
             if name == "panic" && args.len() == 1 {
                 *name = PANIC_AT.to_string();
                 args.push(Expr::Str(format!("{file}:{line}")));
@@ -428,14 +504,18 @@ fn normalize_remote(key: &str) -> String {
 /// no-op — the loader recognizes the specifier before any file resolution,
 /// checks the imported names against this fixed export list, and binds nothing
 /// (the names keep resolving to the builtins they already were). Returns the
-/// module's fixed export list, or `None` for any other specifier. Public so the
-/// editor can offer completion/hover for these names.
-pub fn builtin_alias_exports(spec: &str) -> Option<&'static [&'static str]> {
-    match spec {
-        "std/result" => Some(&["Result", "Ok", "Err"]),
-        "std/option" => Some(&["Option", "Some", "None"]),
-        _ => None,
-    }
+/// module's fixed export list, or `None` for any other specifier.
+///
+/// The split is READ off `symbols::BUILTIN_TYPES_AND_CTORS` since RFC-0125 §3
+/// M6, where it was a second spelling of those six names and a test compared
+/// the two. Each row names its module, so this is the filter.
+pub fn builtin_alias_exports(spec: &str) -> Option<Vec<&'static str>> {
+    let names: Vec<&'static str> = crate::symbols::BUILTIN_TYPES_AND_CTORS
+        .iter()
+        .filter(|(_, m, _, _)| *m == spec)
+        .map(|(n, _, _, _)| *n)
+        .collect();
+    (!names.is_empty()).then_some(names)
 }
 
 /// Resolve an import specifier written inside `importer` to a module key.
@@ -595,6 +675,67 @@ fn audience_objection(
     Some(d)
 }
 
+/// The fence of PLAN-0125-runtime §3: `std/mem` may be imported by
+/// `std/runtime` and by nothing else, and `std/runtime` by nothing at all.
+///
+/// The audience is a constant here beside the standard-library table rather
+/// than a key `vyrn.json` reads, so no manifest widens it. It runs whether or
+/// not the project declared an `audience` key, which is what separates it from
+/// [`audience_objection`]: that one is a fence a project opts into, this one is
+/// the compiler's own. The diagnostic keeps the audience shape (RFC-0072
+/// §Enforcement) so a reader meets one wording for "you may not import this".
+///
+/// Identity is by resolved path, the same resolution every import takes. A
+/// file that merely calls itself `std/runtime.vyrn` inside a project resolves
+/// to its own path, not to the std root's, and gets no primitives.
+fn runtime_fence(
+    importer: &str,
+    imported: &str,
+    line: usize,
+    opts: &LoadOptions,
+) -> Option<Diagnostic> {
+    // A key and a std spec can spell one file two ways — `vyrn check
+    // std/runtime.vyrn` names the root relative to the shell and the std root
+    // absolutely — so identity falls back to the real path. Computed only once
+    // an import has resolved to one of the two fenced modules.
+    let is = |key: &str, spec: &str| {
+        let Ok(k) = resolve_spec(spec, importer, opts) else {
+            return false;
+        };
+        key == k
+            || matches!(
+                (crate::manifest::real_path(key), crate::manifest::real_path(&k)),
+                (Some(a), Some(b)) if a == b
+            )
+    };
+    let fenced = if is(imported, MEM_SPEC) {
+        if is(importer, RUNTIME_SPEC) {
+            return None;
+        }
+        MEM_SPEC
+    } else if is(imported, RUNTIME_SPEC) {
+        RUNTIME_SPEC
+    } else {
+        return None;
+    };
+    let shown = match &opts.audience {
+        Some(map) => crate::audience::display_path(importer, map),
+        None => importer.to_string(),
+    };
+    let mut d = Diagnostic::error(
+        line,
+        0,
+        "audience",
+        format!("`{shown}` cannot import `{fenced}`, whose audience is the runtime"),
+    );
+    d.note = Some(format!(
+        "audience `{RUNTIME_SPEC}` is declared by the compiler (RFC-0125 §2.4), not by \
+         vyrn.json; the safe surface over `std/mem` is what `{RUNTIME_SPEC}` exports, \
+         and the compiler links that into every program"
+    ));
+    Some(d)
+}
+
 /// One parsed module awaiting linking.
 struct Module {
     key: String,
@@ -609,6 +750,31 @@ struct Module {
     /// reserved spelling its declarations are renamed to (see [`RT_PREFIX`]), so
     /// they can neither collide with a user's names nor be captured by them.
     injected: Option<&'static str>,
+}
+
+/// The state one load walks: the modules entered so far, which of them are
+/// still loading, the generated-module identities (RFC-0040 §1), the origin
+/// maps, the success-path warnings and the cycle stack.
+///
+/// Six values threaded as six arguments through a worklist that calls itself
+/// from four places. Nothing here belongs to any one of the six alone.
+struct Work {
+    modules: Vec<Module>,
+    /// `false` = loading, `true` = loaded.
+    states: HashMap<String, bool>,
+    /// Generator-import identity (RFC-0040 §1): a resolved-inputs key mapped
+    /// to the banner of the FIRST module synthesized for it. Two imports whose
+    /// path args RESOLVE identically — however they are spelled (`./strings`
+    /// vs `../strings` from a rebased `.vyx` import) — reuse that one module:
+    /// one instance, shared state, no collision.
+    identities: HashMap<String, String>,
+    origins: crate::origin::OriginMaps,
+    /// RFC-0071 M2b: success-path warnings accumulated as modules are entered.
+    /// They travel BESIDE the program, never in place of it — a warning must
+    /// not change an exit code or a byte of program output.
+    warnings: Vec<Diagnostic>,
+    /// The modules on the path to the one being entered, for the cycle report.
+    stack: Vec<String>,
 }
 
 /// The prefix every declaration of an INJECTED runtime module is renamed to
@@ -649,6 +815,64 @@ pub struct RtModule {
     /// expression takes. `every_route_is_spelled_with_its_modules_prefix` is what
     /// keeps the redundancy honest.
     pub routes: &'static [(&'static str, &'static str)],
+    /// Linked into every program, mentioned or not. Two modules are:
+    /// [`RUNTIME_SPEC`], because the wasm emitter calls its functions from
+    /// lowerings no builtin name announces (a `String` comparison is a call to
+    /// `strCmp`), so no mention scan could gate it (PLAN-0125-runtime §3.2
+    /// step 4); and `std/text`, because the runtime's own `intStr` mentions
+    /// `stringFromBytes` and enters the load inside this loop, after the scan
+    /// (RFC-0125 §3 M6, the third judgment's fifth slice).
+    ///
+    /// The scan's ORDER can change — a pass that recomputes the mention set and
+    /// runs the table again until nothing new arrives is ten lines — and it was
+    /// tried. It answers the same link: [`RUNTIME_SPEC`] is `always`, its
+    /// `intStr` mentions `stringFromBytes` in every program, so the second pass
+    /// injects `std/text` for every program too. What it changes is LOAD ORDER,
+    /// which every emitted module pays for in shifted indices, so the entry
+    /// keeps `always` and the direct backend's sweep carries the cost: a program
+    /// that formats no integer reaches neither function and carries neither
+    /// their code NOR their bytes (RFC-0125 §3 M4).
+    pub always: bool,
+}
+
+/// The module the compiler carries as its runtime (RFC-0125 §2.4). It is the
+/// one member of `std/mem`'s audience, and nothing may import it.
+pub const RUNTIME_SPEC: &str = "std/runtime";
+
+/// The raw-memory primitives (PLAN-0125-runtime §2.1). Its audience is
+/// `{ std/runtime }`, declared here rather than by any `vyrn.json`, which is
+/// what makes the fence a floor: no manifest key widens it. [`runtime_fence`]
+/// is the check.
+pub const MEM_SPEC: &str = "std/mem";
+
+/// The two modules behind the fence. A reader outside the compiler cannot
+/// import either, so a list written for readers — `vyrn doc --std`, the site's
+/// reference shelf — leaves them out. One predicate, so the fence and the
+/// listing cannot disagree (RFC-0125 §2.4).
+pub fn is_fenced(spec: &str) -> bool {
+    spec == MEM_SPEC || spec == RUNTIME_SPEC
+}
+
+/// The reserved prefix of every `std/mem` declaration. The emitter matches on
+/// it to lower a call to one instruction rather than to a `call`.
+pub const MEM_PREFIX: &str = "mem$";
+
+/// The reserved prefix of every `std/runtime` declaration.
+pub const RUNTIME_PREFIX: &str = "runtime$";
+
+/// Whether this build is AUDITED: `VYRN_LEAK_CHECK` set to anything but `0`
+/// in the compiler's environment (RFC-0114 §25, restored by RFC-0125 §3 M4).
+///
+/// It selects `std/runtime`'s accounting allocator — the emitter emits the
+/// four `audit` calls, the module-state teardown behind them, and the
+/// lowering's `<teardown>` root. A BUILD flag rather than a runtime one: a
+/// runtime switch would put a branch in `malloc` that every recorded wasm
+/// hash pays for, and an unaudited build has to be byte-identical or
+/// `VYRN_WASM_MANIFEST=check` is measuring the instrument instead of the
+/// language. Read here rather than in each crate so the emitter and the
+/// lowering cannot disagree about what a build is.
+pub fn audit_build() -> bool {
+    std::env::var_os("VYRN_LEAK_CHECK").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Every runtime module, in load order.
@@ -662,6 +886,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: RT_PREFIX,
         desugared: &["toJson", "fromJson"],
         routes: &[],
+        always: false,
     },
     // RFC-0078 M3: `fromJson`'s untyped half — the reader (via `std/jsonread`),
     // the RFC-0018 Issue vocabulary, the path arithmetic and the scalar decoders.
@@ -673,6 +898,7 @@ pub const RT_MODULES: &[RtModule] = &[
         prefix: "jsondec$",
         desugared: &["fromJson"],
         routes: &[],
+        always: false,
     },
     // RFC-0078 M4b(2)/M4c: `@charCount` — the census's one builtin with no
     // justification for being one. It is spelled with the `@` because that is what
@@ -686,11 +912,29 @@ pub const RT_MODULES: &[RtModule] = &[
     // alone — see the M4c note in RFC-0078 and the doc on `lineAtV`: the
     // interpreter memoizes a line-start table that a Vyrn library cannot, worth
     // 122 ms of a 291 ms `std/vyx` page compile.
+    //
+    // RFC-0125 §3 M6 (the third judgment's fifth slice) added `stringFromBytes`
+    // as a DESUGAR rather than a route: only the CHECK half moved here
+    // ([`STRING_FAULT`]), and each engine still builds the `String` itself,
+    // which needs the primitives `std/mem` fences.
+    //
+    // `always`, and the reason is [`RUNTIME_SPEC`]'s own `intStr`: it makes its
+    // digits into a `String` with `stringFromBytes`, because that builtin is the
+    // ONLY route from bytes to a `String` a Vyrn body has. So the check is in
+    // every program's closure whatever the mention scan says, and the scan could
+    // not see it anyway — it reads the modules loaded before this loop, and the
+    // runtime enters inside it. A second pass over the table WOULD see it, and
+    // would inject this module for every program all the same, for the reason
+    // [`RtModule::always`] records. The price is the direct backend's to sweep: a
+    // program that formats no integer and makes no `String` from bytes reaches
+    // neither function and carries neither — neither code nor bytes, since the
+    // sweep took the data too (RFC-0125 §3 M4).
     RtModule {
         spec: "std/text",
         prefix: "text$",
-        desugared: &[],
+        desugared: &["stringFromBytes"],
         routes: &[("@charCount", "text$charCountV")],
+        always: true,
     },
     // RFC-0081 M2: the six decimal places. Listed as DESUGARED rather than routed
     // for the same reason `toJson` is — `@str` is type-directed and only its float
@@ -708,8 +952,29 @@ pub const RT_MODULES: &[RtModule] = &[
     RtModule {
         spec: "std/num",
         prefix: "num$",
-        desugared: &["@str", "print"],
+        // `assertEq` renders a mismatched float the way `@str` does (RFC-0125 §3
+        // M5), so a test that compares floats and prints nothing still links
+        // the formatter.
+        desugared: &["@str", "print", "assertEq"],
         routes: &[],
+        always: false,
+    },
+    // RFC-0125 §2.4 / PLAN-0125-runtime §3.2: the runtime module, in every
+    // program. `std/mem` is not listed here because nothing injects it: it
+    // enters as `std/runtime`'s import and is marked with its prefix below.
+    RtModule {
+        spec: RUNTIME_SPEC,
+        prefix: RUNTIME_PREFIX,
+        desugared: &[],
+        routes: &[],
+        always: true,
+    },
+    RtModule {
+        spec: MEM_SPEC,
+        prefix: MEM_PREFIX,
+        desugared: &[],
+        routes: &[],
+        always: false,
     },
 ];
 
@@ -725,6 +990,19 @@ pub const RT_MODULES: &[RtModule] = &[
 /// a desugar (see [`RtModule::desugared`]).
 pub const F64_STR: &str = "num$f64Str";
 
+/// The reserved spelling of `std/text`'s byte check — the ONE statement of what a
+/// `String` may hold (RFC-0125 §3 M6, the third judgment's fifth slice), reached
+/// from `stringFromBytes` in all three engines. It answers 0 for bytes that can be
+/// a `String`, 1 for an embedded NUL and 2 for bytes that are not UTF-8; the
+/// wording for 1 and 2 is [`crate::trap::io`]'s `bnul` and `butf8`, as it always
+/// was.
+///
+/// Not a `routes` row, for the reason [`F64_STR`] is not one: a route is a
+/// whole-builtin rename and this is one HALF of one. The BUILD stays per engine
+/// because it allocates, and allocation is what `std/mem`'s fence is around.
+/// `the_string_check_is_std_texts` is what keeps the prefix and the name honest.
+pub const STRING_FAULT: &str = "text$stringFault";
+
 /// The reserved spelling a routed builtin's call becomes, or `None` for a name no
 /// runtime module implements.
 ///
@@ -738,12 +1016,6 @@ pub fn routed_builtin(name: &str) -> Option<&'static str> {
         .flat_map(|rt| rt.routes)
         .find(|(builtin, _)| *builtin == name)
         .map(|(_, reserved)| *reserved)
-}
-
-/// The reserved spelling of an injected runtime declaration (`std/json`'s, the
-/// only prefix the `toJson` desugar spells).
-pub fn rt_name(name: &str) -> String {
-    format!("{RT_PREFIX}{name}")
 }
 
 /// The synthesized source of every generator-produced module reachable from the
@@ -861,9 +1133,13 @@ fn load_with_origins_inner(
     Warnings,
     ModuleGraph,
 ) {
-    match load_modules(root_source, root_path, opts, resolver) {
+    let read_parse = crate::prof::phase("load: read+parse+resolve");
+    let loaded = load_modules(root_source, root_path, opts, resolver);
+    drop(read_parse);
+    match loaded {
         Err((diags, origins)) => (Err(diags), origins, Vec::new(), Vec::new()),
         Ok((modules, root_key, origins, warnings)) => {
+            let _p = crate::prof::phase("load: link");
             let graph = graph_of(&modules);
             (link(modules, &root_key), origins, warnings, graph)
         }
@@ -996,39 +1272,33 @@ fn load_modules(
     (Vec<Diagnostic>, crate::origin::OriginMaps),
 > {
     let root_key = normalize(root_path);
-    let mut modules: Vec<Module> = Vec::new();
-    let mut states: HashMap<String, bool> = HashMap::new(); // false = loading
-    let mut stack: Vec<String> = Vec::new();
-    // Generator-import identity (RFC-0040 §1): a resolved-inputs key
-    // (`name\0resolved-arg\0…`) mapped to the banner of the FIRST module
-    // synthesized for it. Two imports whose path args RESOLVE identically —
-    // however they are spelled (`./strings` vs `../strings` from a rebased `.vyx`
-    // import) — reuse that one module: one instance, shared state, no collision.
-    let mut identities: HashMap<String, String> = HashMap::new();
-    let mut origins = crate::origin::OriginMaps::new();
-    // RFC-0071 M2b: success-path warnings accumulated as modules are entered.
-    // They travel BESIDE the program, never in place of it — a warning must not
-    // change an exit code or a byte of program output.
-    let mut warnings: Vec<Diagnostic> = Vec::new();
+    // A deferred floor decision belongs to ONE load (RFC-0125 M6, fourth
+    // slice). Nobody is obliged to check the program a load returns, so the
+    // next outermost load drops whatever the last one held.
+    if LOAD_DEPTH.with(|d| d.get()) <= 1 {
+        crate::floor::forget();
+    }
+    let mut w = Work {
+        modules: Vec::new(),
+        states: HashMap::new(),
+        identities: HashMap::new(),
+        origins: crate::origin::OriginMaps::new(),
+        warnings: Vec::new(),
+        stack: Vec::new(),
+    };
 
-    #[allow(clippy::too_many_arguments)]
     fn visit(
         key: &str,
         source: Option<&str>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
-        modules: &mut Vec<Module>,
-        states: &mut HashMap<String, bool>,
-        identities: &mut HashMap<String, String>,
-        origins: &mut crate::origin::OriginMaps,
-        warnings: &mut Vec<Diagnostic>,
-        stack: &mut Vec<String>,
+        w: &mut Work,
         root_key: &str,
     ) -> Result<(), Vec<Diagnostic>> {
-        match states.get(key) {
+        match w.states.get(key) {
             Some(true) => return Ok(()), // already loaded
             Some(false) => {
-                let cycle: Vec<&str> = stack.iter().map(|s| s.as_str()).collect();
+                let cycle: Vec<&str> = w.stack.iter().map(|s| s.as_str()).collect();
                 return Err(vec![Diagnostic::error(
                     0,
                     0,
@@ -1038,9 +1308,10 @@ fn load_modules(
             }
             None => {}
         }
-        states.insert(key.to_string(), false);
-        stack.push(key.to_string());
+        w.states.insert(key.to_string(), false);
+        w.stack.push(key.to_string());
 
+        let _read = crate::prof::phase("read");
         let text = match source {
             Some(t) => t.to_string(),
             None => resolver.read(key).map_err(|e| {
@@ -1052,6 +1323,7 @@ fn load_modules(
                 )]
             })?,
         };
+        drop(_read);
         let is_root = key == root_key;
 
         // RFC-0053: register a synthesized module's `//@origin` table NOW, before
@@ -1067,8 +1339,20 @@ fn load_modules(
             // says a comment begins, so text a generator copied through from an
             // input file — a string literal in a `.vyx` — is data, not a control
             // line (RFC-0054's `lex()` exists for this class of problem).
-            let ctx = crate::origin::Context::new(&text, dir_of(importer), &opts.alias_base);
-            origins.add_module(key, &text, &ctx);
+            // RFC-0033 maps generated source to USER source. The project that
+            // bounds a directive is the manifest's directory, and without a
+            // manifest it is the entry file's own directory: what was loaded.
+            // Bounding it by the filesystem root instead made the refusal depend
+            // on how deep the project sat — eight `..` from a shallow temp dir
+            // climbed past the root and was refused, the same eight from a
+            // deeper one landed on a real directory and was mapped.
+            let project = if opts.alias_base.is_empty() {
+                dir_of(root_key)
+            } else {
+                opts.alias_base.as_str()
+            };
+            let ctx = crate::origin::Context::new(&text, dir_of(importer), project);
+            w.origins.add_module(key, &text, &ctx);
             // RFC-0071 M2b, RFC-0099: the same line-scan lifts `//@diag`
             // directives into diagnostics at the severity the generator chose. A
             // page is generated twice (server + client bundle), and a generator
@@ -1093,8 +1377,8 @@ fn load_modules(
                         }
                     }
                     crate::diagnostics::Severity::Warning => {
-                        if !seen(warnings) {
-                            warnings.push(d);
+                        if !seen(&w.warnings) {
+                            w.warnings.push(d);
                         }
                     }
                 }
@@ -1106,11 +1390,11 @@ fn load_modules(
 
         // A `.json` module is a JSON Schema document: synthesize validated
         // type declarations from it (RFC-0010 M2) instead of parsing Vyrn.
-        // Schema modules import nothing themselves.
+        // Schema w.modules import nothing themselves.
         if key.ends_with(".json") {
             let decls = crate::schema::synthesize(&text, None, key)
                 .map_err(|e| vec![Diagnostic::error(0, 0, "load", e)])?;
-            modules.push(Module {
+            w.modules.push(Module {
                 key: key.to_string(),
                 program: Program {
                     imports: Vec::new(),
@@ -1130,20 +1414,20 @@ fn load_modules(
                 gen_source: None,
                 injected: None,
             });
-            stack.pop();
-            states.insert(key.to_string(), true);
+            w.stack.pop();
+            w.states.insert(key.to_string(), true);
             return Ok(());
         }
         // Lex + parse, memoized on the module's TEXT.
         //
         // A keystroke changes one module, but the loader re-parsed every module
-        // reachable from the root: 32 modules and 719 KB for examples/bin, all
+        // reachable from the root: 32 w.modules and 719 KB for examples/bin, all
         // but one of them byte-identical to the previous keystroke. The text is
         // the whole input to lexing and parsing, so its hash is the whole key.
         //
         // Cached BEFORE the per-module attribution below, which depends on `key`
         // and `is_root` rather than on the text, and so must still run — the same
-        // source loaded under two keys yields two different modules from one
+        // source loaded under two keys yields two different w.modules from one
         // parse.
         //
         // Only successes are cached. A parse error's diagnostics are rewritten
@@ -1160,25 +1444,19 @@ fn load_modules(
                 format!("{h:x}:{}", text.len())
             };
             MODULE_HASHES.with(|m| m.borrow_mut().insert(key.to_string(), hash.clone()));
-            if let Some(hit) = PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned()) {
+            if let Some(hit) = {
+                let _p = crate::prof::phase("parse (cache hit)");
+                PARSE_CACHE.with(|c| c.borrow().get(&hash).cloned())
+            } {
                 hit
             } else {
-                let tokens = lexer::lex(&text).map_err(|mut d| {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    vec![d]
-                })?;
+                let _p = crate::prof::phase("parse");
+                let tokens = lexer::lex(&text).map_err(|d| vec![in_module(d, key, root_key)])?;
                 let (parsed, errors) = parser::parse_accum(tokens);
                 if !errors.is_empty() {
                     return Err(errors
                         .into_iter()
-                        .map(|mut d| {
-                            if !is_root {
-                                d.file = Some(key.to_string());
-                            }
-                            d
-                        })
+                        .map(|d| in_module(d, key, root_key))
                         .collect());
                 }
                 PARSE_CACHE.with(|c| {
@@ -1217,35 +1495,8 @@ fn load_modules(
         // Attribute decls to this module (root stays `None` so single-file
         // diagnostics render exactly as before).
         if !is_root {
-            for f in &mut program.functions {
-                f.module = Some(key.to_string());
-            }
-            for t in &mut program.type_decls {
-                t.module = Some(key.to_string());
-            }
-            for p in &mut program.protocols {
-                p.module = Some(key.to_string());
-            }
-            // Contracts (RFC-0071) carry their module too: `ContractInfo.module`
-            // is what lets a diagnostic say which library declared the contract
-            // (`contract `Page`, std/ui`).
-            for c in &mut program.contracts {
-                c.module = Some(key.to_string());
-            }
-            // Module state (RFC-0029) carries its owning module too, for
-            // diagnostics and the same-module initializer-call rule.
-            for g in &mut program.globals {
-                g.module = Some(key.to_string());
-            }
-            // Tag tests with their module too (RFC-0015): they still type-check,
-            // but `vyrn test <root>` runs only the root's (`None`-module) tests.
-            for t in &mut program.tests {
-                t.module = Some(key.to_string());
-            }
-            // Tag benches with their module too (RFC-0055): they still type-check,
-            // but `vyrn bench <root>` runs only the root's (`None`-module) benches.
-            for b in &mut program.benches {
-                b.module = Some(key.to_string());
+            for slot in decl_modules_mut(&mut program) {
+                *slot = Some(key.to_string());
             }
         }
 
@@ -1258,10 +1509,14 @@ fn load_modules(
         // After the parse cache, deliberately: the cache is keyed by content
         // hash, so two files with identical text share one parse and would
         // otherwise share one file name.
-        stamp_panic_sites(
-            &mut program,
-            &site_file(key, root_key, opts.std_root.as_deref()),
-        );
+        //
+        // Not the runtime module (RFC-0125 §2.4): a `panic` there is one of
+        // `trap.rs`'s fixed wordings — `malloc`'s `out of memory` — and every
+        // engine prints that line without a site, byte for byte.
+        let site = site_file(key, root_key, opts.std_root.as_deref());
+        if site != format!("{RUNTIME_SPEC}.vyrn") {
+            stamp_panic_sites(&mut program, &site);
+        }
 
         // RFC-0062: `std/result` / `std/option` are validated NO-OP imports —
         // their only job is to spell the ambient builtins (`Ok`/`Err`/`Result`,
@@ -1293,13 +1548,8 @@ fn load_modules(
                 idx += 1;
                 continue;
             };
-            let load_err = |msg: String| -> Vec<Diagnostic> {
-                let mut d = Diagnostic::error(line, 0, "load", msg);
-                if !is_root {
-                    d.file = Some(key.to_string());
-                }
-                vec![d]
-            };
+            let load_err =
+                |msg: String| -> Vec<Diagnostic> { vec![load_error(key, root_key, line, msg)] };
             if is_namespace {
                 return Err(load_err(format!(
                     "`{spec}` cannot be imported as a namespace (`import * as`) — its names \
@@ -1321,26 +1571,17 @@ fn load_modules(
         let mut import_targets: Vec<Option<String>> = vec![None; program.imports.len()];
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Path(path) = &imp.source {
-                let target = resolve_spec(path, key, opts).map_err(|e| {
-                    let mut d = Diagnostic::error(imp.line, 0, "load", e);
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    vec![d]
-                })?;
+                let target = resolve_spec(path, key, opts)
+                    .map_err(|e| vec![load_error(key, root_key, imp.line, e)])?;
                 // RFC-0072 M1: an import may not WIDEN audience. Checked here,
                 // before the target is visited, so the first illegal edge is the
                 // one reported rather than whatever its subtree fails at.
-                if let Some(mut d) = audience_objection(key, &target, imp.line, opts) {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    return Err(vec![d]);
+                if let Some(d) = audience_objection(key, &target, imp.line, opts)
+                    .or_else(|| runtime_fence(key, &target, imp.line, opts))
+                {
+                    return Err(vec![in_module(d, key, root_key)]);
                 }
-                visit(
-                    &target, None, opts, resolver, modules, states, identities, origins, warnings,
-                    stack, root_key,
-                )?;
+                visit(&target, None, opts, resolver, w, root_key)?;
                 import_targets[i] = Some(target);
             }
         }
@@ -1352,7 +1593,15 @@ fn load_modules(
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
                 let (gen_key, gen_source) = run_generator(
-                    key, is_root, name, args, *line, opts, resolver, modules, states, identities,
+                    key,
+                    name,
+                    args,
+                    *line,
+                    opts,
+                    resolver,
+                    &w.modules,
+                    &w.states,
+                    &mut w.identities,
                     root_key,
                 )?;
                 // RFC-0072 M1: a generator import is an IMPORT, and the same rule
@@ -1361,26 +1610,11 @@ fn load_modules(
                 // not (M5), so this edge is the one a `.vyx` widens by living under
                 // `server/` and being mounted from the client root — the SSR half of
                 // a universal page inherits its caller and cannot widen against it.
-                if let Some(mut d) = audience_objection(key, &gen_key, *line, opts) {
-                    if !is_root {
-                        d.file = Some(key.to_string());
-                    }
-                    return Err(vec![d]);
+                if let Some(d) = audience_objection(key, &gen_key, *line, opts) {
+                    return Err(vec![in_module(d, key, root_key)]);
                 }
                 if let Some(src) = gen_source {
-                    visit(
-                        &gen_key,
-                        Some(&src),
-                        opts,
-                        resolver,
-                        modules,
-                        states,
-                        identities,
-                        origins,
-                        warnings,
-                        stack,
-                        root_key,
-                    )?;
+                    visit(&gen_key, Some(&src), opts, resolver, w, root_key)?;
                 }
                 import_targets[i] = Some(gen_key);
             }
@@ -1390,12 +1624,12 @@ fn load_modules(
             .map(|t| t.expect("every import resolved"))
             .collect();
 
-        stack.pop();
-        states.insert(key.to_string(), true);
+        w.stack.pop();
+        w.states.insert(key.to_string(), true);
         // A module synthesized by a generator (RFC-0021) keeps its source text
         // (its key is the generator banner) so `vyrn emit-gen` can print it.
         let gen_source = key.starts_with("generated by ").then(|| text.clone());
-        modules.push(Module {
+        w.modules.push(Module {
             key: key.to_string(),
             program,
             import_targets,
@@ -1405,29 +1639,15 @@ fn load_modules(
         Ok(())
     }
 
-    if let Err(mut diags) = visit(
+    if let Err(diags) = visit(
         &root_key,
         Some(root_source),
         opts,
         resolver,
-        &mut modules,
-        &mut states,
-        &mut identities,
-        &mut origins,
-        &mut warnings,
-        &mut stack,
+        &mut w,
         &root_key,
     ) {
-        // RFC-0053: lex/parse/load failures inside a synthesized module are
-        // remapped onto their originating input file, exactly as check/movecheck
-        // diagnostics are on the success path (`lib::load`). Ungoverned lines keep
-        // their generated location.
-        if !origins.is_empty() {
-            for d in &mut diags {
-                origins.remap(d);
-            }
-        }
-        return Err((diags, origins));
+        return Err(failed(diags, w.origins));
     }
 
     // RFC-0078 M2b: the INJECTED imports. `toJson` compiles into a call to
@@ -1445,16 +1665,18 @@ fn load_modules(
     //
     // M4c made this a loop over `RT_MODULES` rather than a second copy of itself,
     // which is the whole reason the codecs cost no new mechanism.
-    let mentioned: HashSet<String> = modules
+    let mentioned: HashSet<String> = w
+        .modules
         .iter()
         .flat_map(|m| program_ref_names(&m.program))
         .collect();
     for rt in RT_MODULES {
-        let wanted = rt
-            .desugared
-            .iter()
-            .chain(rt.routes.iter().map(|(b, _)| b))
-            .any(|b| mentioned.contains(*b));
+        let wanted = rt.always
+            || rt
+                .desugared
+                .iter()
+                .chain(rt.routes.iter().map(|(b, _)| b))
+                .any(|b| mentioned.contains(*b));
         // A missing std root is not an error HERE: the diagnostic for a program
         // that needs the runtime and cannot find it belongs to whoever needs it,
         // not to a scan. Each engine refuses loudly at the call instead.
@@ -1468,7 +1690,7 @@ fn load_modules(
         // import. Marking only mention-linked modules left a hand-imported
         // `std/json` with bare `JStr` beside a consumer's own `JStr`, two
         // enums one variant name apart.
-        if !wanted && !states.contains_key(&target) {
+        if !wanted && !w.states.contains_key(&target) {
             continue;
         }
         // The same rule one step further in, and RFC-0081 M2 is what made it
@@ -1478,29 +1700,12 @@ fn load_modules(
         // otherwise fail to load programs that never format a float. A module that
         // is present but broken still fails the load below — this skips only what
         // cannot be read at all.
-        if !states.contains_key(&target) && resolver.read(&target).is_err() {
+        if !w.states.contains_key(&target) && resolver.read(&target).is_err() {
             continue;
         }
-        if !states.contains_key(&target) {
-            if let Err(mut diags) = visit(
-                &target,
-                None,
-                opts,
-                resolver,
-                &mut modules,
-                &mut states,
-                &mut identities,
-                &mut origins,
-                &mut warnings,
-                &mut stack,
-                &root_key,
-            ) {
-                if !origins.is_empty() {
-                    for d in &mut diags {
-                        origins.remap(d);
-                    }
-                }
-                return Err((diags, origins));
+        if !w.states.contains_key(&target) {
+            if let Err(diags) = visit(&target, None, opts, resolver, &mut w, &root_key) {
+                return Err(failed(diags, w.origins));
             }
         }
         // Set AFTER the visit, and whether or not this load performed it: the
@@ -1508,7 +1713,7 @@ fn load_modules(
         // there and the reserved spellings apply to it either way. (They are
         // transparent to a hand importer — `resolve_aliases` rewrites its
         // references along with everything else.)
-        if let Some(m) = modules.iter_mut().find(|m| m.key == target) {
+        if let Some(m) = w.modules.iter_mut().find(|m| m.key == target) {
             m.injected = Some(rt.prefix);
         }
     }
@@ -1519,19 +1724,46 @@ fn load_modules(
     // per-edge one (audience's shape), because the question is what the program
     // NEEDS, and no single import edge knows that.
     if let Some(map) = &opts.artifacts {
-        let graph = floor_graph(&mut modules);
-        if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
-            if d.file.as_deref() == Some(root_key.as_str()) {
-                d.file = None;
+        let graph = floor_graph(&mut w.modules);
+        // RFC-0125 M6, fourth slice: a row a judgment answers cannot be decided
+        // here. The judgment reads the named core, which is built from the
+        // checker's types, and nothing in this load is checked yet. So the
+        // decision is HELD and made after the check, in the one place the CLI
+        // reaches with a checked program; every other row is refused where it
+        // always was, in the order it always was.
+        match crate::floor::objected(&graph, &root_key, map) {
+            // A nested generator load (RFC-0021) is not the artifact; only the
+            // outermost load may hold a decision for the check that follows it.
+            Some(c) if crate::floor::is_judged(&c) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
+                crate::floor::defer(graph, root_key.clone(), map.clone(), w.origins.clone());
             }
-            if !origins.is_empty() {
-                origins.remap(&mut d);
+            _ => {
+                if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
+                    if d.file.as_deref() == Some(root_key.as_str()) {
+                        d.file = None;
+                    }
+                    return Err(failed(vec![d], w.origins));
+                }
             }
-            return Err((vec![d], origins));
         }
     }
 
-    Ok((modules, root_key, origins, warnings))
+    Ok((w.modules, root_key, w.origins, w.warnings))
+}
+
+/// A load's failure: every diagnostic remapped onto the input file a generator
+/// synthesized it from (RFC-0053), exactly as the success path remaps in
+/// `lib::load`. An ungoverned line keeps its generated location.
+fn failed(
+    mut diags: Vec<Diagnostic>,
+    origins: crate::origin::OriginMaps,
+) -> (Vec<Diagnostic>, crate::origin::OriginMaps) {
+    if !origins.is_empty() {
+        for d in &mut diags {
+            origins.remap(d);
+        }
+    }
+    (diags, origins)
 }
 
 /// Guardrails (RFC-0021): a generator's step budget and output-size cap.
@@ -1578,7 +1810,6 @@ thread_local! {
 #[allow(clippy::too_many_arguments)]
 fn run_generator(
     importer: &str,
-    importer_is_root: bool,
     name: &str,
     args: &[Expr],
     line: usize,
@@ -1587,15 +1818,9 @@ fn run_generator(
     modules: &[Module],
     states: &HashMap<String, bool>,
     identities: &mut HashMap<String, String>,
-    _root_key: &str,
+    root_key: &str,
 ) -> Result<(String, Option<String>), Vec<Diagnostic>> {
-    let err = |msg: String| -> Vec<Diagnostic> {
-        let mut d = Diagnostic::error(line, 0, "load", msg);
-        if !importer_is_root {
-            d.file = Some(importer.to_string());
-        }
-        vec![d]
-    };
+    let err = |msg: String| -> Vec<Diagnostic> { vec![load_error(importer, root_key, line, msg)] };
 
     // 1. Arguments must be compile-time constants (RFC-0021).
     let empty = HashMap::new();
@@ -1777,7 +2002,7 @@ fn run_generator(
     // The same check+synthesize a root gets (`crate::check_and_synthesize`): a
     // generator is a runnable program, and RFC-0076 compiles it to wasm, so a
     // builtin whose implementation is synthesized has to be synthesized here too.
-    let gdiags = crate::check_and_synthesize(&mut gen_program);
+    let gdiags = crate::movecheck::comptime(|| crate::check_and_synthesize(&mut gen_program));
     if !gdiags.is_empty() {
         return Err(gdiags);
     }
@@ -1832,24 +2057,30 @@ fn run_generator(
         fp
     });
 
-    // 5b. Cache miss: run the generator in the mediated sandbox.
-    let out = crate::interp::generate(
-        &gen_program,
-        name,
-        &consts,
-        crate::interp::GenInputs {
-            resolver,
-            opts,
-            importer_dir,
-            allowed,
-            aliased,
-            fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
-            max_output: GEN_MAX_OUTPUT_OVERRIDE
-                .with(|c| c.get())
-                .unwrap_or(GEN_MAX_OUTPUT),
-            sources_fingerprint: fingerprint,
-        },
-    )
+    // 5b. Cache miss: run the generator in the mediated sandbox. Marked
+    //     comptime, like the check above: the generator asks for this
+    //     program's ownership plan, and the kernel and the lowering's own lint
+    //     are both about a program a tool holds (RFC-0125 §3 M3, the
+    //     accumulation slice).
+    let out = crate::movecheck::comptime(|| {
+        crate::gen::generate(
+            &gen_program,
+            name,
+            &consts,
+            crate::gen::GenInputs {
+                resolver,
+                opts,
+                importer_dir,
+                allowed,
+                aliased,
+                fuel: GEN_FUEL_OVERRIDE.with(|c| c.get()).unwrap_or(GEN_FUEL),
+                max_output: GEN_MAX_OUTPUT_OVERRIDE
+                    .with(|c| c.get())
+                    .unwrap_or(GEN_MAX_OUTPUT),
+                sources_fingerprint: fingerprint,
+            },
+        )
+    })
     .map_err(|trap| err(format!("generator `{name}({arg_repr})` failed: {trap}")))?;
     bump_gen_runs();
 
@@ -2224,6 +2455,93 @@ fn is_injected(t: &TypeDecl) -> bool {
     t.line == 0
 }
 
+/// Which of a module's five declaration lists a row came from, for the one rule
+/// that needs it: a shared `extern fn` name is skipped only as a FUNCTION.
+#[derive(Clone, Copy, PartialEq)]
+enum DeclKind {
+    Type,
+    Fn,
+    Protocol,
+    Contract,
+    Global,
+}
+
+/// One top-level declaration of a module, as every reader in this file asks
+/// about it.
+struct Decl<'a> {
+    name: &'a str,
+    kind: DeclKind,
+    /// A global is never `export`ed: module state is module-private (RFC-0029),
+    /// so it is not namespace-reachable and cross-module access goes through an
+    /// accessor function.
+    exported: bool,
+    /// A parser-injected builtin type ([`is_injected`]), present in every file.
+    injected: bool,
+    /// An `extern fn` (RFC-0012): a host-ABI contract under its source
+    /// spelling, so no rule here may rename it.
+    is_extern: bool,
+}
+
+/// Every top-level declaration a module states, types first and globals last.
+///
+/// Six readers here asked this and wrote the five lists out to ask it: the decl
+/// set, the export set, the privacy candidates, an injected module's reserved
+/// spellings, [`link`]'s registration and [`load_modules`]'s attribution. A new
+/// declaration form had to reach all six, and each carried its own copy of
+/// which of them a rule skips.
+fn decls(p: &Program) -> impl Iterator<Item = Decl<'_>> {
+    fn d(name: &str, kind: DeclKind, exported: bool) -> Decl<'_> {
+        Decl {
+            name,
+            kind,
+            exported,
+            injected: false,
+            is_extern: false,
+        }
+    }
+    p.type_decls
+        .iter()
+        .map(|t| Decl {
+            injected: is_injected(t),
+            ..d(&t.name, DeclKind::Type, t.exported)
+        })
+        .chain(p.functions.iter().map(|f| Decl {
+            is_extern: f.is_extern,
+            ..d(&f.name, DeclKind::Fn, f.exported)
+        }))
+        .chain(
+            p.protocols
+                .iter()
+                .map(|pr| d(&pr.name, DeclKind::Protocol, pr.exported)),
+        )
+        .chain(
+            p.contracts
+                .iter()
+                .map(|c| d(&c.name, DeclKind::Contract, c.exported)),
+        )
+        .chain(
+            p.globals
+                .iter()
+                .map(|g| d(&g.name, DeclKind::Global, false)),
+        )
+}
+
+/// The owning-module slot of everything a module holds, the two runnable forms
+/// included. Each form needs one: a contract's names the library a diagnostic
+/// blames (RFC-0071), a global's carries the same-module initializer-call rule
+/// (RFC-0029), and a test's or bench's is what makes `vyrn test <root>` run the
+/// root's alone (RFC-0015, RFC-0055). Separate from [`decls`] only because the
+/// borrow is unique.
+fn decl_modules_mut(p: &mut Program) -> impl Iterator<Item = &mut Option<String>> {
+    (p.type_decls.iter_mut().map(|t| &mut t.module))
+        .chain(p.functions.iter_mut().map(|f| &mut f.module))
+        .chain(p.protocols.iter_mut().map(|pr| &mut pr.module))
+        .chain(p.contracts.iter_mut().map(|c| &mut c.module))
+        .chain(p.globals.iter_mut().map(|g| &mut g.module))
+        .chain(p.tests.iter_mut().map(|t| &mut t.module))
+        .chain(p.benches.iter_mut().map(|b| &mut b.module))
+}
+
 /// Resolve import aliasing (RFC-0022) into the flat namespace *before* the
 /// register/visibility/merge machinery, which is deliberately alias-unaware.
 ///
@@ -2249,25 +2567,10 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // 762 KB project, for a set usually read zero times. Filled on first use.
     let mut all_names: HashSet<String> = HashSet::new();
     for m in modules.iter() {
-        let set = module_decls.entry(m.key.clone()).or_default();
-        let mut add = |n: &str| {
-            set.insert(n.to_string());
-        };
-        for t in &m.program.type_decls {
-            add(&t.name);
-        }
-        for f in &m.program.functions {
-            add(&f.name);
-        }
-        for p in &m.program.protocols {
-            add(&p.name);
-        }
-        for c in &m.program.contracts {
-            add(&c.name);
-        }
-        for g in &m.program.globals {
-            add(&g.name);
-        }
+        module_decls
+            .entry(m.key.clone())
+            .or_default()
+            .extend(decls(&m.program).map(|d| d.name.to_string()));
     }
 
     // Exported top-level decl names per module — the surface a namespace import
@@ -2285,36 +2588,18 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         let variants = module_variants.entry(m.key.clone()).or_default();
         for t in &m.program.type_decls {
             if t.line != 0 && t.exported {
-                if let Type::Enum(vs) = &t.base {
+                if let Some(vs) = crate::types::declared_variants(&t.base) {
                     for v in vs {
                         variants.insert(v.name.clone());
                     }
                 }
             }
         }
-        let set = module_exports.entry(m.key.clone()).or_default();
-        let mut ex = |n: &str, exported: bool| {
-            if exported {
-                set.insert(n.to_string());
-            }
-        };
-        for t in &m.program.type_decls {
-            if t.line != 0 {
-                ex(&t.name, t.exported);
-            }
-        }
-        for f in &m.program.functions {
-            ex(&f.name, f.exported);
-        }
-        for p in &m.program.protocols {
-            ex(&p.name, p.exported);
-        }
-        for c in &m.program.contracts {
-            ex(&c.name, c.exported);
-        }
-        // Globals are never `export`ed (module state is module-private,
-        // RFC-0029 — `export let` does not exist), so they are not
-        // namespace-reachable; cross-module access goes through accessor fns.
+        module_exports.entry(m.key.clone()).or_default().extend(
+            decls(&m.program)
+                .filter(|d| d.exported && !d.injected)
+                .map(|d| d.name.to_string()),
+        );
         for n in module_decls.get(&m.key).into_iter().flatten() {
             *name_module_count.entry(n.clone()).or_insert(0) += 1;
         }
@@ -2325,44 +2610,30 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     let mut ns_bindings: HashMap<String, Vec<(String, String)>> = HashMap::new();
     for m in modules.iter() {
         let mine = module_decls.get(&m.key).cloned().unwrap_or_default();
-        let import_locals: HashSet<String> = m
-            .program
-            .imports
-            .iter()
-            .flat_map(|imp| imp.names.iter())
-            .map(|n| n.local().to_string())
-            .collect();
+        let import_locals = import_locals(&m.program);
         let mut seen_ns: HashSet<String> = HashSet::new();
         let binds = ns_bindings.entry(m.key.clone()).or_default();
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             let Some(ns) = &imp.namespace else { continue };
             let mut ok = true;
             if !seen_ns.insert(ns.clone()) {
-                errors.push(with_file(
-                    Diagnostic::error(
-                        imp.line,
-                        0,
-                        "load",
-                        format!("namespace `{ns}` is bound twice in this module"),
-                    ),
-                    m,
+                errors.push(load_error(
+                    &m.key,
                     root_key,
+                    imp.line,
+                    format!("namespace `{ns}` is bound twice in this module"),
                 ));
                 ok = false;
             }
             if mine.contains(ns) || import_locals.contains(ns) {
-                errors.push(with_file(
-                    Diagnostic::error(
-                        imp.line,
-                        0,
-                        "load",
-                        format!(
-                            "namespace `{ns}` collides with a top-level declaration or import \
-                             of the same name in this module"
-                        ),
-                    ),
-                    m,
+                errors.push(load_error(
+                    &m.key,
                     root_key,
+                    imp.line,
+                    format!(
+                        "namespace `{ns}` collides with a top-level declaration or import \
+                             of the same name in this module"
+                    ),
                 ));
                 ok = false;
             }
@@ -2372,27 +2643,34 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         }
     }
 
-    // (target module, original) -> fresh symbol, for co-naming renames.
+    // (target module, original) -> fresh symbol, for every rename apart.
     let mut foreign_renames: HashMap<(String, String), String> = HashMap::new();
-    // Fill `all_names` on the first mint — see the note at its declaration.
-    let ensure_all_names = |all: &mut HashSet<String>, decls: &HashMap<String, HashSet<String>>| {
-        if all.is_empty() {
-            for names in decls.values() {
-                all.extend(names.iter().cloned());
+    // Rename `name`, as `target` declares it, apart from every other name in the
+    // program — once, whichever rule asked. Three do: co-naming (RFC-0022), a
+    // namespaced module's export (RFC-0027) and name privacy (RFC-0046 §3), and
+    // each wrote the fill, the mint and the insert out to ask. `all_names` fills
+    // on the first of them; see the note at its declaration.
+    let mut rename_apart =
+        |renames: &mut HashMap<(String, String), String>, target: &str, name: &str| {
+            let key = (target.to_string(), name.to_string());
+            if renames.contains_key(&key) {
+                return;
             }
-        }
-    };
-    let mint = |original: &str, all: &mut HashSet<String>| -> String {
-        let mut n = 0usize;
-        loop {
-            let cand = format!("{original}__from{n}");
-            if !all.contains(&cand) {
-                all.insert(cand.clone());
-                return cand;
+            if all_names.is_empty() {
+                for names in module_decls.values() {
+                    all_names.extend(names.iter().cloned());
+                }
             }
-            n += 1;
-        }
-    };
+            let mut n = 0usize;
+            let fresh = loop {
+                let cand = format!("{name}__from{n}");
+                if all_names.insert(cand.clone()) {
+                    break cand;
+                }
+                n += 1;
+            };
+            renames.insert(key, fresh);
+        };
 
     // RFC-0078 M2b: an INJECTED module's every declaration is renamed to its
     // reserved spelling, unconditionally rather than on collision. Two things fall
@@ -2431,31 +2709,22 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             .find(|m| &m.key == key)
             .expect("injected module");
         let by_enum = injected_variants.entry(key.clone()).or_default();
-        let mut names: Vec<String> = Vec::new();
+        // Parser-injected builtins are in every module and keep their spelling.
+        let mut names: Vec<String> = decls(&m.program)
+            .filter(|d| !d.injected)
+            .map(|d| d.name.to_string())
+            .collect();
         for t in &m.program.type_decls {
             if t.line == 0 {
-                continue; // parser-injected builtins are in every module
+                continue;
             }
-            names.push(t.name.clone());
-            if let Type::Enum(vs) = &t.base {
+            if let Some(vs) = crate::types::declared_variants(&t.base) {
                 let vars = by_enum.entry(format!("{prefix}{}", t.name)).or_default();
                 for v in vs {
                     vars.insert(v.name.clone(), format!("{prefix}{}", v.name));
                     names.push(v.name.clone());
                 }
             }
-        }
-        for f in &m.program.functions {
-            names.push(f.name.clone());
-        }
-        for p in &m.program.protocols {
-            names.push(p.name.clone());
-        }
-        for c in &m.program.contracts {
-            names.push(c.name.clone());
-        }
-        for g in &m.program.globals {
-            names.push(g.name.clone());
         }
         // No `all_names` bookkeeping: `mint` only ever produces `x__fromN`, which
         // has no `$` in it, so a reserved spelling is unreachable from there —
@@ -2517,31 +2786,23 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                     // local, has no such owner and still errors here.
                     let one_name_two_modules = prev.0 != here.0 && prev.1 == here.1;
                     if !one_name_two_modules {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!("`{local}` is imported twice into this module"),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!("`{local}` is imported twice into this module"),
                         ));
                     }
                 }
                 if n.alias.is_some() && mine.contains(&local) {
-                    errors.push(with_file(
-                        Diagnostic::error(
-                            imp.line,
-                            0,
-                            "load",
-                            format!(
-                                "import alias `{local}` clashes with a top-level declaration of \
-                                 the same name in this module"
-                            ),
-                        ),
-                        m,
+                    errors.push(load_error(
+                        &m.key,
                         root_key,
+                        imp.line,
+                        format!(
+                            "import alias `{local}` clashes with a top-level declaration of \
+                                 the same name in this module"
+                        ),
                     ));
                 }
             }
@@ -2550,12 +2811,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             for n in &imp.names {
                 if n.alias.is_some() && mine.contains(&n.original) {
-                    let key = (target.clone(), n.original.clone());
-                    if !foreign_renames.contains_key(&key) {
-                        ensure_all_names(&mut all_names, &module_decls);
-                        let s = mint(&n.original, &mut all_names);
-                        foreign_renames.insert(key, s);
-                    }
+                    rename_apart(&mut foreign_renames, target, &n.original);
                 }
             }
         }
@@ -2588,19 +2844,15 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                         // call as a forbidden direct use.
                         && !(ambiguous_only.contains(orig) && method_surface.contains(orig))
                     {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!(
-                                    "`{orig}` is not in scope — it was imported as `{}`; use \
-                                     that name (or import `{orig}` too)",
-                                    n.local()
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!(
+                                "`{orig}` is not in scope — it was imported as `{}`; use \
+                                     that name (or import `{orig}` too)",
+                                n.local()
+                            ),
                         ));
                     }
                 }
@@ -2633,10 +2885,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         names.sort();
         for name in names {
             if name_module_count.get(name).copied().unwrap_or(0) >= 2 {
-                ensure_all_names(&mut all_names, &module_decls);
-                foreign_renames
-                    .entry((target.clone(), name.clone()))
-                    .or_insert_with(|| mint(name, &mut all_names));
+                rename_apart(&mut foreign_renames, target, name);
             }
         }
     }
@@ -2659,46 +2908,21 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         // (import vs. declaration) the user must resolve — auto-renaming would
         // silently hide it. Renaming stays limited to names invisible outside
         // their module AND not shadowing an in-scope import here.
-        let imported: HashSet<String> = m
-            .program
-            .imports
-            .iter()
-            .flat_map(|imp| imp.names.iter())
-            .map(|n| n.local().to_string())
+        let imported = import_locals(&m.program);
+        // Non-exported top-level decl names. A parser-injected type is the same
+        // in every module and must never be renamed; an `extern fn` names a
+        // host-ABI contract the backends emit under its SOURCE spelling, so
+        // renaming it severs the contract even when several modules restate the
+        // same one (std/rpc's client stubs do). A global is never exported
+        // (RFC-0029), so it is always a candidate.
+        let mut privates: Vec<String> = decls(&m.program)
+            .filter(|d| {
+                !d.injected
+                    && !d.is_extern
+                    && (d.kind == DeclKind::Global || !exported.contains(d.name))
+            })
+            .map(|d| d.name.to_string())
             .collect();
-        // Non-exported top-level decl names (skip parser-injected line-0 types,
-        // which are the same in every module and must never be renamed). Globals
-        // are never exported (RFC-0029), so they are always candidates.
-        let mut privates: Vec<String> = Vec::new();
-        for t in &m.program.type_decls {
-            if t.line != 0 && !exported.contains(&t.name) {
-                privates.push(t.name.clone());
-            }
-        }
-        for f in &m.program.functions {
-            // An `extern fn` is a host-ABI contract, not a namespace member:
-            // the backends emit the import under the SOURCE spelling and the
-            // JS host supplies it by that exact name (`extern:
-            // { vyrnRpcCall: .. }`). Renaming it severs the contract, so an
-            // extern is never a privacy-rename candidate even when several
-            // modules restate the same one (std/rpc's client stubs do).
-            if !f.is_extern && !exported.contains(&f.name) {
-                privates.push(f.name.clone());
-            }
-        }
-        for p in &m.program.protocols {
-            if !exported.contains(&p.name) {
-                privates.push(p.name.clone());
-            }
-        }
-        for c in &m.program.contracts {
-            if !exported.contains(&c.name) {
-                privates.push(c.name.clone());
-            }
-        }
-        for g in &m.program.globals {
-            privates.push(g.name.clone());
-        }
         privates.sort();
         privates.dedup();
         for name in privates {
@@ -2718,10 +2942,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
                 continue;
             }
             if name_module_count.get(&name).copied().unwrap_or(0) >= 2 {
-                ensure_all_names(&mut all_names, &module_decls);
-                foreign_renames
-                    .entry((m.key.clone(), name.clone()))
-                    .or_insert_with(|| mint(&name, &mut all_names));
+                rename_apart(&mut foreign_renames, &m.key, &name);
             }
         }
     }
@@ -2731,10 +2952,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     for m in modules.iter() {
         for (imp, target) in m.program.imports.iter().zip(&m.import_targets) {
             for n in &imp.names {
-                let resolved = foreign_renames
-                    .get(&(target.clone(), n.original.clone()))
-                    .cloned()
-                    .unwrap_or_else(|| n.original.clone());
+                let resolved = resolved_name(&foreign_renames, target, &n.original);
                 if n.alias.is_some() {
                     // The alias resolves to the decl (renamed or original).
                     rewrites
@@ -2760,10 +2978,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
             if !imp.names.is_empty() {
                 if let Some(by_enum) = injected_variants.get(target) {
                     for n in &imp.names {
-                        let resolved = foreign_renames
-                            .get(&(target.clone(), n.original.clone()))
-                            .cloned()
-                            .unwrap_or_else(|| n.original.clone());
+                        let resolved = resolved_name(&foreign_renames, target, &n.original);
                         if let Some(vars) = by_enum.get(&resolved) {
                             rewrites
                                 .entry(m.key.clone())
@@ -2779,16 +2994,19 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // Pass 3: apply the foreign-decl renames (definition + owning module refs).
     // The renamed module's OWN namespace bindings guard its `ns.member(..)` call
     // sugar from the plain-name rewrite (pass 5 owns those references).
+    let mut renames_by_module: HashMap<&str, HashMap<String, String>> = HashMap::new();
     for ((target, original), s) in &foreign_renames {
-        if let Some(tm) = modules.iter_mut().find(|m| &m.key == target) {
-            let ns_names: HashSet<String> = ns_bindings
-                .get(&tm.key)
-                .into_iter()
-                .flatten()
-                .map(|(n, _)| n.clone())
-                .collect();
-            rename_decl_in_module(&mut tm.program, original, s, &ns_names);
-        }
+        renames_by_module
+            .entry(target.as_str())
+            .or_default()
+            .insert(original.clone(), s.clone());
+    }
+    for tm in modules.iter_mut() {
+        let Some(map) = renames_by_module.get(tm.key.as_str()) else {
+            continue;
+        };
+        let ns_names = ns_names_of(&ns_bindings, &tm.key);
+        rename_decls_in_module(&mut tm.program, map, &ns_names);
     }
 
     // Pass 3b (RFC-0078 M2b): the injected module's enum VARIANT names in the
@@ -2802,7 +3020,7 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
         };
         if let Some(tm) = modules.iter_mut().find(|m| &m.key == key) {
             for t in &mut tm.program.type_decls {
-                if t.line == 0 {
+                if t.line == 0 || crate::types::is_sum_alias(&t.base) {
                     continue;
                 }
                 if let Type::Enum(vs) = &mut t.base {
@@ -2823,24 +3041,16 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     // bare import of the resolved decl name so register/visibility stay unaware.
     for m in modules.iter_mut() {
         if let Some(map) = rewrites.get(&m.key) {
-            let ns_names: HashSet<String> = ns_bindings
-                .get(&m.key)
-                .into_iter()
-                .flatten()
-                .map(|(n, _)| n.clone())
-                .collect();
+            let ns_names = ns_names_of(&ns_bindings, &m.key);
             // This module's own variants guard the rewrite (see
-            // [`RW_VARIANTS`]): an alias local or injected spelling that
+            // [`Renamer::variants`]): an alias local or injected spelling that
             // collides with one must not fold the constructor sites.
             let variants = own_variant_names(&m.program);
             rewrite_module_refs(&mut m.program, map, &ns_names, &variants);
         }
         for (imp, target) in m.program.imports.iter_mut().zip(&m.import_targets) {
             for n in &mut imp.names {
-                let resolved = foreign_renames
-                    .get(&(target.clone(), n.original.clone()))
-                    .cloned()
-                    .unwrap_or_else(|| n.original.clone());
+                let resolved = resolved_name(&foreign_renames, target, &n.original);
                 n.original = resolved;
                 n.alias = None;
             }
@@ -2870,6 +3080,115 @@ fn resolve_aliases(modules: &mut [Module], errors: &mut Vec<Diagnostic>, root_ke
     }
 }
 
+/// Every part of a type, handed to a visitor, outermost first — the ONE descent
+/// the compiler makes over a `Type`.
+///
+/// Four readers ask the same question and used to write the same fourteen arms
+/// out to ask it (RFC-0125 §3 M6): [`type_names`] collects the heads,
+/// [`rewrite_type`] renames each one through a map,
+/// [`NsResolver::rewrite_type`] resolves a `ns.User` spelling to the declaration
+/// it names, and `parser::mark_member_type_params` turns a contract member's
+/// implicit type parameter into a [`Type::Param`] (RFC-0071). All four matched
+/// arm for arm, which is what a rule stated four times looks like when nobody
+/// has drifted yet.
+///
+/// The hook is handed the NODE, not the head name, because the fourth reader
+/// REPLACES a node and a `&mut String` cannot do that. [`type_heads`] and
+/// [`type_heads_mut`] are the head-name reading the other three want, and they
+/// are three lines each over this.
+///
+/// It is a macro because the readers need two mutabilities — one collects
+/// through a shared borrow, three assign through a unique one — and no other
+/// mechanism in Rust states a descent once across both. The arm list below is
+/// the rule; the two definitions after it are spellings of it.
+macro_rules! type_head_descent {
+    ($name:ident $(, $mut_:tt)?) => {
+        pub(crate) fn $name(ty: &$($mut_)? Type, f: &mut impl FnMut(&$($mut_)? Type)) {
+            f(ty);
+            match ty {
+                Type::App(_, args) => {
+                    for a in args {
+                        $name(a, f);
+                    }
+                }
+                Type::Array(a)
+                | Type::Task(a)
+                | Type::Stream(a)
+                | Type::Partial(a)
+                | Type::ArrayN(a, _)
+                | Type::SmallArray(a, _)
+                | Type::Omit(a, _)
+                | Type::Pick(a, _) => $name(a, f),
+                Type::Merge(a, b) => {
+                    $name(a, f);
+                    $name(b, f);
+                }
+                Type::Record(fs) => {
+                    for fl in fs {
+                        $name(&$($mut_)? fl.ty, f);
+                    }
+                }
+                Type::Enum(vs) => {
+                    for v in vs {
+                        for p in &$($mut_)? v.payload {
+                            $name(p, f);
+                        }
+                    }
+                }
+                // Stored function values (RFC-0037) and Maps carry decl
+                // references in their component types too (RFC-0040 §2 exposed
+                // this).
+                Type::Fn(params, ret) => {
+                    for p in params {
+                        $name(p, f);
+                    }
+                    $name(ret, f);
+                }
+                Type::Map(k, v) => {
+                    $name(k, f);
+                    $name(v, f);
+                }
+                _ => {}
+            }
+        }
+    };
+}
+
+type_head_descent!(type_nodes);
+type_head_descent!(type_nodes_mut, mut);
+
+/// The same descent, with the hook on a type's HEAD NAME rather than on the
+/// node — what three of the four readers want. `Named` and `App` are the two
+/// constructors that carry one; every other arm is above.
+fn type_heads(ty: &Type, f: &mut impl FnMut(&String)) {
+    type_nodes(ty, &mut |t| {
+        if let Type::Named(n) | Type::App(n, _) = t {
+            f(n)
+        }
+    });
+}
+
+fn type_heads_mut(ty: &mut Type, f: &mut impl FnMut(&mut String)) {
+    type_nodes_mut(ty, &mut |t| {
+        if let Type::Named(n) | Type::App(n, _) = t {
+            f(n)
+        }
+    });
+}
+
+// The scope-aware descent over a body is `ast::body_scope_descent!`, where the
+// AST is declared. This file was where it was stated once (RFC-0125 §3 M6);
+// seven more readers wanted the same arm list, so it moved to the declaration.
+
+crate::body_scope_descent!(BodyVisit, body_block, body_stmt, body_expr);
+crate::body_scope_descent!(
+    BodyVisitMut,
+    body_block_mut,
+    body_stmt_mut,
+    body_expr_mut,
+    mut
+);
+
 /// Reinterprets namespace-qualified references (`ns.member`, RFC-0027) inside one
 /// importing module into the resolved program-wide decl symbols. A namespace is a
 /// compile-time name, not a value: any surviving bare use of it is an error.
@@ -2889,11 +3208,8 @@ struct NsResolver<'a> {
 
 impl NsResolver<'_> {
     fn err(&mut self, line: usize, msg: String) {
-        let mut d = Diagnostic::error(line, 0, "load", msg);
-        if self.module_key != self.root_key {
-            d.file = Some(self.module_key.clone());
-        }
-        self.errors.push(d);
+        self.errors
+            .push(load_error(&self.module_key, &self.root_key, line, msg));
     }
 
     /// The program-wide symbol a namespace member resolves to (honoring any
@@ -2914,19 +3230,14 @@ impl NsResolver<'_> {
             );
             return None;
         }
-        Some(
-            self.foreign_renames
-                .get(&(target, member.to_string()))
-                .cloned()
-                .unwrap_or_else(|| member.to_string()),
-        )
+        Some(resolved_name(self.foreign_renames, &target, member))
     }
 
     fn resolve_program(&mut self, p: &mut Program) {
         for f in &mut p.functions {
             let mut locals: HashSet<String> = f.params.iter().map(|pm| pm.name.clone()).collect();
             self.walk_type_positions_fn(f, &locals.clone());
-            self.walk_block(&mut f.body, &mut locals);
+            body_block_mut(&mut f.body, &mut locals, self);
         }
         for im in &mut p.impls {
             self.rewrite_type(&mut im.ty);
@@ -2934,7 +3245,7 @@ impl NsResolver<'_> {
                 let mut locals: HashSet<String> =
                     m.params.iter().map(|pm| pm.name.clone()).collect();
                 self.walk_type_positions_fn(m, &locals.clone());
-                self.walk_block(&mut m.body, &mut locals);
+                body_block_mut(&mut m.body, &mut locals, self);
             }
             // `ns.member` uses inside a place projection resolve like any
             // other reference (RFC-0091 M2: a projection is an ordinary body
@@ -2943,7 +3254,7 @@ impl NsResolver<'_> {
                 let mut locals: HashSet<String> =
                     pl.params.iter().map(|pm| pm.name.clone()).collect();
                 self.walk_type_positions_fn(pl, &locals.clone());
-                self.walk_block(&mut pl.body, &mut locals);
+                body_block_mut(&mut pl.body, &mut locals, self);
             }
         }
         for t in &mut p.type_decls {
@@ -2952,24 +3263,24 @@ impl NsResolver<'_> {
             }
             self.rewrite_type(&mut t.base);
             if let Some(pred) = &mut t.predicate {
-                let mut locals: HashSet<String> = std::iter::once("value".to_string()).collect();
-                self.walk_expr(pred, &mut locals);
+                let locals: HashSet<String> = std::iter::once("value".to_string()).collect();
+                body_expr_mut(pred, &locals, self);
             }
         }
         for g in &mut p.globals {
             if let Some(ty) = &mut g.ty {
                 self.rewrite_type(ty);
             }
-            let mut locals = HashSet::new();
-            self.walk_expr(&mut g.init, &mut locals);
+            let locals = HashSet::new();
+            body_expr_mut(&mut g.init, &locals, self);
         }
         for t in &mut p.tests {
             let mut locals = HashSet::new();
-            self.walk_block(&mut t.body, &mut locals);
+            body_block_mut(&mut t.body, &mut locals, self);
         }
         for b in &mut p.benches {
             let mut locals = HashSet::new();
-            self.walk_block(&mut b.body, &mut locals);
+            body_block_mut(&mut b.body, &mut locals, self);
         }
     }
 
@@ -2999,162 +3310,59 @@ impl NsResolver<'_> {
     }
 
     /// Rewrite a namespace-qualified named/applied type (`ns.User`, `ns.Box<T>`)
-    /// into its resolved decl name, recursing through the whole type tree.
+    /// into its resolved decl name, everywhere inside the type tree.
+    ///
+    /// The descent is [`type_head_descent`]'s; what is this pass's own is the
+    /// one line it does at each head.
     fn rewrite_type(&mut self, ty: &mut Type) {
-        match ty {
-            Type::Named(n) => {
-                if let Some((ns, member)) = n.clone().split_once('.') {
-                    if self.ns.contains_key(ns) {
-                        if let Some(sym) = self.resolve_member(ns, member, 0) {
-                            *n = sym;
-                        }
+        let mut visit = |n: &mut String| {
+            let head = n.clone();
+            if let Some((ns, member)) = head.split_once('.') {
+                if self.ns.contains_key(ns) {
+                    if let Some(sym) = self.resolve_member(ns, member, 0) {
+                        *n = sym;
                     }
                 }
             }
-            Type::App(n, args) => {
-                if let Some((ns, member)) = n.clone().split_once('.') {
-                    if self.ns.contains_key(ns) {
-                        if let Some(sym) = self.resolve_member(ns, member, 0) {
-                            *n = sym;
-                        }
-                    }
-                }
-                for a in args {
-                    self.rewrite_type(a);
-                }
-            }
-            Type::Option(a)
-            | Type::Array(a)
-            | Type::Task(a)
-            | Type::Stream(a)
-            | Type::Partial(a)
-            | Type::ArrayN(a, _)
-            | Type::SmallArray(a, _)
-            | Type::Omit(a, _)
-            | Type::Pick(a, _) => self.rewrite_type(a),
-            Type::Result(a, b) | Type::Merge(a, b) => {
-                self.rewrite_type(a);
-                self.rewrite_type(b);
-            }
-            Type::Record(fs) => {
-                for f in fs {
-                    self.rewrite_type(&mut f.ty);
-                }
-            }
-            Type::Enum(vs) => {
-                for v in vs {
-                    for pl in &mut v.payload {
-                        self.rewrite_type(pl);
-                    }
-                }
-            }
-            Type::Fn(params, ret) => {
-                for pt in params {
-                    self.rewrite_type(pt);
-                }
-                self.rewrite_type(ret);
-            }
-            Type::Map(k, v) => {
-                self.rewrite_type(k);
-                self.rewrite_type(v);
-            }
-            _ => {}
-        }
+        };
+        type_heads_mut(ty, &mut visit);
     }
 
     /// Whether `ns` is an in-scope namespace at this use (not shadowed by a local).
     fn is_ns(&self, ns: &str, locals: &HashSet<String>) -> bool {
         self.ns.contains_key(ns) && !locals.contains(ns)
     }
+}
 
-    fn walk_block(&mut self, b: &mut Block, locals: &mut HashSet<String>) {
-        for s in &mut b.stmts {
-            self.walk_stmt(s, locals);
+/// The namespace pass's line at each site. The descent and the scope stack are
+/// [`body_scope_descent`]'s; what is this pass's own is the receiver it deletes.
+impl BodyVisitMut for NsResolver<'_> {
+    fn stmt(&mut self, s: &mut Stmt, _locals: &HashSet<String>) {
+        if let Stmt::Let { ty: Some(t), .. } = s {
+            self.rewrite_type(t);
         }
     }
 
-    fn walk_stmt(&mut self, s: &mut Stmt, locals: &mut HashSet<String>) {
-        match s {
-            Stmt::Let {
-                name, value, ty, ..
-            } => {
-                if let Some(t) = ty {
-                    self.rewrite_type(t);
-                }
-                self.walk_expr(value, locals);
-                // The binding is in scope for subsequent statements (and shadows a
-                // like-named namespace from here on).
-                locals.insert(name.clone());
-            }
-            Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => {
-                self.walk_expr(value, locals)
-            }
-            Stmt::IndexSet { index, value, .. } => {
-                self.walk_expr(index, locals);
-                self.walk_expr(value, locals);
-            }
-            Stmt::Return { value: Some(e), .. } => self.walk_expr(e, locals),
-            Stmt::Return { value: None, .. } => {}
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                self.walk_expr(cond, locals);
-                let mut inner = locals.clone();
-                self.walk_block(then_block, &mut inner);
-                if let Some(eb) = else_block {
-                    let mut inner2 = locals.clone();
-                    self.walk_block(eb, &mut inner2);
-                }
-            }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                pattern,
-                ..
-            } => {
-                self.walk_expr(scrutinee, locals);
-                let mut inner = locals.clone();
-                for b in crate::movecheck::pattern_bindings(pattern) {
-                    inner.insert(b.to_string());
-                }
-                self.walk_block(then_block, &mut inner);
-                if let Some(eb) = else_block {
-                    let mut inner2 = locals.clone();
-                    self.walk_block(eb, &mut inner2);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                self.walk_expr(cond, locals);
-                let mut inner = locals.clone();
-                self.walk_block(body, &mut inner);
-            }
-            Stmt::ForIn {
-                var, iter, body, ..
-            } => {
-                self.walk_expr(iter, locals);
-                let mut inner = locals.clone();
-                inner.insert(var.clone());
-                self.walk_block(body, &mut inner);
-            }
-            Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-            Stmt::Expr(e) => self.walk_expr(e, locals),
-            Stmt::Region { body, .. } => {
-                let mut inner = locals.clone();
-                self.walk_block(body, &mut inner);
-            }
-        }
-    }
-
-    fn walk_expr(&mut self, e: &mut Expr, locals: &HashSet<String>) {
+    fn expr(&mut self, e: &mut Expr, locals: &HashSet<String>) -> bool {
         match e {
             // `ns.fn(args)` and `ns.Enum.Variant(payload)` both arrive as method
-            // sugar — the receiver is the first argument.
-            Expr::Call { name, args, line } => {
+            // sugar — the receiver is the first argument. Either way the
+            // receiver goes and the walk carries on into what is left.
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                line,
+            } => {
                 let l = *line;
+                // A type ARGUMENT is a type, and a namespaced one resolves the
+                // way every other type spelling does (RFC-0125 §3 M6):
+                // `fromJson<shapes.Point>(s)` names the declaration `shapes`
+                // brings in. Before the type argument existed the target was an
+                // `Expr::Var` and the `Field` arm below rewrote it.
+                for t in type_args.iter_mut() {
+                    self.rewrite_type(t);
+                }
                 // `ns.member(rest)` — first arg is the bare namespace.
                 if let Some(Expr::Var { name: head, .. }) = args.first() {
                     if self.is_ns(head, locals) {
@@ -3163,10 +3371,7 @@ impl NsResolver<'_> {
                             *name = sym;
                         }
                         args.remove(0);
-                        for a in args.iter_mut() {
-                            self.walk_expr(a, locals);
-                        }
-                        return;
+                        return true;
                     }
                 }
                 // `ns.Enum.Variant(payload)` — first arg is `ns.Enum` field access
@@ -3186,25 +3391,13 @@ impl NsResolver<'_> {
                             // The variant name is global (variants are not renamed);
                             // drop the qualifier receiver and keep the call name.
                             args.remove(0);
-                            for a in args.iter_mut() {
-                                self.walk_expr(a, locals);
-                            }
-                            return;
                         }
                     }
                 }
-                for a in args.iter_mut() {
-                    self.walk_expr(a, locals);
-                }
             }
-            Expr::Spawn { args, .. } => {
-                for a in args.iter_mut() {
-                    self.walk_expr(a, locals);
-                }
-            }
-            Expr::TryConstruct { name, args, line } => {
-                // `ns.Type?(..)` — the parser folds the qualifier into the name,
-                // exactly as it does for a struct literal's `ns.Type { .. }`.
+            Expr::TryConstruct { name, line, .. } | Expr::StructLit { name, line, .. } => {
+                // `ns.Type?(..)` and `ns.Type { .. }` — the parser folds the
+                // qualifier into the name.
                 if let Some((ns, member)) = name.clone().split_once('.') {
                     if self.is_ns(ns, locals) {
                         if let Some(sym) = self.resolve_member(ns, member, *line) {
@@ -3214,25 +3407,6 @@ impl NsResolver<'_> {
                         let (ns, line) = (ns.to_string(), *line);
                         self.err(line, format!("`{ns}` is not an in-scope namespace"));
                     }
-                }
-                for a in args.iter_mut() {
-                    self.walk_expr(a, locals);
-                }
-            }
-            Expr::StructLit { name, fields, line } => {
-                // `ns.Type { .. }` — the parser encoded the qualifier as `ns.Type`.
-                if let Some((ns, member)) = name.clone().split_once('.') {
-                    if self.is_ns(ns, locals) {
-                        if let Some(sym) = self.resolve_member(ns, member, *line) {
-                            *name = sym;
-                        }
-                    } else {
-                        let (ns, line) = (ns.to_string(), *line);
-                        self.err(line, format!("`{ns}` is not an in-scope namespace"));
-                    }
-                }
-                for (_, v) in fields.iter_mut() {
-                    self.walk_expr(v, locals);
                 }
             }
             Expr::Field { expr, field, line } => {
@@ -3244,7 +3418,7 @@ impl NsResolver<'_> {
                         if let Some(sym) = self.resolve_member(&head, field, l) {
                             *e = Expr::Var { name: sym, line: l };
                         }
-                        return;
+                        return false;
                     }
                 }
                 // `ns.Enum.Variant` (nullary variant) — `ns.Enum` is the inner field.
@@ -3278,11 +3452,10 @@ impl NsResolver<'_> {
                                     ),
                                 );
                             }
-                            return;
+                            return false;
                         }
                     }
                 }
-                self.walk_expr(expr, locals);
             }
             Expr::Var { name, line } => {
                 if self.is_ns(name, locals) {
@@ -3290,89 +3463,26 @@ impl NsResolver<'_> {
                     self.err(line, format!("namespace `{name}` is not a value"));
                 }
             }
-            Expr::Unary { expr, .. } | Expr::Try { expr, .. } => self.walk_expr(expr, locals),
-            Expr::Consume { place, .. } => self.walk_expr(place, locals),
-            Expr::Binary { lhs, rhs, .. } => {
-                self.walk_expr(lhs, locals);
-                self.walk_expr(rhs, locals);
-            }
-            Expr::Match {
-                scrutinee,
-                arms,
-                line,
-            } => {
-                let l = *line;
-                self.walk_expr(scrutinee, locals);
-                for arm in arms.iter_mut() {
-                    let mut inner = locals.clone();
-                    match &mut arm.pattern {
-                        Pattern::Variant(v, binds) => {
-                            // `ns.Enum.Variant` pattern — reduce the dotted path to
-                            // the bare variant (variants are global; the enum need
-                            // only be an exported member of the namespace).
-                            if let Some(idx) = v.find('.') {
-                                let ns = v[..idx].to_string();
-                                let rest = &v[idx + 1..];
-                                let variant = rest.rsplit('.').next().unwrap_or(rest).to_string();
-                                let enum_name = rest.split('.').next().unwrap_or(rest).to_string();
-                                if self.ns.contains_key(&ns) {
-                                    let _ = self.resolve_member(&ns, &enum_name, l);
-                                    *v = variant;
-                                }
-                            }
-                            for b in binds.iter() {
-                                inner.insert(b.clone());
-                            }
-                        }
-                        Pattern::Some(b)
-                        | Pattern::Ok(b)
-                        | Pattern::Err(b)
-                        | Pattern::Success(b)
-                        | Pattern::Failure(b) => {
-                            inner.insert(b.clone());
-                        }
-                        Pattern::None | Pattern::Other => {}
-                    }
-                    match &mut arm.body {
-                        ArmBody::Expr(e) => self.walk_expr(e, &mut inner),
-                        ArmBody::Block(b) => self.walk_block(b, &mut inner),
-                    }
+            _ => {}
+        }
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &mut Pattern, line: usize, _locals: &HashSet<String>) {
+        // `ns.Enum.Variant` pattern — reduce the dotted path to the bare variant
+        // (variants are global; the enum need only be an exported member of the
+        // namespace).
+        if let Pattern::Variant(v, _) = p {
+            if let Some(idx) = v.find('.') {
+                let ns = v[..idx].to_string();
+                let rest = &v[idx + 1..];
+                let variant = rest.rsplit('.').next().unwrap_or(rest).to_string();
+                let enum_name = rest.split('.').next().unwrap_or(rest).to_string();
+                if self.ns.contains_key(&ns) {
+                    let _ = self.resolve_member(&ns, &enum_name, line);
+                    *v = variant;
                 }
             }
-            Expr::IfExpr {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.walk_expr(cond, locals);
-                self.walk_expr(then_branch, locals);
-                if let Some(eb) = else_branch {
-                    self.walk_expr(eb, locals);
-                }
-            }
-            Expr::ArrayLit { elems, .. } => {
-                for e2 in elems.iter_mut() {
-                    self.walk_expr(e2, locals);
-                }
-            }
-            Expr::MapLit { entries, .. } => {
-                for (k, v) in entries.iter_mut() {
-                    self.walk_expr(k, locals);
-                    self.walk_expr(v, locals);
-                }
-            }
-            Expr::Lambda { params, body, .. } => {
-                let mut inner = locals.clone();
-                for p in params.iter() {
-                    inner.insert(p.clone());
-                }
-                match body {
-                    LambdaBody::Expr(e2) => self.walk_expr(e2, &inner),
-                    LambdaBody::Block(b2) => self.walk_block(b2, &mut inner),
-                }
-            }
-            Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
         }
     }
 }
@@ -3380,7 +3490,10 @@ impl NsResolver<'_> {
 fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnostic>> {
     let mut errors: Vec<Diagnostic> = Vec::new();
     // RFC-0022: fold import aliases into the flat namespace up front.
+    let alias_span = crate::prof::phase("link: resolve_aliases");
     resolve_aliases(&mut modules, &mut errors, root_key);
+    drop(alias_span);
+    let index_span = crate::prof::phase("link: index");
 
     // ---- indexes over all modules ----------------------------------------
     // top-level name -> (module key, exported)
@@ -3450,13 +3563,24 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             owner.insert(name.to_string(), (module.to_string(), exported));
         };
 
+    // Every declaration form joins ONE top-level namespace: a contract name is
+    // what `contractOf(Name)` resolves (RFC-0071) and a module-state binding may
+    // not share a name with any other declaration (RFC-0013), so both obey the
+    // ordinary export/import visibility. Impl-flattened methods carry mangled
+    // names (`P__Key__m`) that cannot collide with a user identifier; they are
+    // registered anyway so duplicate impls across modules collide loudly here.
     for m in &modules {
+        for d in decls(&m.program) {
+            if d.injected || (d.kind == DeclKind::Fn && shared_externs.contains(d.name)) {
+                continue;
+            }
+            register(d.name, &m.key, d.exported, &mut clashes);
+        }
         for t in &m.program.type_decls {
             if is_injected(t) {
                 continue;
             }
-            register(&t.name, &m.key, t.exported, &mut clashes);
-            if let Type::Enum(vs) = &t.base {
+            if let Some(vs) = crate::types::declared_variants(&t.base) {
                 for v in vs {
                     variant_enum
                         .entry(v.name.clone())
@@ -3465,34 +3589,13 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 }
             }
         }
-        for f in &m.program.functions {
-            // Impl-flattened methods carry mangled names (`P__Key__m`) that
-            // cannot collide with user identifiers; register them anyway so
-            // duplicate impls across modules collide loudly here.
-            if shared_externs.contains(&f.name) {
-                continue;
-            }
-            register(&f.name, &m.key, f.exported, &mut clashes);
-        }
         for p in &m.program.protocols {
-            register(&p.name, &m.key, p.exported, &mut clashes);
             for sig in &p.methods {
                 method_protocol
                     .entry(sig.name.clone())
                     .or_default()
                     .push((p.name.clone(), m.key.clone()));
             }
-        }
-        // Contracts (RFC-0071) join the same top-level namespace as protocols:
-        // a contract name is what `contractOf(Name)` resolves, so it must be
-        // program-wide unique and obey the ordinary export/import visibility.
-        for c in &m.program.contracts {
-            register(&c.name, &m.key, c.exported, &mut clashes);
-        }
-        // Module-state bindings (RFC-0013) join the top-level namespace: a
-        // global may not share a name with any other top-level declaration.
-        for g in &m.program.globals {
-            register(&g.name, &m.key, false, &mut clashes);
         }
     }
     errors.extend(clash_diagnostics(&clashes, &modules, root_key));
@@ -3502,6 +3605,8 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     // `std/stream`, it just lost the flat namespace to `std/arrays`, and telling
     // the user to look in `std/arrays` sends them somewhere the fix is not.
     let clashed: HashSet<&str> = clashes.iter().map(|(n, _, _)| n.as_str()).collect();
+    drop(index_span);
+    let visible_span = crate::prof::phase("link: visibility");
 
     // ---- per-module import + visibility checks ---------------------------
     // RFC-0054's shadowing fact, gathered as the loop goes and handed to the
@@ -3528,18 +3633,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                 match owner.get(name) {
                     Some((def_module, exported)) if def_module == target => {
                         if !exported {
-                            errors.push(with_file(
-                                Diagnostic::error(
-                                    imp.line,
-                                    0,
-                                    "load",
-                                    format!(
-                                        "`{name}` exists in `{target}` but is not exported — \
-                                         add `export` to its declaration"
-                                    ),
-                                ),
-                                m,
+                            errors.push(load_error(
+                                &m.key,
                                 root_key,
+                                imp.line,
+                                format!(
+                                    "`{name}` exists in `{target}` but is not exported — \
+                                         add `export` to its declaration"
+                                ),
                             ));
                         }
                         // Importing an enum also brings its variants, and a
@@ -3548,18 +3649,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         visible.insert(name.clone());
                     }
                     Some((def_module, _)) if !clashed.contains(name.as_str()) => {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!(
-                                    "`{name}` is not defined in `{target}` (it lives in \
-                                     `{def_module}`)"
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!(
+                                "`{name}` is not defined in `{target}` (it lives in \
+                                     `{def_module}`)"
+                            ),
                         ));
                     }
                     // A clashed name: `clash_diagnostics` already reported the
@@ -3570,15 +3667,11 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         visible.insert(name.clone());
                     }
                     None => {
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                imp.line,
-                                0,
-                                "load",
-                                format!("`{target}` does not define `{name}`"),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            imp.line,
+                            format!("`{target}` does not define `{name}`"),
                         ));
                     }
                 }
@@ -3673,18 +3766,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
                         if gen_importer.as_deref() == Some(def_module.as_str()) {
                             return;
                         }
-                        errors.push(with_file(
-                            Diagnostic::error(
-                                line,
-                                0,
-                                "load",
-                                format!(
-                                    "{what} `{name}` is defined in `{def_module}` but not \
-                                     imported here — add it to an `import {{ .. }} from` list"
-                                ),
-                            ),
-                            m,
+                        errors.push(load_error(
+                            &m.key,
                             root_key,
+                            line,
+                            format!(
+                                "{what} `{name}` is defined in `{def_module}` but not \
+                                     imported here — add it to an `import {{ .. }} from` list"
+                            ),
                         ));
                     }
                 }
@@ -3708,18 +3797,14 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
             modules.sort_unstable();
             modules.dedup();
             let list = modules.join("`, `");
-            errors.push(with_file(
-                Diagnostic::error(
-                    line,
-                    0,
-                    "load",
-                    format!(
-                        "{what} `{name}` is defined in `{list}` but not imported here — add \
-                         it to an `import {{ .. }} from` list"
-                    ),
-                ),
-                m,
+            errors.push(load_error(
+                &m.key,
                 root_key,
+                line,
+                format!(
+                    "{what} `{name}` is defined in `{list}` but not imported here — add \
+                         it to an `import {{ .. }} from` list"
+                ),
             ));
         };
 
@@ -3775,10 +3860,12 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
         }
     }
 
+    drop(visible_span);
     if !errors.is_empty() {
         return Err(errors);
     }
 
+    let _merge = crate::prof::phase("link: merge");
     // ---- merge ------------------------------------------------------------
     // Root last so its injected builtins/log config win; imported modules'
     // injected decls are dropped.
@@ -3851,12 +3938,23 @@ fn link(mut modules: Vec<Module>, root_key: &str) -> Result<Program, Vec<Diagnos
     Ok(program)
 }
 
-/// Attach the module's file to a diagnostic unless it is the root.
-fn with_file(mut d: Diagnostic, m: &Module, root_key: &str) -> Diagnostic {
-    if m.key != root_key {
-        d.file = Some(m.key.clone());
+/// Attach `key` to a diagnostic as its file, unless `key` is the root — a root
+/// diagnostic renders without one, exactly as a single-file program's does.
+///
+/// The ONE place a load's diagnostic learns where it points. `load_modules`,
+/// [`run_generator`] and [`NsResolver`] each restated these two lines against
+/// their own key, and `link` and [`resolve_aliases`] reached a third spelling
+/// through a `&Module`.
+fn in_module(mut d: Diagnostic, key: &str, root_key: &str) -> Diagnostic {
+    if key != root_key {
+        d.file = Some(key.to_string());
     }
     d
+}
+
+/// A load error at `line` of `key`, worded by [`in_module`].
+fn load_error(key: &str, root_key: &str, line: usize, msg: String) -> Diagnostic {
+    in_module(Diagnostic::error(line, 0, "load", msg), key, root_key)
 }
 
 /// The import of `target` a diagnostic should point at, with the module that
@@ -3997,7 +4095,7 @@ fn clash_diagnostics(
                 if rest.len() == 1 { "s" } else { "" }
             )
         });
-        out.push(with_file(d, m, root_key));
+        out.push(in_module(d, &m.key, root_key));
     }
     out
 }
@@ -4013,299 +4111,109 @@ fn clash_diagnostics(
 /// params, so a param that shadows a foreign export is
 /// not mistaken for an un-imported reference.
 fn fn_body_ref_names(f: &Function) -> Vec<(String, usize)> {
-    let mut out = Vec::new();
+    let mut v = RefNames { out: Vec::new() };
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    scope_block(&f.body, &mut locals, &mut out);
-    out
+    body_block(&f.body, &mut locals, &mut v);
+    v.out
 }
 
-fn scope_block(b: &Block, locals: &mut HashSet<String>, out: &mut Vec<(String, usize)>) {
-    for s in &b.stmts {
-        scope_stmt(s, locals, out);
-    }
+/// The four variant names the built-in sums answer to. They are patterns like
+/// any other since RFC-0126 §8, and unlike a declared enum's variant they name
+/// no declaration — so a walk that collects free names must not collect them.
+fn is_sum_arm(name: &str) -> bool {
+    matches!(name, "Some" | "None" | "Ok" | "Err")
 }
 
-fn scope_stmt(s: &Stmt, locals: &mut HashSet<String>, out: &mut Vec<(String, usize)>) {
-    match s {
-        Stmt::Let {
-            name,
-            value,
-            ty,
-            line,
-            ..
-        } => {
-            if let Some(t) = ty {
-                for n in type_names(t) {
-                    out.push((n, *line));
-                }
+/// The collector's line at each site. The descent and the scope stack are
+/// [`body_scope_descent`]'s; what is this reader's own is the name it records.
+struct RefNames {
+    out: Vec<(String, usize)>,
+}
+
+impl BodyVisit<'_> for RefNames {
+    fn stmt(&mut self, s: &Stmt, _locals: &HashSet<String>) {
+        // A `let x: T` annotation is a reference wherever it stands: a value
+        // local never shadows a type.
+        if let Stmt::Let {
+            ty: Some(t), line, ..
+        } = s
+        {
+            for n in type_names(t) {
+                self.out.push((n, *line));
             }
-            scope_expr(value, *line, locals, out);
-            // In scope for subsequent statements (and shadows a like-named export
-            // from here on).
-            locals.insert(name.clone());
-        }
-        Stmt::Assign { value, line, .. } | Stmt::SetField { value, line, .. } => {
-            scope_expr(value, *line, locals, out)
-        }
-        Stmt::IndexSet {
-            index, value, line, ..
-        } => {
-            scope_expr(index, *line, locals, out);
-            scope_expr(value, *line, locals, out);
-        }
-        Stmt::Return {
-            value: Some(e),
-            line,
-        } => scope_expr(e, *line, locals, out),
-        Stmt::Return { value: None, .. } => {}
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            line,
-        } => {
-            scope_expr(cond, *line, locals, out);
-            let mut inner = locals.clone();
-            scope_block(then_block, &mut inner, out);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                scope_block(eb, &mut inner2, out);
-            }
-        }
-        Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            pattern,
-            line,
-        } => {
-            scope_expr(scrutinee, *line, locals, out);
-            let mut inner = locals.clone();
-            for b in crate::movecheck::pattern_bindings(pattern) {
-                inner.insert(b.to_string());
-            }
-            scope_block(then_block, &mut inner, out);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                scope_block(eb, &mut inner2, out);
-            }
-        }
-        Stmt::While { cond, body, line } => {
-            scope_expr(cond, *line, locals, out);
-            let mut inner = locals.clone();
-            scope_block(body, &mut inner, out);
-        }
-        Stmt::ForIn {
-            var,
-            iter,
-            body,
-            line,
-            ..
-        } => {
-            scope_expr(iter, *line, locals, out);
-            let mut inner = locals.clone();
-            inner.insert(var.clone());
-            scope_block(body, &mut inner, out);
-        }
-        Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Expr(e) => scope_expr(e, e.line(), locals, out),
-        Stmt::Region { body, .. } => {
-            let mut inner = locals.clone();
-            scope_block(body, &mut inner, out);
         }
     }
-}
 
-fn scope_expr(e: &Expr, line: usize, locals: &HashSet<String>, out: &mut Vec<(String, usize)>) {
-    match e {
-        Expr::Call { name, args, line } | Expr::Spawn { name, args, line } => {
+    fn expr(&mut self, e: &Expr, locals: &HashSet<String>) -> bool {
+        match e {
             // Method sugar `ns.f(x)` parses as callee `f` with the namespace as
             // its first argument. When that receiver names one of the module's
             // namespaces, the use is QUALIFIED — another module's member — and
             // is recorded under its dotted spelling, never as a bare `f` that
             // would read as this module's flat name. A flat call with a like-
             // shaped argument keeps the bare spelling.
-            let mut sugar = false;
-            if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
+            Expr::Call {
+                name,
+                args,
+                line,
+                type_args: _,
             }
-            if sugar {
+            | Expr::Spawn { name, args, line } => {
+                let mut sugar = false;
                 if let Some(Expr::Var { name: recv, .. }) = args.first() {
-                    out.push((format!("{recv}.{name}"), *line));
+                    sugar = !locals.contains(recv) && SCOPE_NS.with(|s| s.borrow().contains(recv));
                 }
-            } else if !locals.contains(name) {
-                out.push((name.clone(), *line));
-                // `f(x)` is also exactly what method sugar `x.f()` arrives
-                // as. When the caller asked for it (`program_ref_kinds`),
-                // count this occurrence so a name seen ONLY here can be told
-                // apart from one that also appears as a variable, a type, or
-                // a zero-argument call — those cannot be method dispatch.
-                if !args.is_empty() {
-                    SCOPE_AMB.with(|a| {
-                        if let Some(amb) = a.borrow_mut().as_mut() {
-                            *amb.entry(name.clone()).or_default() += 1;
-                        }
-                    });
-                }
-            }
-            for a in args {
-                scope_expr(a, *line, locals, out);
-            }
-        }
-        Expr::StructLit { name, fields, line } => {
-            if !locals.contains(name) {
-                out.push((name.clone(), *line));
-            }
-            for (_, v) in fields {
-                scope_expr(v, *line, locals, out);
-            }
-        }
-        Expr::TryConstruct { name, args, line } => {
-            if !locals.contains(name) {
-                out.push((name.clone(), *line));
-            }
-            for a in args {
-                scope_expr(a, *line, locals, out);
-            }
-        }
-        Expr::Var { name, line } => {
-            if !locals.contains(name) {
-                out.push((name.clone(), *line));
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            scope_expr(expr, line, locals, out)
-        }
-        Expr::Consume { place, .. } => scope_expr(place, line, locals, out),
-        Expr::Binary { lhs, rhs, line, .. } => {
-            scope_expr(lhs, *line, locals, out);
-            scope_expr(rhs, *line, locals, out);
-        }
-        Expr::Match {
-            scrutinee,
-            arms,
-            line,
-        } => {
-            scope_expr(scrutinee, *line, locals, out);
-            for arm in arms {
-                let mut inner = locals.clone();
-                match &arm.pattern {
-                    Pattern::Variant(v, binds) => {
-                        // The variant constructor is a reference; its binds are new locals.
-                        if !inner.contains(v) {
-                            out.push((v.clone(), *line));
-                        }
-                        for b in binds {
-                            inner.insert(b.clone());
-                        }
+                if sugar {
+                    if let Some(Expr::Var { name: recv, .. }) = args.first() {
+                        self.out.push((format!("{recv}.{name}"), *line));
                     }
-                    Pattern::Some(b)
-                    | Pattern::Ok(b)
-                    | Pattern::Err(b)
-                    | Pattern::Success(b)
-                    | Pattern::Failure(b) => {
-                        inner.insert(b.clone());
-                    }
-                    Pattern::None | Pattern::Other => {}
-                }
-                match &arm.body {
-                    ArmBody::Expr(e) => scope_expr(e, *line, &inner, out),
-                    ArmBody::Block(b) => {
-                        let mut binner = inner.clone();
-                        scope_block(b, &mut binner, out);
+                } else if !locals.contains(name) {
+                    self.out.push((name.clone(), *line));
+                    // `f(x)` is also exactly what method sugar `x.f()` arrives
+                    // as. When the caller asked for it (`program_ref_kinds`),
+                    // count this occurrence so a name seen ONLY here can be told
+                    // apart from one that also appears as a variable, a type, or
+                    // a zero-argument call — those cannot be method dispatch.
+                    if !args.is_empty() {
+                        SCOPE_AMB.with(|a| {
+                            if let Some(amb) = a.borrow_mut().as_mut() {
+                                *amb.entry(name.clone()).or_default() += 1;
+                            }
+                        });
                     }
                 }
             }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            line,
-        } => {
-            scope_expr(cond, *line, locals, out);
-            scope_expr(then_branch, *line, locals, out);
-            if let Some(eb) = else_branch {
-                scope_expr(eb, *line, locals, out);
-            }
-        }
-        Expr::ArrayLit { elems, line } => {
-            for e2 in elems {
-                scope_expr(e2, *line, locals, out);
-            }
-        }
-        Expr::MapLit { entries, line } => {
-            for (k, v) in entries {
-                scope_expr(k, *line, locals, out);
-                scope_expr(v, *line, locals, out);
-            }
-        }
-        Expr::Lambda { params, body, line } => {
-            let mut inner = locals.clone();
-            for p in params {
-                inner.insert(p.clone());
-            }
-            match body {
-                LambdaBody::Expr(e2) => scope_expr(e2, *line, &inner, out),
-                LambdaBody::Block(b2) => scope_block(b2, &mut inner, out),
-            }
-        }
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-    }
-}
-
-/// Every named/applied type mentioned anywhere inside `ty`.
-fn type_names(ty: &Type) -> Vec<String> {
-    let mut out = Vec::new();
-    fn walk(t: &Type, out: &mut Vec<String>) {
-        match t {
-            Type::Named(n) => out.push(n.clone()),
-            Type::App(n, args) => {
-                out.push(n.clone());
-                for a in args {
-                    walk(a, out);
+            Expr::StructLit { name, line, .. }
+            | Expr::TryConstruct { name, line, .. }
+            | Expr::Var { name, line } => {
+                if !locals.contains(name) {
+                    self.out.push((name.clone(), *line));
                 }
-            }
-            Type::Option(a)
-            | Type::Array(a)
-            | Type::Task(a)
-            | Type::Stream(a)
-            | Type::Partial(a)
-            | Type::ArrayN(a, _)
-            | Type::SmallArray(a, _) => walk(a, out),
-            Type::Result(a, b) | Type::Merge(a, b) => {
-                walk(a, out);
-                walk(b, out);
-            }
-            Type::Omit(a, _) | Type::Pick(a, _) => walk(a, out),
-            Type::Record(fs) => {
-                for f in fs {
-                    walk(&f.ty, out);
-                }
-            }
-            Type::Enum(vs) => {
-                for v in vs {
-                    for p in &v.payload {
-                        walk(p, out);
-                    }
-                }
-            }
-            // Stored function values (RFC-0037) and Maps carry decl references
-            // in their component types too (RFC-0040 §2 exposed this).
-            Type::Fn(params, ret) => {
-                for p in params {
-                    walk(p, out);
-                }
-                walk(ret, out);
-            }
-            Type::Map(k, v) => {
-                walk(k, out);
-                walk(v, out);
             }
             _ => {}
         }
+        true
     }
-    walk(ty, &mut out);
+
+    fn arm_pattern(&mut self, p: &Pattern, line: usize, locals: &HashSet<String>) {
+        // The variant constructor is a reference; its binds are new locals. The
+        // four built-in sum names are not: they have no declaration to refer to
+        // (RFC-0126 §8).
+        if let Pattern::Variant(v, _) = p {
+            if !locals.contains(v) && !is_sum_arm(v) {
+                self.out.push((v.clone(), line));
+            }
+        }
+    }
+}
+
+/// Every named/applied type mentioned anywhere inside `ty`, in order.
+///
+/// The descent is [`type_head_descent`]'s; what is this reader's own is the
+/// clone it takes at each head.
+fn type_names(ty: &Type) -> Vec<String> {
+    let mut out = Vec::new();
+    type_heads(ty, &mut |n| out.push(n.clone()));
     out
 }
 
@@ -4319,28 +4227,52 @@ fn type_names(ty: &Type) -> Vec<String> {
 // unlinked root AST that the LSP indexes is untouched, so hover still sees `Y`.
 
 /// A name→name substitution for references (`map.get(n)` or `n` unchanged).
-fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {
-    map.get(n).cloned().unwrap_or_else(|| n.to_string())
+/// The program-wide symbol `original` names in module `target` once every
+/// rename apart has been decided — `original` itself when no rule renamed it.
+/// Pass 2, pass 4 and [`NsResolver::resolve_member`] each spelled the lookup
+/// and its fallback out.
+fn resolved_name(
+    renames: &HashMap<(String, String), String>,
+    target: &str,
+    original: &str,
+) -> String {
+    renames
+        .get(&(target.to_string(), original.to_string()))
+        .cloned()
+        .unwrap_or_else(|| original.to_string())
 }
 
-thread_local! {
-    /// The enum variant names the module a [`rewrite_module_refs`] call is
-    /// currently walking declares itself. A call spelled `V(x)` or a `match`
-    /// pattern `V(..)` whose `V` is one of these CONSTRUCTS the module's own
-    /// enum — it is not a reference to a same-spelled declaration, and
-    /// renaming it there corrupted variant constructions inside the renamed
-    /// module (a global/protocol may share a variant's spelling; a fn or type
-    /// cannot). Carried in a thread-local so the recursive rewrite family
-    /// keeps its signatures; set by [`rewrite_module_refs`], read by
-    /// [`rewrite_expr`].
-    static RW_VARIANTS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+/// Every name a module's imports bring into scope — an alias where one is
+/// written, the declaration's own name otherwise. The namespace-collision check
+/// and the name-privacy rule both ask.
+fn import_locals(p: &Program) -> HashSet<String> {
+    p.imports
+        .iter()
+        .flat_map(|imp| imp.names.iter())
+        .map(|n| n.local().to_string())
+        .collect()
+}
+
+/// The namespace names module `key` binds (RFC-0027), which pass 3 and pass 4
+/// each guard their rewrite with.
+fn ns_names_of(binds: &HashMap<String, Vec<(String, String)>>, key: &str) -> HashSet<String> {
+    binds
+        .get(key)
+        .into_iter()
+        .flatten()
+        .map(|(n, _)| n.clone())
+        .collect()
+}
+
+fn ren<'a>(map: &'a HashMap<String, String>, n: &'a str) -> String {
+    map.get(n).cloned().unwrap_or_else(|| n.to_string())
 }
 
 /// Every enum variant name `p` declares itself.
 fn own_variant_names(p: &Program) -> HashSet<String> {
     let mut out = HashSet::new();
     for t in &p.type_decls {
-        if let Type::Enum(vs) = &t.base {
+        if let Some(vs) = crate::types::declared_variants(&t.base) {
             out.extend(vs.iter().map(|v| v.name.clone()));
         }
     }
@@ -4348,72 +4280,16 @@ fn own_variant_names(p: &Program) -> HashSet<String> {
 }
 
 /// Rewrite every referenced type name in `ty` through `map`.
+///
+/// The descent is [`type_head_descent`]'s; what is this reader's own is the
+/// substitution it applies at each head.
 fn rewrite_type(ty: &mut Type, map: &HashMap<String, String>) {
-    match ty {
-        Type::Named(n) => *n = ren(map, n),
-        Type::App(n, args) => {
-            *n = ren(map, n);
-            for a in args {
-                rewrite_type(a, map);
-            }
-        }
-        Type::Option(a)
-        | Type::Array(a)
-        | Type::Task(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => rewrite_type(a, map),
-        Type::Result(a, b) | Type::Merge(a, b) => {
-            rewrite_type(a, map);
-            rewrite_type(b, map);
-        }
-        Type::Record(fs) => {
-            for f in fs {
-                rewrite_type(&mut f.ty, map);
-            }
-        }
-        Type::Enum(vs) => {
-            for v in vs {
-                for p in &mut v.payload {
-                    rewrite_type(p, map);
-                }
-            }
-        }
-        // Stored function values (RFC-0037) and Map values reference decl names
-        // too — a generated module's `fn(Validation<T>)` callback type or
-        // `Map<String, fn(..)>` pending map must follow a co-naming/namespace
-        // rename of `T` like every other position (RFC-0040 §2 exposed this).
-        Type::Fn(params, ret) => {
-            for p in params {
-                rewrite_type(p, map);
-            }
-            rewrite_type(ret, map);
-        }
-        Type::Map(k, v) => {
-            rewrite_type(k, map);
-            rewrite_type(v, map);
-        }
-        _ => {}
-    }
+    type_heads_mut(ty, &mut |n| *n = ren(map, n));
 }
 
-/// Rewrite every referenced name in `e` (call/spawn/struct-lit/try-construct
-/// callees, bare variables, and match-variant constructors) through `map`.
-///
-/// `ns` holds the module's namespace-binding names (RFC-0027): a method-sugar
-/// call whose receiver is a bare namespace (`ns.member(..)` arrives as
-/// `Call { member, args: [Var(ns), ..] }`) is a NAMESPACE member reference that
-/// pass 5 (the `NsResolver`) owns — the plain-name rewrite must leave its call
-/// name alone, or a co-naming rename of a like-named local decl would corrupt
-/// `ns.member` into `ns.renamed` before pass 5 can resolve it (RFC-0031 found
-/// this via a thin contract delegating `store.getItem(..)` while a generated
-/// module co-named `getItem`).
 /// Rewrite every reference to a declaration name in `p` through `map`.
 ///
-/// The plain-name half of the machinery above, exposed for [`crate::jsonenc`]:
+/// The plain-name half of the machinery below, exposed for [`crate::jsonenc`]:
 /// generated encoder source spells the injected module's reserved names as
 /// `VyrnRt_` placeholders (a `$` is unlexable, which is the point of it), and this
 /// is the pass that folds them back. One rewriter, so a generated program and an
@@ -4422,243 +4298,103 @@ pub(crate) fn rewrite_names(p: &mut Program, map: &HashMap<String, String>) {
     rewrite_module_refs(p, map, &HashSet::new(), &HashSet::new());
 }
 
-fn rewrite_expr(
-    e: &mut Expr,
-    map: &HashMap<String, String>,
-    ns: &HashSet<String>,
-    locals: &HashSet<String>,
-) {
-    match e {
-        Expr::Call { name, args, .. } => {
-            let ns_receiver =
-                matches!(args.first(), Some(Expr::Var { name: h, .. }) if ns.contains(h));
-            let shadowed = locals.contains(name);
-            // A constructor of THIS module's own enum (see [`RW_VARIANTS`])
-            // is reached by this spelling, not by any declaration's name.
-            let ctor = RW_VARIANTS.with(|v| v.borrow().contains(name.as_str()));
-            if !ns_receiver && !shadowed && !ctor {
-                *name = ren(map, name);
-            }
-            for a in args {
-                rewrite_expr(a, map, ns, locals);
-            }
-        }
-        Expr::Spawn { name, args, .. } | Expr::TryConstruct { name, args, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            for a in args {
-                rewrite_expr(a, map, ns, locals);
-            }
-        }
-        Expr::StructLit { name, fields, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            for (_, v) in fields {
-                rewrite_expr(v, map, ns, locals);
-            }
-        }
-        Expr::Var { name, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-        }
-        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
-            rewrite_expr(expr, map, ns, locals)
-        }
-        Expr::Consume { place, .. } => rewrite_expr(place, map, ns, locals),
-        Expr::Binary { lhs, rhs, .. } => {
-            rewrite_expr(lhs, map, ns, locals);
-            rewrite_expr(rhs, map, ns, locals);
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            rewrite_expr(scrutinee, map, ns, locals);
-            for arm in arms {
-                let mut inner = locals.clone();
-                if let Pattern::Variant(v, binds) = &mut arm.pattern {
-                    // A `match` arm always constructs — never a declaration
-                    // reference (see [`RW_VARIANTS`]).
-                    let ctor = RW_VARIANTS.with(|w| w.borrow().contains(v.as_str()));
-                    if !ctor {
-                        *v = ren(map, v);
-                    }
-                    for b in binds {
-                        inner.insert(b.clone());
-                    }
-                }
-                match &mut arm.body {
-                    ArmBody::Expr(e) => rewrite_expr(e, map, ns, &inner),
-                    ArmBody::Block(b) => {
-                        let mut binner = inner.clone();
-                        rewrite_block(b, map, ns, &mut binner);
-                    }
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            rewrite_expr(cond, map, ns, locals);
-            rewrite_expr(then_branch, map, ns, locals);
-            if let Some(eb) = else_branch {
-                rewrite_expr(eb, map, ns, locals);
-            }
-        }
-        Expr::ArrayLit { elems, .. } => {
-            for e2 in elems {
-                rewrite_expr(e2, map, ns, locals);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                rewrite_expr(k, map, ns, locals);
-                rewrite_expr(v, map, ns, locals);
-            }
-        }
-        // A lambda body (RFC-0023): rewrite referenced names inside it. Its
-        // params are new locals — they shadow a renamed decl exactly like a
-        // `let` does, so they join the scope rather than trusting that no map
-        // key ever spells them.
-        Expr::Lambda { params, body, .. } => {
-            let mut inner = locals.clone();
-            for p in params {
-                inner.insert(p.clone());
-            }
-            match body {
-                LambdaBody::Expr(e2) => rewrite_expr(e2, map, ns, &inner),
-                LambdaBody::Block(b2) => rewrite_block(b2, map, ns, &mut inner),
-            }
-        }
-        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {}
-    }
+/// The renamer's line at each site. The descent and the scope stack are
+/// [`body_scope_descent`]'s; what is this reader's own is the substitution.
+struct Renamer<'a> {
+    map: &'a HashMap<String, String>,
+    /// The module's namespace-binding names (RFC-0027): a method-sugar call
+    /// whose receiver is a bare namespace (`ns.member(..)` arrives as
+    /// `Call { member, args: [Var(ns), ..] }`) is a NAMESPACE member reference
+    /// that pass 5 (the [`NsResolver`]) owns — the plain-name rewrite must leave
+    /// its call name alone, or a co-naming rename of a like-named local decl
+    /// would corrupt `ns.member` into `ns.renamed` before pass 5 can resolve it
+    /// (RFC-0031 found this via a thin contract delegating `store.getItem(..)`
+    /// while a generated module co-named `getItem`).
+    ns: &'a HashSet<String>,
+    /// The enum variant names the module being walked declares itself. A call
+    /// spelled `V(x)` or a pattern `V(..)` whose `V` is one of these CONSTRUCTS
+    /// the module's own enum — it is not a reference to a same-spelled
+    /// declaration, and renaming it there corrupted variant constructions inside
+    /// the renamed module (a global or protocol may share a variant's spelling;
+    /// a fn or type cannot).
+    variants: &'a HashSet<String>,
 }
 
-fn rewrite_block(
-    b: &mut Block,
-    map: &HashMap<String, String>,
-    ns: &HashSet<String>,
-    locals: &mut HashSet<String>,
-) {
-    for s in &mut b.stmts {
-        rewrite_stmt(s, map, ns, locals);
-    }
-}
-
-fn rewrite_stmt(
-    s: &mut Stmt,
-    map: &HashMap<String, String>,
-    ns: &HashSet<String>,
-    locals: &mut HashSet<String>,
-) {
-    match s {
-        Stmt::Let {
-            name, value, ty, ..
-        } => {
-            if let Some(t) = ty {
-                rewrite_type(t, map);
+impl BodyVisitMut for Renamer<'_> {
+    fn stmt(&mut self, s: &mut Stmt, locals: &HashSet<String>) {
+        match s {
+            Stmt::Let { ty: Some(t), .. } => rewrite_type(t, self.map),
+            // The assignment TARGET is a reference too, not a declaration:
+            // module state (RFC-0029) is a top-level decl, so a rename must
+            // reach `g = v` exactly as it reaches the `g` reads. Missing these
+            // left the write side naming a decl that no longer exists
+            // ("assignment to unknown variable `filter`" once std/arrays'
+            // `filter` forced the name-privacy rename of a same-named global).
+            // A LOCAL of the same name is not that decl, though: `let flag = ..;
+            // flag = x` writes the local. `drop g` names a binding the same way.
+            Stmt::Assign { name, .. }
+            | Stmt::SetField { name, .. }
+            | Stmt::IndexSet { name, .. }
+            | Stmt::Drop { name, .. } => {
+                if !locals.contains(name) {
+                    *name = ren(self.map, name);
+                }
             }
-            rewrite_expr(value, map, ns, locals);
-            // In scope for everything after it — a local shadows a renamed
-            // decl exactly as it shadows the original.
-            locals.insert(name.clone());
-        }
-        // The assignment TARGET is a reference too, not a declaration: module
-        // state (RFC-0029) is a top-level decl, so a rename must reach `g = v`
-        // exactly as it reaches the `g` reads (`Expr::Var` below). Missing these
-        // left the write side naming a decl that no longer exists ("assignment
-        // to unknown variable `filter`" once std/arrays' `filter` forced the
-        // name-privacy rename of a same-named global). A LOCAL of the same name
-        // is not that decl, though: `let flag = ..; flag = x` writes the local,
-        // and rewriting the target rebound the write to the global.
-        Stmt::Assign { name, value, .. } | Stmt::SetField { name, value, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            rewrite_expr(value, map, ns, locals);
-        }
-        Stmt::IndexSet {
-            name, index, value, ..
-        } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-            rewrite_expr(index, map, ns, locals);
-            rewrite_expr(value, map, ns, locals);
-        }
-        Stmt::Return { value: Some(e), .. } => rewrite_expr(e, map, ns, locals),
-        Stmt::Return { value: None, .. } => {}
-        Stmt::If {
-            cond,
-            then_block,
-            else_block,
-            ..
-        } => {
-            rewrite_expr(cond, map, ns, locals);
-            let mut inner = locals.clone();
-            rewrite_block(then_block, map, ns, &mut inner);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                rewrite_block(eb, map, ns, &mut inner2);
-            }
-        }
-        Stmt::IfLet {
-            pattern,
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            rewrite_expr(scrutinee, map, ns, locals);
             // The variant NAME follows the same rename a `match` arm's does —
-            // this walk missed it until RFC-0121 made `if let` over an
-            // imported enum's variants a written shape (the corpus never had
-            // one; `match` always renamed).
-            if let Pattern::Variant(v, _) = &mut *pattern {
-                let ctor = RW_VARIANTS.with(|w| w.borrow().contains(v.as_str()));
-                if !ctor {
-                    *v = ren(map, v);
+            // this walk missed it until RFC-0121 made `if let` over an imported
+            // enum's variants a written shape (the corpus never had one; `match`
+            // always renamed).
+            Stmt::IfLet { pattern, .. } => self.rename_variant(pattern),
+            _ => {}
+        }
+    }
+
+    fn expr(&mut self, e: &mut Expr, locals: &HashSet<String>) -> bool {
+        match e {
+            Expr::Call {
+                name,
+                args,
+                type_args,
+                ..
+            } => {
+                // A renamed declaration is renamed inside a type argument too
+                // (RFC-0125 §3 M6): `fromJson<Pt>(s)` names a type this module
+                // may have had renamed for privacy.
+                for t in type_args.iter_mut() {
+                    rewrite_type(t, self.map);
+                }
+                let ns_receiver =
+                    matches!(args.first(), Some(Expr::Var { name: h, .. }) if self.ns.contains(h));
+                let ctor = self.variants.contains(name.as_str());
+                if !ns_receiver && !locals.contains(name) && !ctor {
+                    *name = ren(self.map, name);
                 }
             }
-            let mut inner = locals.clone();
-            for b in crate::movecheck::pattern_bindings(pattern) {
-                inner.insert(b.to_string());
+            Expr::Spawn { name, .. }
+            | Expr::TryConstruct { name, .. }
+            | Expr::StructLit { name, .. }
+            | Expr::Var { name, .. } => {
+                if !locals.contains(name) {
+                    *name = ren(self.map, name);
+                }
             }
-            rewrite_block(then_block, map, ns, &mut inner);
-            if let Some(eb) = else_block {
-                let mut inner2 = locals.clone();
-                rewrite_block(eb, map, ns, &mut inner2);
+            _ => {}
+        }
+        true
+    }
+
+    fn arm_pattern(&mut self, p: &mut Pattern, _line: usize, _locals: &HashSet<String>) {
+        // A `match` arm always constructs — never a declaration reference.
+        self.rename_variant(p);
+    }
+}
+
+impl Renamer<'_> {
+    fn rename_variant(&self, p: &mut Pattern) {
+        if let Pattern::Variant(v, _) = p {
+            if !self.variants.contains(v.as_str()) {
+                *v = ren(self.map, v);
             }
-        }
-        Stmt::While { cond, body, .. } => {
-            rewrite_expr(cond, map, ns, locals);
-            let mut inner = locals.clone();
-            rewrite_block(body, map, ns, &mut inner);
-        }
-        Stmt::ForIn {
-            var, iter, body, ..
-        } => {
-            rewrite_expr(iter, map, ns, locals);
-            let mut inner = locals.clone();
-            inner.insert(var.clone());
-            rewrite_block(body, map, ns, &mut inner);
-        }
-        // `drop g` names a binding the same way — same rule as the target above.
-        Stmt::Drop { name, .. } => {
-            if !locals.contains(name) {
-                *name = ren(map, name);
-            }
-        }
-        Stmt::Break { .. } | Stmt::Continue { .. } => {}
-        Stmt::Expr(e) => rewrite_expr(e, map, ns, locals),
-        Stmt::Region { body, .. } => {
-            let mut inner = locals.clone();
-            rewrite_block(body, map, ns, &mut inner);
         }
     }
 }
@@ -4667,25 +4403,25 @@ fn rewrite_stmt(
 ///
 /// The body is walked scope-aware: the params seed the local set, so a param or
 /// a `let` that shadows a renamed decl keeps naming the local.
-fn rewrite_function(f: &mut Function, map: &HashMap<String, String>, ns: &HashSet<String>) {
+fn rewrite_function(f: &mut Function, rn: &mut Renamer) {
     for p in &mut f.params {
-        rewrite_type(&mut p.ty, map);
+        rewrite_type(&mut p.ty, rn.map);
     }
-    rewrite_type(&mut f.ret, map);
+    rewrite_type(&mut f.ret, rn.map);
     // A `<T: P>` bound naming an aliased protocol resolves through `map` too.
     for bounds in f.type_bounds.values_mut() {
         for b in bounds.iter_mut() {
-            *b = ren(map, b);
+            *b = ren(rn.map, b);
         }
     }
     let mut locals: HashSet<String> = f.params.iter().map(|p| p.name.clone()).collect();
-    rewrite_block(&mut f.body, map, ns, &mut locals);
+    body_block_mut(&mut f.body, &mut locals, rn);
 }
 
 /// Rewrite every *reference* (types, calls, variables, bounds) in one module's
 /// program through `map`. Declaration names are left alone — a separate step
 /// renames a decl when a foreign name must be freed for a co-named local stub.
-/// `ns` is the module's namespace-binding names (see [`rewrite_expr`]).
+/// `ns` is the module's namespace-binding names (see [`Renamer`]).
 fn rewrite_module_refs(
     p: &mut Program,
     map: &HashMap<String, String>,
@@ -4695,17 +4431,15 @@ fn rewrite_module_refs(
     if map.is_empty() {
         return;
     }
-    // The variant guard rides a thread-local so the recursive rewrite family
-    // keeps its signatures (see [`RW_VARIANTS`]).
-    RW_VARIANTS.with(|v| *v.borrow_mut() = variants.clone());
+    let rn = &mut Renamer { map, ns, variants };
     for f in &mut p.functions {
-        rewrite_function(f, map, ns);
+        rewrite_function(f, rn);
     }
     for im in &mut p.impls {
         im.protocol = ren(map, &im.protocol);
         rewrite_type(&mut im.ty, map);
         for m in &mut im.methods {
-            rewrite_function(m, map, ns);
+            rewrite_function(m, rn);
         }
         // A `place` projection is never flattened into `Program::functions`
         // (RFC-0091 M2), so without this walk a rename never reached its
@@ -4713,14 +4447,14 @@ fn rewrite_module_refs(
         // `clamp` after clamp was renamed, and an alias folding skipped the
         // projection's prologue entirely.
         for pl in &mut im.places {
-            rewrite_function(pl, map, ns);
+            rewrite_function(pl, rn);
         }
     }
     for t in &mut p.type_decls {
         rewrite_type(&mut t.base, map);
         if let Some(pred) = &mut t.predicate {
             // A refinement predicate has no locals of its own.
-            rewrite_expr(pred, map, ns, &HashSet::new());
+            body_expr_mut(pred, &HashSet::new(), rn);
         }
     }
     for g in &mut p.globals {
@@ -4728,7 +4462,7 @@ fn rewrite_module_refs(
             rewrite_type(t, map);
         }
         // A global initializer runs at module-state init: no locals in scope.
-        rewrite_expr(&mut g.init, map, ns, &HashSet::new());
+        body_expr_mut(&mut g.init, &HashSet::new(), rn);
     }
     for pr in &mut p.protocols {
         for m in &mut pr.methods {
@@ -4746,7 +4480,7 @@ fn rewrite_module_refs(
                 crate::ast::ContractMemberKind::Value { ty, default } => {
                     rewrite_type(ty, map);
                     if let Some(d) = default {
-                        rewrite_expr(d, map, ns, &HashSet::new());
+                        body_expr_mut(d, &HashSet::new(), rn);
                     }
                 }
                 crate::ast::ContractMemberKind::Fn {
@@ -4760,21 +4494,18 @@ fn rewrite_module_refs(
                     }
                     rewrite_type(ret, map);
                     if let Some(d) = default {
-                        rewrite_expr(d, map, ns, &HashSet::new());
+                        body_expr_mut(d, &HashSet::new(), rn);
                     }
                 }
             }
         }
     }
     for t in &mut p.tests {
-        rewrite_block(&mut t.body, map, ns, &mut HashSet::new());
+        body_block_mut(&mut t.body, &mut HashSet::new(), rn);
     }
     for b in &mut p.benches {
-        rewrite_block(&mut b.body, map, ns, &mut HashSet::new());
+        body_block_mut(&mut b.body, &mut HashSet::new(), rn);
     }
-    RW_VARIANTS.with(|v| {
-        v.borrow_mut().clear();
-    });
 }
 
 // Every reference name (types and expression callees/variables/variants) used
@@ -4831,9 +4562,9 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
         totals: &mut HashMap<String, usize>,
     ) {
         let mut locals: HashSet<String> = params.collect();
-        let mut refs = Vec::new();
-        scope_block(b, &mut locals, &mut refs);
-        for (n, _) in refs {
+        let mut v = RefNames { out: Vec::new() };
+        body_block(b, &mut locals, &mut v);
+        for (n, _) in v.out {
             *totals.entry(n.clone()).or_default() += 1;
             out.insert(n);
         }
@@ -4923,152 +4654,65 @@ fn program_ref_kinds(p: &Program, split_ambiguous: bool) -> (HashSet<String>, Ha
     (out, ambiguous_only)
 }
 
-/// Rename a top-level *declaration* (its defining name) from `from` to `to` in
-/// module `p`, and rewrite that module's own references to it. Used to free a
-/// foreign name so a co-naming importer's stub can take it (RFC-0022).
-fn rename_decl_in_module(p: &mut Program, from: &str, to: &str, ns: &HashSet<String>) {
+/// Apply every rename `map` holds to module `p`: the top-level *declarations*
+/// themselves, and that module's own references to them. Used to free a foreign
+/// name so a co-naming importer's stub can take it (RFC-0022), and to give an
+/// injected runtime module's every declaration its reserved spelling
+/// (RFC-0078 M2b).
+///
+/// **One walk per module, not one per rename** (RFC-0125 §3 M4). The form
+/// before this took a single `from`/`to` and walked the whole module for it, so
+/// an injected module cost one full walk of itself per declaration it has —
+/// quadratic in the module, and `std/runtime` is 1,951 lines in every program
+/// now. Measured on a three-line program: 15.2 ms here, against 1.8 ms with the
+/// runtime modules absent.
+///
+/// One walk means what many meant because the renames cannot chain: a reserved
+/// spelling holds a `$`, a minted one a `__fromN`, and no name a module
+/// declares holds either, so no rename's target is another's source. The caller
+/// iterates a `HashMap` and always did, so an order-dependent answer was never
+/// sound to begin with.
+fn rename_decls_in_module(p: &mut Program, map: &HashMap<String, String>, ns: &HashSet<String>) {
     for t in &mut p.type_decls {
-        if t.name == from {
-            t.name = to.to_string();
-        }
+        t.name = ren(map, &t.name);
     }
     for f in &mut p.functions {
-        if f.name == from {
-            f.name = to.to_string();
-        }
+        f.name = ren(map, &f.name);
     }
     for pr in &mut p.protocols {
-        if pr.name == from {
-            pr.name = to.to_string();
-        }
+        pr.name = ren(map, &pr.name);
     }
-    let own_variants = own_variant_names(p);
-    // When the spelling being renamed IS one of this module's own enum
-    // variants — an injected module's reserved-spelling pass renaming `JStr`
-    // to `json$JStr` — the variant positions are the TARGETS of the rename
-    // and must follow it. The guard exists for the other direction: a
-    // non-variant decl (a private global, a protocol) sharing a variant's
-    // spelling, whose rename must leave the constructions alone.
-    let protected = if own_variants.contains(from) {
-        HashSet::new()
-    } else {
-        own_variants
-    };
     for c in &mut p.contracts {
-        if c.name == from {
-            c.name = to.to_string();
-        }
+        c.name = ren(map, &c.name);
     }
     for g in &mut p.globals {
-        if g.name == from {
-            g.name = to.to_string();
-        }
+        g.name = ren(map, &g.name);
     }
-    let map: HashMap<String, String> =
-        std::iter::once((from.to_string(), to.to_string())).collect();
-    rewrite_module_refs(p, &map, ns, &protected);
+    // The variant guard the one-rename form carried was a no-op and is dropped
+    // rather than generalized. It skipped a construction site whose name is one
+    // of this module's own variants; the form passed an EMPTY guard set exactly
+    // when the name being renamed WAS such a variant, and a non-empty one only
+    // when the single-entry map could not match a variant site at all. Either
+    // way the site followed the map, which is what an empty set here does.
+    rewrite_module_refs(p, map, ns, &HashSet::new());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// [`RT_MODULES`] writes each route's reserved name out in full so
-    /// [`routed_builtin`] can return a `&'static str` without composing one on a
-    /// path every call expression takes. That redundancy has to be checked, or a
-    /// row could name a spelling the decl rename never produces — a call to a
-    /// function nobody defines, which every engine would then refuse at the worst
-    /// possible moment. Also: no builtin may be claimed by two modules.
-    #[test]
-    fn every_route_is_spelled_with_its_modules_prefix() {
-        let mut seen: Vec<&str> = Vec::new();
-        for rt in RT_MODULES {
-            assert!(rt.prefix.ends_with('$'), "`{}` must end in `$`", rt.prefix);
-            for (builtin, reserved) in rt.routes {
-                assert_eq!(
-                    *reserved,
-                    format!("{}{}", rt.prefix, reserved.trim_start_matches(rt.prefix)),
-                    "`{builtin}` names `{reserved}`, which is not `{}`-prefixed",
-                    rt.prefix
-                );
-                assert!(
-                    reserved.starts_with(rt.prefix),
-                    "`{reserved}` vs `{}`",
-                    rt.prefix
-                );
-                assert!(!seen.contains(builtin), "`{builtin}` is routed twice");
-                seen.push(builtin);
-                assert_eq!(routed_builtin(builtin), Some(*reserved));
-            }
-            for b in rt.desugared {
-                assert!(
-                    routed_builtin(b).is_none(),
-                    "`{b}` is a desugar, not a route"
-                );
-            }
-        }
-        // A route is matched on the CALL NAME, before any type is known, so it
-        // only means the builtin while no declaration may carry the name. This
-        // is the check `movecheck::every_view_and_sink_name_is_reserved` makes
-        // for its list and `parser::every_method_builtin_is_reserved_or_shadowable`
-        // makes for its own — the same hazard, a third pass. A route spelled
-        // with the method-form `@` prefix is unspellable and needs no guard.
-        for rt in RT_MODULES {
-            for (builtin, _) in rt.routes {
-                assert!(
-                    builtin.starts_with('@') || crate::checker::RESERVED.contains(builtin),
-                    "`{builtin}` is routed to a std function but is not reserved, so a \
-                     user declaration of that name would be silently unreachable"
-                );
-            }
-        }
-        assert!(routed_builtin("print").is_none());
-        assert!(
-            routed_builtin("lineAt").is_none(),
-            "`lineAt` keeps its interpreter cache"
-        );
-        // RFC-0094 M2: a routed builtin with a FREE spelling needs no route — an
-        // import does the same work and costs the compiler nothing. Eleven rows
-        // left this table; `@charCount` is what remains, because a method-only
-        // name has no spelling an import can bring into scope.
-        for gone in crate::checker::MOVED_TO_STD {
-            assert!(
-                routed_builtin(gone.0).is_none(),
-                "`{}` moved to `{}`; a route for it would shadow the import",
-                gone.0,
-                gone.1
-            );
-        }
-        let routes: Vec<&str> = RT_MODULES
-            .iter()
-            .flat_map(|rt| rt.routes)
-            .map(|(b, _)| *b)
-            .collect();
-        assert_eq!(routes, vec!["@charCount"]);
-    }
-
-    /// RFC-0081 M2: [`F64_STR`] is a name two backends emit a call to, so the
-    /// module it names has to be in the table and its prefix has to be the one it
-    /// is spelled with. Neither backend can check that for itself — a mismatch is
-    /// a link error in a program that formats a float, which is most of them.
-    #[test]
-    fn the_float_formatter_is_std_nums() {
-        let num = RT_MODULES
-            .iter()
-            .find(|rt| rt.spec == "std/num")
-            .expect("std/num is linked");
-        assert!(
-            F64_STR.starts_with(num.prefix),
-            "`{F64_STR}` vs `{}`",
-            num.prefix
-        );
-        // Both spellings that reach it, and neither is a route: the float case is
-        // one case of a type-directed builtin.
-        assert!(num.desugared.contains(&"@str") && num.desugared.contains(&"print"));
-        assert!(routed_builtin(F64_STR).is_none());
-    }
-
-    pub(super) fn map(entries: &[(&str, &str)]) -> MapResolver {
+    /// The tests that read this module's INSIDES, and only those.
+    ///
+    /// Every other loader test states a claim about a program: it links these
+    /// files and answers 42. Those run the linked program, and since RFC-0125 §3
+    /// M5's ninth slice a program runs on the compiled route — the direct
+    /// backend's module in the driver's WASI host, which this crate cannot reach
+    /// from a unit test (a dev-dependency back on `vyrn-cli` builds a SECOND
+    /// copy of this crate, and the two `Program` types are not the same type).
+    /// So they live in `tests/loader_run.rs`, where the dependency resolves, and
+    /// what stays here is what an integration test cannot see: the cache
+    /// entry's format, the nesting counter, and the two generator budgets.
+    fn map(entries: &[(&str, &str)]) -> MapResolver {
         MapResolver(
             entries
                 .iter()
@@ -5077,828 +4721,14 @@ mod tests {
         )
     }
 
-    pub(super) fn opts() -> LoadOptions {
+    fn opts() -> LoadOptions {
         LoadOptions {
             std_root: Some("std".into()),
             ..Default::default()
         }
     }
 
-    /// Every runtime module a builtin can inject (RFC-0078), plus the modules those
-    /// import. Added to every `run_multi` resolver rather than per test: injection is
-    /// conditional on the mention, so a program that never says `fromJson` links none
-    /// of them, and a test that does say it should not have to know which files that
-    /// implies.
-    const RT_FILES: &[(&str, &str)] = &[
-        ("std/json.vyrn", include_str!("../../../std/json.vyrn")),
-        (
-            "std/jsonread.vyrn",
-            include_str!("../../../std/jsonread.vyrn"),
-        ),
-        (
-            "std/jsondec.vyrn",
-            include_str!("../../../std/jsondec.vyrn"),
-        ),
-        ("std/num.vyrn", include_str!("../../../std/num.vyrn")),
-        ("std/codecs.vyrn", include_str!("../../../std/codecs.vyrn")),
-        ("std/text.vyrn", include_str!("../../../std/text.vyrn")),
-        (
-            "std/strpred.vyrn",
-            include_str!("../../../std/strpred.vyrn"),
-        ),
-        ("std/hash.vyrn", include_str!("../../../std/hash.vyrn")),
-    ];
-
-    fn run_multi(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
-        let files: Vec<(&str, &str)> = files
-            .iter()
-            .copied()
-            .chain(RT_FILES.iter().copied())
-            .collect();
-        let files = &files[..];
-        let mut program = load(root, "main.vyrn", &opts(), &map(files)).map_err(|ds| {
-            ds.iter().map(|d| d.render()).collect::<Vec<_>>().join(
-                "
-",
-            )
-        })?;
-        // `check_and_synthesize` rather than a bare check: since RFC-0078 M2b/M3 a
-        // linked program is not runnable until the JSON builtins' generated Vyrn is
-        // in it, and `loader::load` deliberately stops at the link. A test that ran
-        // the bare check would fail at the call site with "no decoder", which is a
-        // true statement about a program nobody finished assembling.
-        let diags = crate::check_and_synthesize(&mut program);
-        if let Some(d) = diags.first() {
-            return Err(d.render());
-        }
-        crate::interp::run(&program)
-    }
-
-    fn load_err(root: &str, files: &[(&str, &str)]) -> String {
-        match load(root, "main.vyrn", &opts(), &map(files)) {
-            Ok(_) => panic!("expected a load error"),
-            Err(ds) => ds
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
-    }
-
-    #[test]
-    fn imports_functions_and_types_across_modules() {
-        let lib = "export fn double(x: Int64) -> Int64 { return x * 2 } \
-                   export type Age = Int64 where value >= 18 \
-                   fn hidden() -> Int64 { return 0 }";
-        let root = "import { double, Age } from \"./lib\" \
-                    fn main() -> Int64 { let a: Age = 21 return double(a) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 42);
-    }
-
-    #[test]
-    fn import_alias_resolves_to_the_original_decl() {
-        // RFC-0022: `getUser as fetchUser` — the alias is the local name and
-        // resolves to the original function/type in the flat namespace.
-        let lib = "export fn getUser(id: Int64) -> Int64 { return id * 10 } \
-                   export type Age = Int64 where value >= 0";
-        let root = "import { getUser as fetchUser, Age as Years } from \"./lib\" \
-                    fn main() -> Int64 { let y: Years = 3 return fetchUser(y) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 30);
-    }
-
-    #[test]
-    fn import_alias_hides_the_original_name() {
-        // The original name is not brought into scope by an aliased import.
-        let lib = "export fn getUser(id: Int64) -> Int64 { return id }";
-        let root = "import { getUser as fetchUser } from \"./lib\" \
-                    fn main() -> Int64 { return getUser(1) }";
-        let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("getUser"), "{e}");
-    }
-
-    #[test]
-    fn import_alias_clashing_with_a_local_decl_is_an_error() {
-        let lib = "export fn getUser(id: Int64) -> Int64 { return id }";
-        let root = "import { getUser as fetchUser } from \"./lib\" \
-                    fn fetchUser() -> Int64 { return 0 } \
-                    fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("clashes with a top-level declaration"), "{e}");
-    }
-
-    #[test]
-    fn import_alias_lets_a_stub_share_the_real_name() {
-        // The co-naming (RPC stub) pattern: the importing module defines its own
-        // `getUser`, importing the real one under an alias it forwards to.
-        let lib = "export fn getUser(id: Int64) -> Int64 { return id * 100 }";
-        let root = "import { getUser as getUserReal } from \"./lib\" \
-                    fn getUser(id: Int64) -> Int64 { return getUserReal(id) + 1 } \
-                    fn main() -> Int64 { return getUser(2) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 201);
-    }
-
-    #[test]
-    fn aliased_enum_import_brings_variants_under_own_names() {
-        // Importing an enum under an alias still brings its variants by their
-        // own (unaliased) names (RFC-0022).
-        let lib = "export type Color = | Red | Green | Blue";
-        let root = "import { Color as Hue } from \"./lib\" \
-                    fn pick(h: Hue) -> Int64 { return match h { Red => 1, Green => 2, Blue => 3 } } \
-                    fn main() -> Int64 { let c: Hue = Green return pick(c) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 2);
-    }
-
-    #[test]
-    fn validated_type_auto_validates_across_modules() {
-        let lib = "export type Age = Int64 where value >= 18";
-        let root = "import { Age } from \"./lib\" \
-                    fn mk(n: Int64) -> Age { return n } \
-                    fn main() -> Int64 { let a = mk(5) return 0 }";
-        let e = run_multi(root, &[("lib.vyrn", lib)]).unwrap_err();
-        assert!(e.contains("validation failed for `Age`"), "{e}");
-    }
-
-    #[test]
-    fn importing_a_private_name_is_an_error() {
-        let lib = "fn secret() -> Int64 { return 1 }";
-        let root = "import { secret } from \"./lib\" \
-                    fn main() -> Int64 { return secret() }";
-        let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("not exported"), "{e}");
-    }
-
-    #[test]
-    fn importing_a_missing_name_is_an_error() {
-        let root = "import { nope } from \"./lib\" \
-                    fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[("lib.vyrn", "export fn f() -> Int64 { return 1 }")]);
-        assert!(e.contains("does not define `nope`"), "{e}");
-    }
-
-    #[test]
-    fn using_a_foreign_name_without_importing_it_is_an_error() {
-        // `helper` exists (exported, even) in lib, but main never imported it.
-        let lib = "export fn helper() -> Int64 { return 1 } \
-                   export fn wanted() -> Int64 { return 2 }";
-        let root = "import { wanted } from \"./lib\" \
-                    fn main() -> Int64 { return wanted() + helper() }";
-        let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("not imported here"), "{e}");
-    }
-
-    #[test]
-    fn std_result_and_option_imports_are_validated_noops() {
-        // RFC-0062: importing the ambient builtins by name from `std/result` /
-        // `std/option` is a no-op — no file is loaded, the names keep resolving
-        // to the builtins, and the program runs exactly as it would ambiently.
-        let root = "import { Result, Ok, Err } from \"std/result\" \
-                    import { Option, Some, None } from \"std/option\" \
-                    fn find(x: Int64) -> Result<Int64, String> { \
-                        if x > 0 { return Ok(x) } return Err(\"neg\") } \
-                    fn opt(x: Bool) -> Option<Int64> { \
-                        if x { return Some(7) } return None } \
-                    fn main() -> Int64 { \
-                        let r = match find(5) { Ok(v) => v, Err(e) => 0 } \
-                        let o = match opt(true) { Some(n) => n, None => 0 } \
-                        return r + o }";
-        assert_eq!(run_multi(root, &[]).unwrap(), 12);
-    }
-
-    #[test]
-    fn std_result_ambient_use_without_the_import_still_works() {
-        // The import is opt-in style, not a requirement: the same program runs
-        // without importing the names (they were always ambient).
-        let root = "fn find(x: Int64) -> Result<Int64, String> { \
-                        if x > 0 { return Ok(x) } return Err(\"neg\") } \
-                    fn main() -> Int64 { return match find(5) { Ok(v) => v, Err(e) => 0 } }";
-        assert_eq!(run_multi(root, &[]).unwrap(), 5);
-    }
-
-    #[test]
-    fn std_result_unknown_export_is_rejected() {
-        let root = "import { Result, Foo } from \"std/result\" \
-                    fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[]);
-        assert!(e.contains("std/result has no export `Foo`"), "{e}");
-    }
-
-    #[test]
-    fn std_option_rejects_a_result_only_export() {
-        // Each module's export list is fixed and distinct — `Result` is not an
-        // export of `std/option`.
-        let root = "import { Option, Result } from \"std/option\" \
-                    fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[]);
-        assert!(e.contains("std/option has no export `Result`"), "{e}");
-    }
-
-    #[test]
-    fn std_result_namespace_import_is_rejected() {
-        // `import * as r from "std/result"` would create a second spelling
-        // (`r.Ok`) for a builtin — rejected.
-        let root = "import * as r from \"std/result\" \
-                    fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[]);
-        assert!(e.contains("cannot be imported as a namespace"), "{e}");
-    }
-
-    #[test]
-    fn import_cycles_are_errors() {
-        let a = "import { b } from \"./b\" export fn a() -> Int64 { return 1 }";
-        let b = "import { a } from \"./a\" export fn b() -> Int64 { return 2 }";
-        let root = "import { a } from \"./a\" fn main() -> Int64 { return a() }";
-        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("import cycle"), "{e}");
-    }
-
-    #[test]
-    fn cross_module_name_collisions_are_errors() {
-        let a = "export fn f() -> Int64 { return 1 }";
-        let b = "export fn f() -> Int64 { return 2 }";
-        let root = "import { f } from \"./a\" \
-                    import { f } from \"./b\" \
-                    fn main() -> Int64 { return f() }";
-        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(
-            e.contains("`f` is declared by both `a.vyrn` and `b.vyrn`"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn a_module_pair_collision_is_one_error_that_names_the_fix() {
-        // Two modules sharing top-level names is ONE mistake. It used to be
-        // reported once per shared name — including names the user never wrote —
-        // at the foreign declaration's line, against the root file, and then a
-        // fourth time as "`f` is not defined in `b.vyrn`", which is false.
-        let a = "export fn f() -> Int64 { return 1 } \
-                 export fn g() -> Int64 { return 1 }";
-        let b = "export fn f() -> Int64 { return 2 } \
-                 export fn g() -> Int64 { return 2 }";
-        let root = "import { f } from \"./a\" \n\
-                    import { f } from \"./b\" \n\
-                    fn main() -> Int64 { return f() }";
-        let ds = match load(
-            root,
-            "main.vyrn",
-            &opts(),
-            &map(&[("a.vyrn", a), ("b.vyrn", b)]),
-        ) {
-            Ok(_) => panic!("expected a load error"),
-            Err(ds) => ds,
-        };
-        let all = ds
-            .iter()
-            .map(|d| format!("{:?} {} {}", d.file, d.line, d.message))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_eq!(ds.len(), 1, "{all}");
-        let d = &ds[0];
-        // The user's own file, at the import they wrote — never a line borrowed
-        // from the module the name collided with.
-        assert_eq!(d.file, None, "{all}");
-        assert_eq!(d.line, 2, "{all}");
-        assert!(d.message.contains("`f` is declared by both"), "{all}");
-        let note = d.note.as_deref().unwrap_or("");
-        assert!(note.contains("import * as b from \"./b\""), "{note}");
-        // `g` collides too, but the user never wrote it: a note, not an error.
-        assert!(note.contains("`g` collides the same way"), "{note}");
-        assert!(!all.contains("is not defined in"), "{all}");
-        assert!(!all.contains("imported twice"), "{all}");
-    }
-
-    #[test]
-    fn the_same_module_imported_twice_still_says_so() {
-        // The suppression above is only for the same name from DIFFERENT modules
-        // (which the pair collision covers). A genuine double binding still errors.
-        let a = "export fn f() -> Int64 { return 1 } export fn g() -> Int64 { return 2 }";
-        let root = "import { f } from \"./a\" \
-                    import { f } from \"./a\" \
-                    fn main() -> Int64 { return f() }";
-        let e = load_err(root, &[("a.vyrn", a)]);
-        assert!(e.contains("`f` is imported twice"), "{e}");
-        let root = "import { f as x } from \"./a\" \
-                    import { g as x } from \"./a\" \
-                    fn main() -> Int64 { return x() }";
-        let e = load_err(root, &[("a.vyrn", a)]);
-        assert!(e.contains("`x` is imported twice"), "{e}");
-    }
-
-    #[test]
-    fn a_collision_the_user_did_not_import_is_still_one_error() {
-        // Neither name is imported from both modules, so nothing is "imported
-        // twice" — but the flat namespace still cannot hold two `g`s, and the
-        // user has to hear about it exactly once, with the fix.
-        let a = "export fn f() -> Int64 { return 1 } \
-                 export fn g() -> Int64 { return 1 }";
-        let b = "export fn h() -> Int64 { return 2 } \
-                 export fn g() -> Int64 { return 2 }";
-        let root = "import { f } from \"./a\" \n\
-                    import { h } from \"./b\" \n\
-                    fn main() -> Int64 { return f() + h() }";
-        let ds = match load(
-            root,
-            "main.vyrn",
-            &opts(),
-            &map(&[("a.vyrn", a), ("b.vyrn", b)]),
-        ) {
-            Ok(_) => panic!("expected a load error"),
-            Err(ds) => ds,
-        };
-        assert_eq!(ds.len(), 1, "{ds:?}");
-        assert!(ds[0].message.contains("`g` is declared by both"), "{ds:?}");
-    }
-
-    #[test]
-    fn a_namespace_call_is_not_a_bare_use_of_an_aliased_original() {
-        // An aliased import hides the original name, and using it directly is an
-        // error. `bt.routes()` is not that use: it is a namespace call to another
-        // module entirely, which the method sugar parses as `routes(bt)` — and the
-        // check counted that member name as a bare reference. The advice it gave
-        // (`use pageRoutes`) would have produced `bt.pageRoutes()`, which names
-        // nothing.
-        let a = "export fn route() -> Int64 { return 1 } \
-                 export fn routes() -> Int64 { return 2 }";
-        let b = "export fn routes() -> Int64 { return 3 }";
-        let root = "import { route, routes as pageRoutes } from \"./a\" \
-                    import * as bt from \"./b\" \
-                    fn main() -> Int64 { return route() + pageRoutes() + bt.routes() }";
-        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]), Ok(6));
-    }
-
-    #[test]
-    fn a_real_bare_use_of_an_aliased_original_is_still_reported() {
-        // The other direction: the namespace call must not SATISFY the check
-        // either. `routes()` here is the hidden name, written bare, and it is
-        // still an error however many namespace calls share its spelling.
-        let a = "export fn routes() -> Int64 { return 2 }";
-        let b = "export fn routes() -> Int64 { return 3 }";
-        let root = "import { routes as pageRoutes } from \"./a\" \
-                    import * as bt from \"./b\" \
-                    fn main() -> Int64 { return routes() + bt.routes() }";
-        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(
-            e.contains("`routes` is not in scope — it was imported as `pageRoutes`"),
-            "{e}"
-        );
-        // One cause, one error: the collision diagnostics next door do not pile on.
-        assert!(!e.contains("is declared by both"), "{e}");
-    }
-
-    #[test]
-    fn a_namespace_import_resolves_the_collision() {
-        // The fix the diagnostic names has to actually work.
-        let a = "export fn f() -> Int64 { return 1 }";
-        let b = "export fn f() -> Int64 { return 2 }";
-        let root = "import { f } from \"./a\" \
-                    import * as b from \"./b\" \
-                    fn main() -> Int64 { return f() + b.f() }";
-        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 3);
-    }
-
-    #[test]
-    fn importing_an_enum_brings_its_variants() {
-        let lib = "export type Shape = | Circle(Int64) | Dot \
-                   export fn area(s: Shape) -> Int64 { \
-                       return match s { Circle(r) => 3 * r * r, Dot => 0 } }";
-        let root = "import { Shape, area } from \"./lib\" \
-                    fn main() -> Int64 { return area(Circle(2)) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 12);
-    }
-
-    #[test]
-    fn importing_a_protocol_brings_its_methods() {
-        let lib = "export protocol Loud { fn shout(self) -> Int64 } \
-                   impl Loud for Int64 { fn shout(self) -> Int64 { return self * 10 } }";
-        let root = "import { Loud } from \"./lib\" \
-                    fn main() -> Int64 { return 4.shout() }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 40);
-    }
-
-    #[test]
-    fn std_prefix_resolves_against_the_std_root() {
-        let m = "export fn twice(x: Int64) -> Int64 { return x + x }";
-        let root = "import { twice } from \"std/math\" \
-                    fn main() -> Int64 { return twice(21) }";
-        assert_eq!(run_multi(root, &[("std/math.vyrn", m)]).unwrap(), 42);
-    }
-
-    #[test]
-    fn transitive_imports_load_once() {
-        // Both a and b import shared; the diamond loads it once (no collision
-        // with itself).
-        let shared = "export fn one() -> Int64 { return 1 }";
-        let a = "import { one } from \"./shared\" export fn a() -> Int64 { return one() + 10 }";
-        let b = "import { one } from \"./shared\" export fn b() -> Int64 { return one() + 20 }";
-        let root = "import { a } from \"./a\" \
-                    import { b } from \"./b\" \
-                    fn main() -> Int64 { return a() + b() }";
-        assert_eq!(
-            run_multi(
-                root,
-                &[("shared.vyrn", shared), ("a.vyrn", a), ("b.vyrn", b)]
-            )
-            .unwrap(),
-            32
-        );
-    }
-
-    #[test]
-    fn non_root_logging_config_is_an_error() {
-        let lib = "logging { level: trace } export fn f() -> Int64 { return 1 }";
-        let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
-        let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(
-            e.contains("only the root module may configure `logging"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn non_root_module_state_is_legal_via_accessors() {
-        // RFC-0029: a top-level `let` is legal in any module; cross-module
-        // access goes through exported accessor functions. The imported module
-        // owns `count`; the root reads it through `f`.
-        let lib = "let mut count = 7 export fn f() -> Int64 { return count }";
-        let root = "import { f } from \"./lib\" fn main() -> Int64 { return f() }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 7);
-    }
-
-    #[test]
-    fn diamond_imports_share_one_state_instance() {
-        // RFC-0029: `left` and `right` both import the same `store`; the loader
-        // resolves them to ONE module identity, so both mutate the single shared
-        // `count`. The root observes 2 — a single instance across the diamond.
-        let store = "let mut count: Int64 = 0 \
-                     export fn tally() -> Int64 { return count } \
-                     export fn bump() { count = count + 1 }";
-        let left = "import { bump } from \"./store\" export fn l() { bump() }";
-        let right = "import { bump } from \"./store\" export fn r() { bump() }";
-        let root = "import { tally } from \"./store\" \
-                    import { l } from \"./left\" import { r } from \"./right\" \
-                    fn main() -> Int64 { l() r() return tally() }";
-        assert_eq!(
-            run_multi(
-                root,
-                &[
-                    ("store.vyrn", store),
-                    ("left.vyrn", left),
-                    ("right.vyrn", right)
-                ]
-            )
-            .unwrap(),
-            2
-        );
-    }
-
-    #[test]
-    fn initializer_may_read_imported_module_state() {
-        // RFC-0029: an initializer may call an imported accessor — the imported
-        // module initializes first (post-order), so its state is already set.
-        let store = "let seed: Int64 = 41 export fn seedVal() -> Int64 { return seed }";
-        let root = "import { seedVal } from \"./store\" \
-                    let snapshot: Int64 = seedVal() + 1 \
-                    fn main() -> Int64 { return snapshot }";
-        assert_eq!(run_multi(root, &[("store.vyrn", store)]).unwrap(), 42);
-    }
-
-    #[test]
-    fn spawning_a_cross_module_stateful_fn_is_refused() {
-        // RFC-0029 keeps RFC-0013's spawn isolation module-agnostic: a function
-        // reaching ANY module's state (here the imported store's) is not
-        // spawn-safe, so spawning it is refused.
-        let store = "let mut count: Int64 = 0 \
-                     export fn bump() -> Int64 { count = count + 1 return count }";
-        let root = "import { bump } from \"./store\" \
-                    fn worker() -> Int64 { return bump() } \
-                    fn main() -> Int64 { let h = spawn worker() return h.join() }";
-        let e = run_multi(root, &[("store.vyrn", store)]).unwrap_err();
-        assert!(
-            e.contains("is not allowed") && e.contains("isolated"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn two_modules_with_a_private_same_named_helper_link_cleanly() {
-        // RFC-0046 §3: a non-exported decl is invisible outside its module, so
-        // two modules may each carry a private `helper` without colliding — the
-        // linker auto-renames the non-exported decls.
-        let a = "fn helper() -> Int64 { return 1 } \
-                 export fn aVal() -> Int64 { return helper() }";
-        let b = "fn helper() -> Int64 { return 2 } \
-                 export fn bVal() -> Int64 { return helper() }";
-        let root = "import { aVal } from \"./a\" \
-                    import { bVal } from \"./b\" \
-                    fn main() -> Int64 { return aVal() + bVal() }";
-        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 3);
-    }
-
-    #[test]
-    fn a_program_that_imports_a_program_keeps_its_entry_point() {
-        // Every file in `examples/` is a program, so importing one — the website
-        // imports `examples/herofield.vyrn` to hash what it prints — put a
-        // SECOND `main` in the link. `main` is not exported, so the name-privacy
-        // rename above minted a fresh symbol for both of them, and the program
-        // was left with no `main` at all: `call to unknown function \`main\``,
-        // naming no file and no line. The root's entry keeps its spelling; the
-        // imported one, which nothing can reach, is the one that renames.
-        let lib = "export fn libValue() -> Int64 { return 5 } \
-                   fn main() -> Int64 { return 99 }";
-        let root = "import { libValue } from \"./lib\" \
-                    fn main() -> Int64 { return libValue() }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 5);
-    }
-
-    #[test]
-    fn local_may_shadow_a_private_std_internal_name() {
-        // RFC-0046 §3 (the vlog `pad2` bug): `std/time`'s private `pad2` forced a
-        // consumer to rename its own `pad2`. A non-exported foreign name no longer
-        // consumes the consumer's namespace — the local `pad2` compiles unchanged,
-        // and each module's `pad2` resolves to its own.
-        let lib = "fn pad2(n: Int64) -> Int64 { return n } \
-                   export fn tick() -> Int64 { return pad2(7) }";
-        let root = "import { tick } from \"./lib\" \
-                    fn pad2(n: Int64) -> Int64 { return n + 100 } \
-                    fn main() -> Int64 { return tick() + pad2(0) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 7 + 100);
-    }
-
-    #[test]
-    fn module_state_assignment_survives_a_never_imported_foreign_namesake() {
-        // The shelf `filter` bug: `arrays` exports `filter`, `ui` imports only
-        // `includes` from it, so `arrays::filter` is LINKED but never imported
-        // here — enough to force the name-privacy rename of this module's
-        // same-named state. The rename has to reach the assignment TARGETS, not
-        // just the reads, or the write side names a decl that no longer exists.
-        let arrays = "export fn filter() -> Int64 { return 99 } \
-                      export fn includes() -> Int64 { return 1 }";
-        let ui = "import { includes } from \"./arrays\" \
-                  export fn tag() -> Int64 { return includes() }";
-        let root = "import { tag } from \"./ui\" \
-                    let mut filter: Int64 = 0 \
-                    let mut includes: Array<Int64> = [0] \
-                    fn main() -> Int64 { \
-                        filter = 7 \
-                        includes[0] = 2 \
-                        return filter + includes[0] + tag() \
-                    }";
-        assert_eq!(
-            run_multi(root, &[("arrays.vyrn", arrays), ("ui.vyrn", ui)]).unwrap(),
-            7 + 2 + 1
-        );
-    }
-
-    #[test]
-    fn global_name_collides_with_a_function() {
-        // A global may not share a name with any other top-level declaration.
-        let lib = "export fn tally() -> Int64 { return 1 }";
-        let root = "import { tally } from \"./lib\" \
-                    let tally = 0 \
-                    fn main() -> Int64 { return tally }";
-        let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("`tally` is declared by both"), "{e}");
-    }
-
-    // ---- flat-namespace local shadowing (dogfood BUG 2) ------------------
-    // A local/param/loop/lambda/match binding whose name equals ANOTHER linked
-    // module's export must never be mis-resolved as an un-imported foreign
-    // reference. The visibility scan is scope-aware; locals bind before imports.
-
-    #[test]
-    fn local_let_shadows_a_foreign_export_of_the_same_name() {
-        // The shelf shape: module `ui` has a local `t`; module `strings` exports
-        // `t`. Both are linked (root imports from each). `ui`'s local `t` is NOT
-        // a reference to `strings`'s `t`.
-        let strings = "export fn t() -> Int64 { return 99 } \
-                       export fn label() -> Int64 { return 1 }";
-        let ui = "import { label } from \"./strings\" \
-                  export fn render() -> Int64 { let t = 5 return t + label() }";
-        let root = "import { render } from \"./ui\" \
-                    import { t } from \"./strings\" \
-                    fn main() -> Int64 { return render() + t() }";
-        assert_eq!(
-            run_multi(root, &[("strings.vyrn", strings), ("ui.vyrn", ui)]).unwrap(),
-            5 + 1 + 99
-        );
-    }
-
-    #[test]
-    fn param_shadows_a_foreign_global_of_the_same_name() {
-        // The shelf `loc` shape: a generated/library fn's PARAM `loc` shadows the
-        // root's module-state global `loc`.
-        let lib = "export fn greet(loc: Int64) -> Int64 { return loc + 1 }";
-        let root = "import { greet } from \"./lib\" \
-                    let mut loc = 10 \
-                    fn main() -> Int64 { return greet(loc) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 11);
-    }
-
-    #[test]
-    fn for_loop_var_shadows_a_foreign_export() {
-        // The `std/ui` loop-var `t` shape.
-        let strings = "export fn t() -> Int64 { return 7 }";
-        let lib = "export fn total(xs: Array<Int64>) -> Int64 { \
-                       let mut sum = 0 for t in xs { sum = sum + t } return sum }";
-        let root = "import { total } from \"./lib\" \
-                    import { t } from \"./strings\" \
-                    fn main() -> Int64 { let xs: Array<Int64> = [1, 2, 3] return total(xs) + t() }";
-        assert_eq!(
-            run_multi(root, &[("strings.vyrn", strings), ("lib.vyrn", lib)]).unwrap(),
-            6 + 7
-        );
-    }
-
-    #[test]
-    fn match_bind_shadows_a_foreign_export() {
-        let lib = "export fn why() -> Int64 { return 100 }";
-        let root = "import { why } from \"./lib\" \
-                    fn pick(x: Result<Int64, Int64>) -> Int64 { \
-                        return match x { Ok(why) => why, Err(e) => e } } \
-                    fn main() -> Int64 { return pick(Ok(3)) + why() }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 3 + 100);
-    }
-
-    #[test]
-    fn a_genuinely_unimported_foreign_name_still_errors() {
-        // Guard against over-fixing: a bare use that is NOT shadowed by any local
-        // must still be flagged.
-        let lib = "export fn helper() -> Int64 { return 1 } \
-                   export fn wanted() -> Int64 { return 2 }";
-        let root = "import { wanted } from \"./lib\" \
-                    fn main() -> Int64 { return wanted() + helper() }";
-        let e = load_err(root, &[("lib.vyrn", lib)]);
-        assert!(e.contains("not imported here"), "{e}");
-    }
-
-    #[test]
-    fn a_local_shadow_does_not_hide_a_later_genuine_reference() {
-        // `t` is a local only inside the `for`; a use of `t` OUTSIDE that scope is
-        // still a genuine foreign reference — and here `lib` never imported it, so
-        // it must error even though a same-named local exists elsewhere in the fn.
-        let strings = "export fn t() -> Int64 { return 7 }";
-        let lib = "export fn f(xs: Array<Int64>) -> Int64 { \
-                       let mut s = 0 for t in xs { s = s + t } return s + t() }";
-        let root = "import { f } from \"./lib\" \
-                    import { t } from \"./strings\" \
-                    fn main() -> Int64 { let xs: Array<Int64> = [1] return f(xs) + t() }";
-        let e = load_err(root, &[("strings.vyrn", strings), ("lib.vyrn", lib)]);
-        assert!(e.contains("not imported here"), "{e}");
-    }
-
-    #[test]
-    fn namespaced_module_local_shadows_another_modules_export() {
-        // Interaction with RFC-0027: a namespaced module `ui` has a local `t`
-        // while `strings` (also linked) exports `t`.
-        let strings = "export fn t() -> Int64 { return 40 }";
-        let ui = "export fn render() -> Int64 { let t = 2 return t }";
-        let root = "import * as ui from \"./ui\" \
-                    import { t } from \"./strings\" \
-                    fn main() -> Int64 { return ui.render() + t() }";
-        assert_eq!(
-            run_multi(root, &[("strings.vyrn", strings), ("ui.vyrn", ui)]).unwrap(),
-            2 + 40
-        );
-    }
-
-    #[test]
-    fn co_named_stub_with_a_local_shadowing_another_export() {
-        // Interaction with RFC-0022 co-naming AND local shadowing at once: the
-        // root stubs `getUser` (co-naming) and also has a local `t` shadowing
-        // `strings`'s exported `t`.
-        let lib = "export fn getUser(id: Int64) -> Int64 { return id * 100 }";
-        let strings = "export fn t() -> Int64 { return 5 }";
-        let root = "import { getUser as getUserReal } from \"./lib\" \
-                    import { t } from \"./strings\" \
-                    fn getUser(id: Int64) -> Int64 { let t = 1 return getUserReal(id) + t } \
-                    fn main() -> Int64 { return getUser(2) + t() }";
-        assert_eq!(
-            run_multi(root, &[("lib.vyrn", lib), ("strings.vyrn", strings)]).unwrap(),
-            201 + 5
-        );
-    }
-
-    #[test]
-    fn generated_module_param_shadows_a_foreign_export() {
-        // The `.vyx` `cls` shape: a generator-synthesized module has a fn whose
-        // PARAM `cls` shadows `std/html`'s exported `cls`, both linked together.
-        let html = "export fn cls(s: String) -> String { return s.copy() }";
-        let gen = "export gen fn widgets(dir: String) -> String { \
-                       return \"export fn item(cls: String) -> String { return cls.copy() }\" }";
-        let root = "import { cls } from \"./html\" \
-                    import { widgets } from \"./gen\" \
-                    import { item } from widgets(\"./w\") \
-                    fn main() -> Int64 { let a = cls(\"x\") let b = item(\"y\") return 0 }";
-        // Links html (exports `cls`) + the synthesized module (param `cls`) with
-        // no false \"cls not imported\" error.
-        assert_eq!(
-            run_multi(root, &[("html.vyrn", html), ("gen.vyrn", gen)]).unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn a_local_shadow_survives_a_name_privacy_rename() {
-        // The rewrite of a module's OWN references after a name-privacy rename
-        // (RFC-0046 §3) was scope-unaware: a local `let flag` kept its name while
-        // every READ and WRITE of `flag` after it was rewritten to the renamed
-        // GLOBAL — in plain statements and inside lambda bodies alike.
-        let lib = "let mut flag = 9 \
-                   export fn flip() -> Int64 { let flag = 1 return flag } \
-                   export fn lam() -> Int64 { let g: fn(Int64) -> Int64 = flag -> flag + 1 return g(10) } \
-                   export fn peek() -> Int64 { return flag }";
-        let root = "import { flip, lam, peek } from \"./lib\" \
-                    let mut flag = 7 \
-                    fn main() -> Int64 { let f = flip() return f + lam() + peek() + flag }";
-        // flip reads its LOCAL (1), lam's parameter is untouched by the global's
-        // rename (11), peek reads lib's own state and main reads root's (9 + 7).
-        assert_eq!(
-            run_multi(root, &[("lib.vyrn", lib)]).unwrap(),
-            1 + 11 + 9 + 7
-        );
-    }
-
-    #[test]
-    fn a_shadowed_use_of_an_aliased_original_is_not_reported() {
-        // The hidden-original check (RFC-0022) scanned references unscoped: a
-        // LOCAL named like an aliased import's original satisfied it and failed
-        // the load though nothing referenced the hidden foreign name.
-        let ui = "export fn render() -> Int64 { return 1 }";
-        let root = "import { render as draw } from \"./ui\" \
-                    fn helper() -> Int64 { let render = 2 return render } \
-                    fn main() -> Int64 { return helper() }";
-        assert_eq!(run_multi(root, &[("ui.vyrn", ui)]).unwrap(), 2);
-    }
-
-    // KNOWN LIMITATION (documented, not forgotten): with two same-named methods
-    // on two linked protocols, the loader accepts and the checker picks by the
-    // receiver's impl table, but the lowered symbol still mangles from a
-    // last-writer protocol name — `Q__A__area` vs the registered `P__A__area`.
-    // Closing it needs one protocol choice carried into symbol mangling.
-    #[test]
-    #[ignore = "same-named methods on two linked protocols: checker picks P, symbol mangling still says Q"]
-    fn a_shared_method_name_resolves_to_the_imported_protocol() {
-        // Two linked protocols may declare the same method name. Last-writer-wins
-        // made the LATER-loaded module own `render`, so a call resolving to the
-        // EARLIER (imported) protocol was rejected as unimported — purely because
-        // of import order. The loader accepts when the receiver's own module is
-        // imported; the checker picks between the candidates by impl table.
-        let a = "export protocol P { fn area(self) -> Int64 } \
-                 export type A = { v: Int64 } \
-                 impl P for A { fn area(self) -> Int64 { return self.v } }";
-        let b = "export protocol Q { fn area(self) -> Int64 } \
-                 export type B = { v: Int64 } \
-                 impl Q for B { fn area(self) -> Int64 { return self.v + 1 } }";
-        let root = "import { A } from \"./a\" \
-                    import { B } from \"./b\" \
-                    fn main() -> Int64 { let x = A { v: 4 } return x.area() }";
-        assert_eq!(run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(), 4);
-    }
-
-    #[test]
-    fn an_unimported_shared_method_name_lists_every_candidate_module() {
-        // The refusal keeps its shape when the receiver's own module is NOT
-        // imported — reached through a third module that links the protocols
-        // and provides the impl, so every candidate module is named instead of
-        // guessing one.
-        let a = "export protocol P { fn area(self) -> Int64 }";
-        let b = "export protocol Q { fn area(self) -> Int64 }";
-        let c = "import { P } from \"./a\" \
-                 import { Q } from \"./b\" \
-                 export type C = { v: Int64 } \
-                 impl P for C { fn area(self) -> Int64 { return self.v } }";
-        let root = "import { C } from \"./c\" \
-                    fn main() -> Int64 { let x = C { v: 1 } return x.area() }";
-        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b), ("c.vyrn", c)]);
-        assert!(e.contains("`area` is defined in"), "{e}");
-        assert!(e.contains("a.vyrn") && e.contains("b.vyrn"), "{e}");
-    }
-
-    #[test]
-    fn generated_importer_survives_an_at_in_the_path() {
-        // The banner used to split on the last " at ", so an importer whose path
-        // contained " at " was truncated mid-directory and everything derived
-        // from it — relative imports, audience, panic sites — resolved wrong.
-        assert_eq!(
-            generated_importer("generated by mk(\"./w\")\u{1f}N:/work/at acme/app/main.vyrn"),
-            Some("N:/work/at acme/app/main.vyrn")
-        );
-        // A nested banner unwraps to the real on-disk file.
-        assert_eq!(
-            generated_importer(
-                "generated by components(\"./w\")\u{1f}generated by i18n(\"./s\")\u{1f}proj/site.vyrn"
-            ),
-            Some("proj/site.vyrn")
-        );
-        // Banners written before the separator existed still parse the old way —
-        // including its blind spot, which only such legacy keys can reach.
-        assert_eq!(
-            generated_importer("generated by mk(\"./w\") at N:/work at acme/main.vyrn"),
-            Some("acme/main.vyrn")
-        );
-        assert_eq!(generated_importer("main.vyrn"), None);
-    }
-
+    /// The first message a load-and-check refuses `root` with.
     #[test]
     fn a_generator_chain_nesting_past_the_cap_is_a_diagnostic_not_an_abort() {
         // Each nested generator load gets a fresh module-state map, so a chain
@@ -5917,1054 +4747,6 @@ mod tests {
             e[0].message.contains("nest more than 32 deep"),
             "{}",
             e[0].message
-        );
-    }
-
-    // ---- RFC-0027: namespaced imports ------------------------------------
-
-    #[test]
-    fn namespace_calls_and_type_positions() {
-        let api = "export type User = { id: Int64 } \
-                   export fn getUser(id: Int64) -> User { return User { id: id } }";
-        let root = "import * as api from \"./api\" \
-                    fn main() -> Int64 { \
-                        let u: api.User = api.getUser(7) \
-                        return u.id }";
-        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 7);
-    }
-
-    #[test]
-    fn namespace_record_construction() {
-        let api = "export type Req = { id: Int64 } \
-                   export fn take(r: Req) -> Int64 { return r.id }";
-        let root = "import * as api from \"./api\" \
-                    fn main() -> Int64 { return api.take(api.Req { id: 41 }) + 1 }";
-        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 42);
-    }
-
-    #[test]
-    fn namespace_enum_variant_construction_and_match() {
-        let lib = "export type Color = | Red | Green | Blue";
-        let root = "import * as c from \"./lib\" \
-                    fn rank(x: c.Color) -> Int64 { \
-                        return match x { c.Color.Red => 1, c.Color.Green => 2, c.Color.Blue => 3 } } \
-                    fn main() -> Int64 { return rank(c.Color.Green) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 2);
-    }
-
-    #[test]
-    fn namespace_enum_variant_with_payload() {
-        let lib = "export type Shape = | Circle(Int64) | Dot \
-                   export fn area(s: Shape) -> Int64 { return match s { Circle(r) => r * r, Dot => 0 } }";
-        let root = "import * as g from \"./lib\" \
-                    fn main() -> Int64 { return g.area(g.Shape.Circle(6)) }";
-        assert_eq!(run_multi(root, &[("lib.vyrn", lib)]).unwrap(), 36);
-    }
-
-    #[test]
-    fn two_namespaced_modules_share_an_export_name() {
-        // The whole point: two modules both export `render`, coexisting under
-        // distinct namespaces without a flat-namespace collision.
-        let a = "export fn render() -> Int64 { return 1 }";
-        let b = "export fn render() -> Int64 { return 20 }";
-        let root = "import * as a from \"./a\" \
-                    import * as b from \"./b\" \
-                    fn main() -> Int64 { return a.render() + b.render() }";
-        assert_eq!(
-            run_multi(root, &[("a.vyrn", a), ("b.vyrn", b)]).unwrap(),
-            21
-        );
-    }
-
-    #[test]
-    fn namespace_composes_with_selective_import() {
-        // A module may both selectively import and namespace the same module;
-        // they resolve to the same decls.
-        let api = "export fn getUser(id: Int64) -> Int64 { return id * 10 }";
-        let root = "import { getUser } from \"./api\" \
-                    import * as api from \"./api\" \
-                    fn main() -> Int64 { return getUser(2) + api.getUser(3) }";
-        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 50);
-    }
-
-    #[test]
-    fn namespace_type_name_argument() {
-        // `fromJson(ns.User, s)` / `jsonSchema(ns.User)` — type-name arguments.
-        let api = "export type User = { id: Int64, name: String }";
-        let root = "import * as api from \"./api\" \
-                    fn main() -> Int64 { \
-                        return match fromJson(api.User, \"{\\\"id\\\":5,\\\"name\\\":\\\"a\\\"}\") { \
-                            Valid(u) => u.id, Invalid(iss) => 0 } }";
-        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 5);
-    }
-
-    #[test]
-    fn local_binding_shadows_a_namespace() {
-        // A local `api` shadows the namespace; `api.field` is then field access on
-        // the local record, not a qualified reference.
-        let api = "export type T = { field: Int64 } export fn mk() -> T { return T { field: 9 } }";
-        let root = "import * as api from \"./api\" \
-                    fn main() -> Int64 { \
-                        let rec = api.mk() \
-                        let api = rec \
-                        return api.field }";
-        assert_eq!(run_multi(root, &[("api.vyrn", api)]).unwrap(), 9);
-    }
-
-    #[test]
-    fn namespace_used_as_a_value_is_an_error() {
-        let api = "export fn f() -> Int64 { return 1 }";
-        let root = "import * as api from \"./api\" \
-                    fn main() -> Int64 { let x = api return 0 }";
-        let e = load_err(root, &[("api.vyrn", api)]);
-        assert!(e.contains("namespace `api` is not a value"), "{e}");
-    }
-
-    #[test]
-    fn namespace_member_must_be_exported() {
-        let api = "fn secret() -> Int64 { return 1 } export fn ok() -> Int64 { return 2 }";
-        let root = "import * as api from \"./api\" \
-                    fn main() -> Int64 { return api.secret() }";
-        let e = load_err(root, &[("api.vyrn", api)]);
-        assert!(e.contains("no exported member `secret`"), "{e}");
-    }
-
-    #[test]
-    fn namespaces_are_one_level_deep() {
-        // `./a` namespaces `./b`; a root namespace of `./a` cannot reach `b.thing`.
-        let b = "export fn thing() -> Int64 { return 7 }";
-        let a = "import * as b from \"./b\" export fn viaA() -> Int64 { return b.thing() }";
-        let root = "import * as a from \"./a\" \
-                    fn main() -> Int64 { return a.b.thing() }";
-        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("no exported member `b`"), "{e}");
-    }
-
-    #[test]
-    fn namespace_name_colliding_with_a_decl_is_an_error() {
-        let api = "export fn f() -> Int64 { return 1 }";
-        let root = "import * as api from \"./api\" \
-                    fn api() -> Int64 { return 0 } \
-                    fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[("api.vyrn", api)]);
-        assert!(e.contains("collides with a top-level declaration"), "{e}");
-    }
-
-    #[test]
-    fn duplicate_namespace_name_is_an_error() {
-        let a = "export fn f() -> Int64 { return 1 }";
-        let b = "export fn g() -> Int64 { return 2 }";
-        let root = "import * as x from \"./a\" \
-                    import * as x from \"./b\" \
-                    fn main() -> Int64 { return 0 }";
-        let e = load_err(root, &[("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("bound twice"), "{e}");
-    }
-    // ---- round-two regressions --------------------------------------------
-
-    #[test]
-    fn bare_expression_statement_diagnoses_at_its_own_line() {
-        // A side-effect statement's references used to be seeded with line 0,
-        // so an un-imported foreign call reported at the top of the module
-        // instead of at the call site.
-        let lib = "export fn other() -> Int64 { return 1 }";
-        let root = "import { helper } from \"./lib\"\n\
-                    fn main() -> Int64 {\n\
-                        helper()\n\
-                        other()\n\
-                        return 0\n\
-                    }";
-        let ds = load(root, "main.vyrn", &opts(), &map(&[("lib.vyrn", lib)]))
-            .expect_err("expected a load error");
-        let hit = ds
-            .iter()
-            .find(|d| d.message.contains("`other`") && d.message.contains("not imported"));
-        let d = hit.expect("the un-imported reference must be diagnosed");
-        assert_eq!(d.line, 4, "diagnostic must sit on the call site: {d:?}");
-    }
-
-    #[test]
-    fn shared_private_externs_keep_their_host_abi_spelling() {
-        // Two stub modules restating the same private `extern fn` are one
-        // host-ABI contract, not a collision: neither may be renamed (the
-        // backends emit the import under the SOURCE spelling and the JS host
-        // supplies it by that name), the merged program keeps a single copy,
-        // and each stub calls its own without an import.
-        let rpc_a = "extern fn vyrnRpcCall(x: Int64) -> Int64 \
-                     export fn pingA(x: Int64) -> Int64 { return vyrnRpcCall(x) }";
-        let rpc_b = "extern fn vyrnRpcCall(x: Int64) -> Int64 \
-                     export fn pingB(x: Int64) -> Int64 { return vyrnRpcCall(x) }";
-        let root = "import { pingA } from \"./rpc_a\" \
-                    import { pingB } from \"./rpc_b\" \
-                    fn main() -> Int64 { return 0 }";
-        let program = load(
-            root,
-            "main.vyrn",
-            &opts(),
-            &map(&[("rpc_a.vyrn", rpc_a), ("rpc_b.vyrn", rpc_b)]),
-        )
-        .unwrap();
-        let externs: Vec<&str> = program
-            .functions
-            .iter()
-            .filter(|f| f.is_extern)
-            .map(|f| f.name.as_str())
-            .collect();
-        assert_eq!(externs, vec!["vyrnRpcCall"], "one copy, source spelling");
-    }
-
-    #[test]
-    fn aliased_import_does_not_reject_a_protocol_method_call() {
-        // `widget.render()` arrives as the call `render(widget)` — exactly the
-        // shape of a forbidden direct use of an aliased import's original.
-        // When `render` is also a protocol-method surface name, that call
-        // dispatches to impls BEFORE any free function and can never reach the
-        // imported decl, so the hidden-original check must not fire.
-        let ui = "export fn render(w: Int64) -> Int64 { return w }";
-        let gfx = "export protocol P { fn render(self) -> Int64 } \
-                   export type G = { v: Int64 } \
-                   impl P for G { fn render(self) -> Int64 { return self.v } }";
-        let root = "import { render as draw } from \"./ui\" \
-                    import { G } from \"./gfx\" \
-                    fn main() -> Int64 { let g: G = G { v: 3 } return g.render() }";
-        let loaded = load(
-            root,
-            "main.vyrn",
-            &opts(),
-            &map(&[("ui.vyrn", ui), ("gfx.vyrn", gfx)]),
-        );
-        assert!(
-            loaded.is_ok(),
-            "a method-sugar call must not read as a direct use: {:?}",
-            loaded
-                .err()
-                .map(|ds| ds.iter().map(|d| d.message.clone()).collect::<Vec<_>>())
-        );
-    }
-
-    #[test]
-    fn hand_import_of_a_non_enum_decl_keeps_own_variant_spellings() {
-        // Importing ANY decl of an injected module used to spray ALL of its
-        // variant renames over the importer — corrupting a legal private enum
-        // whose variant happens to share a spelling (`JStr`). The renames ride
-        // on importing THE ENUM itself; importing only `emit` leaves the
-        // consumer's own `JStr` alone.
-        let root = "import { emit } from \"std/json\" \
-                    type T = | JStr(Int64) | JEnd \
-                    fn main() -> Int64 { \
-                        let t: T = JStr(41) \
-                        return match t { JStr(n) => n, JEnd => 0 } \
-                    }";
-        assert_eq!(run_multi(root, RT_FILES).unwrap(), 41);
-    }
-
-    #[test]
-    fn importing_the_injected_enum_still_folds_its_variants() {
-        // The other half of the gate: an importer of the enum itself follows
-        // the variant renames, so its own same-spelled variant is NOT created
-        // and the folded constructor runs std/json's code.
-        let root = "import { Json, emit } from \"std/json\" \
-                    fn main() -> Int64 { \
-                        let j: Json = JStr(\"hi\") \
-                        return if emit(j).byteLength == 4 { 1 } else { 0 } \
-                    }";
-        assert_eq!(run_multi(root, RT_FILES).unwrap(), 1);
-    }
-}
-
-#[cfg(test)]
-mod remote_tests {
-    use super::tests::{map, opts};
-    use super::*;
-
-    fn load_err_at(root: &str, files: &[(&str, &str)]) -> String {
-        match load(root, "main.vyrn", &opts(), &map(files)) {
-            Ok(_) => panic!("expected a load error"),
-            Err(ds) => ds
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
-    }
-
-    #[test]
-    fn remote_specifiers_are_their_own_keys() {
-        // A MapResolver keyed by the remote key stands in for the network —
-        // exactly what the CLI's cache does.
-        let lib = "export fn pad(n: Int64) -> Int64 { return n + 1 }";
-        let root = "import { pad } from \"github:acme/strings@v1/src/pad\" \
-                    fn main() -> Int64 { return pad(41) }";
-        let program = load(
-            root,
-            "main.vyrn",
-            &opts(),
-            &map(&[("github:acme/strings@v1/src/pad.vyrn", lib)]),
-        )
-        .unwrap();
-        assert_eq!(crate::interp::run(&program).unwrap(), 42);
-    }
-
-    #[test]
-    fn relative_imports_inside_a_remote_stay_in_its_base() {
-        let a = "import { b } from \"./b\" export fn a() -> Int64 { return b() }";
-        let b = "export fn b() -> Int64 { return 7 }";
-        let root = "import { a } from \"github:acme/x@abc/src/a\" \
-                    fn main() -> Int64 { return a() }";
-        let program = load(
-            root,
-            "main.vyrn",
-            &opts(),
-            &map(&[
-                ("github:acme/x@abc/src/a.vyrn", a),
-                ("github:acme/x@abc/src/b.vyrn", b),
-            ]),
-        )
-        .unwrap();
-        assert_eq!(crate::interp::run(&program).unwrap(), 7);
-    }
-
-    #[test]
-    fn remote_relative_escapes_are_rejected() {
-        let a = "import { x } from \"../../../etc/passwd\" \
-                 export fn a() -> Int64 { return 0 }";
-        let root = "import { a } from \"github:acme/x@abc/src/a\" \
-                    fn main() -> Int64 { return a() }";
-        let e = load_err_at(root, &[("github:acme/x@abc/src/a.vyrn", a)]);
-        assert!(e.contains("escapes its remote module's base"), "{e}");
-    }
-
-    #[test]
-    fn bare_specifiers_inside_remote_modules_are_rejected() {
-        let a = "import { x } from \"money\" export fn a() -> Int64 { return 0 }";
-        let root = "import { a } from \"gist:demko/abc123/a\" \
-                    fn main() -> Int64 { return a() }";
-        let mut o = opts();
-        o.aliases.insert("money".into(), "./money".into());
-        let e = match load(
-            root,
-            "main.vyrn",
-            &o,
-            &map(&[("gist:demko/abc123/a.vyrn", a)]),
-        ) {
-            Ok(_) => panic!("expected error"),
-            Err(ds) => ds[0].message.clone(),
-        };
-        assert!(e.contains("cannot resolve import `money`"), "{e}");
-    }
-
-    #[test]
-    fn http_imports_are_rejected() {
-        let root = "import { x } from \"http://x.dev/y\" fn main() -> Int64 { return 0 }";
-        let e = load_err_at(root, &[]);
-        assert!(e.contains("insecure `http:`"), "{e}");
-    }
-}
-
-#[cfg(test)]
-mod gen_tests {
-    use super::tests::opts;
-    use super::*;
-    use std::cell::RefCell;
-
-    /// A resolver over an in-memory map that ALSO persists the generator cache in
-    /// memory — so a second load in the same test observes cache hits.
-    struct CachingResolver {
-        files: HashMap<String, String>,
-        cache: RefCell<HashMap<String, String>>,
-    }
-    impl CachingResolver {
-        fn new(entries: &[(&str, &str)]) -> CachingResolver {
-            CachingResolver {
-                files: entries
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect(),
-                cache: RefCell::new(HashMap::new()),
-            }
-        }
-    }
-    impl ModuleResolver for CachingResolver {
-        fn read(&self, resolved: &str) -> Result<String, String> {
-            self.files
-                .get(resolved)
-                .cloned()
-                .ok_or_else(|| format!("not found: {resolved}"))
-        }
-        fn list(&self, resolved: &str) -> Result<Vec<String>, String> {
-            let prefix = format!("{}/", resolved.trim_end_matches('/'));
-            let mut names: std::collections::BTreeSet<String> = Default::default();
-            let mut any = false;
-            for k in self.files.keys() {
-                if let Some(rest) = k.strip_prefix(&prefix) {
-                    any = true;
-                    if let Some(seg) = rest.split('/').next() {
-                        if !seg.is_empty() {
-                            names.insert(seg.to_string());
-                        }
-                    }
-                }
-            }
-            if any {
-                Ok(names.into_iter().collect())
-            } else {
-                Err(crate::trap::io_at("listerr", resolved))
-            }
-        }
-        fn list_kinds(&self, resolved: &str) -> Result<Vec<String>, String> {
-            let prefix = format!("{}/", resolved.trim_end_matches('/'));
-            let mut names: std::collections::BTreeSet<String> = Default::default();
-            let mut any = false;
-            for k in self.files.keys() {
-                if let Some(rest) = k.strip_prefix(&prefix) {
-                    any = true;
-                    match rest.split_once('/') {
-                        Some((seg, _)) if !seg.is_empty() => {
-                            names.insert(format!("{seg}/"));
-                        }
-                        None if !rest.is_empty() => {
-                            names.insert(rest.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if any {
-                Ok(names.into_iter().collect())
-            } else {
-                Err(crate::trap::io_at("listerr", resolved))
-            }
-        }
-        fn gen_cache_get(&self, key: &str) -> Option<String> {
-            self.cache.borrow().get(key).cloned()
-        }
-        fn gen_cache_put(&self, key: &str, value: &str) {
-            self.cache
-                .borrow_mut()
-                .insert(key.to_string(), value.to_string());
-        }
-    }
-
-    fn run_with(root: &str, r: &dyn ModuleResolver) -> Result<i64, String> {
-        let program = load(root, "main.vyrn", &opts(), r)
-            .map_err(|ds| ds.iter().map(|d| d.render()).collect::<Vec<_>>().join("\n"))?;
-        let diags = crate::checker::check_accum(&program);
-        if let Some(d) = diags.first() {
-            return Err(d.render());
-        }
-        crate::interp::run(&program)
-    }
-
-    fn map(entries: &[(&str, &str)]) -> MapResolver {
-        MapResolver(
-            entries
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-        )
-    }
-    fn run(root: &str, files: &[(&str, &str)]) -> Result<i64, String> {
-        run_with(root, &map(files))
-    }
-    fn gen_err(root: &str, files: &[(&str, &str)]) -> String {
-        match load(root, "main.vyrn", &opts(), &map(files)) {
-            Ok(p) => match crate::checker::check_accum(&p).first() {
-                Some(d) => d.message.clone(),
-                None => panic!("expected an error, load+check succeeded"),
-            },
-            Err(ds) => ds
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
-                .join("\n"),
-        }
-    }
-
-    #[test]
-    fn generator_output_links_and_runs() {
-        let gen = "export gen fn mk(dir: String) -> String { \
-                       return \"export fn magic() -> Int64 { return 42 }\" }";
-        let root = "import { mk } from \"./gen\" \
-                    import { magic } from mk(\"./data\") \
-                    fn main() -> Int64 { return magic() }";
-        assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 42);
-    }
-
-    #[test]
-    fn generator_reads_a_scoped_file() {
-        // The generator reads a data file (mediated) and emits it as a constant.
-        let gen = "export gen fn consts(dir: String) -> String { \
-                       return match readFile(\"./data/n.txt\") { \
-                           Ok(s) => \"export fn n() -> String { return \\\"\" + s + \"\\\" }\", \
-                           Err(e) => e } }";
-        let root = "import { consts } from \"./gen\" \
-                    import { n } from consts(\"./data\") \
-                    fn main() -> Int64 { print(n()) return 0 }";
-        let files = &[("gen.vyrn", gen), ("data/n.txt", "hello")];
-        // Links + runs (the emitted `n` returns the file content).
-        assert_eq!(run(root, files).unwrap(), 0);
-    }
-
-    #[test]
-    fn generator_readfile_escape_is_rejected() {
-        let gen = "export gen fn g(dir: String) -> String { \
-                       return match readFile(\"./secret.txt\") { Ok(s) => s, Err(e) => e } }";
-        let root = "import { g } from \"./gen\" \
-                    import { x } from g(\"./data\") \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen), ("secret.txt", "top secret")]);
-        assert!(e.contains("escapes its declared inputs"), "{e}");
-    }
-
-    #[test]
-    fn generator_listdir_is_scoped_and_works() {
-        // Emit a function returning the number of files under the data dir.
-        let gen = "export gen fn count(dir: String) -> String { \
-                       return match listDir(dir) { \
-                           Ok(names) => \"export fn n() -> Int64 { return \" + names.length.toString() + \" }\", \
-                           Err(e) => e } }";
-        let root = "import { count } from \"./gen\" \
-                    import { n } from count(\"./data\") \
-                    fn main() -> Int64 { return n() }";
-        let files = &[
-            ("gen.vyrn", gen),
-            ("data/a.txt", "1"),
-            ("data/b.txt", "2"),
-            ("data/c.txt", "3"),
-        ];
-        assert_eq!(run(root, files).unwrap(), 3);
-    }
-
-    #[test]
-    fn distinct_args_make_distinct_modules_same_args_dedup() {
-        // Two calls with different args ⇒ two modules with different names.
-        let gen = "export gen fn mk(tag: String) -> String { \
-                       return \"export fn tag\" + tag + \"() -> Int64 { return \" + tag + \" }\" }";
-        let root = "import { mk } from \"./gen\" \
-                    import { tag1 } from mk(\"1\") \
-                    import { tag2 } from mk(\"2\") \
-                    fn main() -> Int64 { return tag1() + tag2() }";
-        assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 3);
-    }
-
-    #[test]
-    fn same_resolved_path_different_spellings_share_one_stateful_module() {
-        // RFC-0040 §1: two importers call the same generator with path args that
-        // RESOLVE identically but are spelled differently (`./data` vs the rebased
-        // `./x/../data`). They must synthesize ONE module — so its module state (`n`)
-        // exists once and both importers mutate the SAME instance. Without the
-        // resolved-inputs identity, two modules each define `n`/`bump` and collide.
-        let gen = "export gen fn mk(dir: String) -> String { \
-                       return \"let mut n: Int64 = 0\\n\
-                                export fn bump() -> Int64 { n = n + 1\\nreturn n }\\n\" }";
-        let a = "import { mk } from \"./gen\" \
-                 import { bump } from mk(\"./data\") \
-                 export fn a() -> Int64 { return bump() }";
-        let b = "import { mk } from \"./gen\" \
-                 import { bump } from mk(\"./x/../data\") \
-                 export fn b() -> Int64 { return bump() }";
-        let root = "import { a } from \"./a\" \
-                    import { b } from \"./b\" \
-                    fn main() -> Int64 { return a() + b() }";
-        // One shared `n`: a() = 1, b() = 2, sum = 3.
-        assert_eq!(
-            run(root, &[("gen.vyrn", gen), ("a.vyrn", a), ("b.vyrn", b)]).unwrap(),
-            3,
-        );
-    }
-
-    #[test]
-    fn different_resolved_paths_stay_distinct_modules() {
-        // The flip side of §1: two calls that resolve to DIFFERENT targets are
-        // still two modules. Each emits `bump`, so the flat namespace collides —
-        // proof the identity did not over-merge distinct targets.
-        let gen = "export gen fn mk(dir: String) -> String { \
-                       return \"export fn bump() -> Int64 { return 1 }\\n\" }";
-        let a = "import { mk } from \"./gen\" \
-                 import { bump } from mk(\"./data\") \
-                 export fn a() -> Int64 { return bump() }";
-        let b = "import { mk } from \"./gen\" \
-                 import { bump } from mk(\"./other\") \
-                 export fn b() -> Int64 { return bump() }";
-        let root = "import { a } from \"./a\" \
-                    import { b } from \"./b\" \
-                    fn main() -> Int64 { return a() + b() }";
-        let e = gen_err(root, &[("gen.vyrn", gen), ("a.vyrn", a), ("b.vyrn", b)]);
-        assert!(e.contains("`bump` is declared by both"), "{e}");
-    }
-
-    #[test]
-    fn generator_trap_becomes_a_load_diagnostic() {
-        let gen = "export gen fn bad(x: Int64) -> String { \
-                       let q = 1 / x \
-                       return \"\" }";
-        let root = "import { bad } from \"./gen\" \
-                    import { z } from bad(0) \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        assert!(e.contains("generator `bad") && e.contains("failed"), "{e}");
-    }
-
-    #[test]
-    fn generated_name_collision_is_a_load_error() {
-        let gen = "export gen fn mk(d: String) -> String { \
-                       return \"export fn dup() -> Int64 { return 1 }\" }";
-        // The root already defines `dup`, so the generated `dup` collides.
-        let root = "import { mk } from \"./gen\" \
-                    import { dup } from mk(\"./x\") \
-                    fn dup() -> Int64 { return 2 } \
-                    fn main() -> Int64 { return dup() }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        assert!(e.contains("`dup` is declared by both"), "{e}");
-    }
-
-    #[test]
-    fn non_constant_generator_argument_is_rejected() {
-        let gen = "export gen fn mk(d: String) -> String { return \"\" }";
-        let root = "import { mk } from \"./gen\" \
-                    import { x } from mk(readLine()) \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        assert!(e.contains("compile-time-constant"), "{e}");
-    }
-
-    #[test]
-    fn missing_generator_is_a_clear_error() {
-        let root = "import { x } from nope(\"./d\") fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[]);
-        assert!(e.contains("not an imported `gen fn`"), "{e}");
-    }
-
-    #[test]
-    fn module_interface_reflects_exported_surface() {
-        // The generator emits a doc string listing the contract's exported fns.
-        let contract = "export type Id = Int64 where value >= 1 \
-                        export fn ping(id: Id) -> String { return \"pong\" }";
-        let gen = "export gen fn doc(path: String) -> String { \
-                       let iface = moduleInterface(path) \
-                       let mut body = \"export fn names() -> String { return \\\"\" \
-                       for f in iface.functions { body = body + f.name + \";\" } \
-                       body = body + \"\\\" }\" \
-                       return body }";
-        let root = "import { doc } from \"./gen\" \
-                    import { names } from doc(\"./contract\") \
-                    fn main() -> Int64 { print(names()) return 0 }";
-        let files = &[("gen.vyrn", gen), ("contract.vyrn", contract)];
-        // Runs; `names()` returns "ping;" (the one exported fn).
-        assert_eq!(run(root, files).unwrap(), 0);
-    }
-
-    #[test]
-    fn module_interface_closure_reaches_imported_types() {
-        // RFC-0031: the contract NAMES only `Req` in its signature and declares no
-        // types of its own; `Req`/`Book`/`Id` live in `wire`. `moduleInterface`
-        // must reach the whole closure, so the generator counting `iface.types`
-        // sees all three.
-        let wire = "export type Id = Int64 where value >= 1 \
-                    export type Book = { id: Id } \
-                    export type Req = { book: Book }";
-        let contract = "import { Req } from \"./wire\" \
-                        export fn make(r: Req) -> Req { return r }";
-        let gen = "export gen fn cnt(path: String) -> String { \
-                       let iface = moduleInterface(path) \
-                       let mut n = 0 \
-                       for t in iface.types { n = n + 1 } \
-                       return \"export fn n() -> Int64 { return \" + \"\\{n}\" + \" }\\n\" }";
-        let root = "import { cnt } from \"./gen\" \
-                    import { n } from cnt(\"./contract\") \
-                    fn main() -> Int64 { return n() }";
-        assert_eq!(
-            run(
-                root,
-                &[
-                    ("gen.vyrn", gen),
-                    ("contract.vyrn", contract),
-                    ("wire.vyrn", wire)
-                ]
-            )
-            .unwrap(),
-            3,
-            "closure = Req + Book + Id"
-        );
-    }
-
-    #[test]
-    fn closure_type_file_edit_invalidates_the_cache_unrelated_edit_hits() {
-        // RFC-0031 cache soundness: a closure type's defining FILE (`wire.vyrn`)
-        // is never a generator ARGUMENT (the arg is `./contract`), yet editing it
-        // must miss the cache. It joins the recorded inputs through the reflection
-        // read, so the content hash changes on edit; an unrelated file does not.
-        let wire = "export type T = { a: Int64 } export fn seed(t: T) -> T { return t }";
-        let contract = "import { T } from \"./wire\" export fn f(x: T) -> T { return x }";
-        // The generator's output embeds the closure's field spelling, so a real
-        // edit to `wire.vyrn` produces FRESH output, not just a re-run.
-        let gen = "export gen fn refl(path: String) -> String { \
-                       let iface = moduleInterface(path) \
-                       let mut src = \"\" \
-                       for t in iface.types { src = src + t.source } \
-                       return \"export fn shape() -> Int64 { return \" + \"\\{src.byteLength}\" + \" }\\n\" }";
-        let root = "import { refl } from \"./gen\" \
-                    import { shape } from refl(\"./contract\") \
-                    fn main() -> Int64 { return shape() }";
-        let mut r = CachingResolver::new(&[
-            ("gen.vyrn", gen),
-            ("contract.vyrn", contract),
-            ("wire.vyrn", wire),
-            ("noise.vyrn", "export fn unused() -> Int64 { return 0 }"),
-        ]);
-
-        let before = gen_run_count();
-        run_with(root, &r).unwrap();
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-        run_with(root, &r).unwrap();
-        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
-
-        // An unrelated edit (a file the closure never reads) still hits.
-        r.files.insert(
-            "noise.vyrn".to_string(),
-            "export fn unused() -> Int64 { return 1 }".to_string(),
-        );
-        run_with(root, &r).unwrap();
-        assert_eq!(
-            gen_run_count(),
-            before + 1,
-            "unrelated edit: still a cache hit"
-        );
-
-        // Editing the foreign closure type's file misses → re-run + fresh output.
-        r.files.insert(
-            "wire.vyrn".to_string(),
-            "export type T = { a: Int64, b: Int64 } export fn seed(t: T) -> T { return t }"
-                .to_string(),
-        );
-        run_with(root, &r).unwrap();
-        assert_eq!(gen_run_count(), before + 2, "closure type edited: re-run");
-    }
-
-    /// The generator's OWN sources — its module and everything that module
-    /// imports — must invalidate its cache entry.
-    ///
-    /// They used to be hashed into the lookup key, which meant discovering the
-    /// closure (a full parse-walk) on every hit just to find the entry. They are
-    /// now recorded among the entry's inputs and re-hashed on lookup instead, so
-    /// this is the test that the move kept the guarantee: edit the generator, or
-    /// anything it imports, and the next load must RE-RUN rather than serve a
-    /// stale expansion.
-    #[test]
-    fn editing_the_generator_or_its_imports_invalidates_the_cache() {
-        let helper = r#"export fn tag() -> String { return "one" }"#;
-        let gen = r#"import { tag } from "./helper"
-export gen fn emit(x: String) -> String { return "export fn shape() -> String { return \"" + tag() + "\" }" }"#;
-        let root = r#"import { emit } from "./gen"
-import { shape } from emit("./seed")
-fn main() -> Int64 { return shape().byteLength }"#;
-        let mut r = CachingResolver::new(&[
-            ("gen.vyrn", gen),
-            ("helper.vyrn", helper),
-            ("seed.vyrn", "export fn seed() -> Int64 { return 0 }"),
-        ]);
-
-        let before = gen_run_count();
-        assert_eq!(run_with(root, &r).unwrap(), 3, "cold: `one`");
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-        assert_eq!(run_with(root, &r).unwrap(), 3);
-        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
-
-        // Edit a module the GENERATOR imports — never an argument, never read by
-        // the sandbox, reachable only through the generator's own module graph.
-        r.files.insert(
-            "helper.vyrn".to_string(),
-            r#"export fn tag() -> String { return "three" }"#.to_string(),
-        );
-        assert_eq!(
-            run_with(root, &r).unwrap(),
-            5,
-            "generator's import edited: fresh output, not the stale `one`"
-        );
-        assert_eq!(
-            gen_run_count(),
-            before + 2,
-            "generator's import edited: re-run"
-        );
-
-        // Edit the generator module itself.
-        r.files.insert(
-            "gen.vyrn".to_string(),
-            gen.replace("tag()", "tag() + \"!\""),
-        );
-        assert_eq!(
-            run_with(root, &r).unwrap(),
-            6,
-            "generator edited: fresh output (`three` + `!`)"
-        );
-        assert_eq!(gen_run_count(), before + 3, "generator edited: re-run");
-    }
-
-    #[test]
-    fn co_naming_rename_leaves_namespace_member_calls_alone() {
-        // RFC-0031 found this: `mid` delegates `store.get()` via a namespace
-        // (RFC-0027) while ANOTHER module co-names `get` (aliased import + a local
-        // stub of the same name, RFC-0022). The co-naming rename frees `mid`'s
-        // `get` for the stub — but must NOT rewrite `store.get()` (method-sugar
-        // call name) into `store.get__from0`; that member belongs to the
-        // namespace resolver.
-        let store = "let mut n = 41 \
-                     export fn fetch() -> Int64 { n = n + 1 return n }";
-        let mid = "import * as store from \"./store\" \
-                   export fn fetch() -> Int64 { return store.fetch() }";
-        let root = "import { fetch as fetch__real } from \"./mid\" \
-                    fn fetch() -> Int64 { return fetch__real() } \
-                    fn main() -> Int64 { return fetch() }";
-        assert_eq!(
-            run(root, &[("store.vyrn", store), ("mid.vyrn", mid)]).unwrap(),
-            42
-        );
-    }
-
-    #[test]
-    fn closure_name_collision_is_a_load_diagnostic_naming_both_modules() {
-        // RFC-0031: if the closure would hold two DISTINCT `T` decls (one per
-        // module), reflection fails with a load diagnostic naming BOTH modules —
-        // a wire format with two `T`s has no honest JSON spelling.
-        let wire_a = "export type T = { a: Int64 } export type A = { t: T }";
-        let wire_b = "export type T = { b: Int64 } export type B = { t: T }";
-        let contract = "import { A } from \"./wireA\" \
-                        import { B } from \"./wireB\" \
-                        export fn f(a: A) -> B { return B { t: T { b: 0 } } }";
-        let gen = "export gen fn cnt(path: String) -> String { \
-                       let iface = moduleInterface(path) \
-                       return \"export fn z() -> Int64 { return 0 }\\n\" }";
-        let root = "import { cnt } from \"./gen\" \
-                    import { z } from cnt(\"./contract\") \
-                    fn main() -> Int64 { return z() }";
-        let e = gen_err(
-            root,
-            &[
-                ("gen.vyrn", gen),
-                ("contract.vyrn", contract),
-                ("wireA.vyrn", wire_a),
-                ("wireB.vyrn", wire_b),
-            ],
-        );
-        assert!(
-            e.contains("wireA.vyrn") && e.contains("wireB.vyrn"),
-            "names both modules: {e}"
-        );
-        assert!(e.contains('T'), "names the colliding type: {e}");
-    }
-
-    #[test]
-    fn generated_module_imports_a_sibling() {
-        // A synthesized module (its key is a banner, not a path) must resolve its
-        // own relative imports against the real importer's directory (RFC-0021 —
-        // the first `moduleInterface` consumer, RPC, needs this).
-        let contract = "export fn calc() -> Int64 { return 21 }";
-        let gen = "export gen fn wrap(path: String) -> String { \
-                       let iface = moduleInterface(path) \
-                       return \"import { calc } from \\\"\" + path + \"\\\"\\n\" \
-                            + \"export fn go() -> Int64 { return calc() + calc() }\\n\" }";
-        let root = "import { wrap } from \"./gen\" \
-                    import { go } from wrap(\"./contract\") \
-                    fn main() -> Int64 { return go() }";
-        assert_eq!(
-            run(root, &[("gen.vyrn", gen), ("contract.vyrn", contract)]).unwrap(),
-            42
-        );
-    }
-
-    #[test]
-    fn nested_generator_resolves_paths_against_the_real_importer() {
-        // RFC-0029 wave: a generator imported BY a generated module (a nested
-        // generator — e.g. `i18n(..)` inside a `.vyx` script that `components(..)`
-        // synthesized) must resolve its path arguments against the REAL importing
-        // file's directory, not the synthetic banner key. `outer` emits a module
-        // that imports `inner("./sub/data")`; `inner` reflects that module — which
-        // it can only read if the path resolves to `sub/data.vyrn`.
-        let gen = "export gen fn inner(path: String) -> String { \
-                       let iface = moduleInterface(path) \
-                       let mut n = 0 \
-                       for f in iface.functions { n = n + 1 } \
-                       return \"export fn cnt() -> Int64 { return \" + \"\\{n}\" + \" }\\n\" } \
-                   export gen fn outer(dummy: String) -> String { \
-                       return \"import { inner } from \\\"./gen\\\"\\n\" \
-                            + \"import { cnt } from inner(\\\"./sub/data\\\")\\n\" \
-                            + \"export fn go() -> Int64 { return cnt() }\\n\" }";
-        let data = "export fn a() -> Int64 { return 1 } export fn b() -> Int64 { return 2 }";
-        let root = "import { outer } from \"./gen\" \
-                    import { go } from outer(\"x\") \
-                    fn main() -> Int64 { return go() }";
-        // `sub/data` has two exported functions, so `cnt()` — hence `go()` — is 2.
-        assert_eq!(
-            run(root, &[("gen.vyrn", gen), ("sub/data.vyrn", data)]).unwrap(),
-            2
-        );
-    }
-
-    #[test]
-    fn generated_module_may_declare_module_state() {
-        // Module state is legal in a generated module (RFC-0021's carve-out, now
-        // the general RFC-0029 rule — see `non_root_module_state_is_legal_via_accessors`).
-        // The generated `currentLocale`-style global initializes before `main` and
-        // persists across handler calls made from the root (the setLocale/locale + t() shape).
-        let gen = "export gen fn mk(tag: String) -> String { \
-                       return \"let mut cur = 10\\n\" \
-                            + \"export fn bump() { cur = cur + 1 }\\n\" \
-                            + \"export fn peek() -> Int64 { return cur }\\n\" }";
-        let root = "import { mk } from \"./gen\" \
-                    import { bump, peek } from mk(\"x\") \
-                    fn main() -> Int64 { bump() bump() return peek() }";
-        // 10 (init) + 1 + 1 = 12; state persists across the two `bump()` calls.
-        assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 12);
-    }
-
-    #[test]
-    fn generated_module_calls_back_into_its_importer() {
-        // The RPC dispatcher pattern: a generated module invokes a plain function
-        // defined in the module that imported it (the callback convention). Names
-        // owned by the importer are visible to generated code without an import.
-        let gen = "export gen fn cb(tag: String) -> String { \
-                       return \"export fn dispatch() -> Int64 { return onEvent() + 1 }\\n\" }";
-        let root = "import { cb } from \"./gen\" \
-                    import { dispatch } from cb(\"x\") \
-                    fn onEvent() -> Int64 { return 41 } \
-                    fn main() -> Int64 { return dispatch() }";
-        assert_eq!(run(root, &[("gen.vyrn", gen)]).unwrap(), 42);
-    }
-
-    #[test]
-    fn two_generators_same_args_do_not_share_a_cache_entry() {
-        // One module may export several `gen fn`s; distinct generators over the
-        // same arguments must not collide in the content-addressed cache (the
-        // cache key includes the generator name).
-        let gen = "export gen fn a(p: String) -> String { \
-                       return \"export fn which() -> Int64 { return 1 }\" } \
-                   export gen fn b(p: String) -> String { \
-                       return \"export fn which() -> Int64 { return 2 }\" }";
-        let root_a = "import { a } from \"./gen\" \
-                      import { which } from a(\"./x\") \
-                      fn main() -> Int64 { return which() }";
-        let root_b = "import { b } from \"./gen\" \
-                      import { which } from b(\"./x\") \
-                      fn main() -> Int64 { return which() }";
-        let r = CachingResolver::new(&[("gen.vyrn", gen)]);
-        assert_eq!(run_with(root_a, &r).unwrap(), 1, "generator `a` output");
-        assert_eq!(
-            run_with(root_b, &r).unwrap(),
-            2,
-            "generator `b` must not reuse `a`'s cache"
-        );
-    }
-
-    #[test]
-    fn cache_hit_skips_the_second_run_and_input_change_invalidates() {
-        let gen = "export gen fn consts(dir: String) -> String { \
-                       return match readFile(\"./data/n.txt\") { \
-                           Ok(s) => \"export fn n() -> String { return \\\"\" + s + \"\\\" }\", \
-                           Err(e) => e } }";
-        let root = "import { consts } from \"./gen\" \
-                    import { n } from consts(\"./data\") \
-                    fn main() -> Int64 { return 0 }";
-        let mut r = CachingResolver::new(&[("gen.vyrn", gen), ("data/n.txt", "one")]);
-
-        let before = gen_run_count();
-        run_with(root, &r).unwrap();
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-        run_with(root, &r).unwrap();
-        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
-
-        // Change the input file — the recorded input hash no longer matches.
-        r.files.insert("data/n.txt".to_string(), "two".to_string());
-        run_with(root, &r).unwrap();
-        assert_eq!(gen_run_count(), before + 2, "input changed: re-run");
-    }
-
-    /// A generator that COUNTS the entries of a listed directory: the site's
-    /// `repo.vyrn` in miniature. `-1` when the directory is not there at all.
-    const COUNTER: &str = "export gen fn count(dir: String) -> String { \
-                               return match listDir(dir) { \
-                                   Ok(names) => \"export fn n() -> Int64 { return \" \
-                                       + names.length.toString() + \" }\", \
-                                   Err(e) => \"export fn n() -> Int64 { return 0 - 1 }\", \
-                               } }";
-    const COUNTER_ROOT: &str = "import { count } from \"./gen\" \
-                                import { n } from count(\"./data\") \
-                                fn main() -> Int64 { return n() }";
-
-    #[test]
-    fn a_file_added_to_a_listed_directory_re_runs_the_generator() {
-        let mut r = CachingResolver::new(&[("gen.vyrn", COUNTER), ("data/a.txt", "1")]);
-        let before = gen_run_count();
-        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-
-        r.files.insert("data/b.txt".to_string(), "2".to_string());
-        assert_eq!(
-            run_with(COUNTER_ROOT, &r).unwrap(),
-            2,
-            "counts the new file"
-        );
-        assert_eq!(gen_run_count(), before + 2, "listing changed: re-run");
-    }
-
-    #[test]
-    fn a_file_removed_from_a_listed_directory_re_runs_the_generator() {
-        let mut r = CachingResolver::new(&[
-            ("gen.vyrn", COUNTER),
-            ("data/a.txt", "1"),
-            ("data/b.txt", "2"),
-        ]);
-        let before = gen_run_count();
-        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 2);
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-
-        r.files.remove("data/b.txt");
-        assert_eq!(
-            run_with(COUNTER_ROOT, &r).unwrap(),
-            1,
-            "counts what is left"
-        );
-        assert_eq!(gen_run_count(), before + 2, "listing changed: re-run");
-    }
-
-    #[test]
-    fn a_directory_that_appears_re_runs_the_generator() {
-        // The site bug: the first build found no `examples/`, published "0
-        // examples", and kept publishing it. A listing that FAILED is an input
-        // too — the directory being absent is what the generator saw.
-        let mut r = CachingResolver::new(&[("gen.vyrn", COUNTER)]);
-        let before = gen_run_count();
-        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), -1, "no directory yet");
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-
-        r.files.insert("data/a.txt".to_string(), "1".to_string());
-        assert_eq!(
-            run_with(COUNTER_ROOT, &r).unwrap(),
-            1,
-            "the directory appeared: the cached `-1` is stale"
-        );
-        assert_eq!(gen_run_count(), before + 2, "directory appeared: re-run");
-    }
-
-    #[test]
-    fn an_unrelated_file_does_not_invalidate_a_listing() {
-        // The over-invalidation direction. An entry records what the generation
-        // actually read — this listing and nothing else — so a file elsewhere in
-        // the tree leaves the cache hit intact. A cache that never hits would
-        // undo RFC-0076's keystroke budget.
-        let mut r = CachingResolver::new(&[("gen.vyrn", COUNTER), ("data/a.txt", "1")]);
-        let before = gen_run_count();
-        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-
-        r.files
-            .insert("elsewhere/z.txt".to_string(), "irrelevant".to_string());
-        r.files
-            .insert("data.txt".to_string(), "a near miss".to_string());
-        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
-        assert_eq!(
-            gen_run_count(),
-            before + 1,
-            "unrelated files: the cache must still hit"
         );
     }
 
@@ -7050,126 +4832,5 @@ fn main() -> Int64 { return shape().byteLength }"#;
         let body = format!("{}\ndata/a.txt\tdeadbeef\nout", u64::MAX);
         let entry = format!("{CACHE_ENTRY_TAG} {} {body}", entry_tag(key, &body));
         assert!(read_cache_entry(key, &entry).is_none());
-    }
-
-    /// End to end through the loader: a poisoned entry sitting at the right key
-    /// does not reach the program, and the generator runs instead.
-    #[test]
-    fn a_poisoned_entry_does_not_reach_the_program() {
-        let r = CachingResolver::new(&[("gen.vyrn", COUNTER), ("data/a.txt", "1")]);
-        let before = gen_run_count();
-        assert_eq!(run_with(COUNTER_ROOT, &r).unwrap(), 1);
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-        let keys: Vec<String> = r.cache.borrow().keys().cloned().collect();
-        assert_eq!(keys.len(), 1, "one generation, one entry");
-
-        // What an attacker with write access to the cache directory writes.
-        r.gen_cache_put(
-            &keys[0],
-            "v2 0\nexport fn count() -> Int64 { return 999 }\n",
-        );
-        assert_eq!(
-            run_with(COUNTER_ROOT, &r).unwrap(),
-            1,
-            "the generator's own answer, not the entry's"
-        );
-        assert_eq!(gen_run_count(), before + 2, "the refused entry re-ran it");
-    }
-
-    #[test]
-    fn generator_over_step_budget_fails_loudly() {
-        super::GEN_FUEL_OVERRIDE.with(|c| c.set(Some(500)));
-        let gen = "export gen fn spin(n: Int64) -> String { \
-                       let mut i = 0 \
-                       while i < 1000000000 { i = i + 1 } \
-                       return \"\" }";
-        let root = "import { spin } from \"./gen\" \
-                    import { z } from spin(1) \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        super::GEN_FUEL_OVERRIDE.with(|c| c.set(None));
-        assert!(e.contains("exceeded its step budget"), "{e}");
-    }
-
-    #[test]
-    fn generator_over_output_cap_fails_loudly() {
-        super::GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(Some(5)));
-        let gen = "export gen fn big(d: String) -> String { \
-                       return \"this is far more than five bytes\" }";
-        let root = "import { big } from \"./gen\" \
-                    import { z } from big(\"./d\") \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        super::GEN_MAX_OUTPUT_OVERRIDE.with(|c| c.set(None));
-        assert!(e.contains("over the") && e.contains("cap"), "{e}");
-    }
-
-    #[test]
-    fn generator_purity_violation_is_reported() {
-        // A `gen fn` that writes a file fails the comptime-purity check.
-        let gen = "export gen fn bad(d: String) -> String { \
-                       let w = writeFile(\"x\", \"y\") return \"\" }";
-        let root = "import { bad } from \"./gen\" \
-                    import { z } from bad(\"./d\") \
-                    fn main() -> Int64 { return 0 }";
-        let e = gen_err(root, &[("gen.vyrn", gen)]);
-        assert!(e.contains("not comptime-pure"), "{e}");
-    }
-
-    #[test]
-    fn same_relative_arg_in_different_dirs_does_not_collide_in_the_cache() {
-        // dogfood BUG 1: two modules in DIFFERENT directories both call the same
-        // generator with the SAME relative arg (`consts("./data")`), but each
-        // `./data` resolves to a different file. The content-addressed cache must
-        // NOT serve the first importer's output to the second — the key now folds
-        // in the RESOLVED inputs, so the two never share an entry.
-        let gen = "export gen fn consts(dir: String) -> String { \
-                       return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => \"export fn val() -> Int64 { return \" + s + \" }\", \
-                           Err(e) => e } }";
-        let a = "import { consts } from \"../gen\" \
-                 import * as g from consts(\"./data\") \
-                 export fn na() -> Int64 { return g.val() }";
-        let b = "import { consts } from \"../gen\" \
-                 import * as g from consts(\"./data\") \
-                 export fn nb() -> Int64 { return g.val() }";
-        let root = "import { na } from \"./a/client\" \
-                    import { nb } from \"./b/client\" \
-                    fn main() -> Int64 { return na() * 10 + nb() }";
-        let r = CachingResolver::new(&[
-            ("gen.vyrn", gen),
-            ("a/client.vyrn", a),
-            ("a/data/n.txt", "1"),
-            ("b/client.vyrn", b),
-            ("b/data/n.txt", "2"),
-        ]);
-        // Warm cache from `a`'s generation must not leak into `b`'s: 1*10 + 2 = 12
-        // (a pre-fix collision served `b` the value `1`, giving 11).
-        assert_eq!(run_with(root, &r).unwrap(), 12);
-    }
-
-    #[test]
-    fn identical_importer_and_arg_still_hits_the_cache() {
-        // The other half of BUG 1's fix: same importer + same arg must STILL be a
-        // cache hit on re-load (no needless re-run). Two loads of the same root;
-        // the generation runs once, then the warm cache short-circuits it.
-        let gen = "export gen fn consts(dir: String) -> String { \
-                       return match readFile(dir + \"/n.txt\") { \
-                           Ok(s) => \"export fn val() -> Int64 { return \" + s + \" }\", \
-                           Err(e) => e } }";
-        let client = "import { consts } from \"../gen\" \
-                      import { val } from consts(\"./data\") \
-                      export fn na() -> Int64 { return val() }";
-        let root = "import { na } from \"./a/client\" fn main() -> Int64 { return na() }";
-        let r = CachingResolver::new(&[
-            ("gen.vyrn", gen),
-            ("a/client.vyrn", client),
-            ("a/data/n.txt", "7"),
-        ]);
-        let before = gen_run_count();
-        assert_eq!(run_with(root, &r).unwrap(), 7);
-        assert_eq!(gen_run_count(), before + 1, "cold: one run");
-        assert_eq!(run_with(root, &r).unwrap(), 7);
-        assert_eq!(gen_run_count(), before + 1, "warm: cache hit, no re-run");
     }
 }

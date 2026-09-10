@@ -750,7 +750,7 @@ export gen fn parseVon(src: String) -> Result<VonDoc, String> {
 gen fn vonLex(src: String) -> Array<VonTok> {
     let mut out: Array<VonTok> = []
     for t in lex(src) {
-        out.push(VonTok { kind: t.kind, text: t.text, line: t.line, col: t.col })
+        out.push(VonTok { kind: t.kind.copy(), text: t.text.copy(), line: t.line, col: t.col })
     }
     return out
 }
@@ -1064,11 +1064,11 @@ fn emitVariant(name: String, xs: Array<Von>, depth: Int64) -> String {
     return emitVariantArgs(name, xs, depth)
 }
 
-/// A variant's payload list. Each payload is emitted one level DEEPER, because
-/// `vyrn fmt` counts the `(` as an indentation level of its own: a record
-/// payload then breaks its lines and closes in the column `fmt` would put it in
-/// — `Enabled(TlsFiles {` … `})`. That agreement is what makes the canonical
-/// text a fixed point of the formatter.
+/// A variant's payload list. A payload is emitted at the variant's own depth:
+/// `vyrn fmt` reads a brace opened inside an open bracket as a continuation of
+/// the call, so a record payload breaks its lines and closes in the column the
+/// variant is written in — `Enabled(TlsFiles {` … `})`. That agreement is what
+/// makes the canonical text a fixed point of the formatter.
 fn emitVariantArgs(name: String, xs: Array<Von>, depth: Int64) -> String {
     let mut out = name + "("
     let mut i = 0
@@ -1076,7 +1076,7 @@ fn emitVariantArgs(name: String, xs: Array<Von>, depth: Int64) -> String {
         if i > 0 {
             out = out + ", "
         }
-        out = out + emitAt(x, depth + 1)
+        out = out + emitAt(x, depth)
         i = i + 1
     }
     return out + ")"
@@ -1465,9 +1465,9 @@ test "a variant payload keeps its own layout" {
 
 C {
     tls: Enabled(TlsFiles {
-            cert: "/etc/c.pem",
-            key: "/etc/k.pem",
-        }),
+        cert: "/etc/c.pem",
+        key: "/etc/k.pem",
+    }),
     workers: Some(8),
     size: Rect(2, 3),
 }
@@ -1490,12 +1490,12 @@ gen fn converted(j: Json) -> String {
 
 test "a JSON document converts to a VON starting point" {
     let j = JObj([
-            JsonField { key: "name", value: JStr("shelf") },
-            JsonField { key: "port", value: JNum("8443") },
-            JsonField { key: "ratio", value: JNum("1.5") },
-            JsonField { key: "debug", value: JBool(false) },
-            JsonField { key: "audience", value: JObj([JsonField { key: "server", value: JArr([JStr("server")]) }]) },
-        ])
+        JsonField { key: "name", value: JStr("shelf") },
+        JsonField { key: "port", value: JNum("8443") },
+        JsonField { key: "ratio", value: JNum("1.5") },
+        JsonField { key: "debug", value: JBool(false) },
+        JsonField { key: "audience", value: JObj([JsonField { key: "server", value: JArr([JStr("server")]) }]) },
+    ])
     let want = """import type { Manifest } from "std/manifest"
 
 Manifest {

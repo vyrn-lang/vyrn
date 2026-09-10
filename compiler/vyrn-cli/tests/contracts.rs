@@ -437,7 +437,7 @@ fn contract_of_is_comptime_only_and_has_no_native_lowering() {
     )
     .unwrap();
     let out = vyrn()
-        .arg("emit-ir")
+        .arg("emit-wat")
         .arg(dir.join("app.vyrn"))
         .output()
         .expect("run vyrn");

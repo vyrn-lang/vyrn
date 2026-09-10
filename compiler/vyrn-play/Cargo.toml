@@ -13,8 +13,8 @@ description = "The compiler's front end as a wasm module, for the playground on 
 # THE BUILD COMMAND HAS TO RUN FROM THIS DIRECTORY. `.cargo/config.toml` beside
 # this file sets the linker's stack size, and cargo reads that file from the
 # working directory upward — `--manifest-path` from elsewhere silently misses it
-# and leaves the module with wasm-ld's 1 MB default, which the interpreter
-# exhausts long before `CALL_DEPTH_LIMIT`.
+# and leaves the module with wasm-ld's 1 MB default, which the compiler's own
+# recursion exhausts on a deeply nested program.
 #
 #   cd compiler/vyrn-play
 #   cargo build --release --target wasm32-unknown-unknown
@@ -22,6 +22,19 @@ description = "The compiler's front end as a wasm module, for the playground on 
 # `cargo test` from here runs the host-side checks (the crate is an rlib too).
 [dependencies]
 vyrn-frontend = { path = "../vyrn-frontend" }
+# RFC-0125 M5: the page RUNS what this crate COMPILES. `play_compile` answers a
+# module's bytes, and the page instantiates them with `web/wasi-min.js` — the
+# same runtime the `vyrn build --target wasm` demos in `web/` already use. This
+# crate cannot instantiate one itself: it IS a wasm module. The direct backend
+# is pure Rust plus `wasm-encoder`, so it needs no LLVM and no sysroot, which is
+# what makes it the one backend that compiles for this target.
+vyrn-codegen = { path = "../vyrn-codegen" }
+# RFC-0125 §3 M3: the page compiles with the SAME compiler `vyrn run` does. This
+# crate reached `vyrn-lower` transitively through `vyrn-codegen` and never
+# installed it, so the placer never ran and the kernel's refusals never reached
+# the page. It is a direct dependency because `load` calls `install` on it. Its
+# only dependency is `vyrn-frontend`, so it costs this target nothing new.
+vyrn-lower = { path = "../vyrn-lower" }
 
 [lib]
 name = "vyrn_play"

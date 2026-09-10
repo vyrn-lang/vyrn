@@ -1,0 +1,7 @@
+{"name":"Ada","age":36,"role":"Admin","nick":"Countess"}
+{"name":"Bob","age":41,"role":"Member"}
+decoded Cid, age 29
+validate | name | validation failed for `Username`
+validate | age | validation failed for `Age`
+json.type | role | expected one of `Guest`, `Member`, `Admin`, found string
+json.parse |  | line 1, col 3: expected a string key

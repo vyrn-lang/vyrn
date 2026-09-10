@@ -242,7 +242,3 @@ fn main() -> Int64                                                       @59
   release c : Deep<{ data: Array<Int64> }> exit=return                   @66
   release s : Deep<{ data: Array<Int64>, stride: Int64 }> exit=return    @63
   release w : Deep<{ data: Array<Int64>, start: Int64 }> exit=return     @60
-  release a : FreeArr exit=block                                         @71
-  release c : Deep<{ data: Array<Int64> }> exit=block                    @66
-  release s : Deep<{ data: Array<Int64>, stride: Int64 }> exit=block     @63
-  release w : Deep<{ data: Array<Int64>, start: Int64 }> exit=block      @60

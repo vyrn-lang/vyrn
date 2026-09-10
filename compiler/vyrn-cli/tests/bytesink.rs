@@ -67,13 +67,16 @@ fn write_file_bytes_carries_every_byte() {
     let dir = scratch("bytesink-file");
     let target = dir.join("hostile.bin");
     let src = dir.join("hostile.vyrn");
-    let sink = format!(
-        "match writeFileBytes(\"{}\", raw) {{ Ok(d) => print(\"wrote\"), Err(w) => print(w) }}",
-        target.to_str().unwrap().replace('\\', "/")
-    );
-    std::fs::write(&src, hostile_program(&sink)).unwrap();
+    // The path is RELATIVE and the run happens in the scratch directory: the
+    // compiled route's host preopens the working directory and only that, so an
+    // absolute path is refused there and honoured by the tree-walker. The write
+    // this test is about is the same write either way.
+    let sink = "match writeFileBytes(\"hostile.bin\", raw) \
+                { Ok(d) => print(\"wrote\"), Err(w) => print(w) }";
+    std::fs::write(&src, hostile_program(sink)).unwrap();
 
     let out = vyrn()
+        .current_dir(&*dir)
         .args(["run", src.to_str().unwrap()])
         .output()
         .expect("run the program");
@@ -170,9 +173,9 @@ fn the_committed_mandelbrot_fixture_now_has_a_program() {
 /// `examples_interp_native_parity` still passes. Measured, not reasoned about.
 ///
 /// So binary output gets its own comparison, with no normalisation anywhere in
-/// it. Native only: the interpreter is covered by the tests above and the wasm
-/// column has no text mode to get wrong. `#[ignore]` because a native build
-/// needs clang, like every other test that builds one.
+/// it. Native only: the wasm column has no text mode to get wrong, and the
+/// tests above cover it. `#[ignore]` because a native build needs clang, like
+/// every other test that builds one.
 #[test]
 #[ignore = "needs clang for the native build"]
 fn every_engine_writes_the_same_bytes_for_mandelbrot() {

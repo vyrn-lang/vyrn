@@ -338,9 +338,9 @@ test "a module's import line names every export it has" {
     assert(startsWith(line, "import { min, max, "))
     for e in apiEntries("math") {
         assert(match indexOf(line, " " + e.name) {
-                Some(at) => true,
-                None => false,
-            })
+            Some(at) => true,
+            None => false,
+        })
     }
     // Nothing that is not a module has one.
     assertEq(importLine("nope"), "")

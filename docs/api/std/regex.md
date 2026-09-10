@@ -14,12 +14,10 @@ WHY IT IS VYRN AND NOT A BUILTIN. `rfcs/census/blocked-regex.md` measured
 the split: the expensive half of a regex engine (parsing, determinisation,
 the table format) is already written in Rust and reusable, and the CHEAP-
 looking half, the walk, is where the parity risk is. A searching walker as a
-builtin would be spelled three times — Rust for the interpreter, LLVM IR for
-the textual backend, wasm for the direct one — and the three would have to
-agree on offsets and counts byte for byte, not merely on a `Bool`. Written
-here it is spelled ONCE and the three engines run the same source. That is
-the whole argument, and it is the standing rule about backends applied
-exactly.
+builtin would be spelled once per engine and the copies would have to agree
+on offsets and counts byte for byte, not merely on a `Bool`. Written here it
+is spelled ONCE and every engine runs the same source. That is the whole
+argument, and it is the standing rule about backends applied exactly.
 
 WHAT IT SUPPORTS. Literals, `.`, classes (`[abc]`, `[a-z]`, `[^>]`),
 alternation, grouping, and the three repeats `*` `+` `?`. Escapes with `\`.

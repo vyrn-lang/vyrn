@@ -1,0 +1,7 @@
+= 42
+= yes
+x=7 flag=no
+Some(7)
+Some(hi)
+None
+= Some(7)

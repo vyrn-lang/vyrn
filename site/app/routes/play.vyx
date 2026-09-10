@@ -125,7 +125,7 @@ fn examples() -> Array<Example> {
             <!-- The page's four sentences about itself, as REAL markup on
                  hover or focus — a native title clips and cannot wrap safely
                  (user). -->
-            <span class="idehelp" tabindex="0" aria-describedby="playtip">?<span class="tipbox" id="playtip" role="tooltip">The compiler runs in this tab as WebAssembly. Nothing is uploaded. A program is stopped after five seconds, and recursion stops near 466 calls. The tab has no filesystem and no arguments. One file runs, plus <code>std/</code>, which is built in.</span></span>
+            <span class="idehelp" tabindex="0" aria-describedby="playtip">?<span class="tipbox" id="playtip" role="tooltip">The compiler runs in this tab as WebAssembly, and so does the program it compiles. Nothing is uploaded. A program is stopped after five seconds, and recursion stops at 1,000 calls — the language's own limit, the same one <code>vyrn run</code> enforces. The tab has no filesystem and no arguments. One file runs, plus <code>std/</code>, which is built in.</span></span>
             <span class="stat" data-play-status>Loading the compiler…</span>
             <span class="errs"><span aria-hidden="true">⊗</span> <span data-play-errs>0</span></span>
             <span class="spacer"></span>

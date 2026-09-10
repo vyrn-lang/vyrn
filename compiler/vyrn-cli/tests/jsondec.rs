@@ -490,7 +490,7 @@ fn program() -> String {
         src.push_str(&format!(
             "fn show_{0}(x: {1}) -> String {{ return {2} }}\n\
              fn dec_{0}(s: String) -> String {{\n\
-             \x20   return match fromJson({1}, s) {{\n\
+             \x20   return match fromJson<{1}>(s) {{\n\
              \x20       Valid(x) => \"ok \" + show_{0}(x),\n\
              \x20       Invalid(iss) => issues(iss),\n\
              \x20   }}\n\

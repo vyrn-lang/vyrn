@@ -89,3 +89,18 @@ fn unwrapOr(o: Option<Int64>, fallback: Int64) -> Int64                  @16
       var o : Option<Int64>                                              @17
       var x : Int64                                                      @18
       var fallback : Int64                                               @19
+
+fn where$cAge(value: Int64) -> Unit                                      @0
+  if                                                                     @0
+    unary Not : Bool                                                     @0
+      call where$pAge : Bool                                             @0
+        var value : Int64                                                @0
+    do                                                                   @0
+      call panic : Never                                                 @0
+        str "validation failed for `Age`" : String                       @0
+
+fn where$pAge(value: Int64) -> Bool                                      @0
+  return                                                                 @0
+    binary GtEq : Bool                                                   @6
+      var value : Int64                                                  @6
+      int 18 : Int64                                                     @0

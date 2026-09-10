@@ -1,0 +1,13 @@
+// RFC-0004 §4 at the call boundary: a `consume` parameter would own a value
+// the region frees at its closing brace.
+fn take(s: consume String) -> Int64 { return s.byteLength }
+
+fn main() -> Int64 {
+    let mut n = 0
+    region {
+        let s = "a" + "b"
+        n = take(s)
+    }
+    print(n)
+    return 0
+}

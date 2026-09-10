@@ -1,0 +1,2 @@
+protocol_scalar.vyrn:21:1: `impl Show for Age` is not supported — `Age` erases to `Int64` at run time, so a value of it carries no name to dispatch on; implement `Show` for `Int64`, or give `Age` a record type
+protocol_scalar.vyrn:27:0: Age does not implement protocol `Show` (needed for `.show(..)`)

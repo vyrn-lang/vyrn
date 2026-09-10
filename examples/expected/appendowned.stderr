@@ -1,0 +1,1 @@
+appendowned.vyrn:7:0: `append` forgets or overwrites elements without releasing them, and `String` owns heap — move the elements one at a time instead

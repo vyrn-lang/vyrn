@@ -1,0 +1,13 @@
+// Row 12 of the refusals census, over module state that owns no heap.
+//
+// RFC-0013 is a rule about the LIFETIME of module state, not about heap:
+// nothing may take ownership of it whatever it holds.
+type Token = { id: Int64 }
+
+let g = Token { id: 1 }
+
+fn take(t: consume Token) -> Int64 { return t.id }
+
+fn useIt() -> Int64 { return take(g) }
+
+fn main() -> Int64 { return useIt() }

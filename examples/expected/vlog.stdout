@@ -1,0 +1,19 @@
+== fmt ==
+22:13:20 INFO server started
+22:13:21 DEBUG cache warm
+22:13:23 WARN slow query
+22:13:24 ERROR db connection refused
+22:13:27 INFO retrying db connection
+22:13:32 ERROR db connection refused again
+22:13:35 INFO request handled
+== count ==
+info: 3
+debug: 1
+warn: 1
+error: 2
+== stats ==
+lines: 7
+first: 2023-11-14 22:13:20
+last:  2023-11-14 22:13:35
+span:  15s 500ms
+fingerprint: 2e45cec1b5cde05a

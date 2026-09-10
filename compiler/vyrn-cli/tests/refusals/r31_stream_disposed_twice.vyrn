@@ -1,0 +1,8 @@
+// RFC-0075 M1: the obligation is discharged exactly once.
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    let s = fromArray(a)
+    close(s)
+    close(s)
+    return 0
+}

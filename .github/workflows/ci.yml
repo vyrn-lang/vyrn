@@ -15,13 +15,14 @@
 #   ---------------------------------------------------------------
 #   job total                       1141 1043      1243     692
 #
-#   parity: harness 468, build 18, codegen 8, universal-pages 13   -> 561
+#   route (was parity): harness 468, residue 468, build 18, codegen 8,
+#     universal-pages 13                                           -> 1029
 #   gen-engine: the one release test 57                            ->  66
 #   bench: run + compare 114, build 15                             -> 134
 #
 # Two facts the table settles. The caches are already right: `Swatinem/rust-cache`
 # restores in 6-14 s and the builds behind every step above are warm (an 18 s
-# `cargo build -p vyrn-cli` in the parity job is the proof), so there is no
+# `cargo build -p vyrn-cli` in the route job is the proof), so there is no
 # cargo-caching win left to take here. And the long poles are not builds at all —
 # they are two steps that run work in series on a runner with idle cores:
 # `Bench --check`, thirteen independent processes in a `for` loop, and
@@ -65,20 +66,16 @@
 #      (bench, LSP, genwasm, node, docs, install), which run at the same time.
 #      Two jobs and not three — a third was measured on paper and does not move
 #      the pole, which is now the workspace suite.
-#   2. `checks` builds vyrn `--release`. `bench --check` runs every bench body
-#      under the INTERPRETER, so the interpreter's own speed IS that step, and a
-#      debug interpreter is 4-7x slower per bench. Over the corpus on one
-#      machine: 323 s serial / 148 s at -P 4 debug, against 62 s serial / 29 s at
-#      -P 4 release. Release+SERIAL beats debug+parallel by 2.4x. One bench
-#      dominates the corpus — spectralnorm is 95 s of the 323 s debug total, and
-#      16 s of the 62 s release one — so no amount of -P could have cut below it
-#      and the optimization level was always the larger lever.
+#   2. `checks` builds vyrn `--release`. `bench --check` compiles and runs every
+#      bench body, so the compiler's own speed IS that step, and a debug build
+#      is several times slower per bench. Over the corpus on one machine, when
+#      the body ran under the tree-walker: 323 s serial / 148 s at -P 4 debug,
+#      against 62 s serial / 29 s at -P 4 release. Release+SERIAL beat
+#      debug+parallel by 2.4x, and the optimization level was always the larger
+#      lever.
 #
-# The gate loses nothing by not being debug: `--check` runs no codegen, and the
-# four first-party `debug_assert!`s in this workspace are in vyrn-codegen (2),
-# vyrn-lower (1) and vyrn-genwasm (1) — NONE in the interpreter. The 1753-test
-# workspace suite still runs in debug, so every assertion still has a job that
-# trips it. Same corpus, same one-run-per-body, same verdict.
+# The workspace suite still runs in debug, so every `debug_assert!` still has a
+# job that trips it. Same corpus, same one-run-per-body, same verdict.
 #
 # WHERE IT LANDED, from run 32408641317 (warm; 32407284624 is the cold one):
 #
@@ -99,10 +96,14 @@
 # balance a two-way split is supposed to find and the reason a third job would
 # only have added a checkout.
 #
-# THERE IS NO SINGLE POLE any more. `parity` swings 271-500 s across the fleet
-# (one `#[test]` walking 40 programs) and the Windows test leg sits at ~310-320 s;
-# which one tops a given run is scheduling. Cutting further therefore means the
-# parity harness itself — a change to the harness, not to this file.
+# THERE IS NO SINGLE POLE any more — except that the exit-residue ratchet
+# (RFC-0114 §25, restored in the route job) compiles the corpus a second and a
+# third time and roughly doubles that job, which makes `route` the pole again
+# at about 17 minutes. It is a whole-corpus gate that has caught real leaks and
+# it runs in parallel with everything else, so the added WALL time is its own
+# excess over the test job and nothing else waits on it. The Windows test leg
+# sits at ~310-320 s. Cutting further therefore means the two harnesses
+# themselves — a change to them, not to this file.
 
 name: CI
 
@@ -121,7 +122,7 @@ on:
     # what keeps it honest — but a commit touching ONLY `docs/api/*.md` matches
     # `**.md` and runs no workflow, so a hand-edit there is not caught until the
     # next commit that does build. Caught late, not never. The alternative —
-    # dropping `**.md` — puts a full four-platform matrix plus parity behind
+    # dropping `**.md` — puts a full four-platform matrix plus the route behind
     # every research note, which is a worse trade for a directory nothing reads
     # (`vyrn doc --verify` regenerates it either way).
     paths-ignore:
@@ -150,7 +151,7 @@ env:
   CARGO_TERM_COLOR: always
   # Incremental artifacts bloat the cache and don't help clean CI builds.
   CARGO_INCREMENTAL: 0
-  # A missing external tool must FAIL a job here, never skip quietly. The parity
+  # A missing external tool must FAIL a job here, never skip quietly. The route
   # harness drops the wasm column with a `NOTE` when `wasmtime` is absent, and the
   # memory census skips whole when `node` is, so a restored-but-empty cache or a
   # renamed release asset reads as green while a third of the gate does not run.
@@ -246,14 +247,13 @@ jobs:
         # `cargo-nextest` is a pinned tool like wasmtime (RFC-0102): a row in
         # `toolpin.rs`, a version in `vyrn.json`, four hash-locked lines in
         # `vyrn.lock`, and `~/.vyrn/tools/<sha256>/` to unpack into. Same key
-        # shape as the parity job's, with two differences that matter:
+        # shape as the route job's, with two differences that matter:
         #
         #   * `${{ matrix.os }}` is in the key, because this is a four-platform
-        #     matrix and the four artifacts are different binaries. The parity
-        #     job is ubuntu-only and needs no such word.
+                #     job is ubuntu-only and needs no such word.
         #   * a DISTINCT prefix from `vyrn-tools-`, because the two jobs put
         #     different subsets of the same directory in the cache. Sharing one
-        #     key would let this job's nextest-only save answer the parity job's
+        #     key would let this job's nextest-only save answer the route job's
         #     restore as a hit — and its populate step is `if: cache-hit !=
         #     'true'`, so wasmtime would silently never arrive.
         # actions/cache@v4
@@ -308,6 +308,22 @@ jobs:
             exit 1
           }
           echo "$dir" >> "$GITHUB_PATH"
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (RFC-0102: a project that never pinned behaves as it
+        # always did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          compiler/target/debug/vyrn update --locked wabt >/dev/null
+          compiler/target/debug/vyrn update --locked simde >/dev/null
+          wasm2c=$(compiler/target/debug/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/debug/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
       - name: Workspace tests
         working-directory: compiler
         # `cargo nextest run`, not `cargo test`: cargo runs the workspace's 65
@@ -376,9 +392,10 @@ jobs:
       - name: Build vyrn (release)
         working-directory: compiler
         # `--release`, and the bench step below is why. `vyrn bench --check` runs
-        # every bench body once under the INTERPRETER, so the interpreter's own
-        # speed is the whole cost of that step — and a debug interpreter is
-        # 4-7x slower per bench than an optimized one. Measured over the corpus
+        # every bench body once, compiling it first (RFC-0125 §3 M5, the eleventh
+        # slice: the compiled route is the default), so this binary's own speed
+        # is the whole cost of that step — and a debug one is 4-7x slower per
+        # bench than an optimized one. Measured over the corpus
         # on one machine: 323 s serial and 148 s at -P 4 with a debug binary,
         # against 62 s serial and 29 s at -P 4 with a release one. Release+serial
         # beats debug+parallel by 2.4x, so this is the larger of the two levers
@@ -389,17 +406,17 @@ jobs:
         # established answer here rather than a new idea.
         #
         # WHAT THE GATE LOSES BY NOT BEING DEBUG: nothing it could have caught.
-        # `--check` compiles no native code and runs no codegen, and the whole
+        # `--check` compiles no NATIVE code and runs no clang, and the whole
         # workspace carries four first-party `debug_assert!`s — two in
-        # vyrn-codegen, one in vyrn-lower, one in vyrn-genwasm — and NONE in the
-        # interpreter this step exercises. The 1753-test workspace suite still
+        # vyrn-codegen, one in vyrn-lower, one in vyrn-genwasm. The 1753-test
+        # workspace suite still
         # runs in debug, so every `debug_assert` that exists still has a job that
         # trips it. What the gate verifies — that each bench body still compiles
         # and still runs, deterministically — is unchanged, and so is the corpus.
         run: cargo build --quiet --release -p vyrn-cli
       - name: Bench --check (deterministic, RFC-0063)
         # The BLOCKING half of bench-in-CI: `vyrn bench --check` runs each bench
-        # body ONCE under the interpreter — deterministic, no clang, no timing —
+        # body ONCE on the compiled route — deterministic, no clang, no timing —
         # so a bench that stops compiling/running fails the build. The corpus is
         # every example carrying `bench "` (benching, smallarray, and any future
         # one), discovered here exactly as the RFC specifies.
@@ -495,10 +512,50 @@ jobs:
           & powershell -NoProfile -ExecutionPolicy Bypass -File install-test.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-  parity:
-    name: three-way parity (interp == native == wasm)
+  judgments:
+    name: the judgments over the corpus (kernel, effects, typed, core tables)
+    # These four suites build the named core for every instance of every corpus
+    # program and walk it: about eleven minutes together. They used to run
+    # inside `tests (workspace)`, where they tripled that job — 8 minutes to 27
+    # on the Windows leg — for no gain, because CI wall time is the slowest job
+    # and not the sum. They are `#[ignore]`d for the same reason the route
+    # harness is, and they gate here instead, in parallel (RFC-0125
+    # §3 M2, M3 and M6: each carries its own RATCHET).
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: The linear judgment over the corpus (RFC-0125 M2)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test kernel -- --ignored --nocapture
+      - name: The plan's tables against the core's (RFC-0125 M3)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test coretables -- --ignored --nocapture
+      - name: The effect judgment beside the audience and the floor (RFC-0125 M6)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test effects -- --ignored --nocapture
+      - name: Typed by construction over the corpus (RFC-0125 M6)
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test typed -- --ignored --nocapture
+
+  route:
+    name: the native route (wasm2c == wasm)
     # x86-64 only, on purpose, and here is the case for the ARM leg that is NOT
     # here so the next reader does not have to rebuild it.
+    #
+    # RFC-0125 §2.5 gives one native route — the module `--target wasm` writes,
+    # through wasm2c and clang — so this job compares that binary with the same
+    # module under the `wasmtime` CLI (`tests/route.rs`). It needs wabt, and
+    # `vyrn.lock` pins one wabt asset per platform: the Windows one hashed from
+    # its bytes, the three others by the sha256 the release publishes beside
+    # each asset, which `vyrn update --locked` checks against what it downloads
+    # (RFC-0102 M1). `VYRN_REQUIRE_TOOLS=1` is what makes a missing tool fail
+    # here instead of skipping the corpus quietly.
     #
     # What an `ubuntu-24.04-arm` copy of this job would NOT add: a second layout
     # ABI. `vyrn-codegen/tests/layout_vs_clang.rs` compiles for wasm32-wasip1 and
@@ -506,25 +563,19 @@ jobs:
     # the answer. (That citation was a claim when it was written: the test
     # early-returned in every job for want of a toolchain. It executes in THIS
     # job now — see the codegen step below — so the argument rests on something
-    # that has been watched go green.) The layout engine exists for the direct wasm backend; on the
-    # native path LLVM computes layout, so there is nothing of ours to diverge.
-    # The SIMD types are the same story: `<4 x float>` lowers to wasm SIMD in the
-    # column this engine owns.
+    # that has been watched go green.) The layout engine is the one emitter's;
+    # the SIMD types are the same story.
     #
-    # What it WOULD add: the NATIVE column on aarch64. That column is text IR
-    # through clang to a real binary, and the harness compares its stdout byte
-    # for byte against the interpreter — so it is a genuine second ABI for
-    # everything the emitter decides (integer widths, float formatting, struct
-    # returns, trap wording).
+    # What it WOULD add: the route's own column on aarch64 — the same module
+    # through wasm2c and a different clang to a different machine code, compared
+    # byte for byte against the engine. That is a genuine second target for
+    # everything the C compiler decides.
     #
     # What it would cost, measured against run 31724777591 (warm caches): this
     # job takes about 8 minutes and runs in parallel with the others, so the
     # added WALL time is zero and the added runner minutes are free — the repo
-    # is public. The one-time work is a second cache slot, and no new fetch at
-    # all: `vyrn.lock` already pins the aarch64-linux wasmtime beside this
-    # platform's, and the wasi sysroot and the builtins archive are wasm32 target
-    # libraries pinned `/any` — the same file on every host. clang is
-    # preinstalled on the ARM image.
+    # is public. The one-time work is a second cache slot and one more wabt row
+    # in the lock. clang is preinstalled on the ARM image.
     #
     # A cheap, real addition — deliberately left as its own change, because a
     # matrix leg nobody has watched go green is a claim, not a gate.
@@ -538,8 +589,8 @@ jobs:
         with:
           workspaces: compiler
           # Separate cache from the test job — different build graph (only
-          # vyrn-cli's parity test) and keeps both under the size cap.
-          prefix-key: parity
+          # vyrn-cli's route test) and keeps both under the size cap.
+          prefix-key: route
       - name: Pinned tool cache
         id: wasm-tools
         # The ONLY job that needs these now. It was shared with gen-engine,
@@ -547,11 +598,11 @@ jobs:
         # read — RFC-0076 M7 moved the shim to the direct backend and left the
         # exports behind.
         #
-        # All three pieces are live HERE, and each for a different step: the
-        # parity harness needs wasmtime (RFC-0077 M5 made `--target wasm` need
-        # no clang, no sysroot and no builtins), and the codegen integration
-        # tests below need the sysroot and the builtins archive to compile the
-        # C shim and the layout program.
+        # Every piece is live HERE, and each for a different step: the route
+        # harness needs wasmtime for the column it compares against and wabt and
+        # simde for the route itself, and the codegen integration tests below
+        # need the sysroot and the builtins archive to compile the layout
+        # program for wasm32-wasip1.
         #
         # RFC-0102 M4: which versions those are is `vyrn.json`'s answer and which
         # BYTES are `vyrn.lock`'s, so the key is the lock's hash — a version bump
@@ -576,30 +627,43 @@ jobs:
         # the recorded sha256, refuses a mismatch, and never writes the lock —
         # so a CI cache miss cannot silently re-pin anything.
         run: compiler/target/debug/vyrn update --locked
-      - name: Run the parity harness
+      - name: Run the route harness
         working-directory: compiler
-        # Nothing is exported. The harness resolves wasmtime through the same
-        # three steps every other consumer takes — `$VYRN_WASMTIME`, the pin,
-        # the `tools/` walk — and the pin is what answers here. clang is still
-        # needed, for the NATIVE column, and stays discovered (RFC-0102 M3).
-        run: cargo test --quiet -p vyrn-cli --test parity -- --ignored --nocapture
+        # Every corpus program built with `vyrn build` — the module through
+        # wasm2c and clang — and compared byte for byte on stdout, stderr and
+        # exit code against the same module under the `wasmtime` CLI. This is
+        # what the parity harness was, with the textual route it compared
+        # against replaced by the engine (RFC-0125 §2.5).
+        #
+        # Nothing is exported. Each of wasmtime, wabt and simde resolves through
+        # the same three steps every other consumer takes — the environment
+        # variable, the pin, the `tools/` walk — and the pin is what answers
+        # here. clang stays discovered (RFC-0102 M3).
+        run: cargo test --quiet --release -p vyrn-cli --test route -- --ignored --nocapture
       - name: The exit-residue ratchet (RFC-0114 §25)
         working-directory: compiler
-        # Every example built natively and run once under VYRN_LEAK_CHECK,
-        # compared against rfcs/census/residue-baseline.tsv. A double free
-        # fails outright; a clean row that leaks fails; a leak row may only
-        # shrink. This is the gate the exit-residue triage arc was building
-        # toward: the twenty-five rounds it took to get here can no longer
-        # regress quietly.
-        run: cargo test --quiet -p vyrn-cli --test residue -- --ignored --nocapture
+        # Every corpus program compiled with `VYRN_LEAK_CHECK=1` in the
+        # compiler's environment, which selects `std/runtime`'s accounting
+        # allocator, and run once — under `vyrn run` and under the route's own
+        # executable, which are two engines over one module. The verdicts are
+        # compared against `rfcs/census/residue-baseline.tsv`: a double free
+        # fails outright, a clean row that leaks or stops exiting 0 fails, a
+        # leak row may only shrink.
+        #
+        # It is here rather than in the test job for the reason the route
+        # harness is: the route leg needs clang, wabt and simde, and this is
+        # the job that has them. The leg SKIPS where they are missing and the
+        # engine leg still measures the same module, so the ratchet is not
+        # hostage to a platform nobody has pinned wabt for.
+        run: cargo test --quiet --release -p vyrn-cli --test residue -- --ignored --nocapture
       - name: The codegen integration tests that need a toolchain (RFC-0077)
         working-directory: compiler
-        # THE JOB THAT MAKES `layout_vs_clang` A GATE. These eight tests —
-        # `layout_vs_clang` 1, `shim_link` 2, `wasm_runs` 5 — need wasmtime, and
-        # three of them need clang and the wasi sysroot as well. They used to be
+        # THE JOB THAT MAKES `layout_vs_clang` A GATE. These six tests —
+        # `layout_vs_clang` 1, `wasm_runs` 5 — need wasmtime, and one of them
+        # needs clang and the wasi sysroot as well. They used to be
         # ordinary `#[test]`s that early-`return`ed when a tool was missing, and
         # NO job supplied one, so all eight passed in every run having executed
-        # nothing — while the parity job's own comment above cited
+        # nothing — while the route job's own comment above cited
         # `layout_vs_clang` as the reason an ARM leg would add nothing.
         #
         # They are `#[ignore]`d now — the four-platform test job counts them
@@ -614,25 +678,38 @@ jobs:
         # nothing pins is still a quiet `None`.
         #
         # This is also the live consumer of the sysroot and the builtins archive:
-        # the shim compile (`toolchain::shim_wasm`) and the C layout program are
-        # the only readers left in the repo, which is why the pinned cache stays
+        # the C layout program is the only reader left in the repo — the shim
+        # compile went with the textual route — which is why the pinned cache stays
         # in THIS job and left the gen-engine one. Three exported variables and
         # their existence check are gone — the resolver reads the same pin the
         # step above populated, and a pin that will not resolve fails LOUDLY
         # rather than reading as a tool that is merely not installed.
         run: cargo test --quiet -p vyrn-codegen -- --ignored --nocapture
       - name: Universal-pages integration (RFC-0069)
-        # Ignored-tier like parity: spawning the bin server generates the whole
+        # Ignored-tier like the route harness: spawning the bin server generates the whole
         # app cold (minutes in a debug build) — too slow for the test job.
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test universal_pages -- --ignored
+      - name: The native route's two tools, for programs outside this checkout
+        # A test that builds natively does it in a scratch project, and a scratch
+        # project pins nothing, so the pin in this checkout's `vyrn.lock` cannot
+        # answer there (RFC-0102: a project that never pinned behaves as it
+        # always did). The environment variable is the first of the three steps
+        # every consumer takes, so the two paths are exported once, read off
+        # the compiler's own resolution of the pin rather than spelled here.
+        run: |
+          set -eu
+          wasm2c=$(compiler/target/debug/vyrn deps | awk '$1 == "wasm2c" { print $2 }')
+          simde=$(compiler/target/debug/vyrn deps | awk '$1 == "simde" { print $2 }')
+          [ -n "$wasm2c" ] && [ -n "$simde" ] || { echo "the pins did not resolve: wasm2c='$wasm2c' simde='$simde'" >&2; exit 1; }
+          echo "VYRN_WASM2C=$wasm2c" >> "$GITHUB_ENV"
+          echo "VYRN_SIMDE=$simde" >> "$GITHUB_ENV"
       - name: The native bench harness (RFC-0055)
-        # Ignored-tier because it compiles with clang, which this job has and
-        # the test job does not.
+        # Ignored-tier because it compiles the route, which this job has the
+        # tools for and the test job does not.
         #
         # `bench --check`, the face the blocking gate runs, never loads the
-        # harness at all — it runs each body under the interpreter against the
-        # program as written. So nothing in CI exercised the merge that pulls
+        # harness at all — it runs each body against the program as written. So nothing in CI exercised the merge that pulls
         # `std/bench` in, and a defect lived there: a root program declaring a
         # name that a module the harness injects uses privately either failed to
         # compile, naming a type it had never imported, or compiled and called
@@ -647,11 +724,82 @@ jobs:
         working-directory: compiler
         run: cargo test --quiet -p vyrn-cli --test benching -- --ignored
 
+  wasmhash:
+    name: wasm bytes identical across the matrix — ${{ matrix.os }}
+    # RFC-0125 §2.6: the same source must produce the same wasm on every host.
+    # `tests/wasmhash.rs` builds every example `vyrn check` accepts with
+    # `--target wasm` and compares one sha256 per example against the committed
+    # `rfcs/census/wasm-sha256.tsv`. The committed file is the platform that
+    # "writes"; each leg here only checks, so no artifact moves between jobs
+    # and a red leg names the example whose bytes differ.
+    #
+    # Its own job, not a step in `test`: that job builds nothing to wasm, and
+    # this one needs no wasmtime, no clang and no sysroot — the direct backend
+    # emits the module itself. The debug `vyrn` is the one the test spawns; the
+    # manifest was written by a release build, so a leg that differs also
+    # catches a compiler whose output depends on its optimization level.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: Every example's wasm hashes to the recorded manifest
+        working-directory: compiler
+        env:
+          VYRN_WASM_MANIFEST: check
+        run: cargo test --quiet -p vyrn-cli --test wasmhash -- --ignored
+
+  fixtures:
+    name: compiled run prints the recorded output — ${{ matrix.os }}
+    # RFC-0125 §2.6, M5: `tests/fixtures.rs` runs every example with
+    # `vyrn run` — the direct backend's module, in the wasmtime
+    # the CLI embeds — and compares stdout, stderr and the exit code byte for
+    # byte against `examples/expected/`, which the same route records
+    # (`VYRN_FIXTURES=write`) and a human reviews in the diff. With `wasmhash`
+    # (the same bytes everywhere) it says on four platforms what the route job
+    # says on one; what the route says and these two cannot is that a SECOND
+    # backend, written from the same frontend, agrees. It is not a required
+    # check, and a red leg names the example and the first line that differs.
+    #
+    # Its own job for the reason `wasmhash` is one: no clang, no sysroot, no
+    # external wasmtime, and the whole matrix, since the host it runs under is
+    # hand-written and each platform's file and stream calls are its own.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Rust cache
+        # Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: compiler
+      - name: Every example prints what was recorded, as compiled wasm
+        working-directory: compiler
+        run: cargo test --quiet -p vyrn-cli --test fixtures -- --ignored --nocapture
+
   gen-engine:
-    name: cross-engine generation (interp == wasm)
+    name: generation is deterministic over the corpus
     # Its own job rather than a step in `test`: it is the only thing in CI that
     # builds wasmtime + cranelift, which is minutes of compile the other jobs
-    # must not wait on or share a cache with. Parallel to `parity`, and for the
+    # must not wait on or share a cache with. Parallel to `route`, and for the
     # same reason — both are the expensive tier that proves an invariant.
     runs-on: ubuntu-latest
     steps:
@@ -663,28 +811,29 @@ jobs:
         with:
           workspaces: compiler
           # Distinct build graph (vyrn-genwasm and its wasmtime tree) — its own
-          # slot, like parity's.
+          # slot, like the route job's.
           prefix-key: genwasm
       # No wasm toolchain here, deliberately. This job used to restore the same
-      # tool cache as parity and export WASI_SYSROOT/WASI_BUILTINS into the test
+      # tool cache as the route job and export WASI_SYSROOT/WASI_BUILTINS into the test
       # — three tarballs (~150 MB unpacked) for two variables NOTHING in this
       # build reads. RFC-0076 M7 moved the generation engine's shim to
       # the direct backend (`vyrn-genwasm/src/lib.rs`), which needs no clang and
       # no sysroot, and its wasmtime is a crate rather than a spawned binary. The
       # only readers of those two variables left in the repo are the codegen
-      # integration tests, which run in the parity job where the fetch now lives.
-      - name: Every generator agrees under both engines (RFC-0076)
-        # The RFC's acceptance criteria, both halves in one run: the wasm column
-        # must match the interpreter column byte for byte over every
-        # generator-using example, and the interpreter column IS the
-        # `VYRN_NO_WASM_GEN=1` configuration, so "the interpreter still works with
-        # the wasm path disabled" is exercised by the same corpus.
+      # integration tests, which run in the route job where the fetch now lives.
+      - name: Every generator emits the same source twice (RFC-0076)
+        # The RFC's acceptance criterion over the corpus. It compared two engines
+        # until RFC-0125 §3 M5 deleted the second one; the second column is the
+        # SAME engine on a second cold run now, which still catches a generator
+        # whose answer depends on anything but its declared inputs. What the
+        # emitted source MEANS is the `fixtures` job's, which runs every one of
+        # these examples against its recorded output.
         #
         # `--release` because cranelift compiles the guest: measured over this
         # corpus with an empty artifact cache, 20 s release against 98 s debug.
         working-directory: compiler
         run: |
-          cargo test --quiet -p vyrn-cli --release --features wasm-gen \
+          cargo test --quiet -p vyrn-cli --release \
             --test genwasm -- --ignored --nocapture
 
   bench:
@@ -731,9 +880,22 @@ jobs:
           prefix-key: bench
       - name: Build vyrn
         working-directory: compiler
-        # clang is preinstalled on ubuntu-latest (the parity job's native half
-        # relies on it too); `vyrn bench` finds it on PATH.
+        # clang is preinstalled on ubuntu-latest (the route job relies on it
+        # too); `vyrn bench` finds it on PATH. It also needs wabt and simde now
+        # that `vyrn bench` times the route's binary, and reaches them through
+        # the same pin — so this job is red until wabt's linux row is recorded,
+        # the way the route job is.
         run: cargo build --quiet -p vyrn-cli
+      - name: Pinned tool cache
+        id: wasm-tools
+        # actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.vyrn/tools
+          key: vyrn-tools-v2-${{ hashFiles('vyrn.lock') }}
+      - name: Populate ~/.vyrn/tools from vyrn.lock
+        if: steps.wasm-tools.outputs.cache-hit != 'true'
+        run: compiler/target/debug/vyrn update --locked
       - name: Run benches + compare to baseline
         working-directory: compiler
         run: |

@@ -15,9 +15,10 @@
 //!
 //! **The editor grammar is deliberately not compared.** Its contextual list
 //! answers a different question — which words to colour in a `.vyrn` FILE — and
-//! it holds `extern`, `lazy`, `place`, `yield` and `logging`, which these two do
-//! not, while leaving out `consume`, `share` and `panic`, which these two carry.
-//! `editor/vscode/test/grammar.test.mjs` checks that one against the lexer.
+//! it holds `extern`, `lazy`, `place` and `logging`, which these two do not,
+//! while leaving out `consume`, `share` and `panic`, which these two carry.
+//! `editor/vscode/test/grammar.test.mjs` checks that one against the lexer, and
+//! RFC-0127 §3.4 counts every word in all three lists against the compiler.
 
 use std::path::{Path, PathBuf};
 

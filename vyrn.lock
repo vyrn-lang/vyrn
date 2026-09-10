@@ -4,6 +4,11 @@ tool:cargo-nextest@0.9.143/aarch64-linux	https://github.com/nextest-rs/nextest/r
 tool:cargo-nextest@0.9.143/aarch64-macos	https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-universal-apple-darwin.tar.gz	4830d430411148d17602a75cc880bfb4dc8dac153dea59a48a2ef4cc93577f07
 tool:cargo-nextest@0.9.143/x86_64-linux	https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-unknown-linux-gnu.tar.gz	66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e
 tool:cargo-nextest@0.9.143/x86_64-windows	https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.143/cargo-nextest-0.9.143-x86_64-pc-windows-msvc.tar.gz	c42a1dbde532da06dc9b4a43d44fd0ce668b836c2ab7388410f10ff9834476a2
+tool:simde@0.8.2/any	https://github.com/simd-everywhere/simde/archive/refs/tags/v0.8.2.tar.gz	ed2a3268658f2f2a9b5367628a85ccd4cf9516460ed8604eed369653d49b25fb
+tool:wabt@1.0.41/aarch64-linux	https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-arm64.tar.gz	5e35416ee8725dc7cc0572e4392a8117cbf008b0e34c0db65c75506b0299cdbf
+tool:wabt@1.0.41/aarch64-macos	https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-macos-arm64.tar.gz	e5269d6bbe05dfeb179e4f21111b3a641d6ccaa38b0b21d472ae5c65f8c4ff5d
+tool:wabt@1.0.41/x86_64-linux	https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-linux-x64.tar.gz	83f8122e924745fcd70636e3594bc01c4c47f2d4c8f3c63b5d70d3f83a482677
+tool:wabt@1.0.41/x86_64-windows	https://github.com/WebAssembly/wabt/releases/download/1.0.41/wabt-1.0.41-windows-x64.tar.gz	37285ec7244384ffd382841f93fd23335aae846c92016a132d765c60f27a2f31
 tool:wasi-builtins@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/libclang_rt.builtins-wasm32-wasi-25.0.tar.gz	13aca55665321200b9659b292615adf5110ace9e891ab94511badd970553ca18
 tool:wasi-sysroot@25.0/any	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-25/wasi-sysroot-25.0.tar.gz	d09c62c18efcddffe4b2fdd8c5830109cc8e36130cdbc9acdc0bd1b204c942bb
 tool:wasmtime@46.0.1/aarch64-linux	https://github.com/bytecodealliance/wasmtime/releases/download/v46.0.1/wasmtime-v46.0.1-aarch64-linux.tar.xz	071c4def2a08f0ebc95c52dfd4f2886eb697ba495804217cf76e13b09d70a1be

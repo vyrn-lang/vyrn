@@ -75,50 +75,43 @@ pub struct Program {
     /// shipped binary contains no tests, and the string pool / regex collection
     /// skip them by construction. Checked as Unit-returning function bodies;
     /// executed only by `vyrn test`.
-    pub tests: Vec<TestDecl>,
+    pub tests: Vec<NamedBlock>,
     /// `bench "name" { body }` declarations (RFC-0055). A separate field, exactly
     /// like [`Program::tests`]: `run`/`build`/`emit-ir` walk only `functions`, so a
     /// shipped binary contains no benches and the string pool / regex collection
     /// skip them by construction. Checked as Unit-returning function bodies
     /// (`blackBox` legal inside); executed only by `vyrn bench` (which lowers them
     /// to ordinary functions + a synthesized harness `main` before the backends).
-    pub benches: Vec<BenchDecl>,
+    pub benches: Vec<NamedBlock>,
 }
 
-/// A `bench "name" { body }` declaration (RFC-0055): a named block checked exactly
-/// like a Unit-returning function body under a synthetic name (`bench@<index>`) so
-/// movecheck/ownership/spawn analyses apply unchanged. Structurally identical to
-/// [`TestDecl`]; `vyrn bench` runs only the *root* module's (`None`-module) benches.
+/// A named block declaration: `test "name" { body }` (RFC-0015) and
+/// `bench "name" { body }` (RFC-0055) are the same declaration under two words.
+///
+/// Both are checked exactly like a Unit-returning function body under a
+/// synthetic unspellable name (`test@<index>` / `bench@<index>`) so
+/// movecheck/ownership/spawn analyses apply unchanged, and both are held in a
+/// [`Program`] field of their own so `run`/`build`/`emit-ir` never walk them: a
+/// shipped binary contains no tests and no benches, and the string pool and the
+/// regex collection skip both fields by construction.
+///
+/// The KEYWORD is what tells the two apart, in the parser and nowhere else, and
+/// the field is what tells a subcommand which to run. `vyrn test` runs only the
+/// root module's [`Program::tests`] and `vyrn bench` only its
+/// [`Program::benches`]; an imported module's still type-check and do not run.
+/// RFC-0127 §8 is the census that merged the two carriers and the reason the
+/// two words stay two.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BenchDecl {
-    /// The bench's display name (the string literal after `bench`).
+pub struct NamedBlock {
+    /// The display name — the string literal after `test` or `bench`. Unique per
+    /// file.
     pub name: String,
-    /// The block body — timed under `vyrn bench`, run once under `--check`.
+    /// The block body. Timed under `vyrn bench`, run once under `--check`.
     pub body: Block,
     /// `///` documentation (markdown), attached by the parser; `None` if absent.
     pub doc: Option<String>,
-    /// The module (file) this bench came from; `None` for the root. Set by the
-    /// loader. `vyrn bench` runs only `None`-module (root) benches.
-    pub module: Option<String>,
-    pub line: usize,
-}
-
-/// A `test "name" { body }` declaration (RFC-0015): a named block checked exactly
-/// like a Unit-returning function body and run by `vyrn test`. The `name` is a
-/// plain string (unique per file). Only the *root* module's tests are run by
-/// `vyrn test <root>`; an imported module's tests still type-check but do not
-/// run (they run when that module is itself the argument).
-#[derive(Debug, Clone, PartialEq)]
-pub struct TestDecl {
-    /// The test's display name (the string literal after `test`).
-    pub name: String,
-    /// The block body — checked/analysed under a synthetic unspellable function
-    /// name (`test@<index>`) so movecheck/ownership/spawn analyses apply unchanged.
-    pub body: Block,
-    /// `///` documentation (markdown), attached by the parser; `None` if absent.
-    pub doc: Option<String>,
-    /// The module (file) this test came from; `None` for the root. Set by the
-    /// loader. `vyrn test` runs only `None`-module (root) tests.
+    /// The module (file) this declaration came from; `None` for the root. Set by
+    /// the loader, and what "only the root module's" is asked of.
     pub module: Option<String>,
     pub line: usize,
 }
@@ -138,13 +131,33 @@ pub enum LogSink {
 ///
 /// `t.xs[k] = v` becomes `let mut t.xs[] = t.xs` / `t.xs[][k] = v` /
 /// `t.xs = t.xs[]`. The name is unspellable — `[` cannot appear in an identifier
-/// — and by convention ONLY the container that is moved out and written back
-/// ends in `[]`; the operand temps the desugar hoists ahead of the move carry a
-/// further suffix (`[]i`, `[]v`) so they do not match. The interpreter keys its
-/// take on this (`Interp::take_place`); `symbols.rs` filters all of them out of
-/// the completion index on the looser `contains('[')`.
+/// — and ONLY the container that is moved out and written back ends in `[]`.
+/// The operand temps the desugar hoists ahead of the move carry a further
+/// suffix (`[]idx`, `#idx`, `#val`, `[]arg1`) so they do not match, and `#` is
+/// what keeps a hoisted operand from reading as DERIVED from the container
+/// under [`ast::mentions_place`](crate::ast::mentions_place).
+///
+/// **`parser::place_receiver` is the one statement of the naming and this is
+/// the one statement of the reading.** Every pass below asks here —
+/// `movecheck.rs` for rule 2's exemption, `direct.rs` to recognise the idiom —
+/// so a rename of the suffix moves one line and trips
+/// `parser::tests::the_desugars_temps_answer_the_one_predicate`.
+/// `symbols.rs` filters all of them out of the completion index on the looser
+/// `contains('[')`.
 pub fn is_place_temp(name: &str) -> bool {
     name.ends_with("[]")
+}
+
+/// The place RFC-0082 M2's hoisted VALUE temp was lifted out of, if `name` is
+/// one — `Some("ps")` for `ps[]#val`.
+///
+/// The desugar lifts a place assignment's right-hand side ahead of the move-out
+/// so it runs before the container leaves its home. The temp therefore outlives
+/// exactly as the store it feeds does, which is what `movecheck.rs` asks this
+/// for, and the place it names is what a reader wrote rather than what the
+/// parser minted.
+pub fn hoisted_value(name: &str) -> Option<&str> {
+    Some(name.strip_suffix("#val")?.trim_end_matches("[]"))
 }
 
 /// The default logging threshold — `Info`: `trace`/`debug` are suppressed unless
@@ -182,29 +195,35 @@ pub fn is_surface_builtin(name: &str) -> bool {
 /// The ORDER is the meaning: the index is the ordinal a `logging { level: .. }`
 /// block compares against, so this is a list and not a set.
 ///
-/// THREE SITES DELIBERATELY STILL SPELL THE FIVE OUT, and they are not
+/// TWO SITES DELIBERATELY STILL SPELL THE FIVE OUT, and they are not
 /// duplication:
 ///
-/// - `interp.rs`'s dispatch arm and `vyrn-codegen/src/direct.rs`'s two arms are
-///   READ AS DATA by `vyrn-frontend/tests/primitives.rs`, which scans both files
-///   for literals to enumerate what each engine implements and compares that to
-///   RFC-0078's census. A predicate is invisible to a text scan.
-/// - `checker.rs`'s `RESERVED`, `SPAWN_FORBIDDEN` and `COMPTIME_FORBIDDEN` hold
-///   the five among dozens of unrelated names, where splicing a const array in
-///   costs more than it saves. `every_log_level_is_reserved_and_forbidden_where_effects_are`
-///   compares them to this table instead.
+/// - `vyrn-codegen/src/direct.rs`'s arm is READ AS DATA by
+///   `vyrn-frontend/tests/primitives.rs`, which scans that file for literals to
+///   enumerate what the backend implements and compares that to RFC-0078's
+///   census. A predicate is invisible to a text scan.
+/// - `parser.rs`'s [`crate::parser::METHOD_BUILTINS`] pairs each level with the
+///   internal spelling its call site carries, among two dozen unrelated names.
+///   `every_log_level_is_a_method_builtin_and_an_effect` compares that table to
+///   this one.
+///
+/// The five words are NOT reserved. A row is matched by name, so the sugar
+/// produces `@info` and the row is seeded under that (RFC-0125 §3 M6, the
+/// levels slice); a module that declares or imports `info` gets the word back.
 pub const LOG_LEVELS: [&str; 5] = ["trace", "debug", "info", "warn", "error"];
 
-/// Whether `name` is one of the five log levels.
-pub fn is_log_level(name: &str) -> bool {
-    LOG_LEVELS.contains(&name)
-}
-
 /// The ordinal of a log-level name (RFC-0008), `trace` lowest → `error` highest.
-/// Shared by the config-block parser, the interpreter, and the codegen so they
-/// filter identically. Returns `None` for an unknown name.
+/// Shared by the config-block parser and the codegen so they filter
+/// identically. Returns `None` for an unknown name.
 pub fn log_level_ordinal(name: &str) -> Option<usize> {
     LOG_LEVELS.iter().position(|l| *l == name)
+}
+
+/// The ordinal of the INTERNAL spelling a log call site carries — `@info` is 2.
+/// `None` for every other name, which is how a backend tells a log call from
+/// any other call without a second table.
+pub fn log_internal(name: &str) -> Option<usize> {
+    log_level_ordinal(name.strip_prefix('@')?)
 }
 
 /// A top-level module-state binding (RFC-0013): `let [mut] name [: Type] = init`.
@@ -509,8 +528,7 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
                 collect_params(a, out);
             }
         }
-        Type::Option(a)
-        | Type::Array(a)
+        Type::Array(a)
         | Type::Task(a)
         | Type::Stream(a)
         | Type::Partial(a)
@@ -518,7 +536,7 @@ fn collect_params(ty: &Type, out: &mut Vec<String>) {
         | Type::SmallArray(a, _)
         | Type::Omit(a, _)
         | Type::Pick(a, _) => collect_params(a, out),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
+        Type::Merge(a, b) | Type::Map(a, b) => {
             collect_params(a, out);
             collect_params(b, out);
         }
@@ -735,12 +753,80 @@ pub enum Capability {
     Share,
 }
 
+/// A name a binding form introduces, and where the reader spelled it.
+///
+/// `col` is the 1-based column of the NAME in Unicode scalar values, `0` when a
+/// desugar made the binder and no source token spells it — the convention
+/// [`Function::col`] and [`ImplBlock::col`] already follow. The editor is the
+/// only reader: it indexes a local by its position, and a binder with no column
+/// never becomes one (a phantom local is worse than a missing one).
+///
+/// The line rides here because a binder's own line is not always its node's: a
+/// `match` arm is spelled below the `match`. A `let` and a `for` variable are
+/// the exception — the grammar puts each on its statement's line — so those two
+/// carry a column and nothing else. A [`Param`] carries both, for the same
+/// reason an arm does: a signature spans lines.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Binder {
+    pub name: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+/// The flavour of a binding a body makes.
+///
+/// The editor shows it — a `let` hovers as a `let`, a loop variable as a `for`
+/// — and it is the AST's because the descent is: `body_scope_descent!` names
+/// every binding form already, to keep its scope stack, so a reader indexing
+/// binding SITES reads the kind off the hook rather than writing the list of
+/// forms out again (RFC-0125 §3 M6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalKind {
+    /// A function parameter (`fn area(s: Shape)` -> `s`). Not a body's binding,
+    /// so no descent reports it; a reader of a signature does.
+    Param,
+    /// `let [mut] name [: Type] = value` — and every binder that reads like
+    /// one: a pattern binder, a lambda parameter.
+    Let { mutable: bool },
+    /// `for name in iter { .. }` — the loop variable.
+    ForVar,
+}
+
+impl Binder {
+    /// A binder no source token spells — a desugar's.
+    pub fn synthetic(name: impl Into<String>) -> Self {
+        Binder {
+            name: name.into(),
+            line: 0,
+            col: 0,
+        }
+    }
+}
+
+impl std::ops::Deref for Binder {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.name
+    }
+}
+
+impl std::fmt::Display for Binder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.name)
+    }
+}
+
 /// A single parameter (name + capability + declared type).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub capability: Capability,
     pub ty: Type,
+    /// 1-based line of the parameter's NAME — its own, not the function's: a
+    /// signature spans lines. `0` for a synthesized parameter.
+    pub line: usize,
+    /// 1-based column of the parameter's NAME — see [`Binder::col`].
+    pub col: usize,
 }
 
 /// The v0.1 type universe. Structural records and unions (RFC-0002) are not
@@ -827,12 +913,6 @@ pub enum Type {
     Unit,
     /// A named validated type; resolved against the program's [`TypeDecl`]s.
     Named(String),
-    /// A built-in optional (RFC-0005). The inner type is a scalar or validated
-    /// scalar in v0.1.
-    Option(Box<Type>),
-    /// A built-in result (RFC-0005): `Result<T, E>`. Both payloads are scalar or
-    /// validated scalars in v0.1.
-    Result(Box<Type>, Box<Type>),
     /// A structural record type (RFC-0002): an ordered set of named fields.
     /// Compatibility is by shape (width subtyping), not name.
     Record(Vec<Field>),
@@ -890,11 +970,16 @@ pub enum Type {
     /// stream would still answer `.length`), and a library type would have to be
     /// spelled with an `Array` base, so `let a: Array<T> = s` would launder the
     /// obligation away. Neither is a runtime concern — both are about what the
-    /// checker will accept — so the *lowering* is `Array<T>`'s exactly, in all
-    /// three engines: `{ ptr data, i64 len, i64 cap }`, `Val::Array`, the same
-    /// indexed walk for `for … in`. RFC-0083's `F32x4` is the opposite case (a
-    /// value with a new representation and no ownership); this is a resource
-    /// with a new *rule* and no new representation.
+    /// checker will accept.
+    ///
+    /// **M1's representation WAS `Array<T>`'s exactly** — `{ ptr data, i64 len,
+    /// i64 cap }`, `Val::Array`, the same indexed walk for `for … in` — and M2b
+    /// ended that in all three engines, because a pull-based producer has no
+    /// buffer to point at. `llt_of` answers `{ ptr, i64, i64, i64, i64, i64 }`,
+    /// a six-word header tagged over the two producers, and the interpreter
+    /// holds a `Val::Stream` of its own. RFC-0126 §6 records the correction: the
+    /// claim above outlived the code by an RFC, and a reader pricing the
+    /// collapse of this constructor from it would have priced a free one.
     ///
     /// M1's only producer is `fromArray`, so the sequence is eager. M2's
     /// `unfold`/`channel` are what make it pull-based; nothing in the obligation
@@ -956,6 +1041,42 @@ pub enum Type {
 }
 
 impl Type {
+    /// `Option<T>` as the variant list it IS — RFC-0126 §8.1, and §8.15's M5
+    /// deleted the constructor that used to spell it. `None` is variant 0 and
+    /// `Some` is variant 1, which is the TAG order `Pattern::Failure` and
+    /// `Pattern::Success` have named since RFC-0079's `??` desugar.
+    ///
+    /// [`Display`](std::fmt::Display) prints this back as `Option<T>`, and
+    /// [`crate::types::option_payload`] reads it back, so nothing above the AST
+    /// has to know the sum lost a spelling.
+    pub fn option(t: Type) -> Type {
+        Type::Enum(vec![
+            EnumVariant {
+                name: "None".to_string(),
+                payload: Vec::new(),
+            },
+            EnumVariant {
+                name: "Some".to_string(),
+                payload: vec![t],
+            },
+        ])
+    }
+
+    /// `Result<T, E>` as the variant list it IS. [`Type::option`]'s twin, and
+    /// the tag order is the same rule: `Err` is variant 0.
+    pub fn result(ok: Type, err: Type) -> Type {
+        Type::Enum(vec![
+            EnumVariant {
+                name: "Err".to_string(),
+                payload: vec![err],
+            },
+            EnumVariant {
+                name: "Ok".to_string(),
+                payload: vec![ok],
+            },
+        ])
+    }
+
     /// Every variant of this enum, as a value.
     ///
     /// The lock a coverage test needs, and it has two halves that only work
@@ -984,8 +1105,6 @@ impl Type {
         "Str",
         "Unit",
         "Named",
-        "Option",
-        "Result",
         "Record",
         "Omit",
         "Pick",
@@ -1025,8 +1144,6 @@ impl Type {
             Type::Str => "Str",
             Type::Unit => "Unit",
             Type::Named(_) => "Named",
-            Type::Option(_) => "Option",
-            Type::Result(..) => "Result",
             Type::Record(_) => "Record",
             Type::Omit(..) => "Omit",
             Type::Pick(..) => "Pick",
@@ -1073,8 +1190,6 @@ impl std::fmt::Display for Type {
             Type::Str => write!(f, "String"),
             Type::Unit => write!(f, "Unit"),
             Type::Named(n) | Type::Param(n) => write!(f, "{n}"),
-            Type::Option(t) => write!(f, "Option<{t}>"),
-            Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Record(fields) => {
                 write!(f, "{{ ")?;
                 for (i, fld) in fields.iter().enumerate() {
@@ -1089,10 +1204,32 @@ impl std::fmt::Display for Type {
             Type::Pick(b, keys) => write!(f, "Pick<{b}, {}>", keys.join(", ")),
             Type::Merge(a, b) => write!(f, "Merge<{a}, {b}>"),
             Type::Partial(b) => write!(f, "Partial<{b}>"),
-            Type::Enum(vs) => {
-                let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
-                write!(f, "enum {{ {} }}", names.join(" | "))
-            }
+            // The two built-in sums keep their SPELLING whichever way they were
+            // built. Since RFC-0126 §8.11's M4b `resolve` answers `| None |
+            // Some(T)` for an `Option<T>`, and a diagnostic that named it that
+            // way would be naming a shape at a user who wrote a name. It is
+            // §8.6's third guard, and it stands whether or not the constructors
+            // still exist.
+            Type::Enum(vs) => match vs.as_slice() {
+                [n, s] if n.name == "None" && n.payload.is_empty() && s.name == "Some" => {
+                    match s.payload.first() {
+                        Some(t) => write!(f, "Option<{t}>"),
+                        None => write!(f, "enum {{ None | Some }}"),
+                    }
+                }
+                [e, o]
+                    if e.name == "Err"
+                        && o.name == "Ok"
+                        && e.payload.len() == 1
+                        && o.payload.len() == 1 =>
+                {
+                    write!(f, "Result<{}, {}>", o.payload[0], e.payload[0])
+                }
+                _ => {
+                    let names: Vec<&str> = vs.iter().map(|v| v.name.as_str()).collect();
+                    write!(f, "enum {{ {} }}", names.join(" | "))
+                }
+            },
             Type::App(n, args) => {
                 let rendered: Vec<String> = args.iter().map(|a| a.to_string()).collect();
                 write!(f, "{n}<{}>", rendered.join(", "))
@@ -1126,7 +1263,9 @@ pub struct Block {
     pub stmts: Vec<Stmt>,
 }
 
-/// A statement. In v0, `if`/`while` are statements (not expressions).
+/// A statement. `while`, `for` and `region` are statements and nothing else;
+/// `if` is both (RFC-0030 gave the expression form its own node, [`Expr::IfExpr`])
+/// and `match` is one node the checker reads by position (RFC-0118).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     /// `let [mut] name [: Type] = value;`
@@ -1136,6 +1275,8 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
         line: usize,
+        /// 1-based column of the bound NAME — see [`Binder::col`].
+        col: usize,
     },
     /// `name = value;` (only legal for `mut` bindings)
     Assign {
@@ -1201,6 +1342,8 @@ pub enum Stmt {
     /// array (`Array<T>` or `Array<T, N>`); `name` takes the element type `T`.
     ForIn {
         var: String,
+        /// 1-based column of the loop variable's NAME — see [`Binder::col`].
+        col: usize,
         iter: Expr,
         body: Block,
         line: usize,
@@ -1300,13 +1443,37 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
+        /// Explicit type arguments (RFC-0125 §3 M6): `fromJson<Shape>(s)`.
+        ///
+        /// Empty for every call that does not write them, which is almost all
+        /// of them — a generic's type arguments are solved from its arguments,
+        /// and this is what a caller writes when they cannot be. `schemaOf`,
+        /// `jsonSchema` and `fromJson` are the three signatures in the language
+        /// whose type parameter appears nowhere in their parameters, so they
+        /// are the reason this exists; any generic may be written this way.
+        ///
+        /// The checker seeds the solve with these and then infers the rest, so
+        /// a partial list is legal and an over-long one is refused. The
+        /// backends re-solve from the arguments as they always have, and read
+        /// these only where the arguments cannot answer.
+        type_args: Vec<Type>,
         line: usize,
     },
     /// `match scrutinee { Some(x) => e, None => e }` — an expression yielding a
-    /// value (RFC-0005). Arms are single expressions in v0.1.
+    /// value (RFC-0005). An arm is a single expression here; in STATEMENT
+    /// position an arm may be a block instead (RFC-0118), which is what
+    /// [`ArmBody`] carries and what `stmt_pos` permits.
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,
+        /// Whether this `match` stands DIRECTLY in statement position, which is
+        /// where a block arm is legal (RFC-0118). It is a fact about the text
+        /// and the parser has it: `Stmt::Expr` sets it and nothing else does,
+        /// so a `match` nested anywhere inside an expression keeps `false`.
+        /// Every synthesized `match` — the `?`/`??` desugars, refutable `let`,
+        /// the codec and storage expansions — is false, because each has
+        /// single-expression arms by construction.
+        stmt_pos: bool,
         line: usize,
     },
     /// `if cond { expr } else if cond2 { expr } else { expr }` used in an
@@ -1370,13 +1537,17 @@ pub enum Expr {
         args: Vec<Expr>,
         line: usize,
     },
-    /// A lambda literal (RFC-0023): `|x| expr` or `|x, y| { block }`. The
-    /// parameters are untyped in the literal — their types flow from the expected
-    /// `fn(..) -> R` type of the parameter position it is passed to. Legal ONLY as
-    /// a call argument in a function-typed parameter position (enforced by the
-    /// checker). Captures outer locals by read; monomorphized away in codegen.
+    /// A lambda literal: `x -> expr`, `(x, y) -> expr` or `x -> { block }`
+    /// (RFC-0110; the `|x| expr` spelling is retired and the parser reports it).
+    /// The parameters are untyped in the literal — their types flow from the
+    /// expected `fn(..) -> R` type of the position it appears in. Two positions
+    /// take one: a call argument in a `fn`-typed parameter position (RFC-0023),
+    /// which is monomorphized away in codegen, and anywhere a STORED `fn` value
+    /// is expected (RFC-0037), which is defunctionalized — a `let` with a
+    /// declared `fn` type takes one, and `std/stream.vyrn` writes three.
+    /// Captures outer locals by read.
     Lambda {
-        params: Vec<String>,
+        params: Vec<Binder>,
         body: LambdaBody,
         line: usize,
     },
@@ -1434,36 +1605,99 @@ pub struct MatchArm {
     pub body: ArmBody,
 }
 
-/// A pattern in a `match` arm. v0.1 supports the `Option` and `Result` variants.
+/// A pattern in a `match` arm. One spellable form since RFC-0126 §8.10 folded
+/// `Some`/`None`/`Ok`/`Err` into [`Pattern::Variant`]; the other three are built
+/// by a desugar and cannot be written.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    /// `Some(name)` — binds the payload to `name`.
-    Some(String),
-    /// `None`.
-    None,
-    /// `Ok(name)` — binds the success payload.
-    Ok(String),
-    /// `Err(name)` — binds the error payload.
-    Err(String),
-    /// A user-enum variant pattern: `Circle(r)`, `Rect(w, h)`, or `Empty`.
-    Variant(String, Vec<String>),
+    /// A variant pattern: `Circle(r)`, `Rect(w, h)`, `Empty` — and, since
+    /// RFC-0126 §8, `Some(x)`, `None`, `Ok(x)` and `Err(e)` too. The parser
+    /// spells all of them one way; the SCRUTINEE decides what a name means, as
+    /// it always did for a declared enum.
+    Variant(String, Vec<Binder>),
     /// The tag-1 arm — `Some` *or* `Ok`, whichever the scrutinee turns out to
     /// be. Unspellable in source; produced only by the `??` desugar (RFC-0079),
     /// which runs in the parser and so has no type information to choose with.
     /// This is the same trick `Expr::Try` plays for `?`, moved into `Pattern` so
     /// `??` can reach `match` and inherit its drops, ownership, validation and
     /// short-circuiting instead of restating any of them.
-    Success(String),
+    Success(Binder),
     /// The tag-0 arm — `None` *or* `Err`. Carries a binder so a `Result`'s error
     /// payload is bound rather than dropped on the floor; on the `Option` path
     /// the checker binds nothing, since there is no payload.
-    Failure(String),
+    Failure(Binder),
     /// The default arm: matches ANY value, binds nothing. Unspellable in
     /// source; produced only by the refutable-`let` desugar (RFC-0121), whose
     /// `match` must be exhaustive over an enum the parser cannot see the
     /// variants of — the same reason `Success`/`Failure` exist for `??`.
     /// Placed last by its producer; every engine tests it as `true`.
     Other,
+}
+
+impl Pattern {
+    /// The names this pattern binds, in the order it binds them — `Some(x)`,
+    /// `Ok(e)`, `Circle(w, h)`.
+    ///
+    /// The rule was three matches before RFC-0125 §3 M6: `movecheck`'s for the
+    /// ownership walk, the checker's for the purity walk, and `symbols`' for the
+    /// editor's binder index. It lives on the type it is a fact about, so a
+    /// fourth pattern form reaches all three readers or none.
+    ///
+    /// A desugar's binder is `@`-prefixed and unspellable ([`Pattern::Success`],
+    /// [`Pattern::Failure`]), so a reader that indexes source positions finds
+    /// nothing for one and must not invent a phantom local.
+    pub fn bindings(&self) -> Vec<&str> {
+        self.binders()
+            .into_iter()
+            .map(|b| b.name.as_str())
+            .collect()
+    }
+
+    /// The binders this pattern introduces, with their columns.
+    pub fn binders(&self) -> Vec<&Binder> {
+        match self {
+            Pattern::Success(b) | Pattern::Failure(b) => vec![b],
+            Pattern::Variant(_, binds) => binds.iter().collect(),
+            Pattern::Other => Vec::new(),
+        }
+    }
+
+    /// The same binders, mutably — what a rename walk rewrites.
+    pub fn binders_mut(&mut self) -> Vec<&mut Binder> {
+        match self {
+            Pattern::Success(b) | Pattern::Failure(b) => vec![b],
+            Pattern::Variant(_, binds) => binds.iter_mut().collect(),
+            Pattern::Other => Vec::new(),
+        }
+    }
+}
+
+impl Stmt {
+    /// The source line this statement starts on.
+    ///
+    /// Every statement form carries a line and `Stmt::Expr` answers its
+    /// expression's, so this is total where [`Expr::line`] is best effort: the
+    /// five literal `Expr` variants carry no line and answer 0. That is why the
+    /// checker records the enclosing statement's line as it walks and its three
+    /// range diagnostics report that.
+    pub fn line(&self) -> usize {
+        match self {
+            Stmt::Let { line, .. }
+            | Stmt::Assign { line, .. }
+            | Stmt::SetField { line, .. }
+            | Stmt::IndexSet { line, .. }
+            | Stmt::Return { line, .. }
+            | Stmt::Break { line }
+            | Stmt::Continue { line }
+            | Stmt::If { line, .. }
+            | Stmt::IfLet { line, .. }
+            | Stmt::While { line, .. }
+            | Stmt::ForIn { line, .. }
+            | Stmt::Drop { line, .. }
+            | Stmt::Region { line, .. } => *line,
+            Stmt::Expr(e) => e.line(),
+        }
+    }
 }
 
 impl Expr {
@@ -1490,6 +1724,371 @@ impl Expr {
     }
 }
 
+/// Every statement and every expression a body holds, in source order, with the
+/// local names in scope at each one — the ONE descent this workspace makes over
+/// a `Block`.
+///
+/// Eight readers ask the same question and used to write the same thirty-five
+/// arms out to ask it (RFC-0125 §3 M6). Three are the loader's — `scope_*`
+/// collects the free names, `rewrite_*` renames them, `NsResolver` resolves the
+/// namespace-qualified ones; three are this file's — `lambdas`,
+/// `node_addrs` and `alias_embedded`; one is `project::walk_block`, the
+/// shared mutable walk seven passes call; and one is the direct backend's
+/// hoist. They had drifted, and each drift was a defect: only two of the
+/// loader's three put an `Ok(x) =>` arm's binding in scope, so a rename map
+/// spelling a success binder would have folded the binding into a declaration.
+///
+/// What differs between the readers is one line at a SITE, never the traversal.
+/// The loader's collector records a namespace-sugar call under its DOTTED
+/// spelling; its renamer SKIPS a namespace receiver; its resolver DELETES the
+/// receiver argument; `lambdas` keeps the body a literal holds;
+/// `alias_embedded` stops at a subtree equal to the one it is pairing; the
+/// hoist stops at a lambda. So the visitor is handed the node and the scope and
+/// writes its own line, and the walk owns the descent and the scope stack and
+/// nothing else.
+///
+/// It is a macro for `type_head_descent`'s reason, one binding form up: some
+/// readers read through a shared borrow and some assign through a unique one,
+/// and no other mechanism in Rust states a descent once across both. Each
+/// expansion defines its own trait, so the two borrows are two spellings of one
+/// arm list. The shared expansion carries the body's lifetime, because a reader
+/// may keep a borrow it is handed — `lambdas` hands back the `LambdaBody` at
+/// each address; the unique expansion cannot and does not need to.
+///
+/// Four hooks and one const:
+///
+/// * `stmt` and `expr` see a node before its children; `expr` answers `false`
+///   to skip them, which is what a reader that replaced the node itself says.
+/// * `after_expr` sees an expression after its children — the innermost-last
+///   order `project::walk_block`'s substituting readers need, so a substituted
+///   expression is never re-walked. It does not fire for a node whose children
+///   were skipped.
+/// * `arm_pattern` sees one `match` arm's pattern at the `match`'s line, before
+///   that arm's own bindings join the scope.
+/// * `SCOPED` is `false` for a reader that never looks at `locals`; the walk
+///   then binds no name and reads no pattern. Only the loader's three readers
+///   ask about scope, and the rest are walked per statement or per loop.
+#[macro_export]
+macro_rules! body_scope_descent {
+    ($visit:ident, $blk:ident, $st:ident, $ex:ident) => {
+        $crate::body_scope_descent!(@walk $visit, $blk, $st, $ex, ('a), ());
+    };
+    ($visit:ident, $blk:ident, $st:ident, $ex:ident, mut) => {
+        $crate::body_scope_descent!(@walk $visit, $blk, $st, $ex, (), (mut));
+    };
+    (@walk $visit:ident, $blk:ident, $st:ident, $ex:ident, ($($lt:lifetime)?), ($($mut_:tt)?)) => {
+        trait $visit$(<$lt>)? {
+            /// Whether this reader looks at `locals`. `false` skips the scope
+            /// stack: no name is bound and no pattern is read.
+            const SCOPED: bool = true;
+
+            /// One statement, before its children. `locals` is what is bound
+            /// where the statement starts; a `let`'s own name joins after it.
+            fn stmt(
+                &mut self,
+                s: &$($lt)? $($mut_)? $crate::ast::Stmt,
+                locals: &::std::collections::HashSet<String>,
+            ) {
+                let _ = (s, locals);
+            }
+
+            /// One expression, before its children. `false` skips them — the
+            /// answer a reader that replaced the node itself gives.
+            fn expr(
+                &mut self,
+                e: &$($lt)? $($mut_)? $crate::ast::Expr,
+                locals: &::std::collections::HashSet<String>,
+            ) -> bool {
+                let _ = (e, locals);
+                true
+            }
+
+            /// One expression, after its children — and not at all when `expr`
+            /// skipped them.
+            fn after_expr(
+                &mut self,
+                e: &$($lt)? $($mut_)? $crate::ast::Expr,
+                locals: &::std::collections::HashSet<String>,
+            ) {
+                let _ = (e, locals);
+            }
+
+            /// One name this body binds, at the position it is spelled, and the
+            /// type the source declares for it.
+            ///
+            /// The walk below names every binding form already — that is what
+            /// the scope stack is — so a reader that indexes binding SITES
+            /// takes them from here rather than restating the list. A binder a
+            /// desugar made carries no column; the reader decides what to do
+            /// with it.
+            ///
+            /// `declared` is `Some` only for an annotated `let`: it is the one
+            /// binding form whose type the source states, and it is the answer
+            /// a reader has for a body no pass reached.
+            fn bind(
+                &mut self,
+                name: &str,
+                line: usize,
+                col: usize,
+                kind: $crate::ast::LocalKind,
+                declared: Option<&$crate::ast::Type>,
+            ) {
+                let _ = (name, line, col, kind, declared);
+            }
+
+            /// One `match` arm's pattern, at the `match`'s line, before that
+            /// arm's own bindings join the scope.
+            fn arm_pattern(
+                &mut self,
+                p: &$($lt)? $($mut_)? $crate::ast::Pattern,
+                line: usize,
+                locals: &::std::collections::HashSet<String>,
+            ) {
+                let _ = (p, line, locals);
+            }
+        }
+
+        fn $blk<$($lt,)? V: $visit$(<$lt>)? + ?Sized>(
+            b: &$($lt)? $($mut_)? $crate::ast::Block,
+            locals: &mut ::std::collections::HashSet<String>,
+            v: &mut V,
+        ) {
+            for s in &$($mut_)? b.stmts {
+                $st(s, locals, v);
+            }
+        }
+
+        fn $st<$($lt,)? V: $visit$(<$lt>)? + ?Sized>(
+            s: &$($lt)? $($mut_)? $crate::ast::Stmt,
+            locals: &mut ::std::collections::HashSet<String>,
+            v: &mut V,
+        ) {
+            use $crate::ast::Stmt;
+            v.stmt(&$($mut_)? *s, locals);
+            match s {
+                Stmt::Let {
+                    name,
+                    value,
+                    mutable,
+                    ty,
+                    line,
+                    col,
+                    ..
+                } => {
+                    $ex(value, locals, v);
+                    v.bind(
+                        name.as_str(),
+                        *line,
+                        *col,
+                        $crate::ast::LocalKind::Let { mutable: *mutable },
+                        ty.as_ref(),
+                    );
+                    // In scope for subsequent statements (and shadows a
+                    // like-named export, namespace or renamed decl from here on).
+                    if V::SCOPED {
+                        locals.insert(name.clone());
+                    }
+                }
+                Stmt::Assign { value, .. } | Stmt::SetField { value, .. } => $ex(value, locals, v),
+                Stmt::IndexSet { index, value, .. } => {
+                    $ex(index, locals, v);
+                    $ex(value, locals, v);
+                }
+                Stmt::Return { value: Some(e), .. } => $ex(e, locals, v),
+                Stmt::Return { value: None, .. } => {}
+                Stmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    $ex(cond, locals, v);
+                    let mut inner = locals.clone();
+                    $blk(then_block, &mut inner, v);
+                    if let Some(eb) = else_block {
+                        let mut inner2 = locals.clone();
+                        $blk(eb, &mut inner2, v);
+                    }
+                }
+                Stmt::IfLet {
+                    scrutinee,
+                    then_block,
+                    else_block,
+                    pattern,
+                    ..
+                } => {
+                    $ex(scrutinee, locals, v);
+                    for b in pattern.binders() {
+                        v.bind(
+                            b.name.as_str(),
+                            b.line,
+                            b.col,
+                            $crate::ast::LocalKind::Let { mutable: false },
+                            None,
+                        );
+                    }
+                    let mut inner = locals.clone();
+                    if V::SCOPED {
+                        for b in pattern.bindings() {
+                            inner.insert(b.to_string());
+                        }
+                    }
+                    $blk(then_block, &mut inner, v);
+                    if let Some(eb) = else_block {
+                        let mut inner2 = locals.clone();
+                        $blk(eb, &mut inner2, v);
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    $ex(cond, locals, v);
+                    let mut inner = locals.clone();
+                    $blk(body, &mut inner, v);
+                }
+                Stmt::ForIn {
+                    var,
+                    iter,
+                    body,
+                    line,
+                    col,
+                    ..
+                } => {
+                    $ex(iter, locals, v);
+                    v.bind(var.as_str(), *line, *col, $crate::ast::LocalKind::ForVar, None);
+                    let mut inner = locals.clone();
+                    if V::SCOPED {
+                        inner.insert(var.clone());
+                    }
+                    $blk(body, &mut inner, v);
+                }
+                Stmt::Drop { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
+                Stmt::Expr(e) => $ex(e, locals, v),
+                Stmt::Region { body, .. } => {
+                    let mut inner = locals.clone();
+                    $blk(body, &mut inner, v);
+                }
+            }
+        }
+
+        fn $ex<$($lt,)? V: $visit$(<$lt>)? + ?Sized>(
+            e: &$($lt)? $($mut_)? $crate::ast::Expr,
+            locals: &::std::collections::HashSet<String>,
+            v: &mut V,
+        ) {
+            use $crate::ast::{ArmBody, Expr, LambdaBody};
+            if !v.expr(&$($mut_)? *e, locals) {
+                return;
+            }
+            match e {
+                // A call's args are walked whatever the visitor made of the
+                // callee — including one the namespace pass just removed. An
+                // array literal's elements are the same list under another name.
+                Expr::Call { args, .. }
+                | Expr::Spawn { args, .. }
+                | Expr::TryConstruct { args, .. }
+                | Expr::ArrayLit { elems: args, .. } => {
+                    for a in args {
+                        $ex(a, locals, v);
+                    }
+                }
+                Expr::StructLit { fields, .. } => {
+                    for (_, val) in fields {
+                        $ex(val, locals, v);
+                    }
+                }
+                Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+                    $ex(expr, locals, v)
+                }
+                Expr::Consume { place, .. } => $ex(place, locals, v),
+                Expr::Binary { lhs, rhs, .. } => {
+                    $ex(lhs, locals, v);
+                    $ex(rhs, locals, v);
+                }
+                Expr::Match {
+                    scrutinee,
+                    arms,
+                    line,
+                    ..
+                } => {
+                    let l = *line;
+                    $ex(scrutinee, locals, v);
+                    for arm in arms {
+                        let mut inner = locals.clone();
+                        v.arm_pattern(&$($mut_)? arm.pattern, l, &inner);
+                        for b in arm.pattern.binders() {
+                            v.bind(
+                                b.name.as_str(),
+                                b.line,
+                                b.col,
+                                $crate::ast::LocalKind::Let { mutable: false },
+                                None,
+                            );
+                        }
+                        if V::SCOPED {
+                            for b in arm.pattern.bindings() {
+                                inner.insert(b.to_string());
+                            }
+                        }
+                        match &$($mut_)? arm.body {
+                            ArmBody::Expr(e2) => $ex(e2, &inner, v),
+                            ArmBody::Block(b2) => $blk(b2, &mut inner, v),
+                        }
+                    }
+                }
+                Expr::IfExpr {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    $ex(cond, locals, v);
+                    $ex(then_branch, locals, v);
+                    if let Some(eb) = else_branch {
+                        $ex(eb, locals, v);
+                    }
+                }
+                Expr::MapLit { entries, .. } => {
+                    for (k, val) in entries {
+                        $ex(k, locals, v);
+                        $ex(val, locals, v);
+                    }
+                }
+                // A lambda's params are new locals: they shadow a decl exactly
+                // as a `let` does (RFC-0023).
+                Expr::Lambda { params, body, .. } => {
+                    for p in params.iter() {
+                        v.bind(
+                            p.name.as_str(),
+                            p.line,
+                            p.col,
+                            $crate::ast::LocalKind::Let { mutable: false },
+                            None,
+                        );
+                    }
+                    let mut inner = locals.clone();
+                    if V::SCOPED {
+                        for p in params.iter() {
+                            inner.insert(p.name.clone());
+                        }
+                    }
+                    match body {
+                        LambdaBody::Expr(e2) => $ex(e2, &inner, v),
+                        LambdaBody::Block(b2) => $blk(b2, &mut inner, v),
+                    }
+                }
+                Expr::Var { .. }
+                | Expr::Int(_)
+                | Expr::Byte(_)
+                | Expr::Float(_)
+                | Expr::Bool(_)
+                | Expr::Str(_) => {}
+            }
+            v.after_expr(&$($mut_)? *e, locals);
+        }
+    };
+}
+
+crate::body_scope_descent!(AstVisit, ast_block, ast_stmt, ast_expr);
+
 /// Every lambda literal the program holds, by node address (RFC-0101 M6).
 ///
 /// A backend walks a body through a recursion that has erased the program's
@@ -1504,67 +2103,41 @@ impl Expr {
 /// Function bodies and module-state initializers — what the backends lower. A
 /// literal inside a leaked desugar is not here, and a caller that misses keeps
 /// whatever it did before.
-pub fn lambdas(p: &Program) -> std::collections::HashMap<usize, &LambdaBody> {
-    let mut out = std::collections::HashMap::new();
+pub fn lambdas<'a>(p: &'a Program) -> std::collections::HashMap<usize, &'a LambdaBody> {
+    struct Lambdas<'a>(std::collections::HashMap<usize, &'a LambdaBody>);
+    impl<'a> AstVisit<'a> for Lambdas<'a> {
+        const SCOPED: bool = false;
+        fn expr(&mut self, e: &'a Expr, _: &std::collections::HashSet<String>) -> bool {
+            if let Expr::Lambda { body, .. } = e {
+                self.0.insert(e as *const Expr as usize, body);
+            }
+            true
+        }
+    }
+    let mut v = Lambdas(std::collections::HashMap::new());
+    let mut locals = std::collections::HashSet::new();
     for f in &p.functions {
-        lambdas_block(&f.body, &mut out);
+        ast_block(&f.body, &mut locals, &mut v);
     }
     for g in &p.globals {
-        lambdas_expr(&g.init, &mut out);
+        ast_expr(&g.init, &locals, &mut v);
     }
-    out
+    v.0
 }
 
-fn lambdas_block<'a>(b: &'a Block, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
-    for s in &b.stmts {
-        lambdas_stmt(s, out);
-    }
-}
+/// A reader that records the address of every node it is handed, in walk order.
+struct Addrs<'o>(&'o mut Vec<usize>);
 
-fn lambdas_stmt<'a>(s: &'a Stmt, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
-    match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => lambdas_expr(value, out),
-        Stmt::IndexSet { index, value, .. } => {
-            lambdas_expr(index, out);
-            lambdas_expr(value, out);
-        }
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                lambdas_expr(e, out);
-            }
-        }
-        Stmt::If {
-            cond: scrutinee,
-            then_block,
-            else_block,
-            ..
-        }
-        | Stmt::IfLet {
-            scrutinee,
-            then_block,
-            else_block,
-            ..
-        } => {
-            lambdas_expr(scrutinee, out);
-            lambdas_block(then_block, out);
-            if let Some(eb) = else_block {
-                lambdas_block(eb, out);
-            }
-        }
-        Stmt::While {
-            cond: e, body: bl, ..
-        }
-        | Stmt::ForIn {
-            iter: e, body: bl, ..
-        } => {
-            lambdas_expr(e, out);
-            lambdas_block(bl, out);
-        }
-        Stmt::Region { body, .. } => lambdas_block(body, out),
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+impl AstVisit<'_> for Addrs<'_> {
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &Stmt, _: &std::collections::HashSet<String>) {
+        self.0.push(s as *const Stmt as usize);
+    }
+
+    fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+        self.0.push(e as *const Expr as usize);
+        true
     }
 }
 
@@ -1573,336 +2146,357 @@ fn lambdas_stmt<'a>(s: &'a Stmt, out: &mut std::collections::HashMap<usize, &'a 
 /// loop body against its clone with (RFC-0114 §26): two structurally equal
 /// trees walk to two same-length lists, and pairing them is the alias map
 /// that lets a release planned on the original discharge from the clone.
-/// Mirrors [`lambdas_block`]'s coverage; a variant missed here surfaces as a
-/// LOUD finish-check failure on the corpus, never a silent hole.
+/// The order is `body_scope_descent`'s, so it cannot drift from what any
+/// other reader of a body sees.
 pub fn node_addrs(b: &Block, out: &mut Vec<usize>) {
-    for s in &b.stmts {
-        node_addrs_stmt(s, out);
-    }
+    ast_block(b, &mut std::collections::HashSet::new(), &mut Addrs(out));
 }
 
 /// [`node_addrs`] for one statement — the entry `iterate_loop` walks the
 /// cloned tail with, statement by statement.
 pub fn node_addrs_one(s: &Stmt, out: &mut Vec<usize>) {
-    node_addrs_stmt(s, out)
+    ast_stmt(s, &mut std::collections::HashSet::new(), &mut Addrs(out));
 }
 
 /// [`node_addrs`] for one expression — the entry a lifted lambda SHELL's
 /// value form is zipped with (the wrapper statement is synthesized and has
 /// no original; the expression inside does).
 pub fn node_addrs_val(e: &Expr, out: &mut Vec<usize>) {
-    node_addrs_expr(e, out)
+    ast_expr(e, &std::collections::HashSet::new(), &mut Addrs(out));
 }
 
 /// Pair every subtree of `tree` structurally equal to `orig` with it,
 /// node-for-node — how a rewrite's embedded argument clone is aliased
 /// (RFC-0114 §26): `toJson(x)` becomes a synthesized encoder call holding a
 /// clone of `x`, and the plan's rows live on the original.
+///
+/// A subtree that matches is paired whole and not descended into, which is the
+/// walk's `false`: its children are already paired, node for node, by the two
+/// address lists.
 pub fn alias_embedded(tree: &Expr, orig: &Expr, out: &mut Vec<(usize, usize)>) {
-    if tree == orig {
-        let (mut c, mut o) = (Vec::new(), Vec::new());
-        node_addrs_expr(tree, &mut c);
-        node_addrs_expr(orig, &mut o);
-        out.extend(c.into_iter().zip(o));
-        return;
+    struct Alias<'o> {
+        orig: &'o Expr,
+        out: &'o mut Vec<(usize, usize)>,
     }
-    match tree {
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(inner) => alias_embedded(inner, orig, out),
-            LambdaBody::Block(b) => alias_embedded_block(b, orig, out),
-        },
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            alias_embedded(expr, orig, out)
-        }
-        Expr::Consume { place, .. } => alias_embedded(place, orig, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            alias_embedded(lhs, orig, out);
-            alias_embedded(rhs, orig, out);
-        }
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                alias_embedded(a, orig, out);
+    impl AstVisit<'_> for Alias<'_> {
+        const SCOPED: bool = false;
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            if e != self.orig {
+                return true;
             }
+            let (mut c, mut o) = (Vec::new(), Vec::new());
+            node_addrs_val(e, &mut c);
+            node_addrs_val(self.orig, &mut o);
+            self.out.extend(c.into_iter().zip(o));
+            false
         }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            alias_embedded(scrutinee, orig, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => alias_embedded(e, orig, out),
-                    ArmBody::Block(b) => alias_embedded_block(b, orig, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            alias_embedded(cond, orig, out);
-            alias_embedded(then_branch, orig, out);
-            if let Some(eb) = else_branch {
-                alias_embedded(eb, orig, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                alias_embedded(v, orig, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                alias_embedded(k, orig, out);
-                alias_embedded(v, orig, out);
-            }
-        }
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
+    }
+    ast_expr(
+        tree,
+        &std::collections::HashSet::new(),
+        &mut Alias { orig, out },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// How this language spells a PLACE, and what an expression mentions.
+//
+// A path, its root, the two probes a store asks and the two a `?` asks: none of
+// them is a rule, and every one is a question about the SHAPE of the AST. They
+// were `movecheck.rs`'s because the move check asked them first (RFC-0125 §3
+// M3, the algebra slice); the readers are the core, the direct backend, the
+// checker and the must-use judgment, and each of those asks the AST.
+// ---------------------------------------------------------------------------
+
+/// The base name of a place path: `r.a[0]` is `r`.
+///
+/// A message names a PATH and a borrow names the PARAMETER it came from, so the
+/// two are comparable only at the root.
+pub fn root_of(path: &str) -> &str {
+    match path.find(['.', '[']) {
+        Some(i) => &path[..i],
+        None => path,
     }
 }
 
-fn alias_embedded_block(b: &Block, orig: &Expr, out: &mut Vec<(usize, usize)>) {
-    for s in &b.stmts {
-        match s {
-            Stmt::Let { value, .. }
-            | Stmt::Assign { value, .. }
-            | Stmt::SetField { value, .. }
-            | Stmt::Expr(value) => alias_embedded(value, orig, out),
-            Stmt::IndexSet { index, value, .. } => {
-                alias_embedded(index, orig, out);
-                alias_embedded(value, orig, out);
-            }
-            Stmt::Return { value, .. } => {
-                if let Some(e) = value {
-                    alias_embedded(e, orig, out);
-                }
-            }
-            Stmt::If {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => {
-                alias_embedded(cond, orig, out);
-                alias_embedded_block(then_block, orig, out);
-                if let Some(eb) = else_block {
-                    alias_embedded_block(eb, orig, out);
-                }
-            }
-            Stmt::IfLet {
-                scrutinee,
-                then_block,
-                else_block,
-                ..
-            } => {
-                alias_embedded(scrutinee, orig, out);
-                alias_embedded_block(then_block, orig, out);
-                if let Some(eb) = else_block {
-                    alias_embedded_block(eb, orig, out);
-                }
-            }
-            Stmt::While {
-                cond: e, body: bl, ..
-            }
-            | Stmt::ForIn {
-                iter: e, body: bl, ..
-            } => {
-                alias_embedded(e, orig, out);
-                alias_embedded_block(bl, orig, out);
-            }
-            Stmt::Region { body, .. } => alias_embedded_block(body, orig, out),
-            Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+/// RFC-0075 — the linearity of `Stream<T>`: acquired once, disposed exactly once.
+///
+/// This is the milestone's whole claim, so it is worth stating what it is not.
+/// `own.rs` already reclaims an owned heap value at block exit and on every
+/// divergent exit (RFC-0060), which is "owned and dropped". A stream is stronger:
+/// disposal must be *written*, because M2's producer has a teardown that no
+/// generic memory drop can run, and the tRPC incidents this RFC quotes were live
+/// producers rather than unreachable bytes. So the obligation is checked here and
+/// the release is emitted by the construct that discharges it — a stream binding
+/// is never in a `drop_stack` frame of its own.
+///
+/// The analysis is deliberately name-based and typeless, like the rest of this
+/// file: movecheck runs only on programs the checker already accepted, so
+/// `close(x)` implies `x` is a stream and there is no read operation on a stream
+/// at all — every mention of a stream binding is a move. That last fact is what
+/// makes a one-pass syntactic walk exact instead of approximate.
+///
+/// Known limit, shared with the `Consumed` map above: bindings are keyed by NAME,
+/// so an inner `let s = 1` shadowing an outer stream `s` reads as a disposal of
+/// the outer one. Erring toward accepting matches the existing pass; a scope-id
+/// key would have to be introduced for both at once.
+///
+/// Whether `e` reads the place `base`, or anything derived from it.
+///
+/// The store half of RFC-0089 rule 4 asks this: a store releases what the place
+/// held, and the old value is usually an operand of the new one — `acc = acc +
+/// x` reads the old buffer and `a = @push(a, i)` grows it. A value that names the
+/// place therefore releases nothing. The self-append spine reclaims that shape
+/// by not allocating at all; every other shape is a recorded leak, which is the
+/// side of the trade a language that promises memory safety takes.
+///
+/// **Derived, not just equal.** A place desugar (RFC-0082) names its temporary
+/// after the path it took: `t.xs[k] = v` becomes a move-out into `t.xs[]`, the
+/// element store, and the write-back `t.xs = t.xs[]` — which hands the SAME
+/// buffer back. Comparing the base name alone reads that write-back as a store of
+/// an unrelated value and frees what it is about to store. `placeorder.vyrn`
+/// caught it in one parity run, and it is the shape RFC-0087 §4 warned about in
+/// its own words.
+///
+/// A lambda with a block body answers `true` without being read. The question is
+/// "may this store free the old value", where `true` costs a leak and `false` can
+/// cost a use-after-free.
+///
+/// The descent is [`body_scope_descent`]'s; what is
+/// this probe's own is the derived-name test and the two forms it answers
+/// `true` for without descending.
+pub fn mentions_place(e: &Expr, base: &str) -> bool {
+    /// The probe's line at each site: a name derived from the base is a
+    /// mention, and two forms answer `true` without being read.
+    struct Mentions<'a> {
+        base: &'a str,
+        found: bool,
+    }
+
+    impl Mentions<'_> {
+        fn derived(&self, n: &str) -> bool {
+            let base = self.base;
+            n == base
+                || (n.len() > base.len()
+                    && n.starts_with(base)
+                    && matches!(n.as_bytes()[base.len()], b'.' | b'['))
         }
     }
+
+    impl AstVisit<'_> for Mentions<'_> {
+        const SCOPED: bool = false;
+
+        fn expr(&mut self, e: &Expr, _: &std::collections::HashSet<String>) -> bool {
+            match e {
+                Expr::Var { name, .. } if self.derived(name) => self.found = true,
+                // A block-bodied lambda and a block match arm (RFC-0118) both
+                // answer `true` without being read, for the reason the doc
+                // gives: `true` costs a leak and `false` can cost a
+                // use-after-free.
+                Expr::Lambda {
+                    body: LambdaBody::Block(_),
+                    ..
+                } => self.found = true,
+                Expr::Match { arms, .. } if arms.iter().any(|a| a.body.as_expr().is_none()) => {
+                    self.found = true
+                }
+                _ => {}
+            }
+            !self.found
+        }
+    }
+
+    let mut v = Mentions { base, found: false };
+    ast_expr(e, &std::collections::HashSet::new(), &mut v);
+    v.found
 }
 
-fn node_addrs_stmt(s: &Stmt, out: &mut Vec<usize>) {
-    out.push(s as *const Stmt as usize);
+/// The nested blocks of a statement, for the declaration walk.
+pub fn sub_blocks(s: &Stmt) -> Vec<&Block> {
     match s {
-        Stmt::Let { value, .. }
-        | Stmt::Assign { value, .. }
-        | Stmt::SetField { value, .. }
-        | Stmt::Expr(value) => node_addrs_expr(value, out),
-        Stmt::IndexSet { index, value, .. } => {
-            node_addrs_expr(index, out);
-            node_addrs_expr(value, out);
-        }
-        Stmt::Return { value, .. } => {
-            if let Some(e) = value {
-                node_addrs_expr(e, out);
-            }
-        }
         Stmt::If {
-            cond: scrutinee,
             then_block,
             else_block,
             ..
         }
         | Stmt::IfLet {
-            scrutinee,
             then_block,
             else_block,
             ..
         } => {
-            node_addrs_expr(scrutinee, out);
-            node_addrs(then_block, out);
-            if let Some(eb) = else_block {
-                node_addrs(eb, out);
-            }
+            let mut v = vec![then_block];
+            v.extend(else_block.as_ref());
+            v
         }
-        Stmt::While {
-            cond: e, body: bl, ..
+        Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Region { body, .. } => {
+            vec![body]
         }
-        | Stmt::ForIn {
-            iter: e, body: bl, ..
-        } => {
-            node_addrs_expr(e, out);
-            node_addrs(bl, out);
-        }
-        Stmt::Region { body, .. } => node_addrs(body, out),
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop { .. } => {}
+        _ => Vec::new(),
     }
 }
 
-fn node_addrs_expr(e: &Expr, out: &mut Vec<usize>) {
-    out.push(e as *const Expr as usize);
+/// Whether a whole statement (including everything nested in it) mentions the
+/// binding — the double-disposal probe.
+pub fn stmt_mentions(s: &Stmt, name: &str) -> bool {
+    let here = match s {
+        Stmt::Let { value, .. }
+        | Stmt::Assign { value, .. }
+        | Stmt::SetField { value, .. }
+        | Stmt::Expr(value) => mentions(value, name),
+        Stmt::IndexSet { index, value, .. } => mentions(index, name) || mentions(value, name),
+        Stmt::If { cond: e, .. }
+        | Stmt::While { cond: e, .. }
+        | Stmt::IfLet { scrutinee: e, .. } => mentions(e, name),
+        Stmt::ForIn { iter, .. } => mentions(iter, name),
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| mentions(e, name)),
+        Stmt::Drop { name: n, .. } => n == name,
+        _ => false,
+    };
+    here || sub_blocks(s)
+        .iter()
+        .any(|b| b.stmts.iter().any(|s| stmt_mentions(s, name)))
+}
+
+/// Whether `e` names the binding anywhere. Every mention of a stream is a
+/// move — a `Stream` has no field, no length, and no indexing — so this needs
+/// no notion of position, which is what keeps it a dozen lines.
+pub fn mentions(e: &Expr, name: &str) -> bool {
+    paths(e, name).0
+}
+
+/// How the paths through `e` treat the binding: `.0` where SOME path names
+/// it, `.1` where EVERY path does.
+///
+/// The two answers differ at exactly two shapes — a `match` and an `if` used
+/// as an expression — because those are the only expressions with a path
+/// that skips a sub-expression. Everything else evaluates all of its parts,
+/// so a mention in one part is a mention on every path through the whole.
+///
+/// This is RFC-0095 M3. the must-use walk read a statement's expressions with
+/// [`mentions`] alone, which answers "some path", and then treated the answer
+/// as a disposal on every path — so `match p { Some(n) => t.join(), None => 0 }`
+/// discharged a task the `None` path abandons. The `if` STATEMENT never had
+/// the hole: `scan` walks its two blocks and merges them. The merge is
+/// unchanged; what changed is that a branching EXPRESSION now reaches it.
+pub fn paths(e: &Expr, name: &str) -> (bool, bool) {
+    // Two sub-expressions that both run: a mention in either is a mention,
+    // and a disposal on every path through either is one through the pair.
+    let seq = |a: (bool, bool), b: (bool, bool)| (a.0 || b.0, a.1 || b.1);
+    let all = |m: bool| (m, m);
     match e {
-        Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(inner) => node_addrs_expr(inner, out),
-            LambdaBody::Block(b) => node_addrs(b, out),
-        },
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            node_addrs_expr(expr, out)
+        Expr::Var { name: n, .. } => all(n == name),
+        Expr::Int(_) | Expr::Byte(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Str(_) => {
+            (false, false)
         }
-        Expr::Consume { place, .. } => node_addrs_expr(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            node_addrs_expr(lhs, out);
-            node_addrs_expr(rhs, out);
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } | Expr::Field { expr, .. } => {
+            paths(expr, name)
         }
+        Expr::Consume { place, .. } => paths(place, name),
+        Expr::Binary { lhs, rhs, .. } => seq(paths(lhs, name), paths(rhs, name)),
         Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
         | Expr::Spawn { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                node_addrs_expr(a, out);
-            }
-        }
+        | Expr::TryConstruct { args, .. }
+        | Expr::ArrayLit { elems: args, .. } => args
+            .iter()
+            .fold((false, false), |acc, a| seq(acc, paths(a, name))),
+        Expr::MapLit { entries, .. } => entries.iter().fold((false, false), |acc, (k, v)| {
+            seq(seq(acc, paths(k, name)), paths(v, name))
+        }),
+        Expr::StructLit { fields, .. } => fields
+            .iter()
+            .fold((false, false), |acc, (_, v)| seq(acc, paths(v, name))),
+        // The scrutinee runs whatever arm is taken, so it is sequenced with
+        // the arms rather than merged into them. An arm list that is empty
+        // has no path of its own to say anything about.
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            node_addrs_expr(scrutinee, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => node_addrs_expr(e, out),
-                    ArmBody::Block(b) => node_addrs(b, out),
-                }
+            let s = paths(scrutinee, name);
+            if arms.is_empty() {
+                return s;
             }
+            // A block arm (RFC-0118) exists only in statement position,
+            // which is never an operand this hoisting question is asked
+            // about; if one is ever met, (true, false) is conservative in
+            // both directions.
+            let any = arms
+                .iter()
+                .any(|a| a.body.as_expr().is_none_or(|e| paths(e, name).0));
+            let every = arms
+                .iter()
+                .all(|a| a.body.as_expr().is_some_and(|e| paths(e, name).1));
+            seq(s, (any, every))
         }
+        // A missing `else` is a path that names nothing. The checker refuses
+        // an if-expression without one, so this is the incomplete tree and
+        // not a shape a program can write.
         Expr::IfExpr {
             cond,
             then_branch,
             else_branch,
             ..
         } => {
-            node_addrs_expr(cond, out);
-            node_addrs_expr(then_branch, out);
-            if let Some(eb) = else_branch {
-                node_addrs_expr(eb, out);
-            }
+            let t = paths(then_branch, name);
+            let e = match else_branch {
+                Some(b) => paths(b, name),
+                None => (false, false),
+            };
+            seq(paths(cond, name), (t.0 || e.0, t.1 && e.1))
         }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                node_addrs_expr(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                node_addrs_expr(k, out);
-                node_addrs_expr(v, out);
-            }
-        }
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
+        // A lambda body may never run, and reading it as a disposal on every
+        // path is the answer this walk has always given. Narrowing it would
+        // widen what compiles, which is not this milestone.
+        Expr::Lambda { body, .. } => all(match body {
+            LambdaBody::Expr(e) => mentions(e, name),
+            LambdaBody::Block(b) => b.stmts.iter().any(|s| stmt_mentions(s, name)),
+        }),
     }
 }
 
-fn lambdas_expr<'a>(e: &'a Expr, out: &mut std::collections::HashMap<usize, &'a LambdaBody>) {
+/// Whether parameter `i` of the builtin `name` takes its argument for good,
+/// under **rule 1**.
+///
+/// It was `RESERVED_SINKS`, three rows in a hand list (RFC-0087 §2b). RFC-0094
+/// M1 reads `consume` off the seeded signature instead ([`crate::prelude`]), so
+/// the fact is written once where every rule sees it. Everything else a builtin
+/// does with a heap argument is a read: `print` formats it, `@concat` copies out
+/// of it, `at` looks inside it.
+///
+/// **A linear parameter is not rule 1's.** `close`, `boxStream` and
+/// `serveStream` each declare `consume Stream<T>`, and a `Stream<T>` already
+/// carries a disposal obligation the [`linear`] walk proves: every mention of a
+/// stream binding is a disposal there, so a second one is refused before rule 1
+/// is asked. Two rules over one value would refuse the same program twice with
+/// the worse words — rule 1's menu offers `.copy()`, which a stream has no
+/// answer for. The obligation on the TYPE wins, and the census's claim that
+/// these three carry a rule "nowhere at all" is corrected rather than acted on.
+/// The place an expression names, spelled as the store arms spell it:
+/// `xs`, `s.keys`, `a.b.c`. `None` for anything that is not a place.
+pub fn store_path(e: &Expr) -> Option<String> {
     match e {
-        Expr::Lambda { body, .. } => {
-            out.insert(e as *const Expr as usize, body);
-            match body {
-                LambdaBody::Expr(inner) => lambdas_expr(inner, out),
-                LambdaBody::Block(b) => lambdas_block(b, out),
-            }
+        Expr::Var { name, .. } => Some(name.clone()),
+        Expr::Field { expr, field, .. } => Some(format!("{}.{field}", store_path(expr)?)),
+        _ => None,
+    }
+}
+
+/// The place `e` reads, as `(root name, whole path)`.
+///
+/// `s` is `("s", "s")` and `r.a.b` is `("r", "r.a.b")` — the root is what a move
+/// takes, the path is what the diagnostic quotes. Anything else (a call, a
+/// literal, an operator) is not a place and answers `None`: it has no earlier
+/// owner, so nothing about it can be a move.
+pub fn place_path(e: &Expr) -> Option<(String, String)> {
+    match e {
+        Expr::Var { name, .. } => Some((name.clone(), name.clone())),
+        Expr::Field { expr, field, .. } => {
+            let (root, path) = place_path(expr)?;
+            Some((root, format!("{path}.{field}")))
         }
-        Expr::Unary { expr, .. } | Expr::Field { expr, .. } | Expr::Try { expr, .. } => {
-            lambdas_expr(expr, out)
-        }
-        Expr::Consume { place, .. } => lambdas_expr(place, out),
-        Expr::Binary { lhs, rhs, .. } => {
-            lambdas_expr(lhs, out);
-            lambdas_expr(rhs, out);
-        }
-        Expr::Call { args, .. }
-        | Expr::TryConstruct { args, .. }
-        | Expr::Spawn { args, .. }
-        | Expr::ArrayLit { elems: args, .. } => {
-            for a in args {
-                lambdas_expr(a, out);
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            lambdas_expr(scrutinee, out);
-            for a in arms {
-                match &a.body {
-                    ArmBody::Expr(e) => lambdas_expr(e, out),
-                    ArmBody::Block(b) => lambdas_block(b, out),
-                }
-            }
-        }
-        Expr::IfExpr {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            lambdas_expr(cond, out);
-            lambdas_expr(then_branch, out);
-            if let Some(eb) = else_branch {
-                lambdas_expr(eb, out);
-            }
-        }
-        Expr::StructLit { fields, .. } => {
-            for (_, v) in fields {
-                lambdas_expr(v, out);
-            }
-        }
-        Expr::MapLit { entries, .. } => {
-            for (k, v) in entries {
-                lambdas_expr(k, out);
-                lambdas_expr(v, out);
-            }
-        }
-        Expr::Int(_)
-        | Expr::Byte(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::Str(_)
-        | Expr::Var { .. } => {}
+        // RFC-0093: a take is not a place. `consume d.title` names no storage
+        // the frame can still reach, so it is an OWNER at every store, every
+        // return and every pattern position — with no second rule, which is the
+        // whole reason the prefix costs so little.
+        _ => None,
     }
 }

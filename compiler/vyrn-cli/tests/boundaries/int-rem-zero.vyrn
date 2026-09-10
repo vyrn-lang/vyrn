@@ -1,0 +1,11 @@
+/// Row `int-rem-zero` — RFC-0002. `%` by a runtime zero, a rule of its own
+/// because the operator is.
+
+fn zero(n: Int64) -> Int64 {
+    return n - n
+}
+
+fn main() -> Int64 {
+    print(10 % zero(3))
+    return 0
+}

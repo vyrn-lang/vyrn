@@ -338,14 +338,10 @@ fn main() -> Int64 {
     assert_eq!(r.kind, SymbolKind::Local);
     assert_eq!(r.name, "s");
     assert_eq!(r.target_line, 2);
-    // RFC-0087 U1: a binding whose type owns heap carries its memory answer on
-    // hover. A String literal is a data-segment pointer, so this one is static —
-    // and saying so is the point, because the next line up could be a concat and
-    // nothing in the source would say which.
-    assert_eq!(
-        r.hover,
-        "let s: String\n\nmemory: static data — nothing reclaims it, and nothing needs to"
-    );
+    // RFC-0125 §3 M3, the report slice: the memory line is the CORE's, and
+    // this crate installs no placer, so the hover here carries the type alone.
+    // `vyrn-lsp`'s own suite pins the memory line through a server that does.
+    assert_eq!(r.hover, "let s: String");
 }
 
 /// A local shadows a same-named top-level symbol: the `area` *call* on line 19
@@ -447,29 +443,22 @@ fn main() -> Int64 {
     assert_eq!(d.end_col, 13);
 }
 
-/// A movecheck use-after-consume diagnostic is pinned to the consumed
-/// **identifier** on the error's line (the movecheck message backtick-quotes the
-/// variable name). Guards that the pinner covers movecheck, not just checker.
-#[test]
-fn movecheck_use_after_consume_pinned_to_ident() {
-    let src = "\
-fn main() -> Int64 {
-    let x = 5;
-    drop x;
-    return x;
-}
-";
-    let a = analyze(src);
-    let d = a
-        .diagnostics
-        .iter()
-        .find(|d| d.stage == "movecheck" && d.message.contains("already consumed"))
-        .expect("a movecheck use-after-consume diagnostic");
-    // Line 4: `    return x;` — the offending use `x` is at col 12.
-    assert_eq!(d.line, 4);
-    assert_eq!(d.col, 12, "pinned to the `x` use, not col 0 (whole line)");
-    assert_eq!(d.end_col, 13);
-}
+/// A movecheck diagnostic is pinned to the borrowed **identifier** on the
+/// error's line (the movecheck message backtick-quotes the variable name).
+/// The pinner used to be guarded over `movecheck` as well as the checker.
+///
+/// It read a use-after-consume until that rule left this pass (RFC-0125 §3 M3,
+/// row 06), a store until rule 2 left too (rows 01, 02, 03, 27 and 34), a
+/// `for .. in consume` of a `read` parameter until rows 10, 11 and 29 left,
+/// and last a closure that outlives the call capturing a borrow, until row 24
+/// left. `movecheck.rs` states NO refusal now, so there is nothing of that
+/// stage left to pin and the guard goes with the rule.
+///
+/// What the editor shows for a rule the KERNEL states is the standing gap this
+/// arc has recorded since the first row moved: `vyrn-lsp` installs the
+/// lowering, so the sentence reaches a reader, but the kernel refuses at a
+/// LINE and the pinner works from a column. Every rule above is in the same
+/// position, and the answer is one slice about `Refusal`, not one test.
 
 /// An `unknown type` diagnostic (a type reference that doesn't resolve) is
 /// pinned to the type **identifier** in the annotation. Guards the identifier
@@ -884,4 +873,157 @@ fn member_completion_offers_record_fields() {
         Some("age: Int64 where value >= 18"),
         "refined field renders as written: {by_label:?}"
     );
+}
+
+/// A binder inside an interpolation hole never becomes a local, and every local
+/// that IS indexed is spelled where it says it is.
+///
+/// A hole is re-lexed as its own source, so its tokens count lines and columns
+/// from the hole. `Parser::binder_pos` answers `(0, 0)` there and a binder with
+/// no column is not indexed: a row at a hole-relative position would point the
+/// editor at whatever token happens to sit there.
+#[test]
+fn a_binder_inside_an_interpolation_is_not_a_local() {
+    let src = "fn twice(f: fn(Int64) -> Int64, x: Int64) -> Int64 {
+    return f(f(x))
+}
+fn main() -> Int64 {
+    let s = \"x=\\{twice(q -> { let t = q + 1
+        return t }, 3)}\"
+    print(s)
+    return 0
+}
+";
+    let a = analyze(src);
+    assert!(
+        a.diagnostics.is_empty(),
+        "clean program: {:?}",
+        a.diagnostics
+    );
+    let names: Vec<&str> = a.locals.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["f", "x", "s"],
+        "the hole's `q` and `t` are not locals"
+    );
+    // Every row that IS indexed names the token it points at. Without the rule
+    // above, the hole's `let t` lands at line 1, column 18 — inside `twice`'s
+    // signature, which is where the hole's own column 18 happens to fall.
+    let lines: Vec<&str> = src.lines().collect();
+    for b in &a.locals {
+        let at = &lines[b.line - 1][b.col - 1..];
+        assert!(
+            at.starts_with(b.name.as_str()),
+            "{b:?} is not spelled at its position: {at}"
+        );
+    }
+}
+
+/// Every `.vyrn` of the corpus, sorted, with the repository root it is under.
+///
+/// The two corpus pins below read the same files: what `analyze` decides about
+/// a program is one answer, and a pin over half of it is not a licence.
+fn corpus() -> (std::path::PathBuf, Vec<std::path::PathBuf>) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in ["examples", "site", "std", "compiler/vyrn-cli/tests"] {
+        let mut stack = vec![root.join(dir)];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("vyrn") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    files.sort();
+    (root, files)
+}
+
+/// The corpus walked on a thread with room: it holds files a debug build cannot
+/// walk on the harness's own stack (`site/app/chart.vyrn` is 35 KB of one
+/// expression tree).
+fn over_the_corpus(each: fn(&str, &str)) {
+    let (root, files) = corpus();
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || {
+            for p in files {
+                let rel = p
+                    .strip_prefix(&root)
+                    .unwrap_or(&p)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let Ok(src) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                each(&rel, &src);
+            }
+        })
+        .expect("spawn")
+        .join()
+        .expect("the corpus scan");
+}
+
+/// Every local binding `analyze` gives over the corpus, printed: the name, the
+/// kind, the position, the enclosing function and the type on hover.
+///
+/// The pin for the editor's LOCALS. Nothing else records them — a local is not
+/// a declaration, so no `vyrn check` byte moves when one is lost — and the walk
+/// that produced them is the section RFC-0125 §3 M6 deletes. This is the
+/// licence for that deletion: run it before and after and compare every byte.
+///
+/// `cargo test -p vyrn-frontend --test symbols_api -- --ignored --nocapture
+/// the_pinned_binders_over_the_corpus`
+#[test]
+#[ignore]
+fn the_pinned_binders_over_the_corpus() {
+    over_the_corpus(|rel, src| {
+        let a = analyze(src);
+        println!("===== {rel} ({} locals)", a.locals.len());
+        for b in &a.locals {
+            println!(
+                "{rel}:{}:{}:{} {} {:?} fn@{} | {}",
+                b.line,
+                b.col,
+                b.end_col,
+                b.name,
+                b.kind,
+                b.fn_line,
+                b.ty.as_ref().map(ToString::to_string).unwrap_or_default()
+            );
+        }
+    });
+}
+
+/// Every diagnostic position `analyze` gives over the corpus, printed.
+///
+/// The pin for [`vyrn_frontend::analyze`]'s COLUMNS, which nothing else
+/// records. `vyrn check` does not go through this path — it reports what the
+/// loader and the checker say, at the column those give — so a change to the
+/// keyword-column map moves no byte of the corpus's `vyrn check` stderr and is
+/// invisible to the licence RFC-0125 §3 M6 uses everywhere else. This is the
+/// licence for that map: run it before and after and compare the whole output.
+///
+/// `cargo test -p vyrn-frontend --test symbols_api -- --ignored --nocapture
+/// the_pinned_columns_over_the_corpus`
+#[test]
+#[ignore]
+fn the_pinned_columns_over_the_corpus() {
+    over_the_corpus(|rel, src| {
+        let a = analyze(src);
+        println!("===== {rel} ({} diagnostics)", a.diagnostics.len());
+        for d in &a.diagnostics {
+            println!(
+                "{}:{}:{}:{} {} | {}",
+                rel, d.line, d.col, d.end_col, d.stage, d.message
+            );
+        }
+    });
 }

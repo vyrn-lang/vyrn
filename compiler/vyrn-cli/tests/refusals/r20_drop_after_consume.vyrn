@@ -1,0 +1,10 @@
+// RFC-0089 rule 1 at the drop: what a `consume` parameter took is gone.
+fn take(xs: consume Array<Int64>) -> Int64 { return xs.length }
+
+fn main() -> Int64 {
+    let a: Array<Int64> = [1, 2]
+    let n = take(a)
+    drop a
+    print(n)
+    return 0
+}

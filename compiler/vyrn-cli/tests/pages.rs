@@ -136,7 +136,7 @@ fn emit_gen_shows_the_synthesized_router() {
 
     // The dynamic segment is validated against the declared type before user code.
     assert!(
-        src.contains("fromJson(UiRouteInt, segs["),
+        src.contains("fromJson<UiRouteInt>(segs["),
         "dynamic segment parse:\n{src}"
     );
     // The loader's Invalid arm renders a 422 error page.

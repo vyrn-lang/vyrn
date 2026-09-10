@@ -131,3 +131,149 @@ fn releaseacrossexit_lowers_to_its_blessed_dump() {
 fn projection_lowers_to_its_blessed_dump() {
     check("examples/projection.vyrn", "projection.lowered");
 }
+
+/// Every corpus program's lowering, one sha256 a line — the pin for what the
+/// loader's walks over a body PRODUCE.
+///
+/// RFC-0125 §3 M6 states the scope-aware body walk once, and the failure mode of
+/// that slice is a silent name-resolution change: a call that resolves to
+/// another module's like-named export, an argument the namespace pass forgets to
+/// drop, a local that stops shadowing a renamed decl. None of those need be a
+/// diagnostic, so the whole-stderr `vyrn check` diff can be byte-identical while
+/// the linked program is different. `emit-lowered` prints the root module's
+/// lowered body with every name RESOLVED, so a hash of it moves the moment any
+/// of those does.
+///
+/// It prints rather than asserts, exactly as
+/// `symbols_api::the_pinned_columns_over_the_corpus` does: the licence is two
+/// runs of it, before and after, compared line for line. Every `.vyrn` file
+/// under `examples/`, `site/`, `std/` and `compiler/vyrn-cli/tests/` is a root
+/// here, so a module that is only ever imported is still hashed once as itself.
+/// A program `vyrn check` refuses has no lowering, and its row records the exit
+/// code instead — a refusal that appears or disappears moves this pin too.
+///
+/// `cargo test -p vyrn-cli --test lowered_dump -- --ignored --nocapture
+/// the_pinned_lowering_over_the_corpus`
+#[test]
+#[ignore = "runs the compiler over the whole corpus; run explicitly"]
+fn the_pinned_lowering_over_the_corpus() {
+    let root = repo_root();
+    let mut files = Vec::new();
+    for dir in ["examples", "site", "std", "compiler/vyrn-cli/tests"] {
+        let mut stack = vec![root.join(dir)];
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else {
+                continue;
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().and_then(|s| s.to_str()) == Some("vyrn") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    let mut rels: Vec<String> = files
+        .iter()
+        .map(|p| {
+            p.strip_prefix(&root)
+                .unwrap_or(p)
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    rels.sort();
+    let dump = |rel: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_vyrn"))
+            .current_dir(&root)
+            .args(["emit-lowered", rel])
+            .output()
+            .expect("vyrn emit-lowered");
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n"))
+            .ok_or_else(|| out.status.code().unwrap_or(-1))
+    };
+    let (mut lowered, mut unstable) = (0usize, 0usize);
+    for rel in &rels {
+        match dump(rel) {
+            Ok(text) => {
+                lowered += 1;
+                // Twice, because two programs do not lower to the same bytes
+                // twice (RFC-0125 §3 M6 found this with the pin's first run):
+                // `std/von.vyrn` and `std/vyx.vyrn` print their `release (taken
+                // later)` lines in a different ORDER on every run. That is the
+                // release placement's, not the loader's, and a pin that recorded
+                // one of the orders would report a difference at every run. A row
+                // that does not reproduce within the run is recorded as
+                // `unstable` instead, so the pin says which programs it cannot
+                // speak for.
+                let again = dump(rel).unwrap_or_default();
+                if again == text {
+                    println!(
+                        "{rel}\t{}\t{} lines",
+                        vyrn_frontend::hash::sha256_hex(text.as_bytes()),
+                        text.lines().count()
+                    );
+                } else {
+                    unstable += 1;
+                    println!("{rel}\tunstable\t{} lines", text.lines().count());
+                }
+            }
+            Err(rc) => println!("{rel}\trefused rc={rc}"),
+        }
+    }
+    println!(
+        "===== {} programs, {lowered} lowered, {unstable} unstable",
+        rels.len()
+    );
+}
+
+/// The dump is the same bytes on every run, on a root the blessed snapshots do
+/// not reach — RFC-0125 §3 M3, the determinism gate.
+///
+/// The five snapshots above are small examples. `std/von.vyrn` and
+/// `std/vyx.vyrn` are the two largest generator-carrying modules in the tree,
+/// and a page module is the one `site/` root that needs no generated data. A
+/// placement that walked a `HashMap` would reorder its `release` lines between
+/// processes — Rust seeds a `RandomState` per process — and neither the
+/// blessed snapshots nor `rfcs/census/wasm-sha256.tsv` would see it, because
+/// the snapshots are examples and the manifest hashes `examples/` alone.
+///
+/// Ten runs, because one reordering in ten is still a reordering: the whole
+/// point of a determinism gate is that a rare answer fails it.
+#[test]
+fn the_lowering_is_the_same_bytes_on_every_run() {
+    for root in [
+        "std/von.vyrn",
+        "std/vyx.vyrn",
+        "site/app/docs.vyrn",
+        "examples/regexredux.vyrn",
+    ] {
+        let first = dump(root);
+        assert!(
+            first.contains("\n  release "),
+            "{root} places no release, so it gates nothing"
+        );
+        for run in 2..=10 {
+            let again = dump(root);
+            if again == first {
+                continue;
+            }
+            let (a, b): (Vec<&str>, Vec<&str>) = (again.lines().collect(), first.lines().collect());
+            let at = a
+                .iter()
+                .zip(&b)
+                .position(|(x, y)| x != y)
+                .unwrap_or(a.len().min(b.len()));
+            panic!(
+                "{root}: run {run} differs from run 1 at line {}\n  run 1: {}\n  run {run}: {}",
+                at + 1,
+                b.get(at).unwrap_or(&"<end of file>"),
+                a.get(at).unwrap_or(&"<end of file>"),
+            );
+        }
+    }
+}

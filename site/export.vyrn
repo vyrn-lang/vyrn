@@ -1034,9 +1034,31 @@ fn missingDemo() -> Bool {
     return true
 }
 
+/// The output directory, off the command line.
+///
+/// `args()` is `argv[1..]` — it EXCLUDES the program's own name (RFC-0014), so
+/// the directory is the first element and not the second. This read used to ask
+/// for `argv[1]`, which is one past the only argument the caller passes, so
+/// `vyrn run site/export.vyrn dist` wrote to `out` and said nothing. The site
+/// workflow passes `out`, which is also the default, and so never noticed
+/// (RFC-0125 §3 M5, the fourth slice).
+fn outDirFrom(argv: Array<String>) -> String {
+    if argv.length > 0 {
+        return argv[0].copy()
+    }
+    return "out"
+}
+
+test "the export writes where it is told, and to `out` when it is told nothing" {
+    assertEq(outDirFrom([]), "out")
+    assertEq(outDirFrom(["dist"]), "dist")
+    // A second argument is not the directory. `args()` carries no program name,
+    // so reading past the first element is how the directory got ignored.
+    assertEq(outDirFrom(["dist", "extra"]), "dist")
+}
+
 fn main() -> Int64 {
-    let argv = args()
-    let outDir = if argv.length > 1 { argv[1].copy() } else { "out" }
+    let outDir = outDirFrom(args())
     if missingHistory() || missingDemo() {
         return 1
     }
@@ -1137,9 +1159,8 @@ fn has(haystack: String, needle: String) -> Bool {
 /// Every value of the attribute `name` in `html`, in document order.
 ///
 /// `split` and `indexOf` do the scanning, because both are builtins and this
-/// walks 56 documents: the same loop written byte by byte in Vyrn runs in the
-/// interpreter and takes minutes, which is how a gate becomes something people
-/// switch off.
+/// walks 56 documents: the same loop written byte by byte in Vyrn took minutes,
+/// which is how a gate becomes something people switch off.
 ///
 /// The needle carries the leading space — ` id="`, not `id="` — so `data-id="`
 /// and `aria-labelledby="` are not read as the attribute they end with. An id
@@ -1150,9 +1171,9 @@ fn attrValues(html: String, name: String) -> Array<String> {
     let mut i = 1
     while i < parts.length {
         out.push(match indexOf(parts[i], "\"") {
-                Some(at) => substring(parts[i], 0, at),
-                None => "",
-            })
+            Some(at) => substring(parts[i], 0, at),
+            None => "",
+        })
         i = i + 1
     }
     return out
@@ -1383,7 +1404,7 @@ test "every name in a module's index points at an export that is on the page" {
 /// documents over and over — one test walks every route for its masthead
 /// marker, the next walks them all for their fragments, a third for their
 /// stamps — and each ask re-rendered the page AND re-ran the whole stamp
-/// pipeline through the interpreter. On CI `The site's own tests` was 1392 s
+/// pipeline. On CI `The site's own tests` was 1392 s
 /// of a 1788 s job, and most of it was the same eighty pages drawn again.
 ///
 /// A page is a pure function of the tree here: nothing in a test mutates what

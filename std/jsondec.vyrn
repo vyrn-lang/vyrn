@@ -1,6 +1,6 @@
 /// std/jsondec (RFC-0078 M3) — the untyped half of `fromJson`, in Vyrn.
 ///
-/// `fromJson(T, s)` is two halves, exactly as `toJson` is (RFC-0078 M2b):
+/// `fromJson<T>(s)` is two halves, exactly as `toJson` is (RFC-0078 M2b):
 ///
 ///   read(s)          -> a `Json` tree                 [std/jsonread — not typed]
 ///   decode(tree, T)  -> a value of T, plus `Issue`s   [needs the compiler]
@@ -20,10 +20,11 @@
 ///
 /// RFC-0078 M3 predicted `Option<T>` for that. It cannot be: a bare `Option<U>`
 /// IS a decode target (`Array<Option<Int64>>` decodes today), and `Option<Option<U>>`
-/// is rejected by the checker — "nested Option/Result is not supported in v0.1".
-/// So every decoder returns `Array<T>` with **zero or one** element: empty means
-/// "no value, and the issue is already recorded". One convention for every T,
-/// including `T = Option<U>`.
+/// has no wire form — a double `null` has two readings, so `codec::wire`
+/// declines it. (The CHECKER stopped refusing the type at RFC-0126 §8; the
+/// wire refusal is its own and stands.) So every decoder returns `Array<T>`
+/// with **zero or one** element: empty means "no value, and the issue is
+/// already recorded". One convention for every T, including `T = Option<U>`.
 ///
 /// # Wording
 ///
@@ -180,19 +181,19 @@ export fn valOf(v: Json) -> Json {
 /// `json.type`: `expected <what>, found <kind>`.
 export fn pushType(iss: modify Array<Issue>, path: String, expected: String, found: String) -> Unit {
     iss.push(Issue {
-            key: "json.type",
-            path: path.copy(),
-            message: "expected " + expected + ", found " + found,
-        })
+        key: "json.type",
+        path: path.copy(),
+        message: "expected " + expected + ", found " + found,
+    })
 }
 
 /// ``json.missing``: ``missing required field `name` ``.
 export fn pushMissing(iss: modify Array<Issue>, path: String, field: String) -> Unit {
     iss.push(Issue {
-            key: "json.missing",
-            path: path.copy(),
-            message: "missing required field `" + field + "`",
-        })
+        key: "json.missing",
+        path: path.copy(),
+        message: "missing required field `" + field + "`",
+    })
 }
 
 /// `validate`: a refined type's `where` clause did not hold. The message is the
@@ -464,9 +465,9 @@ test "the one-wire-form-per-value accessors" {
     assertEq(keyOf(JObj([])), "")
     assertEq(
         keyOf(JObj([
-                    JsonField { key: "a", value: JNull },
-                    JsonField { key: "b", value: JNull },
-                ])),
+            JsonField { key: "a", value: JNull },
+            JsonField { key: "b", value: JNull },
+        ])),
         "",
     )
     assertEq(tagOf(JStr("Dot")), "Dot")

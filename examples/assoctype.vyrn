@@ -35,8 +35,8 @@ impl<T> Unwrap for Option<T> {
     }
     fn valueOr(self, fallback: Output) -> Output {
         return match self {
-            Some(v) => v,
-            None => fallback,
+            Some(v) => v.copy(),
+            None => fallback.copy(),
         }
     }
 }

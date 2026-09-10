@@ -25,51 +25,20 @@ pub fn is_member_type_param(name: &str) -> bool {
 /// Rewrite every `Named(n)` in `ty` for which [`is_member_type_param`] holds
 /// into a [`Type::Param`], recursively. Applied to each contract member's types
 /// right after parsing them.
+///
+/// The descent is [`crate::loader::type_nodes_mut`]'s; what is this reader's own
+/// is the one node it replaces. It was a fourteen-arm copy of that macro's arms
+/// until RFC-0125 §3 M6 put the hook on the node — a `&mut String` could not
+/// replace a `Type::Named` with a `Type::Param`, which is the whole of what this
+/// does.
 fn mark_member_type_params(ty: &mut Type) {
-    match ty {
-        Type::Named(n) => {
+    crate::loader::type_nodes_mut(ty, &mut |t| {
+        if let Type::Named(n) = t {
             if is_member_type_param(n) {
-                *ty = Type::Param(std::mem::take(n));
+                *t = Type::Param(std::mem::take(n));
             }
         }
-        Type::App(_, args) => {
-            for a in args {
-                mark_member_type_params(a);
-            }
-        }
-        Type::Option(a)
-        | Type::Array(a)
-        | Type::Task(a)
-        | Type::Stream(a)
-        | Type::Partial(a)
-        | Type::ArrayN(a, _)
-        | Type::SmallArray(a, _)
-        | Type::Omit(a, _)
-        | Type::Pick(a, _) => mark_member_type_params(a),
-        Type::Result(a, b) | Type::Merge(a, b) | Type::Map(a, b) => {
-            mark_member_type_params(a);
-            mark_member_type_params(b);
-        }
-        Type::Record(fields) => {
-            for f in fields {
-                mark_member_type_params(&mut f.ty);
-            }
-        }
-        Type::Enum(variants) => {
-            for v in variants {
-                for p in &mut v.payload {
-                    mark_member_type_params(p);
-                }
-            }
-        }
-        Type::Fn(params, ret) => {
-            for p in params {
-                mark_member_type_params(p);
-            }
-            mark_member_type_params(ret);
-        }
-        _ => {}
-    }
+    });
 }
 
 /// Whether the cursor sits on a `contract Name {` declaration starter.
@@ -123,6 +92,7 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // order. Both rebuild like `push`, so a statement writes back through the
     // receiver place.
     ("reserve", "@reserve"),
+    ("clear", "@clear"),
     ("append", "@append"),
     // `dst.copyFrom(src)` (RFC-0115): overwrite `dst`'s elements with `src`'s,
     // reusing the buffer — the refill loop fannkuch hand-wrote, as one copy.
@@ -152,6 +122,19 @@ pub const METHOD_BUILTINS: &[(&str, &str)] = &[
     // the two names a future `std/arrays` predicate would most want.
     ("anyTrue", "@anyTrue"),
     ("allTrue", "@allTrue"),
+    // `log.info("..")` and the other four levels (RFC-0008). These five were
+    // RESERVED — five common English words no program could use for a function
+    // of its own — because a seeded row is matched by NAME and a user `fn
+    // info(..)` would have inherited the log contract. The internal spelling is
+    // the answer the record's third one: `@info` is unlexable, the row is
+    // seeded under it, and the five words go back to any module that wants
+    // them. [`crate::ast::LOG_LEVELS`] is the table these pair with, and
+    // `every_log_level_is_a_method_builtin_and_an_effect` holds the two equal.
+    ("trace", "@trace"),
+    ("debug", "@debug"),
+    ("info", "@info"),
+    ("warn", "@warn"),
+    ("error", "@error"),
 ];
 
 /// The surface spelling of an internal method-builtin name, for a DIAGNOSTIC.
@@ -241,6 +224,15 @@ fn unshadow_method_builtins(program: &mut Program) {
     crate::project::walk_program(program, &mut give_back);
 }
 
+/// The tree the grammar alone produces: no prelude, no method-form unshadowing,
+/// no `impl` flattening.
+///
+/// [`crate::prelude::type_decls`] parses `prelude.vyrn` through this, which is
+/// why it cannot use [`parse_accum`] — the prelude is what `parse_accum` adds.
+pub(crate) fn parse_bare(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
+    Parser::over(tokens).program_accum()
+}
+
 /// Parse a token stream into a [`Program`].
 ///
 /// Returns the *first* parse error (the historical single-error surface). For
@@ -264,556 +256,17 @@ pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
 /// diagnostics should treat a non-empty error list as "do not run downstream
 /// checks" (a partial program would only produce cascading type errors).
 pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
-    let (mut program, errors) = Parser {
-        tokens,
-        pos: 0,
-        no_struct: false,
-        type_params: Vec::new(),
-        type_aliases: Default::default(),
-        field_preds: None,
-        extra_stmts: Vec::new(),
-        errors: Vec::new(),
-        depth: 0,
-    }
-    .program_accum();
-    // Before the injected declarations below, so only what the module itself
-    // declares or imports can claim a method-form builtin's name.
+    let (mut program, errors) = parse_bare(tokens);
+    // Before the prelude below, so only what the module itself declares or
+    // imports can claim a method-form builtin's name.
     unshadow_method_builtins(&mut program);
-    // The built-in `Value` enum (RFC-0007): the closed set of types a tagged
-    // template can interpolate. Injected so every program can name `Array<Value>`
-    // and match `IntVal`/`StrVal`/`BoolVal` — the tag surface — without a `use`.
-    program.type_decls.push(TypeDecl {
-        name: "Value".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Enum(vec![
-            EnumVariant {
-                name: "IntVal".to_string(),
-                payload: vec![Type::Int],
-            },
-            EnumVariant {
-                name: "StrVal".to_string(),
-                payload: vec![Type::Str],
-            },
-            EnumVariant {
-                name: "BoolVal".to_string(),
-                payload: vec![Type::Bool],
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    // The built-in `Template` record (RFC-0007): the structured form of an
-    // interpolated string — literal `parts` interleaved with boxed `values`.
-    // `template"a\{x}b"` yields one of these; any code can read its fields.
-    program.type_decls.push(TypeDecl {
-        name: "Template".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "parts".to_string(),
-                ty: Type::Array(Box::new(Type::Str)),
-            },
-            Field {
-                name: "values".to_string(),
-                ty: Type::Array(Box::new(Type::Named("Value".to_string()))),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    // The error model (RFC-0009): a structured `Issue` (with an i18n `key`) and a
-    // generic `Validation<T>` = `Valid(T) | Invalid([Issue])`. A validator
-    // accumulates all failing checks into an issue array and returns `Invalid`,
-    // so every problem is reported at once and each carries a translation key.
-    program.type_decls.push(TypeDecl {
-        name: "Issue".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "key".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "path".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "message".to_string(),
-                ty: Type::Str,
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    program.type_decls.push(TypeDecl {
-        name: "Validation".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: vec!["T".to_string()],
-        base: Type::Enum(vec![
-            EnumVariant {
-                name: "Valid".to_string(),
-                payload: vec![Type::Param("T".to_string())],
-            },
-            EnumVariant {
-                name: "Invalid".to_string(),
-                payload: vec![Type::Array(Box::new(Type::Named("Issue".to_string())))],
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    // Persistence outcome (RFC-0044): the three honest results of `load`ing a
-    // typed value from a file — the file is absent (`Missing`), present but not
-    // decodable (`Corrupt` with the accumulated `Issue`s), or decoded (`Loaded`).
-    // A missing file is deliberately NOT the same as a corrupt one. Injected like
-    // `Validation` so `load(TypeName, path)` (a call-site desugar) can name its
-    // variants without an import.
-    program.type_decls.push(TypeDecl {
-        name: "LoadResult".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: vec!["T".to_string()],
-        base: Type::Enum(vec![
-            EnumVariant {
-                name: "Missing".to_string(),
-                payload: vec![],
-            },
-            EnumVariant {
-                name: "Corrupt".to_string(),
-                payload: vec![Type::Array(Box::new(Type::Named("Issue".to_string())))],
-            },
-            EnumVariant {
-                name: "Loaded".to_string(),
-                payload: vec![Type::Param("T".to_string())],
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    // `Schema` (RFC-0003 reflection): the extractable shape of a validated type,
-    // produced by `schemaOf(TypeName)` — its name, base spelling, `///` doc,
-    // and everything its `where` predicate implies (numeric bounds, multipleOf,
-    // string length bounds, regex pattern). Turn it into OpenAPI/JSON in
-    // ordinary code.
-    program.type_decls.push(TypeDecl {
-        name: "Schema".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "name".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "base".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
-            },
-            Field {
-                name: "min".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
-            },
-            Field {
-                name: "max".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
-            },
-            Field {
-                name: "multipleOf".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
-            },
-            Field {
-                name: "minLength".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
-            },
-            Field {
-                name: "maxLength".to_string(),
-                ty: Type::Option(Box::new(Type::Int)),
-            },
-            Field {
-                name: "pattern".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    // Module reflection (RFC-0021): `moduleInterface(path)` returns the shape of
-    // a module's EXPORTED surface — `schemaOf` generalized from one type to a
-    // whole module. Injected like `Schema`/`Issue` so a generator can name them
-    // without an import, and filtered out of the LSP by their line-0 origin. The
-    // records reference each other and `Schema` by name (resolution is
-    // order-independent). A generator consumes these to emit stubs/docs/mocks.
-    //   Origin    { file, line, col, name }
-    //   ParamInfo { name, spelling, schema, uncodable }
-    //   FnInfo     { name, params: Array<ParamInfo>, ret, retSchema, retUncodable,
-    //                mutates, origin }
-    //   TypeInfo   { name, source, module, schema, origin }
-    //   ModuleInterface { functions: Array<FnInfo>, types: Array<TypeInfo> }
-    // Where a declaration was WRITTEN (RFC-0073 M1) — the file it came from and
-    // the 1-based line/column of its name token, so a generated symbol can be
-    // mapped back to the declaration it stands for. `name` is the declaration's
-    // own name, which is routinely not the generated symbol's (`pastes.list`
-    // stands for `list`), so an origin answers on its own. An unknown position
-    // is `line == 0 && col == 0`, the same "not located" spelling the LSP's
-    // symbol index uses.
-    program.type_decls.push(TypeDecl {
-        name: "Origin".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "file".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "line".to_string(),
-                ty: Type::Int,
-            },
-            Field {
-                name: "col".to_string(),
-                ty: Type::Int,
-            },
-            Field {
-                name: "name".to_string(),
-                ty: Type::Str,
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    program.type_decls.push(TypeDecl {
-        name: "ParamInfo".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "name".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "spelling".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "schema".to_string(),
-                ty: Type::Named("Schema".to_string()),
-            },
-            // The first type inside this parameter's type that cannot cross the
-            // wire, or `""` when the whole of it can (RFC-0071 M3). A parameter
-            // is a DECODE target, so this is `codec::decodable`'s answer — which
-            // is the compiler's own rule rather than a second one that could
-            // drift from it.
-            Field {
-                name: "uncodable".to_string(),
-                ty: Type::Str,
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    program.type_decls.push(TypeDecl {
-        name: "FnInfo".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "name".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "params".to_string(),
-                ty: Type::Array(Box::new(Type::Named("ParamInfo".to_string()))),
-            },
-            Field {
-                name: "ret".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "retSchema".to_string(),
-                ty: Type::Named("Schema".to_string()),
-            },
-            // The same answer for the return type, `codec::encodable`'s way
-            // round — a return is ENCODED. `Unit` reports itself here (nothing
-            // is codable that is not a value); a caller that means "nothing is
-            // sent" tests `ret == ""` first, which is what `std/rpc` does.
-            Field {
-                name: "retUncodable".to_string(),
-                ty: Type::Str,
-            },
-            // `mut fn` — the author declared that this procedure changes state
-            // (RFC-0074 M4a). Never inferred: Vyrn does not track effects, so
-            // this is exactly what the declaration said and nothing more. One
-            // bit, three spellings — `std/graphql` reads it as Mutation vs
-            // Query, an HTTP projection as not-a-`GET`, gRPC ignores it.
-            Field {
-                name: "mutates".to_string(),
-                ty: Type::Bool,
-            },
-            // Where the procedure was declared (RFC-0073 M1) — the half of
-            // `//@origin` that line-granular mapping cannot carry: a generated
-            // stub knows which declaration it stands for, and can say so.
-            Field {
-                name: "origin".to_string(),
-                ty: Type::Named("Origin".to_string()),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    program.type_decls.push(TypeDecl {
-        name: "TypeInfo".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "name".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "source".to_string(),
-                ty: Type::Str,
-            },
-            // The import specifier (relative to the reflected module's importer)
-            // for the module that DECLARES this type — so a generator that must
-            // share the type's identity (rpcServer/rpcInProcess) can import it
-            // from the right module when the closure reaches across imports
-            // (RFC-0031). Own types carry the generator's own contract argument.
-            Field {
-                name: "module".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "schema".to_string(),
-                ty: Type::Named("Schema".to_string()),
-            },
-            // Where the type was declared — the reflected module's file for its
-            // own types, the DECLARING module's for a closure type reached
-            // across an import (RFC-0073 M1).
-            Field {
-                name: "origin".to_string(),
-                ty: Type::Named("Origin".to_string()),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    program.type_decls.push(TypeDecl {
-        name: "ModuleInterface".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "functions".to_string(),
-                ty: Type::Array(Box::new(Type::Named("FnInfo".to_string()))),
-            },
-            Field {
-                name: "types".to_string(),
-                ty: Type::Array(Box::new(Type::Named("TypeInfo".to_string()))),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    // Contract reflection (RFC-0071): `contractOf(Name)` returns the declared
-    // shape of a module contract — `moduleInterface`'s counterpart on the
-    // *expectation* side, so `std/contract:checkContract(iface, contractOf(P))`
-    // compares two ordinary records in ordinary Vyrn code and the compiler stays
-    // ignorant of any particular contract. Injected like `ModuleInterface` so a
-    // generator can name them without an import.
-    //   MemberInfo   { name, kind, spelling, params, ret, optional, variadic, doc }
-    //   ContractInfo { name, module, doc, open, members: Array<MemberInfo> }
-    // `kind` is `"let"` or `"fn"`; `name` is `"*"` for the open rule; `spelling`
-    // is the member's whole type (`Head`, or `fn(Int64) -> String`) so a
-    // comparison against `FnInfo`/`TypeInfo` spellings is a string comparison.
-    // `variadic` marks an open rule written `fn *(..) -> R`, which constrains the
-    // return type only.
-    program.type_decls.push(TypeDecl {
-        name: "MemberInfo".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "name".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "kind".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "spelling".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "params".to_string(),
-                ty: Type::Array(Box::new(Type::Str)),
-            },
-            Field {
-                name: "ret".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "optional".to_string(),
-                ty: Type::Bool,
-            },
-            Field {
-                name: "variadic".to_string(),
-                ty: Type::Bool,
-            },
-            Field {
-                name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    program.type_decls.push(TypeDecl {
-        name: "ContractInfo".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "name".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "module".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "doc".to_string(),
-                ty: Type::Option(Box::new(Type::Str)),
-            },
-            Field {
-                name: "open".to_string(),
-                ty: Type::Bool,
-            },
-            Field {
-                name: "members".to_string(),
-                ty: Type::Array(Box::new(Type::Named("MemberInfo".to_string()))),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    // The server surface (RFC-0016): the `Request` handed to `handle` and the
-    // `Response` it returns. Ordinary records (no `where`), injected like
-    // `Schema`/`Issue` so every program can name them without a `use` and
-    // `vyrn serve` can construct/read them across the FFI-free interpreter
-    // boundary. `path` carries the query string as sent; `body` is the raw
-    // request body (`""` when absent). Users construct them freely — `main`
-    // calling `handle` directly is the parity story.
-    //
-    // `headers` (RFC-0072 M4) carries the request's header block. RFC 9110 makes
-    // field names case-insensitive, and a `Map<String, String>` lookup is exact,
-    // so the NAMES ARE LOWERCASED WHERE THE REQUEST IS BUILT — the host lowercases
-    // as it parses the wire, and a hand-written `Request` literal writes lowercase
-    // keys. Normalizing at construction rather than at lookup keeps the map itself
-    // canonical: iterating it yields one spelling per header, and no reader has to
-    // remember a helper to be correct. Duplicate field lines join with `", "` per
-    // RFC 9110 §5.3.
-    program.type_decls.push(TypeDecl {
-        name: "Request".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "method".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "path".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "headers".to_string(),
-                ty: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
-            },
-            Field {
-                name: "body".to_string(),
-                ty: Type::Str,
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
-    program.type_decls.push(TypeDecl {
-        name: "Response".to_string(),
-        exported: false,
-        module: None,
-        doc: None,
-        type_params: Vec::new(),
-        base: Type::Record(vec![
-            Field {
-                name: "status".to_string(),
-                ty: Type::Int,
-            },
-            Field {
-                name: "contentType".to_string(),
-                ty: Type::Str,
-            },
-            Field {
-                name: "body".to_string(),
-                ty: Type::Str,
-            },
-            // The `Vary` response header (RFC-0072 M4). A response whose body
-            // depends on a request header must say which, or a shared cache will
-            // serve one audience's copy to the other — a page's HTML to a client
-            // asking for its JSON payload. `""` emits no header.
-            Field {
-                name: "vary".to_string(),
-                ty: Type::Str,
-            },
-            // Every OTHER response header, in insertion order (RFC-0074 M2).
-            // `Vary` kept its own field because RFC-0072 M4 already shipped it and
-            // one negotiation channel is better than two; the rest of HTTP's
-            // response vocabulary — `ETag`, `Cache-Control`, `Last-Modified`,
-            // `Location` — is open-ended, so it is a map rather than a field per
-            // header. Names are written as they go on the wire (response header
-            // names are never looked up by the program that just wrote them, so
-            // the `Request` lowercasing rule does not apply here).
-            Field {
-                name: "headers".to_string(),
-                ty: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
-            },
-        ]),
-        predicate: None,
-        line: 0,
-    });
+    // The language's prelude (RFC-0125 §3 M6): the declarations the compiler
+    // puts into every program. They are stated once, in Vyrn, in
+    // `prelude.vyrn`, and [`crate::prelude::type_decls`] parses that with the
+    // parser below. Nothing here says what they are.
+    program
+        .type_decls
+        .extend(crate::prelude::type_decls().iter().cloned());
     // Flatten each `impl P for T` method into a mangled top-level function
     // (`P__Key__method`), so type checking, monomorphization, and lowering treat
     // it like any function; protocol-method *calls* resolve to these names by the
@@ -857,6 +310,14 @@ pub fn parse_accum(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Whether this parser reads an interpolation hole rather than the file.
+    ///
+    /// A hole is re-lexed as its own source, so its tokens count lines and
+    /// columns from the hole rather than from the file — which is why
+    /// [`Parser::parse_hole`] anchors every diagnostic at the template. A
+    /// binder inherits the same limit, so one parsed here carries no position
+    /// and never becomes a local ([`crate::ast::Binder`]).
+    in_hole: bool,
     /// When true, a bare `Ident {` is NOT a struct literal (so `if x { .. }`
     /// parses `x` as the condition and `{` as the block). Reset inside `( .. )`.
     no_struct: bool,
@@ -901,6 +362,38 @@ struct Parser {
     /// ([`Parser::unary`], which every expression recursion enters exactly
     /// once), a type ([`Parser::type_`]) and a block ([`Parser::block`]).
     depth: u32,
+}
+
+/// How a binary operator is written, for a diagnostic that quotes one.
+///
+/// Derived, not tabulated: [`Parser::binop`] says which token spells each
+/// operator and `lexer::punct_text` says how that token is written, so the
+/// spelling is stated once and `checker::pred_summary`'s own nineteen rows are
+/// gone (RFC-0125 §3 M6). The search is over 36 spellings, on a path that is
+/// about to format a message.
+pub fn binop_text(op: BinOp) -> &'static str {
+    crate::lexer::PUNCT_SPELLINGS
+        .iter()
+        .find(|s| {
+            crate::lexer::punct_tok(s)
+                .and_then(|t| Parser::binop(&t))
+                .map(|(o, _)| o)
+                == Some(op)
+        })
+        .copied()
+        .unwrap_or_else(|| unreachable!("every `BinOp` is spelled by one token"))
+}
+
+/// A skeleton wrapped as a function body, for the statement-list mode of a
+/// code quote (RFC-0054).
+///
+/// [`Parser::parses_as_stmts`] tries a skeleton this way and
+/// [`Parser::skeleton_error_detail`] reports the error out of the same wrapper,
+/// which is why they are one statement: the detail's line is the wrapped line
+/// minus the wrapper's own, and a wrapper that grew a line in one place and not
+/// the other would point at the wrong row.
+fn as_fn_body(src: &str) -> String {
+    format!("fn __vyrn_probe__() {{\n{src}\n}}")
 }
 
 /// Whether `e` is a field-access chain bottoming out in `a[i]` (i.e. `@at(a, i)`),
@@ -969,6 +462,7 @@ pub fn place_receiver(
                     line,
                 },
                 line,
+                col: 0,
             });
             post.insert(
                 0,
@@ -998,9 +492,11 @@ pub fn place_receiver(
                 ty: None,
                 value: args[1].clone(),
                 line,
+                col: 0,
             });
             let index = Expr::Var { name: idx, line };
             let load = Expr::Call {
+                type_args: Vec::new(),
                 name: "@at".to_string(),
                 args: vec![
                     Expr::Var {
@@ -1017,6 +513,7 @@ pub fn place_receiver(
                 ty: None,
                 value: load,
                 line,
+                col: 0,
             });
             post.insert(
                 0,
@@ -1078,6 +575,7 @@ pub fn hoist_operand(e: Expr, name: String, hoists: &mut Vec<Stmt>, line: usize)
         ty: None,
         value: e,
         line,
+        col: 0,
     });
     Expr::Var { name, line }
 }
@@ -1117,7 +615,131 @@ fn hoist_mutating_receiver(e: &mut Expr, line: usize) -> Option<(Vec<Stmt>, Vec<
     Some((hoists, post))
 }
 
+/// What a store through a place becomes — the ONE statement of RFC-0082 M1's
+/// rewrite.
+///
+/// Two callers write a store whose target is not a slot. `a[i] = v` is the
+/// surface one, and [`Parser::stmt`] reaches this after `postfix` has parsed
+/// `a[i]` as `@at(a, i)`. A store through a projection is the other, and
+/// `project.rs` reaches it for `@slot` (RFC-0091 M3). Both wanted the same
+/// statements and both used to spell them, down to the temporaries' names.
+///
+/// RFC-0091 7a refused the projection case by name: `a[i] = v` accepted a
+/// projection only where the yielded place was the binding's own element,
+/// because writing anywhere else "needs an address-of no backend has".
+/// **That reading was wrong, and the mechanism was already in the repo.**
+/// RFC-0082 M1 met the same problem for `r.a[i] = v` — a container that is not
+/// a slot — and answered it without an address-of: move the container out into
+/// a temp, mutate the temp, move it back. [`place_receiver`] is that desugar,
+/// it is pure AST, and it already handles the three shapes a place can take.
+///
+/// So a store through a user container is the same three statements the
+/// language emits for `r.a[i] = v`, wrapped around the store the projection
+/// resolved to. No engine gains an addressing mode.
+///
+/// The move-out is O(1) for a growable container — a header copy, sharing the
+/// buffer — and a whole-value copy for one held inline, which is what
+/// `a[i].f = v` has always cost.
+///
+/// `None` means the target is something no store can reach: a call result, a
+/// literal, a temporary. The caller keeps its own refusal.
+pub fn store_stmts(place: &Expr, value: &Expr, line: usize) -> Option<Vec<Stmt>> {
+    match place {
+        // The whole receiver: `yield self` and nothing else.
+        Expr::Var { name, .. } => Some(vec![Stmt::Assign {
+            name: name.clone(),
+            value: value.clone(),
+            line,
+        }]),
+        // A field of a place: `return self.count`.
+        Expr::Field { expr, field, .. } => {
+            let (recv, mut out, moves, post) = place_receiver(expr, line)?;
+            let value = if moves.is_empty() {
+                value.clone()
+            } else {
+                hoist_operand(value.clone(), format!("{recv}#val"), &mut out, line)
+            };
+            out.extend(moves);
+            out.push(Stmt::SetField {
+                name: recv,
+                field: field.clone(),
+                value,
+                line,
+            });
+            out.extend(post);
+            Some(out)
+        }
+        // An element of a place: `return self.data[j]`, and the seeded row's
+        // `yield @slot(self, i)`.
+        Expr::Call { name, args, .. }
+            if (name == crate::project::AT || name == crate::project::ELEM) && args.len() == 2 =>
+        {
+            let (recv, mut out, moves, post) = place_receiver(&args[0], line)?;
+            // With a move-out in play the index and the value run before it, in
+            // source order: nothing may read the place while it is out.
+            let (index, value) = if moves.is_empty() {
+                (args[1].clone(), value.clone())
+            } else {
+                // `#`, not `[]`: the round-fifty rename, mirrored — a name
+                // spelled `{recv}[]idx` reads as DERIVED from the `{recv}[]`
+                // container temp under `mentions_place`, which vetoed the
+                // inner store's displaced-element row and left every
+                // overwritten user-container element with no owner
+                // (exit-residue round fifty-seven, std/slots).
+                let i = hoist_operand(args[1].clone(), format!("{recv}#idx"), &mut out, line);
+                let v = hoist_operand(value.clone(), format!("{recv}#val"), &mut out, line);
+                (i, v)
+            };
+            out.extend(moves);
+            out.push(Stmt::IndexSet {
+                name: recv,
+                index,
+                value,
+                line,
+            });
+            out.extend(post);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 impl Parser {
+    /// A parser over `tokens` with nothing in scope — what an entry point
+    /// starts from.
+    ///
+    /// **The nine fields are stated here and nowhere else.** Four places built
+    /// this record by hand, two of them adding the enclosing declaration's
+    /// scope to it, and a tenth field would have had to be added to all four.
+    fn over(tokens: Vec<Token>) -> Parser {
+        Parser {
+            tokens,
+            pos: 0,
+            in_hole: false,
+            no_struct: false,
+            type_params: Vec::new(),
+            type_aliases: Default::default(),
+            field_preds: None,
+            extra_stmts: Vec::new(),
+            errors: Vec::new(),
+            depth: 0,
+        }
+    }
+
+    /// A sub-parser over `tokens` that inherits what the enclosing declaration
+    /// has in scope: its generic parameters and its type aliases, so a
+    /// re-lexed interpolation hole or code-quote skeleton that mentions `T`
+    /// still parses. Nothing else crosses — the desugar queue, the recovered
+    /// errors and the nesting depth are the sub-parse's own.
+    fn sub(&self, tokens: Vec<Token>) -> Parser {
+        Parser {
+            type_params: self.type_params.clone(),
+            type_aliases: self.type_aliases.clone(),
+            in_hole: true,
+            ..Parser::over(tokens)
+        }
+    }
+
     // ---- token cursor helpers -------------------------------------------
 
     fn peek(&self) -> &Tok {
@@ -1241,6 +863,25 @@ impl Parser {
             return Ok("self".to_string());
         }
         self.expect_ident()
+    }
+
+    /// Where the token under the cursor is spelled in the FILE, or `(0, 0)`
+    /// when no file token spells it. A hole's tokens count from the hole, so a
+    /// binder parsed there carries no position ([`Parser::in_hole`]). Every
+    /// binder's line and column is taken here, so the rule is stated once.
+    fn binder_pos(&self) -> (usize, usize) {
+        if self.in_hole {
+            (0, 0)
+        } else {
+            (self.line(), self.col())
+        }
+    }
+
+    /// The binder under the cursor: its name and where it is spelled.
+    fn expect_binder(&mut self) -> Result<Binder, Diagnostic> {
+        let (line, col) = self.binder_pos();
+        let name = self.expect_ident()?;
+        Ok(Binder { name, line, col })
     }
 
     fn expect_ident(&mut self) -> Result<String, Diagnostic> {
@@ -1477,7 +1118,7 @@ impl Parser {
                 Tok::Ident(name)
                     if name == "test" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
-                    match self.test_decl() {
+                    match self.named_block("test") {
                         Ok(mut t) => {
                             t.doc = doc;
                             tests.push(t);
@@ -1495,7 +1136,7 @@ impl Parser {
                 Tok::Ident(name)
                     if name == "bench" && matches!(self.tokens[self.pos + 1].tok, Tok::Str(_)) =>
                 {
-                    match self.bench_decl() {
+                    match self.named_block("bench") {
                         Ok(mut b) => {
                             b.doc = doc;
                             benches.push(b);
@@ -2252,14 +1893,18 @@ impl Parser {
         let name = self.expect_ident()?;
         self.eat(&Tok::LParen)?;
         let capability = self.parse_self_capability();
+        let (self_line, self_col) = self.binder_pos();
         self.eat(&Tok::Vself)?;
         let mut params = vec![Param {
             name: "self".to_string(),
             capability,
             ty: self_ty.clone(),
+            line: self_line,
+            col: self_col,
         }];
         while *self.peek() == Tok::Comma {
             self.advance();
+            let (line, col) = self.binder_pos();
             let pname = self.expect_ident()?;
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
@@ -2268,6 +1913,8 @@ impl Parser {
                 name: pname,
                 capability,
                 ty,
+                line,
+                col,
             });
         }
         self.eat(&Tok::RParen)?;
@@ -2807,6 +2454,57 @@ impl Parser {
     /// on its own type variable, which is most of what a generic impl is for.
     /// Returns empty when no `<` follows.
     #[allow(clippy::type_complexity)]
+    /// The explicit type arguments of a call — `fromJson<Shape>(s)` — or an
+    /// empty list where the callee is followed by anything else.
+    ///
+    /// **`<` after a callee is ambiguous with less-than, so this is a
+    /// SPECULATIVE parse.** A binder position (`fn f<T>`) has no ambiguity: the
+    /// grammar is already inside a declaration. A call site is an expression,
+    /// and `f < g` is a comparison. The rule is the narrowest one that admits
+    /// the form: a comma-separated type list, closed by `>`, with `(`
+    /// IMMEDIATELY after the `>`. Anything else rewinds the cursor and leaves
+    /// the `<` to the binary operator, so no program that parsed before parses
+    /// differently — except `a < b > (c)`, which is a comparison of a `Bool`
+    /// against a value and has no meaning in this language.
+    ///
+    /// The cursor is the whole of the parser's state at an expression boundary,
+    /// so rewinding is one assignment. Nothing is recorded and no diagnostic is
+    /// raised on the failed attempt: the type parser's error belongs to whoever
+    /// re-reads these tokens as an expression.
+    fn call_type_args(&mut self) -> Vec<Type> {
+        if *self.peek() != Tok::Lt {
+            return Vec::new();
+        }
+        let saved = self.pos;
+        self.advance();
+        let mut out = Vec::new();
+        loop {
+            match self.type_() {
+                Ok(t) => out.push(t),
+                Err(_) => {
+                    self.pos = saved;
+                    return Vec::new();
+                }
+            }
+            if *self.peek() == Tok::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let closes = *self.peek() == Tok::Gt
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.tok),
+                Some(Tok::LParen)
+            );
+        if closes && !out.is_empty() {
+            self.advance(); // the `>`
+            return out;
+        }
+        self.pos = saved;
+        Vec::new()
+    }
+
     fn type_param_binder(
         &mut self,
     ) -> Result<(Vec<String>, std::collections::HashMap<String, Vec<String>>), Diagnostic> {
@@ -2859,6 +2557,7 @@ impl Parser {
 
         let mut params = Vec::new();
         while *self.peek() != Tok::RParen {
+            let (line, col) = self.binder_pos();
             let pname = self.expect_ident()?;
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
@@ -2867,6 +2566,8 @@ impl Parser {
                 name: pname,
                 capability,
                 ty,
+                line,
+                col,
             });
             if *self.peek() == Tok::Comma {
                 self.advance();
@@ -2919,14 +2620,18 @@ impl Parser {
         })
     }
 
-    /// `test "name" { body }` — a test declaration (RFC-0015). `test` is a
-    /// contextual starter (a plain identifier elsewhere); the caller has already
-    /// confirmed the `test` / string-literal lookahead. The body parses like any
-    /// function block; `assert`/`assertEq` become legal inside it (enforced by the
-    /// checker, which knows it is in a test).
-    fn test_decl(&mut self) -> Result<TestDecl, Diagnostic> {
+    /// `test "name" { body }` (RFC-0015) and `bench "name" { body }` (RFC-0055)
+    /// — one production, because they are one declaration (RFC-0127 §8).
+    ///
+    /// Both words are contextual starters (a plain identifier elsewhere) and the
+    /// caller has already confirmed the word / string-literal lookahead, so
+    /// `word` is only what the refusal is worded with. The body parses like any
+    /// function block; `assert`/`assertEq` become legal inside a test and
+    /// `blackBox` inside a bench, both enforced by the checker, which knows
+    /// which field it is walking.
+    fn named_block(&mut self, word: &str) -> Result<NamedBlock, Diagnostic> {
         let line = self.line();
-        self.advance(); // `test` (a contextual Ident)
+        self.advance(); // `test` / `bench` (a contextual Ident)
         let name = match self.advance() {
             Tok::Str(s) => s,
             other => {
@@ -2934,48 +2639,16 @@ impl Parser {
                     self.line(),
                     self.col(),
                     "parse",
-                    format!("expected a test name string, found {other:?}"),
+                    format!("expected a {word} name string, found {other:?}"),
                 ))
             }
         };
-        // A test body sees no generic parameters (a test is monomorphic).
+        // The body sees no generic parameters (a test and a bench are both
+        // monomorphic).
         self.type_params.clear();
         let body = self.block()?;
         self.type_params.clear();
-        Ok(TestDecl {
-            name,
-            body,
-            doc: None,
-            module: None,
-            line,
-        })
-    }
-
-    /// `bench "name" { body }` — a benchmark declaration (RFC-0055). `bench` is a
-    /// contextual starter (a plain identifier elsewhere); the caller has already
-    /// confirmed the `bench` / string-literal lookahead. Structurally identical to
-    /// [`Parser::test_decl`]; the body parses like any function block, and
-    /// `blackBox` becomes legal inside it (enforced by the checker, which knows it
-    /// is in a bench).
-    fn bench_decl(&mut self) -> Result<BenchDecl, Diagnostic> {
-        let line = self.line();
-        self.advance(); // `bench` (a contextual Ident)
-        let name = match self.advance() {
-            Tok::Str(s) => s,
-            other => {
-                return Err(Diagnostic::error(
-                    self.line(),
-                    self.col(),
-                    "parse",
-                    format!("expected a bench name string, found {other:?}"),
-                ))
-            }
-        };
-        // A bench body sees no generic parameters (a bench is monomorphic).
-        self.type_params.clear();
-        let body = self.block()?;
-        self.type_params.clear();
-        Ok(BenchDecl {
+        Ok(NamedBlock {
             name,
             body,
             doc: None,
@@ -3009,6 +2682,7 @@ impl Parser {
         self.eat(&Tok::LParen)?;
         let mut params = Vec::new();
         while *self.peek() != Tok::RParen {
+            let (line, col) = self.binder_pos();
             let pname = self.expect_ident()?;
             self.eat(&Tok::Colon)?;
             let capability = self.parse_capability();
@@ -3017,6 +2691,8 @@ impl Parser {
                 name: pname,
                 capability,
                 ty,
+                line,
+                col,
             });
             if *self.peek() == Tok::Comma {
                 self.advance();
@@ -3348,7 +3024,7 @@ impl Parser {
                 self.eat(&Tok::Lt)?;
                 let inner = self.type_()?;
                 self.eat(&Tok::Gt)?;
-                Type::Option(Box::new(inner))
+                Type::option(inner)
             }
             "Result" => {
                 self.eat(&Tok::Lt)?;
@@ -3356,7 +3032,7 @@ impl Parser {
                 self.eat(&Tok::Comma)?;
                 let err = self.type_()?;
                 self.eat(&Tok::Gt)?;
-                Type::Result(Box::new(ok), Box::new(err))
+                Type::result(ok, err)
             }
             // Compile-time transformers (RFC-0002 §7).
             "Omit" | "Pick" => {
@@ -3705,9 +3381,9 @@ impl Parser {
             ));
         }
         self.eat(&Tok::LParen)?;
-        let mut binds: Vec<String> = Vec::new();
+        let mut binds: Vec<Binder> = Vec::new();
         while *self.peek() != Tok::RParen {
-            binds.push(self.expect_ident()?);
+            binds.push(self.expect_binder()?);
             if *self.peek() == Tok::Comma {
                 self.advance();
             } else {
@@ -3744,30 +3420,32 @@ impl Parser {
         let msg = format!("let `{variant}(..)` did not match");
         let mut stmts = Vec::new();
         for (j, b) in binds.iter().enumerate() {
-            let arm_binds: Vec<String> = binds
+            let arm_binds: Vec<Binder> = binds
                 .iter()
                 .enumerate()
-                .map(|(k, name)| {
+                .map(|(k, b)| {
                     if k == j {
-                        name.clone()
+                        b.clone()
                     } else {
-                        format!("@rl{k}")
+                        Binder::synthetic(format!("@rl{k}"))
                     }
                 })
                 .collect();
             let m = Expr::Match {
+                stmt_pos: false,
                 scrutinee: Box::new(scrut.clone()),
                 arms: vec![
                     MatchArm {
                         pattern: Pattern::Variant(variant.clone(), arm_binds),
                         body: ArmBody::Expr(Expr::Var {
-                            name: b.clone(),
+                            name: b.name.clone(),
                             line,
                         }),
                     },
                     MatchArm {
                         pattern: Pattern::Other,
                         body: ArmBody::Expr(Expr::Call {
+                            type_args: Vec::new(),
                             name: "panic".to_string(),
                             args: vec![Expr::Str(msg.clone())],
                             line,
@@ -3777,11 +3455,12 @@ impl Parser {
                 line,
             };
             stmts.push(Stmt::Let {
-                name: b.clone(),
+                name: b.name.clone(),
                 mutable: false,
                 ty: None,
                 value: m,
                 line,
+                col: b.col,
             });
         }
         Ok(self.spliced(stmts))
@@ -3808,6 +3487,7 @@ impl Parser {
                 {
                     return self.refutable_let(line, mutable);
                 }
+                let col = self.binder_pos().1;
                 let name = self.expect_ident()?;
                 let ty = if *self.peek() == Tok::Colon {
                     self.advance();
@@ -3829,6 +3509,7 @@ impl Parser {
                         ty,
                         value,
                         line,
+                        col,
                     });
                     pre.extend(post);
                     return Ok(self.spliced(pre));
@@ -3839,6 +3520,7 @@ impl Parser {
                     ty,
                     value,
                     line,
+                    col,
                 })
             }
             Tok::Return => {
@@ -3899,6 +3581,7 @@ impl Parser {
             }
             Tok::For => {
                 self.advance();
+                let col = self.binder_pos().1;
                 let var = self.expect_ident()?;
                 self.eat(&Tok::In)?;
                 // Parse the iterable in the no-struct context (like a `while`
@@ -3920,6 +3603,7 @@ impl Parser {
                     body,
                     line,
                     consuming,
+                    col,
                 })
             }
             Tok::Region => {
@@ -3974,54 +3658,22 @@ impl Parser {
                             // The array may live in a slot already, or in a
                             // record field / array element that `place_receiver`
                             // moves out and back around the store (RFC-0082 M1).
-                            if let Some((recv, mut hoists, moves, post)) =
-                                place_receiver(&args[0], line)
-                            {
-                                let index = args[1].clone();
+                            // The statements are `store_stmts`'s, which is also
+                            // where a store through a projection goes — the
+                            // rewrite is stated once and the temporaries are
+                            // named once with it.
+                            //
+                            // The shape is asked BEFORE the value is parsed, so
+                            // an unreachable target is still this sentence and
+                            // not whatever the right side says.
+                            if place_receiver(&args[0], line).is_some() {
                                 self.advance(); // eat `=`
                                 let value = self.expr()?;
                                 self.eat_semi();
-                                // With a move-out in play the index and the value
-                                // must be evaluated before it, in source order
-                                // (RFC-0082 M2). Nothing moves when the base is
-                                // already a slot, so `a[i] = v` stays one
-                                // statement.
-                                let (index, value) = if moves.is_empty() {
-                                    (index, value)
-                                } else {
-                                    // `#`, not `[]`: a hoisted operand is
-                                    // its own binding, and a name spelled
-                                    // `{recv}[]val` reads as DERIVED from the
-                                    // `{recv}[]` container temp under
-                                    // `mentions_place` (the byte after the
-                                    // base is `[`), which stood the inner
-                                    // store's displaced-element release down
-                                    // forever (exit-residue round fifty). `#`
-                                    // is just as unspellable and derives from
-                                    // nothing.
-                                    let i = hoist_operand(
-                                        index,
-                                        format!("{recv}#idx"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    let v = hoist_operand(
-                                        value,
-                                        format!("{recv}#val"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    (i, v)
+                                let Some(stmts) = store_stmts(&e, &value, line) else {
+                                    unreachable!("`place_receiver` answered for this place")
                                 };
-                                hoists.extend(moves);
-                                hoists.push(Stmt::IndexSet {
-                                    name: recv,
-                                    index,
-                                    value,
-                                    line,
-                                });
-                                hoists.extend(post);
-                                return Ok(self.spliced(hoists));
+                                return Ok(self.spliced(stmts));
                             }
                             return Err(Diagnostic::error(
                                 line,
@@ -4033,86 +3685,27 @@ impl Parser {
                             ));
                         }
                     }
-                    // `a[i].f = v` — write-through to a record field of an array
-                    // element (RFC-0011 addendum). `a[i].f` parsed as
-                    // `Field { @at(a, i), f }`; a trailing `=` makes it a
-                    // copy-modify-store: load element `i`, set field `f` on the
-                    // copy, store it back into slot `i`. Desugars to the exact
-                    // idiom `let mut @tmp = a[i]  @tmp.f = v  a[i] = @tmp`, so it
-                    // inherits SetField's field/validated-data rules and
-                    // IndexSet's bounds-check + coercion unchanged, in all three
-                    // backends.
-                    if let Expr::Field { expr, field, .. } = &e {
+                    // `a[i].f = v` — write-through to a record field of an
+                    // array element (RFC-0011 addendum). The statements are
+                    // `store_stmts`'s, the same ones `a[i] = v` above and a
+                    // store through a projection both take: move the container
+                    // out, set the field on the temp, move it back. The rewrite
+                    // is stated once and the temporaries are named once with it.
+                    //
+                    // The shape is asked BEFORE the value is parsed, so an
+                    // unreachable target is still this sentence and not
+                    // whatever the right side says.
+                    if let Expr::Field { expr, .. } = &e {
                         if let Expr::Call { name, args, .. } = expr.as_ref() {
                             if name == "@at" && args.len() == 2 {
-                                if let Some((recv, mut hoists, mut pre, post)) =
-                                    place_receiver(&args[0], line)
-                                {
-                                    let field = field.clone();
+                                if place_receiver(&args[0], line).is_some() {
                                     self.advance(); // eat `=`
                                     let value = self.expr()?;
                                     self.eat_semi();
-                                    // The element copy's binding name. Unspellable
-                                    // (contains `[`), so it can't collide with a
-                                    // real identifier and is filtered from the
-                                    // symbol/completion index; but it reads
-                                    // naturally if it surfaces in a SetField
-                                    // diagnostic ("record `ps[]` has no field ..").
-                                    let tmp = format!("{recv}[]");
-                                    // The element load and the store back both
-                                    // need the index, and it must run once, so it
-                                    // is hoisted whether or not it reads a place;
-                                    // the value is hoisted because the element is
-                                    // TAKEN out of the array in the interpreter
-                                    // (RFC-0082 M2) — `a[i].f = a[i].g` would
-                                    // otherwise read the hole.
-                                    let index = hoist_operand(
-                                        args[1].clone(),
-                                        format!("{tmp}idx"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    let value = hoist_operand(
-                                        value,
-                                        format!("{tmp}val"),
-                                        &mut hoists,
-                                        line,
-                                    );
-                                    // `let mut @tmp = a[i]`, `@tmp.f = v`, then
-                                    // `a[i] = @tmp` — inside whatever move-out /
-                                    // move-back `place_receiver` asked for.
-                                    pre.push(Stmt::Let {
-                                        name: tmp.clone(),
-                                        mutable: true,
-                                        ty: None,
-                                        value: Expr::Call {
-                                            name: "@at".to_string(),
-                                            args: vec![
-                                                Expr::Var {
-                                                    name: recv.clone(),
-                                                    line,
-                                                },
-                                                index.clone(),
-                                            ],
-                                            line,
-                                        },
-                                        line,
-                                    });
-                                    pre.push(Stmt::SetField {
-                                        name: tmp.clone(),
-                                        field,
-                                        value,
-                                        line,
-                                    });
-                                    pre.push(Stmt::IndexSet {
-                                        name: recv,
-                                        index,
-                                        value: Expr::Var { name: tmp, line },
-                                        line,
-                                    });
-                                    hoists.extend(pre);
-                                    hoists.extend(post);
-                                    return Ok(self.spliced(hoists));
+                                    let Some(stmts) = store_stmts(&e, &value, line) else {
+                                        unreachable!("`place_receiver` answered for this place")
+                                    };
+                                    return Ok(self.spliced(stmts));
                                 }
                                 return Err(Diagnostic::error(
                                     line,
@@ -4165,6 +3758,7 @@ impl Parser {
                 if let Expr::Call { name, args, .. } = &e {
                     if name == "@push"
                         || name == "@reserve"
+                        || name == "@clear"
                         || name == "@append"
                         || name == "@copyFrom"
                         || name == "@tally"
@@ -4235,6 +3829,15 @@ impl Parser {
                             }
                         }
                     }
+                }
+                // Statement position (RFC-0118). A `match` written HERE may have
+                // block arms; one nested anywhere inside an expression may not.
+                // The parser is where that fact exists, so it is written on the
+                // node here and read by the checker — it used to be recovered
+                // later by comparing the arms slice's ADDRESS.
+                let mut e = e;
+                if let Expr::Match { stmt_pos, .. } = &mut e {
+                    *stmt_pos = true;
                 }
                 Ok(Stmt::Expr(e))
             }
@@ -4359,17 +3962,18 @@ impl Parser {
     /// reads one.
     fn nullish(lhs: Expr, rhs: Expr, line: usize) -> Expr {
         Expr::Match {
+            stmt_pos: false,
             scrutinee: Box::new(lhs),
             arms: vec![
                 MatchArm {
-                    pattern: Pattern::Success("@v".to_string()),
+                    pattern: Pattern::Success(Binder::synthetic("@v")),
                     body: ArmBody::Expr(Expr::Var {
                         name: "@v".to_string(),
                         line,
                     }),
                 },
                 MatchArm {
-                    pattern: Pattern::Failure("@e".to_string()),
+                    pattern: Pattern::Failure(Binder::synthetic("@e")),
                     body: ArmBody::Expr(rhs),
                 },
             ],
@@ -4571,7 +4175,14 @@ impl Parser {
                         }
                         _ => name,
                     };
-                    return Ok(Expr::Call { name, args, line });
+                    // Method form takes no explicit type arguments: the
+                    // receiver is the first one and it is always concrete.
+                    return Ok(Expr::Call {
+                        name,
+                        args,
+                        type_args: Vec::new(),
+                        line,
+                    });
                 } else if *self.peek() == Tok::LBrace
                     && !self.no_struct
                     && matches!(&e, Expr::Var { .. })
@@ -4606,6 +4217,7 @@ impl Parser {
                 self.no_struct = saved;
                 self.eat(&Tok::RBracket)?;
                 return Ok(Expr::Call {
+                    type_args: Vec::new(),
                     name: "@at".to_string(),
                     args: vec![e, idx],
                     line,
@@ -4659,7 +4271,7 @@ impl Parser {
         if *self.peek() == Tok::LParen {
             self.advance();
             while *self.peek() != Tok::RParen {
-                params.push(self.expect_ident()?);
+                params.push(self.expect_binder()?);
                 if *self.peek() == Tok::Comma {
                     self.advance();
                 } else {
@@ -4669,7 +4281,7 @@ impl Parser {
             self.eat(&Tok::RParen)?;
         } else {
             // The unparenthesised single parameter, which is the common one.
-            params.push(self.expect_ident()?);
+            params.push(self.expect_binder()?);
         }
         self.eat(&Tok::Arrow)?;
         let body = if *self.peek() == Tok::LBrace {
@@ -4888,6 +4500,7 @@ impl Parser {
                 if fallible {
                     self.advance(); // consume `?`
                 }
+                let type_args = self.call_type_args();
                 if *self.peek() == Tok::LParen {
                     // call / construction
                     self.advance();
@@ -4912,7 +4525,12 @@ impl Parser {
                     Ok(if fallible {
                         Expr::TryConstruct { name, args, line }
                     } else {
-                        Expr::Call { name, args, line }
+                        Expr::Call {
+                            name,
+                            args,
+                            type_args,
+                            line,
+                        }
                     })
                 } else if *self.peek() == Tok::LBrace && !self.no_struct {
                     // struct literal: `Name { field: expr, ... }`
@@ -4952,6 +4570,7 @@ impl Parser {
             // but the lexer can never produce a leading `@`, so user source
             // hitting the bare `str`/`concat` names gets the migration hint.
             pieces.push(Expr::Call {
+                type_args: Vec::new(),
                 name: "@str".to_string(),
                 args: vec![e],
                 line,
@@ -4966,6 +4585,7 @@ impl Parser {
         let mut acc = iter.next().unwrap();
         for p in iter {
             acc = Expr::Call {
+                type_args: Vec::new(),
                 name: "@concat".to_string(),
                 args: vec![acc, p],
                 line,
@@ -4985,17 +4605,7 @@ impl Parser {
                 format!("in interpolation: {}", e.render()),
             )
         })?;
-        let mut sub = Parser {
-            tokens: toks,
-            pos: 0,
-            no_struct: false,
-            type_params: self.type_params.clone(),
-            type_aliases: self.type_aliases.clone(),
-            field_preds: None,
-            extra_stmts: Vec::new(),
-            errors: Vec::new(),
-            depth: 0,
-        };
+        let mut sub = self.sub(toks);
         // A sub-parser diagnostic carries line numbers relative to the hole
         // snippet — anchor it at the template and embed the detail, exactly
         // like the lex-error wrapping above.
@@ -5048,6 +4658,7 @@ impl Parser {
         for src in &exprs {
             let e = self.parse_hole(src, line, col)?;
             values.push(Expr::Call {
+                type_args: Vec::new(),
                 name: "value".to_string(),
                 args: vec![e],
                 line,
@@ -5060,6 +4671,7 @@ impl Parser {
         // `@list` is the internal spelling of the removed `list` builtin (see
         // `@str`/`@concat` above): produced only by desugaring, never lexable.
         let wrap = |e| Expr::Call {
+            type_args: Vec::new(),
             name: "@list".to_string(),
             args: vec![e],
             line,
@@ -5077,6 +4689,7 @@ impl Parser {
             });
         }
         Ok(Expr::Call {
+            type_args: Vec::new(),
             name: tag,
             args: vec![wrap(parts_lit), wrap(values_lit)],
             line,
@@ -5134,6 +4747,7 @@ impl Parser {
             });
         };
         let code_text = |s: &str| Expr::Call {
+            type_args: Vec::new(),
             name: "@codeText".to_string(),
             args: vec![Expr::Str(s.to_string())],
             line,
@@ -5146,6 +4760,7 @@ impl Parser {
                 let ctx = self.hole_context(&parts, &exprs, i);
                 let value = self.parse_hole(&exprs[i], line, col)?;
                 let splice = Expr::Call {
+                    type_args: Vec::new(),
                     name: "@codeSplice".to_string(),
                     args: vec![value, Expr::Int(ctx)],
                     line,
@@ -5199,18 +4814,7 @@ impl Parser {
     /// A fresh sub-parser over `src`, sharing the enclosing generic params (so a
     /// skeleton mentioning `T` inside a generic `gen fn` still parses).
     fn sub_parser(&self, src: &str) -> Option<Parser> {
-        let toks = crate::lexer::lex(src).ok()?;
-        Some(Parser {
-            tokens: toks,
-            pos: 0,
-            no_struct: false,
-            type_params: self.type_params.clone(),
-            type_aliases: self.type_aliases.clone(),
-            field_preds: None,
-            extra_stmts: Vec::new(),
-            errors: Vec::new(),
-            depth: 0,
-        })
+        Some(self.sub(crate::lexer::lex(src).ok()?))
     }
 
     /// Whether `src` parses cleanly as any of the four skeleton modes.
@@ -5233,7 +4837,7 @@ impl Parser {
     /// Statement-list mode: `src` is a function body (wrapped so `program_accum`
     /// parses it as one).
     fn parses_as_stmts(&self, src: &str) -> bool {
-        self.parses_as_decls(&format!("fn __vyrn_probe__() {{\n{src}\n}}"))
+        self.parses_as_decls(&as_fn_body(src))
     }
 
     /// Expression mode: `src` is a single expression consuming the whole stream.
@@ -5256,8 +4860,7 @@ impl Parser {
     /// parses in no mode. Prefers the statement-mode error (the common case is a
     /// declaration or statement skeleton).
     fn skeleton_error_detail(&self, skel: &str) -> (String, usize, usize) {
-        let wrapped = format!("fn __vyrn_probe__() {{\n{skel}\n}}");
-        if let Some(mut p) = self.sub_parser(&wrapped) {
+        if let Some(mut p) = self.sub_parser(&as_fn_body(skel)) {
             let (_prog, errs) = p.program_accum();
             if let Some(d) = errs.into_iter().next() {
                 let sl = d.line.saturating_sub(1).max(1); // undo the wrapper line
@@ -5307,6 +4910,7 @@ impl Parser {
         Ok(Expr::Match {
             scrutinee: Box::new(scrutinee),
             arms,
+            stmt_pos: false,
             line,
         })
     }
@@ -5335,8 +4939,23 @@ impl Parser {
     /// names are `@`-prefixed so they can never collide with a user identifier.
     fn storage_desugar(name: &str, args: &[Expr], line: usize) -> Option<Expr> {
         let call = |n: &str, a: Vec<Expr>| Expr::Call {
+            type_args: Vec::new(),
             name: n.to_string(),
             args: a,
+            line,
+        };
+        // `load(TypeName, path)`'s first argument is a type NAME in argument
+        // position, which is the shape RFC-0125 §3 M6 took off `fromJson`. The
+        // two helpers keep it — they are `std/storage`'s surface and not the
+        // language's — so the desugar converts it here, once, to the type
+        // argument `fromJson<T>(s)` now takes.
+        let decode = |t: &Expr, text: Expr| Expr::Call {
+            name: "fromJson".to_string(),
+            args: vec![text],
+            type_args: match t {
+                Expr::Var { name, .. } => vec![Type::Named(name.clone())],
+                _ => Vec::new(),
+            },
             line,
         };
         let var = |n: &str| Expr::Var {
@@ -5350,16 +4969,20 @@ impl Parser {
             )),
             ("load", 2) => {
                 let decoded = Expr::Match {
-                    scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
+                    stmt_pos: false,
+                    scrutinee: Box::new(decode(&args[0], var("@t"))),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
+                            pattern: Pattern::Variant(
+                                "Valid".to_string(),
+                                vec![Binder::synthetic("@v")],
+                            ),
                             body: ArmBody::Expr(call("Loaded", vec![var("@v")])),
                         },
                         MatchArm {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
-                                vec!["@i".to_string()],
+                                vec![Binder::synthetic("@i")],
                             ),
                             body: ArmBody::Expr(call("Corrupt", vec![var("@i")])),
                         },
@@ -5367,14 +4990,15 @@ impl Parser {
                     line,
                 };
                 Some(Expr::Match {
+                    stmt_pos: false,
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Ok("@t".to_string()),
+                            pattern: Pattern::Variant("Ok".into(), vec![Binder::synthetic("@t")]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Err("@e".to_string()),
+                            pattern: Pattern::Variant("Err".into(), vec![Binder::synthetic("@e")]),
                             body: ArmBody::Expr(var("Missing")),
                         },
                     ],
@@ -5384,16 +5008,20 @@ impl Parser {
             ("loadOr", 3) => {
                 let default = args[2].clone();
                 let decoded = Expr::Match {
-                    scrutinee: Box::new(call("fromJson", vec![args[0].clone(), var("@t")])),
+                    stmt_pos: false,
+                    scrutinee: Box::new(decode(&args[0], var("@t"))),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Variant("Valid".to_string(), vec!["@v".to_string()]),
+                            pattern: Pattern::Variant(
+                                "Valid".to_string(),
+                                vec![Binder::synthetic("@v")],
+                            ),
                             body: ArmBody::Expr(var("@v")),
                         },
                         MatchArm {
                             pattern: Pattern::Variant(
                                 "Invalid".to_string(),
-                                vec!["@i".to_string()],
+                                vec![Binder::synthetic("@i")],
                             ),
                             body: ArmBody::Expr(default.clone()),
                         },
@@ -5401,14 +5029,15 @@ impl Parser {
                     line,
                 };
                 Some(Expr::Match {
+                    stmt_pos: false,
                     scrutinee: Box::new(call("readFile", vec![args[1].clone()])),
                     arms: vec![
                         MatchArm {
-                            pattern: Pattern::Ok("@t".to_string()),
+                            pattern: Pattern::Variant("Ok".into(), vec![Binder::synthetic("@t")]),
                             body: ArmBody::Expr(decoded),
                         },
                         MatchArm {
-                            pattern: Pattern::Err("@e".to_string()),
+                            pattern: Pattern::Variant("Err".into(), vec![Binder::synthetic("@e")]),
                             body: ArmBody::Expr(default),
                         },
                     ],
@@ -5539,14 +5168,6 @@ impl Parser {
         Ok(Expr::StructLit { name, fields, line })
     }
 
-    /// Parse the `(name)` that binds a pattern's payload.
-    fn pattern_binding(&mut self) -> Result<String, Diagnostic> {
-        self.eat(&Tok::LParen)?;
-        let bind = self.expect_ident()?;
-        self.eat(&Tok::RParen)?;
-        Ok(bind)
-    }
-
     fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
         let line = self.line();
         let mut name = self.expect_ident()?;
@@ -5562,7 +5183,7 @@ impl Parser {
             if *self.peek() == Tok::LParen {
                 self.advance();
                 while *self.peek() != Tok::RParen {
-                    binds.push(self.expect_ident()?);
+                    binds.push(self.expect_binder()?);
                     if *self.peek() == Tok::Comma {
                         self.advance();
                     } else {
@@ -5573,30 +5194,24 @@ impl Parser {
             }
             return Ok(Pattern::Variant(name, binds));
         }
-        match name.as_str() {
-            "Some" => Ok(Pattern::Some(self.pattern_binding()?)),
-            "Ok" => Ok(Pattern::Ok(self.pattern_binding()?)),
-            "Err" => Ok(Pattern::Err(self.pattern_binding()?)),
-            "None" => Ok(Pattern::None),
-            // Any other identifier is a user-enum variant: `V`, `V(x)`, `V(x, y)`.
-            _ => {
-                let _ = line;
-                let mut binds = Vec::new();
-                if *self.peek() == Tok::LParen {
+        // Every identifier is a variant name: `V`, `V(x)`, `V(x, y)`, and since
+        // RFC-0126 §8 that includes `Some`, `None`, `Ok` and `Err`. The parser
+        // has no scrutinee to ask what the name means, and it never needed one.
+        let _ = line;
+        let mut binds = Vec::new();
+        if *self.peek() == Tok::LParen {
+            self.advance();
+            while *self.peek() != Tok::RParen {
+                binds.push(self.expect_binder()?);
+                if *self.peek() == Tok::Comma {
                     self.advance();
-                    while *self.peek() != Tok::RParen {
-                        binds.push(self.expect_ident()?);
-                        if *self.peek() == Tok::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.eat(&Tok::RParen)?;
+                } else {
+                    break;
                 }
-                Ok(Pattern::Variant(name, binds))
             }
+            self.eat(&Tok::RParen)?;
         }
+        Ok(Pattern::Variant(name, binds))
     }
 }
 
@@ -5817,7 +5432,9 @@ mod tests {
             panic!("expected a match initializer, got {value:?}");
         };
         assert_eq!(arms.len(), 2);
-        assert!(matches!(&arms[0].pattern, Pattern::Variant(v, b) if v == "Circle" && b == &["r"]));
+        assert!(
+            matches!(&arms[0].pattern, Pattern::Variant(v, b) if v == "Circle" && b.len() == 1 && b[0].name == "r")
+        );
         assert!(matches!(&arms[1].pattern, Pattern::Other));
         // The trap is an ordinary `panic`, so the wording has ONE source and
         // the loader stamps the site — parity by construction.
@@ -6440,17 +6057,7 @@ mod tests {
                    fn ok(x: T) -> T { return x } \
                    fn main() -> Int64 { return ok(1) }";
         let toks = lex(src).unwrap();
-        let mut p = Parser {
-            tokens: toks,
-            pos: 0,
-            no_struct: false,
-            type_params: Vec::new(),
-            type_aliases: Default::default(),
-            field_preds: None,
-            extra_stmts: Vec::new(),
-            errors: Vec::new(),
-            depth: 0,
-        };
+        let mut p = Parser::over(toks);
         let (prog, errors) = p.program_accum();
         assert!(!errors.is_empty(), "the broken decl must actually fail");
         let ok = prog
@@ -6731,14 +6338,18 @@ mod tests {
 
     #[test]
     fn index_field_assign_desugars_to_load_setfield_store() {
-        // `a[i].f = v` becomes exactly `let mut a[] = a[i]  a[].f = v  a[i] = a[]`
-        // (three statements spliced into the block, in order).
+        // `a[i].f = v` is `store_stmts`'s field arm: the index binds, the
+        // element moves out, the field is set on the temp, the temp moves back.
         let p =
             parse_src("fn main() -> Int64 { let mut a: Array<Int64> = []  a[0].f = 9  return 0 }");
         let stmts = &p.functions[0].body.stmts;
-        // let a  |  let mut a[]=a[0]  |  a[].f=9  |  a[0]=a[]  |  return
-        assert_eq!(stmts.len(), 5);
-        match &stmts[1] {
+        // let a | let a[]idx=0 | let mut a[]=a[a[]idx] | a[].f=9 | a[a[]idx]=a[] | return
+        assert_eq!(stmts.len(), 6);
+        assert!(
+            matches!(&stmts[1], Stmt::Let { name, .. } if name == "a[]idx"),
+            "the index binds once, so the load and the write-back name one              value — and `direct::elem_field_store` can fold the three              statements into one store through the element's address"
+        );
+        match &stmts[2] {
             Stmt::Let {
                 name,
                 mutable,
@@ -6752,14 +6363,14 @@ mod tests {
             }
             other => panic!("expected `let mut a[] = a[0]`, got {other:?}"),
         }
-        match &stmts[2] {
+        match &stmts[3] {
             Stmt::SetField { name, field, .. } => {
                 assert_eq!(name, "a[]");
                 assert_eq!(field, "f");
             }
             other => panic!("expected SetField on the temp, got {other:?}"),
         }
-        match &stmts[3] {
+        match &stmts[4] {
             Stmt::IndexSet {
                 name,
                 value: Expr::Var { name: v, .. },
@@ -6902,6 +6513,45 @@ mod tests {
                 && !shape[3].contains(r#"name: "f""#)
                 && !shape[3].contains(r#"name: "g""#),
             "the store names only temps, so it re-evaluates nothing: {shape:#?}"
+        );
+    }
+
+    /// The desugar names a temp and [`crate::ast::is_place_temp`] reads that
+    /// name back; every pass below asks the one predicate rather than spelling
+    /// a suffix. A rename that leaves a reader behind is silent otherwise —
+    /// which is what `3f4ac923` did when the hoisted operands went from
+    /// `[]val`/`[]idx` to `#val`/`#idx` and `movecheck.rs`'s own copy of the
+    /// spelling stayed on the old one.
+    #[test]
+    fn the_desugars_temps_answer_the_one_predicate() {
+        let mut minted: Vec<(String, bool)> = Vec::new();
+        for src in [
+            "fn main() -> Int64 { let mut s: S = S { xs: [1, 2] }  s.xs[f()] = g()  return 0 }",
+            "fn main() -> Int64 { let mut ps: Array<S> = []  ps[1].xs = g()  return 0 }",
+            "fn main() -> Int64 { let mut s: S = S { xs: [1] }  s.xs.swapRemove(h())  return 0 }",
+        ] {
+            for st in &parse_src(src).functions[0].body.stmts {
+                if let Stmt::Let { name, .. } = st {
+                    if name.contains('[') || name.contains('#') {
+                        minted.push((name.clone(), crate::ast::is_place_temp(name)));
+                    }
+                }
+            }
+        }
+        minted.sort();
+        minted.dedup();
+        assert_eq!(
+            minted,
+            [
+                ("ps[]", true),
+                ("ps[]#val", false),
+                ("ps[]idx", false),
+                ("s.xs[]", true),
+                ("s.xs[]#idx", false),
+                ("s.xs[]#val", false),
+                ("s.xs[][]arg1", false),
+            ]
+            .map(|(n, p)| (n.to_string(), p))
         );
     }
 
@@ -7065,6 +6715,11 @@ mod tests {
 
     // ---- function values (RFC-0023) -------------------------------------
 
+    /// The names a lambda's parameters carry, without their columns.
+    fn names(ps: &[Binder]) -> Vec<&str> {
+        ps.iter().map(|b| b.name.as_str()).collect()
+    }
+
     fn only_arg(p: &Program) -> Expr {
         // The single call argument of `f(<arg>)` in `main`'s first statement.
         match &p.functions.last().unwrap().body.stmts[0] {
@@ -7099,7 +6754,7 @@ mod tests {
         );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
-                assert_eq!(params, vec!["x".to_string()]);
+                assert_eq!(names(&params), vec!["x"]);
                 assert!(matches!(body, LambdaBody::Expr(_)));
             }
             other => panic!("expected lambda, got {other:?}"),
@@ -7114,7 +6769,7 @@ mod tests {
         );
         match only_arg(&p) {
             Expr::Lambda { params, body, .. } => {
-                assert_eq!(params, vec!["x".to_string(), "y".to_string()]);
+                assert_eq!(names(&params), vec!["x", "y"]);
                 assert!(matches!(body, LambdaBody::Block(_)));
             }
             other => panic!("expected lambda, got {other:?}"),

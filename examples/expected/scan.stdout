@@ -1,0 +1,11 @@
+ident: hello
+inner: "x, y", z
+first: "a, b"
+beforeSemi: head // ; not a stop
+real 
+quoted: a\"b
+untilClose: prefix "}}" 
+beforeHash: id # ' comment
+
+cssInner:  color: red /* } not a close */ 
+beforeSemi: color: red /* ; hidden */ 

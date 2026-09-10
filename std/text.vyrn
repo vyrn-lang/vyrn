@@ -37,12 +37,14 @@
 /// is the validated inverse, so decoding is expressible today — which is why this
 /// file needs no compiler change of any kind, unlike `std/num`, which needed two.
 ///
-/// **The validator is not duplicated, it is inverted.** `stringFromBytes` walks
-/// Björn Höhrmann's DFA (`utf8d_table`, shared between the textual and direct
-/// wasm backends since RFC-0077 M2g) to decide validity and throws the
-/// codepoints away. `decodeUtf8` below decides the same question by first-byte
-/// dispatch and keeps them. The two must agree on every byte string, and the test
-/// asserts exactly that rather than trusting the tables to match.
+/// **The validator is not inverted any more, it is the same function.**
+/// `stringFromBytes` used to walk Björn Höhrmann's DFA in each engine and throw
+/// the codepoints away, while `decodeUtf8` decided the same question by
+/// first-byte dispatch and kept them — two statements the test compared. RFC-0125
+/// §3 M6's fifth slice made the check one Vyrn function every engine calls, so
+/// `stringFault` and `decodeUtf8` now share `utf8Width` and cannot disagree.
+/// `tests/text.rs` compares BOTH against Rust's `std::str::from_utf8` for that
+/// reason: an oracle inside this file would compare the file with itself.
 ///
 /// **One deliberate disagreement, and it is not about UTF-8.** `stringFromBytes`
 /// rejects an interior NUL *before* it looks at UTF-8 (RFC-0014's rule: a Vyrn
@@ -69,69 +71,129 @@ export fn decodeUtf8(b: Array<UInt8>) -> Option<Array<Int64>> {
     let mut i = 0
     while i < n {
         let b0 = Int64(b[i])
-        if b0 < 128 {
+        let w = utf8Width(b, i)
+        if w == 0 {
+            return None
+        }
+        if w == 1 {
             out.push(b0)
+        } else if w == 2 {
+            out.push((b0 - 192) * 64 + (Int64(b[i + 1]) - 128))
+        } else if w == 3 {
+            out.push((b0 - 224) * 4096 + (Int64(b[i + 1]) - 128) * 64 + (Int64(b[i + 2]) - 128))
+        } else {
+            out.push(
+                (b0 - 240) * 262144 + (Int64(b[i + 1]) - 128) * 4096
+                + (Int64(b[i + 2]) - 128) * 64
+                + (Int64(b[i + 3]) - 128),
+            )
+        }
+        i = i + w
+    }
+    return Some(out)
+}
+
+/// The width of the UTF-8 sequence that starts at `i` in `b`, or 0 when the
+/// bytes there start none — RFC-0125 §3 M6, the third judgment's fifth slice.
+///
+/// **The one statement of what UTF-8 admits.** `decodeUtf8` above asks it and
+/// then does the codepoint arithmetic; `stringFault` below asks it and steps.
+/// Before this slice the same ranges were written four times: here, and once
+/// per engine behind `stringFromBytes` — Rust's `String::from_utf8` in the
+/// interpreter, Björn Höhrmann's DFA in the textual emitter's
+/// `@__vyrn_utf8valid`, and the same DFA again in `std/runtime`'s `utf8Valid`
+/// for the wasm route. The engines call this now and none of them decides.
+///
+/// `w` is the width (0 = this byte starts no sequence) and `lo`/`hi` bound the
+/// FIRST continuation byte. Those bounds are the whole of the overlong and
+/// out-of-range story: 0xE0 demands 0xA0+ (below that the value fits in two
+/// bytes), 0xED stops at 0x9F (above it is a surrogate), 0xF0 demands 0x90+
+/// and 0xF4 stops at 0x8F (past U+10FFFF). A width of 0 covers 0x80..0xC1 (a
+/// lone continuation, and the two overlong two-byte leads) and 0xF5..0xFF.
+export fn utf8Width(b: Array<UInt8>, i: Int64) -> Int64 {
+    let b0 = Int64(b[i])
+    if b0 < 128 {
+        return 1
+    }
+    let mut w = 0
+    let mut lo = 128
+    let mut hi = 191
+    if b0 >= 194 && b0 <= 223 {
+        w = 2
+    } else if b0 == 224 {
+        w = 3
+        lo = 160
+    } else if b0 == 237 {
+        w = 3
+        hi = 159
+    } else if (b0 >= 225 && b0 <= 236) || b0 == 238 || b0 == 239 {
+        w = 3
+    } else if b0 == 240 {
+        w = 4
+        lo = 144
+    } else if b0 == 244 {
+        w = 4
+        hi = 143
+    } else if b0 >= 241 && b0 <= 243 {
+        w = 4
+    }
+    if w == 0 || i + w > b.length {
+        return 0
+    }
+    let c1 = Int64(b[i + 1])
+    if c1 < lo || c1 > hi {
+        return 0
+    }
+    let mut k = 2
+    while k < w {
+        let c = Int64(b[i + k])
+        if c < 128 || c > 191 {
+            return 0
+        }
+        k = k + 1
+    }
+    return w
+}
+
+/// What is wrong with `b` if it were made into a `String`: 0 nothing, 1 a NUL
+/// byte, 2 not UTF-8 — RFC-0125 §3 M6, the third judgment's fifth slice.
+///
+/// **This is the CHECK half of `stringFromBytes`, and all three engines call
+/// it.** The census's `string-nul` and `string-utf8` rows had three carriers
+/// because the check and the BUILD were one function per engine, and the build
+/// needs the raw-memory primitives `std/mem` fences. The check needs none: it
+/// reads bytes and answers a number. So it is ordinary Vyrn, reached the way
+/// `char-boundary` and `json-decode` are, and each engine keeps only its
+/// build.
+///
+/// The NUL scan runs over the WHOLE array before the encoding is looked at,
+/// because RFC-0014 orders the two: a `String` is NUL-terminated, so bytes
+/// holding one are not representable rather than badly encoded, and
+/// `[0xFF, 0x00]` is a NUL error and not an encoding error. ASCII is stepped
+/// here rather than through `utf8Width`, so the digits `intStr` hands in cost
+/// no call.
+export fn stringFault(b: Array<UInt8>) -> Int64 {
+    let n = b.length
+    let mut i = 0
+    while i < n {
+        if b[i] == 0 {
+            return 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if b[i] < 128 {
             i = i + 1
         } else {
-            // `w` is the sequence width (0 = this byte cannot start one), and
-            // `lo`/`hi` bound the FIRST continuation byte. Those bounds are the
-            // whole of the overlong and out-of-range story: 0xE0 demands 0xA0+
-            // (below that the value fits in two bytes), 0xED stops at 0x9F (above
-            // it is a surrogate), 0xF0 demands 0x90+ and 0xF4 stops at 0x8F (past
-            // U+10FFFF).
-            let mut w = 0
-            let mut lo = 128
-            let mut hi = 191
-            if b0 >= 194 && b0 <= 223 {
-                w = 2
-            } else if b0 == 224 {
-                w = 3
-                lo = 160
-            } else if b0 == 237 {
-                w = 3
-                hi = 159
-            } else if (b0 >= 225 && b0 <= 236) || b0 == 238 || b0 == 239 {
-                w = 3
-            } else if b0 == 240 {
-                w = 4
-                lo = 144
-            } else if b0 == 244 {
-                w = 4
-                hi = 143
-            } else if b0 >= 241 && b0 <= 243 {
-                w = 4
+            let w = utf8Width(b, i)
+            if w == 0 {
+                return 2
             }
-            // A width of 0 covers 0x80..0xC1 (a lone continuation, and the two
-            // overlong two-byte leads) and 0xF5..0xFF.
-            if w == 0 || i + w > n {
-                return None
-            }
-            let c1 = Int64(b[i + 1])
-            if c1 < lo || c1 > hi {
-                return None
-            }
-            let mut cp = 0
-            if w == 2 {
-                cp = (b0 - 192) * 64 + (c1 - 128)
-            } else if w == 3 {
-                let c2 = Int64(b[i + 2])
-                if c2 < 128 || c2 > 191 {
-                    return None
-                }
-                cp = (b0 - 224) * 4096 + (c1 - 128) * 64 + (c2 - 128)
-            } else {
-                let c2 = Int64(b[i + 2])
-                let c3 = Int64(b[i + 3])
-                if c2 < 128 || c2 > 191 || c3 < 128 || c3 > 191 {
-                    return None
-                }
-                cp = (b0 - 240) * 262144 + (c1 - 128) * 4096 + (c2 - 128) * 64 + (c3 - 128)
-            }
-            out.push(cp)
             i = i + w
         }
     }
-    return Some(out)
+    return 0
 }
 
 /// The codepoints of `s` — the `chars` builtin, in Vyrn.

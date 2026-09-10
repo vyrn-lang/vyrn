@@ -1,0 +1,3 @@
+consume_borrowed.vyrn:20:0: `ys` may not be passed to a `consume` parameter via `take(..)` — it is a `read` parameter
+  fix: declare the parameter `ys: consume ..` if this function should own it
+  fix: `ys.copy()` if both sides need a value
