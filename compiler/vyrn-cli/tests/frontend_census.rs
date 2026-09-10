@@ -683,17 +683,9 @@ fn movecheck_sections() -> Vec<Section> {
     use Kind::*;
     vec![
         sec(
-            "pub struct OwningSite {",
-            Dead,
-            "the module head and RFC-0089 Phase 4a's site record. NO READER: \
-             `owning_sites` is called by this file's own tests and by nothing \
-             else in the workspace. Phase 4b enforces at every one of these \
-             sites, so the count that sized it is spent",
-        ),
-        sec(
             "pub struct ProjectionSite {",
             Job,
-            "RFC-0092's projection record. READER: \
+            "the module head and RFC-0092's projection record. READER: \
              `compiler/vyrn-cli/tests/projections.rs`, the regression guard \
              `track-eg` moved out of this file — the kernel refuses these, so \
              the guard asserts the corpus records none",
@@ -836,11 +828,6 @@ fn movecheck_sections() -> Vec<Section> {
              `tests/projections.rs`",
         ),
         sec(
-            "    fn site(&self, kind: &'static str, line: usize, e: &Expr, declared: Option<&Type>) {",
-            Dead,
-            "RFC-0089 rule 1's instrument. NO READER, with `OwningSite` above",
-        ),
-        sec(
             "fn block(&self, b: &Block, scope: &mut Vec<HashSet<String>>) -> bool {",
             Shared,
             "a block, and whether it diverges",
@@ -850,11 +837,6 @@ fn movecheck_sections() -> Vec<Section> {
             Shared,
             "the walk over statements: it writes the two records in the same \
              arm it walks",
-        ),
-        sec(
-            "    fn capture_site(&self, name: &str, line: usize) {",
-            Dead,
-            "a lambda's captures, recorded for `OwningSite` above. NO READER",
         ),
         sec(
             "fn expr(&self, e: &Expr, scope: &mut Vec<HashSet<String>>) {",
@@ -1088,22 +1070,17 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("project.rs", "shared machinery", 273, 0),
         ("project.rs", "tests", 309, 0),
-        ("movecheck.rs", "the file's own job", 1050, 0),
+        ("movecheck.rs", "the file's own job", 1084, 0),
         ("movecheck.rs", "a rule stated a second time", 0, 0),
-        (
-            "movecheck.rs",
-            "a path only a deleted route reached",
-            157,
-            0,
-        ),
+        ("movecheck.rs", "a path only a deleted route reached", 0, 0),
         (
             "movecheck.rs",
             "a copy of a table another module carries",
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1551, 0),
-        ("movecheck.rs", "tests", 207, 0),
+        ("movecheck.rs", "shared machinery", 1511, 0),
+        ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");
 }
