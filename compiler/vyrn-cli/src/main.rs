@@ -4024,7 +4024,15 @@ import {{ benchOne }} from \"std/bench\"
     let out_path = dir.join(&exe_name);
     // The route, not a second copy of it: `vyrn bench` times the binary `vyrn
     // build` would ship, through the same wasm2c and the same clang flags.
-    if build_wasm2c(path, &program, &out_path.to_string_lossy(), target).is_err() {
+    // As a test host, for the same reason `bodies_wasm` gives: the lifted
+    // bodies are checked again for the lowering's record, and outside a host
+    // `blackBox` is refused, so the record lost every node under it, the core
+    // could not lower the body, and no local of any bench body was released.
+    // `push 1000` then leaked 692 MB a run and `membench` peaked at 2.9 GB.
+    vyrn_frontend::checker::set_test_host(true);
+    let built = build_wasm2c(path, &program, &out_path.to_string_lossy(), target);
+    vyrn_frontend::checker::set_test_host(false);
+    if built.is_err() {
         let _ = std::fs::remove_dir_all(&dir);
         return (ExitCode::FAILURE, None);
     }
