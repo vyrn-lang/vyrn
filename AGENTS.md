@@ -144,6 +144,7 @@ Do not optimize on a guess. A micro-optimization that the numbers do not license
 - Work in a worktree of your own. Never touch another worktree. Never delete a worktree or its `tools` junction.
 - Never `git stash`. The stash list is shared by every worktree. Set work aside with a patch file.
 - Never run two cargo commands at the same time in one worktree. Run every gate in the foreground with a timeout and wait for it.
+- Never poll a log with repeated tool calls (`grep -c`, `tail`). A foreground command blocks until it ends, under a ten-minute cap, so split a longer run into suites that fit; a background command wakes you with a notification when it ends. Between the two, end your turn and wait. Every poll is a tool call against a budget that is shared by every agent on the account.
 - Never pipe a test suite's output. Redirect it to a file and read the file. A suite's leaked child holds the pipe open, and the run looks hung for as long as you wait.
 - Never write a polling or wait loop, in a script or by hand, and never an `until … sleep` loop through the Monitor tool either. Run the command under a timeout in the foreground and read its exit code; or run it in the background and do nothing until the harness notifies you. A loop outlives the agent that wrote it, and six loops on one file were found on this machine.
 - A background process is a process tree. Stop it by its tree, then list what is still alive under your worktree before you start the next command.
