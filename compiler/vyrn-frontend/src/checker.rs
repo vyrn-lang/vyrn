@@ -906,10 +906,41 @@ fn check_accum_inner(
             let opaque =
                 |t: &Type| crate::types::substitute(t, &probe) != *t || type_mentions_self(t);
             for sig in &p.methods {
-                // A projection requirement (RFC-0123 M2) is satisfied by a
-                // `places` member, matched on the same terms a method is —
-                // and the receiver capability carries the result's too, since
-                // the parser made them equal on both sides.
+                let want = || {
+                    render_method_sig(&sig.name, sig.recv, &sig.params, &sig.param_caps, &sig.ret)
+                };
+                // Does the member the impl provides have the signature the
+                // protocol declared, and how does it read? Both members that can
+                // satisfy a requirement are matched on these terms — a method,
+                // and a projection since RFC-0123 M2 — so the rule is read here
+                // and the two arms below say only which member they looked in.
+                //
+                // `self` is implicit in the declaration and the first parameter
+                // of the member the parser built, whose type is the impl's own
+                // head — so its TYPE is dropped rather than compared. Its
+                // CAPABILITY is compared: a bounded generic types `x.m(..)` from
+                // the protocol, so an impl free to take `modify self` where the
+                // protocol says `self` would mutate through a borrow with
+                // nothing at the call site to say so.
+                let provided = |f: &crate::ast::Function| {
+                    let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
+                    let got_caps: Vec<Capability> =
+                        f.params.iter().skip(1).map(|p| p.capability).collect();
+                    let recv = f
+                        .params
+                        .first()
+                        .map(|p| p.capability)
+                        .unwrap_or(Capability::Read);
+                    let agrees = got.len() == sig.params.len()
+                        && (sig.ret == f.ret || opaque(&sig.ret))
+                        && recv == sig.recv
+                        && got_caps == sig.param_caps
+                        && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                    (
+                        agrees,
+                        render_method_sig(&f.name, recv, &got, &got_caps, &f.ret),
+                    )
+                };
                 if sig.result_cap.is_some() {
                     let Some(f) = imp.places.iter().find(|m| m.name == sig.name) else {
                         out.push(cerr_at!(
@@ -920,30 +951,12 @@ fn check_accum_inner(
                              all required",
                             imp.protocol,
                             imp.ty,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
+                            want(),
                             imp.protocol
                         ));
                         continue;
                     };
-                    let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
-                    let got_caps: Vec<Capability> =
-                        f.params.iter().skip(1).map(|p| p.capability).collect();
-                    let f_recv = f
-                        .params
-                        .first()
-                        .map(|p| p.capability)
-                        .unwrap_or(Capability::Read);
-                    let agrees = got.len() == sig.params.len()
-                        && (sig.ret == f.ret || opaque(&sig.ret))
-                        && f_recv == sig.recv
-                        && got_caps == sig.param_caps
-                        && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                    let (agrees, got) = provided(f);
                     if !agrees {
                         out.push(cerr_at!(
                             f.line,
@@ -952,14 +965,8 @@ fn check_accum_inner(
                              `{}`, this provides `{}`",
                             f.name,
                             imp.protocol,
-                            render_method_sig(
-                                &sig.name,
-                                sig.recv,
-                                &sig.params,
-                                &sig.param_caps,
-                                &sig.ret
-                            ),
-                            render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                            want(),
+                            got
                         ));
                     }
                     continue;
@@ -973,38 +980,13 @@ fn check_accum_inner(
                              holding a `T: {}` may call it",
                         imp.protocol,
                         imp.ty,
-                        render_method_sig(
-                            &sig.name,
-                            sig.recv,
-                            &sig.params,
-                            &sig.param_caps,
-                            &sig.ret
-                        ),
+                        want(),
                         imp.protocol,
                         imp.protocol
                     ));
                     continue;
                 };
-                // `self` is implicit in the declaration and the first parameter
-                // of the method the parser built, whose type is the impl's own
-                // head — so its TYPE is dropped rather than compared. Its
-                // CAPABILITY is compared: a bounded generic types `x.m(..)` from
-                // the protocol, so an impl free to take `modify self` where the
-                // protocol says `self` would mutate through a borrow with
-                // nothing at the call site to say so.
-                let got: Vec<Type> = f.params.iter().skip(1).map(|p| p.ty.clone()).collect();
-                let got_caps: Vec<Capability> =
-                    f.params.iter().skip(1).map(|p| p.capability).collect();
-                let f_recv = f
-                    .params
-                    .first()
-                    .map(|p| p.capability)
-                    .unwrap_or(Capability::Read);
-                let agrees = got.len() == sig.params.len()
-                    && (sig.ret == f.ret || opaque(&sig.ret))
-                    && f_recv == sig.recv
-                    && got_caps == sig.param_caps
-                    && std::iter::zip(&sig.params, &got).all(|(w, g)| w == g || opaque(w));
+                let (agrees, got) = provided(f);
                 if !agrees {
                     out.push(cerr_at!(
                         f.line,
@@ -1013,14 +995,8 @@ fn check_accum_inner(
                              provides `{}`",
                         render_impl_head(imp),
                         imp.protocol,
-                        render_method_sig(
-                            &sig.name,
-                            sig.recv,
-                            &sig.params,
-                            &sig.param_caps,
-                            &sig.ret
-                        ),
-                        render_method_sig(&f.name, f_recv, &got, &got_caps, &f.ret)
+                        want(),
+                        got
                     ));
                 }
             }
@@ -1563,30 +1539,13 @@ fn check_places(checker: &Checker, program: &Program, out: &mut Vec<Diagnostic>)
         // handle reads the same bytes, but a write through one can land in
         // the copy, so `atSet`'s place stays a chain the store machinery can
         // prove writes through.
-        let mut roots: std::collections::HashSet<String> =
-            f.params.iter().map(|p| p.name.clone()).collect();
-        if f.params.first().map(|p| p.capability) != Some(crate::ast::Capability::Modify) {
-            for s in &f.body.stmts[..f.body.stmts.len() - 1] {
-                if let Stmt::Let { name, value, .. } = s {
-                    if let_borrows_from(value, &roots) {
-                        roots.insert(name.clone());
-                    }
-                }
-            }
-        }
-        match crate::project::place_root(y) {
-            Some(root) if roots.contains(&root) => {}
-            Some(root) => push(cerr_at!(
-                f.line,
-                f.name_span(),
-                "projection `{}` returns a place rooted at `{root}`, which the \
-                 access site does not own — a projection may only return a place \
-                 inside `self`, a parameter, or a prologue `let` that borrows \
-                 from one",
-                f.name
-            )),
-            None => {}
-        }
+        let modifies =
+            f.params.first().map(|p| p.capability) == Some(crate::ast::Capability::Modify);
+        let prologue = match modifies {
+            true => &f.body.stmts[..0],
+            false => &f.body.stmts[..f.body.stmts.len() - 1],
+        };
+        rooted_where_the_site_owns(f, y, prologue.iter(), &mut push);
         // The body itself, with `self` typed to the implementing type.
         let r = checker.function(f);
         if let Err(s) = r {
@@ -1688,12 +1647,37 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
     // Roots trace through borrowing `let`s of BOTH segments: the prologue's,
     // and the hit prologue's — the payload binding after the miss is decided
     // is `tryField`'s whole reason to have one.
+    let prologue = f.body.stmts[..n - 1]
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .map(|(_, s)| s);
+    rooted_where_the_site_owns(f, y, prologue, push);
+    if let Err(s) = checker.function(f) {
+        push(s);
+    }
+    for s in checker.errors.borrow_mut().drain(..) {
+        push(s);
+    }
+}
+
+/// Rule 3 for both projection shapes: what a projection yields is rooted where
+/// the access site owns — `self`, a parameter, or a prologue `let` that borrows
+/// from one.
+///
+/// `prologue` is the statements a root traces through, and it is the whole of
+/// what the two shapes differ in: the plain kind traces its own prologue and
+/// nothing when the receiver is `modify`, and the optional kind traces both
+/// segments' but not the decision itself.
+fn rooted_where_the_site_owns<'s>(
+    f: &Function,
+    y: &Expr,
+    prologue: impl Iterator<Item = &'s Stmt>,
+    push: &mut impl FnMut(Diagnostic),
+) {
     let mut roots: std::collections::HashSet<String> =
         f.params.iter().map(|p| p.name.clone()).collect();
-    for (i, s) in f.body.stmts[..n - 1].iter().enumerate() {
-        if i == at {
-            continue;
-        }
+    for s in prologue {
         if let Stmt::Let { name, value, .. } = s {
             if let_borrows_from(value, &roots) {
                 roots.insert(name.clone());
@@ -1712,12 +1696,6 @@ fn check_optional_place(checker: &Checker, f: &Function, push: &mut impl FnMut(D
             f.name
         )),
         None => {}
-    }
-    if let Err(s) = checker.function(f) {
-        push(s);
-    }
-    for s in checker.errors.borrow_mut().drain(..) {
-        push(s);
     }
 }
 
@@ -2506,27 +2484,8 @@ impl<'a> Checker<'a> {
                  `if let Some(x) = ..{name}(..)`; the miss is the `else` arm"
             ));
         }
-        if args.len() - 1 != f.params.len() - 1 {
-            return Err(cerr!(
-                line,
-                "projection `{name}` expects {} argument(s) besides `self`, got {}",
-                f.params.len() - 1,
-                args.len() - 1
-            ));
-        }
-        let mut subst: HashMap<String, Type> = HashMap::new();
-        self.unify(&imp.ty, &recv, &mut subst, line)?;
-        for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
-            let want = crate::types::substitute(&p.ty, &subst);
-            let got = self.expr(arg, scope, Some(&want), Some(fn_ret))?;
-            if !self.coercible(&got, &want) {
-                return Err(cerr!(
-                    line,
-                    "projection `{name}` argument is {got}, expected {want}"
-                ));
-            }
-            self.prove_coercion(arg, &want, line)?;
-        }
+        let subst =
+            self.solve_projection_call(imp, f, name, &recv, args, scope, Some(fn_ret), line)?;
         if recording() {
             if let Ok(Some(p)) = crate::project::optional_site(
                 self.impl_blocks,
@@ -2591,30 +2550,49 @@ impl<'a> Checker<'a> {
             ));
         }
         let recv = recv.clone();
+        let subst = self.solve_projection_call(imp, f, method, &recv, args, scope, fn_ret, line)?;
+        Ok(Some(crate::types::substitute(&f.ret, &subst)))
+    }
+
+    /// A projection call against the projection it names: the arity besides
+    /// `self`, the impl head solved against the receiver, and every argument at
+    /// the type that solution gives it. Both readers ask — the access site and
+    /// the `if let` an optional projection is tested by — and each reads its own
+    /// result through the substitution this answers with.
+    #[allow(clippy::too_many_arguments)]
+    fn solve_projection_call(
+        &self,
+        imp: &crate::ast::ImplBlock,
+        f: &crate::ast::Function,
+        name: &str,
+        recv: &Type,
+        args: &[Expr],
+        scope: &Scope,
+        fn_ret: Option<&Type>,
+        line: usize,
+    ) -> Result<HashMap<String, Type>, Diagnostic> {
         if args.len() - 1 != f.params.len() - 1 {
             return Err(cerr!(
                 line,
-                "projection `{method}` expects {} argument(s) besides `self`, got {}",
+                "projection `{name}` expects {} argument(s) besides `self`, got {}",
                 f.params.len() - 1,
                 args.len() - 1
             ));
         }
-        // Solve `impl<T> .. for Ring<T>` against the receiver, so a projection
-        // declared `-> T` answers with the element type at this call.
         let mut subst: HashMap<String, Type> = HashMap::new();
-        self.unify(&imp.ty, &recv, &mut subst, line)?;
+        self.unify(&imp.ty, recv, &mut subst, line)?;
         for (arg, p) in args[1..].iter().zip(&f.params[1..]) {
             let want = crate::types::substitute(&p.ty, &subst);
             let got = self.expr(arg, scope, Some(&want), fn_ret)?;
             if !self.coercible(&got, &want) {
                 return Err(cerr!(
                     line,
-                    "projection `{method}` argument is {got}, expected {want}"
+                    "projection `{name}` argument is {got}, expected {want}"
                 ));
             }
             self.prove_coercion(arg, &want, line)?;
         }
-        Ok(Some(crate::types::substitute(&f.ret, &subst)))
+        Ok(subst)
     }
 
     /// Solve `impl<T> .. for Slots<T>` against the receiver, and read `ty`
@@ -2948,22 +2926,13 @@ impl<'a> Checker<'a> {
     /// f<T>`) reads as rigid — the two are the same type wherever the shadowing
     /// literal type-checks, so the reading costs nothing.
     fn mentions_open_param(&self, ty: &Type) -> bool {
-        let cur = self.cur_fn.borrow();
-        let rigid = self.generics.get(cur.as_str());
-        let mut found = false;
-        walk_type(ty, &mut |t| {
-            if let Type::Param(n) = t {
-                if !rigid.is_some_and(|ps| ps.contains(n)) {
-                    found = true;
-                }
-            }
-        });
-        found
+        !self.open_params(ty).is_empty()
     }
 
     /// The parameters [`Self::mentions_open_param`] finds, by name, in the order
-    /// they occur and without repeats. For the one diagnostic that has to NAME
-    /// them (see [`Self::stored_fn_named`]); every other reader wants the bool.
+    /// they occur and without repeats. The rule itself is here: the reader that
+    /// has to NAME them wants the list (see [`Self::stored_fn_named`]), every
+    /// other reader wants the bool above.
     fn open_params(&self, ty: &Type) -> Vec<String> {
         let cur = self.cur_fn.borrow();
         let rigid = self.generics.get(cur.as_str());
@@ -3541,34 +3510,9 @@ impl<'a> Checker<'a> {
                 self.ensure_no_stream(&f.ty, t.line, "a record field")?;
                 self.ensure_type_exists(&f.ty, t.line)?;
             }
-            if let Some(pred) = &t.predicate {
-                if consteval::contains_call(pred) {
-                    return Err(cerr!(
-                        t.line,
-                        "cross-field predicate for `{}` may not contain calls (v0.1)",
-                        t.name
-                    ));
-                }
-                // The predicate sees every field in scope, by name.
-                let mut scope = Scope::closed();
-                for f in fields {
-                    scope[0].insert(
-                        f.name.clone(),
-                        Binding {
-                            ty: f.ty.clone(),
-                            mutable: false,
-                        },
-                    );
-                }
-                let pty = self.expr(pred, &scope, None, None)?;
-                if self.base(&pty) != Type::Bool {
-                    return Err(cerr!(
-                        t.line,
-                        "cross-field predicate for `{}` must be Bool, found {pty}",
-                        t.name
-                    ));
-                }
-            }
+            // The predicate sees every field in scope, by name.
+            let binds = fields.iter().map(|f| (f.name.clone(), f.ty.clone()));
+            self.check_predicate(t, "cross-field", binds)?;
             return Ok(());
         }
         // Enum declaration (RFC-0002 §4).
@@ -3587,40 +3531,28 @@ impl<'a> Checker<'a> {
             }
             return Ok(());
         }
-        // A transparent alias to a built-in generic wrapper: `type DeleteResult =
-        // Result<Bool, String>` / `type Maybe = Option<Int64>`. Allowed so a
-        // codable `Result`/`Option` can be named and handed to `fromJson`/
-        // `jsonSchema` by name (RFC-0024's RPC ripple). No `where` clause (its
-        // payloads carry their own refinements); the payload types must exist.
-        if crate::types::is_sum_alias(&t.base) {
-            if t.predicate.is_some() {
-                return Err(cerr!(
-                    t.line,
-                    "a `{}` alias cannot have a `where` clause",
-                    if crate::types::result_payloads(&t.base).is_some() {
-                        "Result"
-                    } else {
-                        "Option"
-                    }
-                ));
+        // A transparent alias to a built-in generic wrapper or collection: `type
+        // DeleteResult = Result<Bool, String>`, `type Maybe = Option<Int64>`,
+        // `type Bag = Map<String, Int64>`. Allowed so a codable one can be named
+        // and handed to `fromJson`/`jsonSchema` by name (RFC-0024's RPC ripple,
+        // RFC-0028, RFC-0011). No `where` clause — the payloads and elements
+        // carry their own refinements — and the types inside must exist.
+        let wrapper = match &t.base {
+            b if crate::types::is_sum_alias(b) => {
+                Some(match crate::types::result_payloads(b).is_some() {
+                    true => "Result",
+                    false => "Option",
+                })
             }
-            self.ensure_type_exists(&t.base, t.line)?;
-            return Ok(());
-        }
-        // A transparent alias to a `Map`/`Array` (RFC-0028/RFC-0011), so a codable
-        // collection can be named and handed to `fromJson`/`jsonSchema` by name
-        // (the same rationale as the `Result`/`Option` aliases above). No `where`
-        // clause; the element/value types must exist.
-        if matches!(t.base, Type::Map(..) | Type::Array(_) | Type::ArrayN(..)) {
+            Type::Map(..) => Some("Map"),
+            Type::Array(_) | Type::ArrayN(..) => Some("Array"),
+            _ => None,
+        };
+        if let Some(noun) = wrapper {
             if t.predicate.is_some() {
                 return Err(cerr!(
                     t.line,
-                    "a `{}` alias cannot have a `where` clause",
-                    if matches!(t.base, Type::Map(..)) {
-                        "Map"
-                    } else {
-                        "Array"
-                    }
+                    "a `{noun}` alias cannot have a `where` clause"
                 ));
             }
             self.ensure_type_exists(&t.base, t.line)?;
@@ -3661,32 +3593,52 @@ impl<'a> Checker<'a> {
             ));
         }
         // `String` refinements are allowed (e.g. `value.byteLength >= 3`); like all
-        // predicates they must be call-free and const-analyzable (checked below).
-        if let Some(pred) = &t.predicate {
-            if consteval::contains_call(pred) {
-                return Err(cerr!(
-                    t.line,
-                    "refinement predicate for `{}` may not contain calls (v0.1)",
-                    t.name
-                ));
-            }
-            // Predicate is checked in an environment where `value` has the base type.
-            let mut scope = Scope::closed();
-            scope[0].insert(
-                "value".into(),
-                Binding {
-                    ty: t.base.clone(),
-                    mutable: false,
-                },
-            );
-            let pty = self.expr(pred, &scope, None, None)?;
-            if self.base(&pty) != Type::Bool {
-                return Err(cerr!(
-                    t.line,
-                    "refinement predicate for `{}` must be Bool, found {pty}",
-                    t.name
-                ));
-            }
+        // predicates they must be call-free and const-analyzable.
+        //
+        // The predicate is checked in an environment where `value` has the base
+        // type.
+        self.check_predicate(
+            t,
+            "refinement",
+            std::iter::once(("value".to_string(), t.base.clone())),
+        )
+    }
+
+    /// A type declaration's `where` predicate, wherever it is written: it may
+    /// contain no call, and it must be Bool in a scope holding `binds` and
+    /// nothing else.
+    ///
+    /// `kind` is the adjective the two refusals name it by — a record's
+    /// predicate is cross-field and sees its fields, a scalar's is a refinement
+    /// and sees `value` — and it is the whole of what the two spellings of this
+    /// rule differed in.
+    fn check_predicate(
+        &self,
+        t: &TypeDecl,
+        kind: &str,
+        binds: impl Iterator<Item = (String, Type)>,
+    ) -> Result<(), Diagnostic> {
+        let Some(pred) = &t.predicate else {
+            return Ok(());
+        };
+        if consteval::contains_call(pred) {
+            return Err(cerr!(
+                t.line,
+                "{kind} predicate for `{}` may not contain calls (v0.1)",
+                t.name
+            ));
+        }
+        let mut scope = Scope::closed();
+        for (name, ty) in binds {
+            scope[0].insert(name, Binding { ty, mutable: false });
+        }
+        let pty = self.expr(pred, &scope, None, None)?;
+        if self.base(&pty) != Type::Bool {
+            return Err(cerr!(
+                t.line,
+                "{kind} predicate for `{}` must be Bool, found {pty}",
+                t.name
+            ));
         }
         Ok(())
     }
@@ -8568,6 +8520,52 @@ impl<'a> Checker<'a> {
             Type::Fn(ps, r) => (ps.clone(), (**r).clone()),
             _ => return Ok(()),
         };
+        // Contravariance, and the return unified: the value's own parameter
+        // type must accept whatever the callee will pass. Checking the reverse
+        // direction too let the callee pass a NARROWER record than the value
+        // reads — a missing field at dispatch. A type parameter that occurs
+        // ONLY inside this `fn` parameter's own parameter list is solved from
+        // the value's declared types, exactly as a bare name solves it
+        // (RFC-0071 M2b). All three arms below that hand over a function value
+        // ask it; `owner` is how each names the value.
+        let params_accept = |owner: &str,
+                             vptys: &[Type],
+                             vret: &Type,
+                             subst: &mut HashMap<String, Type>|
+         -> Result<(), Diagnostic> {
+            for (a, b) in vptys.iter().zip(&ptys) {
+                let b = &self.solve_fn_param(b, a, subst, line);
+                if !self.assignable(b, a) {
+                    return Err(cerr!(
+                        line,
+                        "{owner} expects a {a} argument, but `{callee}` \
+                         will pass it {b}"
+                    ));
+                }
+            }
+            self.unify(&ret, vret, subst, line)
+        };
+        // The two arms that hand over a value of `fn` TYPE share their arity
+        // sentence as well; the named-function arm below has its own, because a
+        // declaration is not a value and the sentence says so.
+        let value_matches = |subject: &str,
+                             owner: &str,
+                             vptys: &[Type],
+                             vret: &Type,
+                             subst: &mut HashMap<String, Type>|
+         -> Result<(), Diagnostic> {
+            if vptys.len() != ptys.len() {
+                return Err(cerr!(
+                    line,
+                    "{subject} is a {}-argument function value, but \
+                     `{callee}` argument {} expects {}",
+                    vptys.len(),
+                    i + 1,
+                    ptys.len()
+                ));
+            }
+            params_accept(owner, vptys, vret, subst)
+        };
         match arg {
             Expr::Lambda {
                 params,
@@ -8681,32 +8679,8 @@ impl<'a> Checker<'a> {
                 if let Some(Type::Fn(vptys, vret)) =
                     self.lookup(scope, vn).map(|b| self.base(&b.ty))
                 {
-                    if vptys.len() != ptys.len() {
-                        return Err(cerr!(
-                            line,
-                            "`{vn}` is a {}-argument function value, but \
-                             `{callee}` argument {} expects {}",
-                            vptys.len(),
-                            i + 1,
-                            ptys.len()
-                        ));
-                    }
-                    // Contravariant, like the named-function arm below: the
-                    // value's own parameter type must accept whatever the
-                    // callee will pass. Checking the reverse direction too let
-                    // the callee pass a NARROWER record than the value reads
-                    // — a missing field at dispatch.
-                    for (a, b) in vptys.iter().zip(&ptys) {
-                        let b = &self.solve_fn_param(b, a, subst, line);
-                        if !self.assignable(b, a) {
-                            return Err(cerr!(
-                                line,
-                                "`{vn}` expects a {a} argument, but `{callee}` \
-                                 will pass it {b}"
-                            ));
-                        }
-                    }
-                    self.unify(&ret, &vret, subst, line)?;
+                    let vn = format!("`{vn}`");
+                    value_matches(&vn, &vn, &vptys, &vret, subst)?;
                     return Ok(());
                 }
                 let sig = self.sigs.get(vn).ok_or_else(|| {
@@ -8736,17 +8710,7 @@ impl<'a> Checker<'a> {
                         ptys.len()
                     ));
                 }
-                for (a, b) in sig.0.iter().zip(&ptys) {
-                    let b = &self.solve_fn_param(b, a, subst, line);
-                    if !self.assignable(b, a) {
-                        return Err(cerr!(
-                            line,
-                            "`{vn}` expects a {a} argument, but `{callee}` will \
-                             pass it {b}"
-                        ));
-                    }
-                }
-                self.unify(&ret, &sig.1, subst, line)?;
+                params_accept(&format!("`{vn}`"), &sig.0, &sig.1, subst)?;
                 self.record_arg_fn(
                     &crate::types::substitute(expected_fn, subst),
                     Some(vn),
@@ -8781,34 +8745,7 @@ impl<'a> Checker<'a> {
                         i + 1
                     ));
                 };
-                if vptys.len() != ptys.len() {
-                    return Err(cerr!(
-                        line,
-                        "this is a {}-argument function value, but \
-                         `{callee}` argument {} expects {}",
-                        vptys.len(),
-                        i + 1,
-                        ptys.len()
-                    ));
-                }
-                // Contravariant (see the Var arm above): the value's declared
-                // parameter type must accept what the callee will pass.
-                for (a, b) in vptys.iter().zip(&ptys) {
-                    // A type parameter that occurs ONLY inside this `fn`
-                    // parameter's own parameter list is solved from the value's
-                    // declared types, exactly as a bare name solves it
-                    // (RFC-0071 M2b).
-                    let b = &self.solve_fn_param(b, a, subst, line);
-                    if !self.assignable(b, a) {
-                        return Err(cerr!(
-                            line,
-                            "this function value expects a {a} argument, \
-                             but `{callee}` will pass it {b}"
-                        ));
-                    }
-                }
-                self.unify(&ret, &vret, subst, line)?;
-                Ok(())
+                value_matches("this", "this function value", &vptys, &vret, subst)
             }
         }
     }

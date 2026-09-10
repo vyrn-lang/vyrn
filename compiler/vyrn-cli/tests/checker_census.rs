@@ -730,11 +730,11 @@ fn the_structural_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the typing judgment", 3486, 143),
-        ("a rule the checker states", 1492, 58),
-        ("the checker's part in a rewrite stated elsewhere", 455, 16),
+        ("the typing judgment", 3462, 140),
+        ("a rule the checker states", 1477, 54),
+        ("the checker's part in a rewrite stated elsewhere", 455, 14),
         ("one arm per form, type constructor or builtin", 2778, 140),
-        ("shared machinery", 2240, 30),
+        ("shared machinery", 2216, 30),
         ("tests", 4666, 0),
     ];
     assert_eq!(got, want, "the structural census has moved");
