@@ -26493,6 +26493,62 @@ be the last one landed and the language is better than before it.
 
 ---
 
+### The arc's state at the close of 2026-09-10
+
+Decision: the lead's, with the user's, that the branch merges to `main` with the
+line target not met, because the safety properties are gated and the blocker
+is one thing that no series of slices reaches.
+
+What is stated once now, against the branch point `dea7cf34` (1,142 commits):
+
+| | at the base | now |
+|---|---|---|
+| compiler source, `compiler/*/src` | 129,144 | 114,511 |
+| `movecheck.rs` | 7,044 | 2,130 |
+| `own.rs` | 2,974 | 949 |
+| `loader.rs` | 7,044 | 4,836 |
+| `symbols.rs` | 4,650 | 4,381 |
+| `checker.rs` | 14,574 | 15,054 |
+| `direct.rs` | 17,027 | 17,652 |
+| `main.rs` (cli) | 5,984 | 7,080 |
+| §2.7's target | | 40,000 to 45,000 |
+
+Safe: every refusal in the corpus is the kernel's or the checker's and is
+pinned with its sentence in `tests/refusals.rs`; the move check refuses nothing
+on its own; every process that compiles installs the lowering (`tests/hosts.rs`),
+which this week exposed a silent `where` validation hole on assignment, three
+emitter compile failures, seven release bodies a backend invented, and an
+editor index that had lost 583 declared types; the wasm manifest is byte-pinned
+on four platforms; the residue ratchet holds at 172 clean / 3 leaking on both
+engines; the kernel corpus is 27,650 accepted, 0 refused, 0 unlowered.
+
+Fast, for a developer: a change is licensed by a corpus diff, a manifest check
+and the ratchet, and CI runs the whole list on a pull request in twenty
+minutes; the rules for working here are `AGENTS.md`.
+
+The one blocker, measured (`track-ek`): with a core installed everywhere, the
+emitter's AST dispatch is still reached 4,563,688 times for `Expr::Var` and
+674,714 for `Stmt::Let` over the gate list, because the core is a
+statement-level IR whose rows point at AST expression leaves, and it lowers
+963 of 21,722 bodies whole. `Stmt::Continue` is retired; `Stmt::Break` stands
+at 1, blocked by `Rhs::Call` for a callee no declared function of the program
+names. The 65,000 lines between here and §2.7's target are the AST walk in
+`direct.rs` and the checker as a pass, and both go only when the core lowers
+every body at the expression level. That is one RFC, not a slice, and its
+measure is bodies lowered whole from 4 per cent to 100.
+
+Decisions taken on 2026-09-10: the five log words are sugar over one row; the
+three type-name builtins take a type parameter; `print`, `@str` and `toJson`
+take a `Show` bound; code quotes keep their four-mode validation, a cost paid
+for a feature and not a rule stated twice.
+
+Left, ranked: the core as an expression-level IR (the RFC above); the checker's
+`stmt`/`expr` as the typed judgment's reader, 1,318 lines, behind it; the
+thin forms (`share`, `lazy`, `place`, `TryConstruct`, `while let`, `spawn`,
+`region`) as the user's keep-or-delete calls, one track each; `project_imports`
+in the driver, 165 lines, behind `vyrn why` needing a project that does not
+load.
+
 ## Open questions
 
 1. **The kernel's own trust.** It is a few hundred lines and it is the trusted
