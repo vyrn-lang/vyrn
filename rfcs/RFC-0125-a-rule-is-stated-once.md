@@ -26648,7 +26648,7 @@ an emitted drop over a long list, which no frame budget bounds. Blocked by
 that question, not by the flag. Left with it: the remaining 4.8x on "push
 1000", which is two runtime calls per element against inline code.
 
-#### Three thin forms leave (2026-09-11, `thin-forms`).
+**Three thin forms leave (2026-09-11, `thin-forms`).**
 Decision: the lead's, on the counts below. A form that no program writes, or that
 delivers nothing it promises, leaves the language.
 Went: the `share` capability (one parser word, four passes, both highlighters);
