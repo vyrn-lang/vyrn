@@ -10104,6 +10104,7 @@ comment lines dropped so a doc mention is not a host.
 |---|---|---|---|
 | when the census was written | 17 | 10 | 7 |
 | after the three installs | **15** | **14** | **1** |
+| merged into core, where `tests/projections.rs` had landed | 16 | 15 | 1 |
 
 **The seven, and why one of them is right.** `vyrn-cli/src/wasmrun.rs`,
 `vyrn-cli/tests/lowered.rs`, `vyrn-frontend/tests/common/mod.rs`,
@@ -10323,7 +10324,7 @@ debug and the release-only ones as marked.
 | `fixtures` `--ignored` | 1, 150 s |
 | `testsweep` `--ignored` | 1, 334 s |
 | `coredrive` `--ignored`, release | 1, 51 s — 963 of 21,722 bodies whole, 168 of 170 programs byte-identical, `Stmt::Break` 8 over three programs |
-| `hosts` | 2 — 15 entries, 14 with the line, `vyrn-genwasm` the one without |
+| `hosts` | 2 — 16 entries at the merge, 15 with the line, `vyrn-genwasm` the one without |
 | `emitter_census`, plain and `--ignored` | 3 and 1 |
 | `forms` and `surface`, plain and `--ignored` | 8 and 2, 3 and 1 |
 | `frontend_census`, `cli_census`, plain and `--ignored` | 2 and 1, 2 and 1 |
