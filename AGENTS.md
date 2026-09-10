@@ -147,6 +147,8 @@ Do not optimize on a guess. A micro-optimization that the numbers do not license
 - Never pipe a test suite's output. Redirect it to a file and read the file. A suite's leaked child holds the pipe open, and the run looks hung for as long as you wait.
 - Never write a polling or wait loop, in a script or by hand. Run the command under a timeout and read its exit code. A process that must be waited for is re-checked later, not watched.
 - A background process is a process tree. Stop it by its tree, then list what is still alive under your worktree before you start the next command.
+- Kill only a process whose command line names your own worktree. Eight tracks and other sessions share this machine; a cargo process you cannot match to your own command is someone else's.
+- A suite that stops growing its log is not hung until you have checked the process's start time and CPU. Read the log's last line, look for a leaked child, and wait for the timeout; do not kill on a guess.
 - Set `TMP` and `TEMP` to a shallow directory of your own before any cargo test. The suites scratch under fixed names.
 - `vyrn-lsp` and `vyrn-genwasm` are outside the workspace. Test them and format them explicitly.
 - Do not push and do not merge into another branch. The lead does both.
