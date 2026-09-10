@@ -1049,7 +1049,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 829, 0),
-        ("project.rs", "the file's own job", 1091, 0),
+        ("project.rs", "the file's own job", 1088, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (

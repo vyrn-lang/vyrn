@@ -25449,7 +25449,7 @@ descent `ast.rs` declares.  Stayed: RFC-0092's instrument and its walk 1,298,
 because the guard is independent of the kernel's rule; the driver 128, the memo
 221, the argument rows 200, the generator screen 19, each read outside.
 Lines: `movecheck.rs` 2,489 to 2,125, `ast.rs` 2,019 to 2,316, `project.rs`
-1,590 to 1,698, the three 6,098 to 6,139 — the 41 added are the producer and its
+1,590 to 1,695, the three 6,098 to 6,136 — the 41 added are the producer and its
 pin.  Refusals: 0 lost / 0 gained over 323 roots at 77 refused.  Manifest:
 untouched, so the residue ratchet is not asked.
 Licence: byte-identical against the branch point, after each of the three
