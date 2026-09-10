@@ -167,7 +167,14 @@ fn loader_sections() -> Vec<Section> {
              project opts into, and PLAN-0125-runtime §3's, which is the \
              compiler's own and no manifest widens",
         ),
-        sec("struct Module {", Shared, "one parsed module awaiting linking"),
+        sec(
+            "struct Module {",
+            Shared,
+            "one parsed module awaiting linking, and the state one load walks \
+             around it — six values threaded as six arguments through a \
+             worklist that calls itself from four places, until RFC-0125 §3 \
+             M6's worklist slice",
+        ),
         sec(
             "pub const RT_PREFIX: &str = \"json$\";",
             Job,
@@ -1052,7 +1059,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         );
     }
     let want = vec![
-        ("loader.rs", "the file's own job", 4036, 9),
+        ("loader.rs", "the file's own job", 4000, 9),
         ("loader.rs", "a rule stated a second time", 0, 0),
         ("loader.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1061,7 +1068,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("loader.rs", "shared machinery", 641, 1),
+        ("loader.rs", "shared machinery", 666, 1),
         ("loader.rs", "tests", 137, 0),
         ("symbols.rs", "the file's own job", 2947, 0),
         ("symbols.rs", "a rule stated a second time", 267, 0),

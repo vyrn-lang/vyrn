@@ -746,6 +746,31 @@ struct Module {
     injected: Option<&'static str>,
 }
 
+/// The state one load walks: the modules entered so far, which of them are
+/// still loading, the generated-module identities (RFC-0040 §1), the origin
+/// maps, the success-path warnings and the cycle stack.
+///
+/// Six values threaded as six arguments through a worklist that calls itself
+/// from four places. Nothing here belongs to any one of the six alone.
+struct Work {
+    modules: Vec<Module>,
+    /// `false` = loading, `true` = loaded.
+    states: HashMap<String, bool>,
+    /// Generator-import identity (RFC-0040 §1): a resolved-inputs key mapped
+    /// to the banner of the FIRST module synthesized for it. Two imports whose
+    /// path args RESOLVE identically — however they are spelled (`./strings`
+    /// vs `../strings` from a rebased `.vyx` import) — reuse that one module:
+    /// one instance, shared state, no collision.
+    identities: HashMap<String, String>,
+    origins: crate::origin::OriginMaps,
+    /// RFC-0071 M2b: success-path warnings accumulated as modules are entered.
+    /// They travel BESIDE the program, never in place of it — a warning must
+    /// not change an exit code or a byte of program output.
+    warnings: Vec<Diagnostic>,
+    /// The modules on the path to the one being entered, for the cycle report.
+    stack: Vec<String>,
+}
+
 /// The prefix every declaration of an INJECTED runtime module is renamed to
 /// (RFC-0078 M2b). `$` is not an identifier character in Vyrn — the lexer takes
 /// `is_alphanumeric() || '_'` — so no source can spell one of these names. That
@@ -1247,39 +1272,27 @@ fn load_modules(
     if LOAD_DEPTH.with(|d| d.get()) <= 1 {
         crate::floor::forget();
     }
-    let mut modules: Vec<Module> = Vec::new();
-    let mut states: HashMap<String, bool> = HashMap::new(); // false = loading
-    let mut stack: Vec<String> = Vec::new();
-    // Generator-import identity (RFC-0040 §1): a resolved-inputs key
-    // (`name\0resolved-arg\0…`) mapped to the banner of the FIRST module
-    // synthesized for it. Two imports whose path args RESOLVE identically —
-    // however they are spelled (`./strings` vs `../strings` from a rebased `.vyx`
-    // import) — reuse that one module: one instance, shared state, no collision.
-    let mut identities: HashMap<String, String> = HashMap::new();
-    let mut origins = crate::origin::OriginMaps::new();
-    // RFC-0071 M2b: success-path warnings accumulated as modules are entered.
-    // They travel BESIDE the program, never in place of it — a warning must not
-    // change an exit code or a byte of program output.
-    let mut warnings: Vec<Diagnostic> = Vec::new();
+    let mut w = Work {
+        modules: Vec::new(),
+        states: HashMap::new(),
+        identities: HashMap::new(),
+        origins: crate::origin::OriginMaps::new(),
+        warnings: Vec::new(),
+        stack: Vec::new(),
+    };
 
-    #[allow(clippy::too_many_arguments)]
     fn visit(
         key: &str,
         source: Option<&str>,
         opts: &LoadOptions,
         resolver: &dyn ModuleResolver,
-        modules: &mut Vec<Module>,
-        states: &mut HashMap<String, bool>,
-        identities: &mut HashMap<String, String>,
-        origins: &mut crate::origin::OriginMaps,
-        warnings: &mut Vec<Diagnostic>,
-        stack: &mut Vec<String>,
+        w: &mut Work,
         root_key: &str,
     ) -> Result<(), Vec<Diagnostic>> {
-        match states.get(key) {
+        match w.states.get(key) {
             Some(true) => return Ok(()), // already loaded
             Some(false) => {
-                let cycle: Vec<&str> = stack.iter().map(|s| s.as_str()).collect();
+                let cycle: Vec<&str> = w.stack.iter().map(|s| s.as_str()).collect();
                 return Err(vec![Diagnostic::error(
                     0,
                     0,
@@ -1289,8 +1302,8 @@ fn load_modules(
             }
             None => {}
         }
-        states.insert(key.to_string(), false);
-        stack.push(key.to_string());
+        w.states.insert(key.to_string(), false);
+        w.stack.push(key.to_string());
 
         let _read = crate::prof::phase("read");
         let text = match source {
@@ -1333,7 +1346,7 @@ fn load_modules(
                 opts.alias_base.as_str()
             };
             let ctx = crate::origin::Context::new(&text, dir_of(importer), project);
-            origins.add_module(key, &text, &ctx);
+            w.origins.add_module(key, &text, &ctx);
             // RFC-0071 M2b, RFC-0099: the same line-scan lifts `//@diag`
             // directives into diagnostics at the severity the generator chose. A
             // page is generated twice (server + client bundle), and a generator
@@ -1358,8 +1371,8 @@ fn load_modules(
                         }
                     }
                     crate::diagnostics::Severity::Warning => {
-                        if !seen(warnings) {
-                            warnings.push(d);
+                        if !seen(&w.warnings) {
+                            w.warnings.push(d);
                         }
                     }
                 }
@@ -1371,11 +1384,11 @@ fn load_modules(
 
         // A `.json` module is a JSON Schema document: synthesize validated
         // type declarations from it (RFC-0010 M2) instead of parsing Vyrn.
-        // Schema modules import nothing themselves.
+        // Schema w.modules import nothing themselves.
         if key.ends_with(".json") {
             let decls = crate::schema::synthesize(&text, None, key)
                 .map_err(|e| vec![Diagnostic::error(0, 0, "load", e)])?;
-            modules.push(Module {
+            w.modules.push(Module {
                 key: key.to_string(),
                 program: Program {
                     imports: Vec::new(),
@@ -1395,20 +1408,20 @@ fn load_modules(
                 gen_source: None,
                 injected: None,
             });
-            stack.pop();
-            states.insert(key.to_string(), true);
+            w.stack.pop();
+            w.states.insert(key.to_string(), true);
             return Ok(());
         }
         // Lex + parse, memoized on the module's TEXT.
         //
         // A keystroke changes one module, but the loader re-parsed every module
-        // reachable from the root: 32 modules and 719 KB for examples/bin, all
+        // reachable from the root: 32 w.modules and 719 KB for examples/bin, all
         // but one of them byte-identical to the previous keystroke. The text is
         // the whole input to lexing and parsing, so its hash is the whole key.
         //
         // Cached BEFORE the per-module attribution below, which depends on `key`
         // and `is_root` rather than on the text, and so must still run — the same
-        // source loaded under two keys yields two different modules from one
+        // source loaded under two keys yields two different w.modules from one
         // parse.
         //
         // Only successes are cached. A parse error's diagnostics are rewritten
@@ -1562,10 +1575,7 @@ fn load_modules(
                 {
                     return Err(vec![in_module(d, key, root_key)]);
                 }
-                visit(
-                    &target, None, opts, resolver, modules, states, identities, origins, warnings,
-                    stack, root_key,
-                )?;
+                visit(&target, None, opts, resolver, w, root_key)?;
                 import_targets[i] = Some(target);
             }
         }
@@ -1577,7 +1587,16 @@ fn load_modules(
         for (i, imp) in program.imports.iter().enumerate() {
             if let ImportSource::Generator { name, args, line } = &imp.source {
                 let (gen_key, gen_source) = run_generator(
-                    key, name, args, *line, opts, resolver, modules, states, identities, root_key,
+                    key,
+                    name,
+                    args,
+                    *line,
+                    opts,
+                    resolver,
+                    &w.modules,
+                    &w.states,
+                    &mut w.identities,
+                    root_key,
                 )?;
                 // RFC-0072 M1: a generator import is an IMPORT, and the same rule
                 // decides it. The generated module's audience is its input file's
@@ -1589,19 +1608,7 @@ fn load_modules(
                     return Err(vec![in_module(d, key, root_key)]);
                 }
                 if let Some(src) = gen_source {
-                    visit(
-                        &gen_key,
-                        Some(&src),
-                        opts,
-                        resolver,
-                        modules,
-                        states,
-                        identities,
-                        origins,
-                        warnings,
-                        stack,
-                        root_key,
-                    )?;
+                    visit(&gen_key, Some(&src), opts, resolver, w, root_key)?;
                 }
                 import_targets[i] = Some(gen_key);
             }
@@ -1611,12 +1618,12 @@ fn load_modules(
             .map(|t| t.expect("every import resolved"))
             .collect();
 
-        stack.pop();
-        states.insert(key.to_string(), true);
+        w.stack.pop();
+        w.states.insert(key.to_string(), true);
         // A module synthesized by a generator (RFC-0021) keeps its source text
         // (its key is the generator banner) so `vyrn emit-gen` can print it.
         let gen_source = key.starts_with("generated by ").then(|| text.clone());
-        modules.push(Module {
+        w.modules.push(Module {
             key: key.to_string(),
             program,
             import_targets,
@@ -1626,29 +1633,15 @@ fn load_modules(
         Ok(())
     }
 
-    if let Err(mut diags) = visit(
+    if let Err(diags) = visit(
         &root_key,
         Some(root_source),
         opts,
         resolver,
-        &mut modules,
-        &mut states,
-        &mut identities,
-        &mut origins,
-        &mut warnings,
-        &mut stack,
+        &mut w,
         &root_key,
     ) {
-        // RFC-0053: lex/parse/load failures inside a synthesized module are
-        // remapped onto their originating input file, exactly as check/movecheck
-        // diagnostics are on the success path (`lib::load`). Ungoverned lines keep
-        // their generated location.
-        if !origins.is_empty() {
-            for d in &mut diags {
-                origins.remap(d);
-            }
-        }
-        return Err((diags, origins));
+        return Err(failed(diags, w.origins));
     }
 
     // RFC-0078 M2b: the INJECTED imports. `toJson` compiles into a call to
@@ -1666,7 +1659,8 @@ fn load_modules(
     //
     // M4c made this a loop over `RT_MODULES` rather than a second copy of itself,
     // which is the whole reason the codecs cost no new mechanism.
-    let mentioned: HashSet<String> = modules
+    let mentioned: HashSet<String> = w
+        .modules
         .iter()
         .flat_map(|m| program_ref_names(&m.program))
         .collect();
@@ -1690,7 +1684,7 @@ fn load_modules(
         // import. Marking only mention-linked modules left a hand-imported
         // `std/json` with bare `JStr` beside a consumer's own `JStr`, two
         // enums one variant name apart.
-        if !wanted && !states.contains_key(&target) {
+        if !wanted && !w.states.contains_key(&target) {
             continue;
         }
         // The same rule one step further in, and RFC-0081 M2 is what made it
@@ -1700,29 +1694,12 @@ fn load_modules(
         // otherwise fail to load programs that never format a float. A module that
         // is present but broken still fails the load below — this skips only what
         // cannot be read at all.
-        if !states.contains_key(&target) && resolver.read(&target).is_err() {
+        if !w.states.contains_key(&target) && resolver.read(&target).is_err() {
             continue;
         }
-        if !states.contains_key(&target) {
-            if let Err(mut diags) = visit(
-                &target,
-                None,
-                opts,
-                resolver,
-                &mut modules,
-                &mut states,
-                &mut identities,
-                &mut origins,
-                &mut warnings,
-                &mut stack,
-                &root_key,
-            ) {
-                if !origins.is_empty() {
-                    for d in &mut diags {
-                        origins.remap(d);
-                    }
-                }
-                return Err((diags, origins));
+        if !w.states.contains_key(&target) {
+            if let Err(diags) = visit(&target, None, opts, resolver, &mut w, &root_key) {
+                return Err(failed(diags, w.origins));
             }
         }
         // Set AFTER the visit, and whether or not this load performed it: the
@@ -1730,7 +1707,7 @@ fn load_modules(
         // there and the reserved spellings apply to it either way. (They are
         // transparent to a hand importer — `resolve_aliases` rewrites its
         // references along with everything else.)
-        if let Some(m) = modules.iter_mut().find(|m| m.key == target) {
+        if let Some(m) = w.modules.iter_mut().find(|m| m.key == target) {
             m.injected = Some(rt.prefix);
         }
     }
@@ -1741,7 +1718,7 @@ fn load_modules(
     // per-edge one (audience's shape), because the question is what the program
     // NEEDS, and no single import edge knows that.
     if let Some(map) = &opts.artifacts {
-        let graph = floor_graph(&mut modules);
+        let graph = floor_graph(&mut w.modules);
         // RFC-0125 M6, fourth slice: a row a judgment answers cannot be decided
         // here. The judgment reads the named core, which is built from the
         // checker's types, and nothing in this load is checked yet. So the
@@ -1752,23 +1729,35 @@ fn load_modules(
             // A nested generator load (RFC-0021) is not the artifact; only the
             // outermost load may hold a decision for the check that follows it.
             Some(c) if crate::floor::is_judged(&c) && LOAD_DEPTH.with(|d| d.get()) == 1 => {
-                crate::floor::defer(graph, root_key.clone(), map.clone(), origins.clone());
+                crate::floor::defer(graph, root_key.clone(), map.clone(), w.origins.clone());
             }
             _ => {
                 if let Some(mut d) = crate::floor::objection(&graph, &root_key, map) {
                     if d.file.as_deref() == Some(root_key.as_str()) {
                         d.file = None;
                     }
-                    if !origins.is_empty() {
-                        origins.remap(&mut d);
-                    }
-                    return Err((vec![d], origins));
+                    return Err(failed(vec![d], w.origins));
                 }
             }
         }
     }
 
-    Ok((modules, root_key, origins, warnings))
+    Ok((w.modules, root_key, w.origins, w.warnings))
+}
+
+/// A load's failure: every diagnostic remapped onto the input file a generator
+/// synthesized it from (RFC-0053), exactly as the success path remaps in
+/// `lib::load`. An ungoverned line keeps its generated location.
+fn failed(
+    mut diags: Vec<Diagnostic>,
+    origins: crate::origin::OriginMaps,
+) -> (Vec<Diagnostic>, crate::origin::OriginMaps) {
+    if !origins.is_empty() {
+        for d in &mut diags {
+            origins.remap(d);
+        }
+    }
+    (diags, origins)
 }
 
 /// Guardrails (RFC-0021): a generator's step budget and output-size cap.
