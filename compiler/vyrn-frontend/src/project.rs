@@ -344,11 +344,11 @@ impl Drop for Memo {
     }
 }
 
-/// Whether a compile-scope [`Memo`] is open. The facts walk expands a
-/// projection store only then (round fifty-seven): inside a compile the
-/// lowering walks the same leaked nodes and reads the same plan rows; the LSP
-/// analyzes per keystroke with no memo, and expanding there would leak one
-/// tree per keystroke per store site for rows nothing will ever emit.
+/// Whether a compile-scope [`Memo`] is open. A projection store is expanded
+/// only then (round fifty-seven): inside a compile the lowering walks the same
+/// leaked nodes and reads the same plan rows; the LSP analyzes per keystroke
+/// with no memo, and expanding there would leak one tree per keystroke per
+/// store site for rows nothing will ever emit.
 pub fn memo_open() -> bool {
     STORES.with(|m| m.borrow().is_some())
 }
@@ -441,11 +441,12 @@ pub fn store_index(
 }
 
 /// The shared expansion of a store site, for a reader that has the statement
-/// but not the receiver's TYPE — which is the lowering.
+/// but not the receiver's TYPE — the lowering, and `movecheck`'s body descent.
 ///
-/// [`store_index`] needs `aty` to find the `place atSet` at all; the lowering
-/// stands at a `Stmt::IndexSet` whose receiver is a NAME and has no scope of
-/// binding types to resolve it in. So the anchor is the index node — a node of
+/// [`store_index`] needs `aty` to find the `place atSet` at all, and neither
+/// reader has one: each stands at a `Stmt::IndexSet` whose receiver is a NAME,
+/// with no scope of binding types to resolve it in. The checker has the type
+/// and expands as it records, so the anchor is the index node — a node of
 /// the program, alive for the whole compile — and the verification is the whole
 /// site: the same receiver name, the same index, the same value. Address reuse
 /// answering from a dead key is the failure [`memo`] guards against, and this

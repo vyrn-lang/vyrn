@@ -706,9 +706,19 @@ fn movecheck_sections() -> Vec<Section> {
              through a fn value, where no capability row answers",
         ),
         sec(
-            "enum Want {",
+            "fn declarations(program: &Program) -> Declared {",
             Shared,
-            "what a run is for, and one run's outputs",
+            "the declaration reading every walk over a body starts from, and              the one body descent both of them read",
+        ),
+        sec(
+            "struct Lets<'a> {",
+            Job,
+            "what a compile reads off a body besides the rules: the lambdas              that stand the fn-value meet down, and the projection stores it              descends through. READERS: `facts` above, and `lets_outputs`              below",
+        ),
+        sec(
+            "pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) -> String {",
+            Job,
+            "the key a fn-value signature meets under. READERS: the meet              above, and `vyrn_lower::core` at a call through a fn value",
         ),
         sec(
             "pub fn lets_outputs(program: &Program) -> Vec<String> {",
@@ -761,10 +771,10 @@ fn movecheck_sections() -> Vec<Section> {
              backtick — the suppression key `refusals` merges the two lists on",
         ),
         sec(
-            "fn run(program: &Program, want: Want) -> Run {",
+            "fn run(program: &Program) -> Vec<ProjectionSite> {",
             Shared,
-            "the one walk: the capability tables, every body, the drains, and \
-             round forty-six's meet over the fn-value signatures",
+            "RFC-0092 M0's walk: the capability tables, every body and the \
+             drains",
         ),
         sec(
             "struct MoveCheck<'a> {",
@@ -1065,7 +1075,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("symbols.rs", "shared machinery", 435, 0),
         ("symbols.rs", "tests", 829, 0),
-        ("project.rs", "the file's own job", 1008, 0),
+        ("project.rs", "the file's own job", 1009, 0),
         ("project.rs", "a rule stated a second time", 0, 0),
         ("project.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1076,7 +1086,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
         ),
         ("project.rs", "shared machinery", 273, 0),
         ("project.rs", "tests", 309, 0),
-        ("movecheck.rs", "the file's own job", 1102, 0),
+        ("movecheck.rs", "the file's own job", 1237, 0),
         ("movecheck.rs", "a rule stated a second time", 0, 0),
         ("movecheck.rs", "a path only a deleted route reached", 0, 0),
         (
@@ -1085,7 +1095,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1370, 0),
+        ("movecheck.rs", "shared machinery", 1216, 0),
         ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");

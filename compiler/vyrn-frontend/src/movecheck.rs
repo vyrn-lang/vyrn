@@ -84,7 +84,7 @@ pub struct ProjectionSite {
 /// every cross-module result reads as `?` — the error Phase 4b's per-file
 /// measurement made, by 81 sites.
 pub fn projection_sites(program: &Program) -> Vec<ProjectionSite> {
-    run(program, Want::Projections).projections
+    run(program)
 }
 
 /// One call-argument position whose argument expression BUILT the value it
@@ -166,11 +166,177 @@ pub struct Facts {
     pub fnval_clear: HashSet<String>,
 }
 
-/// The closure over the call graph, out of one walk.
+/// The closure over the call graph, over the one body descent.
 pub fn facts(program: &Program) -> Facts {
-    let r = run(program, Want::Lets);
-    Facts {
-        fnval_clear: r.fnval_clear,
+    let decl = declarations(program);
+    let lets = Lets::over(program, &decl);
+    let caps = crate::declared::arg_caps(program);
+    let mut sig_groups: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    for f in &program.functions {
+        let ps: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
+        let key = fn_sig_key(&ps, &f.ret, decl.decls());
+        sig_groups
+            .entry(key)
+            .or_insert_with(|| (ps.len(), Vec::new()))
+            .1
+            .push(f.name.clone());
+    }
+    let mut fnval_clear: HashSet<String> = HashSet::new();
+    for (key, (arity, members)) in &sig_groups {
+        if lets.arities.contains(arity) || lets.sigs.contains(key) {
+            continue;
+        }
+        let all_clear = !members.is_empty()
+            && members.iter().all(|m| {
+                // The meet is per POSITION in the plan's reading, and the
+                // position it was asked about is the one the temporary sits
+                // in. A signature every one of whose members reads EVERY
+                // position is clear at every position, which is the answer a
+                // key can carry. It used to ask two call-graph sets beside
+                // the capability; both were empty for every program the
+                // kernel accepts (RFC-0125 §3 M3, the wrapped lend).
+                caps.get(m)
+                    .is_some_and(|cs| cs.iter().all(|c| *c == Capability::Read))
+            });
+        if std::env::var("VYRN_MEET_DUMP").is_ok() {
+            eprintln!("meet: key={key} members={members:?} clear={all_clear}");
+        }
+        if all_clear {
+            fnval_clear.insert(key.clone());
+        }
+    }
+    Facts { fnval_clear }
+}
+
+/// The declaration reading every walk over a body starts from.
+///
+/// [`crate::checker::recorded`] is asked for its record and for its EFFECT: the
+/// checker expands a `place atSet` store as it records, and [`Lets`] reads that
+/// expansion back out of `project`'s memo rather than building a second one.
+///
+/// It also rebuilds [`PLACE_NAMES`], which is the program's and not a walk's:
+/// `views` and `element_path` read it, and the core asks both at a call it is
+/// lowering, where no walk of this file has run.
+fn declarations(program: &Program) -> Declared {
+    PLACE_NAMES.with(|s| {
+        *s.borrow_mut() = program
+            .impls
+            .iter()
+            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
+            .collect();
+    });
+    let rec_span = crate::prof::phase("movecheck: checker::record");
+    let rec = crate::checker::recorded(program);
+    drop(rec_span);
+    Declared::new(program).recording(rec)
+}
+
+crate::body_scope_descent!(LetsVisit, lets_block, lets_stmt, lets_expr);
+
+/// What a compile reads off a body besides the rules: the lambdas that stand
+/// the fn-value meet down, and the projection stores it descends through.
+///
+/// A lambda carries no capability rows, so a signature one could inhabit is not
+/// a signature the meet may clear. Which lambdas those are is a question about
+/// ARITY, unless an argument position declares a fn type — then it is a
+/// question about that signature alone (round fifty-five).
+///
+/// An `a[i] = v` store the checker expanded through a `place atSet` projection
+/// is read as the expansion, the same leaked nodes the lowering walks. So a
+/// lambda inside the projection's body counts, and one inside the index or the
+/// value it stands in for does not.
+struct Lets<'a> {
+    decl: &'a Declared,
+    /// Lambda nodes an argument position already gave a signature.
+    typed: HashSet<usize>,
+    /// Index and value nodes a projection store's expansion stands in for.
+    skipped: HashSet<usize>,
+    arities: HashSet<usize>,
+    sigs: HashSet<String>,
+    stores: Vec<String>,
+}
+
+impl<'a> LetsVisit<'a> for Lets<'_> {
+    /// Nothing here asks what is in scope.
+    const SCOPED: bool = false;
+
+    fn stmt(&mut self, s: &'a Stmt, _: &HashSet<String>) {
+        let Stmt::IndexSet {
+            name,
+            index,
+            value,
+            line,
+        } = s
+        else {
+            return;
+        };
+        let Some(blk) = crate::project::stored(name, index, value) else {
+            return;
+        };
+        if std::env::var_os("VYRN_PROJ_DUMP").is_some() {
+            eprintln!("proj-store walked: {name} line {line}");
+        }
+        self.skipped.insert(index as *const Expr as usize);
+        self.skipped.insert(value as *const Expr as usize);
+        self.stores.push(format!("store {name}:{line}"));
+        lets_block(blk, &mut HashSet::new(), self);
+    }
+
+    fn expr(&mut self, e: &'a Expr, _: &HashSet<String>) -> bool {
+        if self.skipped.contains(&(e as *const Expr as usize)) {
+            return false;
+        }
+        match e {
+            // Recorded before the walk reaches the lambda, so the arity poison
+            // stands down for it and the meet refuses only its own signature.
+            Expr::Call { name, args, .. } => {
+                for (i, a) in args.iter().enumerate() {
+                    if !matches!(a, Expr::Lambda { .. }) {
+                        continue;
+                    }
+                    let Some(pt) = self.decl.param_ty(name, i) else {
+                        continue;
+                    };
+                    if let Type::Fn(ps, r) = crate::types::resolve(pt, self.decl.decls()) {
+                        self.typed.insert(a as *const Expr as usize);
+                        self.sigs.insert(fn_sig_key(&ps, &r, self.decl.decls()));
+                    }
+                }
+            }
+            Expr::Lambda { params, .. } => {
+                if !self.typed.contains(&(e as *const Expr as usize)) {
+                    self.arities.insert(params.len());
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+}
+
+impl<'a> Lets<'a> {
+    /// Every function, test and bench body, and no module-state initializer —
+    /// the set the walk this replaced covered.
+    fn over(program: &'a Program, decl: &'a Declared) -> Lets<'a> {
+        let mut v = Lets {
+            decl,
+            typed: HashSet::new(),
+            skipped: HashSet::new(),
+            arities: HashSet::new(),
+            sigs: HashSet::new(),
+            stores: Vec::new(),
+        };
+        let mut locals = HashSet::new();
+        let bodies = program
+            .functions
+            .iter()
+            .map(|f| &f.body)
+            .chain(program.tests.iter().map(|t| &t.body))
+            .chain(program.benches.iter().map(|b| &b.body));
+        for b in bodies {
+            lets_block(b, &mut locals, &mut v);
+        }
+        v
     }
 }
 
@@ -182,38 +348,19 @@ pub fn fn_sig_key(ps: &[Type], ret: &Type, decls: &HashMap<String, TypeDecl>) ->
     format!("{rps:?}->{:?}", crate::types::resolve(ret, decls))
 }
 
-/// What a run of the pass is for. The check is the hot path — a keystroke pays
-/// for it — so neither record is built unless somebody asked.
-#[derive(PartialEq, Clone, Copy)]
-enum Want {
-    Lets,
-    /// RFC-0092 M0: record every projection the rule would refuse, refuse none.
-    Projections,
-}
-
-/// One run's outputs.
-struct Run {
-    projections: Vec<ProjectionSite>,
-    fnval_clear: HashSet<String>,
-    /// The three things a [`Want::Lets`] run produces, for [`lets_outputs`].
-    arities: HashSet<usize>,
-    sigs: HashSet<String>,
-    stores: Vec<String>,
-}
-
-/// Everything one [`Want::Lets`] walk produces, one sorted line per row.
+/// Everything [`Lets`] reads off a program, one sorted line per row.
 ///
 /// Three kinds of row and no fourth: the arity of a lambda whose signature the
 /// declaration does not name, the signature key of one it does, and the
-/// projection store whose desugared group the walk descends into instead of the
-/// index and the value. READER: `compiler/vyrn-cli/tests/letswalk.rs`, which
-/// prints these over the corpus so the walk can be rewritten against them
-/// (RFC-0125 Section 3 M3).
+/// projection store whose expansion stands in for the index and the value.
+/// READER: `compiler/vyrn-cli/tests/letswalk.rs`, which prints them over the
+/// corpus (RFC-0125 Section 3 M3).
 pub fn lets_outputs(program: &Program) -> Vec<String> {
-    let r = run(program, Want::Lets);
-    let mut out: Vec<String> = r.arities.iter().map(|n| format!("arity {n}")).collect();
-    out.extend(r.sigs.iter().map(|k| format!("sig {k}")));
-    out.extend(r.stores);
+    let decl = declarations(program);
+    let lets = Lets::over(program, &decl);
+    let mut out: Vec<String> = lets.arities.iter().map(|n| format!("arity {n}")).collect();
+    out.extend(lets.sigs.iter().map(|k| format!("sig {k}")));
+    out.extend(lets.stores);
     out.sort();
     out.dedup();
     out
@@ -751,19 +898,9 @@ fn subject(message: &str) -> Option<&str> {
     (!root.is_empty() && root.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(root)
 }
 
-/// The one walk, shared by [`owning_sites`], [`facts`] and [`projection_sites`].
-/// `want` turns each record on; with neither the pass still builds and carries
-/// its type environment, and asks `owns_heap` nowhere.
-fn run(program: &Program, want: Want) -> Run {
-    // The projection-name set for [`named_projection`], rebuilt per run so a
-    // long-lived process (the LSP) always answers for the program in hand.
-    PLACE_NAMES.with(|s| {
-        *s.borrow_mut() = program
-            .impls
-            .iter()
-            .flat_map(|i| i.places.iter().map(|p| p.name.clone()))
-            .collect();
-    });
+/// RFC-0092 M0's walk: record every projection the rule would refuse, refuse
+/// none. Its one reader is [`projection_sites`].
+fn run(program: &Program) -> Vec<ProjectionSite> {
     // A method call is written `s.insert(v)` and reaches this pass as
     // `insert(s, v)` — the SURFACE name, because the impl is selected by the
     // receiver's type and this pass does not select impls. The protocol is what
@@ -773,18 +910,9 @@ fn run(program: &Program, want: Want) -> Run {
     // function became a method. Stated once, in [`crate::declared::arg_caps`].
     let caps = crate::declared::arg_caps(program);
     let globals: HashSet<String> = program.globals.iter().map(|g| g.name.clone()).collect();
-    // RFC-0125 §3 M3, the type slice: the type of a node is the checker's
-    // answer, read off its record. `recorded` serves the analysis's own check
-    // where one was made and checks once where none was, and the record it
-    // makes here is held for the rest of the analysis — so the check the
-    // lowering used to pay for is the one this asks for.
-    let rec_span = crate::prof::phase("movecheck: checker::record");
-    let rec = crate::checker::recorded(program);
-    drop(rec_span);
-    let decl = Declared::new(program).recording(rec);
+    let decl = declarations(program);
     let mc = MoveCheck {
         caps: &caps,
-        impls: &program.impls,
         globals: &globals,
         decl: &decl,
         // Module state is the outermost frame and is built once, not per body.
@@ -801,23 +929,16 @@ fn run(program: &Program, want: Want) -> Run {
         ret: RefCell::new(Type::Unit),
         cur_fn: RefCell::new(String::new()),
         writeback: RefCell::new(None),
-        lets: want == Want::Lets,
-        lambda_arities: (want == Want::Lets).then(|| RefCell::new(Default::default())),
-        typed_lambdas: (want == Want::Lets).then(|| RefCell::new(Default::default())),
-        lambda_sigs: (want == Want::Lets).then(|| RefCell::new(Default::default())),
-        projections: (want == Want::Projections).then(|| RefCell::new(Vec::new())),
-        stores: RefCell::new(Vec::new()),
+        projections: RefCell::new(Vec::new()),
     };
     let mut projections = Vec::new();
     // A projection site is stamped with the module of the body it was found in,
     // the same way an error is — the sink itself has no idea which file it is
     // reading, and a linked program is most of somebody else's.
     let drain = |into: &mut Vec<ProjectionSite>, mc: &MoveCheck, module: &Option<String>| {
-        if let Some(sink) = &mc.projections {
-            for mut p in sink.borrow_mut().drain(..) {
-                p.module.clone_from(module);
-                into.push(p);
-            }
+        for mut p in mc.projections.borrow_mut().drain(..) {
+            p.module.clone_from(module);
+            into.push(p);
         }
     };
     for f in &program.functions {
@@ -849,67 +970,11 @@ fn run(program: &Program, want: Want) -> Run {
     // consumed after) and "disposed exactly once" is a must-analysis — and it
     // is now the typed judgment's (`vyrn_lower::typed::obligation`), reached
     // from [`refusals`] through `own::must_use_refusals`.
-    // Round forty-six's meet, over the target set of every fn-value signature
-    // the program declares.
-    //
-    // The core asks this by signature at the call it lowers, because a call
-    // through a fn value names no function and no capability row answers for
-    // its positions (RFC-0125 §3 M3, the last table's slice — the plan asked
-    // it per argument row until then).
-    let lambda_arities = mc
-        .lambda_arities
-        .map(RefCell::into_inner)
-        .unwrap_or_default();
-    let lambda_sigs = mc.lambda_sigs.map(RefCell::into_inner).unwrap_or_default();
-    let mut sig_groups: HashMap<String, (usize, Vec<String>)> = HashMap::new();
-    for f in &program.functions {
-        let ps: Vec<Type> = f.params.iter().map(|p| p.ty.clone()).collect();
-        let key = fn_sig_key(&ps, &f.ret, decl.decls());
-        sig_groups
-            .entry(key)
-            .or_insert_with(|| (ps.len(), Vec::new()))
-            .1
-            .push(f.name.clone());
-    }
-    let mut fnval_clear: HashSet<String> = HashSet::new();
-    for (key, (arity, members)) in &sig_groups {
-        if lambda_arities.contains(arity) || lambda_sigs.contains(key) {
-            continue;
-        }
-        let all_clear = !members.is_empty()
-            && members.iter().all(|m| {
-                // The meet is per POSITION in the plan's reading, and the
-                // position it was asked about is the one the temporary sits
-                // in. A signature every one of whose members reads EVERY
-                // position is clear at every position, which is the answer a
-                // key can carry. It used to ask two call-graph sets beside
-                // the capability; both were empty for every program the
-                // kernel accepts (RFC-0125 §3 M3, the wrapped lend).
-                caps.get(m)
-                    .is_some_and(|cs| cs.iter().all(|c| *c == Capability::Read))
-            });
-        if std::env::var("VYRN_MEET_DUMP").is_ok() {
-            eprintln!("meet: key={key} members={members:?} clear={all_clear}");
-        }
-        if all_clear {
-            fnval_clear.insert(key.clone());
-        }
-    }
-    Run {
-        projections,
-        fnval_clear,
-        arities: lambda_arities,
-        sigs: lambda_sigs,
-        stores: mc.stores.into_inner(),
-    }
+    projections
 }
 
 struct MoveCheck<'a> {
     caps: &'a HashMap<String, Vec<Capability>>,
-    /// The program's impl blocks — what selects a `place atSet` projection,
-    /// so the facts walk can read a projection store as the desugared group
-    /// the lowering emits (round fifty-seven).
-    impls: &'a [crate::ast::ImplBlock],
     /// Module-state binding names (RFC-0013). A global may never be passed to a
     /// `consume` parameter — nothing may take ownership of module state.
     globals: &'a HashSet<String>,
@@ -942,29 +1007,9 @@ struct MoveCheck<'a> {
     /// receiver (`sinks`), and the statement form takes and revives it in one
     /// line — so the take is not recorded there, and the receiver is read.
     writeback: RefCell<Option<String>>,
-    /// Whether this is the [`Want::Lets`] walk — the one `own::analyze` runs,
-    /// which walks a projection's desugared statement group and records what
-    /// a lambda captures. It was read off `lending.is_some()` until the two
-    /// call-graph sets went (RFC-0125 §3 M3, the wrapped lend), which made a
-    /// sink stand in for a mode.
-    lets: bool,
-    /// Round forty-six: the arity of every lambda the walk met. A lambda has
-    /// no capability rows and no retention rows, so a signature any lambda
-    /// could inhabit (matched by arity — the declared reading does not type
-    /// lambdas) stands down from the fn-value meet below.
-    lambda_arities: Option<RefCell<std::collections::HashSet<usize>>>,
-    /// Round fifty-five: lambdas whose type IS known — they sit in an
-    /// argument position whose declared parameter is a fn type. They poison
-    /// only their own signature, not their whole arity.
-    typed_lambdas: Option<RefCell<std::collections::HashSet<usize>>>,
-    /// The signature keys those typed lambdas inhabit.
-    lambda_sigs: Option<RefCell<std::collections::HashSet<String>>>,
-    /// Where RFC-0092 M0's projection sites go, or `None` everywhere else. The
-    /// measurement is a mode, not a second walk: the two places that would refuse
-    /// are the two places that record.
-    projections: Option<RefCell<Vec<ProjectionSite>>>,
-    /// Every projection store this walk descended into, for [`lets_outputs`].
-    stores: RefCell<Vec<String>>,
+    /// Where RFC-0092 M0's projection sites go. The two places that would
+    /// refuse are the two places that record.
+    projections: RefCell<Vec<ProjectionSite>>,
 }
 
 /// A binding that names a value somebody else owns (RFC-0089 rule 2).
@@ -1195,13 +1240,8 @@ impl MoveCheck<'_> {
         // Everything the four screens here used to guard — a scalar copies, a
         // borrow does not move, a projection does not move — decided a
         // `Consumed` entry, and it went with the table (RFC-0125 §3 M3, the
-        // table slice). What is left is RFC-0092's instrument, and an
-        // instrument is a MODE: the check walk and the facts walk record
-        // nothing, so they ask nothing. The screen is here rather than at the
-        // ten call sites because every one of them would need it.
-        if self.projections.is_none() {
-            return;
-        }
+        // table slice). What is left is RFC-0092's instrument.
+        //
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
@@ -1454,9 +1494,6 @@ impl MoveCheck<'_> {
     /// A root that is already a borrow was refused before this RFC (rule 3, Phase
     /// 4b), so it is not part of this bill.
     fn note_returned_projection(&self, e: &Expr, line: usize) {
-        if self.projections.is_none() {
-            return;
-        }
         if let Some((root, _)) = place_path(e) {
             if self.borrow_of(&root).is_some() {
                 return;
@@ -1487,10 +1524,7 @@ impl MoveCheck<'_> {
         ty: Option<Type>,
         line: usize,
     ) {
-        let Some(sink) = &self.projections else {
-            return;
-        };
-        sink.borrow_mut().push(ProjectionSite {
+        self.projections.borrow_mut().push(ProjectionSite {
             kind,
             module: None,
             func: self.cur_fn.borrow().clone(),
@@ -1641,33 +1675,9 @@ impl MoveCheck<'_> {
                 value,
                 line,
             } => {
-                // Round fifty-seven: a store a `place atSet` PROJECTION
-                // governs runs as the desugared statement group the checker
-                // recorded (`project::stored`, the same leaked nodes the
-                // lowering walks). The facts walk reads that group here, so
-                // the element write-back inside it gets a plan row and the
-                // displaced value a free — `strs[s] = tail` through
-                // `std/slots` leaked every overwritten element (genref, and
-                // the user-container half of §26's stand-aside). The CHECK
-                // walk keeps the plain reading: its diagnostics name the
-                // spelling the user wrote.
-                if self.lets && crate::project::memo_open() {
-                    let aty = self.vars.borrow().get(name).cloned().flatten();
-                    if let Some(aty) = aty {
-                        if let Ok(Some(blk)) =
-                            crate::project::store_index(self.impls, name, index, value, &aty)
-                        {
-                            if std::env::var_os("VYRN_PROJ_DUMP").is_some() {
-                                eprintln!("proj-store walked: {name} line {line}");
-                            }
-                            self.stores
-                                .borrow_mut()
-                                .push(format!("store {name}:{line}"));
-                            self.block(blk, scope);
-                            return false;
-                        }
-                    }
-                }
+                // A store a `place atSet` PROJECTION governs is read as the
+                // expansion by [`Lets`], not here: this walk records what the
+                // reader WROTE, because its rows quote the reader's spelling.
                 self.expr(index, scope);
                 self.expr(value, scope);
                 self.store(value, &|| format!("`{name}`"), *line, true);
@@ -1985,24 +1995,6 @@ impl MoveCheck<'_> {
                 // Left-to-right: check each argument, then apply its consumption,
                 // so passing the same variable to two `consume` params is caught.
                 for (i, arg) in args.iter().enumerate() {
-                    // Round fifty-five: a lambda in an argument position
-                    // whose declared parameter is a fn type has a KNOWN
-                    // signature — recorded before the walk meets the lambda,
-                    // so the arity poison stands down for it and the meet
-                    // refuses only its own signature.
-                    if matches!(arg, Expr::Lambda { .. }) {
-                        if let (Some(tl), Some(ls)) = (&self.typed_lambdas, &self.lambda_sigs) {
-                            if let Some(pt) = self.decl.param_ty(name, i) {
-                                if let Type::Fn(ps, r) =
-                                    crate::types::resolve(pt, self.decl.decls())
-                                {
-                                    tl.borrow_mut().insert(arg as *const Expr as usize);
-                                    ls.borrow_mut()
-                                        .insert(fn_sig_key(&ps, &r, self.decl.decls()));
-                                }
-                            }
-                        }
-                    }
                     self.expr(arg, scope);
                     // A builtin whose parameter declares `consume` takes its
                     // argument, and rule 1 governs the take exactly as it
@@ -2055,15 +2047,6 @@ impl MoveCheck<'_> {
             // so a reference to one that was already consumed surfaces the standard
             // use-after-consume error here too.
             Expr::Lambda { params, body, .. } => {
-                if let Some(la) = &self.lambda_arities {
-                    let typed = self
-                        .typed_lambdas
-                        .as_ref()
-                        .is_some_and(|t| t.borrow().contains(&(e as *const Expr as usize)));
-                    if !typed {
-                        la.borrow_mut().insert(params.len());
-                    }
-                }
                 scope.push(HashSet::new());
                 self.enter();
                 for p in params {
