@@ -10443,6 +10443,30 @@ and `another statement` read 0 core rows over the corpus, so each needs a row
 first — a loop the pass makes up, an `St::Switch` the statement screen refuses,
 and an `St::Row` the driver must place.
 
+#### An optional projection's four parts are stated at the call site (2026-09-10, `track-er`)
+Decision: the core states `project::optional_inline`'s split at the `if let` as the two-way branch on the miss test that the emitters emit, and no construct inside an inlined projection is its receiver's last owner.
+Went: the projection CALL rows the core states 5 to 0, the table empty; `Stmt::Break` on the emitter's AST arm 4 to 1, `tryplace.vyrn` 3 to 0; `Stmt::Let` on the arm 39,748 to 39,742 against the rows' 35,605 to 35,611.
+Stayed: the `Stmt::Break` arm at 1, because `jchain`'s payer is `@at` on a user container and its store side is `atSet`, one slice.
+Lines: `core.rs` 6,550 to 6,699. `coredrive.rs` 591 to 587. `direct.rs` 17,598 and `project.rs` 1,590, both unmoved: the site is the core's to state and both walks were there already.
+Refusals: 0 lost / 0 gained. Manifest: untouched, 176 examples, `VYRN_WASM_MANIFEST=check` green and `rfcs/census/wasm-sha256.tsv` unchanged — this slice moves no emitted byte.
+Licence:
+- `kernel --ignored`: 177 programs, 27,650 accepted, 0 refused, 0 unlowered, unmoved.
+- the residue ratchet `--ignored`, release: engine 172 clean and 3 leaking, route the same, 0 failed, 726 s; the baseline held.
+- `coredrive --ignored`: 963 of 21,722 bodies whole, 168 of 170 byte-identical, the same two programs (`ifexpr` 6,894 against 6,892; `knucleotide` 15,212 against 15,206); both tables re-pinned.
+- `vyrn check` over `examples/` against `e1879220`: 209 programs, every byte of stderr and every exit code identical, 33 refused either way.
+- `cargo fmt --all --check` and `vyrn-lsp`'s own: clean. `cargo build --release -p vyrn-cli`: no warning.
+- the form census moved and is re-pinned in RFC-0127 §3.1: `Expr::Call` in `lower` 26 to 27, `Expr::Var` 25 to 26, `Pattern::Variant` 1 to 2, the total 913 to 916.
+- `cargo test -p vyrn-cli` 646 passed, 45 ignored, 0 failed. `--ignored`: `lowered_dump` 419 programs, 341 lowered, 0 unstable, byte-identical; `coretables` 177 programs and 711 edge-row sites; `effects` 30,198 judged and 0 unattributed; `typed` 238,668 stores and 0 unjudged; `columns`, `lowered`, `fixtures`, `testsweep` green.
+Findings:
+- the kernel refused `tryplace.vyrn:57` on the first build of this slice, and the cause was not the split: `let JObj(fields) = self` is `tryField`'s hit prologue, `self` substitutes to the caller's `doc`, and `last_owner` made that switch `doc`'s last owner — so the payload left `doc` on the hit edge, the join's edges disagreed, the placer wrote `("doc", 0)` into Rule N's table, and the second build released `doc` on one edge only. `Builder::reading` states the missing rule: a projection declares `read self`.
+- the placer is two rounds and no fixpoint. A row it learns in round one is emitted in round two and judged by nobody, so a rule that is wrong in round one reaches the kernel as a refusal rather than as a correction.
+- `VYRN_KERNEL_TRACE=<fn>` prints the body per round and `=1` prints every release the placer found owed; the two together name the round a wrong row was learned in. That is the tool for a refusal of this shape.
+- the plain kind has the same hole and this slice does not close it: `jchain.vyrn`'s `nested.field("inner")` binds `@b5.fields` as owning and the placer reports a release for it. Nothing refuses today, and `Builder::inlined` is where the same guard would go.
+- a `St::Block` around the hit branch, so the prologue's own bindings have a site, was written and then deleted: with the guard in place the kernel asks for nothing there, and the block was 15 lines that changed no answer.
+- `@at` and `atSet` inlined in the core were WRITTEN, measured and reverted: 69 lines in `core.rs`, the refusal held (209 programs, 33 refused, every byte identical — the read alone does refuse `slots.vyrn:35` as `track-em` measured, and `project::store_index` at `Stmt::IndexSet` is the payer), and `Stmt::Break` on the AST arm stayed at 1. So `track-em`'s prediction that the read takes the arm to 0 is WRONG. The body classes moved a little and no form row did; the whole-body count held at 963 of 21,722.
+Left:
+- `jchain`'s 1 `break`, blocked by the DRIVER and not by `@at`: `jchain`'s `main` is not one of the 963 bodies the rows carry, so the emitter walks the AST there whatever the core states. Its class is `Rhs::Call` — a callee that is no declared function — which is M3's largest row left. Inlining `@at` in the core does not change that, and the 69 lines are recorded here rather than merged.
+
 ### M4 — the runtime in Vyrn
 
 The runtime module of §2.4, compiled by the emitter into every program. The

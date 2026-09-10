@@ -1610,6 +1610,7 @@ fn build_seeded(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        reading: Vec::new(),
         seed,
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
@@ -1715,6 +1716,7 @@ pub fn build_module_state<'a>(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        reading: Vec::new(),
         seed,
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
@@ -1820,6 +1822,7 @@ fn build_outside_seeded<'a>(
         after: Vec::new(),
         after_of_rhs: Vec::new(),
         stream_loops: Vec::new(),
+        reading: Vec::new(),
         seed,
         loop_marks: Vec::new(),
         loop_aliased: HashMap::new(),
@@ -1897,6 +1900,11 @@ struct Builder<'a> {
     /// built, waiting for the name [`Builder::bind`] gives it. The arm that
     /// builds a lambda as a whole right-hand side has no name yet.
     pending_closure: Option<Vec<Name>>,
+    /// The receivers of the projections being inlined here, innermost last.
+    /// A projection declares `read self`, so no construct of its body is its
+    /// receiver's last owner however the substituted name reads
+    /// ([`Builder::takes_scrutinee`]).
+    reading: Vec<Name>,
 }
 
 impl<'a> Builder<'a> {
@@ -2108,6 +2116,7 @@ impl<'a> Builder<'a> {
     /// - The OPTIONAL kind (RFC-0122). Its body splits into four parts at a
     ///   miss test, its consumer is an `if let`, and
     ///   [`vyrn_frontend::project::optional_inline`] mints a different tree.
+    ///   [`Builder::optional_if_let`] states that split at the `if let`.
     /// - The receiver has no recorded type, so the tree cannot be keyed.
     fn inlined(
         &mut self,
@@ -2162,6 +2171,135 @@ impl<'a> Builder<'a> {
         }
         let place = self.place(&p.place, out)?;
         Ok(Some(Rhs::Read(place)))
+    }
+
+    /// `if let Some(x) = s.tryAt(h)` (RFC-0122), stated at the site — RFC-0125
+    /// §3 M3, the optional-projection slice.
+    ///
+    /// The OPTIONAL kind is [`Builder::inlined`]'s fourth `None`: its body
+    /// splits into four parts at a miss test, and
+    /// [`vyrn_frontend::project::optional_inline`] mints a tree of its own.
+    /// There is no `Option` on either path, so the site is no scrutinee and no
+    /// switch: it is the two-way branch the emitters emit, on the miss test,
+    /// with the source's `else` block on the TRUE edge. Stating it as a
+    /// [`St::Switch`] on a call result left every statement of the four parts
+    /// with no row at all, which is what `tryplace.vyrn`'s three `break`
+    /// occurrences on the AST arm were.
+    ///
+    /// Answers whether this site is one. The conditions are
+    /// [`Builder::inlined`]'s, and the reasons with them.
+    #[allow(clippy::too_many_arguments)]
+    fn optional_if_let(
+        &mut self,
+        pattern: &Pattern,
+        scrutinee: &'a Expr,
+        then_block: &'a Block,
+        else_block: Option<&'a Block>,
+        sid: usize,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<bool, Gap> {
+        if !vyrn_frontend::project::memo_open() {
+            return Ok(false);
+        }
+        let Expr::Call { name, args, .. } = scrutinee else {
+            return Ok(false);
+        };
+        let Some(recv) = args.first() else {
+            return Ok(false);
+        };
+        let Ok(rty) = self.ty_of(recv) else {
+            return Ok(false);
+        };
+        let Some(f) = vyrn_frontend::project::lookup_in(&self.program.impls, &rty, name) else {
+            return Ok(false);
+        };
+        if !vyrn_frontend::project::is_optional(f) {
+            return Ok(false);
+        }
+        let p = match vyrn_frontend::project::optional_site(
+            &self.program.impls,
+            Some(&rty),
+            name,
+            recv,
+            &args[1..],
+            line,
+        ) {
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(false),
+            Err(e) => return gap_d("an optional projection this site cannot inline", &e, line),
+        };
+        let held = match recv {
+            Expr::Var { name, .. } => self.lookup(name),
+            _ => None,
+        };
+        if let Some(n) = held {
+            self.reading.push(n);
+        }
+        let r = self.optional_body(p, pattern, then_block, else_block, sid, name, line, out);
+        if held.is_some() {
+            self.reading.pop();
+        }
+        r
+    }
+
+    /// [`Builder::optional_if_let`]'s four parts, once the site is one.
+    #[allow(clippy::too_many_arguments)]
+    fn optional_body(
+        &mut self,
+        p: &'a vyrn_frontend::project::OptionalProjection,
+        pattern: &Pattern,
+        then_block: &'a Block,
+        else_block: Option<&'a Block>,
+        sid: usize,
+        name: &str,
+        line: usize,
+        out: &mut Vec<St>,
+    ) -> Result<bool, Gap> {
+        for s in &p.prologue {
+            self.stmt(s, out)?;
+        }
+        let cond = self.read_val(&p.miss, out)?;
+        // The TRUE edge is the miss, which is the source's `else` — edge 1 of
+        // the join, as the plan numbers it.
+        let mut miss = Vec::new();
+        if let Some(blk) = else_block {
+            self.block(blk, &mut miss)?;
+        }
+        self.edge_drops(sid, 1, &mut miss)?;
+        let mut hit = Vec::new();
+        let mark = self.scope.len();
+        for s in &p.hit {
+            self.stmt(s, &mut hit)?;
+        }
+        // The binder names the yielded place, which is a BORROW of the
+        // receiver: the declared `-> read Option<T>` says so, and nothing on
+        // either path is copied or released. Read through
+        // [`Builder::place`] for [`Builder::inlined`]'s reason — a right-hand
+        // side would take the yield out of the receiver where the field owns
+        // heap.
+        if let Pattern::Variant(_, binds) = pattern {
+            if let Some(bind) = binds.first() {
+                if !is_place_read(&p.place) {
+                    return gap_d("a projection whose yield is not a place", name, line);
+                }
+                let ty = self.ty_of(&p.place)?;
+                let place = self.place(&p.place, &mut hit)?;
+                let n = self.name(bind, ty, false, line);
+                hit.push(St::Let(n, Rhs::Read(place)));
+                self.scope.push((bind.name.clone(), n));
+            }
+        }
+        self.block(then_block, &mut hit)?;
+        self.edge_drops(sid, 0, &mut hit)?;
+        self.scope.truncate(mark);
+        out.push(St::If {
+            cond,
+            then: miss,
+            els: hit,
+            site: sid,
+        });
+        Ok(true)
     }
 
     /// Whether a value is a borrow: a name whose type owns heap and which
@@ -2785,6 +2923,17 @@ impl<'a> Builder<'a> {
                 else_block,
                 line,
             } => {
+                if self.optional_if_let(
+                    pattern,
+                    scrutinee,
+                    then_block,
+                    else_block.as_ref(),
+                    sid,
+                    *line,
+                    out,
+                )? {
+                    return Ok(());
+                }
                 let sty = self.ty_of(scrutinee)?;
                 let (sv, consuming) = self.scrutinee(scrutinee, sid, None, out)?;
                 let owns = consuming || self.made_scrutinee(scrutinee);
@@ -3474,7 +3623,7 @@ impl<'a> Builder<'a> {
     /// freeing behind it.
     fn takes_scrutinee(&self, n: Name, lines: Option<(usize, usize)>) -> bool {
         let info = &self.body.names[n as usize];
-        lines.is_some() && info.releases && info.heap && !info.borrow
+        lines.is_some() && info.releases && info.heap && !info.borrow && !self.reading.contains(&n)
     }
 
     /// Whether the construct took the temporary `t` it owns: the payloads

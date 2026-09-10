@@ -104,20 +104,18 @@ const CONT: usize = 8;
 /// arm emitted, for every program where either is not zero. The residue the
 /// next slice on this line has to empty, program by program and not as one sum.
 ///
-/// Every one is a projection's body INLINED at its caller, and the two rows
-/// have different payers. `tryplace.vyrn`'s three are the OPTIONAL kind
-/// (RFC-0122), whose tree `project::optional_inline` mints and whose consumer
-/// is an `if let` — see [`CALLS`]. `jchain.vyrn`'s one is
-/// `doc.field("items")[1]`, where the emitter inlines `Json`'s `at` and then
-/// inlines `field` from the CLONE of the receiver that expansion holds, so the
-/// `break` stands on a node the core never saw; the core would have to inline
-/// `a[i]` on a user container too, and the store side of that is `atSet`.
+/// The one left is a projection's body INLINED at its caller.
+/// `jchain.vyrn`'s is `doc.field("items")[1]`, where the emitter inlines
+/// `Json`'s `at` and then inlines `field` from the CLONE of the receiver that
+/// expansion holds, so the `break` stands on a node the core never saw; the
+/// core would have to inline `a[i]` on a user container too, and the store
+/// side of that is `atSet`.
 ///
 /// The other rewrite that put an exit out of the core's reach,
 /// `project::iterate_loop`'s clone of a user container's loop body, is off this
 /// table since the exits slice — `own::ReleasePlan::key_of` maps a clone back
 /// to the node the core keyed.
-const PIN: [(&str, usize, usize); 2] = [("jchain.vyrn", 1, 0), ("tryplace.vyrn", 3, 0)];
+const PIN: [(&str, usize, usize); 1] = [("jchain.vyrn", 1, 0)];
 
 /// Per program and callee: the projection CALL rows the core still states.
 ///
@@ -129,14 +127,12 @@ const PIN: [(&str, usize, usize); 2] = [("jchain.vyrn", 1, 0), ("tryplace.vyrn",
 /// the eight `break` occurrences on the AST arm were: the emitter inlines and
 /// the core did not.
 ///
-/// Every row left is the OPTIONAL kind (RFC-0122): its body splits into four
-/// parts at a miss test, its consumer is an `if let`, and
-/// `project::optional_inline` mints a tree of its own — a second inline, and
-/// the payer for the three `break` occurrences [`PIN`] still names.
-const CALLS: [(&str, &str, usize); 2] = [
-    ("tryplace.vyrn", "tryAt", 2),
-    ("tryplace.vyrn", "tryField", 3),
-];
+/// The table is EMPTY since the optional slice: the last five rows were the
+/// OPTIONAL kind (RFC-0122), whose body splits into four parts at a miss test
+/// and whose consumer is an `if let`, and the core states that split at the
+/// site too (`Builder::optional_if_let`). A row here again is a site the core
+/// stopped inlining.
+const CALLS: [(&str, &str, usize); 0] = [];
 
 /// The shapes `examples/` does not write, emitted both ways here so the licence
 /// above and the exit count below are the LANGUAGE's and not one directory's.
