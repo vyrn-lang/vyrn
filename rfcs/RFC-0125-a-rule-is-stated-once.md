@@ -25815,3 +25815,39 @@ be the last one landed and the language is better than before it.
    the language chose explicit copies. Counting stays available as a runtime
    change under the same kernel if `.copy()` cost becomes the complaint users
    actually have.
+
+#### Four rules the checker wrote twice, and the two items that were empty (2026-09-10, `track-ep`)
+
+Decision: measure a track's items before taking them; two of these three state
+nothing the checker states. Item 1 is ZERO pairs — `typed::judge` has one reader,
+`tests/typed.rs`, and answers by kind, never with a `Diagnostic`; the one
+diagnostic `typed.rs` writes is `typed::obligation`'s must-use sentence, which
+`checker.rs` never writes. Measured: the two run beside each other
+over 342 loadable roots of `examples/`, `std/`, `site/` and
+`compiler/vyrn-cli/tests/` for 0 sentences from both. Item 3 points the other way:
+`vyrn-lower`'s only dependency is `vyrn-frontend` and `lower` takes
+`recorded: &checker::Recorded` (`vyrn-lower/src/lib.rs:497`), so `Recorded` is what
+the judgment is filled FROM. Item 2 is one shape with six leaf answers over five
+walks, two here and three in `declared.rs`, differing in the leaf verdict, the
+cycle answer, the `seen` key and how a `Named` descends. One walk with four knobs
+and five callers, each a different combination, is a worse home than five walks
+that say what they mean. Not taken.
+
+Went: the conformance rule (one set of terms for a protocol's method and its
+projection), the rigid-parameter rule, a declaration's `where` predicate (a
+record's differed from a scalar's by an adjective), its wrapper aliases, and a
+projection call's argument rule, written at both readers. Stayed: the rest — a
+clone scan over the non-test half finds no repeat above fourteen lines.
+Lines: `checker.rs` 15,090 to 15,040; `typed.rs` 912 to 912. `cerr!` sites 400 to
+395, no sentence changed. Refusals: 0 lost / 0 gained. Manifest: untouched.
+Licence: `vyrn check` over 419 corpus roots under the branch-point binary and this
+one, at each of the three commits — 419 byte-identical, 245 refused under both.
+Findings: a shared reading costs a signature, so two of the four are read once at a
+HIGHER line count, and a fifth — the `mut` rule at four writing forms — was built,
+measured at +15 lines and reverted. `Owned::reaches_declared_in` keys its cycle set
+on the bare constructor and never removes an entry, the shape
+`Checker::declared_owned_in`'s comment calls wrong for its own question;
+recomputed, not witnessed, and `declared.rs`'s.
+Left: `checker.rs` under 13,500, blocked by the typing judgment. `Checker::stmt`
+and `Checker::expr` are 1,318 of the 1,590 the target needs and they fill
+`Recorded`, which `vyrn-lower` reads to build the core `typed.rs` judges.
