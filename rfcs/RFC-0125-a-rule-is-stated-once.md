@@ -26361,6 +26361,8 @@ re-pinned in this commit. `Expr::Var` loses five mentions in the checker (the
 three arms that read a type name out of argument position) and `Expr::Call`
 gains one in the parser.
 
+Manifest, added at the merge: 5 rows (`graphql`, `pagesdemo`, `rest`, `rpc`, `rpcsplit`), the five examples whose modules `std/rpc`, `std/graphql` and `std/connect` generate. `wasm2wat` old against new: the instruction stream is identical line for line; every differing line is an `i32.const` data address or a data segment moved by four bytes, from the first segment after the generated names. CI's compiled-run fixtures and the native route were green on the same bytes. The track's report was cut off before its manifest line, and the manifest was written here.
+
 #### The union `print` and `toString` take is a bound (2026-09-10, `track-ej`)
 
 The third of the three the open question §"What is left in `Checker::call`"
