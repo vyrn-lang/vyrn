@@ -17506,7 +17506,7 @@ whether it allocated. `pure` is the bottom.
 |---|---|---|---|---|---|---|
 | `alloc` | `runtime$malloc`, `mem$grow`; and an owned name born of a primitive, a literal or a builtin | `memory.grow` | yes | yes | yes | yes |
 | `read-input` | `readLine` | `fd_read` on 0 | yes | yes | EOF | no |
-| `write-output` | `print`, `writeStdout`, `trace`, `debug`, `info`, `warn`, `error` | `fd_write` on 1, 2 | yes | yes | yes | no (finding 4) |
+| `write-output` | `print`, `writeStdout`, `@trace`, `@debug`, `@info`, `@warn`, `@error` | `fd_write` on 1, 2 | yes | yes | yes | no (finding 4) |
 | `fs-read` | `readFile`, `readFileBytes` | `path_open`, `fd_read`, `fd_close`, `fd_prestat_get` | yes | yes | `NOENT` | `readFile` yes, `readFileBytes` no (finding 5) |
 | `fs-write` | `writeFile`, `writeFileBytes`, `renameFile`, `fsyncFile` | `path_open`, `fd_write`, `path_rename`, `fd_sync` | yes | yes | `NOENT` | no |
 | `fs-list` | `listDir`, `listDirKinds` | `fd_readdir` | no (`NATIVE_UNSUPPORTED`) | yes | `BADF` | yes, mediated |
