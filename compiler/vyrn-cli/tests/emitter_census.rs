@@ -829,7 +829,7 @@ fn the_emitter_census_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("the mapping §2.3 names", 7722, 716),
+        ("the mapping §2.3 names", 7720, 716),
         ("a decision §2.3 says it must not make", 1230, 213),
         ("the runtime it emits by hand", 625, 7),
         ("one block per builtin name", 4807, 978),
@@ -909,7 +909,7 @@ fn what_the_emitter_reads_is_what_the_rfc_records() {
     })
     .collect();
     let want = vec![
-        ("neither", 51, 6081, 0, 0),
+        ("neither", 51, 6079, 0, 0),
         ("the core's rows", 5, 2078, 0, 21),
         ("the source, and the core says it too", 1, 81, 1, 0),
         ("the source, and the core has no row", 10, 1815, 88, 0),

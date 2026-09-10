@@ -3522,11 +3522,9 @@ impl<'p> Fn_<'_, 'p> {
     /// [`vyrn_frontend::declared::Owned::release_kind`]'s row, and nothing
     /// else. The row says what a release MEANS — a call the type declared, a
     /// buffer, a walk — and this adds the byte offsets, which are `layout`'s
-    /// and which no pass above this crate can state. It derived the row a
-    /// second time until RFC-0125 §3 M3's release slice, from the same type
-    /// shapes, asking `own` on two different spellings depending on the arm.
+    /// and which no pass above this crate can state.
     ///
-    /// The spelling matters and this is the one place it does. A declared row
+    /// The spelling matters, and this is the one place it does. A declared row
     /// is keyed by the type's NAME, so it is asked of `ty`. Every other row is
     /// asked of the SUBSTITUTED type: a generic body's `Array<T>` has a
     /// `Param` element and `own` answers `Deep` for one, because inside that
@@ -5777,7 +5775,7 @@ impl<'p> Fn_<'_, 'p> {
     /// untouched, for a type with no refinement.
     ///
     /// The two callers above are the same three instructions over two
-    /// generated bodies, and `what` is the one word their refusal differs by.
+    /// `what` is the one word the two callers' refusals differ by.
     fn call_generated(
         &mut self,
         b: &mut Frame,
@@ -12276,12 +12274,12 @@ impl<'p> Fn_<'_, 'p> {
     /// a copy of its own — one loop, both directions, the way
     /// [`Fn_::rel_body`] and [`Fn_::copy_body`] are one walk per type.
     ///
-    /// The two gates are not the same question and neither is the other's.
-    /// A release is gated on the element's own release ROW: a record reaches
-    /// two Strings and has no row until RFC-0092 M3, and walking into one here
-    /// would free fields no rule says the array owns. A copy is gated on
-    /// reachability, because copying a value that reaches heap and has no row
-    /// still has to duplicate what it reaches.
+    /// The two gates are different questions and neither contains the other. A
+    /// release is gated on the element's own release ROW, which is `own`'s
+    /// proof that the container owns the element; walking into an element with
+    /// no row would free places no rule says the array owns. A copy is gated on
+    /// reachability, because a copy of a value that reaches heap has to
+    /// duplicate what it reaches whether or not anything releases it.
     fn each(
         &mut self,
         m: &mut Module,
