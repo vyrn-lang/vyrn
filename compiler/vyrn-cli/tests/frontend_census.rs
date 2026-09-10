@@ -1079,7 +1079,7 @@ fn the_frontend_census_is_what_the_rfc_records() {
             0,
             0,
         ),
-        ("movecheck.rs", "shared machinery", 1362, 0),
+        ("movecheck.rs", "shared machinery", 1365, 0),
         ("movecheck.rs", "tests", 48, 0),
     ];
     assert_eq!(got, want, "the frontend census has moved");

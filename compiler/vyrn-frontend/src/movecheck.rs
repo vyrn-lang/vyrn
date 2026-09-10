@@ -1172,11 +1172,21 @@ impl MoveCheck<'_> {
         line: usize,
         outlives: bool,
     ) {
+        // Everything the four screens here used to guard — a scalar copies, a
+        // borrow does not move, a projection does not move — decided a
+        // `Consumed` entry, and it went with the table (RFC-0125 §3 M3, the
+        // table slice). What is left is RFC-0092's instrument, and an
+        // instrument is a MODE: the check walk and the facts walk record
+        // nothing, so they ask nothing. The screen is here rather than at the
+        // ten call sites because every one of them would need it.
+        if self.projections.is_none() {
+            return;
+        }
         // An ELEMENT read stored inline: `out.push(xs[i])`. `xs[i]` reaches this
         // pass as `@at(xs, i)`, which is a call, so the `place_path` bail two
         // blocks down is where it used to leave — invisible to every rule.
         if let Some((_, path)) = element_path(value) {
-            if self.projections.is_some() && outlives {
+            if outlives {
                 let ty = self.type_of(value);
                 self.note_projection("elem-store", &path, into(), ty, line);
             }
@@ -1187,19 +1197,12 @@ impl MoveCheck<'_> {
         let Some((root, path)) = place_path(value) else {
             return;
         };
-        // RFC-0092 M0's instrument, kept as M1's regression guard: it records
-        // what the branch below now refuses, so a site that reappears is counted.
-        // Recorded BEFORE the `owns_heap` guard, so a scalar field is counted and
-        // told apart rather than lost.
-        if self.projections.is_some() && path != root && outlives && self.borrow_of(&root).is_none()
-        {
+        // Recorded BEFORE the `owns_heap` guard, so a scalar field is counted
+        // and told apart rather than lost.
+        if path != root && outlives && self.borrow_of(&root).is_none() {
             let ty = self.type_of(value);
             self.note_projection("store", &path, into(), ty, line);
         }
-        // Everything the four screens below this used to guard — a scalar
-        // copies, a borrow does not move, a projection does not move — decided
-        // a `Consumed` entry, and it went with the table (RFC-0125 §3 M3, the
-        // table slice). What is left of this walk is the instrument.
     }
 
     /// The borrow status a `let` of `value` gives its binding.
