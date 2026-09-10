@@ -94,9 +94,11 @@ const CLASSES: [&str; 8] = [
 ///
 /// The exits slice named two readers of `Stmt::Continue`'s arm in
 /// `vyrn-frontend/tests/semantics.rs` and neither is one. Both are in [`SHAPES`]
-/// and both read zero: that file compiles without `vyrn_lower::install()`, so
-/// `own::analyze` never runs the placer, the core holds no body at all, and
-/// every statement of every program in it falls to the AST arm.
+/// and both read zero. The reason it gave for the zeros — that the file
+/// compiles without `vyrn_lower::install()`, so the placer never runs and every
+/// statement falls to the arm — has been false since that file installed the
+/// lowering, and what the zeros mean here is not measured. The arm stays until
+/// something measures it.
 const BREAK: usize = 7;
 const CONT: usize = 8;
 
